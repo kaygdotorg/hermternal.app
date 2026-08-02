@@ -1,5 +1,16 @@
-import { resolveVariant, stepVariant } from './state.mjs';
-import { renderPicker, renderThemeOptions, renderVariant } from './view.mjs';
+import {
+  canSend,
+  normalizeDraft,
+  resolveVariant,
+  stepVariant,
+  THEMES,
+} from './state.mjs';
+import {
+  renderLocalExchange,
+  renderPicker,
+  renderThemeOptions,
+  renderVariant,
+} from './view.mjs';
 
 const stage = document.querySelector('#stage');
 const pickerRoot = document.querySelector('[data-picker-root]');
@@ -58,3 +69,199 @@ document.addEventListener('keydown', (event) => {
 
 setActive(current);
 requestAnimationFrame(() => requestAnimationFrame(() => picker.setAttribute('data-ready', '')));
+
+const root = document.documentElement;
+const composer = document.querySelector('.composer');
+const prompt = document.querySelector('#prompt');
+const sendButton = document.querySelector('.send-button');
+const toast = document.querySelector('[data-toast]');
+const sidebar = document.querySelector('#sidebar');
+const sidebarTrigger = document.querySelector('[data-sidebar-open]');
+const attachmentStatus = document.querySelector('[data-attachment-status]');
+const recordTime = document.querySelector('[data-record-time]');
+let lastDrawerFocus = null;
+let recordingTimer = null;
+let recordingSeconds = 0;
+let toastTimer = null;
+
+function announce(message) {
+  window.clearTimeout(toastTimer);
+  toast.textContent = message;
+  toast.hidden = false;
+  toastTimer = window.setTimeout(() => {
+    toast.hidden = true;
+  }, 2600);
+}
+
+export function setTheme(theme) {
+  if (!THEMES.includes(theme)) return;
+  root.dataset.theme = theme;
+  const option = document.querySelector(`[data-theme-value="${theme}"]`);
+  document.querySelector('[data-theme-label]').textContent = option.querySelector('span:nth-child(2)').textContent;
+  document.querySelectorAll('[data-theme-value]').forEach((item) => {
+    item.setAttribute('aria-checked', String(item === option));
+  });
+}
+
+export function setSidebar(open) {
+  document.body.classList.toggle('sidebar-open', open);
+  sidebarTrigger.setAttribute('aria-expanded', String(open));
+  document.body.style.overflow = open ? 'hidden' : '';
+  if (open) {
+    lastDrawerFocus = document.activeElement;
+    sidebar.focus({ preventScroll: true });
+  } else if (lastDrawerFocus instanceof HTMLElement) {
+    lastDrawerFocus.focus({ preventScroll: true });
+  }
+}
+
+export function setMenu(name, open) {
+  document.querySelectorAll('[data-menu]').forEach((menu) => {
+    menu.hidden = !(menu.dataset.menu === name && open);
+  });
+  document.querySelectorAll('[data-menu-trigger]').forEach((trigger) => {
+    trigger.setAttribute('aria-expanded', String(trigger.dataset.menuTrigger === name && open));
+  });
+}
+
+function closeTopLayer() {
+  const openTrigger = document.querySelector('[data-menu-trigger][aria-expanded="true"]');
+  if (openTrigger) {
+    setMenu('', false);
+    openTrigger.focus();
+    return true;
+  }
+  if (document.body.classList.contains('sidebar-open')) {
+    setSidebar(false);
+    return true;
+  }
+  return false;
+}
+
+function updateSendState() {
+  sendButton.disabled = !canSend(prompt.value);
+}
+
+export function submitDraft() {
+  const value = normalizeDraft(prompt.value);
+  if (!canSend(value)) return false;
+  stage.querySelector('.transcript-flow').insertAdjacentHTML('beforeend', renderLocalExchange(value));
+  prompt.value = '';
+  updateSendState();
+  stage.querySelector('.local-turn:last-child')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  announce('Added locally. Nothing was sent.');
+  return true;
+}
+
+function toggleRecording(button) {
+  const recording = !button.classList.contains('recording');
+  button.classList.toggle('recording', recording);
+  button.setAttribute('aria-label', recording ? 'Stop voice recording' : 'Record a voice note');
+  recordTime.hidden = !recording;
+  window.clearInterval(recordingTimer);
+  if (!recording) {
+    announce('Mock voice note kept locally.');
+    return;
+  }
+  recordingSeconds = 0;
+  recordTime.textContent = '0:00';
+  recordingTimer = window.setInterval(() => {
+    recordingSeconds += 1;
+    recordTime.textContent = `0:${String(recordingSeconds).padStart(2, '0')}`;
+  }, 1000);
+}
+
+document.addEventListener('click', (event) => {
+  const menuTrigger = event.target.closest('[data-menu-trigger]');
+  if (menuTrigger) {
+    setMenu(menuTrigger.dataset.menuTrigger, menuTrigger.getAttribute('aria-expanded') !== 'true');
+    return;
+  }
+
+  const themeOption = event.target.closest('[data-theme-value]');
+  if (themeOption) {
+    setTheme(themeOption.dataset.themeValue);
+    setMenu('', false);
+    announce(`${themeOption.querySelector('span:nth-child(2)').textContent} theme selected.`);
+    return;
+  }
+
+  const modelOption = event.target.closest('[data-model]');
+  if (modelOption) {
+    document.querySelector('[data-model-label]').textContent = modelOption.dataset.model;
+    document.querySelectorAll('[data-model]').forEach((item) => {
+      item.setAttribute('aria-checked', String(item === modelOption));
+    });
+    setMenu('', false);
+    announce(`${modelOption.dataset.model} selected.`);
+    return;
+  }
+
+  if (event.target.closest('[data-sidebar-open]')) setSidebar(true);
+  if (event.target.closest('[data-sidebar-close]')) setSidebar(false);
+
+  const expand = event.target.closest('[data-expand]');
+  if (expand) {
+    const expanded = !composer.classList.contains('expanded');
+    composer.classList.toggle('expanded', expanded);
+    expand.setAttribute('aria-expanded', String(expanded));
+    prompt.focus();
+  }
+
+  if (event.target.closest('[data-attach]')) {
+    attachmentStatus.hidden = false;
+    announce('Mock attachment added locally.');
+  }
+  if (event.target.closest('[data-attachment-remove]')) attachmentStatus.hidden = true;
+  if (event.target.closest('[data-context]')) announce('Context controls are mocked locally.');
+
+  const voice = event.target.closest('[data-voice]');
+  if (voice) toggleRecording(voice);
+
+  const toolToggle = event.target.closest('[data-tool-toggle]');
+  if (toolToggle) {
+    const detail = toolToggle.closest('.event-row').querySelector('.tool-detail');
+    detail.hidden = !detail.hidden;
+    toolToggle.setAttribute('aria-expanded', String(!detail.hidden));
+  }
+
+  const approval = event.target.closest('[data-approval]');
+  if (approval) {
+    approval.closest('.approval-actions').innerHTML = `<span class="approval-result">${approval.dataset.approval === 'allow' ? 'Allowed once' : 'Skipped'}</span>`;
+    announce(approval.dataset.approval === 'allow' ? 'Mock context allowed once.' : 'Mock context skipped.');
+  }
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && closeTopLayer()) return;
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+    event.preventDefault();
+    submitDraft();
+  }
+});
+
+composer.addEventListener('submit', (event) => {
+  event.preventDefault();
+  submitDraft();
+});
+prompt.addEventListener('input', updateSendState);
+
+document.addEventListener('pointermove', (event) => {
+  if (!matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  const target = event.target.closest('.magnetic');
+  if (!target) return;
+  const rect = target.getBoundingClientRect();
+  const x = Math.max(-3, Math.min(3, (event.clientX - rect.left - rect.width / 2) * 0.12));
+  const y = Math.max(-3, Math.min(3, (event.clientY - rect.top - rect.height / 2) * 0.12));
+  target.style.setProperty('--mag-x', `${x}px`);
+  target.style.setProperty('--mag-y', `${y}px`);
+});
+
+document.addEventListener('pointerout', (event) => {
+  const target = event.target.closest('.magnetic');
+  if (!target || target.contains(event.relatedTarget)) return;
+  target.style.removeProperty('--mag-x');
+  target.style.removeProperty('--mag-y');
+});
+
+setTheme('system');
