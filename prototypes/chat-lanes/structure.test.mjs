@@ -138,9 +138,13 @@ test('theme menu exposes all ten theme fixtures as named controls', () => {
   assert.match(options, />Monokai</);
 });
 
-test('mobile theme menu clears the fixed prototype picker without losing its scroll budget', () => {
+test('mobile overlays clear the fixed prototype picker without losing menu scroll budget', () => {
   assert.match(
     styles,
     /@media \(max-width: 820px\)\s*\{[^]*\.theme-menu\s*\{[^}]*bottom:\s*4\.75rem[^}]*max-height:\s*75vh[^}]*overflow-y:\s*auto/s,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 820px\)\s*\{[^]*\.toast\s*\{[^}]*bottom:\s*4\.75rem/s,
   );
 });

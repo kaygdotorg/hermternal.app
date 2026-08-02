@@ -480,8 +480,9 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
   .conversation-shell { min-height: calc(100vh - 5.7rem); }
   .lane { width: min(calc(100% - 1.5rem), var(--reading)); }
   .composer-dock { width: min(calc(100% - 1rem), calc(var(--reading) + 2rem)); }
-  /* Keep the final theme row above the fixed prototype picker so real pointer hit testing remains available. */
+  /* Reserve the picker's bottom lane so theme taps and transient feedback remain fully readable. */
   .theme-menu { position: fixed; right: 1rem; bottom: 4.75rem; left: 1rem; width: auto; max-height: 75vh; overflow-y: auto; }
+  .toast { bottom: 4.75rem; }
 }
 
 @media (max-width: 560px) {
