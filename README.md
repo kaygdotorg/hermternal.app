@@ -29,6 +29,8 @@ Four environments are intentionally distinct rather than accent swaps:
 
 Three reading stances change measure, rhythm, type treatment, and state density: Reflective favors editorial pacing, Compact favors operational scanning, and Wide supports long-form review.
 
+The System environment follows the browser's light or dark color-scheme preference; explicit theme fixtures remain deterministic.
+
 ## Interaction and motion intent
 
 Desktop and tablet navigation remains a persistent floating object. Below 851px it moves off-canvas behind a hamburger and scrim, traps keyboard focus, and returns focus on dismissal. The composer keeps attachment and context actions at bottom-left, model / voice / send at right, and long-prompt expansion at top-right.

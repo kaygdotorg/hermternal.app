@@ -41,6 +41,23 @@ test('material, layering, typography, and magnetic motion use accepted shared to
   assert.match(app, /target\.style\.translate/);
 });
 
+test('system theme follows the host color scheme without changing explicit themes', () => {
+  assert.match(
+    styles,
+    /@media \(prefers-color-scheme: dark\)\s*\{\s*html\[data-theme="system"\]\s*\{[^}]*color-scheme:\s*dark/s,
+  );
+  assert.match(styles, /html\[data-theme="system"\][\s\S]*--canvas:\s*#171a20/);
+  assert.match(styles, /html\[data-theme="nord"\]\s*\{\s*color-scheme:\s*dark/s);
+});
+
+test('menus expose keyboard navigation and preserve touch-sized brand hit areas', () => {
+  assert.match(app, /function moveMenuFocus\(event\)/);
+  assert.match(app, /event\.key === 'ArrowDown'/);
+  assert.match(app, /event\.key === 'ArrowUp'/);
+  assert.match(app, /previouslyOpenTrigger\.focus/);
+  assert.match(styles, /\.brand, \.mobile-brand\s*\{[^}]*min-height:\s*44px/s);
+});
+
 test('official Geist variable fonts are self-hosted with license and fallbacks', () => {
   const sans = new URL('./assets/fonts/Geist[wght].woff2', import.meta.url);
   const mono = new URL('./assets/fonts/GeistMono[wght].woff2', import.meta.url);

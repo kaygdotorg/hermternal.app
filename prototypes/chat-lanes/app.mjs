@@ -201,16 +201,54 @@ function positionFloatingMenu(menu, trigger) {
   menu.style.bottom = `${innerHeight - triggerRect.top + 8}px`;
 }
 
+function focusMenuItem(menu) {
+  const item = menu.querySelector('[aria-checked="true"]')
+    ?? menu.querySelector('[role^="menuitem"]');
+  item?.focus({ preventScroll: true });
+}
+
+function moveMenuFocus(event) {
+  const menu = event.target.closest('[role="menu"]');
+  if (!menu) return false;
+  const items = [...menu.querySelectorAll('[role^="menuitem"]')]
+    .filter((item) => !item.hidden && getComputedStyle(item).display !== 'none');
+  if (!items.length) return false;
+
+  const currentIndex = Math.max(0, items.indexOf(document.activeElement));
+  const nextIndex = event.key === 'ArrowDown'
+    ? (currentIndex + 1) % items.length
+    : event.key === 'ArrowUp'
+      ? (currentIndex - 1 + items.length) % items.length
+      : event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? items.length - 1
+          : -1;
+  if (nextIndex < 0) return false;
+  event.preventDefault();
+  items[nextIndex].focus({ preventScroll: true });
+  return true;
+}
+
 export function setMenu(name, open) {
+  const previouslyOpenTrigger = document.querySelector('[data-menu-trigger][aria-expanded="true"]');
   document.querySelectorAll('[data-menu]').forEach((menu) => {
     const shouldOpen = menu.dataset.menu === name && open;
     const trigger = document.querySelector(`[data-menu-trigger="${menu.dataset.menu}"]`);
     if (shouldOpen && trigger) positionFloatingMenu(menu, trigger);
     animateMenu(menu, shouldOpen);
+    if (shouldOpen && lastInputModality === 'keyboard') {
+      requestAnimationFrame(() => {
+        if (!menu.hidden) focusMenuItem(menu);
+      });
+    }
   });
   document.querySelectorAll('[data-menu-trigger]').forEach((trigger) => {
     trigger.setAttribute('aria-expanded', String(trigger.dataset.menuTrigger === name && open));
   });
+  if (!open && previouslyOpenTrigger && lastInputModality === 'keyboard') {
+    previouslyOpenTrigger.focus({ preventScroll: true });
+  }
 }
 
 window.addEventListener('resize', () => {
@@ -333,6 +371,7 @@ document.addEventListener('click', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (moveMenuFocus(event)) return;
   if (event.key === 'Escape' && closeTopLayer()) return;
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
     event.preventDefault();
