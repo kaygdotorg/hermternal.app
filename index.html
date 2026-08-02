@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en" data-theme="tahoe-light" data-stance="editorial">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Hermternal web conversation interface prototype." />
+    <title>Hermternal — conversation mockup</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#conversation">Skip to conversation</a>
+    <div class="ambient" aria-hidden="true"><span></span><span></span><span></span></div>
+
+    <header class="mobile-bar material">
+      <button class="icon-button menu-button magnetic" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+      </button>
+      <a class="mobile-brand" href="#conversation" aria-label="Hermternal home"><span class="brand-mark" aria-hidden="true">H</span><span>Hermternal</span></a>
+      <button class="icon-button magnetic" type="button" aria-label="Start new conversation">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+      </button>
+    </header>
+
+    <div class="app-shell">
+      <div class="scrim" aria-hidden="true"></div>
+      <aside class="sidebar material" id="sidebar" aria-label="Primary navigation" tabindex="-1">
+        <div class="sidebar-top">
+          <a class="brand" href="#conversation" aria-label="Hermternal home"><span class="brand-mark" aria-hidden="true">H</span><span class="brand-copy"><strong>Hermternal</strong><small>quiet intelligence</small></span></a>
+          <button class="icon-button collapse-button magnetic" type="button" aria-label="Close navigation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6" /></svg>
+          </button>
+        </div>
+
+        <button class="new-chat magnetic" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span>New conversation</span><kbd>⌘ N</kbd></button>
+
+        <nav aria-label="Conversation history">
+          <p class="eyebrow">Today</p>
+          <a class="history-item active" href="#conversation" aria-current="page"><span class="status-dot"></span><span><strong>Spring launch narrative</strong><small>Now · Atlas is writing</small></span></a>
+          <a class="history-item" href="#conversation"><span class="status-dot"></span><span><strong>Reading list synthesis</strong><small>42 min ago</small></span></a>
+          <p class="eyebrow">Previous</p>
+          <a class="history-item" href="#conversation"><span class="status-dot"></span><span><strong>Garden studio layout</strong><small>Yesterday</small></span></a>
+          <a class="history-item" href="#conversation"><span class="status-dot"></span><span><strong>Q3 research questions</strong><small>Friday</small></span></a>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+        <div class="settings-panel">
+          <button class="settings-trigger magnetic" type="button" aria-expanded="false" aria-controls="appearance-panel">
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1" /></svg>Appearance</span><svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+          </button>
+          <section class="appearance-panel" id="appearance-panel" aria-label="Appearance settings" hidden>
+            <fieldset><legend>Theme gallery</legend><div class="theme-grid" role="radiogroup" aria-label="Theme">
+              <button class="theme-swatch selected" type="button" role="radio" aria-checked="true" data-theme="tahoe-light" style="--swatch:#eef3f8;--dot:#3979e8"><i></i><span>Tahoe light</span></button>
+              <button class="theme-swatch" type="button" role="radio" aria-checked="false" data-theme="tahoe-dark" style="--swatch:#10151f;--dot:#84aefb"><i></i><span>Tahoe dark</span></button>
+              <button class="theme-swatch" type="button" role="radio" aria-checked="false" data-theme="graphite" style="--swatch:#272829;--dot:#d5d0c8"><i></i><span>Graphite</span></button>
+              <button class="theme-swatch" type="button" role="radio" aria-checked="false" data-theme="ocean" style="--swatch:#092e44;--dot:#39d0c5"><i></i><span>Ocean</span></button>
+              <button class="theme-swatch" type="button" role="radio" aria-checked="false" data-theme="ember" style="--swatch:#351a19;--dot:#ff865f"><i></i><span>Ember</span></button>
+              <button class="theme-swatch" type="button" role="radio" aria-checked="false" data-theme="forest" style="--swatch:#142d24;--dot:#8bd09a"><i></i><span>Forest</span></button>
+              <button class="theme-swatch" type="button" role="radio" aria-checked="false" data-theme="lavender" style="--swatch:#29223e;--dot:#c4a7ff"><i></i><span>Lavender</span></button>
+              <button class="theme-swatch contrast-swatch" type="button" role="radio" aria-checked="false" data-theme="contrast" style="--swatch:#000;--dot:#fff"><i></i><span>Contrast</span></button>
+            </div></fieldset>
+            <fieldset><legend>Stance</legend><div class="stance-group" role="radiogroup" aria-label="Layout stance">
+              <button class="stance-button selected" type="button" role="radio" aria-checked="true" data-stance="editorial"><strong>Calm editorial</strong><small>Airy and reflective</small></button>
+              <button class="stance-button" type="button" role="radio" aria-checked="false" data-stance="command"><strong>Focused command</strong><small>Dense and operational</small></button>
+              <button class="stance-button" type="button" role="radio" aria-checked="false" data-stance="studio"><strong>Warm studio</strong><small>Social and expressive</small></button>
+            </div></fieldset>
+          </section>
+          <button class="profile-button magnetic" type="button"><span class="avatar" aria-hidden="true">AM</span><span><strong>Alex Morgan</strong><small>Prototype workspace</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg></button>
+        </div>
+      </aside>
+
+      <main class="main" id="conversation" tabindex="-1">
+        <header class="conversation-header">
+          <div><p class="eyebrow">Shared space</p><h1>Spring launch narrative</h1></div>
+          <div class="header-actions"><span class="presence"><i></i>Connected</span><button class="icon-button magnetic" type="button" aria-label="Conversation options"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg></button></div>
+        </header>
+
+        <section class="conversation-surface material" aria-label="Conversation messages" aria-live="polite">
+          <div class="date-divider"><span>Today, 10:24</span></div>
+          <article class="message user-message">
+            <div class="message-meta"><strong>You</strong><time datetime="2026-08-02T10:24:00Z">10:24</time></div>
+            <div class="message-body"><p>Help me shape the opening narrative for our spring launch. It should feel optimistic and precise—less like a campaign, more like an invitation to think differently about daily work.</p><div class="attachment-card"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M8 13h8M8 17h5" /></svg><span><strong>launch-notes.txt</strong><small>18 KB · mock attachment</small></span></div></div>
+          </article>
+
+          <article class="message assistant-message">
+            <div class="assistant-avatar" aria-hidden="true"><span>H</span></div>
+            <div class="assistant-content"><div class="message-meta"><strong>Hermternal</strong><span class="model-label">Atlas · thoughtful</span></div><div class="message-body"><p>The strongest thread in your notes is not novelty—it’s regained attention. I’d open with the moment people recognize how much of their day is spent tending the tools around their work, rather than the work itself.</p><blockquote>“The best tools don’t ask for your attention. They return it.”</blockquote><p>From there, the narrative can move through three beats: the noise we inherited, the space we can reclaim, and what becomes possible when technology feels quietly present.</p></div></div>
+          </article>
+
+          <div class="tool-activity" role="status">
+            <div class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></svg></div>
+            <div><div class="activity-title"><strong>Reviewing launch notes</strong><span class="activity-pulse"><i></i><i></i><i></i></span></div><p>Extracting voice, audience, and recurring ideas from the mock attachment</p></div>
+            <span class="tool-time">1.8s</span>
+          </div>
+
+          <article class="message assistant-message streaming">
+            <div class="assistant-avatar" aria-hidden="true"><span>H</span></div>
+            <div class="assistant-content"><div class="message-meta"><strong>Hermternal</strong><span class="stream-label"><i></i>Writing</span></div><div class="message-body"><p>Here’s a first pass at the opening:</p><p class="draft">Every day, small interruptions take us a little farther from the work we meant to do. Not all at once—just tab by tab, prompt by prompt, decision by decision. This spring, we’re introducing a quieter way forward: technology that knows when to step in, and when to step back<span class="caret" aria-hidden="true"></span></p></div><div class="stream-actions"><button type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="6" height="6" rx="1" /></svg>Stop</button><span>Responding with Atlas</span></div></div>
+          </article>
+        </section>
+
+        <div class="composer-wrap">
+          <div class="attachment-feedback" role="status" hidden><span>Mock brief attached</span><button type="button" aria-label="Remove mock attachment">Remove</button></div>
+          <form class="composer material" aria-label="Message composer">
+            <button class="expand-button icon-button magnetic" type="button" aria-label="Expand composer" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" /><path d="m3 8 6-6M21 8l-6-6M3 16l6 6M21 16l-6 6" /></svg></button>
+            <label class="sr-only" for="prompt">Message Hermternal</label>
+            <textarea id="prompt" rows="1" placeholder="Ask anything, or bring in a thought…"></textarea>
+            <div class="composer-tools">
+              <div class="attachment-controls">
+                <button class="icon-button magnetic attach-button" type="button" aria-label="Attach a file"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.6 9.6a2 2 0 0 1-2.8-2.8l8.9-8.9" /></svg></button>
+                <button class="context-pill magnetic" type="button" aria-label="Add context"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span>Context</span></button>
+              </div>
+              <div class="send-controls">
+                <div class="model-picker">
+                  <button class="model-button magnetic" type="button" aria-haspopup="menu" aria-expanded="false"><span><strong>Atlas</strong><small>Thoughtful</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg></button>
+                  <div class="model-menu material" role="menu" hidden>
+                    <p class="eyebrow">Choose a model</p>
+                    <button type="button" role="menuitemradio" aria-checked="true" data-model="Atlas" data-mode="Thoughtful"><span><strong>Atlas</strong><small>Deep thinking and nuanced writing</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg></button>
+                    <button type="button" role="menuitemradio" aria-checked="false" data-model="Swift" data-mode="Instant"><span><strong>Swift</strong><small>Quick answers and lightweight edits</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg></button>
+                    <button type="button" role="menuitemradio" aria-checked="false" data-model="Muse" data-mode="Creative"><span><strong>Muse</strong><small>Exploration and imaginative drafts</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg></button>
+                  </div>
+                </div>
+                <button class="icon-button magnetic voice-button" type="button" aria-label="Record a voice note" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8" /></svg><span class="record-time" hidden>0:00</span></button>
+                <button class="send-button magnetic" type="submit" aria-label="Send message"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14" /></svg></button>
+              </div>
+            </div>
+          </form>
+          <p class="prototype-note">Static prototype · responses and tool activity are simulated</p>
+        </div>
+      </main>
+    </div>
+    <div class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="app.js"></script>
+  </body>
+</html>
