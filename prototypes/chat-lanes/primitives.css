@@ -50,6 +50,19 @@
   background: var(--material);
 }
 
+/* A shared, floating glass island for the compact page chrome. It owns the
+   geometry and magnetic return so sibling islands cannot subtly drift apart. */
+.ui-glass-pill {
+  display: inline-flex;
+  min-height: 50px;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 1rem;
+  border-radius: 999px;
+  translate: 0 0;
+  transition: translate 320ms var(--ease-magnetic, cubic-bezier(.22, 1, .36, 1));
+}
+
 .ui-selector {
   display: inline-flex;
   align-items: center;
@@ -84,12 +97,14 @@
     color 150ms ease;
 }
 
+.ui-glass-pill.magnetic.is-magnetic-following { transition: translate 0s; }
+
 @media (hover: hover) and (pointer: fine) {
   .ui-button:hover { background-color: var(--accent-soft); color: var(--text); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-button { translate: 0 0 !important; transform: none !important; }
+  .ui-button, .ui-glass-pill { translate: 0 0 !important; transform: none !important; }
 }
 
 @media (prefers-reduced-transparency: reduce) {

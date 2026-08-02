@@ -84,6 +84,7 @@ requestAnimationFrame(() => requestAnimationFrame(() => picker.setAttribute('dat
 
 const root = document.documentElement;
 const composer = document.querySelector('.composer');
+const expandButton = document.querySelector('[data-expand]');
 const prompt = document.querySelector('#prompt');
 const sendButton = document.querySelector('.send-button');
 const toast = document.querySelector('[data-toast]');
@@ -287,6 +288,19 @@ function updateSendState() {
 }
 
 function resizePrompt() {
+  // Measure intrinsic wrapping without the compact row's minimum height. The
+  // expand affordance is meaningful only once a draft genuinely reaches two lines.
+  const priorHeight = prompt.style.height;
+  const priorMinHeight = prompt.style.minHeight;
+  prompt.style.minHeight = '0';
+  prompt.style.height = '0px';
+  const measuredStyle = getComputedStyle(prompt);
+  const intrinsicHeight = prompt.scrollHeight;
+  const verticalPadding = Number.parseFloat(measuredStyle.paddingTop) + Number.parseFloat(measuredStyle.paddingBottom);
+  const visualLines = Math.max(1, Math.ceil((intrinsicHeight - verticalPadding) / Number.parseFloat(measuredStyle.lineHeight)));
+  prompt.style.height = priorHeight;
+  prompt.style.minHeight = priorMinHeight;
+
   prompt.style.height = 'auto';
   const style = getComputedStyle(prompt);
   const maxHeight = composer.classList.contains('expanded')
@@ -295,6 +309,7 @@ function resizePrompt() {
   const nextHeight = Math.min(prompt.scrollHeight, maxHeight);
   prompt.style.height = `${nextHeight}px`;
   prompt.style.overflowY = prompt.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  expandButton.hidden = !composer.classList.contains('expanded') && visualLines < 2;
 }
 
 function filterHistory() {

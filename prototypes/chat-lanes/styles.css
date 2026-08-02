@@ -338,11 +338,10 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 
 .conversation-shell { position: relative; z-index: var(--layer-shell); display: flex; min-width: 0; min-height: calc(100vh - 2rem); flex-direction: column; overflow: clip; border: 1px solid color-mix(in srgb, var(--glass-edge) 88%, var(--line)); border-radius: var(--radius-shell); background: var(--surface); box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow-shell); }
 .conversation-header { position: relative; z-index: 5; display: flex; align-items: center; justify-content: space-between; min-height: 5.1rem; padding: .65rem 1rem .25rem; border-bottom: 0; background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; }
-.header-island { border-radius: 999px; }
-.conversation-title.header-island { display: flex; min-width: 0; min-height: 50px; align-items: center; justify-content: center; padding: 0 1rem; }
+.conversation-title.header-island { min-width: 0; }
 .conversation-title h1 { overflow: hidden; margin: 0; font-size: .9375rem; font-weight: 600; line-height: 1; letter-spacing: -.018em; text-overflow: ellipsis; white-space: nowrap; }
-.header-actions { display: flex; align-items: center; gap: .15rem; min-height: 50px; padding: 2px 3px 2px .7rem; }
-.local-state { display: flex; align-items: center; gap: .4rem; margin-right: .4rem; color: var(--text-faint); font-size: .66rem; font-weight: 500; }
+.header-actions { gap: .4rem; }
+.local-state { display: flex; align-items: center; gap: .4rem; color: var(--text-faint); font-size: .66rem; font-weight: 500; }
 .local-state i { width: .42rem; height: .42rem; border-radius: 50%; background: var(--positive); box-shadow: 0 0 0 3px color-mix(in srgb, var(--positive) 12%, transparent); }
 .stage { flex: 1; min-height: 0; }
 .lane { width: min(calc(100% - 3rem), var(--reading)); margin: 0 auto; padding: 2.4rem 0 3rem; }
@@ -523,7 +522,9 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
   .conversation-shell { border-right: 0; border-left: 0; border-radius: 0; }
   .conversation-header { min-height: 4.65rem; padding: .45rem .65rem .2rem; }
   .conversation-title.header-island { min-width: 0; padding-inline: .72rem; }
-  .local-state { display: none; }
+  /* The status island has no useful content at this width, so remove the
+     entire shared pill rather than leaving an empty vertical capsule. */
+  .header-actions { display: none; }
   .lane { width: calc(100% - 1rem); padding-top: 1.8rem; }
   .conversation-turn { margin-bottom: 2.3rem; }
   .message-user { width: 94%; }

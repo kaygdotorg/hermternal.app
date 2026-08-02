@@ -11,10 +11,9 @@ import {
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 const app = readFileSync(new URL('./app.mjs', import.meta.url), 'utf8');
+const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
 
 test('selected Canvas refinement exposes reusable material and control primitives', () => {
-  const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
-
   assert.match(html, /href="primitives\.css"/);
   assert.match(primitives, /\.glass-surface/);
   assert.match(primitives, /\.ui-button/);
@@ -86,24 +85,28 @@ test('compact composer keeps its selector quiet and its actions unframed', () =>
   assert.match(styles, /\.expand-button\s*\{[^}]*z-index:\s*2/s);
   assert.match(app, /function resizePrompt\(\)/);
   assert.match(app, /prompt\.style\.overflowY/);
+  assert.match(app, /const expandButton = document\.querySelector\('\[data-expand\]'\)/);
+  assert.match(app, /expandButton\.hidden = !composer\.classList\.contains\('expanded'\) && visualLines < 2/);
   assert.match(styles, /\.model-trigger\s*\{[^}]*background:\s*transparent/s);
   assert.doesNotMatch(html, /composer-toolbar[^]*ui-action-cluster/);
 });
 
 test('desktop shell heights align and the top chrome is composed from islands', () => {
-  assert.match(html, /class="conversation-title glass-surface header-island"/);
-  assert.match(html, /class="header-actions glass-surface header-island"/);
+  assert.match(html, /class="conversation-title glass-surface ui-glass-pill magnetic header-island"/);
+  assert.match(html, /class="header-actions glass-surface ui-glass-pill magnetic header-island"/);
   assert.match(styles, /\.app-shell\s*\{[^}]*align-items:\s*stretch/s);
   assert.match(styles, /\.sidebar\s*\{[^}]*position:\s*relative[^}]*height:\s*auto/s);
   assert.match(html, /class="sidebar-inner"/);
   assert.match(styles, /\.sidebar-inner\s*\{[^}]*position:\s*sticky[^}]*height:\s*calc\(100vh - 2rem\)/s);
   assert.match(styles, /\.conversation-header\s*\{[^}]*border-bottom:\s*0[^}]*background:\s*transparent[^}]*backdrop-filter:\s*none/s);
-  assert.match(styles, /\.header-island\s*\{[^}]*border-radius:\s*999px/s);
   assert.doesNotMatch(html, /class="header-actions[\s\S]*ui-action-cluster/);
   assert.match(styles, /@media \(max-width: 820px\)\s*\{[^]*\.app-shell\s*\{[^}]*z-index:\s*auto/s);
   const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
+  assert.match(primitives, /\.ui-glass-pill\s*\{[^}]*min-height:\s*50px[^}]*border-radius:\s*999px[^}]*translate:\s*0 0/s);
+  assert.match(primitives, /\.ui-glass-pill\.magnetic\.is-magnetic-following\s*\{[^}]*transition:\s*translate 0s/s);
   assert.match(primitives, /\.ui-pill\s*\{[^}]*background:\s*var\(--material\)/s);
   assert.match(primitives, /\.ui-action-cluster\s*\{[^}]*background:\s*var\(--material\)/s);
+  assert.match(styles, /@media \(max-width: 560px\)\s*\{[^]*\.header-actions\s*\{[^}]*display:\s*none/s);
 });
 
 test('compact chrome uses one primary label without stacked subtitles', () => {
@@ -116,7 +119,7 @@ test('compact chrome uses one primary label without stacked subtitles', () => {
   assert.doesNotMatch(models, /<small/);
   assert.doesNotMatch(html, /data-theme-label/);
   assert.doesNotMatch(html, /Color only—geometry stays fixed/);
-  assert.match(styles, /\.conversation-title\.header-island\s*\{[^}]*display:\s*flex[^}]*align-items:\s*center[^}]*justify-content:\s*center/s);
+  assert.match(primitives, /\.ui-glass-pill\s*\{[^}]*display:\s*inline-flex[^}]*align-items:\s*center[^}]*justify-content:\s*center/s);
 });
 
 test('distilled transcript keeps capability states while removing redundant chrome', () => {
