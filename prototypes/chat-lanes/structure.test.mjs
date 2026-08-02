@@ -28,6 +28,7 @@ test('material, layering, typography, and magnetic motion use accepted shared to
   assert.match(styles, /--material-opacity:\s*60%/);
   assert.match(styles, /--surface-raised-opacity:\s*60%/);
   assert.doesNotMatch(styles, /--(?:material|surface-raised):\s*rgba/);
+  assert.match(styles, /\.proto-picker\s*\{[^}]*background:\s*rgba\(10, 10, 10, 0\.6\)/s);
   assert.match(styles, /--layer-sidebar:\s*20/);
   assert.match(styles, /--layer-menu:\s*100/);
   assert.match(styles, /\.sidebar\s*\{[^}]*z-index:\s*var\(--layer-sidebar\)/s);
@@ -55,9 +56,25 @@ test('desktop shell heights align and the top chrome is composed from islands', 
   assert.match(styles, /\.conversation-header\s*\{[^}]*border-bottom:\s*0[^}]*background:\s*transparent[^}]*backdrop-filter:\s*none/s);
   assert.match(styles, /\.header-island\s*\{[^}]*border-radius:\s*999px/s);
   assert.match(styles, /\.header-actions \.ui-action-cluster\s*\{[^}]*border:\s*0[^}]*background:\s*transparent/s);
+  assert.match(styles, /@media \(max-width: 820px\)\s*\{[^]*\.app-shell\s*\{[^}]*z-index:\s*auto/s);
   const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
   assert.match(primitives, /\.ui-pill\s*\{[^}]*background:\s*var\(--material\)/s);
   assert.match(primitives, /\.ui-action-cluster\s*\{[^}]*background:\s*var\(--material\)/s);
+});
+
+test('motion opportunities use restrained shared recipes and reduced-motion fallbacks', () => {
+  assert.match(app, /MENU_ENTER_MS\s*=\s*180/);
+  assert.match(app, /MENU_EXIT_MS\s*=\s*130/);
+  assert.match(app, /menu\.animate/);
+  assert.match(app, /lastInputModality\s*===\s*'keyboard'/);
+  assert.match(app, /TOAST_EXIT_MS\s*=\s*140/);
+  assert.match(app, /lastInputModality\s*!==\s*'keyboard'\s*\?\s*''\s*:\s*' motion-immediate'/);
+  assert.match(styles, /\.toast\.motion-immediate[^}]*transition:\s*none/s);
+  assert.match(styles, /\.toast\.is-visible\s*\{[^}]*opacity:\s*1[^}]*transform:\s*translateY\(0\) scale\(1\)/s);
+  assert.match(styles, /@starting-style\s*\{[^]*\.local-turn\s*\{[^}]*opacity:\s*0[^}]*transform:\s*translateY\(8px\)/s);
+  assert.match(styles, /@starting-style\s*\{[^]*\.approval-result\s*\{[^}]*opacity:\s*0[^}]*transform:\s*translateY\(4px\)/s);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)\s*\{[^]*transition-duration:\s*120ms\s*!important/s);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)\s*\{[^]*\.toast\.motion-immediate[^}]*transition:\s*none\s*!important/s);
 });
 
 test('each lane renders the same conversation content through a distinct container model', () => {

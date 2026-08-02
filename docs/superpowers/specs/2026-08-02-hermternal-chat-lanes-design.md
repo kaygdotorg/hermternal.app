@@ -162,4 +162,10 @@ Hermes capability research informs future component boundaries without expanding
 
 The desktop sidebar and conversation canvas share the same grid-row height. A sticky inner sidebar rail keeps navigation, Appearance, and profile controls within the viewport while the full sidebar material continues to the transcript's bottom edge. The conversation header itself paints no slab, border, or blur; the title and session actions are two independent glass islands at the top of the solid reading canvas.
 
-All standalone glass surfaces consume the same 60/40 material token. Nested buttons and action groups remain fully transparent to avoid compounded alpha. Transcript content uses a separately named raised-surface token that is also normalized to 60% opacity across themes. Semantic overlays such as danger/recording feedback, the drawer scrim, and the fixed prototype comparison harness are not glass surfaces and retain purpose-specific opacity.
+All standalone glass surfaces consume the same 60/40 material token. Nested buttons and action groups remain fully transparent to avoid compounded alpha. Transcript content uses a separately named raised-surface token that is also normalized to 60% opacity across themes. The visible prototype comparison picker also uses 60% opacity. Semantic overlays such as danger/recording feedback and the drawer scrim are not material surfaces and retain purpose-specific opacity.
+
+## Canvas motion refinement
+
+Motion follows one restrained state-change vocabulary. Pointer-opened menus originate at their trigger edge and move from zero opacity plus `scale(.97)` to rest in `180ms`; exit takes `130ms`. Toast feedback enters from 8px below with a slight `.98` scale, new local turns enter from 8px below, and approval decisions enter from 4px below. These effects animate only opacity and transform and remain interruptible.
+
+Keyboard-triggered menus, local turns, approval results, and toasts render immediately because keyboard operation must never wait for spatial motion. Theme changes, composer expansion, transcript loading, and existing prose are deliberately not animated: they are frequent or reading-sensitive changes where movement would add noise or distort text. Reduced Motion removes spatial displacement and magnetic following, retaining only a `120ms` opacity transition for state continuity.

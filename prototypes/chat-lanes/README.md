@@ -24,7 +24,9 @@ The three surfaces use one derived radius scale (`12px`, `18px`, `26px`), the na
 
 `primitives.css` is the prototype-level reuse boundary. It defines the shared glass surface plus semantic button, icon-button, pill, selector, and independent-action-cluster families. Magnetic controls follow the pointer at 18% strength with a 7px clamp and spring back through the individual CSS `translate` property, allowing press-scale to compose without displacement bugs. Touch and reduced-motion input do not drift.
 
-Controls meet a 44 CSS-pixel target. The navigation becomes a left drawer below 820px. Focus visibility, reduced motion, reduced transparency, increased contrast, and 320px-wide layouts are represented in the prototype CSS.
+Controls meet a 44 CSS-pixel target. The navigation becomes a left drawer below 820px; its scrim and close control remain above the fixed mobile toolbar. Focus visibility, reduced motion, reduced transparency, increased contrast, and 320px-wide layouts are represented in the prototype CSS.
+
+Motion is intentionally limited to state changes that benefit from visible causality. Pointer-opened menus settle from `scale(.97)` and zero opacity in `180ms`, then leave in `130ms`; keyboard-opened menus appear immediately. Pointer-created toasts, newly submitted local turns, and approval results use short transform-and-opacity entrances, while keyboard-created equivalents settle immediately. Transcript loading, theme changes, and composer expansion do not receive decorative animation. Reduced Motion replaces spatial travel with a `120ms` opacity-only transition, while magnetic drift is disabled entirely.
 
 ## Mocked boundaries
 

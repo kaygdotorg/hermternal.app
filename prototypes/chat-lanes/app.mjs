@@ -24,7 +24,19 @@ const highlight = picker.querySelector('.proto-picker-highlight');
 const items = [...picker.querySelectorAll('[data-variant-index]')];
 const MAGNETIC_STRENGTH = 0.18;
 const MAGNETIC_MAX = 7;
+const MENU_ENTER_MS = 180;
+const MENU_EXIT_MS = 130;
+const TOAST_EXIT_MS = 140;
+const REDUCED_MOTION_MS = 120;
 let magneticFrame = 0;
+let lastInputModality = 'pointer';
+
+document.addEventListener('keydown', () => {
+  lastInputModality = 'keyboard';
+}, { capture: true });
+document.addEventListener('pointerdown', () => {
+  lastInputModality = 'pointer';
+}, { capture: true });
 
 function moveHighlight() {
   const item = items[current];
@@ -83,13 +95,26 @@ let lastDrawerFocus = null;
 let recordingTimer = null;
 let recordingSeconds = 0;
 let toastTimer = null;
+let toastHideTimer = null;
 
 function announce(message) {
+  const shouldAnimate = lastInputModality !== 'keyboard';
   window.clearTimeout(toastTimer);
+  window.clearTimeout(toastHideTimer);
   toast.textContent = message;
   toast.hidden = false;
+  toast.classList.toggle('motion-immediate', !shouldAnimate);
+  if (shouldAnimate) requestAnimationFrame(() => toast.classList.add('is-visible'));
+  else toast.classList.add('is-visible');
   toastTimer = window.setTimeout(() => {
-    toast.hidden = true;
+    toast.classList.remove('is-visible');
+    if (!shouldAnimate) {
+      toast.hidden = true;
+      return;
+    }
+    toastHideTimer = window.setTimeout(() => {
+      toast.hidden = true;
+    }, TOAST_EXIT_MS);
   }, 2600);
 }
 
@@ -115,9 +140,47 @@ export function setSidebar(open) {
   }
 }
 
+function animateMenu(menu, shouldOpen) {
+  const isKeyboardAction = lastInputModality === 'keyboard';
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const wasHidden = menu.hidden;
+  const renderedStyle = wasHidden ? null : getComputedStyle(menu);
+  const currentOpacity = renderedStyle?.opacity ?? '0';
+  const currentTransform = renderedStyle?.transform === 'none' ? 'scale(1)' : renderedStyle?.transform;
+  menu.getAnimations().forEach((animation) => animation.cancel());
+  menu.dataset.state = shouldOpen ? 'open' : 'closed';
+
+  if (shouldOpen) {
+    menu.hidden = false;
+    if (isKeyboardAction) return;
+    menu.animate(
+      reduceMotion
+        ? [{ opacity: wasHidden ? 0 : currentOpacity }, { opacity: 1 }]
+        : [{ opacity: wasHidden ? 0 : currentOpacity, transform: wasHidden ? 'scale(.97)' : currentTransform }, { opacity: 1, transform: 'scale(1)' }],
+      { duration: reduceMotion ? REDUCED_MOTION_MS : MENU_ENTER_MS, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
+    );
+    return;
+  }
+
+  if (menu.hidden) return;
+  if (isKeyboardAction) {
+    menu.hidden = true;
+    return;
+  }
+  const animation = menu.animate(
+    reduceMotion
+      ? [{ opacity: currentOpacity }, { opacity: 0 }]
+      : [{ opacity: currentOpacity, transform: currentTransform }, { opacity: 0, transform: 'scale(.97)' }],
+    { duration: reduceMotion ? REDUCED_MOTION_MS : MENU_EXIT_MS, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
+  );
+  animation.finished.then(() => {
+    if (menu.dataset.state === 'closed') menu.hidden = true;
+  }).catch(() => {});
+}
+
 export function setMenu(name, open) {
   document.querySelectorAll('[data-menu]').forEach((menu) => {
-    menu.hidden = !(menu.dataset.menu === name && open);
+    animateMenu(menu, menu.dataset.menu === name && open);
   });
   document.querySelectorAll('[data-menu-trigger]').forEach((trigger) => {
     trigger.setAttribute('aria-expanded', String(trigger.dataset.menuTrigger === name && open));
@@ -146,9 +209,12 @@ export function submitDraft() {
   const value = normalizeDraft(prompt.value);
   if (!canSend(value)) return false;
   stage.querySelector('.transcript-flow').insertAdjacentHTML('beforeend', renderLocalExchange(value));
+  const motionClass = lastInputModality !== 'keyboard' ? '' : ' motion-immediate';
+  const localTurn = stage.querySelector('.local-turn:last-child');
+  if (motionClass) localTurn?.classList.add('motion-immediate');
   prompt.value = '';
   updateSendState();
-  stage.querySelector('.local-turn:last-child')?.scrollIntoView({ block: 'center' });
+  localTurn?.scrollIntoView({ block: 'center' });
   announce('Added locally. Nothing was sent.');
   return true;
 }
@@ -227,7 +293,8 @@ document.addEventListener('click', (event) => {
 
   const approval = event.target.closest('[data-approval]');
   if (approval) {
-    approval.closest('.approval-actions').innerHTML = `<span class="approval-result">${approval.dataset.approval === 'allow' ? 'Allowed once' : 'Skipped'}</span>`;
+    const motionClass = lastInputModality !== 'keyboard' ? '' : ' motion-immediate';
+    approval.closest('.approval-actions').innerHTML = `<span class="approval-result${motionClass}">${approval.dataset.approval === 'allow' ? 'Allowed once' : 'Skipped'}</span>`;
     announce(approval.dataset.approval === 'allow' ? 'Mock context allowed once.' : 'Mock context skipped.');
   }
 });

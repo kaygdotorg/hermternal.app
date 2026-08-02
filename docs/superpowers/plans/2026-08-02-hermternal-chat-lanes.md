@@ -17,7 +17,7 @@
 - Theme changes affect semantic color/material tokens only.
 - All primary controls meet a 44 by 44 CSS-pixel target.
 - The current root prototype remains unchanged.
-- The prototype picker markup, class names, CSS values, URL behavior, and keyboard wiring match `/home/hermy/.codex/skills/prototype/PICKER.md` verbatim except for variant names.
+- The prototype picker markup, class names, URL behavior, and keyboard wiring match `/home/hermy/.codex/skills/prototype/PICKER.md`; its visible material alpha follows the later user-approved 60/40 invariant.
 
 ---
 
