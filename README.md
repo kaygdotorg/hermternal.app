@@ -1,4 +1,4 @@
-# Hermternal web conversation mockup
+# Hermternal command / inspect prototype
 
 This directory is a high-fidelity, web-only interaction prototype for Hermternal. Open `index.html` directly or serve the directory with:
 
@@ -6,38 +6,43 @@ This directory is a high-fidelity, web-only interaction prototype for Hermternal
 python -m http.server 8000
 ```
 
-Then visit `http://localhost:8000`. No build step, package install, account, or network connection is required.
+Then visit `http://localhost:8000`. It has no build step, package install, account, remote asset, or network requirement.
 
-## What is mocked
+## Visual thesis: the quiet instrument
 
-Every conversation, attachment, model, tool event, connectivity indicator, profile, voice recording, and send result is static or locally simulated. The prototype makes no API calls and contains no authentication, backend, persistence, analytics, live data, deployment configuration, or Hermes gateway integration. Refresh restores the default appearance and content.
+Hermternal is designed as a calm instrument for issuing a direction and inspecting what follows, not as a generic chat dashboard. The moonlit graphite workspace holds two physical objects: a compact Tahoe-inspired history sidebar and one continuous, chrome-rimmed conversation shell. Inside that shell, a luminous signal rail connects prompts, responses, tool work, approval, and streaming into a legible execution trace. Strong spacing and typography establish the reading hierarchy; the assistant's key statement alone receives an editorial serif treatment.
 
-## Design system and stances
+The deliberate visual risk is the trace rail. It gives operational states a shared grammar without turning prose into log output. The rest of the interface stays low-chroma and avoids feature tiles, decorative cards, oversized pills, rainbow accents, arbitrary gradients, and stacked glass panels. Sidebar and composer share the same material recipe and blur weight because both are controls floating above the reading surface. The larger conversation shell is more solid so text remains stable and calm.
 
-The interface uses one semantic material system across the floating navigation, conversation chrome, menus, and composer: translucent surfaces, a bright edge, soft depth, and background blur. CSS custom properties keep color, material, shadow, radii, spacing, and motion coherent.
+Four environments are intentionally distinct rather than accent swaps:
 
-Eight themes provide different material moods, not only accent changes: Tahoe light and dark are luminous and atmospheric; graphite is neutral and low-chroma; ocean, ember, forest, and lavender tint both the environment and glass; high-contrast removes decorative shadow and uses solid black, white, and yellow.
+- **Moon** is the default blue-black, night-focused workspace.
+- **Paper** changes the entire material and depth model for warm daylight reading.
+- **Archive** uses an olive study palette with softer document contrast.
+- **Ink** removes decorative shadow and pushes edges and type toward hard contrast.
 
-Three selectable stances change hierarchy and rhythm:
+Three reading stances change measure, rhythm, type treatment, and state density: Reflective favors editorial pacing, Compact favors operational scanning, and Wide supports long-form review.
 
-- **Calm editorial** uses generous whitespace, serif conversation copy, and a balanced reading width.
-- **Focused command** increases information density, uses sans-serif content, squares surfaces, and emphasizes tool activity.
-- **Warm studio** narrows the conversation, increases conversational spacing, rounds avatars, and turns quotations into soft cards.
+## Interaction and motion intent
 
-## Interaction and motion
+Desktop and tablet navigation remains a persistent floating object. Below 851px it moves off-canvas behind a hamburger and scrim, traps keyboard focus, and returns focus on dismissal. The composer keeps attachment and context actions at bottom-left, model / voice / send at right, and long-prompt expansion at top-right.
 
-Desktop navigation floats persistently. At tablet and mobile widths it moves off-canvas, opened from a 44px menu control and dismissed by its close control, backdrop, or Escape. Model, theme, stance, attachment, expanded-writing, voice-note, and send states are all interactive. Pointer-capable devices receive a restrained lift on key controls; touch devices do not. Motion uses short, interruptible transforms and opacity changes. `prefers-reduced-motion` removes transitions and animated streaming decoration.
+Menus originate beside their controls. The drawer, scrim, and menu state use short, interruptible transform/opacity transitions with no `transition: all`, `scale(0)`, ease-in, or exaggerated bounce. Magnetic movement is restricted to fine pointers, capped at three pixels, and paired with immediate press feedback. Reduced-motion removes spatial motion; reduced-transparency replaces glass with solid material; unsupported blur receives the same solid fallback.
 
-## Accessibility
+## What is interactive
 
-The document uses semantic landmarks, headings, navigation, articles, forms, labels, and fieldsets. Controls meet a 44px minimum target where used in the primary interface, expose state through accessible names and `aria-expanded`/`aria-pressed` where needed, and have high-visibility `:focus-visible` treatment. Escape closes layered controls. Status changes are announced through polite live regions. The layout is designed for browser zoom and reflows from desktop through tablet to 320px narrow web.
+The mobile drawer, theme environments, reading stances, model menu, composer expansion, mock attachment, context feedback, voice-note timer, approval choices, tool inspection, Escape dismissal, Command/Ctrl–Enter send, and focus states are interactive. Sending appends a local mock command and a short simulated streaming state to demonstrate command → inspect feedback. It never transmits or generates content.
 
-The high-contrast theme provides the strongest contrast option. Theme-specific visual contrast should still be validated with production tooling before any design is adopted. The off-canvas navigation makes background content inert while open and loops keyboard focus inside the drawer.
+The transcript includes realistic static prompt, attachment, assistant, tool, approval, and active-streaming states. Loading, denial, empty/new-thread, and completion feedback are represented through local controls and live-region messages.
 
-## Performance choices
+## Accessibility and responsive behavior
 
-There are no external assets, fonts, frameworks, runtime dependencies, polling loops, or network requests. Icons are inline SVG, theme changes update root custom properties, and animation is limited to compositor-friendly transforms/opacity plus tiny status indicators. Blur has an opaque fallback for unsupported browsers. The voice timer exists only while its mock recording state is active.
+The page uses semantic landmarks, headings, navigation, articles, forms, labels, fieldsets, time elements, and live regions. Primary controls meet a 44px minimum target. Focus is visible, Escape closes the topmost layer, the mobile drawer traps focus, and narrow layouts reflow through 320px without overlapping the transcript and composer. System fonts support browser zoom and platform text rendering. Color choices still require production contrast validation before adoption.
 
-## Intentional limitations
+## Performance and mocked boundaries
 
-This is not production UI. Data does not persist, controls do not reach services or the file system, tool progress never resolves, streaming text is prewritten, and the model choices are fictional prototype fixtures. Empty, failure, attachment, streaming, loading, and connected states are represented visually for design evaluation; they are not connected to application logic.
+There are no external dependencies, fonts, images, frameworks, polling loops, APIs, authentication, persistence, analytics, deployment settings, credentials, live data, or Hermes gateway integration. Icons are inline SVG; animation uses transforms and opacity except for tiny status indicators. The voice timer runs only while its local mock state is active.
+
+This remains a planning prototype. Conversations, attachments, models, tools, permissions, connectivity, profile data, streaming, and send results are fixtures or browser-only simulations. Refresh restores the initial state. Nothing reaches a service, model, file system, or other user.
+
+See `DESIGN-NOTES.md` for the command/inspect composition sketch and the pre-build critique that guided this pass.
