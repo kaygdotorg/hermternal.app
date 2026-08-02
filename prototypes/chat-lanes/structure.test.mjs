@@ -49,6 +49,7 @@ test('official Geist variable fonts are self-hosted with license and fallbacks',
   assert.match(styles, /@font-face\s*\{[^}]*font-family:\s*"Geist"[^}]*Geist%5Bwght%5D\.woff2[^}]*font-display:\s*swap/s);
   assert.match(styles, /@font-face\s*\{[^}]*font-family:\s*"Geist Mono"[^}]*GeistMono%5Bwght%5D\.woff2[^}]*font-display:\s*swap/s);
   assert.match(styles, /font-family:\s*"Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif/);
+  assert.match(styles, /\.proto-picker\s*\{[^}]*font-family:\s*"Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif/s);
 });
 
 test('compact composer keeps its selector quiet and its actions unframed', () => {
