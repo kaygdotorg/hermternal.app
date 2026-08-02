@@ -36,11 +36,11 @@ test('material, layering, typography, and magnetic motion use accepted shared to
   assert.match(styles, /--layer-menu:\s*100/);
   assert.match(styles, /\.sidebar\s*\{[^}]*z-index:\s*var\(--layer-sidebar\)/s);
   assert.match(styles, /\.floating-menu\s*\{[^}]*z-index:\s*var\(--layer-menu\)/s);
-  assert.match(app, /MAGNETIC_STRENGTH\s*=\s*0\.28/);
-  assert.match(app, /MAGNETIC_MAX\s*=\s*12/);
+  assert.match(app, /MAGNETIC_STRENGTH\s*=\s*0\.18/);
+  assert.match(app, /MAGNETIC_MAX\s*=\s*7/);
+  assert.match(app, /MAGNETIC_PARALLAX\s*=\s*0\.2/);
   assert.match(app, /target\.style\.translate/);
-  assert.match(primitives, /translate 320ms var\(--ease-magnetic, cubic-bezier\(\.22, 1, \.36, 1\)\)/);
-  assert.doesNotMatch(primitives, /cubic-bezier\(\.2, 1\.35, \.3, 1\)/);
+  assert.match(primitives, /translate 420ms cubic-bezier\(\.2, 1\.35, \.3, 1\)/);
 });
 
 test('system theme follows the host color scheme without changing explicit themes', () => {
@@ -81,7 +81,7 @@ test('compact composer keeps its selector quiet and its actions unframed', () =>
   assert.match(styles, /--composer-control-size:\s*\.875rem/);
   assert.match(styles, /--composer-prompt-row:\s*2\.75rem/);
   assert.match(styles, /\.composer\s*\{[^}]*min-height:\s*6rem/s);
-  assert.match(styles, /\.composer textarea\s*\{[^}]*min-height:\s*var\(--composer-prompt-row\)[^}]*max-height:\s*3rem/s);
+  assert.match(styles, /\.composer textarea\s*\{[^}]*min-height:\s*var\(--composer-prompt-row\)[^}]*max-height:\s*min\(32vh, 10rem\)/s);
   assert.match(styles, /\.expand-button\s*\{[^}]*z-index:\s*2/s);
   assert.match(app, /function resizePrompt\(\)/);
   assert.match(app, /prompt\.style\.overflowY/);
@@ -103,7 +103,8 @@ test('desktop shell heights align and the top chrome is composed from islands', 
   assert.match(styles, /@media \(max-width: 820px\)\s*\{[^]*\.app-shell\s*\{[^}]*z-index:\s*auto/s);
   const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
   assert.match(primitives, /\.ui-glass-pill\s*\{[^}]*min-height:\s*50px[^}]*border-radius:\s*999px[^}]*translate:\s*0 0/s);
-  assert.match(primitives, /\.ui-glass-pill\.header-island\s*\{[^}]*inline-size:\s*10\.375rem[^}]*flex:\s*0 0 10\.375rem/s);
+  assert.doesNotMatch(primitives, /\.ui-glass-pill\.header-island\s*\{[^}]*inline-size:/s);
+  assert.match(primitives, /\.ui-glass-pill\.header-island\s*\{[^}]*width:\s*max-content[^}]*flex:\s*0 0 auto/s);
   assert.match(primitives, /\.ui-glass-pill\.magnetic\.is-magnetic-following\s*\{[^}]*transition:\s*translate 0s/s);
   assert.match(primitives, /\.ui-pill\s*\{[^}]*background:\s*var\(--material\)/s);
   assert.match(primitives, /\.ui-action-cluster\s*\{[^}]*background:\s*var\(--material\)/s);

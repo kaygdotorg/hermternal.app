@@ -22,7 +22,7 @@
   translate: 0 0;
   transform: scale(1);
   transition:
-    translate 320ms var(--ease-magnetic, cubic-bezier(.22, 1, .36, 1)),
+    translate 420ms cubic-bezier(.2, 1.35, .3, 1),
     transform 140ms var(--ease-out),
     background-color 150ms ease,
     color 150ms ease;
@@ -50,8 +50,8 @@
   background: var(--material);
 }
 
-/* A shared, floating glass island for the compact page chrome. It owns the
-   geometry and magnetic return so sibling islands cannot subtly drift apart. */
+/* A shared floating-glass family for compact page chrome. Geometry stays
+   content-driven; consistency comes from height, padding, material, and motion. */
 .ui-glass-pill {
   display: inline-flex;
   min-height: 50px;
@@ -61,16 +61,15 @@
   border-radius: 999px;
   translate: 0 0;
   transition:
-    translate 360ms var(--ease-magnetic, cubic-bezier(.22, 1, .36, 1)),
-    transform 160ms var(--ease-out),
+    translate 420ms cubic-bezier(.2, 1.35, .3, 1),
     background-color 150ms ease,
-    box-shadow 180ms var(--ease-out);
+    color 150ms ease;
 }
 
 .ui-glass-pill.header-island {
   box-sizing: border-box;
-  inline-size: 10.375rem;
-  flex: 0 0 10.375rem;
+  width: max-content;
+  flex: 0 0 auto;
 }
 
 .ui-selector {
@@ -110,21 +109,13 @@
 .ui-glass-pill.magnetic.is-magnetic-following {
   transition:
     translate 0s,
-    transform 160ms var(--ease-out),
     background-color 150ms ease,
-    box-shadow 180ms var(--ease-out);
+    color 150ms ease;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .ui-button:hover { background-color: var(--accent-soft); color: var(--text); }
-  .ui-glass-pill.magnetic:hover {
-    transform: scale(1.018);
-    background-color: color-mix(in srgb, var(--material-base) 58%, var(--accent-soft));
-    box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, var(--line) 45%, transparent),
-      0 22px 48px rgba(29, 40, 58, 0.15),
-      0 5px 13px rgba(29, 40, 58, 0.08);
-  }
+  .ui-glass-pill.magnetic:hover { background-color: color-mix(in srgb, var(--material-base) 62%, transparent); }
 }
 
 @media (prefers-reduced-motion: reduce) {

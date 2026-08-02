@@ -22,8 +22,11 @@ document.querySelector('[data-theme-options]').innerHTML = renderThemeOptions();
 const picker = document.querySelector('.proto-picker');
 const highlight = picker.querySelector('.proto-picker-highlight');
 const items = [...picker.querySelectorAll('[data-variant-index]')];
-const MAGNETIC_STRENGTH = 0.28;
-const MAGNETIC_MAX = 12;
+// Calternal's signed-off magnetic recipe: subtle cursor follow with a small
+// label lead, clamped tightly enough that compact controls keep their place.
+const MAGNETIC_STRENGTH = 0.18;
+const MAGNETIC_MAX = 7;
+const MAGNETIC_PARALLAX = 0.2;
 const MENU_ENTER_MS = 180;
 const MENU_EXIT_MS = 130;
 const TOAST_EXIT_MS = 140;
@@ -516,8 +519,9 @@ searchInput.addEventListener('input', filterHistory);
 
 function moveMagneticTarget(target, event) {
   const rect = target.getBoundingClientRect();
-  const x = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientX - rect.left - rect.width / 2) * MAGNETIC_STRENGTH));
-  const y = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientY - rect.top - rect.height / 2) * MAGNETIC_STRENGTH));
+  const follow = MAGNETIC_STRENGTH * (1 + MAGNETIC_PARALLAX);
+  const x = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientX - rect.left - rect.width / 2) * follow));
+  const y = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientY - rect.top - rect.height / 2) * follow));
   cancelAnimationFrame(magneticFrame);
   magneticFrame = requestAnimationFrame(() => {
     target.classList.add('is-magnetic-following');
@@ -533,9 +537,6 @@ function respondToMagneticPointer(event) {
   if (target) moveMagneticTarget(target, event);
 }
 
-// Entry has the same attraction as a move, so the tactile response is visible
-// even when someone pauses their pointer directly over a compact pill.
-document.addEventListener('pointerover', respondToMagneticPointer);
 document.addEventListener('pointermove', respondToMagneticPointer);
 
 document.addEventListener('pointerout', (event) => {

@@ -402,7 +402,7 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 
 .composer-dock { position: sticky; z-index: var(--layer-sticky); bottom: 0; width: min(calc(100% - 3rem), calc(var(--reading) + 2rem)); margin: auto auto 0; padding: 1rem 0 4.75rem; }
 .composer { position: relative; min-height: 6rem; padding: .55rem .6rem .2rem; border-radius: var(--radius-nested); }
-.composer textarea { display: block; width: calc(100% - 2.75rem); min-height: var(--composer-prompt-row); max-height: 3rem; overflow-y: hidden; padding: .16rem .45rem; resize: none; border: 0; outline: 0; background: transparent; font-size: var(--composer-copy-size); font-weight: 400; line-height: 1.4; }
+.composer textarea { display: block; width: calc(100% - 2.75rem); min-height: var(--composer-prompt-row); max-height: min(32vh, 10rem); overflow-y: hidden; padding: .16rem .45rem; resize: none; border: 0; outline: 0; background: transparent; font-size: var(--composer-copy-size); font-weight: 400; line-height: 1.4; }
 .composer textarea::placeholder { color: var(--text-faint); }
 .expand-button { position: absolute; z-index: 2; top: .35rem; right: .35rem; }
 .composer-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 0; margin-top: 0; }
@@ -521,7 +521,7 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
   .app-shell { padding-inline: 0; }
   .conversation-shell { border-right: 0; border-left: 0; border-radius: 0; }
   .conversation-header { min-height: 4.65rem; padding: .45rem .65rem .2rem; }
-  .conversation-title.header-island { min-width: 0; inline-size: auto; flex-basis: auto; padding-inline: .72rem; }
+  .conversation-title.header-island { min-width: 0; padding-inline: .72rem; }
   /* The status island has no useful content at this width, so remove the
      entire shared pill rather than leaving an empty vertical capsule. */
   .header-actions { display: none; }
