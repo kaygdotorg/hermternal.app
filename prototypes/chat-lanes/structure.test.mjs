@@ -36,8 +36,8 @@ test('material, layering, typography, and magnetic motion use accepted shared to
   assert.match(styles, /--layer-menu:\s*100/);
   assert.match(styles, /\.sidebar\s*\{[^}]*z-index:\s*var\(--layer-sidebar\)/s);
   assert.match(styles, /\.floating-menu\s*\{[^}]*z-index:\s*var\(--layer-menu\)/s);
-  assert.match(app, /MAGNETIC_STRENGTH\s*=\s*0\.18/);
-  assert.match(app, /MAGNETIC_MAX\s*=\s*7/);
+  assert.match(app, /MAGNETIC_STRENGTH\s*=\s*0\.28/);
+  assert.match(app, /MAGNETIC_MAX\s*=\s*12/);
   assert.match(app, /target\.style\.translate/);
   assert.match(primitives, /translate 320ms var\(--ease-magnetic, cubic-bezier\(\.22, 1, \.36, 1\)\)/);
   assert.doesNotMatch(primitives, /cubic-bezier\(\.2, 1\.35, \.3, 1\)/);
@@ -103,6 +103,7 @@ test('desktop shell heights align and the top chrome is composed from islands', 
   assert.match(styles, /@media \(max-width: 820px\)\s*\{[^]*\.app-shell\s*\{[^}]*z-index:\s*auto/s);
   const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
   assert.match(primitives, /\.ui-glass-pill\s*\{[^}]*min-height:\s*50px[^}]*border-radius:\s*999px[^}]*translate:\s*0 0/s);
+  assert.match(primitives, /\.ui-glass-pill\.header-island\s*\{[^}]*inline-size:\s*10\.375rem[^}]*flex:\s*0 0 10\.375rem/s);
   assert.match(primitives, /\.ui-glass-pill\.magnetic\.is-magnetic-following\s*\{[^}]*transition:\s*translate 0s/s);
   assert.match(primitives, /\.ui-pill\s*\{[^}]*background:\s*var\(--material\)/s);
   assert.match(primitives, /\.ui-action-cluster\s*\{[^}]*background:\s*var\(--material\)/s);

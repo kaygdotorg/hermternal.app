@@ -521,7 +521,7 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
   .app-shell { padding-inline: 0; }
   .conversation-shell { border-right: 0; border-left: 0; border-radius: 0; }
   .conversation-header { min-height: 4.65rem; padding: .45rem .65rem .2rem; }
-  .conversation-title.header-island { min-width: 0; padding-inline: .72rem; }
+  .conversation-title.header-island { min-width: 0; inline-size: auto; flex-basis: auto; padding-inline: .72rem; }
   /* The status island has no useful content at this width, so remove the
      entire shared pill rather than leaving an empty vertical capsule. */
   .header-actions { display: none; }

@@ -22,8 +22,8 @@ document.querySelector('[data-theme-options]').innerHTML = renderThemeOptions();
 const picker = document.querySelector('.proto-picker');
 const highlight = picker.querySelector('.proto-picker-highlight');
 const items = [...picker.querySelectorAll('[data-variant-index]')];
-const MAGNETIC_STRENGTH = 0.18;
-const MAGNETIC_MAX = 7;
+const MAGNETIC_STRENGTH = 0.28;
+const MAGNETIC_MAX = 12;
 const MENU_ENTER_MS = 180;
 const MENU_EXIT_MS = 130;
 const TOAST_EXIT_MS = 140;
@@ -514,11 +514,7 @@ prompt.addEventListener('input', () => {
 });
 searchInput.addEventListener('input', filterHistory);
 
-document.addEventListener('pointermove', (event) => {
-  if (!matchMedia('(hover: hover) and (pointer: fine)').matches) return;
-  if (event.pointerType === 'touch' || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const target = event.target.closest('.magnetic');
-  if (!target) return;
+function moveMagneticTarget(target, event) {
   const rect = target.getBoundingClientRect();
   const x = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientX - rect.left - rect.width / 2) * MAGNETIC_STRENGTH));
   const y = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientY - rect.top - rect.height / 2) * MAGNETIC_STRENGTH));
@@ -528,7 +524,19 @@ document.addEventListener('pointermove', (event) => {
     // Individual translate composes with the shared press-scale transform.
     target.style.translate = `${x}px ${y}px`;
   });
-});
+}
+
+function respondToMagneticPointer(event) {
+  if (!matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  if (event.pointerType === 'touch' || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const target = event.target.closest('.magnetic');
+  if (target) moveMagneticTarget(target, event);
+}
+
+// Entry has the same attraction as a move, so the tactile response is visible
+// even when someone pauses their pointer directly over a compact pill.
+document.addEventListener('pointerover', respondToMagneticPointer);
+document.addEventListener('pointermove', respondToMagneticPointer);
 
 document.addEventListener('pointerout', (event) => {
   const target = event.target.closest('.magnetic');
