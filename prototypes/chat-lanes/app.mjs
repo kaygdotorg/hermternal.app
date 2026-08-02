@@ -22,7 +22,6 @@ document.querySelector('[data-theme-options]').innerHTML = renderThemeOptions();
 const picker = document.querySelector('.proto-picker');
 const highlight = picker.querySelector('.proto-picker-highlight');
 const items = [...picker.querySelectorAll('[data-variant-index]')];
-const replay = picker.querySelector('.proto-picker-replay');
 
 function moveHighlight() {
   const item = items[current];
@@ -54,7 +53,6 @@ function setActive(index) {
 }
 
 items.forEach((item, index) => item.addEventListener('click', () => setActive(index)));
-replay.addEventListener('click', () => mountVariant(current));
 window.addEventListener('resize', moveHighlight);
 
 document.addEventListener('keydown', (event) => {
@@ -64,7 +62,6 @@ document.addEventListener('keydown', (event) => {
   if (number >= 1 && number <= items.length) setActive(number - 1);
   else if (event.key === 'ArrowRight') setActive(stepVariant(current, 1));
   else if (event.key === 'ArrowLeft') setActive(stepVariant(current, -1));
-  else if (event.key === 'r' || event.key === 'R') mountVariant(current);
 });
 
 setActive(current);
@@ -148,7 +145,7 @@ export function submitDraft() {
   stage.querySelector('.transcript-flow').insertAdjacentHTML('beforeend', renderLocalExchange(value));
   prompt.value = '';
   updateSendState();
-  stage.querySelector('.local-turn:last-child')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  stage.querySelector('.local-turn:last-child')?.scrollIntoView({ block: 'center' });
   announce('Added locally. Nothing was sent.');
   return true;
 }

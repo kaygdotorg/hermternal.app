@@ -121,8 +121,6 @@ export function renderPicker() {
       <button class="proto-picker-item" data-active aria-current="true" data-variant-index="0" aria-label="Continuous Canvas">Canvas</button>
       <button class="proto-picker-item" data-variant-index="1" aria-label="Turn Stacks">Stacks</button>
       <button class="proto-picker-item" data-variant-index="2" aria-label="Focus Lane">Focus</button>
-      <span class="proto-picker-divider" aria-hidden="true"></span>
-      <button class="proto-picker-item proto-picker-replay" aria-label="Replay animation (R)">↻</button>
     </nav>`;
 }
 
