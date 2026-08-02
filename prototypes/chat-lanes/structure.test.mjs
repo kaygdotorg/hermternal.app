@@ -145,6 +145,45 @@ test('mobile overlays clear the fixed prototype picker without losing menu scrol
   );
   assert.match(
     styles,
-    /@media \(max-width: 820px\)\s*\{[^]*\.toast\s*\{[^}]*bottom:\s*4\.75rem/s,
+    /@media \(max-width: 820px\)\s*\{[^]*\.toast\s*\{[^}]*bottom:\s*calc\(4\.75rem \+ 7\.25rem \+ \.75rem\)/s,
   );
+});
+
+test('appearance menu escapes the sidebar backdrop root while keeping the shared glass recipe', () => {
+  const sidebarEnd = html.indexOf('</aside>');
+  const themeMenu = html.indexOf('id="theme-menu"');
+
+  assert.ok(sidebarEnd > -1);
+  assert.ok(themeMenu > sidebarEnd);
+  assert.match(html, /data-menu-trigger="theme"[^>]*aria-controls="theme-menu"/);
+  assert.match(styles, /\.theme-menu\s*\{[^}]*position:\s*fixed[^}]*z-index:\s*var\(--layer-menu\)/s);
+});
+
+test('model menu also escapes its blurred composer and anchors through shared menu geometry', () => {
+  const composerMarkup = html.match(/<form class="composer[\s\S]*?<\/form>/)?.[0] ?? '';
+  const mainEnd = html.indexOf('</main>');
+  const modelMenu = html.indexOf('id="model-menu"');
+
+  assert.doesNotMatch(composerMarkup, /data-menu="model"/);
+  assert.ok(modelMenu > mainEnd);
+  assert.match(html, /data-menu-trigger="model"[^>]*aria-controls="model-menu"/);
+  assert.match(styles, /\.model-menu\s*\{[^}]*position:\s*fixed/s);
+  assert.match(app, /function positionFloatingMenu\(menu, trigger\)/);
+});
+
+test('tool and approval rows reserve a readable two-line content block', () => {
+  const continuous = renderVariant('continuous');
+
+  assert.equal((continuous.match(/class="event-copy"/g) ?? []).length, 2);
+  assert.match(styles, /\.event-row\s*\{[^}]*min-height:\s*72px[^}]*padding:\s*\.7rem\s+\.75rem/s);
+  assert.match(styles, /\.event-copy\s*\{[^}]*min-height:\s*2\.5rem[^}]*align-content:\s*center[^}]*gap:\s*\.18rem/s);
+  assert.match(styles, /\.event-copy span\s*\{[^}]*line-height:\s*1\.35/s);
+});
+
+test('composer actions use mobile-reference visual weight without shrinking touch targets', () => {
+  assert.match(html, /href="primitives\.css"[^>]*>[\s\S]*href="styles\.css"/);
+  assert.match(styles, /--composer-action-size:\s*48px/);
+  assert.match(styles, /\.composer-toolbar \.ui-icon-button\s*\{[^}]*width:\s*var\(--composer-action-size\)[^}]*height:\s*var\(--composer-action-size\)/s);
+  assert.match(styles, /\.composer-toolbar \.ui-icon-button svg\s*\{[^}]*width:\s*1\.3rem[^}]*height:\s*1\.3rem/s);
+  assert.match(styles, /\.text-control, \.model-trigger\s*\{[^}]*min-height:\s*var\(--composer-action-size\)/s);
 });

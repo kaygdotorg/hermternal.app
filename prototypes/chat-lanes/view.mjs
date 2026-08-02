@@ -57,13 +57,13 @@ function operationalStates() {
   return `
     <div class="event-row tool-event">
       <span class="event-icon">${icon('terminal')}</span>
-      <div><strong>Reviewing launch-notes.md</strong><span>Extracted voice, audience, and constraints</span></div>
+      <div class="event-copy"><strong>Reviewing launch-notes.md</strong><span>Extracted voice, audience, and constraints</span></div>
       <button class="event-action" type="button" data-tool-toggle aria-expanded="false">Details ${icon('chevron')}</button>
       <pre class="tool-detail" hidden><code>voice: calm, specific\naudience: product teams\nconstraint: no campaign language</code></pre>
     </div>
     <div class="event-row approval-event">
       <span class="event-icon">${icon('file')}</span>
-      <div><strong>Use the attached brief as context?</strong><span>Mock approval · no file is read or uploaded</span></div>
+      <div class="event-copy"><strong>Use the attached brief as context?</strong><span>Mock approval · no file is read or uploaded</span></div>
       <div class="approval-actions">
         <button type="button" data-approval="deny">Not now</button>
         <button class="primary-compact" type="button" data-approval="allow">Allow once</button>

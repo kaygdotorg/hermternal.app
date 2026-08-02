@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light dark" />
     <meta name="description" content="Three local Hermternal chat composition mockups." />
     <title>Hermternal chat lanes</title>
-    <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="primitives.css" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <a class="skip-link" href="#conversation">Skip to conversation</a>
@@ -54,20 +54,22 @@
 
         <div class="sidebar-footer">
           <div class="menu-anchor">
-            <button class="footer-row ui-button magnetic" type="button" data-menu-trigger="theme" aria-haspopup="menu" aria-expanded="false">
+            <button class="footer-row ui-button magnetic" type="button" data-menu-trigger="theme" aria-haspopup="menu" aria-controls="theme-menu" aria-expanded="false">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 0 0 16c-2-2-2-14 0-16Z" /></svg>
               <span><strong>Appearance</strong></span>
               <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 5 5-5 5" /></svg>
             </button>
-            <div class="floating-menu theme-menu glass-surface" role="menu" data-menu="theme" hidden>
-              <header><strong>Theme</strong></header>
-              <div class="theme-grid" data-theme-options></div>
-            </div>
           </div>
           <button class="profile-row ui-button magnetic" type="button"><span class="avatar" aria-hidden="true">AM</span><span><strong>Alex Morgan</strong></span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg></button>
         </div>
         </div>
       </aside>
+
+      <!-- This menu lives outside the blurred sidebar so its backdrop samples the conversation beneath it. -->
+      <div class="floating-menu theme-menu glass-surface" id="theme-menu" role="menu" data-menu="theme" hidden>
+        <header><strong>Theme</strong></header>
+        <div class="theme-grid" data-theme-options></div>
+      </div>
 
       <main class="conversation-shell" id="conversation" tabindex="-1">
         <header class="conversation-header">
@@ -98,12 +100,7 @@
               </div>
               <div class="composer-right">
                 <div class="menu-anchor model-anchor">
-                  <button class="model-trigger ui-button ui-selector magnetic" type="button" data-menu-trigger="model" aria-haspopup="menu" aria-expanded="false"><span data-model-label>Sonnet 4.5</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4" /></svg></button>
-                  <div class="floating-menu model-menu glass-surface" role="menu" data-menu="model" hidden>
-                    <button class="menu-option" type="button" role="menuitemradio" aria-checked="true" data-model="Sonnet 4.5"><span><strong>Sonnet 4.5</strong></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg></button>
-                    <button class="menu-option" type="button" role="menuitemradio" aria-checked="false" data-model="Opus 4.1"><span><strong>Opus 4.1</strong></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg></button>
-                    <button class="menu-option" type="button" role="menuitemradio" aria-checked="false" data-model="Haiku 4.5"><span><strong>Haiku 4.5</strong></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg></button>
-                  </div>
+                  <button class="model-trigger ui-button ui-selector magnetic" type="button" data-menu-trigger="model" aria-haspopup="menu" aria-controls="model-menu" aria-expanded="false"><span data-model-label>Sonnet 4.5</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4" /></svg></button>
                 </div>
                 <button class="icon-button ui-button ui-icon-button voice-button magnetic" type="button" data-voice aria-label="Record a voice note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="4" width="6" height="11" rx="3" /><path d="M6 11a6 6 0 0 0 12 0M12 17v3M9 20h6" /></svg><span data-record-time hidden>0:00</span></button>
                 <button class="send-button ui-button ui-icon-button magnetic" type="submit" aria-label="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-5 14-2-5-7-2Z" /><path d="m12 14 7-9" /></svg></button>
@@ -112,6 +109,13 @@
           </form>
         </div>
       </main>
+
+      <!-- Composer popovers share the same top-level backdrop root as the appearance menu. -->
+      <div class="floating-menu model-menu glass-surface" id="model-menu" role="menu" data-menu="model" hidden>
+        <button class="menu-option" type="button" role="menuitemradio" aria-checked="true" data-model="Sonnet 4.5"><span><strong>Sonnet 4.5</strong></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg></button>
+        <button class="menu-option" type="button" role="menuitemradio" aria-checked="false" data-model="Opus 4.1"><span><strong>Opus 4.1</strong></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg></button>
+        <button class="menu-option" type="button" role="menuitemradio" aria-checked="false" data-model="Haiku 4.5"><span><strong>Haiku 4.5</strong></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg></button>
+      </div>
     </div>
 
     <div data-picker-root></div>

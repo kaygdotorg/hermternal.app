@@ -177,14 +177,48 @@ function animateMenu(menu, shouldOpen) {
   }).catch(() => {});
 }
 
+function positionFloatingMenu(menu, trigger) {
+  const isMobileThemeSheet = menu.dataset.menu === 'theme' && matchMedia('(max-width: 820px)').matches;
+  if (isMobileThemeSheet) {
+    menu.style.removeProperty('left');
+    menu.style.removeProperty('right');
+    menu.style.removeProperty('bottom');
+    return;
+  }
+
+  const triggerRect = trigger.getBoundingClientRect();
+  const menuWidth = menu.dataset.menu === 'theme' ? 352 : 240;
+  const viewportGutter = 16;
+  const preferredLeft = menu.dataset.menu === 'theme'
+    ? triggerRect.right - 64
+    : triggerRect.right - menuWidth;
+  const left = Math.min(
+    innerWidth - menuWidth - viewportGutter,
+    Math.max(viewportGutter, preferredLeft),
+  );
+  menu.style.left = `${left}px`;
+  menu.style.right = 'auto';
+  menu.style.bottom = `${innerHeight - triggerRect.top + 8}px`;
+}
+
 export function setMenu(name, open) {
   document.querySelectorAll('[data-menu]').forEach((menu) => {
-    animateMenu(menu, menu.dataset.menu === name && open);
+    const shouldOpen = menu.dataset.menu === name && open;
+    const trigger = document.querySelector(`[data-menu-trigger="${menu.dataset.menu}"]`);
+    if (shouldOpen && trigger) positionFloatingMenu(menu, trigger);
+    animateMenu(menu, shouldOpen);
   });
   document.querySelectorAll('[data-menu-trigger]').forEach((trigger) => {
     trigger.setAttribute('aria-expanded', String(trigger.dataset.menuTrigger === name && open));
   });
 }
+
+window.addEventListener('resize', () => {
+  const trigger = document.querySelector('[data-menu-trigger][aria-expanded="true"]');
+  if (!trigger) return;
+  const menu = document.querySelector(`[data-menu="${trigger.dataset.menuTrigger}"]`);
+  if (menu) positionFloatingMenu(menu, trigger);
+});
 
 function closeTopLayer() {
   const openTrigger = document.querySelector('[data-menu-trigger][aria-expanded="true"]');
