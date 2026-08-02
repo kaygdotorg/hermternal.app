@@ -29,6 +29,8 @@ test('material, layering, typography, and magnetic motion use accepted shared to
   assert.match(styles, /--surface-raised-opacity:\s*50%/);
   assert.doesNotMatch(styles, /--(?:material|surface-raised):\s*rgba/);
   assert.match(styles, /\.proto-picker\s*\{[^}]*background:\s*rgba\(10, 10, 10, 0\.5\)/s);
+  assert.match(styles, /\.proto-picker\s*\{[^}]*-webkit-backdrop-filter:\s*blur\(var\(--glass-blur\)\)\s+saturate\(var\(--glass-saturation\)\)[^}]*backdrop-filter:\s*blur\(var\(--glass-blur\)\)\s+saturate\(var\(--glass-saturation\)\)/s);
+  assert.match(styles, /@media \(prefers-reduced-transparency: reduce\)\s*\{[^]*\.glass-surface, \.material-floating, \.proto-picker\s*\{[^}]*background:\s*var\(--material-solid\)[^}]*backdrop-filter:\s*none[^}]*-webkit-backdrop-filter:\s*none/s);
   assert.doesNotMatch(styles, /\.composer-dock::before/);
   assert.match(styles, /--layer-sidebar:\s*20/);
   assert.match(styles, /--layer-menu:\s*100/);
