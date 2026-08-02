@@ -1,5 +1,11 @@
 # Hermternal command / inspect prototype
 
+## Current three-lane exploration
+
+The active design critique surface lives in `prototypes/chat-lanes/`. It replaces the rejected visual direction with three isolated conversation compositions behind a neutral picker. See [`prototypes/chat-lanes/README.md`](prototypes/chat-lanes/README.md) for the mock boundaries, controls, themes, and NetBird serving command.
+
+The original prototype below is retained only as a discarded baseline and is not imported by the new exploration.
+
 This directory is a high-fidelity, web-only interaction prototype for Hermternal. Open `index.html` directly or serve the directory with:
 
 ```sh
