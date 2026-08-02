@@ -75,6 +75,19 @@ test('desktop shell heights align and the top chrome is composed from islands', 
   assert.match(primitives, /\.ui-action-cluster\s*\{[^}]*background:\s*var\(--material\)/s);
 });
 
+test('compact chrome uses one primary label without stacked subtitles', () => {
+  const sidebar = html.match(/<aside class="sidebar[\s\S]*?<\/aside>/)?.[0] ?? '';
+  const title = html.match(/<div class="conversation-title[\s\S]*?<\/div>/)?.[0] ?? '';
+  const models = html.match(/<div class="floating-menu model-menu[\s\S]*?<\/div>\s*<\/div>/)?.[0] ?? '';
+  assert.doesNotMatch(sidebar, /<small/);
+  assert.doesNotMatch(title, /<p>/);
+  assert.equal((title.match(/<h1/g) ?? []).length, 1);
+  assert.doesNotMatch(models, /<small/);
+  assert.doesNotMatch(html, /data-theme-label/);
+  assert.doesNotMatch(html, /Color only—geometry stays fixed/);
+  assert.match(styles, /\.conversation-title\.header-island\s*\{[^}]*display:\s*flex[^}]*align-items:\s*center[^}]*justify-content:\s*center/s);
+});
+
 test('motion opportunities use restrained shared recipes and reduced-motion fallbacks', () => {
   assert.match(app, /MENU_ENTER_MS\s*=\s*180/);
   assert.match(app, /MENU_EXIT_MS\s*=\s*130/);

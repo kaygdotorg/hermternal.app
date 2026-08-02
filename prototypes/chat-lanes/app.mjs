@@ -122,7 +122,6 @@ export function setTheme(theme) {
   if (!THEMES.includes(theme)) return;
   root.dataset.theme = theme;
   const option = document.querySelector(`[data-theme-value="${theme}"]`);
-  document.querySelector('[data-theme-label]').textContent = option.querySelector('span:nth-child(2)').textContent;
   document.querySelectorAll('[data-theme-value]').forEach((item) => {
     item.setAttribute('aria-checked', String(item === option));
   });
