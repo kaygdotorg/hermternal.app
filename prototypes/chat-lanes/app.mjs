@@ -31,7 +31,8 @@ const MENU_ENTER_MS = 180;
 const MENU_EXIT_MS = 130;
 const TOAST_EXIT_MS = 140;
 const REDUCED_MOTION_MS = 120;
-let magneticFrame = 0;
+const magneticTargets = [...document.querySelectorAll('.magnetic')];
+const magneticFrames = new WeakMap();
 let lastInputModality = 'pointer';
 
 document.addEventListener('keydown', () => {
@@ -522,29 +523,31 @@ function moveMagneticTarget(target, event) {
   const follow = MAGNETIC_STRENGTH * (1 + MAGNETIC_PARALLAX);
   const x = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientX - rect.left - rect.width / 2) * follow));
   const y = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientY - rect.top - rect.height / 2) * follow));
-  cancelAnimationFrame(magneticFrame);
-  magneticFrame = requestAnimationFrame(() => {
+  cancelAnimationFrame(magneticFrames.get(target) ?? 0);
+  const frame = requestAnimationFrame(() => {
     target.classList.add('is-magnetic-following');
     // Individual translate composes with the shared press-scale transform.
     target.style.translate = `${x}px ${y}px`;
   });
+  magneticFrames.set(target, frame);
 }
 
-function respondToMagneticPointer(event) {
-  if (!matchMedia('(hover: hover) and (pointer: fine)').matches) return;
-  if (event.pointerType === 'touch' || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const target = event.target.closest('.magnetic');
-  if (target) moveMagneticTarget(target, event);
-}
-
-document.addEventListener('pointermove', respondToMagneticPointer);
-
-document.addEventListener('pointerout', (event) => {
-  const target = event.target.closest('.magnetic');
-  if (!target || target.contains(event.relatedTarget)) return;
-  cancelAnimationFrame(magneticFrame);
+function resetMagneticTarget(target) {
+  cancelAnimationFrame(magneticFrames.get(target) ?? 0);
   target.classList.remove('is-magnetic-following');
   target.style.translate = '';
+}
+
+// Match Calternal's action semantics directly: the event's pointer type is the
+// authority. Hybrid iPad/trackpad environments may report a coarse primary
+// pointer even while a mouse is actively producing hover events.
+magneticTargets.forEach((target) => {
+  target.addEventListener('pointermove', (event) => {
+    if (event.pointerType === 'touch' || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    moveMagneticTarget(target, event);
+  });
+  target.addEventListener('pointerleave', () => resetMagneticTarget(target));
+  target.addEventListener('pointercancel', () => resetMagneticTarget(target));
 });
 
 setTheme('system');

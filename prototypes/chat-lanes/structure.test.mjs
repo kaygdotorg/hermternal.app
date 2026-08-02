@@ -40,6 +40,10 @@ test('material, layering, typography, and magnetic motion use accepted shared to
   assert.match(app, /MAGNETIC_MAX\s*=\s*7/);
   assert.match(app, /MAGNETIC_PARALLAX\s*=\s*0\.2/);
   assert.match(app, /target\.style\.translate/);
+  assert.doesNotMatch(app, /matchMedia\('\(hover: hover\) and \(pointer: fine\)'\)/);
+  assert.match(app, /magneticTargets\.forEach/);
+  assert.match(app, /target\.addEventListener\('pointermove'/);
+  assert.match(app, /target\.addEventListener\('pointerleave'/);
   assert.match(primitives, /translate 420ms cubic-bezier\(\.2, 1\.35, \.3, 1\)/);
 });
 
@@ -87,6 +91,8 @@ test('compact composer keeps its selector quiet and its actions unframed', () =>
   assert.match(app, /prompt\.style\.overflowY/);
   assert.match(app, /const expandButton = document\.querySelector\('\[data-expand\]'\)/);
   assert.match(app, /expandButton\.hidden = !composer\.classList\.contains\('expanded'\) && visualLines < 2/);
+  assert.match(html, /data-expand[^>]*>[\s\S]*?<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" \/>/);
+  assert.doesNotMatch(html, /<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/);
   assert.match(styles, /\.model-trigger\s*\{[^}]*background:\s*transparent/s);
   assert.doesNotMatch(html, /composer-toolbar[^]*ui-action-cluster/);
 });
