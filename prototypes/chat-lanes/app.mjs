@@ -89,8 +89,14 @@ const sendButton = document.querySelector('.send-button');
 const toast = document.querySelector('[data-toast]');
 const sidebar = document.querySelector('#sidebar');
 const sidebarTrigger = document.querySelector('[data-sidebar-open]');
+const conversation = document.querySelector('#conversation');
+const mobileToolbar = document.querySelector('.mobile-toolbar');
 const attachmentStatus = document.querySelector('[data-attachment-status]');
 const recordTime = document.querySelector('[data-record-time]');
+const searchInput = document.querySelector('[data-search-history]');
+const historyItems = [...document.querySelectorAll('[data-history-item]')];
+const historyGroups = [...document.querySelectorAll('[data-history-group]')];
+const historyEmpty = document.querySelector('[data-history-empty]');
 let lastDrawerFocus = null;
 let recordingTimer = null;
 let recordingSeconds = 0;
@@ -131,6 +137,10 @@ export function setSidebar(open) {
   document.body.classList.toggle('sidebar-open', open);
   sidebarTrigger.setAttribute('aria-expanded', String(open));
   document.body.style.overflow = open ? 'hidden' : '';
+  // The drawer is a modal navigation surface on narrow screens. Inerting the
+  // page behind it keeps keyboard and assistive-technology focus in one place.
+  conversation.inert = open;
+  mobileToolbar.inert = open;
   if (open) {
     lastDrawerFocus = document.activeElement;
     sidebar.focus({ preventScroll: true });
@@ -276,6 +286,73 @@ function updateSendState() {
   sendButton.disabled = !canSend(prompt.value);
 }
 
+function filterHistory() {
+  const query = searchInput.value.trim().toLocaleLowerCase();
+  let visibleCount = 0;
+  historyItems.forEach((item) => {
+    const matches = !query || item.textContent.toLocaleLowerCase().includes(query);
+    item.hidden = !matches;
+    if (matches) visibleCount += 1;
+  });
+  historyGroups.forEach((group) => {
+    group.hidden = query.length > 0 && !group.querySelector('[data-history-item]:not([hidden])');
+  });
+  historyEmpty.hidden = visibleCount > 0 || !query;
+}
+
+function startNewConversation() {
+  setMenu('', false);
+  setSidebar(false);
+  mountVariant(current);
+  composer.classList.remove('expanded');
+  document.querySelector('[data-expand]').setAttribute('aria-expanded', 'false');
+  attachmentStatus.hidden = true;
+  prompt.value = '';
+  updateSendState();
+  searchInput.value = '';
+  filterHistory();
+  prompt.focus({ preventScroll: true });
+  announce('New conversation started locally.');
+}
+
+function stopStreaming(button) {
+  const message = button.closest('.streaming-message');
+  if (!message) return;
+  message.classList.add('is-complete');
+  button.disabled = true;
+  button.textContent = 'Stopped';
+  message.querySelector('[data-stream-caption]').textContent = 'Local response stopped';
+  const status = message.querySelector('.stream-status');
+  status?.replaceChildren(document.createTextNode('Stopped'));
+  announce('Mock response stopped locally.');
+}
+
+function trapDrawerFocus(event) {
+  if (event.key !== 'Tab') return;
+  const openMenu = [...document.querySelectorAll('[data-menu][data-state="open"]')]
+    .find((menu) => !menu.hidden);
+  const layer = openMenu ?? (document.body.classList.contains('sidebar-open') ? sidebar : null);
+  if (!layer) return;
+  const focusable = [...layer.querySelectorAll('a[href], button:not([disabled]), input, [tabindex]:not([tabindex="-1"])')];
+  if (!focusable.length) {
+    event.preventDefault();
+    layer.focus({ preventScroll: true });
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (!layer.contains(document.activeElement)) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  } else if (event.shiftKey && (document.activeElement === first || document.activeElement === layer)) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+}
+
 export function submitDraft() {
   const value = normalizeDraft(prompt.value);
   if (!canSend(value)) return false;
@@ -337,6 +414,11 @@ document.addEventListener('click', (event) => {
   if (event.target.closest('[data-sidebar-open]')) setSidebar(true);
   if (event.target.closest('[data-sidebar-close]')) setSidebar(false);
 
+  if (event.target.closest('[data-new-conversation]')) {
+    startNewConversation();
+    return;
+  }
+
   const expand = event.target.closest('[data-expand]');
   if (expand) {
     const expanded = !composer.classList.contains('expanded');
@@ -368,11 +450,25 @@ document.addEventListener('click', (event) => {
     approval.closest('.approval-actions').innerHTML = `<span class="approval-result${motionClass}">${approval.dataset.approval === 'allow' ? 'Allowed once' : 'Skipped'}</span>`;
     announce(approval.dataset.approval === 'allow' ? 'Mock context allowed once.' : 'Mock context skipped.');
   }
+
+  const stop = event.target.closest('[data-stop-stream]');
+  if (stop) stopStreaming(stop);
+
+  if (!menuTrigger && !event.target.closest('[data-menu]')) {
+    const openMenu = document.querySelector('[data-menu-trigger][aria-expanded="true"]');
+    if (openMenu) setMenu('', false);
+  }
 });
 
 document.addEventListener('keydown', (event) => {
+  trapDrawerFocus(event);
   if (moveMenuFocus(event)) return;
   if (event.key === 'Escape' && closeTopLayer()) return;
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
+    event.preventDefault();
+    startNewConversation();
+    return;
+  }
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
     event.preventDefault();
     submitDraft();
@@ -384,6 +480,7 @@ composer.addEventListener('submit', (event) => {
   submitDraft();
 });
 prompt.addEventListener('input', updateSendState);
+searchInput.addEventListener('input', filterHistory);
 
 document.addEventListener('pointermove', (event) => {
   if (!matchMedia('(hover: hover) and (pointer: fine)').matches) return;

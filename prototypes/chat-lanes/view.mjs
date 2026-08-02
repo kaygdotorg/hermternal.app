@@ -73,7 +73,7 @@ function streamingMessage() {
         <p>Here’s a tighter opening:</p>
         <p>Work rarely slows down because people lack ideas. It slows down in the spaces between them—finding context, repeating decisions, and rebuilding momentum. Hermternal keeps those threads together, so the next step is already within reach.<span class="typing-caret" aria-hidden="true"></span></p>
       </div>
-      <footer class="stream-footer"><button type="button">Stop</button><span>Local simulated response</span></footer>
+      <footer class="stream-footer"><button type="button" data-stop-stream>Stop</button><span data-stream-caption>Local simulated response</span></footer>
     </article>`;
 }
 

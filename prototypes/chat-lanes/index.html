@@ -18,7 +18,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14M5 16h14" /></svg>
       </button>
       <a class="mobile-brand" href="#conversation" aria-label="Hermternal home"><span class="brand-mark" aria-hidden="true">H</span><span>Hermternal</span></a>
-      <button class="icon-button ui-button ui-icon-button magnetic" type="button" aria-label="Start a new conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+      <button class="icon-button ui-button ui-icon-button magnetic" type="button" data-new-conversation aria-label="Start a new conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
     </header>
 
     <div class="app-shell">
@@ -34,22 +34,27 @@
           <button class="icon-button ui-button ui-icon-button sidebar-close magnetic" type="button" data-sidebar-close aria-label="Close navigation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6" /></svg></button>
         </div>
 
-        <button class="new-chat ui-button magnetic" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span>New conversation</span><kbd>⌘N</kbd></button>
+        <button class="new-chat ui-button magnetic" type="button" data-new-conversation><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span>New conversation</span><kbd>⌘N</kbd></button>
 
-        <label class="search-field">
+        <label class="search-field" data-history-search>
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
           <span class="sr-only">Search conversations</span>
-          <input type="search" placeholder="Search" />
+          <input type="search" data-search-history placeholder="Search" autocomplete="off" />
         </label>
 
         <nav class="history" aria-label="Conversation history">
-          <p class="section-label">Today</p>
-          <a class="history-row active" href="#conversation" aria-current="page"><span><strong>Launch narrative</strong></span><time>10:46</time></a>
-          <a class="history-row" href="#conversation"><span><strong>Research synthesis</strong></span><time>09:18</time></a>
-          <p class="section-label">Previous 7 days</p>
-          <a class="history-row" href="#conversation"><span><strong>Studio layout</strong></span><time>Fri</time></a>
-          <a class="history-row" href="#conversation"><span><strong>Quarterly questions</strong></span><time>Thu</time></a>
-          <a class="history-row" href="#conversation"><span><strong>Reading queue</strong></span><time>Wed</time></a>
+          <div class="history-group" data-history-group>
+            <p class="section-label">Today</p>
+            <a class="history-row active" data-history-item href="#conversation" aria-current="page"><span><strong>Launch narrative</strong></span><time datetime="2026-08-02T10:46:00Z">10:46</time></a>
+            <a class="history-row" data-history-item href="#conversation"><span><strong>Research synthesis</strong></span><time datetime="2026-08-02T09:18:00Z">09:18</time></a>
+          </div>
+          <div class="history-group" data-history-group>
+            <p class="section-label">Previous 7 days</p>
+            <a class="history-row" data-history-item href="#conversation"><span><strong>Studio layout</strong></span><time datetime="2026-07-31">Fri</time></a>
+            <a class="history-row" data-history-item href="#conversation"><span><strong>Quarterly questions</strong></span><time datetime="2026-07-30">Thu</time></a>
+            <a class="history-row" data-history-item href="#conversation"><span><strong>Reading queue</strong></span><time datetime="2026-07-29">Wed</time></a>
+          </div>
+          <p class="history-empty" data-history-empty role="status" hidden>No conversations found</p>
         </nav>
 
         <div class="sidebar-footer">
@@ -60,7 +65,7 @@
               <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 5 5-5 5" /></svg>
             </button>
           </div>
-          <button class="profile-row ui-button magnetic" type="button"><span class="avatar" aria-hidden="true">AM</span><span><strong>Alex Morgan</strong></span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg></button>
+          <div class="profile-row"><span class="avatar" aria-hidden="true">AM</span><span><strong>Alex Morgan</strong></span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg></div>
         </div>
         </div>
       </aside>

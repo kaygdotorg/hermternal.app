@@ -25,6 +25,7 @@ test('selected Canvas refinement exposes reusable material and control primitive
 });
 
 test('material, layering, typography, and magnetic motion use accepted shared tokens', () => {
+  const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
   assert.match(styles, /--material-opacity:\s*50%/);
   assert.match(styles, /--surface-raised-opacity:\s*50%/);
   assert.doesNotMatch(styles, /--(?:material|surface-raised):\s*rgba/);
@@ -39,6 +40,8 @@ test('material, layering, typography, and magnetic motion use accepted shared to
   assert.match(app, /MAGNETIC_STRENGTH\s*=\s*0\.18/);
   assert.match(app, /MAGNETIC_MAX\s*=\s*7/);
   assert.match(app, /target\.style\.translate/);
+  assert.match(primitives, /translate 320ms var\(--ease-magnetic, cubic-bezier\(\.22, 1, \.36, 1\)\)/);
+  assert.doesNotMatch(primitives, /cubic-bezier\(\.2, 1\.35, \.3, 1\)/);
 });
 
 test('system theme follows the host color scheme without changing explicit themes', () => {
@@ -214,4 +217,30 @@ test('composer actions use mobile-reference visual weight without shrinking touc
   assert.match(styles, /\.composer-toolbar \.ui-icon-button\s*\{[^}]*width:\s*var\(--composer-action-size\)[^}]*height:\s*var\(--composer-action-size\)/s);
   assert.match(styles, /\.composer-toolbar \.ui-icon-button svg\s*\{[^}]*width:\s*1\.3rem[^}]*height:\s*1\.3rem/s);
   assert.match(styles, /\.text-control, \.model-trigger\s*\{[^}]*min-height:\s*var\(--composer-action-size\)/s);
+});
+
+test('visible navigation and stream controls have bounded local behavior', () => {
+  const continuous = renderVariant('continuous');
+  assert.equal((html.match(/data-new-conversation/g) ?? []).length, 2);
+  assert.match(html, /data-search-history/);
+  assert.match(html, /data-history-item/);
+  assert.match(continuous, /data-stop-stream/);
+  assert.doesNotMatch(html, /<button class="profile-row/);
+  assert.match(app, /function startNewConversation\(\)/);
+  assert.match(app, /function filterHistory\(\)/);
+  assert.match(app, /function stopStreaming\(button\)/);
+  assert.match(app, /event\.key\.toLowerCase\(\) === 'n'/);
+});
+
+test('mobile drawer inerting and focus wrap protect the reading surface', () => {
+  assert.match(app, /conversation\.inert = open/);
+  assert.match(app, /mobileToolbar\.inert = open/);
+  assert.match(app, /function trapDrawerFocus\(event\)/);
+  assert.match(app, /event\.key !== 'Tab'/);
+});
+
+test('reduced motion keeps authored state feedback without a global transition kill', () => {
+  assert.doesNotMatch(styles, /\*\s*,\s*\*::before\s*,\s*\*::after\s*\{[^}]*transition-duration:\s*\.01ms/s);
+  assert.match(styles, /\.stream-status i, \.typing-caret\s*\{\s*animation:\s*none\s*!important/s);
+  assert.match(styles, /\.ui-button, \.proto-picker-item, \.sidebar, \.drawer-scrim[^}]*transition-duration:\s*120ms/s);
 });

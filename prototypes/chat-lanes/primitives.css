@@ -22,7 +22,7 @@
   translate: 0 0;
   transform: scale(1);
   transition:
-    translate 420ms cubic-bezier(.2, 1.35, .3, 1),
+    translate 320ms var(--ease-magnetic, cubic-bezier(.22, 1, .36, 1)),
     transform 140ms var(--ease-out),
     background-color 150ms ease,
     color 150ms ease;
