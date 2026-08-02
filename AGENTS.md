@@ -110,8 +110,25 @@ for every non-trivial screen or interaction, define:
 
 ## collaboration and git discipline
 
+### branch model and releases
+
+this repository has exactly two permanent branches:
+
+- `dev` is the integration branch. all planning, mockup, feature, fix, and documentation work lands here first.
+- `main` contains only release-ready, working builds promoted from `dev`. do not develop directly on `main`.
+
+use short-lived focused branches or worktrees from `dev` for concurrent work. merge or fast-forward completed atomic work into `dev`. promote only a verified, releasable `dev` commit to `main`.
+
+release versions use `vYYYY.MM.DD.<patch-num>`, for example `v2026.08.01.1`. increment `patch-num` for every additional release on the same calendar date. create a matching annotated git tag only when a release is promoted to `main`.
+
+### agent instruction and skill links
+
+`CLAUDE.md` must always be a relative symlink to the root `AGENTS.md` file. maintain one source of truth for project instructions.
+
+if project-specific agent skills are ever added under `.agents/`, `.claude/` must be a relative symlink to `.agents/`. do not create either directory until project-specific skills are actually needed.
+
 work in focused branches or worktrees. one agent owns a file at a time. do not overwrite another agent's uncommitted work.
 
-keep commits small and coherent. a commit must include its matching code comments and documentation updates. do not commit secrets, generated credentials, live transcripts, API keys, signing assets, or user data.
+keep commits small and coherent. use conventional commits in the form `type(scope): description`. every completed atomic work unit must be committed and pushed. a commit must include its matching code comments and documentation updates. do not commit secrets, generated credentials, live transcripts, API keys, signing assets, or user data.
 
 when instructions conflict, preserve the current planning-only scope and ask for clarification before introducing live integrations or infrastructure changes.
