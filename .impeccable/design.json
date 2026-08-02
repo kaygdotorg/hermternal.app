@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-02T12:00:00.000Z",
+  "title": "Design System: Hermternal chat lanes",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Signal Blue",
+        "canonical": "#3478f6",
+        "tonalRamp": ["#10234f", "#173a78", "#1e529e", "#286bc6", "#3478f6", "#6098fa", "#98bcff", "#d8e6ff"]
+      },
+      "neutral-bg": {
+        "role": "neutral",
+        "displayName": "Cool Paper",
+        "canonical": "#e9edf3",
+        "tonalRamp": ["#161a20", "#343b47", "#596474", "#7f8b9a", "#aeb8c6", "#cbd3dd", "#e0e5ec", "#f6f8fb"]
+      },
+      "dark-bg": {
+        "role": "neutral",
+        "displayName": "Night Graphite",
+        "canonical": "#171a20",
+        "tonalRamp": ["#0b0d10", "#171a20", "#242a33", "#353e4b", "#566171", "#7f8998", "#b6bec9", "#eef1f5"]
+      }
+    },
+    "typographyMeta": {
+      "display": {"displayName": "Geist UI", "purpose": "Compact conversation titles and identity labels."},
+      "body": {"displayName": "Geist Reading", "purpose": "Assistant prose and user-authored prompts."},
+      "mono": {"displayName": "Geist Mono", "purpose": "Tool details, measurements, and keyboard hints only."}
+    },
+    "shadows": [
+      {"name": "floating-control", "value": "var(--shadow-float)", "purpose": "Ambient lift for sidebar, composer, menus, and islands."},
+      {"name": "conversation-shell", "value": "var(--shadow-shell)", "purpose": "Stable depth for the reading container."}
+    ],
+    "motion": [
+      {"name": "menu-enter", "value": "180ms cubic-bezier(0.23, 1, 0.32, 1)", "purpose": "Short interruptible settle for pointer-opened menus."},
+      {"name": "menu-exit", "value": "130ms cubic-bezier(0.23, 1, 0.32, 1)", "purpose": "Quick dismissal that never blocks reading."},
+      {"name": "magnetic-follow", "value": "translate capped at 7px; 18% pointer strength", "purpose": "Fine-pointer-only physical response for reusable controls."}
+    ],
+    "breakpoints": [
+      {"name": "drawer", "value": "820px"},
+      {"name": "phone", "value": "560px"}
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "High-contrast action with a tactile 44px target.",
+      "html": "<button class=\"ds-primary\">New conversation</button>",
+      "css": ".ds-primary { background: var(--text); color: var(--surface-solid); min-height: 44px; padding: 0 12px; border: 0; border-radius: 12px; font: 500 0.6875rem/1.2 Geist, system-ui, sans-serif; transition: background-color 150ms ease, transform 140ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-primary:hover { background: var(--accent); } .ds-primary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }"
+    },
+    {
+      "name": "Glass Surface",
+      "kind": "card",
+      "refersTo": "glass-surface",
+      "description": "Shared translucent material for floating controls.",
+      "html": "<div class=\"ds-glass\">Floating control</div>",
+      "css": ".ds-glass { border: 1px solid var(--glass-edge); border-radius: 18px; background: var(--material); box-shadow: var(--shadow-float); backdrop-filter: blur(20px) saturate(1.38); -webkit-backdrop-filter: blur(20px) saturate(1.38); padding: 12px; color: var(--text); font: 400 0.8125rem/1.5 Geist, system-ui, sans-serif; }"
+    },
+    {
+      "name": "Search Field",
+      "kind": "input",
+      "refersTo": "input-search",
+      "description": "Quiet raised field for finding conversation history.",
+      "html": "<label class=\"ds-search\"><input placeholder=\"Search\" /></label>",
+      "css": ".ds-search { display: flex; align-items: center; min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-raised); color: var(--text-faint); } .ds-search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font: 400 0.6875rem/1.2 Geist, system-ui, sans-serif; } .ds-search:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); box-shadow: 0 0 0 3px var(--accent-soft); }"
+    },
+    {
+      "name": "Operational Row",
+      "kind": "custom",
+      "refersTo": "event-row",
+      "description": "Two-line tool or approval state attached to the conversation.",
+      "html": "<div class=\"ds-event\"><span class=\"ds-event-icon\">›_</span><span><strong>Reviewing notes</strong><small>Extracted constraints</small></span></div>",
+      "css": ".ds-event { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 11px; min-height: 72px; align-items: center; padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-raised); color: var(--text); font: 500 0.72rem/1.3 Geist, system-ui, sans-serif; } .ds-event-icon { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 12px; background: var(--accent-soft); color: var(--accent); } .ds-event small { display: block; margin-top: 3px; color: var(--text-faint); font: 400 0.64rem/1.35 Geist, system-ui, sans-serif; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Instrument",
+    "overview": "Hermternal is a calm instrument for issuing a direction and inspecting what follows. The interface keeps agent work readable in one thread, with translucent controls floating above a cool graphite reading surface.",
+    "keyCharacteristics": ["One Geist voice", "Shared 50% glass material", "Inspectable operational rows", "Touch-first controls"],
+    "rules": [
+      {"name": "The Rare Accent Rule", "body": "Keep the accent concentrated on state, action, and focus.", "section": "colors"},
+      {"name": "The One Voice Rule", "body": "Do not introduce a second UI font; use Geist Mono only for code or measurements.", "section": "typography"},
+      {"name": "The Material Consistency Rule", "body": "Transparent surfaces share opacity, blur, saturation, edge, and fallback values.", "section": "elevation"}
+    ],
+    "dos": ["Do keep controls at least 44px.", "Do preserve the open reading hierarchy.", "Do use semantic theme tokens."],
+    "donts": ["Don't add solid dashboard chrome.", "Don't stack title and subtitle in compact controls.", "Don't imply live gateway integrations in this prototype."]
+  }
+}
