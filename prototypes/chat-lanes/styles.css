@@ -1,3 +1,20 @@
+/* Prototype-only: pin the self-hosted official Geist family so visual fixtures remain deterministic. */
+@font-face {
+  font-family: "Geist";
+  src: url("assets/fonts/Geist%5Bwght%5D.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("assets/fonts/GeistMono%5Bwght%5D.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 :root {
   color-scheme: light;
   --radius-control: 12px;
@@ -38,7 +55,7 @@
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --reading: 47rem;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  font-family: "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-synthesis: none;
   font-optical-sizing: auto;
 }
@@ -269,7 +286,7 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 .sidebar-close { display: none; }
 .new-chat { display: grid; grid-template-columns: 1.15rem 1fr auto; align-items: center; gap: .65rem; min-height: 44px; margin-top: .25rem; padding: 0 .75rem; border-radius: var(--radius-control); background: var(--text); color: var(--surface-solid); text-align: left; }
 .new-chat span { font-size: .76rem; font-weight: 500; }
-.new-chat kbd { opacity: .62; font: 400 .62rem/1 ui-monospace, monospace; }
+.new-chat kbd { opacity: .62; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .62rem; font-weight: 400; line-height: 1; }
 .search-field { display: flex; align-items: center; min-height: 44px; margin: .65rem 0 .25rem; padding: 0 .7rem; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--text-faint); }
 .search-field svg { width: .95rem; flex: 0 0 auto; }
 .search-field input { width: 100%; min-width: 0; padding: 0 .5rem; border: 0; outline: 0; background: transparent; font-size: .74rem; }
@@ -327,7 +344,7 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 .event-action svg { width: .8rem; }
 .approval-actions { display: flex; gap: .25rem; }
 .approval-actions .primary-compact { background: var(--accent); color: var(--accent-ink); }
-.tool-detail { grid-column: 2 / -1; margin: .25rem 0 .15rem; padding: .7rem; overflow-x: auto; border-radius: var(--radius-control); background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text-soft); font: 400 .67rem/1.55 ui-monospace, monospace; }
+.tool-detail { grid-column: 2 / -1; margin: .25rem 0 .15rem; padding: .7rem; overflow-x: auto; border-radius: var(--radius-control); background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text-soft); font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .67rem; font-weight: 400; line-height: 1.55; }
 .stream-status { display: flex; align-items: center; gap: .38rem; color: var(--positive) !important; }
 .stream-status i { width: .38rem; height: .38rem; border-radius: 50%; background: currentColor; animation: pulse 1.3s ease-in-out infinite; }
 .typing-caret { display: inline-block; width: 1.5px; height: 1em; margin-left: .18rem; vertical-align: -.12em; background: var(--accent); animation: blink 1s steps(1) infinite; }

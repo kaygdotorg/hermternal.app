@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 
 import {
   renderPicker,
@@ -33,10 +33,22 @@ test('material, layering, typography, and magnetic motion use accepted shared to
   assert.match(styles, /--layer-menu:\s*100/);
   assert.match(styles, /\.sidebar\s*\{[^}]*z-index:\s*var\(--layer-sidebar\)/s);
   assert.match(styles, /\.floating-menu\s*\{[^}]*z-index:\s*var\(--layer-menu\)/s);
-  assert.match(styles, /font-family:\s*-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif/);
   assert.match(app, /MAGNETIC_STRENGTH\s*=\s*0\.18/);
   assert.match(app, /MAGNETIC_MAX\s*=\s*7/);
   assert.match(app, /target\.style\.translate/);
+});
+
+test('official Geist variable fonts are self-hosted with license and fallbacks', () => {
+  const sans = new URL('./assets/fonts/Geist[wght].woff2', import.meta.url);
+  const mono = new URL('./assets/fonts/GeistMono[wght].woff2', import.meta.url);
+  assert.equal(existsSync(sans), true);
+  assert.equal(existsSync(mono), true);
+  assert.ok(statSync(sans).size > 60_000);
+  assert.ok(statSync(mono).size > 60_000);
+  assert.equal(existsSync(new URL('./assets/fonts/OFL.txt', import.meta.url)), true);
+  assert.match(styles, /@font-face\s*\{[^}]*font-family:\s*"Geist"[^}]*Geist%5Bwght%5D\.woff2[^}]*font-display:\s*swap/s);
+  assert.match(styles, /@font-face\s*\{[^}]*font-family:\s*"Geist Mono"[^}]*GeistMono%5Bwght%5D\.woff2[^}]*font-display:\s*swap/s);
+  assert.match(styles, /font-family:\s*"Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif/);
 });
 
 test('compact composer keeps its selector quiet and its actions unframed', () => {
