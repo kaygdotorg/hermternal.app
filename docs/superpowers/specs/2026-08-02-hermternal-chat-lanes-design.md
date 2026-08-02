@@ -60,7 +60,7 @@ Message content never changes font family to create drama. Hierarchy comes from 
 
 ### Material and color
 
-Sidebar and composer use the same material recipe: identical background alpha, blur, saturation, border highlight, and elevation. The larger conversation shell is calmer and more opaque for stable reading. Translucent materials never stack directly on one another.
+Sidebar and composer use the same material recipe: identical background alpha, blur, saturation, border highlight, and elevation. The larger conversation shell is a solid reading canvas. Translucent materials never stack directly on one another.
 
 The default Tahoe Frost palette is:
 
@@ -136,3 +136,30 @@ Before presenting the picker:
 ## Selection and promotion
 
 The user chooses a lane after comparing the live variants. No lane is promoted merely because it is recommended here. After selection, the chosen container model may be integrated into the product prototype and the isolated picker is removed unless the user asks to retain it.
+
+## Canvas refinement decision
+
+The Continuous Canvas is the selected direction for refinement. The other lanes remain available only as comparison fixtures during this pass.
+
+The sidebar must establish a desktop stacking context above the conversation shell so the Appearance drop-up can cross the canvas boundary. Layering uses named levels rather than isolated one-off values: shell, sticky chrome, sidebar, menu, modal/drawer, toast, and prototype picker.
+
+The composer becomes a compact, reusable glass surface. Its material is 60% opaque and therefore 40% see-through, with backdrop blur and saturation applied to content behind it. The material recipe is shared by the sidebar and any future floating interface surface. Reduced-transparency mode remains near-solid.
+
+Controls use four semantic primitives:
+
+- `icon-button` supplies a 44px target with a visually quieter icon-sized affordance.
+- `pill` is reserved for a single capsule-shaped label or action.
+- `action-cluster` groups independent adjacent actions in one glass island.
+- `segmented-selector` represents one selection from multiple options with a moving selection treatment.
+
+All four may opt into the shared magnetic pointer behavior derived from Calternal's `dev` branch: pointer-only drift, 18% follow strength, a 7px clamp, CSS `translate` so press scale composes, and a spring return. Touch and reduced-motion input never drift.
+
+The composer no longer wraps bottom-row actions in individual pills. Attachment, context, voice, and send retain 44px interaction targets but use quiet bare chrome. The model selector is a text label and chevron with hover/focus feedback rather than a persistent filled capsule. Idle composer height is reduced while the long-prompt expansion remains available.
+
+Typography is one native system family across shell, transcript, navigation, and controls: `-apple-system`, `BlinkMacSystemFont`, `"SF Pro Text"`, `"Segoe UI"`, sans-serif. Weights remain limited to 400, 500, and 600. Tool and command output alone uses `ui-monospace`. This keeps the web prototype aligned with future SwiftUI interfaces and removes arbitrary display-font emphasis.
+
+Hermes capability research informs future component boundaries without expanding this pass: searchable sessions, memory and skills, tools, approvals, vision attachments, delegation, scheduled jobs, voice, and multi-channel provenance will receive dedicated surfaces rather than being compressed into the composer.
+
+The desktop sidebar and conversation canvas share the same grid-row height. A sticky inner sidebar rail keeps navigation, Appearance, and profile controls within the viewport while the full sidebar material continues to the transcript's bottom edge. The conversation header itself paints no slab, border, or blur; the title and session actions are two independent glass islands at the top of the solid reading canvas.
+
+All standalone glass surfaces consume the same 60/40 material token. Nested buttons and action groups remain fully transparent to avoid compounded alpha. Transcript content uses a separately named raised-surface token that is also normalized to 60% opacity across themes. Semantic overlays such as danger/recording feedback, the drawer scrim, and the fixed prototype comparison harness are not glass surfaces and retain purpose-specific opacity.

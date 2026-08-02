@@ -236,3 +236,39 @@ git push -u origin mockup/chat-lanes-v3-build
 - [ ] **Step 7: Serve the verified picker on NetBird**
 
 Stop only the existing Python server bound to `0.0.0.0:33918`, start the exact server command from Step 1 in the build worktree, and verify `curl -I http://10.69.69.155:33918/` returns HTTP 200.
+
+### Task 5: Refine the selected Canvas system
+
+**Files:**
+- Modify: `prototypes/chat-lanes/index.html`
+- Modify: `prototypes/chat-lanes/styles.css`
+- Modify: `prototypes/chat-lanes/app.mjs`
+- Modify: `prototypes/chat-lanes/structure.test.mjs`
+- Modify: `prototypes/chat-lanes/README.md`
+
+**Interfaces:**
+- Produces named layer, opacity, blur, radius, type, and magnetic-motion tokens.
+- Produces reusable `icon-button`, `pill`, `action-cluster`, and `segmented-selector` class contracts.
+- Preserves all existing local-only interactions and the three-lane comparison harness.
+
+- [ ] **Step 1: Add failing source and structure contracts**
+
+Assert a named menu layer above the conversation shell, a 60%-opaque shared material token, an 18%/7px magnetic configuration using CSS `translate`, reusable control-family classes, and a plain model trigger without the persistent accent fill.
+
+- [ ] **Step 2: Run tests and verify RED**
+
+Run: `node --test prototypes/chat-lanes/*.test.mjs`
+
+Expected: the new refinement contracts fail against the original Canvas system.
+
+- [ ] **Step 3: Implement the shared material, controls, and compact composer**
+
+Apply the accepted system without adding dependencies or production integrations. Preserve 44px targets, keyboard behavior, reduced motion, reduced transparency, and all ten themes.
+
+- [ ] **Step 4: Run automated and rendered checks**
+
+Run syntax, unit, structure, Playwright desktop/mobile interaction, contrast, zoom, and screenshot checks. Inspect the screenshots directly and correct visual drift.
+
+- [ ] **Step 5: Document, inspect, commit, push, and serve**
+
+Update the prototype README with the material and primitive contracts, update the code-review graph, inspect change impact and diff, commit the atomic refinement, push the branch, and verify HTTP 200 at `http://10.69.69.155:33918/`.

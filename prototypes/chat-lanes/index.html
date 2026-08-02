@@ -7,32 +7,34 @@
     <meta name="description" content="Three local Hermternal chat composition mockups." />
     <title>Hermternal chat lanes</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="primitives.css" />
   </head>
   <body>
     <a class="skip-link" href="#conversation">Skip to conversation</a>
     <div class="ambient-field" aria-hidden="true"></div>
 
-    <header class="mobile-toolbar material-floating" aria-label="Mobile toolbar">
-      <button class="icon-button magnetic" type="button" data-sidebar-open aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+    <header class="mobile-toolbar glass-surface" aria-label="Mobile toolbar">
+      <button class="icon-button ui-button ui-icon-button magnetic" type="button" data-sidebar-open aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14M5 16h14" /></svg>
       </button>
       <a class="mobile-brand" href="#conversation" aria-label="Hermternal home"><span class="brand-mark" aria-hidden="true">H</span><span>Hermternal</span></a>
-      <button class="icon-button magnetic" type="button" aria-label="Start a new conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+      <button class="icon-button ui-button ui-icon-button magnetic" type="button" aria-label="Start a new conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
     </header>
 
     <div class="app-shell">
       <button class="drawer-scrim" type="button" data-sidebar-close aria-label="Close navigation" tabindex="-1"></button>
 
-      <aside class="sidebar material-floating" id="sidebar" aria-label="Primary navigation" tabindex="-1">
+      <aside class="sidebar glass-surface" id="sidebar" aria-label="Primary navigation" tabindex="-1">
+        <div class="sidebar-inner">
         <div class="sidebar-topline">
           <a class="brand" href="#conversation" aria-label="Hermternal home">
             <span class="brand-mark" aria-hidden="true">H</span>
             <span><strong>Hermternal</strong><small>Local prototype</small></span>
           </a>
-          <button class="icon-button sidebar-close magnetic" type="button" data-sidebar-close aria-label="Close navigation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6" /></svg></button>
+          <button class="icon-button ui-button ui-icon-button sidebar-close magnetic" type="button" data-sidebar-close aria-label="Close navigation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6" /></svg></button>
         </div>
 
-        <button class="new-chat magnetic" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span>New conversation</span><kbd>⌘N</kbd></button>
+        <button class="new-chat ui-button magnetic" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span>New conversation</span><kbd>⌘N</kbd></button>
 
         <label class="search-field">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
@@ -52,30 +54,33 @@
 
         <div class="sidebar-footer">
           <div class="menu-anchor">
-            <button class="footer-row magnetic" type="button" data-menu-trigger="theme" aria-haspopup="menu" aria-expanded="false">
+            <button class="footer-row ui-button magnetic" type="button" data-menu-trigger="theme" aria-haspopup="menu" aria-expanded="false">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 0 0 16c-2-2-2-14 0-16Z" /></svg>
               <span><strong>Appearance</strong><small data-theme-label>System</small></span>
               <svg class="row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 5 5-5 5" /></svg>
             </button>
-            <div class="floating-menu theme-menu material-floating" role="menu" data-menu="theme" hidden>
+            <div class="floating-menu theme-menu glass-surface" role="menu" data-menu="theme" hidden>
               <header><strong>Theme</strong><span>Color only—geometry stays fixed</span></header>
               <div class="theme-grid" data-theme-options></div>
             </div>
           </div>
-          <button class="profile-row magnetic" type="button"><span class="avatar" aria-hidden="true">AM</span><span><strong>Alex Morgan</strong><small>Prototype account</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg></button>
+          <button class="profile-row ui-button magnetic" type="button"><span class="avatar" aria-hidden="true">AM</span><span><strong>Alex Morgan</strong><small>Prototype account</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg></button>
+        </div>
         </div>
       </aside>
 
       <main class="conversation-shell" id="conversation" tabindex="-1">
         <header class="conversation-header">
-          <div class="conversation-title">
+          <div class="conversation-title glass-surface header-island">
             <p>Launch narrative</p>
             <h1>Shape the opening</h1>
           </div>
-          <div class="header-actions">
+          <div class="header-actions glass-surface header-island">
             <span class="local-state"><i aria-hidden="true"></i>Local</span>
-            <button class="icon-button magnetic" type="button" aria-label="Share conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M8 8l4-4 4 4" /><path d="M5 13v7h14v-7" /></svg></button>
-            <button class="icon-button magnetic" type="button" aria-label="Conversation options"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg></button>
+            <div class="ui-action-cluster" role="group" aria-label="Conversation actions">
+              <button class="icon-button ui-button ui-icon-button magnetic" type="button" aria-label="Share conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M8 8l4-4 4 4" /><path d="M5 13v7h14v-7" /></svg></button>
+              <button class="icon-button ui-button ui-icon-button magnetic" type="button" aria-label="Conversation options"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg></button>
+            </div>
           </div>
         </header>
 
@@ -83,30 +88,29 @@
 
         <div class="composer-dock">
           <div class="attachment-status" data-attachment-status role="status" hidden><span>launch-brief.md attached locally</span><button type="button" data-attachment-remove>Remove</button></div>
-          <form class="composer material-floating" aria-label="Message composer">
-            <button class="icon-button expand-button magnetic" type="button" data-expand aria-label="Expand composer" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" /><path d="m4 9 5-5M20 9l-5-5M4 15l5 5M20 15l-5 5" /></svg></button>
+          <form class="composer glass-surface" aria-label="Message composer">
+            <button class="icon-button ui-button ui-icon-button expand-button magnetic" type="button" data-expand aria-label="Expand composer" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" /><path d="m4 9 5-5M20 9l-5-5M4 15l5 5M20 15l-5 5" /></svg></button>
             <label class="sr-only" for="prompt">Message Hermes</label>
             <textarea id="prompt" rows="2" placeholder="Message Hermes…"></textarea>
             <div class="composer-toolbar">
               <div class="composer-left">
-                <button class="icon-button magnetic" type="button" data-attach aria-label="Attach a file"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20 12-7.8 7.8a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.5 3.5 0 0 1 5 5l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8" /></svg></button>
-                <button class="text-control magnetic" type="button" data-context><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7zM4 12h3M17 12h3M12 4v3M12 17v3" /></svg><span>Context</span></button>
+                <button class="icon-button ui-button ui-icon-button magnetic" type="button" data-attach aria-label="Attach a file"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20 12-7.8 7.8a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.5 3.5 0 0 1 5 5l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8" /></svg></button>
+                <button class="text-control ui-button magnetic" type="button" data-context><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7zM4 12h3M17 12h3M12 4v3M12 17v3" /></svg><span>Context</span></button>
               </div>
               <div class="composer-right">
                 <div class="menu-anchor model-anchor">
-                  <button class="model-trigger magnetic" type="button" data-menu-trigger="model" aria-haspopup="menu" aria-expanded="false"><span data-model-label>Sonnet 4.5</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4" /></svg></button>
-                  <div class="floating-menu model-menu material-floating" role="menu" data-menu="model" hidden>
+                  <button class="model-trigger ui-button ui-selector magnetic" type="button" data-menu-trigger="model" aria-haspopup="menu" aria-expanded="false"><span data-model-label>Sonnet 4.5</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4" /></svg></button>
+                  <div class="floating-menu model-menu glass-surface" role="menu" data-menu="model" hidden>
                     <button class="menu-option" type="button" role="menuitemradio" aria-checked="true" data-model="Sonnet 4.5"><span><strong>Sonnet 4.5</strong><small>Balanced reasoning</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg></button>
                     <button class="menu-option" type="button" role="menuitemradio" aria-checked="false" data-model="Opus 4.1"><span><strong>Opus 4.1</strong><small>Deep work</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg></button>
                     <button class="menu-option" type="button" role="menuitemradio" aria-checked="false" data-model="Haiku 4.5"><span><strong>Haiku 4.5</strong><small>Fast responses</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg></button>
                   </div>
                 </div>
-                <button class="icon-button voice-button magnetic" type="button" data-voice aria-label="Record a voice note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="4" width="6" height="11" rx="3" /><path d="M6 11a6 6 0 0 0 12 0M12 17v3M9 20h6" /></svg><span data-record-time hidden>0:00</span></button>
-                <button class="send-button magnetic" type="submit" aria-label="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-5 14-2-5-7-2Z" /><path d="m12 14 7-9" /></svg></button>
+                <button class="icon-button ui-button ui-icon-button voice-button magnetic" type="button" data-voice aria-label="Record a voice note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="4" width="6" height="11" rx="3" /><path d="M6 11a6 6 0 0 0 12 0M12 17v3M9 20h6" /></svg><span data-record-time hidden>0:00</span></button>
+                <button class="send-button ui-button ui-icon-button magnetic" type="submit" aria-label="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-5 14-2-5-7-2Z" /><path d="m12 14 7-9" /></svg></button>
               </div>
             </div>
           </form>
-          <p class="prototype-note">Everything shown is mocked locally. Nothing is sent.</p>
         </div>
       </main>
     </div>

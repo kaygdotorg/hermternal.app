@@ -22,6 +22,9 @@ document.querySelector('[data-theme-options]').innerHTML = renderThemeOptions();
 const picker = document.querySelector('.proto-picker');
 const highlight = picker.querySelector('.proto-picker-highlight');
 const items = [...picker.querySelectorAll('[data-variant-index]')];
+const MAGNETIC_STRENGTH = 0.18;
+const MAGNETIC_MAX = 7;
+let magneticFrame = 0;
 
 function moveHighlight() {
   const item = items[current];
@@ -245,20 +248,26 @@ prompt.addEventListener('input', updateSendState);
 
 document.addEventListener('pointermove', (event) => {
   if (!matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  if (event.pointerType === 'touch' || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const target = event.target.closest('.magnetic');
   if (!target) return;
   const rect = target.getBoundingClientRect();
-  const x = Math.max(-3, Math.min(3, (event.clientX - rect.left - rect.width / 2) * 0.12));
-  const y = Math.max(-3, Math.min(3, (event.clientY - rect.top - rect.height / 2) * 0.12));
-  target.style.setProperty('--mag-x', `${x}px`);
-  target.style.setProperty('--mag-y', `${y}px`);
+  const x = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientX - rect.left - rect.width / 2) * MAGNETIC_STRENGTH));
+  const y = Math.max(-MAGNETIC_MAX, Math.min(MAGNETIC_MAX, (event.clientY - rect.top - rect.height / 2) * MAGNETIC_STRENGTH));
+  cancelAnimationFrame(magneticFrame);
+  magneticFrame = requestAnimationFrame(() => {
+    target.classList.add('is-magnetic-following');
+    // Individual translate composes with the shared press-scale transform.
+    target.style.translate = `${x}px ${y}px`;
+  });
 });
 
 document.addEventListener('pointerout', (event) => {
   const target = event.target.closest('.magnetic');
   if (!target || target.contains(event.relatedTarget)) return;
-  target.style.removeProperty('--mag-x');
-  target.style.removeProperty('--mag-y');
+  cancelAnimationFrame(magneticFrame);
+  target.classList.remove('is-magnetic-following');
+  target.style.translate = '';
 });
 
 setTheme('system');

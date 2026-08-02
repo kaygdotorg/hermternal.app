@@ -20,12 +20,16 @@ The prototype has no build step and no runtime dependency. It loads no remote fo
 
 ## Shared design constraints
 
-The three surfaces use one derived radius scale (`12px`, `18px`, `26px`), the platform system typeface at weights 400/500/600, and one material recipe shared by the sidebar and composer. Ten popular color fixtures change semantic tokens only: System, Nord, Dracula, Gruvbox, Solarized, Catppuccin, Tokyo Night, Rosé Pine, One Dark, and Monokai.
+The three surfaces use one derived radius scale (`12px`, `18px`, `26px`), the native Apple/system sans stack at weights 400/500/600, and one material recipe shared by the sidebar and composer. That material is 60% opaque (40% see-through) with a `20px` backdrop blur and a reduced-transparency fallback. Ten popular color fixtures change semantic tokens only: System, Nord, Dracula, Gruvbox, Solarized, Catppuccin, Tokyo Night, Rosé Pine, One Dark, and Monokai.
+
+`primitives.css` is the prototype-level reuse boundary. It defines the shared glass surface plus semantic button, icon-button, pill, selector, and independent-action-cluster families. Magnetic controls follow the pointer at 18% strength with a 7px clamp and spring back through the individual CSS `translate` property, allowing press-scale to compose without displacement bugs. Touch and reduced-motion input do not drift.
 
 Controls meet a 44 CSS-pixel target. The navigation becomes a left drawer below 820px. Focus visibility, reduced motion, reduced transparency, increased contrast, and 320px-wide layouts are represented in the prototype CSS.
 
 ## Mocked boundaries
 
 Conversations, models, attachments, context, tool details, approvals, voice timing, streaming, and send results are browser-only fixtures or simulations. Nothing is uploaded, persisted, generated, authenticated, or sent to a Hermes gateway. Refresh restores the initial state.
+
+The current fixtures are informed by Hermes Agent's documented sessions, tools, approvals, vision attachments, memory, skills, delegation, voice, and scheduled-task capabilities. This refinement does not add those integrations; it only keeps the prototype component boundaries broad enough to explore them later without overloading the composer.
 
 The rejected root prototype remains untouched so the comparison is reversible. The selected lane can be promoted later; this exploration does not define production architecture.

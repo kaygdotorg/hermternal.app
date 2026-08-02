@@ -1,11 +1,64 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   renderPicker,
   renderThemeOptions,
   renderVariant,
 } from './view.mjs';
+
+const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+const app = readFileSync(new URL('./app.mjs', import.meta.url), 'utf8');
+
+test('selected Canvas refinement exposes reusable material and control primitives', () => {
+  const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
+
+  assert.match(html, /href="primitives\.css"/);
+  assert.match(primitives, /\.glass-surface/);
+  assert.match(primitives, /\.ui-button/);
+  assert.match(primitives, /\.ui-pill/);
+  assert.match(primitives, /\.ui-selector/);
+  assert.match(primitives, /\.ui-action-cluster/);
+  assert.match(primitives, /backdrop-filter:\s*blur\(var\(--glass-blur\)\)\s+saturate\(var\(--glass-saturation\)\)/);
+});
+
+test('material, layering, typography, and magnetic motion use accepted shared tokens', () => {
+  assert.match(styles, /--material-opacity:\s*60%/);
+  assert.match(styles, /--surface-raised-opacity:\s*60%/);
+  assert.doesNotMatch(styles, /--(?:material|surface-raised):\s*rgba/);
+  assert.match(styles, /--layer-sidebar:\s*20/);
+  assert.match(styles, /--layer-menu:\s*100/);
+  assert.match(styles, /\.sidebar\s*\{[^}]*z-index:\s*var\(--layer-sidebar\)/s);
+  assert.match(styles, /\.floating-menu\s*\{[^}]*z-index:\s*var\(--layer-menu\)/s);
+  assert.match(styles, /font-family:\s*-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif/);
+  assert.match(app, /MAGNETIC_STRENGTH\s*=\s*0\.18/);
+  assert.match(app, /MAGNETIC_MAX\s*=\s*7/);
+  assert.match(app, /target\.style\.translate/);
+});
+
+test('compact composer keeps its selector quiet and its actions unframed', () => {
+  assert.match(html, /class="model-trigger ui-button ui-selector magnetic"/);
+  assert.match(styles, /\.composer\s*\{[^}]*min-height:\s*6\.25rem/s);
+  assert.match(styles, /\.model-trigger\s*\{[^}]*background:\s*transparent/s);
+  assert.doesNotMatch(html, /composer-toolbar[^]*ui-action-cluster/);
+});
+
+test('desktop shell heights align and the top chrome is composed from islands', () => {
+  assert.match(html, /class="conversation-title glass-surface header-island"/);
+  assert.match(html, /class="header-actions glass-surface header-island"/);
+  assert.match(styles, /\.app-shell\s*\{[^}]*align-items:\s*stretch/s);
+  assert.match(styles, /\.sidebar\s*\{[^}]*position:\s*relative[^}]*height:\s*auto/s);
+  assert.match(html, /class="sidebar-inner"/);
+  assert.match(styles, /\.sidebar-inner\s*\{[^}]*position:\s*sticky[^}]*height:\s*calc\(100vh - 2rem\)/s);
+  assert.match(styles, /\.conversation-header\s*\{[^}]*border-bottom:\s*0[^}]*background:\s*transparent[^}]*backdrop-filter:\s*none/s);
+  assert.match(styles, /\.header-island\s*\{[^}]*border-radius:\s*999px/s);
+  assert.match(styles, /\.header-actions \.ui-action-cluster\s*\{[^}]*border:\s*0[^}]*background:\s*transparent/s);
+  const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
+  assert.match(primitives, /\.ui-pill\s*\{[^}]*background:\s*var\(--material\)/s);
+  assert.match(primitives, /\.ui-action-cluster\s*\{[^}]*background:\s*var\(--material\)/s);
+});
 
 test('each lane renders the same conversation content through a distinct container model', () => {
   const continuous = renderVariant('continuous');
