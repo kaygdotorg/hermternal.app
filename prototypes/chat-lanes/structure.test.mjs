@@ -88,7 +88,7 @@ test('desktop shell heights align and the top chrome is composed from islands', 
   assert.match(styles, /\.sidebar-inner\s*\{[^}]*position:\s*sticky[^}]*height:\s*calc\(100vh - 2rem\)/s);
   assert.match(styles, /\.conversation-header\s*\{[^}]*border-bottom:\s*0[^}]*background:\s*transparent[^}]*backdrop-filter:\s*none/s);
   assert.match(styles, /\.header-island\s*\{[^}]*border-radius:\s*999px/s);
-  assert.match(styles, /\.header-actions \.ui-action-cluster\s*\{[^}]*border:\s*0[^}]*background:\s*transparent/s);
+  assert.doesNotMatch(html, /class="header-actions[\s\S]*ui-action-cluster/);
   assert.match(styles, /@media \(max-width: 820px\)\s*\{[^]*\.app-shell\s*\{[^}]*z-index:\s*auto/s);
   const primitives = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
   assert.match(primitives, /\.ui-pill\s*\{[^}]*background:\s*var\(--material\)/s);
@@ -106,6 +106,17 @@ test('compact chrome uses one primary label without stacked subtitles', () => {
   assert.doesNotMatch(html, /data-theme-label/);
   assert.doesNotMatch(html, /Color only—geometry stays fixed/);
   assert.match(styles, /\.conversation-title\.header-island\s*\{[^}]*display:\s*flex[^}]*align-items:\s*center[^}]*justify-content:\s*center/s);
+});
+
+test('distilled transcript keeps capability states while removing redundant chrome', () => {
+  const continuous = renderVariant('continuous');
+
+  assert.doesNotMatch(html, /aria-label="Share conversation"/);
+  assert.doesNotMatch(html, /aria-label="Conversation options"/);
+  assert.doesNotMatch(continuous, /class="message-actions"/);
+  assert.doesNotMatch(continuous, /class="lane-intro"/);
+  assert.match(continuous, /Reviewing launch-notes\.md/);
+  assert.match(continuous, /Allow once/);
 });
 
 test('motion opportunities use restrained shared recipes and reduced-motion fallbacks', () => {

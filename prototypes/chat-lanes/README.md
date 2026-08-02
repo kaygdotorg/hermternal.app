@@ -24,6 +24,8 @@ The three surfaces use one derived radius scale (`12px`, `18px`, `26px`) and pin
 
 Floating menus render beside, rather than inside, blurred shells so each surface samples the real content behind it and preserves the same material recipe. Composer actions use 48px touch targets with 20–21px icons; tool and approval rows reserve a 40px two-line copy block instead of compressing their title and supporting text.
 
+The distilled conversation chrome keeps only the title and local-session islands; unimplemented share, overflow, copy, and regenerate controls are intentionally omitted until their interactions exist.
+
 `primitives.css` is the prototype-level reuse boundary. It defines the shared glass surface plus semantic button, icon-button, pill, selector, and independent-action-cluster families. Magnetic controls follow the pointer at 18% strength with a 7px clamp and spring back through the individual CSS `translate` property, allowing press-scale to compose without displacement bugs. Touch and reduced-motion input do not drift.
 
 Controls meet a 44 CSS-pixel target. The navigation becomes a left drawer below 820px; its scrim and close control remain above the fixed mobile toolbar. Focus visibility, reduced motion, reduced transparency, increased contrast, and 320px-wide layouts are represented in the prototype CSS.

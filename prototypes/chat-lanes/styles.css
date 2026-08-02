@@ -337,13 +337,10 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 .conversation-title.header-island { display: flex; min-width: 0; min-height: 50px; align-items: center; justify-content: center; padding: 0 1rem; }
 .conversation-title h1 { overflow: hidden; margin: 0; font-size: .9375rem; font-weight: 600; line-height: 1; letter-spacing: -.018em; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions { display: flex; align-items: center; gap: .15rem; min-height: 50px; padding: 2px 3px 2px .7rem; }
-.header-actions .ui-action-cluster { padding: 0; border: 0; background: transparent; }
 .local-state { display: flex; align-items: center; gap: .4rem; margin-right: .4rem; color: var(--text-faint); font-size: .66rem; font-weight: 500; }
 .local-state i { width: .42rem; height: .42rem; border-radius: 50%; background: var(--positive); box-shadow: 0 0 0 3px color-mix(in srgb, var(--positive) 12%, transparent); }
 .stage { flex: 1; min-height: 0; }
 .lane { width: min(calc(100% - 3rem), var(--reading)); margin: 0 auto; padding: 2.4rem 0 3rem; }
-.lane-intro { display: flex; align-items: center; gap: .5rem; margin-bottom: 2rem; color: var(--text-faint); font-size: .64rem; letter-spacing: .025em; }
-.lane-intro span::after { margin-left: .5rem; color: var(--line-strong); content: "·"; }
 .conversation-turn { margin-bottom: 3rem; }
 .message { position: relative; margin-bottom: 1.65rem; }
 .message-meta { display: flex; align-items: center; gap: .55rem; min-height: 1.5rem; margin-bottom: .42rem; color: var(--text-faint); font-size: .65rem; font-weight: 400; letter-spacing: .015em; }
@@ -357,9 +354,6 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 .assistant-prose li::before { display: grid; width: 1.25rem; height: 1.25rem; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--text-faint); content: counter(beats); font-size: .58rem; line-height: 1; }
 .user-surface { padding: .85rem 1rem; border: 1px solid var(--line); border-radius: var(--radius-nested); background: var(--surface-raised); color: var(--text); font-size: .86rem; line-height: 1.6; }
 .message-user { width: min(88%, 38rem); margin-left: auto; }
-.message-actions { display: flex; gap: .1rem; min-height: 44px; align-items: center; margin-top: .4rem; opacity: .66; }
-.quiet-action { display: grid; width: 44px; height: 44px; place-items: center; border-radius: var(--radius-control); background: transparent; color: var(--text-faint); }
-.quiet-action svg { width: .95rem; }
 .event-row { position: relative; display: grid; grid-template-columns: 2rem minmax(0, 1fr) auto; align-items: center; gap: .7rem; min-height: 72px; margin: .55rem 0; padding: .7rem .75rem; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); }
 .event-icon { display: grid; width: 2rem; height: 2rem; place-items: center; border-radius: var(--radius-control); background: var(--accent-soft); color: var(--accent); }
 .event-icon svg { width: .95rem; }
@@ -393,11 +387,10 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 
 /* Focus Lane: long-form measure with metadata disclosed only when it helps. */
 .lane-focus { --reading: 40rem; padding-top: 3.2rem; }
-.lane-focus .lane-intro { justify-content: center; margin-bottom: 3rem; }
 .lane-focus .conversation-turn { margin-bottom: 4rem; }
 .lane-focus .message-user { width: min(92%, 34rem); }
 .lane-focus .assistant-prose { font-size: clamp(.96rem, 1.15vw, 1.04rem); line-height: 1.78; }
-.lane-focus .message-meta, .lane-focus .message-actions { transition: opacity 160ms ease; }
+.lane-focus .message-meta { transition: opacity 160ms ease; }
 .lane-focus .event-row { grid-template-columns: 1.8rem minmax(0, 1fr) auto; min-height: 52px; border-color: transparent; border-top-color: var(--line); border-radius: 0; background: transparent; }
 .lane-focus .event-icon { width: 1.8rem; height: 1.8rem; border-radius: var(--radius-control); }
 
@@ -474,11 +467,11 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 @keyframes pulse { 50% { opacity: .36; } }
 
 @media (hover: hover) and (pointer: fine) {
-  .lane-focus .message-meta, .lane-focus .message-actions { opacity: .46; }
-  .lane-focus .message:focus-within .message-meta, .lane-focus .message:hover .message-meta, .lane-focus .message:focus-within .message-actions, .lane-focus .message:hover .message-actions { opacity: 1; }
-  .magnetic:hover, .history-row:hover, .menu-option:hover, .quiet-action:hover, .event-action:hover { background-color: var(--accent-soft); color: var(--text); }
+  .lane-focus .message-meta { opacity: .46; }
+  .lane-focus .message:focus-within .message-meta, .lane-focus .message:hover .message-meta { opacity: 1; }
+  .magnetic:hover, .history-row:hover, .menu-option:hover, .event-action:hover { background-color: var(--accent-soft); color: var(--text); }
   .new-chat.magnetic:hover, .send-button.magnetic:hover { background-color: var(--text); color: var(--surface-solid); }
-  .menu-option:active, .quiet-action:active { transform: scale(.97); transition-duration: 100ms; }
+  .menu-option:active { transform: scale(.97); transition-duration: 100ms; }
 }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
@@ -525,7 +518,6 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
   .conversation-title.header-island { min-width: 0; padding-inline: .72rem; }
   .local-state { display: none; }
   .lane { width: calc(100% - 1rem); padding-top: 1.8rem; }
-  .lane-intro { margin-inline: .4rem; }
   .conversation-turn { margin-bottom: 2.3rem; }
   .message-user { width: 94%; }
   .assistant-prose { font-size: .92rem; line-height: 1.67; }

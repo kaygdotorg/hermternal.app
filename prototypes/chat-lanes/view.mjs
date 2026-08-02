@@ -17,9 +17,7 @@ const icon = (name) => {
   const paths = {
     check: '<path d="m7 12 3 3 7-7"/>',
     chevron: '<path d="m9 7 5 5-5 5"/>',
-    copy: '<rect x="8" y="8" width="10" height="10" rx="2"/><path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"/>',
     file: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M10 13h5M10 16h4"/>',
-    refresh: '<path d="M19 7v5h-5M5 17v-5h5"/><path d="M7.1 8.5A6 6 0 0 1 18 12M6 12a6 6 0 0 0 10.9 3.5"/>',
     terminal: '<path d="m5 7 4 5-4 5M11 17h8"/>',
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
@@ -46,10 +44,6 @@ function assistantMessage() {
           <li><span>End on what the team can finally spend time doing.</span></li>
         </ol>
       </div>
-      <footer class="message-actions" aria-label="Response actions">
-        <button class="quiet-action" type="button" aria-label="Copy response">${icon('copy')}</button>
-        <button class="quiet-action" type="button" aria-label="Regenerate response">${icon('refresh')}</button>
-      </footer>
     </article>`;
 }
 
@@ -86,9 +80,6 @@ function streamingMessage() {
 export function renderVariant(lane) {
   return `
     <section class="lane lane-${lane}" data-lane="${lane}" aria-label="Conversation messages">
-      <div class="lane-intro">
-        <span>Today</span><time>10:42</time>
-      </div>
       <div class="transcript-flow">
         <section class="conversation-turn">
           ${userMessage('Plan a calm product launch. Use the attached notes, keep the language precise, and avoid anything that sounds like a campaign.')}
