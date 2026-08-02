@@ -143,7 +143,7 @@ The Continuous Canvas is the selected direction for refinement. The other lanes 
 
 The sidebar must establish a desktop stacking context above the conversation shell so the Appearance drop-up can cross the canvas boundary. Layering uses named levels rather than isolated one-off values: shell, sticky chrome, sidebar, menu, modal/drawer, toast, and prototype picker.
 
-The composer becomes a compact, reusable glass surface. Its material is 60% opaque and therefore 40% see-through, with backdrop blur and saturation applied to content behind it. The material recipe is shared by the sidebar and any future floating interface surface. Reduced-transparency mode remains near-solid.
+The composer becomes a compact, reusable glass surface. Its material is 50% opaque and therefore 50% see-through, with backdrop blur and saturation applied to content behind it. The material recipe is shared by the sidebar and any future floating interface surface. Reduced-transparency mode remains near-solid.
 
 Controls use four semantic primitives:
 
@@ -162,10 +162,26 @@ Hermes capability research informs future component boundaries without expanding
 
 The desktop sidebar and conversation canvas share the same grid-row height. A sticky inner sidebar rail keeps navigation, Appearance, and profile controls within the viewport while the full sidebar material continues to the transcript's bottom edge. The conversation header itself paints no slab, border, or blur; the title and session actions are two independent glass islands at the top of the solid reading canvas.
 
-All standalone glass surfaces consume the same 60/40 material token. Nested buttons and action groups remain fully transparent to avoid compounded alpha. Transcript content uses a separately named raised-surface token that is also normalized to 60% opacity across themes. The visible prototype comparison picker also uses 60% opacity. Semantic overlays such as danger/recording feedback and the drawer scrim are not material surfaces and retain purpose-specific opacity.
+All standalone glass surfaces consume the same 50/50 material token. Nested buttons and action groups remain fully transparent to avoid compounded alpha. Transcript content uses a separately named raised-surface token that is also normalized to 50% opacity across themes. The visible prototype comparison picker also uses 50% opacity. Semantic overlays such as danger/recording feedback and the drawer scrim are not material surfaces and retain purpose-specific opacity.
 
 ## Canvas motion refinement
 
 Motion follows one restrained state-change vocabulary. Pointer-opened menus originate at their trigger edge and move from zero opacity plus `scale(.97)` to rest in `180ms`; exit takes `130ms`. Toast feedback enters from 8px below with a slight `.98` scale, new local turns enter from 8px below, and approval decisions enter from 4px below. These effects animate only opacity and transform and remain interruptible.
 
 Keyboard-triggered menus, local turns, approval results, and toasts render immediately because keyboard operation must never wait for spatial motion. Theme changes, composer expansion, transcript loading, and existing prose are deliberately not animated: they are frequent or reading-sensitive changes where movement would add noise or distort text. Reduced Motion removes spatial displacement and magnetic following, retaining only a `120ms` opacity transition for state continuity.
+
+## Geist typography and 50/50 material refinement
+
+The user approved Geist as Hermternal's opinionated prototype family. The web mockup will self-host the official Geist Sans variable font under its SIL Open Font License and retain `system-ui`, `-apple-system`, `BlinkMacSystemFont`, and `"Segoe UI"` as fallbacks. Geist Sans owns navigation, controls, transcript prose, and authored messages at weights 400, 500, and 600. Geist Mono is reserved for tool output, command text, and code. The prototype will load only the required webfont files, declare `font-display: swap`, and keep the license text beside the assets. This preserves the no-runtime-dependency boundary and avoids a third-party font request.
+
+Typography removes stacked title/subtitle patterns from compact chrome. The top-left conversation island contains only `Shape the opening`, vertically and horizontally centered. The sidebar brand, conversation rows, Appearance control, and profile control each contain one primary label; timestamps may remain right-aligned because they are metadata columns rather than subtitles. Model menu rows contain only the model name. The Appearance menu contains a single `Theme` heading and one name per theme option. Section headings such as `Today` and `Previous 7 days` remain because they organize groups rather than qualify an adjacent title.
+
+Sidebar labels use one 13px/500 treatment with a compact but non-cramped line height. Timestamps and section headings use 11px/400–500. Composer text uses 14px/400. Transcript prose remains 15–16px/400 with the existing comfortable reading leading. Hierarchy comes from placement, size, and color rather than extra explanatory lines or arbitrary boldness.
+
+Every translucent surface moves to one 50% opaque / 50% transparent invariant. Both `--material-opacity` and `--surface-raised-opacity` become 50%, while all glass surfaces continue to share the same background base, `20px` blur, `1.38` saturation, border, and elevation recipe. The composer dock's 58% veil is removed because it compounds the composer material and makes an otherwise identical alpha look more opaque than the Appearance menu. No new translucent layer may be placed directly under or over another translucent layer. Reduced Transparency remains near-solid.
+
+Reference review used the current official iPad App Store presentations for [ChatGPT](https://apps.apple.com/us/app/chatgpt/id6448311069?platform=ipad), [Claude](https://apps.apple.com/us/app/claude-by-anthropic/id6473753684?platform=ipad), and [Perplexity](https://apps.apple.com/us/app/perplexity-ai-search-chat/id1668000334?platform=ipad). The adopted lessons are restraint rather than visual imitation: compact single-line top chrome, a dominant reading surface, sparse persistent metadata, a bottom composer that does not become a toolbar, and a sidebar that yields attention to the conversation. Hermternal retains its own Canvas composition, 50/50 glass material, theme system, magnetic controls, and agent-operation states.
+
+### Refinement verification
+
+Browser checks must confirm that the composer, Appearance menu, model menu, sidebar, header islands, and mobile toolbar compute to the same 0.5 background alpha, `20px` backdrop blur, and shared border recipe in every theme. The composer dock must have no painted pseudo-element veil. Visual inspection must compare text visibility behind the composer and behind the portion of the Appearance menu that crosses the solid conversation canvas. At desktop, iPad, and iPhone widths, all compact chrome must show one label per control or island, sidebar rows must remain at least 44px tall, long titles must truncate rather than create a second line, and browser zoom must not clip the new font metrics.
