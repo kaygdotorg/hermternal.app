@@ -286,6 +286,17 @@ function updateSendState() {
   sendButton.disabled = !canSend(prompt.value);
 }
 
+function resizePrompt() {
+  prompt.style.height = 'auto';
+  const style = getComputedStyle(prompt);
+  const maxHeight = composer.classList.contains('expanded')
+    ? prompt.scrollHeight
+    : Number.parseFloat(style.maxHeight);
+  const nextHeight = Math.min(prompt.scrollHeight, maxHeight);
+  prompt.style.height = `${nextHeight}px`;
+  prompt.style.overflowY = prompt.scrollHeight > maxHeight ? 'auto' : 'hidden';
+}
+
 function filterHistory() {
   const query = searchInput.value.trim().toLocaleLowerCase();
   let visibleCount = 0;
@@ -308,6 +319,7 @@ function startNewConversation() {
   document.querySelector('[data-expand]').setAttribute('aria-expanded', 'false');
   attachmentStatus.hidden = true;
   prompt.value = '';
+  resizePrompt();
   updateSendState();
   searchInput.value = '';
   filterHistory();
@@ -361,6 +373,7 @@ export function submitDraft() {
   const localTurn = stage.querySelector('.local-turn:last-child');
   if (motionClass) localTurn?.classList.add('motion-immediate');
   prompt.value = '';
+  resizePrompt();
   updateSendState();
   localTurn?.scrollIntoView({ block: 'center' });
   announce('Added locally. Nothing was sent.');
@@ -424,6 +437,7 @@ document.addEventListener('click', (event) => {
     const expanded = !composer.classList.contains('expanded');
     composer.classList.toggle('expanded', expanded);
     expand.setAttribute('aria-expanded', String(expanded));
+    resizePrompt();
     prompt.focus();
   }
 
@@ -479,7 +493,10 @@ composer.addEventListener('submit', (event) => {
   event.preventDefault();
   submitDraft();
 });
-prompt.addEventListener('input', updateSendState);
+prompt.addEventListener('input', () => {
+  resizePrompt();
+  updateSendState();
+});
 searchInput.addEventListener('input', filterHistory);
 
 document.addEventListener('pointermove', (event) => {
@@ -507,3 +524,4 @@ document.addEventListener('pointerout', (event) => {
 });
 
 setTheme('system');
+resizePrompt();

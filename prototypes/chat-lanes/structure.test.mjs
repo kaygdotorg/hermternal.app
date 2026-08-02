@@ -80,7 +80,12 @@ test('compact composer keeps its selector quiet and its actions unframed', () =>
   assert.match(html, /<textarea id="prompt" rows="1"/);
   assert.match(styles, /--composer-copy-size:\s*\.9375rem/);
   assert.match(styles, /--composer-control-size:\s*\.875rem/);
-  assert.match(styles, /\.composer\s*\{[^}]*min-height:\s*5\.25rem/s);
+  assert.match(styles, /--composer-prompt-row:\s*2\.75rem/);
+  assert.match(styles, /\.composer\s*\{[^}]*min-height:\s*6rem/s);
+  assert.match(styles, /\.composer textarea\s*\{[^}]*min-height:\s*var\(--composer-prompt-row\)[^}]*max-height:\s*3rem/s);
+  assert.match(styles, /\.expand-button\s*\{[^}]*z-index:\s*2/s);
+  assert.match(app, /function resizePrompt\(\)/);
+  assert.match(app, /prompt\.style\.overflowY/);
   assert.match(styles, /\.model-trigger\s*\{[^}]*background:\s*transparent/s);
   assert.doesNotMatch(html, /composer-toolbar[^]*ui-action-cluster/);
 });
