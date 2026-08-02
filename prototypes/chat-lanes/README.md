@@ -20,7 +20,7 @@ The prototype has no build step and no runtime dependency. It loads no remote fo
 
 ## Shared design constraints
 
-The three surfaces use one derived radius scale (`12px`, `18px`, `26px`), the native Apple/system sans stack at weights 400/500/600, and one material recipe shared by the sidebar and composer. That material is 60% opaque (40% see-through) with a `20px` backdrop blur and a reduced-transparency fallback. Ten popular color fixtures change semantic tokens only: System, Nord, Dracula, Gruvbox, Solarized, Catppuccin, Tokyo Night, Rosé Pine, One Dark, and Monokai.
+The three surfaces use one derived radius scale (`12px`, `18px`, `26px`) and pinned, self-hosted Geist Sans and Geist Mono prototype assets under SIL OFL 1.1. Compact chrome contains one primary label. Material and raised surfaces are 50% opaque with a `20px` backdrop blur and `1.38` saturation, plus a reduced-transparency fallback. The composer dock does not paint an additional veil. Ten popular color fixtures change semantic tokens only: System, Nord, Dracula, Gruvbox, Solarized, Catppuccin, Tokyo Night, Rosé Pine, One Dark, and Monokai.
 
 `primitives.css` is the prototype-level reuse boundary. It defines the shared glass surface plus semantic button, icon-button, pill, selector, and independent-action-cluster families. Magnetic controls follow the pointer at 18% strength with a 7px clamp and spring back through the individual CSS `translate` property, allowing press-scale to compose without displacement bugs. Touch and reduced-motion input do not drift.
 

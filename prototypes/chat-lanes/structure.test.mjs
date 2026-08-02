@@ -25,10 +25,11 @@ test('selected Canvas refinement exposes reusable material and control primitive
 });
 
 test('material, layering, typography, and magnetic motion use accepted shared tokens', () => {
-  assert.match(styles, /--material-opacity:\s*60%/);
-  assert.match(styles, /--surface-raised-opacity:\s*60%/);
+  assert.match(styles, /--material-opacity:\s*50%/);
+  assert.match(styles, /--surface-raised-opacity:\s*50%/);
   assert.doesNotMatch(styles, /--(?:material|surface-raised):\s*rgba/);
-  assert.match(styles, /\.proto-picker\s*\{[^}]*background:\s*rgba\(10, 10, 10, 0\.6\)/s);
+  assert.match(styles, /\.proto-picker\s*\{[^}]*background:\s*rgba\(10, 10, 10, 0\.5\)/s);
+  assert.doesNotMatch(styles, /\.composer-dock::before/);
   assert.match(styles, /--layer-sidebar:\s*20/);
   assert.match(styles, /--layer-menu:\s*100/);
   assert.match(styles, /\.sidebar\s*\{[^}]*z-index:\s*var\(--layer-sidebar\)/s);
