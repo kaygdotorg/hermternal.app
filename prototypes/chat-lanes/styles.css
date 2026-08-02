@@ -25,6 +25,8 @@
   --glass-blur: 20px;
   --glass-saturation: 1.38;
   --composer-action-size: 48px;
+  --composer-copy-size: .9375rem;
+  --composer-control-size: .875rem;
   --layer-shell: 1;
   --layer-sticky: 10;
   --layer-sidebar: 20;
@@ -399,15 +401,15 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 .lane-focus .event-icon { width: 1.8rem; height: 1.8rem; border-radius: var(--radius-control); }
 
 .composer-dock { position: sticky; z-index: var(--layer-sticky); bottom: 0; width: min(calc(100% - 3rem), calc(var(--reading) + 2rem)); margin: auto auto 0; padding: 1rem 0 4.75rem; }
-.composer { position: relative; min-height: 6.25rem; padding: .7rem .6rem .45rem; border-radius: var(--radius-nested); }
-.composer textarea { display: block; width: calc(100% - 2.75rem); min-height: 2.55rem; max-height: 10rem; padding: .08rem .45rem; resize: none; border: 0; outline: 0; background: transparent; font-size: .87rem; font-weight: 400; line-height: 1.5; }
+.composer { position: relative; min-height: 5.25rem; padding: .35rem .6rem .2rem; border-radius: var(--radius-nested); }
+.composer textarea { display: block; width: calc(100% - 2.75rem); min-height: 1.85rem; max-height: 10rem; padding: .08rem .45rem; resize: none; border: 0; outline: 0; background: transparent; font-size: var(--composer-copy-size); font-weight: 400; line-height: 1.4; }
 .composer textarea::placeholder { color: var(--text-faint); }
 .expand-button { position: absolute; top: .3rem; right: .35rem; }
 .composer-toolbar { display: flex; align-items: end; justify-content: space-between; gap: .35rem; margin-top: 0; }
 .composer-left, .composer-right { display: flex; align-items: center; gap: .15rem; }
 .composer-toolbar .ui-icon-button { width: var(--composer-action-size); min-width: var(--composer-action-size); height: var(--composer-action-size); border-radius: 999px; }
 .composer-toolbar .ui-icon-button svg { width: 1.3rem; height: 1.3rem; }
-.text-control, .model-trigger { display: flex; align-items: center; gap: .38rem; min-height: var(--composer-action-size); padding: 0 .55rem; border-radius: var(--radius-control); background: transparent; color: var(--text-soft); font-size: .7rem; font-weight: 500; }
+.text-control, .model-trigger { display: flex; align-items: center; gap: .38rem; min-height: var(--composer-action-size); padding: 0 .55rem; border-radius: var(--radius-control); background: transparent; color: var(--text-soft); font-size: var(--composer-control-size); font-weight: 500; }
 .text-control svg { width: 1.2rem; height: 1.2rem; }
 .model-trigger svg { width: 1rem; height: 1rem; }
 .model-trigger { background: transparent; color: var(--text-soft); }

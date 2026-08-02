@@ -77,7 +77,10 @@ test('official Geist variable fonts are self-hosted with license and fallbacks',
 
 test('compact composer keeps its selector quiet and its actions unframed', () => {
   assert.match(html, /class="model-trigger ui-button ui-selector magnetic"/);
-  assert.match(styles, /\.composer\s*\{[^}]*min-height:\s*6\.25rem/s);
+  assert.match(html, /<textarea id="prompt" rows="1"/);
+  assert.match(styles, /--composer-copy-size:\s*\.9375rem/);
+  assert.match(styles, /--composer-control-size:\s*\.875rem/);
+  assert.match(styles, /\.composer\s*\{[^}]*min-height:\s*5\.25rem/s);
   assert.match(styles, /\.model-trigger\s*\{[^}]*background:\s*transparent/s);
   assert.doesNotMatch(html, /composer-toolbar[^]*ui-action-cluster/);
 });
