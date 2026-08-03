@@ -17,8 +17,6 @@ const icon = (name) => {
   const paths = {
     check: '<path d="m7 12 3 3 7-7"/>',
     chevron: '<path d="m9 7 5 5-5 5"/>',
-    file: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M10 13h5M10 16h4"/>',
-    terminal: '<path d="m5 7 4 5-4 5M11 17h8"/>',
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
 };
@@ -50,14 +48,12 @@ function assistantMessage() {
 function operationalStates() {
   return `
     <div class="event-row tool-event">
-      <span class="event-icon">${icon('terminal')}</span>
-      <div class="event-copy"><strong>Reviewing launch-notes.md</strong><span>Extracted voice, audience, and constraints</span></div>
+      <div class="event-copy"><strong>Reviewing launch-notes.md</strong></div>
       <button class="event-action" type="button" data-tool-toggle aria-expanded="false">Details ${icon('chevron')}</button>
       <pre class="tool-detail" hidden><code>voice: calm, specific\naudience: product teams\nconstraint: no campaign language</code></pre>
     </div>
     <div class="event-row approval-event">
-      <span class="event-icon">${icon('file')}</span>
-      <div class="event-copy"><strong>Use the attached brief as context?</strong><span>Mock approval · no file is read or uploaded</span></div>
+      <div class="event-copy"><strong>Use the attached brief as context?</strong></div>
       <div class="approval-actions">
         <button type="button" data-approval="deny">Not now</button>
         <button class="primary-compact" type="button" data-approval="allow">Allow once</button>
@@ -109,9 +105,9 @@ export function renderPicker() {
   return `
     <nav class="proto-picker" aria-label="Prototype variants">
       <span class="proto-picker-highlight" aria-hidden="true"></span>
-      <button class="proto-picker-item" data-active aria-current="true" data-variant-index="0" aria-label="Continuous Canvas">Canvas</button>
-      <button class="proto-picker-item" data-variant-index="1" aria-label="Turn Stacks">Stacks</button>
-      <button class="proto-picker-item" data-variant-index="2" aria-label="Focus Lane">Focus</button>
+      <button class="proto-picker-item magnetic" data-active aria-current="true" data-variant-index="0" aria-label="Continuous Canvas">Canvas</button>
+      <button class="proto-picker-item magnetic" data-variant-index="1" aria-label="Turn Stacks">Stacks</button>
+      <button class="proto-picker-item magnetic" data-variant-index="2" aria-label="Focus Lane">Focus</button>
     </nav>`;
 }
 

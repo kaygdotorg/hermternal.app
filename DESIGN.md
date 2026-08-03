@@ -83,7 +83,7 @@ The surface uses self-hosted Geist for a single consistent voice, with Geist Mon
 - One typographic voice with clear weight and measure changes.
 - 50% translucent control surfaces with shared blur and saturation.
 - Cool neutral canvas, restrained semantic accent, and theme-driven color roles.
-- Operational states share a readable two-line row grammar.
+- Operational states use a quiet single-line utility-row grammar.
 - Touch targets stay at least 44px; magnetic motion is pointer-only and restrained.
 
 ## Colors
@@ -172,7 +172,7 @@ The form language is a small derived radius scale: 12px controls, 18px nested co
 
 ### Operational Rows
 
-- **Structure:** 72px minimum row with a 40px icon and a reserved two-line copy block.
+- **Structure:** 56px minimum utility row with one clear label and no decorative leading icon or stacked subtitle.
 - **States:** Tool rows disclose details; approval rows make the decision explicit; streaming rows use a single restrained status indicator.
 
 ## Do's and Don'ts

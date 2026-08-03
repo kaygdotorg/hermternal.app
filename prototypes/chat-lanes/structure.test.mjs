@@ -36,8 +36,8 @@ test('material, layering, typography, and magnetic motion use accepted shared to
   assert.match(styles, /--layer-menu:\s*100/);
   assert.match(styles, /\.sidebar\s*\{[^}]*z-index:\s*var\(--layer-sidebar\)/s);
   assert.match(styles, /\.floating-menu\s*\{[^}]*z-index:\s*var\(--layer-menu\)/s);
-  assert.match(app, /MAGNETIC_STRENGTH\s*=\s*0\.18/);
-  assert.match(app, /MAGNETIC_MAX\s*=\s*7/);
+  assert.match(app, /MAGNETIC_STRENGTH\s*=\s*0\.22/);
+  assert.match(app, /MAGNETIC_MAX\s*=\s*9/);
   assert.match(app, /MAGNETIC_PARALLAX\s*=\s*0\.2/);
   assert.match(app, /target\.style\.translate/);
   assert.doesNotMatch(app, /matchMedia\('\(hover: hover\) and \(pointer: fine\)'\)/);
@@ -74,8 +74,11 @@ test('official Geist variable fonts are self-hosted with license and fallbacks',
   assert.equal(existsSync(new URL('./assets/fonts/OFL.txt', import.meta.url)), true);
   assert.match(styles, /@font-face\s*\{[^}]*font-family:\s*"Geist"[^}]*Geist%5Bwght%5D\.woff2[^}]*font-display:\s*swap/s);
   assert.match(styles, /@font-face\s*\{[^}]*font-family:\s*"Geist Mono"[^}]*GeistMono%5Bwght%5D\.woff2[^}]*font-display:\s*swap/s);
-  assert.match(styles, /font-family:\s*"Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif/);
-  assert.match(styles, /\.proto-picker\s*\{[^}]*font-family:\s*"Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif/s);
+  assert.match(styles, /--font-ui:\s*"Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif/);
+  assert.match(styles, /--font-mono:\s*"Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace/);
+  assert.match(styles, /font-family:\s*var\(--font-ui\)/);
+  assert.match(styles, /\.assistant-prose\s*\{[^}]*font-family:\s*var\(--font-ui\)[^}]*font-size:\s*1rem/s);
+  assert.match(styles, /\.event-copy strong\s*\{[^}]*font-family:\s*var\(--font-ui\)[^}]*font-size:\s*\.8125rem/s);
 });
 
 test('compact composer keeps its selector quiet and its actions unframed', () => {
@@ -176,6 +179,7 @@ test('each lane renders the same conversation content through a distinct contain
 test('picker exposes exactly three named lane controls', () => {
   const picker = renderPicker();
   assert.equal((picker.match(/data-variant-index=/g) ?? []).length, 3);
+  assert.equal((picker.match(/proto-picker-item magnetic/g) ?? []).length, 3);
   assert.match(picker, /aria-label="Continuous Canvas">Canvas</);
   assert.match(picker, /aria-label="Turn Stacks">Stacks</);
   assert.match(picker, /aria-label="Focus Lane">Focus</);
@@ -221,13 +225,25 @@ test('model menu also escapes its blurred composer and anchors through shared me
   assert.match(app, /function positionFloatingMenu\(menu, trigger\)/);
 });
 
-test('tool and approval rows reserve a readable two-line content block', () => {
+test('tool and approval states use a quiet single-line utility grammar', () => {
   const continuous = renderVariant('continuous');
+  const eventCopies = continuous.match(/<div class="event-copy">[\s\S]*?<\/div>/g) ?? [];
 
-  assert.equal((continuous.match(/class="event-copy"/g) ?? []).length, 2);
-  assert.match(styles, /\.event-row\s*\{[^}]*min-height:\s*72px[^}]*padding:\s*\.7rem\s+\.75rem/s);
-  assert.match(styles, /\.event-copy\s*\{[^}]*min-height:\s*2\.5rem[^}]*align-content:\s*center[^}]*gap:\s*\.18rem/s);
-  assert.match(styles, /\.event-copy span\s*\{[^}]*line-height:\s*1\.35/s);
+  assert.equal(eventCopies.length, 2);
+  assert.doesNotMatch(continuous, /class="event-icon"/);
+  eventCopies.forEach((copy) => assert.doesNotMatch(copy, /<span>/));
+  assert.match(styles, /\.event-row\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto[^}]*min-height:\s*56px[^}]*border-radius:\s*0[^}]*background:\s*transparent/s);
+  assert.match(styles, /\.event-copy strong\s*\{[^}]*font-size:\s*\.8125rem[^}]*line-height:\s*1\.4/s);
+});
+
+test('assistant copy keeps a readable gutter and ordinary numbered-list rhythm', () => {
+  assert.match(styles, /\.assistant-prose ol\s*\{[^}]*padding-left:\s*1\.35rem[^}]*list-style:\s*decimal/s);
+  assert.match(styles, /\.assistant-prose li\s*\{[^}]*display:\s*list-item/s);
+  assert.doesNotMatch(styles, /\.assistant-prose li::before/);
+  assert.doesNotMatch(styles, /\.lane-continuous \.message-assistant\s*\{[^}]*padding-right/s);
+  assert.doesNotMatch(styles, /\.lane-continuous \.event-row\s*\{[^}]*margin-left/s);
+  assert.match(styles, /@media \(max-width: 560px\)\s*\{[^]*\.lane\s*\{[^}]*width:\s*calc\(100% - 2rem\)/s);
+  assert.match(styles, /@media \(max-width: 560px\)\s*\{[^]*\.assistant-prose\s*\{[^}]*font-size:\s*1rem/s);
 });
 
 test('composer actions use mobile-reference visual weight without shrinking touch targets', () => {

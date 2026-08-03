@@ -36,6 +36,6 @@ Motion is intentionally limited to state changes that benefit from visible causa
 
 Conversations, models, attachments, context, tool details, approvals, voice timing, streaming, and send results are browser-only fixtures or simulations. Nothing is uploaded, persisted, generated, authenticated, or sent to a Hermes gateway. Refresh restores the initial state.
 
-The current fixtures are informed by Hermes Agent's documented sessions, tools, approvals, vision attachments, memory, skills, delegation, voice, and scheduled-task capabilities. This refinement does not add those integrations; it only keeps the prototype component boundaries broad enough to explore them later without overloading the composer.
+The current fixtures are informed by Hermes Agent's documented sessions, tools, approvals, vision attachments, memory, skills, delegation, voice, and scheduled-task capabilities. Operational tool and approval fixtures use quiet single-line utility rows—no decorative leading icon or stacked explanatory subtitle—so they remain inspectable without becoming card-like chat bubbles. This refinement does not add those integrations; it only keeps the prototype component boundaries broad enough to explore them later without overloading the composer.
 
 The rejected root prototype remains untouched so the comparison is reversible. The selected lane can be promoted later; this exploration does not define production architecture.

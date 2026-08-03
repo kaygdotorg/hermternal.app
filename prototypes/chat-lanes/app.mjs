@@ -24,8 +24,8 @@ const highlight = picker.querySelector('.proto-picker-highlight');
 const items = [...picker.querySelectorAll('[data-variant-index]')];
 // Calternal's signed-off magnetic recipe: subtle cursor follow with a small
 // label lead, clamped tightly enough that compact controls keep their place.
-const MAGNETIC_STRENGTH = 0.18;
-const MAGNETIC_MAX = 7;
+const MAGNETIC_STRENGTH = 0.22;
+const MAGNETIC_MAX = 9;
 const MAGNETIC_PARALLAX = 0.2;
 const MENU_ENTER_MS = 180;
 const MENU_EXIT_MS = 130;
