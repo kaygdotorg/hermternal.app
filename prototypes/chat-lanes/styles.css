@@ -330,7 +330,9 @@ svg { width: 1.15rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 .section-label { margin: .8rem .7rem .35rem; color: var(--text-faint); font-size: .6875rem; font-weight: 500; letter-spacing: .035em; }
 .history-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; min-height: 48px; padding: .45rem .7rem; border-radius: var(--radius-control); }
 .history-row time { color: var(--text-faint); font-size: .6875rem; font-weight: 400; }
-.history-row.active { background: var(--surface-raised); box-shadow: inset 0 0 0 1px var(--line); }
+/* Session selection uses the quiet surface fill only; mouse activation must not paint a ring over the reading canvas. Keyboard focus keeps the shared :focus-visible treatment below. */
+.history-row.active { background: var(--surface-raised); box-shadow: none; }
+.history-row:focus:not(:focus-visible) { outline: none; box-shadow: none; }
 .sidebar-footer { display: grid; gap: .25rem; padding-top: .5rem; border-top: 1px solid var(--line); }
 .footer-row, .profile-row { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr) 1rem; align-items: center; gap: .65rem; width: 100%; min-height: 52px; padding: .35rem .6rem; border-radius: var(--radius-control); background: transparent; text-align: left; }
 .profile-row { grid-template-columns: 2rem minmax(0, 1fr) 1rem; }
