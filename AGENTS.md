@@ -97,7 +97,7 @@ before reporting a change complete:
 
 prototype interfaces must be responsive across desktop web, narrow web, iPhone, and iPad form factors. use mock data that represents realistic long sessions, streaming states, tools, approvals, attachments, errors, and empty states.
 
-create reusable semantic design tokens before duplicating visual values. share design intent, token names, interaction specifications, and fixtures between web and Apple prototypes. do not attempt to share UI implementation across React and SwiftUI.
+create reusable semantic design tokens before duplicating visual values. share design intent, token names, interaction specifications, and fixtures between web and Apple prototypes. do not attempt to share UI implementation across Svelte and SwiftUI.
 
 for every non-trivial screen or interaction, define:
 

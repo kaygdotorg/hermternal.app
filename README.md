@@ -1,48 +1,39 @@
-# Hermternal command / inspect prototype
+# Hermternal
 
-This directory is a high-fidelity, web-only interaction prototype for Hermternal. Open `index.html` directly or serve the directory with:
+Hermternal is an open-source web and Apple client for Hermes Agent.
 
-```sh
-python -m http.server 8000
-```
+This repository is in the planning and high-fidelity prototype phase. It does not contain a live Hermes integration, production authentication, deployment configuration, or application build scaffold. Current visual exploration happens in Paper.
 
-Then visit `http://localhost:8000`. It has no build step, package install, account, remote asset, or network requirement.
+## Planned clients
 
-## Visual thesis: the quiet instrument
+- `apps/web/` will contain a static TypeScript client built with Svelte 5, SvelteKit 2, Vite, Bun, and `@sveltejs/adapter-static`.
+- `apps/apple/` will contain native SwiftUI clients for iOS and iPadOS. The same Apple architecture will later support macOS.
 
-Hermternal is designed as a calm instrument for issuing a direction and inspecting what follows, not as a generic chat dashboard. The moonlit graphite workspace holds two physical objects: a compact Tahoe-inspired history sidebar and one continuous, chrome-rimmed conversation shell. Inside that shell, a luminous signal rail connects prompts, responses, tool work, approval, and streaming into a legible execution trace. Strong spacing and typography establish the reading hierarchy; the assistant's key statement alone receives an editorial serif treatment.
+The web and Apple clients will share protocol contracts, redacted fixtures, state definitions, test scenarios, and semantic design-token names. They will not share UI, authentication, networking, persistence, lifecycle, or accessibility implementations.
 
-The deliberate visual risk is the trace rail. It gives operational states a shared grammar without turning prose into log output. The rest of the interface stays low-chroma and avoids feature tiles, decorative cards, oversized pills, rainbow accents, arbitrary gradients, and stacked glass panels. Sidebar and composer share the same material recipe and blur weight because both are controls floating above the reading surface. The larger conversation shell is more solid so text remains stable and calm.
+## Repository map
 
-Four environments are intentionally distinct rather than accent swaps:
+| Path | Purpose |
+| --- | --- |
+| `apps/` | Platform-owned client implementations. |
+| `contracts/` | Language-neutral Hermes Dashboard contracts, fixtures, state models, and design tokens. |
+| `docs/` | Product, architecture, protocol, security, and deployment decisions. |
+| `prototypes/` | Notes about prototype sources and their mocked boundaries. |
+| `scripts/` | Future contract-generation and parity-check tools. |
 
-- **Moon** is the default blue-black, night-focused workspace.
-- **Paper** changes the entire material and depth model for warm daylight reading.
-- **Archive** uses an olive study palette with softer document contrast.
-- **Ink** removes decorative shadow and pushes edges and type toward hard contrast.
+## Product boundary
 
-Three reading stances change measure, rhythm, type treatment, and state density: Reflective favors editorial pacing, Compact favors operational scanning, and Wide supports long-form review.
+Hermternal v0.0.1 is planned as the first live chat client. It will use the Hermes Dashboard HTTPS, authentication, and WebSocket surfaces. SSH, PTY/TUI access, dashboard administration, terminal backend selection, and direct access to `~/.hermes` are outside the client scope.
 
-## Interaction and motion intent
+All present data and interactions are plans, specifications, or mock fixtures. Nothing in this repository currently connects to Hermes or reads live user data.
 
-Desktop and tablet navigation remains a persistent floating object. Below 851px it moves off-canvas behind a hamburger and scrim, traps keyboard focus, and returns focus on dismissal. The composer keeps attachment and context actions at bottom-left, model / voice / send at right, and long-prompt expansion at top-right.
+## Branches
 
-Menus originate beside their controls. The drawer, scrim, and menu state use short, interruptible transform/opacity transitions with no `transition: all`, `scale(0)`, ease-in, or exaggerated bounce. Magnetic movement is restricted to fine pointers, capped at three pixels, and paired with immediate press feedback. Reduced-motion removes spatial motion; reduced-transparency replaces glass with solid material; unsupported blur receives the same solid fallback.
+- `dev` is the integration branch for all planning and development work.
+- `main` contains only verified, release-ready builds promoted from `dev`.
 
-## What is interactive
+See [`AGENTS.md`](AGENTS.md) for the complete project rules.
 
-The mobile drawer, theme environments, reading stances, model menu, composer expansion, mock attachment, context feedback, voice-note timer, approval choices, tool inspection, Escape dismissal, Command/Ctrl–Enter send, and focus states are interactive. Sending appends a local mock command and a short simulated streaming state to demonstrate command → inspect feedback. It never transmits or generates content.
+## License
 
-The transcript includes realistic static prompt, attachment, assistant, tool, approval, and active-streaming states. Loading, denial, empty/new-thread, and completion feedback are represented through local controls and live-region messages.
-
-## Accessibility and responsive behavior
-
-The page uses semantic landmarks, headings, navigation, articles, forms, labels, fieldsets, time elements, and live regions. Primary controls meet a 44px minimum target. Focus is visible, Escape closes the topmost layer, the mobile drawer traps focus, and narrow layouts reflow through 320px without overlapping the transcript and composer. System fonts support browser zoom and platform text rendering. Color choices still require production contrast validation before adoption.
-
-## Performance and mocked boundaries
-
-There are no external dependencies, fonts, images, frameworks, polling loops, APIs, authentication, persistence, analytics, deployment settings, credentials, live data, or Hermes gateway integration. Icons are inline SVG; animation uses transforms and opacity except for tiny status indicators. The voice timer runs only while its local mock state is active.
-
-This remains a planning prototype. Conversations, attachments, models, tools, permissions, connectivity, profile data, streaming, and send results are fixtures or browser-only simulations. Refresh restores the initial state. Nothing reaches a service, model, file system, or other user.
-
-See `DESIGN-NOTES.md` for the command/inspect composition sketch and the pre-build critique that guided this pass.
+Hermternal is licensed under the [GNU General Public License v2.0](LICENSE).
