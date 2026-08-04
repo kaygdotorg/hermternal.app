@@ -108,6 +108,27 @@ for every non-trivial screen or interaction, define:
 - accessibility labels, focus order, and keyboard behavior
 - performance risks and how the prototype avoids them
 
+### shared pill interaction contract
+
+use one semantic, reusable pill primitive for title controls, workspace modes, selected sessions, approvals, artifact actions, and other compact controls. variants may be icon-only, icon-first with a revealed label, compound, or selected. controls that only look similar must also share input, motion, accessibility, and sizing behavior.
+
+- use a full capsule radius for pills. use the shared radius token instead of a local literal.
+- keep the combined icon and label group optically centered. reserve a fixed-width icon slot so labels do not shift the icon.
+- use a minimum 44×44 css px effective target on web touch and hybrid layouts. a visible shell may be 32–40px inside that target. size text controls to their content plus padding; do not force a 44px width.
+- on fine pointers, support Calternal-style magnetic movement. cap drift, update only compositor-friendly `translate`, and reset cleanly on pointer leave or cancel.
+- on repeated press, restart the Dynamic-Island-style scale pulse from the current rendered state. compose scale feedback with magnetic translation so one effect does not replace the other.
+- respond on pointer down. do not block input while motion settles. every transition must be immediate, interruptible, and reversible.
+- touch activation must not depend on hover. do not leave a pill expanded after touch input.
+- keyboard focus must expose the same label and state information as pointer hover. support Enter and Space where the control role requires them.
+- give icon-only controls an accessible name and tooltip. do not rely on icon shape, color, tick count, or motion alone.
+- reduced motion disables magnetic drift and bounce. retain immediate static press, focus, and selected feedback.
+- when text grows, preserve target size and legibility. widen, reflow, stack, or move secondary actions to overflow. do not shrink text or targets to solve clipping.
+- test narrow widths, 200% browser zoom, larger text, localization, pointer cancel, rapid repeat presses, and focus transfer.
+
+Paper mockups must show the relevant resting, hover, focused, pressed, expanded, selected, and open states as separate static states. Paper does not prove runtime interaction behavior. implement and verify motion only in a later local prototype with mocked data and no production integration.
+
+use selected pill material only for persistent state, such as the active conversation or workspace mode. `New chat` is an action and must never appear selected. the conversation title pill enters editing immediately; on mobile, center the editor above a dimmed, blurred background and show the keyboard state.
+
 ## collaboration and git discipline
 
 ### branch model and releases
