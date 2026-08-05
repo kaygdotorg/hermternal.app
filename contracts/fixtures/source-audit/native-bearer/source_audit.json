@@ -1,0 +1,194 @@
+{
+  "schema": "hermternal.source-audit.native-bearer.v1",
+  "contract_version": "dashboard-v0.0.1",
+  "hermes_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e6",
+  "scope": {
+    "platform": "web",
+    "auth_family": "native_bearer_session",
+    "source_checkout": "local pinned audit checkout",
+    "integration_mode": "mock_and_proof_only",
+    "unverified_route_policy": "blocked_unverified"
+  },
+  "source_evidence": [
+    {
+      "file": "middleware.py",
+      "lines": "49-86",
+      "claim": "Public auth/bootstrap prefixes and exact public API paths bypass the gated auth middleware."
+    },
+    {
+      "file": "middleware.py",
+      "lines": "281-320",
+      "claim": "The middleware extracts Authorization Bearer values and verifies them through the session-provider stack."
+    },
+    {
+      "file": "middleware.py",
+      "lines": "323-373",
+      "claim": "A verified bearer attaches the session and continues; provider outage returns 503; invalid bearer returns structured 401 without cookie fallback."
+    },
+    {
+      "file": "routes.py",
+      "lines": "778-817",
+      "claim": "The reviewed auth REST routes are GET /api/auth/me and POST /api/auth/ws-ticket."
+    },
+    {
+      "file": "sessions.py",
+      "lines": "50-51",
+      "claim": "GET /api/sessions is registered."
+    },
+    {
+      "file": "sessions.py",
+      "lines": "166-167",
+      "claim": "GET /api/sessions/search is registered."
+    },
+    {
+      "file": "sessions.py",
+      "lines": "552-553",
+      "claim": "GET /api/sessions/{session_id} is registered."
+    },
+    {
+      "file": "sessions.py",
+      "lines": "598-599",
+      "claim": "GET /api/sessions/{session_id}/messages is registered."
+    },
+    {
+      "file": "sessions.py",
+      "lines": "661-662",
+      "claim": "PATCH /api/sessions/{session_id} is registered."
+    },
+    {
+      "file": "web_server.py",
+      "lines": "2306",
+      "claim": "POST /api/chat/image-upload is registered."
+    },
+    {
+      "file": "routes.py",
+      "lines": "152, 289, 841, 894",
+      "claim": "Provider discovery and native authorize/token/refresh endpoints are public bootstrap or credential issuance/rotation routes."
+    },
+    {
+      "file": "token_auth.py",
+      "lines": "60-75",
+      "claim": "The separate service-token seam registers exact paths and does not widen authentication to unregistered paths."
+    },
+    {
+      "file": "token_auth.py",
+      "lines": "144-183",
+      "claim": "A registered service-token route accepts only that seam's token decision, returning 401 or 503 on failure."
+    },
+    {
+      "file": "web_server.py",
+      "lines": "4000-4011",
+      "claim": "POST /api/gateway/drain documents the separate service-token seam."
+    }
+  ],
+  "route_sets": {
+    "native_bearer_authenticated": [
+      {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "source": "routes.py:778"
+      },
+      {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "source": "routes.py:799"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions",
+        "source": "sessions.py:50"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/search",
+        "source": "sessions.py:166"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/{session_id}",
+        "source": "sessions.py:552"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/{session_id}/messages",
+        "source": "sessions.py:598"
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/sessions/{session_id}",
+        "source": "sessions.py:661"
+      },
+      {
+        "method": "POST",
+        "path": "/api/chat/image-upload",
+        "source": "web_server.py:2306"
+      }
+    ],
+    "public_bootstrap_or_issuance": [
+      {
+        "method": "GET",
+        "path": "/login",
+        "source": "routes.py:132"
+      },
+      {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "source": "routes.py:152"
+      },
+      {
+        "method": "GET",
+        "path": "/auth/login",
+        "source": "routes.py:182"
+      },
+      {
+        "method": "GET",
+        "path": "/auth/native/authorize",
+        "source": "routes.py:289"
+      },
+      {
+        "method": "GET",
+        "path": "/auth/callback",
+        "source": "routes.py:379"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/password-login",
+        "source": "routes.py:650"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/logout",
+        "source": "routes.py:742"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/native/token",
+        "source": "routes.py:841"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/native/refresh",
+        "source": "routes.py:894"
+      }
+    ],
+    "separate_service_token": [
+      {
+        "method": "POST",
+        "path": "/api/gateway/drain",
+        "source": "web_server.py:4000; token_auth.py:60-183",
+        "native_bearer": false
+      }
+    ]
+  },
+  "decision_rules": {
+    "native_route_match": "exact_method_and_path_shape",
+    "parameter_segment_rule": "{session_id} matches one non-empty path segment only",
+    "valid_bearer": "pass_through_to_handler",
+    "invalid_or_expired_bearer": "401_invalid_or_expired_session",
+    "provider_unavailable": "503_auth_provider_unreachable",
+    "public_route": "bypass_native_bearer_gate",
+    "service_token_route": "evaluate_only_with_separate_token_auth_seam",
+    "unverified_route": "blocked_unverified",
+    "bearer_fallback": "never_fallback_to_cookie_after_present_bearer_fails"
+  }
+}

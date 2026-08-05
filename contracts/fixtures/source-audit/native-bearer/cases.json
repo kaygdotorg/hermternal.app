@@ -1,0 +1,323 @@
+{
+  "schema": "hermternal.source-audit.native-bearer.cases.v1",
+  "contract_version": "dashboard-v0.0.1",
+  "hermes_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e6",
+  "fixture_policy": "synthetic_markers_only",
+  "cases": [
+    {
+      "id": "positive-auth-me",
+      "kind": "positive",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "pass_through",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "positive-auth-ws-ticket",
+      "kind": "positive",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "pass_through",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "positive-session-list",
+      "kind": "positive",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "pass_through",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "positive-session-search",
+      "kind": "positive",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions/search",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "pass_through",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "positive-session-detail",
+      "kind": "positive",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions/synthetic-session-001",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "pass_through",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "positive-session-messages",
+      "kind": "positive",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions/synthetic-session-001/messages",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "pass_through",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "positive-session-patch",
+      "kind": "positive",
+      "request": {
+        "method": "PATCH",
+        "path": "/api/sessions/synthetic-session-001",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "pass_through",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "positive-image-upload",
+      "kind": "positive",
+      "request": {
+        "method": "POST",
+        "path": "/api/chat/image-upload",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "pass_through",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "negative-public-provider-discovery",
+      "kind": "negative",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "public_bootstrap_or_issuance",
+        "native_bearer_decision": "bypass_native_bearer_gate",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "negative-public-native-authorize",
+      "kind": "negative",
+      "request": {
+        "method": "GET",
+        "path": "/auth/native/authorize",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "public_bootstrap_or_issuance",
+        "native_bearer_decision": "bypass_native_bearer_gate",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "negative-public-native-token",
+      "kind": "negative",
+      "request": {
+        "method": "POST",
+        "path": "/auth/native/token",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "public_bootstrap_or_issuance",
+        "native_bearer_decision": "bypass_native_bearer_gate",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "negative-public-native-refresh",
+      "kind": "negative",
+      "request": {
+        "method": "POST",
+        "path": "/auth/native/refresh",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "public_bootstrap_or_issuance",
+        "native_bearer_decision": "bypass_native_bearer_gate",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "negative-service-token-drain",
+      "kind": "negative",
+      "request": {
+        "method": "POST",
+        "path": "/api/gateway/drain",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "separate_service_token",
+        "native_bearer_decision": "separate_service_token_only",
+        "handler_status": "handler_dependent"
+      }
+    },
+    {
+      "id": "negative-unverified-health",
+      "kind": "negative",
+      "request": {
+        "method": "GET",
+        "path": "/api/health",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "blocked_unverified",
+        "native_bearer_decision": "blocked_unverified",
+        "handler_status": "not_asserted"
+      }
+    },
+    {
+      "id": "negative-unverified-session-export",
+      "kind": "negative",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions/synthetic-session-001/export",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "blocked_unverified",
+        "native_bearer_decision": "blocked_unverified",
+        "handler_status": "not_asserted"
+      }
+    },
+    {
+      "id": "negative-unverified-wrong-method",
+      "kind": "negative",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/me",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "blocked_unverified",
+        "native_bearer_decision": "blocked_unverified",
+        "handler_status": "not_asserted"
+      }
+    },
+    {
+      "id": "negative-unverified-message-suffix",
+      "kind": "negative",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions/synthetic-session-001/messages/extra",
+        "bearer_state": "valid",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "blocked_unverified",
+        "native_bearer_decision": "blocked_unverified",
+        "handler_status": "not_asserted"
+      }
+    },
+    {
+      "id": "negative-invalid-bearer",
+      "kind": "negative",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "bearer_state": "invalid_or_expired",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "401_invalid_or_expired_session",
+        "http_status": 401
+      }
+    },
+    {
+      "id": "negative-provider-outage",
+      "kind": "negative",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions",
+        "bearer_state": "provider_unavailable",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "503_auth_provider_unreachable",
+        "http_status": 503
+      }
+    },
+    {
+      "id": "negative-missing-bearer",
+      "kind": "negative",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "bearer_state": "missing",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "401_without_authenticated_cookie",
+        "http_status": 401
+      }
+    },
+    {
+      "id": "negative-wrong-auth-scheme",
+      "kind": "negative",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "bearer_state": "wrong_scheme",
+        "session_cookie": "absent"
+      },
+      "expected": {
+        "route_class": "native_bearer_authenticated",
+        "native_bearer_decision": "401_without_authenticated_cookie",
+        "http_status": 401
+      }
+    }
+  ]
+}
