@@ -10,12 +10,22 @@
     "method": "POST",
     "path": "/api/chat/image-upload",
     "content_type": "application/json",
-    "body_fields": ["data_url", "filename"]
+    "body_fields": [
+      "data_url",
+      "filename"
+    ]
   },
   "limits": {
     "max_bytes": 26214400,
     "mime_prefix": "image/",
-    "accepted_extensions": [".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"],
+    "accepted_extensions": [
+      ".bmp",
+      ".gif",
+      ".jpeg",
+      ".jpg",
+      ".png",
+      ".webp"
+    ],
     "magic_formats": [
       {
         "id": "webp",
@@ -24,21 +34,52 @@
         "offset": 8,
         "offset_hex": "57454250"
       },
-      {"id": "png", "extension": ".png", "prefix_hex": "89504e470d0a1a0a"},
-      {"id": "jpeg", "extension": ".jpg", "prefix_hex": "ffd8ff"},
-      {"id": "gif87a", "extension": ".gif", "prefix_hex": "474946383761"},
-      {"id": "gif89a", "extension": ".gif", "prefix_hex": "474946383961"},
-      {"id": "bmp", "extension": ".bmp", "prefix_hex": "424d"}
+      {
+        "id": "png",
+        "extension": ".png",
+        "prefix_hex": "89504e470d0a1a0a"
+      },
+      {
+        "id": "jpeg",
+        "extension": ".jpg",
+        "prefix_hex": "ffd8ff"
+      },
+      {
+        "id": "gif87a",
+        "extension": ".gif",
+        "prefix_hex": "474946383761"
+      },
+      {
+        "id": "gif89a",
+        "extension": ".gif",
+        "prefix_hex": "474946383961"
+      },
+      {
+        "id": "bmp",
+        "extension": ".bmp",
+        "prefix_hex": "424d"
+      }
     ]
   },
   "storage": {
     "root": "HERMES_HOME/images/",
-    "response_fields": ["ok", "path", "name", "bytes", "mime_type"],
+    "response_fields": [
+      "ok",
+      "path",
+      "name",
+      "bytes",
+      "mime_type"
+    ],
     "path_policy": "server_generated_timestamp_nonce_sanitized_stem_extension"
   },
   "redaction": {
     "diagnostic_format": "semantic_only",
-    "forbidden_raw_values": ["data_url", "absolute_path", "base64_payload", "user_filename"],
+    "forbidden_raw_values": [
+      "data_url",
+      "absolute_path",
+      "base64_payload",
+      "user_filename"
+    ],
     "transcript_policy": "image_bytes_not_stored"
   },
   "source_evidence": {
@@ -89,7 +130,9 @@
       "id": "empty-selection",
       "state": "empty",
       "request": null,
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "no_attachment",
         "reason": "empty_selection",
@@ -106,8 +149,12 @@
     {
       "id": "pending-upload",
       "state": "pending",
-      "request": {"phase": "uploading"},
-      "fixture": {"decoded_size_override": null},
+      "request": {
+        "phase": "uploading"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "pending",
         "reason": "upload_pending",
@@ -129,14 +176,22 @@
         "data_url": "data:image/png;base64,iVBORw0KGgo=",
         "filename": "clipboard.png"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "accepted",
         "reason": "accepted",
         "detected_extension": ".png",
         "attachment_state": "accepted",
         "draft": "unchanged",
-        "response_fields": ["ok", "path", "name", "bytes", "mime_type"],
+        "response_fields": [
+          "ok",
+          "path",
+          "name",
+          "bytes",
+          "mime_type"
+        ],
         "stored_under": "HERMES_HOME/images/",
         "filename_stem": "clipboard",
         "diagnostic": "attachment[accepted;format=png;bytes=8]"
@@ -151,14 +206,22 @@
         "data_url": "data:image/jpeg;base64,/9j/",
         "filename": "camera.jpeg"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "accepted",
         "reason": "accepted",
         "detected_extension": ".jpg",
         "attachment_state": "accepted",
         "draft": "unchanged",
-        "response_fields": ["ok", "path", "name", "bytes", "mime_type"],
+        "response_fields": [
+          "ok",
+          "path",
+          "name",
+          "bytes",
+          "mime_type"
+        ],
         "stored_under": "HERMES_HOME/images/",
         "filename_stem": "camera",
         "diagnostic": "attachment[accepted;format=jpeg;bytes=3]"
@@ -173,14 +236,22 @@
         "data_url": "data:image/gif;base64,R0lGODdh",
         "filename": "legacy.gif"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "accepted",
         "reason": "accepted",
         "detected_extension": ".gif",
         "attachment_state": "accepted",
         "draft": "unchanged",
-        "response_fields": ["ok", "path", "name", "bytes", "mime_type"],
+        "response_fields": [
+          "ok",
+          "path",
+          "name",
+          "bytes",
+          "mime_type"
+        ],
         "stored_under": "HERMES_HOME/images/",
         "filename_stem": "legacy",
         "diagnostic": "attachment[accepted;format=gif87a;bytes=6]"
@@ -195,14 +266,22 @@
         "data_url": "data:image/gif;base64,R0lGODlh",
         "filename": "modern.gif"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "accepted",
         "reason": "accepted",
         "detected_extension": ".gif",
         "attachment_state": "accepted",
         "draft": "unchanged",
-        "response_fields": ["ok", "path", "name", "bytes", "mime_type"],
+        "response_fields": [
+          "ok",
+          "path",
+          "name",
+          "bytes",
+          "mime_type"
+        ],
         "stored_under": "HERMES_HOME/images/",
         "filename_stem": "modern",
         "diagnostic": "attachment[accepted;format=gif89a;bytes=6]"
@@ -217,14 +296,22 @@
         "data_url": "data:image/webp;base64,UklGRjAwMDBXRUJQ",
         "filename": "capture.webp"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "accepted",
         "reason": "accepted",
         "detected_extension": ".webp",
         "attachment_state": "accepted",
         "draft": "unchanged",
-        "response_fields": ["ok", "path", "name", "bytes", "mime_type"],
+        "response_fields": [
+          "ok",
+          "path",
+          "name",
+          "bytes",
+          "mime_type"
+        ],
         "stored_under": "HERMES_HOME/images/",
         "filename_stem": "capture",
         "diagnostic": "attachment[accepted;format=webp;bytes=12]"
@@ -239,14 +326,22 @@
         "data_url": "data:image/bmp;base64,Qk0=",
         "filename": "bitmap.bmp"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "accepted",
         "reason": "accepted",
         "detected_extension": ".bmp",
         "attachment_state": "accepted",
         "draft": "unchanged",
-        "response_fields": ["ok", "path", "name", "bytes", "mime_type"],
+        "response_fields": [
+          "ok",
+          "path",
+          "name",
+          "bytes",
+          "mime_type"
+        ],
         "stored_under": "HERMES_HOME/images/",
         "filename_stem": "bitmap",
         "diagnostic": "attachment[accepted;format=bmp;bytes=2]"
@@ -254,26 +349,52 @@
       "notes": "BMP is accepted only when the pinned BM signature is present."
     },
     {
-      "id": "valid-recognized-bytes-unknown-image-mime",
+      "id": "invalid-unsupported-image-mime",
       "state": "ready",
       "request": {
         "content_type": "application/json",
         "data_url": "data:image/tiff;base64,iVBORw0KGgo=",
         "filename": "relabelled.tiff"
       },
-      "fixture": {"decoded_size_override": null},
-      "expected": {
-        "decision": "accepted",
-        "reason": "accepted",
-        "detected_extension": ".png",
-        "attachment_state": "accepted",
-        "draft": "unchanged",
-        "response_fields": ["ok", "path", "name", "bytes", "mime_type"],
-        "stored_under": "HERMES_HOME/images/",
-        "filename_stem": "relabelled",
-        "diagnostic": "attachment[accepted;format=png;bytes=8]"
+      "fixture": {
+        "decoded_size_override": null
       },
-      "notes": "The pinned server treats image/* as a declaration and magic bytes as the format authority."
+      "expected": {
+        "decision": "rejected",
+        "reason": "unsupported_image_mime",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=unsupported_image_mime]"
+      },
+      "notes": "An unsupported image MIME declaration fails closed before the bytes can be promoted."
+    },
+    {
+      "id": "invalid-image-mime-mismatch",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/jpeg;base64,iVBORw0KGgo=",
+        "filename": "declared-jpeg.png"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "mime_mismatch",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=mime_mismatch]"
+      },
+      "notes": "PNG bytes declared as JPEG fail closed instead of allowing the declaration to override content."
     },
     {
       "id": "valid-sanitized-filename",
@@ -283,19 +404,86 @@
         "data_url": "data:image/png;base64,iVBORw0KGgo=",
         "filename": "../unsafe name\u0000.png"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "accepted",
         "reason": "accepted",
         "detected_extension": ".png",
         "attachment_state": "accepted",
         "draft": "unchanged",
-        "response_fields": ["ok", "path", "name", "bytes", "mime_type"],
+        "response_fields": [
+          "ok",
+          "path",
+          "name",
+          "bytes",
+          "mime_type"
+        ],
         "stored_under": "HERMES_HOME/images/",
         "filename_stem": "unsafe_name",
         "diagnostic": "attachment[accepted;format=png;bytes=8]"
       },
       "notes": "Directory components and control characters cannot escape the server-generated image basename."
+    },
+    {
+      "id": "valid-default-filename-omitted",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/png;base64,iVBORw0KGgo="
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "accepted",
+        "reason": "accepted",
+        "detected_extension": ".png",
+        "attachment_state": "accepted",
+        "draft": "unchanged",
+        "response_fields": [
+          "ok",
+          "path",
+          "name",
+          "bytes",
+          "mime_type"
+        ],
+        "stored_under": "HERMES_HOME/images/",
+        "filename_stem": "pasted-image",
+        "diagnostic": "attachment[accepted;format=png;bytes=8]"
+      },
+      "notes": "The optional filename may be omitted and defaults to the server-safe pasted-image stem."
+    },
+    {
+      "id": "valid-null-filename",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/png;base64,iVBORw0KGgo=",
+        "filename": null
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "accepted",
+        "reason": "accepted",
+        "detected_extension": ".png",
+        "attachment_state": "accepted",
+        "draft": "unchanged",
+        "response_fields": [
+          "ok",
+          "path",
+          "name",
+          "bytes",
+          "mime_type"
+        ],
+        "stored_under": "HERMES_HOME/images/",
+        "filename_stem": "pasted-image",
+        "diagnostic": "attachment[accepted;format=png;bytes=8]"
+      },
+      "notes": "An explicit null optional filename follows the same pasted-image default as omission."
     },
     {
       "id": "invalid-missing-data-url",
@@ -305,7 +493,9 @@
         "data_url": null,
         "filename": "missing.png"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "rejected",
         "reason": "malformed_request",
@@ -327,7 +517,9 @@
         "data_url": "https://synthetic.invalid/image.png",
         "filename": "remote.png"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "rejected",
         "reason": "invalid_data_url",
@@ -349,7 +541,9 @@
         "data_url": "data:image/png,iVBORw0KGgo=",
         "filename": "plain.png"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "rejected",
         "reason": "not_base64",
@@ -371,7 +565,9 @@
         "data_url": "data:image/png;base64,not*base64",
         "filename": "malformed.png"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "rejected",
         "reason": "invalid_base64",
@@ -386,6 +582,126 @@
       "notes": "Strict base64 decoding prevents malformed text from becoming an attachment."
     },
     {
+      "id": "invalid-base64-parameter-suffix",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/png;base64foo,iVBORw0KGgo=",
+        "filename": "invalid-base64-parameter-suffix.png"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "invalid_data_url",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=invalid_data_url]"
+      },
+      "notes": "A base64 parameter suffix is not the exact base64 parameter."
+    },
+    {
+      "id": "invalid-base64-parameter-extra",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/png;base64;foo,iVBORw0KGgo=",
+        "filename": "invalid-base64-parameter-extra.png"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "invalid_data_url",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=invalid_data_url]"
+      },
+      "notes": "Additional media parameters are outside the exact upload grammar."
+    },
+    {
+      "id": "invalid-base64-parameter-repeat",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/png;base64;base64,iVBORw0KGgo=",
+        "filename": "invalid-base64-parameter-repeat.png"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "invalid_data_url",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=invalid_data_url]"
+      },
+      "notes": "Repeated base64 parameters fail closed rather than being substring-matched."
+    },
+    {
+      "id": "invalid-base64-parameter-case",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/png;BASE64,iVBORw0KGgo=",
+        "filename": "invalid-base64-parameter-case.png"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "invalid_data_url",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=invalid_data_url]"
+      },
+      "notes": "The policy uses case-sensitive exact lowercase data URL grammar."
+    },
+    {
+      "id": "invalid-noncanonical-base64",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/png;base64,iVBORw0KGgp=",
+        "filename": "invalid-noncanonical-base64.png"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "noncanonical_base64",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=noncanonical_base64]"
+      },
+      "notes": "Pad bits that decode to the same bytes are rejected unless the payload re-encodes identically."
+    },
+    {
       "id": "invalid-non-image-mime",
       "state": "ready",
       "request": {
@@ -393,7 +709,9 @@
         "data_url": "data:text/plain;base64,JVBERi0=",
         "filename": "document.pdf"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "rejected",
         "reason": "not_image",
@@ -415,7 +733,9 @@
         "data_url": "data:image/png;base64,",
         "filename": "empty.png"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "rejected",
         "reason": "unsupported_image_type",
@@ -437,7 +757,9 @@
         "data_url": "data:image/png;base64,JVBERi0=",
         "filename": "mislabeled.png"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "rejected",
         "reason": "unsupported_image_type",
@@ -452,6 +774,126 @@
       "notes": "A filename or declared image MIME cannot override the byte signature."
     },
     {
+      "id": "invalid-png-pdf-polyglot",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/png;base64,iVBORw0KGgolUERGLTEuNw==",
+        "filename": "invalid-png-pdf-polyglot.png"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "polyglot_image",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=polyglot_image]"
+      },
+      "notes": "PNG bytes followed immediately by a PDF signature are rejected as an obvious polyglot."
+    },
+    {
+      "id": "invalid-jpeg-zip-polyglot",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/jpeg;base64,/9j/UEsDBA==",
+        "filename": "invalid-jpeg-zip-polyglot.jpg"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "polyglot_image",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=polyglot_image]"
+      },
+      "notes": "JPEG bytes followed immediately by a ZIP signature are rejected as an obvious polyglot."
+    },
+    {
+      "id": "invalid-gif-html-polyglot",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/gif;base64,R0lGODlhPGh0bWw+",
+        "filename": "invalid-gif-html-polyglot.gif"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "polyglot_image",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=polyglot_image]"
+      },
+      "notes": "GIF bytes followed immediately by HTML are rejected as an obvious polyglot."
+    },
+    {
+      "id": "invalid-webp-html-polyglot",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/webp;base64,UklGRjAwMDBXRUJQPGh0bWw+",
+        "filename": "invalid-webp-html-polyglot.webp"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "polyglot_image",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=polyglot_image]"
+      },
+      "notes": "WEBP bytes followed immediately by HTML are rejected as an obvious polyglot."
+    },
+    {
+      "id": "invalid-bmp-html-polyglot",
+      "state": "ready",
+      "request": {
+        "content_type": "application/json",
+        "data_url": "data:image/bmp;base64,Qk08aHRtbD4=",
+        "filename": "invalid-bmp-html-polyglot.bmp"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
+      "expected": {
+        "decision": "rejected",
+        "reason": "polyglot_image",
+        "detected_extension": null,
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "response_fields": [],
+        "stored_under": null,
+        "filename_stem": null,
+        "diagnostic": "attachment[rejected;reason=polyglot_image]"
+      },
+      "notes": "BMP bytes followed immediately by HTML are rejected as an obvious polyglot."
+    },
+    {
       "id": "invalid-oversize",
       "state": "ready",
       "request": {
@@ -459,7 +901,9 @@
         "data_url": "data:image/png;base64,iVBORw0KGgo=",
         "filename": "oversize.png"
       },
-      "fixture": {"decoded_size_override": 26214401},
+      "fixture": {
+        "decoded_size_override": 26214401
+      },
       "expected": {
         "decision": "rejected",
         "reason": "too_large",
@@ -481,7 +925,9 @@
         "data_url": "data:image/png;base64,iVBORw0KGgo=",
         "filename": "wrong-envelope.png"
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "rejected",
         "reason": "unsupported_content_type",
@@ -503,7 +949,9 @@
         "data_url": "data:image/png;base64,iVBORw0KGgo=",
         "filename": 7
       },
-      "fixture": {"decoded_size_override": null},
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "rejected",
         "reason": "malformed_request",
@@ -520,8 +968,12 @@
     {
       "id": "interrupted-upload",
       "state": "interrupted",
-      "request": {"phase": "transport_interrupted"},
-      "fixture": {"decoded_size_override": null},
+      "request": {
+        "phase": "transport_interrupted"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "interrupted",
         "reason": "upload_interrupted",
@@ -538,8 +990,12 @@
     {
       "id": "incompatible-contract",
       "state": "incompatible",
-      "request": {"contract": "dashboard-v0.0.2"},
-      "fixture": {"decoded_size_override": null},
+      "request": {
+        "contract": "dashboard-v0.0.2"
+      },
+      "fixture": {
+        "decoded_size_override": null
+      },
       "expected": {
         "decision": "blocked",
         "reason": "incompatible_contract",

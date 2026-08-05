@@ -12,6 +12,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -30,8 +31,19 @@ SOURCE_PATH = "hermes_cli/web_server.py"
 SOURCE_GIT_BLOB = "1fb3e6131629e7399ef12de78148ac6e7ec58d34"
 SOURCE_FILE_SHA256 = "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a"
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_JSON_SCAN_DEPTH = 64
+MAX_JSON_SCAN_NODES = 10_000
+MAX_RETAINED_TEXT_LENGTH = 4_096
+MAX_ERROR_MESSAGE_LENGTH = 240
 RESPONSE_FIELDS = ["ok", "path", "name", "bytes", "mime_type"]
 STORAGE_ROOT = "HERMES_HOME/images/"
+SUPPORTED_IMAGE_MIME_FORMATS = {
+    "image/png": frozenset({"png"}),
+    "image/jpeg": frozenset({"jpeg"}),
+    "image/gif": frozenset({"gif87a", "gif89a"}),
+    "image/webp": frozenset({"webp"}),
+    "image/bmp": frozenset({"bmp"}),
+}
 
 ROOT_KEYS = {
     "schema",
@@ -79,15 +91,28 @@ EXPECTED_CASE_IDS = (
     "valid-gif89a",
     "valid-webp",
     "valid-bmp",
-    "valid-recognized-bytes-unknown-image-mime",
+    "invalid-unsupported-image-mime",
+    "invalid-image-mime-mismatch",
     "valid-sanitized-filename",
+    "valid-default-filename-omitted",
+    "valid-null-filename",
     "invalid-missing-data-url",
     "invalid-non-data-url",
     "invalid-not-base64",
     "invalid-malformed-base64",
+    "invalid-base64-parameter-suffix",
+    "invalid-base64-parameter-extra",
+    "invalid-base64-parameter-repeat",
+    "invalid-base64-parameter-case",
+    "invalid-noncanonical-base64",
     "invalid-non-image-mime",
     "invalid-empty-payload",
     "invalid-unknown-image-bytes",
+    "invalid-png-pdf-polyglot",
+    "invalid-jpeg-zip-polyglot",
+    "invalid-gif-html-polyglot",
+    "invalid-webp-html-polyglot",
+    "invalid-bmp-html-polyglot",
     "invalid-oversize",
     "invalid-content-type",
     "invalid-filename-type",
@@ -159,6 +184,25 @@ _FORMATS: tuple[tuple[str, bytes | None, int | None, bytes | None, str], ...] = 
     ("gif89a", b"GIF89a", None, None, ".gif"),
     ("bmp", b"BM", None, None, ".bmp"),
 )
+_DATA_URL_PAYLOAD_RE = re.compile(r"\A[A-Za-z0-9+/]*={0,2}\Z")
+_FOREIGN_SIGNATURES = (
+    b"%PDF-",
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"PK\x07\x08",
+    b"<html",
+    b"<!doctype html",
+    b"<script",
+    b"<svg",
+)
+_FORMAT_HEADER_ENDS = {
+    "png": 8,
+    "jpeg": 3,
+    "gif87a": 6,
+    "gif89a": 6,
+    "webp": 12,
+    "bmp": 2,
+}
 
 
 class ContractError(ValueError):
@@ -199,6 +243,16 @@ def _check_keys(value: Any, expected: set[str], context: str) -> None:
     )
 
 
+def _check_optional_keys(value: Any, required: set[str], optional: set[str], context: str) -> None:
+    """Require all required keys while allowing only declared optional keys."""
+
+    _require(type(value) is dict, f"{context}: expected object")
+    actual = set(value)
+    allowed = required | optional
+    _require(required <= actual, f"{context}: missing required keys")
+    _require(actual <= allowed, f"{context}: unknown keys")
+
+
 def _strict_int(value: Any, context: str) -> None:
     _require(type(value) is int, f"{context}: expected integer")
 
@@ -217,20 +271,40 @@ def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ContractError(f"duplicate JSON key: {key}")
+            raise ContractError("duplicate JSON key")
         result[key] = value
     return result
 
 
+def _scan_finite_json(value: Any) -> None:
+    """Reject exponent overflow with bounded, iterative post-parse scanning."""
+
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        _require(nodes <= MAX_JSON_SCAN_NODES, "JSON value graph exceeds bounded scan")
+        _require(depth <= MAX_JSON_SCAN_DEPTH, "JSON nesting exceeds bounded scan")
+        if type(current) is float:
+            _require(math.isfinite(current), "non-finite JSON value is not allowed")
+        elif type(current) is dict:
+            for child in current.values():
+                stack.append((child, depth + 1))
+        elif type(current) is list:
+            for child in current:
+                stack.append((child, depth + 1))
+
+
 def load_document(path: Path = DEFAULT_CASES_PATH) -> dict[str, Any]:
-    """Load UTF-8 JSON with duplicate-key and non-finite-value rejection."""
+    """Load JSON with duplicate-key, parser-error, and finite-value rejection."""
 
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
-        raise ContractError(f"invalid UTF-8 in {path}: {exc}") from exc
+        raise ContractError("invalid UTF-8") from exc
     except OSError as exc:
-        raise ContractError(f"could not read {path}: {exc}") from exc
+        raise ContractError("could not read fixture") from exc
     try:
         document = json.loads(
             text,
@@ -240,13 +314,18 @@ def load_document(path: Path = DEFAULT_CASES_PATH) -> dict[str, Any]:
     except ContractError:
         raise
     except json.JSONDecodeError as exc:
-        raise ContractError(f"invalid JSON in {path}: {exc.msg}") from exc
+        raise ContractError("invalid JSON syntax") from exc
+    except RecursionError as exc:
+        raise ContractError("invalid JSON nesting") from exc
+    except ValueError as exc:
+        raise ContractError("invalid JSON value") from exc
+    _scan_finite_json(document)
     _require(type(document) is dict, "document: expected object")
     return document
 
 
-def _format_from_bytes(data: bytes) -> tuple[str, str] | None:
-    """Return the source format ID and stored extension for recognized bytes."""
+def _raw_format_from_bytes(data: bytes) -> tuple[str, str] | None:
+    """Return the format selected by the pinned magic-byte checks."""
 
     head = data[:16]
     for format_id, prefix, offset, marker, extension in _FORMATS:
@@ -256,6 +335,73 @@ def _format_from_bytes(data: bytes) -> tuple[str, str] | None:
         elif prefix is not None and head.startswith(prefix):
             return format_id, extension
     return None
+
+
+def _foreign_prefix(value: bytes) -> bool:
+    """Identify only an obvious foreign payload at a structural boundary."""
+
+    lowered = value[:32].lower()
+    return any(lowered.startswith(marker.lower()) for marker in _FOREIGN_SIGNATURES)
+
+
+def _validated_format_end(data: bytes, format_id: str) -> int | None:
+    """Return a trusted image terminator, not an arbitrary trailing-byte offset."""
+
+    if format_id == "png":
+        cursor = 8
+        while cursor + 12 <= len(data):
+            length = int.from_bytes(data[cursor : cursor + 4], "big")
+            end = cursor + 12 + length
+            if end > len(data):
+                return None
+            if data[cursor + 4 : cursor + 8] == b"IEND" and length == 0:
+                return end
+            cursor = end
+        return None
+    if format_id == "jpeg":
+        end = data.find(b"\xff\xd9", 3)
+        return end + 2 if end >= 0 else None
+    if format_id in {"gif87a", "gif89a"}:
+        end = data.find(b"\x3b", 6)
+        return end + 1 if end >= 0 else None
+    if format_id == "webp" and len(data) >= 12:
+        riff_size = int.from_bytes(data[4:8], "little")
+        end = 8 + riff_size
+        if 12 <= end <= len(data):
+            return end
+        return None
+    if format_id == "bmp" and len(data) >= 6:
+        file_size = int.from_bytes(data[2:6], "little")
+        if 2 <= file_size <= len(data):
+            return file_size
+    return None
+
+
+def _has_obvious_polyglot(data: bytes, format_id: str) -> bool:
+    """Reject foreign bytes only at a suffix/terminator boundary.
+
+    Valid format-internal chunks are not scanned for marker text. This keeps
+    legitimate image payloads with arbitrary chunk contents accepted while
+    rejecting the deterministic PNG+PDF, JPEG+ZIP, and image+HTML polyglots.
+    """
+
+    header_end = _FORMAT_HEADER_ENDS[format_id]
+    if _foreign_prefix(data[header_end:]):
+        return True
+    terminal_end = _validated_format_end(data, format_id)
+    return terminal_end is not None and _foreign_prefix(data[terminal_end:])
+
+
+def _format_from_bytes(data: bytes) -> tuple[str, str] | None:
+    """Return a recognized format only when it is not an obvious polyglot."""
+
+    detected = _raw_format_from_bytes(data)
+    if detected is None:
+        return None
+    format_id, extension = detected
+    if _has_obvious_polyglot(data, format_id):
+        return None
+    return format_id, extension
 
 
 def _sanitize_filename_stem(filename: str | None) -> str:
@@ -271,21 +417,40 @@ def _sanitize_filename_stem(filename: str | None) -> str:
 
 
 def _parse_data_url(data_url: Any) -> tuple[bytes, str] | tuple[None, str]:
-    """Decode the source's strict data URL boundary without network access."""
+    """Decode exactly ``data:image/<supported>;base64,<canonical>``."""
 
     if type(data_url) is not str:
         return None, "malformed_request"
-    text = data_url.strip()
+    text = data_url
     if not text.startswith("data:") or "," not in text:
         return None, "invalid_data_url"
     header, encoded = text.split(",", 1)
-    mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
-    if ";base64" not in header:
+    if not header.startswith("data:"):
+        return None, "invalid_data_url"
+    media = header[5:]
+    mime_type = media.split(";", 1)[0]
+    if not mime_type.startswith("image/"):
+        if mime_type.lower().startswith("image/"):
+            return None, "invalid_data_url"
+        return None, "not_image"
+    if mime_type not in SUPPORTED_IMAGE_MIME_FORMATS:
+        if mime_type.lower() in SUPPORTED_IMAGE_MIME_FORMATS:
+            return None, "invalid_data_url"
+        return None, "unsupported_image_mime"
+    parameters = media.split(";")
+    if len(parameters) == 1:
         return None, "not_base64"
+    if parameters != [mime_type, "base64"]:
+        return None, "invalid_data_url"
+    if _DATA_URL_PAYLOAD_RE.fullmatch(encoded) is None:
+        return None, "invalid_base64"
     try:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError):
         return None, "invalid_base64"
+    canonical = base64.b64encode(data).decode("ascii")
+    if canonical != encoded:
+        return None, "noncanonical_base64"
     return data, mime_type
 
 
@@ -378,10 +543,14 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     if decoded_size > MAX_IMAGE_BYTES:
         return _rejected("too_large")
 
-    detected = _format_from_bytes(data)
-    if detected is None:
+    raw_detected = _raw_format_from_bytes(data)
+    if raw_detected is None:
         return _rejected("unsupported_image_type")
-    format_id, extension = detected
+    format_id, extension = raw_detected
+    if _has_obvious_polyglot(data, format_id):
+        return _rejected("polyglot_image")
+    if format_id not in SUPPORTED_IMAGE_MIME_FORMATS[parse_result]:
+        return _rejected("mime_mismatch")
     stem = _sanitize_filename_stem(filename)
     return {
         "decision": "accepted",
@@ -406,6 +575,31 @@ def _iter_strings(value: Any) -> Iterable[str]:
     elif type(value) is list:
         for child in value:
             yield from _iter_strings(child)
+
+
+_RETAINED_DATA_URL_RE = re.compile(
+    r"(?i)\bdata:image/[a-z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}"
+)
+_RETAINED_BASE64_RE = re.compile(
+    r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{8,}={1,2}(?![A-Za-z0-9+/])"
+)
+_RETAINED_PATH_RE = re.compile(
+    r"(?i)(?:file://|(?:^|[\s(\"'])/(?:users|private|tmp|var|home|etc|opt|root)(?:/|$)|(?:^|[\s(\"'])[a-z]:[\\/]|(?:^|[\s(\"'])\\\\)"
+)
+_RETAINED_FILENAME_RE = re.compile(
+    r"(?i)(?<![\w.-])(?:\.\.?[\\/][^\r\n]*|[a-z0-9_.-]+[\\/][^\r\n]*|[a-z0-9_.-]+)\.(?:png|jpg|jpeg|gif|webp|bmp|tiff|pdf)(?![\w.-])"
+)
+
+
+def _validate_retained_text(value: Any, context: str) -> None:
+    """Reject raw attachment/path material in retained free-form metadata."""
+
+    _strict_string(value, context)
+    _require(len(value) <= MAX_RETAINED_TEXT_LENGTH, f"{context}: retained text is too long")
+    _require(_RETAINED_DATA_URL_RE.search(value) is None, f"{context}: raw data URL is not retained")
+    _require(_RETAINED_BASE64_RE.search(value) is None, f"{context}: raw base64 is not retained")
+    _require(_RETAINED_PATH_RE.search(value) is None, f"{context}: raw path is not retained")
+    _require(_RETAINED_FILENAME_RE.search(value) is None, f"{context}: user filename is not retained")
 
 
 def _validate_no_credential_material(document: dict[str, Any]) -> None:
@@ -484,7 +678,7 @@ def validate_document(document: dict[str, Any]) -> None:
         _strict_int(citation["line"], f"source_evidence.citations[{index}].line")
         _require(citation["line"] > 0, f"source_evidence.citations[{index}].line: must be positive")
         _strict_string(citation["marker"], f"source_evidence.citations[{index}].marker")
-        _strict_string(citation["claim"], f"source_evidence.citations[{index}].claim")
+        _validate_retained_text(citation["claim"], f"source_evidence.citations[{index}].claim")
 
     cases = document["cases"]
     _require(type(cases) is list, "cases: expected array")
@@ -501,13 +695,18 @@ def validate_document(document: dict[str, Any]) -> None:
         if override is not None:
             _strict_int(override, f"{context}.fixture.decoded_size_override")
             _require(override > 0, f"{context}.fixture.decoded_size_override: must be positive")
-        _strict_string(case["notes"], f"{context}.notes")
+        _validate_retained_text(case["notes"], f"{context}.notes")
         _require(bool(case["notes"].strip()), f"{context}.notes: must not be empty")
 
         if case["state"] == "empty":
             _require(case["request"] is None, f"{context}.request: empty state must have no request")
         elif case["state"] == "ready":
-            _check_keys(case["request"], {"content_type", "data_url", "filename"}, f"{context}.request")
+            _check_optional_keys(
+                case["request"],
+                {"content_type", "data_url"},
+                {"filename"},
+                f"{context}.request",
+            )
         elif case["state"] == "pending" or case["state"] == "interrupted":
             _check_keys(case["request"], {"phase"}, f"{context}.request")
             _strict_string(case["request"]["phase"], f"{context}.request.phase")
@@ -535,6 +734,13 @@ def _git_environment() -> dict[str, str]:
         "GIT_INDEX_FILE",
         "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
         "GIT_REPLACE_REF_BASE",
     ):
         environment.pop(key, None)
@@ -551,8 +757,7 @@ def _run_git(root: Path, args: list[str], raw: bool = False) -> bytes | str:
         env=_git_environment(),
     )
     if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", "replace").strip()
-        raise ContractError(f"git verification failed ({' '.join(args)}): {detail}")
+        raise ContractError("git verification failed")
     return result.stdout if raw else result.stdout.decode("utf-8").strip()
 
 
@@ -560,7 +765,9 @@ def validate_source(source_root: Path, document: dict[str, Any]) -> None:
     """Verify provenance and markers from immutable pinned Git blob bytes."""
 
     root = source_root.resolve()
-    _require(root.is_dir(), f"source root is not a directory: {root}")
+    _require(root.is_dir(), "source root is not a directory")
+    checkout_root = Path(_run_git(root, ["rev-parse", "--show-toplevel"])).resolve()
+    _require(checkout_root == root, "source root is not the exact checkout root")
     commit = _run_git(root, ["rev-parse", "--verify", f"{PINNED_SHA}^{{commit}}"])
     _require(commit == PINNED_SHA, "source commit does not match the pinned revision")
     tree = _run_git(root, ["rev-parse", "--verify", f"{PINNED_SHA}^{{tree}}"])
@@ -666,7 +873,7 @@ def _parse_cli(argv: list[str]) -> tuple[Path, Path | None]:
             raise ContractError("usage: validate.py [--cases PATH] [--source-root PATH]")
         if argument in {"--cases", "--source-root"}:
             if index + 1 >= len(argv):
-                raise ContractError(f"cli-arguments: {argument} needs a value")
+                raise ContractError("cli-arguments: option needs a value")
             value = Path(argv[index + 1])
             if argument == "--cases":
                 cases_path = value
@@ -674,8 +881,15 @@ def _parse_cli(argv: list[str]) -> tuple[Path, Path | None]:
                 source_root = value
             index += 2
             continue
-        raise ContractError(f"cli-arguments: unknown argument {argument}")
+        raise ContractError("cli-arguments: unknown argument")
     return cases_path, source_root
+
+
+def _print_structured_error(code: str, message: str) -> None:
+    """Emit one bounded semantic error without raw paths or input material."""
+
+    safe_message = " ".join(message.split())[:MAX_ERROR_MESSAGE_LENGTH]
+    print(json.dumps({"error": {"code": code, "message": safe_message}}, sort_keys=True))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -694,12 +908,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     except ContractError as exc:
-        message = str(exc).replace("\n", " ").strip()
-        print(json.dumps({"error": {"code": "contract", "message": message}}, sort_keys=True))
+        _print_structured_error("contract", str(exc))
         return 1
-    except (OSError, RecursionError) as exc:
-        message = str(exc).replace("\n", " ").strip()
-        print(json.dumps({"error": {"code": "runtime", "message": message}}, sort_keys=True))
+    except (OSError, TypeError, ValueError, UnicodeError, RecursionError):
+        _print_structured_error("runtime", "validation failed")
         return 1
 
 
