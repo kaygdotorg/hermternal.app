@@ -31,8 +31,8 @@ The client treats PTY data as bytes. It does not parse command meaning or write 
 - `resume` identifies the Hermes conversation that the TUI should restore. It is separate from `attach`.
 - `fresh=1` disables the active-session fallback and asks for a fresh Hermes identity. It does not mean that a prior PTY process can be reattached under a different token.
 - In attach mode, a disconnect or navigation enters `detached`; the PTY remains eligible for reattach for 30 minutes. A legacy non-attach disconnect instead closes the bridge and enters `exited`.
-- An explicit Hermternal **Close** enters `closing`, detaches the socket, and stops client retries. The pinned source exposes no client-facing PTY kill operation; server cleanup occurs through process exit or the keep-alive retention policy.
-- A second socket attaching to the same PTY supersedes the first socket. The old socket receives close code `4409`.
+- An explicit Hermternal **Close** is mode-specific: in legacy mode it follows the disconnect path, closes the bridge, terminates the child, and enters `exited`; in attach mode it detaches the socket, retains the PTY for the keep-alive window, and stops client retries. The pinned source exposes no client-facing PTY kill operation for attach mode.
+- A second socket attaching to the same PTY supersedes the first socket. The source closes the old socket with `4409` before assigning the replacement WebSocket; the replacement then becomes active, and stale cleanup cannot detach it.
 
 ## Legacy versus attach mode
 
@@ -45,7 +45,7 @@ The pinned source selects the PTY lifetime from the **presence** of the `attach`
 
 The source does not define a client-visible attach-token grammar or an issuance route. Hermternal therefore treats only an exact opaque handle obtained from the reviewed attach flow as usable. A malformed or expired handle fails closed during preflight, before opening `/api/pty` or performing socket accept/upgrade, route dispatch, registry lookup/attach/spawn, session attach, or PTY spawn: do not create a replacement PTY, fall back to the legacy path, or retry the rejected value. This guard is required because the pinned registry accepts any non-empty key and can create a new PTY after an old detached entry has been reaped; that source behavior must not turn an invalid handle into an accidental fresh session.
 
-A superseded socket is a separate failure from a malformed or expired handle. It is already open when a replacement attach arrives. The replacement must attach first; only then does the old socket receive `4409`, stop reading, and fail to retry or call detach against the replacement. The pinned `detach` identity check preserves the replacement attachment.
+A superseded socket is a separate failure from a malformed or expired handle. It is already open when a replacement attach arrives. The pinned `PtySession.attach` closes the old socket with `4409` before assigning the replacement WebSocket. The replacement is then marked active, and the old handler's later cleanup fails to retry or call detach against the replacement. The pinned `detach` identity check preserves the replacement attachment.
 
 The source audit and deterministic regression fixtures for this distinction live in [`fixtures/source-audit/pty-attach`](../fixtures/source-audit/pty-attach/README.md).
 
@@ -74,13 +74,14 @@ The source audit and deterministic regression fixtures for this distinction live
 | `4403` | `failed` | Report host or origin rejection. Do not loop. |
 | `4404` | `failed` | Report that embedded chat is disabled. |
 | `4408` | `failed` | Report that the peer is not allowed. |
-| `4409` | `detached` | Stop reading the superseded socket and keep the current attachment. |
+| `4409` | `detached` | Stop reading the superseded socket; the source sends this before assigning the replacement, which then becomes the current attachment. |
 | `4410` | `exited` | Stop reconnecting to the dead PTY. |
 | `1011` | `failed` | Report backend failure and offer an explicit retry. |
 | Legacy socket disconnect without `attach` | `exited` | The source closes the bridge. Do not offer reattach for that PTY. |
 | Malformed or expired attach handle | `failed` | Reject during preflight before opening `/api/pty`; do not spawn a replacement PTY, fall back to legacy mode, or replay input. |
-| Already-open superseded socket | `detached` | The replacement attaches first; then the stale socket receives `4409`, stops reading, and cannot detach or retry. |
-| Hermternal **Close** | `closed` | Detach the socket and do not reconnect automatically. Do not claim that the PTY process was killed. |
+| Already-open superseded socket | `detached` | The stale socket receives `4409` before the replacement is assigned; then the replacement attaches, and stale cleanup cannot detach or retry it. |
+| Legacy Hermternal **Close** | `exited` | Follow the legacy disconnect path, close the bridge, terminate the PTY, and offer a new terminal; reattach is prohibited. |
+| Attach Hermternal **Close** | `detached` | Detach the socket, retain the PTY for the keep-alive window, and stop client retries; do not claim that attach-mode Close killed the process. |
 | Network loss | `detached` | Reattach with the same token while the 30-minute window remains. |
 
 Unknown close codes are compatibility failures. Do not treat them as permission to issue shell commands or to create a fresh session automatically.
@@ -92,8 +93,8 @@ Unknown close codes are compatibility failures. Do not treat them as permission 
 - A WebSocket ticket is short-lived and single-use. Mint one per gated upgrade.
 - Resize controls never appear as terminal input.
 - A detached PTY is not a new conversation. Reattach preserves the server-owned identity.
-- Missing or empty `attach` is legacy mode and terminates the PTY on socket disconnect; it never implies keep-alive.
+- Missing or empty `attach` is legacy mode and terminates the PTY on socket disconnect or explicit Close; it never implies keep-alive.
 - A malformed or expired attach handle fails closed before opening a replacement PTY, and a superseded socket cannot detach or retry the active replacement.
-- No v0.0.1 client action requests PTY process termination at the pinned revision. View disposal and **Close** detach.
+- Attach-mode view disposal and **Close** do not request PTY process termination; legacy non-attach disconnect or **Close** follows the bridge termination path.
 - PTY bytes, including retained prompt and tool output, are not stored as a local transcript mirror; retained bytes remain ephemeral output, not replayable actions or a durable transcript.
 - Input, resize, attach, reattach, and close transitions remain interruptible. Retained output must not block the close control.

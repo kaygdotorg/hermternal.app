@@ -8,12 +8,13 @@
 
 This fixture set freezes the source-correct lifecycle split that clients must not blur:
 
-- a missing or empty `attach` value selects the legacy one-socket/one-PTY path; a socket disconnect closes the bridge and terminates the child;
+- a missing or empty `attach` value selects the legacy one-socket/one-PTY path; a socket disconnect or explicit Close closes the bridge and terminates the child;
 - a previously accepted, exact opaque attach handle selects the keep-alive registry; socket loss detaches only the socket, and the same handle may reattach while the session is retained;
 - retained output is a bounded byte buffer, not a transcript and not an ordered replay snapshot; retained and live frames may race;
 - user input, resize controls, prompt submissions, and tool actions are not retained as replayable actions and must never be replayed; prompt and tool output bytes are PTY output and may appear in the retained buffer;
 - malformed or expired handles fail closed before opening `/api/pty`; preflight must reject before `socket.accept`, WebSocket accept or upgrade, route dispatch, registry lookup/attach/spawn, session attach, or PTY spawn, and must not fall back to legacy mode or silently create a replacement PTY;
-- an already-open stale socket is a separate supersession case: the replacement attaches first, then the stale socket receives `4409`, stops reading, and cannot detach or retry the replacement socket.
+- an already-open stale socket is a separate supersession case: the stale socket receives `4409` before the replacement WebSocket is assigned, then the replacement becomes active; stale cleanup cannot detach or retry the replacement socket;
+- Hermternal **Close** is mode-specific: the legacy fixture closes the bridge and terminates the child, while attach mode detaches and retains the PTY.
 
 The pinned source accepts any non-empty query value as a registry key and does not expose a client-visible handle grammar or expiry rejection. The fail-closed fixture cases are therefore an Hermternal client/proof guard. They prevent an unrecognized value from becoming a new registry key, including after the source reaps an expired detached entry.
 
@@ -37,10 +38,11 @@ The standard-library validator requires the exact unique three-file audit set, b
 | --- | --- |
 | `missing-attach-selects-legacy` | Missing attach is not an implicit keep-alive request. |
 | `legacy-disconnect-terminates` | Legacy disconnect closes the bridge, exits the PTY, and prohibits reattach. |
+| `legacy-close-terminates` | Legacy explicit Close follows the bridge-close path, exits the PTY, and prohibits reattach. |
 | `attach-detach-reattach` | One valid handle preserves the PTY identity across detach and reattach. |
 | `malformed-attach-fails-closed` | Malformed input is rejected by a closed preflight schema before any socket accept, WebSocket accept or upgrade, route dispatch, registry lookup/attach/spawn, session attach, or PTY spawn. |
 | `expired-attach-fails-closed` | A reaped handle is rejected before `/api/pty` opens or the source can spawn a fresh PTY for its old key. |
-| `superseded-socket-fails-closed` | An already-open stale socket receives `4409` only after the replacement attaches, without detaching the replacement. |
+| `superseded-socket-fails-closed` | An already-open stale socket receives `4409` before the replacement WebSocket is assigned, without detaching the replacement. |
 | `retained-output-race` | Both retained/live receive orders are allowed; the client renders receive order without a replay boundary. |
 | `retained-output-truncation` | The newest 1 MiB is bounded and older output may be absent. |
 | `no-input-replay` | Reattach may send retained PTY output, including prompt/tool output bytes; no prior user input, resize control, prompt submission, or tool action is replayed. |
@@ -67,7 +69,7 @@ python3 contracts/fixtures/source-audit/pty-attach/validate.py \
   --baseline-output contracts/fixtures/source-audit/pty-attach/validation-baseline.json
 ```
 
-The validator runs fifty-three in-process mutation checks from a closed executable inventory: exact root and nested object schemas, source-set and observation-range drift, missing or false source/contract semantics, pinned revision URL drift, source redaction violations, lifecycle handle/session/socket/process mismatches, legacy registry-entry violations, unsafe or structurally expanded snapshots, each malformed preflight route/socket/session activity class, versioned and separator-variant non-replayable input/resize/prompt/tool-action replay aliases, and incorrect supersession binding/order or extra lifecycle events must each fail validation. The runner derives the reported count from the mutations it actually executes and self-checks removal and count mismatches. The baseline measures the checked-in audit/fixture artifacts listed by `validate.py`; its duration is environment evidence, not a pass threshold. The command exits non-zero on schema drift, missing required cases, changed source fingerprints, unsafe replay expectations, or redaction violations.
+The validator runs in-process mutation checks from a closed executable inventory: exact root, nested-object, leaf-type, exact-reference, and event schemas; canonical source fingerprint drift; source-set and observation-range drift; missing or false source/contract semantics; pinned revision URL drift; source redaction violations; lifecycle handle/session/socket/process mismatches; legacy registry-entry and mode-specific Close violations; unsafe or structurally expanded snapshots; each malformed preflight route/socket/session activity class; versioned and separator-variant non-replayable input/resize/prompt/tool-action replay aliases; and incorrect supersession binding/order or extra lifecycle events must each fail validation. The runner derives the reported count from the mutations it actually executes and self-checks removal and count mismatches. The baseline measures the checked-in audit/fixture artifacts listed by `validate.py`; its duration is environment evidence, not a pass threshold. The command exits non-zero on schema drift, missing required cases, changed source fingerprints, unsafe replay expectations, or redaction violations.
 
 ## Scope notes
 

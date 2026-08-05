@@ -39,6 +39,7 @@ ARTIFACT_FILES = (
 REQUIRED_CASES = {
     "missing-attach-selects-legacy",
     "legacy-disconnect-terminates",
+    "legacy-close-terminates",
     "attach-detach-reattach",
     "malformed-attach-fails-closed",
     "expired-attach-fails-closed",
@@ -128,6 +129,12 @@ TIMELINE_SCHEMAS = {
         event_schema("socket.disconnect", "socket"),
         event_schema("bridge.close", "process_ref"),
     ),
+    "legacy-close-terminates": (
+        event_schema("socket.accept", "socket"),
+        event_schema("pty.spawn", "process_ref", "socket"),
+        event_schema("client.close", "socket"),
+        event_schema("bridge.close", "process_ref"),
+    ),
     "attach-detach-reattach": (
         event_schema("socket.accept", "handle_ref", "process_ref", "session_ref", "socket"),
         event_schema("registry.spawn", "handle_ref", "process_ref", "session_ref"),
@@ -149,8 +156,8 @@ TIMELINE_SCHEMAS = {
     ),
     "superseded-socket-fails-closed": (
         event_schema("session.attach", "handle_ref", "process_ref", "session_ref", "socket"),
-        event_schema("session.attach", "handle_ref", "process_ref", "session_ref", "socket"),
         event_schema("socket.close", "close_code", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("session.attach", "handle_ref", "process_ref", "session_ref", "socket"),
         event_schema("stale_socket.finally", "handle_ref", "process_ref", "session_ref", "socket"),
         event_schema("stale_socket.detach_ignored", "handle_ref", "process_ref", "session_ref", "socket"),
     ),
@@ -175,9 +182,63 @@ TIMELINE_SCHEMAS = {
     ),
 }
 EVENT_VOCABULARY = frozenset(event for schema in TIMELINE_SCHEMAS.values() for event, _ in schema)
+TIMELINE_EXACT_VALUES = {
+    "missing-attach-selects-legacy": ({}, {}),
+    "legacy-disconnect-terminates": (
+        {"socket": "synthetic-socket-legacy-a"},
+        {"process_ref": "synthetic-legacy-pty", "socket": "synthetic-socket-legacy-a"},
+        {"socket": "synthetic-socket-legacy-a"},
+        {"process_ref": "synthetic-legacy-pty"},
+    ),
+    "legacy-close-terminates": (
+        {"socket": "synthetic-socket-legacy-close"},
+        {"process_ref": "synthetic-legacy-close-pty", "socket": "synthetic-socket-legacy-close"},
+        {"socket": "synthetic-socket-legacy-close"},
+        {"process_ref": "synthetic-legacy-close-pty"},
+    ),
+    "attach-detach-reattach": (
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-b"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-b"},
+    ),
+    "malformed-attach-fails-closed": ({}, {"reason": "malformed_attach_handle"}),
+    "expired-attach-fails-closed": ({"elapsed_seconds": 1801}, {}, {"reason": "expired_attach_handle"}),
+    "superseded-socket-fails-closed": (
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a"},
+        {"close_code": 4409, "handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-b"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a"},
+    ),
+    "retained-output-race": (
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "payload_ref": "synthetic-retained-output"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "payload_ref": "synthetic-live-output"},
+    ),
+    "retained-output-truncation": (
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+    ),
+    "no-input-replay": (
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a", "input_ref": "synthetic-input-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a", "resize_ref": "synthetic-resize-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a", "prompt_ref": "synthetic-prompt-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a", "tool_action_ref": "synthetic-tool-action-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-a"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-b"},
+        {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty", "socket": "synthetic-socket-attach-b", "payload_ref": "synthetic-output-only", "payload": {"kind": "output", "bytes_ref": "synthetic-output-bytes"}},
+    ),
+}
 CASE_ROOT_FIELDS = {
     "missing-attach-selects-legacy": frozenset({"id", "kind", "attach_handle", "timeline", "expected"}),
     "legacy-disconnect-terminates": frozenset({"id", "kind", "attach_handle", "timeline", "expected", "identity"}),
+    "legacy-close-terminates": frozenset({"id", "kind", "attach_handle", "timeline", "expected", "identity"}),
     "attach-detach-reattach": frozenset({"id", "kind", "attach_handle", "timeline", "expected", "identity"}),
     "malformed-attach-fails-closed": frozenset({"id", "kind", "attach_handle", "timeline", "expected"}),
     "expired-attach-fails-closed": frozenset({"id", "kind", "attach_handle", "timeline", "source_hazard", "expected"}),
@@ -192,10 +253,76 @@ PAYLOAD_FIELDS = frozenset({"retained_hex", "live_hex"})
 SCHEDULE_FIELDS = frozenset({"name", "receive_order"})
 RETENTION_OBSERVATION_FIELDS = frozenset({"buffer_cap_bytes", "appended_bytes", "oldest_bytes_dropped"})
 PINNED_REVISION_URL = f"https://github.com/NousResearch/hermes-agent/commit/{REVISION}"
+SYNTHETIC_REF_RE = re.compile(r"^synthetic-[a-z0-9]+(?:-[a-z0-9]+)*$")
+SECRET_SHAPED_PATTERNS = (
+    re.compile(r"(?i)(?:^|\b)eyj[a-z0-9_-]{8,}\.[a-z0-9_-]{4,}\.[a-z0-9_-]{4,}"),
+    re.compile(r"(?i)(?:^|\b)(?:ghp|github_pat|glpat|sk|xoxb|xoxp)-[a-z0-9_-]{8,}"),
+    re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{12,}"),
+    re.compile(r"(?i)\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|secret)\s*[:=]\s*\S+"),
+)
+CANONICAL_SOURCE_FINGERPRINTS = {
+    "hermes_cli/pty_bridge.py": {
+        "git_blob_sha": "cf4a4e60a75eab4490fa718db8651c079c5ff828",
+        "sha256": "e24515762a8ee3c9089369b7ecba20307af62c7cfb6d02abf04261ecacaa6095",
+        "size_bytes": 11287,
+        "ranges": {
+            (208, 223): {
+                "sha256": "b47ef01af464b50c8ea8547f2a6172f2a30b951762157fa53430d50f14517edb",
+                "markers": ("def write(self, data: bytes) -> None:", "if self._closed or not data:", "os.write(self._fd, view)"),
+                "why": "Input is written directly to the PTY and is not a retained-session replay source.",
+            },
+            (250, 286): {
+                "sha256": "7e7a52539df866e073afb4f20c607d9225a62b64d7e857098a6b55446396fb36",
+                "markers": ("def close(self) -> None:", "signal.SIGHUP", "signal.SIGTERM", "signal.SIGKILL"),
+                "why": "The bridge close path terminates and reaps the child used by the legacy socket path.",
+            },
+        },
+    },
+    "hermes_cli/pty_session.py": {
+        "git_blob_sha": "43910be9deb4655c6eb2dbad62b0b4aa1d81c0fa",
+        "sha256": "617448d953ec978f1b3287b02ac0dd2ad61c255d3366e0ca45efdf829146d8c5",
+        "size_bytes": 6769,
+        "ranges": {
+            (19, 39): {
+                "sha256": "5377a211167f9a94202f241728b650dabeede5aeed7261554c4aaf5cae6c8161",
+                "markers": ("class RingBuffer:", "self._buf.extend(data)", "self._truncated = True"),
+                "why": "Detached output is bounded to the newest configured bytes and may be truncated.",
+            },
+            (42, 105): {
+                "sha256": "7eb9380f292579da9f9f272cb3dea00b792d9977cb965566a191d57dfb989636",
+                "markers": ("class PtySession:", "await ws.send_bytes(snap)", "await ws.send_bytes(chunk)", "WS_CLOSE_SUPERSEDED", "if self._ws is not ws:"),
+                "why": "A valid handle keeps one PTY alive across socket detach, sends retained bytes on attach, races live sends without a boundary, and protects the replacement socket from a stale detach.",
+            },
+            (139, 191): {
+                "sha256": "24751a22ce6d297089cee6599c0219a33bc88a92b105d157c1ffae5aff09a6f3",
+                "markers": ("class PtySessionRegistry:", "if existing is not None and existing.alive:", "if (not s.alive)", "(now - s.last_detached_at) > self._ttl"),
+                "why": "The registry reuses live sessions, reaps expired detached entries, and otherwise can spawn a new session for a key that the client must no longer reuse.",
+            },
+        },
+    },
+    "hermes_cli/web_server.py": {
+        "git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+        "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+        "size_bytes": 703915,
+        "ranges": {
+            (14416, 14500): {
+                "sha256": "8d941a08e658821446b8eeb321d27a946982d49c6253faa7ff2ae38de04b56ff",
+                "markers": ('async def _legacy_pump(ws: "WebSocket", bridge) -> None:', "await asyncio.to_thread(bridge.close)", 'if msg.get("type") == "websocket.disconnect"'),
+                "why": "The no-handle path is one socket to one bridge and closes the bridge when the socket ends.",
+            },
+            (15720, 15797): {
+                "sha256": "62954abe342c1737e4c987520ccea14f98f2dc8e9dd8735fc0705f20418a719d",
+                "markers": ('attach_token = ws.query_params.get("attach") or None', "if attach_token is None:", "await PTY_REGISTRY.attach_or_spawn(", "await session.attach(ws)", "PTY_REGISTRY.detach(attach_token, ws)"),
+                "why": "The query-value presence split selects legacy termination or registry-backed detach/reattach. The source does not validate a client-visible handle grammar.",
+            },
+        },
+    },
+}
 
 EXPECTED_FIELDS_BY_CASE = {
     "missing-attach-selects-legacy": frozenset({"mode", "keep_alive", "fallback_to_attach"}),
     "legacy-disconnect-terminates": frozenset({"state_after_disconnect", "process_lifetime", "reattach", "spawn_count", "input_replay_count"}),
+    "legacy-close-terminates": frozenset({"state_after_close", "process_lifetime", "close_action", "reattach", "spawn_count"}),
     "attach-detach-reattach": frozenset({"state_sequence", "process_lifetime_during_detach", "session_identity_preserved", "spawn_count", "reattach", "input_replay_count"}),
     "malformed-attach-fails-closed": frozenset({"state", "client_action", "spawn_count", "legacy_fallback", "retry_same_handle"}),
     "expired-attach-fails-closed": frozenset({"state", "client_action", "spawn_count", "legacy_fallback", "retry_same_handle", "fresh_session_implicit"}),
@@ -313,16 +440,17 @@ OBSERVATION_EXPECTATIONS = {
             }
         ),
         "source_observation": {
-            "summary": "A replacement attach closes the old socket with 4409; the old handler's later detach is ignored unless it is still the current socket.",
+            "summary": "PtySession.attach closes the old socket with 4409 before assigning the replacement WebSocket; the old handler's later detach is ignored unless it is still the current socket.",
             "assertions": {
                 "replacement_close": "old_socket_4409",
+                "replacement_order": "close_old_before_assign_new",
                 "stale_cleanup": "detach_ignored_when_not_current",
             },
         },
         "contract_result": {
-            "summary": "The replacement attaches first; the already-open stale socket then receives 4409, stops reading, and never retries or detaches the active replacement.",
+            "summary": "The already-open stale socket receives 4409 before the replacement is assigned; the replacement then becomes active, and the stale handler never retries or detaches it.",
             "assertions": {
-                "ordering": "replacement_attach_before_4409_close",
+                "ordering": "4409_close_before_replacement_assign",
                 "stale_socket": "stop_reading_no_retry",
                 "active_socket": "replacement_remains_attached",
                 "close_code": 4409,
@@ -411,6 +539,28 @@ def require_keys(value: Any, expected: frozenset[str], label: str) -> dict[str, 
     return value
 
 
+def require_synthetic_ref(value: Any, label: str) -> str:
+    require(type(value) is str and SYNTHETIC_REF_RE.fullmatch(value) is not None, f"{label} must be a sanitized synthetic reference")
+    return value
+
+
+def validate_event_leaf_types(event: dict[str, Any], label: str) -> None:
+    for field, value in event.items():
+        field_label = f"{label}.{field}"
+        if field in {"step", "close_code", "elapsed_seconds"}:
+            require(type(value) is int, f"{field_label} must be an integer")
+        elif field in {"event", "reason"}:
+            require(type(value) is str and value, f"{field_label} must be non-empty text")
+        elif field == "payload":
+            payload = require_keys(value, SNAPSHOT_PAYLOAD_FIELDS, field_label)
+            require(type(payload.get("kind")) is str and payload["kind"] == "output", f"{field_label}.kind must be output")
+            require_synthetic_ref(payload.get("bytes_ref"), f"{field_label}.bytes_ref")
+        elif field.endswith("_ref") or field in REF_LIKE_KEYS:
+            require_synthetic_ref(value, field_label)
+        else:
+            fail(f"{field_label} has no closed leaf type")
+
+
 def load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -471,17 +621,11 @@ def validate_redaction(document: dict[str, Any], label: str) -> None:
                         or lowered_key in {key_name.lower() for key_name in REF_LIKE_KEYS}
                     )
                 )
-                if ref_like and isinstance(child, str):
-                    require(
-                        child.startswith("synthetic-"),
-                        f"non-synthetic {label} reference at {path}.{key}",
-                    )
+                if ref_like:
+                    require_synthetic_ref(child, f"{label} reference at {path}.{key}")
         if isinstance(value, str):
-            # These markers catch accidental pasting of common credential forms
-            # without rejecting the deliberately synthetic references and source hashes.
-            lowered = value.lower()
-            for marker in ("eyj", "ghp_", "sk-", "xoxb-"):
-                require(not lowered.startswith(marker), f"credential-like {label} value at {path}")
+            for pattern in SECRET_SHAPED_PATTERNS:
+                require(pattern.search(value) is None, f"secret-shaped {label} prose at {path}")
 
 
 def events(case: dict[str, Any]) -> list[dict[str, Any]]:
@@ -508,8 +652,10 @@ def replay_alias_kind(event_name: str) -> str | None:
         return None
     if parts[-1].startswith("v") and parts[-1][1:].isdigit():
         parts.pop()
-    if parts and parts[-1].startswith("version") and parts[-1][7:].isdigit():
+    elif parts[-1].startswith("version") and parts[-1][7:].isdigit():
         parts.pop()
+    elif len(parts) >= 2 and parts[-2] in {"v", "version"} and parts[-1].isdigit():
+        parts = parts[:-2]
     if not parts or parts[-1] != "replay":
         return None
     prefix = parts[:-1]
@@ -528,8 +674,9 @@ def replay_alias_kind(event_name: str) -> str | None:
 
 def validate_timeline_schema(case_id: str, timeline: list[dict[str, Any]]) -> None:
     schema = TIMELINE_SCHEMAS.get(case_id)
-    require(schema is not None, f"{case_id}: closed timeline schema is missing")
-    require(len(timeline) == len(schema), f"{case_id}: timeline event count changed")
+    exact_values = TIMELINE_EXACT_VALUES.get(case_id)
+    require(schema is not None and exact_values is not None, f"{case_id}: closed timeline schema is missing")
+    require(len(timeline) == len(schema) == len(exact_values), f"{case_id}: timeline event count changed")
     for index, (expected_event, expected_fields) in enumerate(schema, start=1):
         event = timeline[index - 1]
         actual_event = event.get("event")
@@ -538,6 +685,9 @@ def validate_timeline_schema(case_id: str, timeline: list[dict[str, Any]]) -> No
         require(actual_event == expected_event, f"{case_id}: event {index} changed")
         require(set(event) == expected_fields, f"{case_id}: {expected_event} fields changed")
         require(event.get("step") == index, f"{case_id}: timeline step {index} changed")
+        validate_event_leaf_types(event, f"{case_id}.timeline[{index - 1}]")
+        for field, expected_value in exact_values[index - 1].items():
+            require(event.get(field) == expected_value, f"{case_id}: {expected_event}.{field} changed")
 
 
 def assert_order(names: list[str], before: str, after: str, case_id: str) -> None:
@@ -575,15 +725,13 @@ def valid_handle(case: dict[str, Any]) -> dict[str, str]:
     handle = require_keys(case.get("attach_handle"), HANDLE_FIELDS, f"{case_id} attach_handle")
     require(handle.get("present") is True, f"{case_id}: handle must be present")
     require(handle.get("classification") == "valid_exact_opaque_handle", f"{case_id}: handle is not exact opaque")
-    reference = handle.get("reference")
-    require(isinstance(reference, str) and reference.startswith("synthetic-"), f"{case_id}: handle reference must be synthetic")
+    reference = require_synthetic_ref(handle.get("reference"), f"{case_id}: handle reference")
     identity = case.get("identity")
     require(isinstance(identity, dict), f"{case_id}: lifecycle identity is required")
     require(set(identity) == {"handle_ref", "session_ref", "process_ref"}, f"{case_id}: lifecycle identity fields changed")
     require(identity.get("handle_ref") == reference, f"{case_id}: attach handle does not match expected handle")
     for field in ("handle_ref", "session_ref", "process_ref"):
-        value = identity.get(field)
-        require(isinstance(value, str) and value.startswith("synthetic-"), f"{case_id}: {field} must be synthetic")
+        require_synthetic_ref(identity.get(field), f"{case_id}: {field}")
     return identity
 
 
@@ -619,6 +767,20 @@ def action_counts(names: list[str]) -> tuple[dict[str, int], dict[str, int]]:
         for kind, event_names in NON_REPLAYABLE_REPLAY_EVENTS.items()
     }
     return sent, replayed
+
+
+def validate_replay_alias_unit_cases() -> None:
+    aliases = {
+        "input.replay.v2": "input",
+        "resize_replay_version-2": "resize",
+        "prompt-replay-version_2": "prompt",
+        "tool_action.replay.v2": "tool_action",
+        "action-replay-version_2": "tool_action",
+    }
+    for alias, expected_kind in aliases.items():
+        require(replay_alias_kind(alias) == expected_kind, f"replay alias classifier missed {alias}")
+    for ordinary_event in EVENT_VOCABULARY:
+        require(replay_alias_kind(ordinary_event) is None, f"replay alias classifier misclassified {ordinary_event}")
 
 
 def missing_handle(case: dict[str, Any]) -> None:
@@ -675,6 +837,30 @@ def validate_case(case: dict[str, Any]) -> None:
         require(expected.get("input_replay_count") == replayed_counts["input"], f"{case_id}: input replay count changed")
         return
 
+    if case_id == "legacy-close-terminates":
+        missing_handle(case)
+        require(kind == "legacy_close", f"{case_id}: wrong kind")
+        identity = case.get("identity")
+        require(identity == {"process_ref": "synthetic-legacy-close-pty", "socket_ref": "synthetic-socket-legacy-close"}, f"{case_id}: legacy Close identity changed")
+        require(set(names).isdisjoint({"registry.attach", "registry.spawn", "registry.detach", "registry.reuse", "session.attach"}), f"{case_id}: legacy Close entered registry")
+        accepts = event_items(case, "socket.accept")
+        spawns = event_items(case, "pty.spawn")
+        closes = event_items(case, "client.close")
+        bridges = event_items(case, "bridge.close")
+        require(len(accepts) == len(spawns) == len(closes) == len(bridges) == 1, f"{case_id}: legacy Close must have one accept, spawn, client close, and bridge close")
+        require(accepts[0]["socket"] == identity["socket_ref"], f"{case_id}: accepted socket identity changed")
+        require(spawns[0]["socket"] == identity["socket_ref"], f"{case_id}: spawned socket identity changed")
+        require(closes[0]["socket"] == identity["socket_ref"], f"{case_id}: Close socket identity changed")
+        require(spawns[0]["process_ref"] == identity["process_ref"], f"{case_id}: spawned process identity changed")
+        require(bridges[0]["process_ref"] == spawns[0]["process_ref"], f"{case_id}: Close bridge identity changed")
+        assert_order(names, "client.close", "bridge.close", case_id)
+        require(expected.get("state_after_close") == "exited", f"{case_id}: Close must exit legacy mode")
+        require(expected.get("process_lifetime") == "terminated", f"{case_id}: legacy Close must terminate")
+        require(expected.get("close_action") == "terminate_bridge", f"{case_id}: Close action changed")
+        require(expected.get("reattach") == "prohibited", f"{case_id}: legacy Close reattach must be prohibited")
+        require(expected.get("spawn_count") == len(spawns) == 1, f"{case_id}: expected one spawn")
+        return
+
     if case_id == "attach-detach-reattach":
         identity = valid_handle(case)
         require(kind == "attach_detach_reattach", f"{case_id}: wrong kind")
@@ -719,8 +905,7 @@ def validate_case(case: dict[str, Any]) -> None:
         handle = require_keys(case.get("attach_handle"), HANDLE_FIELDS, f"{case_id} attach_handle")
         require(handle.get("present") is True, f"{case_id}: invalid handle must be represented")
         require(handle.get("classification") == ("malformed" if case_id.startswith("malformed") else "expired"), f"{case_id}: classification changed")
-        reference = handle.get("reference")
-        require(isinstance(reference, str) and reference.startswith("synthetic-"), f"{case_id}: invalid handle reference must be synthetic")
+        reference = require_synthetic_ref(handle.get("reference"), f"{case_id}: invalid handle reference")
         validate_preflight(case_id, names)
         spawn_count = len(event_items(case, "pty.spawn")) + len(event_items(case, "registry.spawn"))
         require(expected.get("state") == "failed", f"{case_id}: invalid handle must fail")
@@ -754,11 +939,17 @@ def validate_case(case: dict[str, Any]) -> None:
             "stale_attach": names.index("session.attach"),
             "replacement_attach": names.index("session.attach", names.index("session.attach") + 1),
             "socket.close": names.index("socket.close"),
+            "stale_socket.finally": names.index("stale_socket.finally"),
             "stale_socket.detach_ignored": names.index("stale_socket.detach_ignored"),
         }
-        require(names_indexes["stale_attach"] < names_indexes["replacement_attach"], f"{case_id}: replacement attach must follow stale attach")
-        require(names_indexes["replacement_attach"] < names_indexes["socket.close"], f"{case_id}: replacement must attach before stale close")
-        require(names_indexes["socket.close"] < names_indexes["stale_socket.detach_ignored"], f"{case_id}: stale cleanup must follow superseded close")
+        require(
+            names_indexes["stale_attach"]
+            < names_indexes["socket.close"]
+            < names_indexes["replacement_attach"]
+            < names_indexes["stale_socket.finally"]
+            < names_indexes["stale_socket.detach_ignored"],
+            f"{case_id}: stale close must precede replacement assignment and stale cleanup",
+        )
         require(expected.get("active_socket") == "synthetic-socket-attach-b", f"{case_id}: replacement must remain active")
         require(expected.get("active_session_state") == "attached", f"{case_id}: replacement must remain attached")
         require(expected.get("stale_socket_action") == "stop_without_retry", f"{case_id}: stale socket must fail closed")
@@ -936,6 +1127,13 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
             "source.extra_observation_field",
             "source.extra_semantic_field",
             "source.wrong_revision_url",
+            "source.canonical_file_sha256",
+            "source.canonical_git_blob_sha",
+            "source.canonical_file_size",
+            "source.canonical_range_sha256",
+            "source.canonical_range_marker",
+            "source.canonical_range_rationale",
+            "source.secret_shaped_prose",
             "fixture.reused_session_identity",
             "fixture.attach_handle_reference",
             "fixture.detach_socket_identity",
@@ -970,6 +1168,14 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
             "fixture.extra_pty_spawn",
             "fixture.mismatched_identity_event",
             "fixture.non_synthetic_ref",
+            "fixture.none_leaf_value",
+            "fixture.object_reference_value",
+            "fixture.invalid_payload_leaf",
+            "fixture.wrong_exact_reference",
+            "fixture.secret_shaped_prose",
+            "fixture.attach_bridge_close",
+            "fixture.legacy_close_missing_bridge",
+            "fixture.attach_close_terminated",
             "fixture.extra_case_field",
         }
     )
@@ -1049,6 +1255,39 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
     def mutate_wrong_revision_url(mutated: dict[str, Any]) -> None:
         mutated["source"]["revision_url"] = "https://github.com/NousResearch/hermes-agent/tree/main"
 
+    def source_record(mutated: dict[str, Any], path: str) -> dict[str, Any]:
+        records = [record for record in source_files(mutated) if record.get("path") == path]
+        require(len(records) == 1, f"source mutation target {path!r} must exist exactly once")
+        return records[0]
+
+    def source_range_record(mutated: dict[str, Any], path: str, start: int, end: int) -> dict[str, Any]:
+        ranges = source_record(mutated, path).get("ranges")
+        require(isinstance(ranges, list), f"source mutation target {path!r} must have ranges")
+        matches = [item for item in ranges if isinstance(item, dict) and item.get("start") == start and item.get("end") == end]
+        require(len(matches) == 1, f"source mutation target {path}:{start}-{end} must exist exactly once")
+        return matches[0]
+
+    def mutate_canonical_file_sha256(mutated: dict[str, Any]) -> None:
+        source_record(mutated, "hermes_cli/pty_bridge.py")["sha256"] = "0" * 64
+
+    def mutate_canonical_git_blob_sha(mutated: dict[str, Any]) -> None:
+        source_record(mutated, "hermes_cli/pty_bridge.py")["git_blob_sha"] = "0" * 40
+
+    def mutate_canonical_file_size(mutated: dict[str, Any]) -> None:
+        source_record(mutated, "hermes_cli/pty_bridge.py")["size_bytes"] = 11288
+
+    def mutate_canonical_range_sha256(mutated: dict[str, Any]) -> None:
+        source_range_record(mutated, "hermes_cli/pty_bridge.py", 208, 223)["sha256"] = "0" * 64
+
+    def mutate_canonical_range_marker(mutated: dict[str, Any]) -> None:
+        source_range_record(mutated, "hermes_cli/pty_bridge.py", 208, 223)["markers"][0] = "def write(self, payload: bytes) -> None:"
+
+    def mutate_canonical_range_rationale(mutated: dict[str, Any]) -> None:
+        source_range_record(mutated, "hermes_cli/pty_bridge.py", 208, 223)["why"] = "The source uses an unrelated input path."
+
+    def mutate_source_secret_shaped_prose(mutated: dict[str, Any]) -> None:
+        mutated["source"]["note"] = "Bearer abcdefghijkl"
+
     def mutate_reused_session_identity(mutated: dict[str, Any]) -> None:
         case = fixture_case(mutated, "attach-detach-reattach")
         reuse = event_items(case, "registry.reuse")
@@ -1127,12 +1366,14 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
         case = fixture_case(mutated, "superseded-socket-fails-closed")
         timeline = case["timeline"]
         close_index = next(index for index, item in enumerate(timeline) if item.get("event") == "socket.close")
+        close_event = timeline.pop(close_index)
         replacement_index = next(
             index for index, item in enumerate(timeline)
             if item.get("event") == "session.attach" and item.get("socket") == "synthetic-socket-attach-b"
         )
-        close_event = timeline.pop(close_index)
-        timeline.insert(replacement_index - (1 if close_index < replacement_index else 0), close_event)
+        timeline.insert(replacement_index + 1, close_event)
+        for step, event in enumerate(timeline, start=1):
+            event["step"] = step
 
     def supersession_case(mutated: dict[str, Any]) -> dict[str, Any]:
         return fixture_case(mutated, "superseded-socket-fails-closed")
@@ -1178,6 +1419,39 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
         case = fixture_case(mutated, "legacy-disconnect-terminates")
         event_items(case, "socket.accept")[0]["socket"] = "socket-raw"
 
+    def mutate_none_leaf_value(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "superseded-socket-fails-closed")
+        event_items(case, "socket.close")[0]["close_code"] = None
+
+    def mutate_object_reference_value(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "legacy-disconnect-terminates")
+        event_items(case, "socket.accept")[0]["socket"] = {"value": "synthetic-socket-legacy-a"}
+
+    def mutate_invalid_payload_leaf(mutated: dict[str, Any]) -> None:
+        snapshot = snapshot_event(mutated)
+        snapshot["payload"]["bytes_ref"] = {"value": "synthetic-output-bytes"}
+
+    def mutate_wrong_exact_reference(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "legacy-close-terminates")
+        event_items(case, "bridge.close")[0]["process_ref"] = "synthetic-other-pty"
+
+    def mutate_fixture_secret_shaped_prose(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "expired-attach-fails-closed")
+        case["source_hazard"] = "password: abcdefghijkl"
+
+    def mutate_attach_bridge_close(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "attach-detach-reattach")
+        case["timeline"].append({"step": 9, "event": "bridge.close", "process_ref": "synthetic-attach-pty"})
+
+    def mutate_legacy_close_missing_bridge(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "legacy-close-terminates")
+        timeline = case["timeline"]
+        case["timeline"] = [event for event in timeline if event.get("event") != "bridge.close"]
+
+    def mutate_attach_close_terminated(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "attach-detach-reattach")
+        case["expected"]["process_lifetime_during_detach"] = "terminated"
+
     def mutate_extra_case_field(mutated: dict[str, Any]) -> None:
         fixture_case(mutated, "missing-attach-selects-legacy")["unexpected"] = "synthetic-extra"
 
@@ -1211,6 +1485,13 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
     expect_source("source.extra_observation_field", "source evidence contains an unknown observation field", mutate_source_extra_observation_field)
     expect_source("source.extra_semantic_field", "source evidence contains an unknown semantic field", mutate_source_extra_semantic_field)
     expect_source("source.wrong_revision_url", "source evidence uses an unpinned revision URL", mutate_wrong_revision_url)
+    expect_source("source.canonical_file_sha256", "source evidence forges a full-file SHA-256", mutate_canonical_file_sha256)
+    expect_source("source.canonical_git_blob_sha", "source evidence forges a Git blob SHA", mutate_canonical_git_blob_sha)
+    expect_source("source.canonical_file_size", "source evidence forges a full-file size", mutate_canonical_file_size)
+    expect_source("source.canonical_range_sha256", "source evidence forges a range SHA-256", mutate_canonical_range_sha256)
+    expect_source("source.canonical_range_marker", "source evidence forges a range marker", mutate_canonical_range_marker)
+    expect_source("source.canonical_range_rationale", "source evidence forges a range rationale", mutate_canonical_range_rationale)
+    expect_source("source.secret_shaped_prose", "source evidence contains secret-shaped free prose", mutate_source_secret_shaped_prose)
 
     expect_fixture("fixture.reused_session_identity", "registry reuse points at a different PTY session", mutate_reused_session_identity)
     expect_fixture("fixture.attach_handle_reference", "attach handle reference differs from expected identity", mutate_attach_handle_reference)
@@ -1246,6 +1527,14 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
     expect_fixture("fixture.extra_pty_spawn", "attach timeline spawns an extra PTY", mutate_extra_pty_spawn)
     expect_fixture("fixture.mismatched_identity_event", "supersession event changes process identity", mutate_mismatched_identity_event)
     expect_fixture("fixture.non_synthetic_ref", "fixture contains a non-synthetic reference", mutate_non_synthetic_ref)
+    expect_fixture("fixture.none_leaf_value", "fixture contains a None leaf value", mutate_none_leaf_value)
+    expect_fixture("fixture.object_reference_value", "fixture contains an object reference leaf", mutate_object_reference_value)
+    expect_fixture("fixture.invalid_payload_leaf", "snapshot payload contains an object byte reference", mutate_invalid_payload_leaf)
+    expect_fixture("fixture.wrong_exact_reference", "fixture changes an exact process reference", mutate_wrong_exact_reference)
+    expect_fixture("fixture.secret_shaped_prose", "fixture contains secret-shaped free prose", mutate_fixture_secret_shaped_prose)
+    expect_fixture("fixture.attach_bridge_close", "attach mode closes the bridge", mutate_attach_bridge_close)
+    expect_fixture("fixture.legacy_close_missing_bridge", "legacy Close omits bridge termination", mutate_legacy_close_missing_bridge)
+    expect_fixture("fixture.attach_close_terminated", "attach Close incorrectly terminates the PTY", mutate_attach_close_terminated)
     expect_fixture("fixture.extra_case_field", "fixture case contains an unknown field", mutate_extra_case_field)
 
     reported_count = len(executed_ids)
@@ -1264,6 +1553,24 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
     else:
         fail("mutation inventory regression accepted a count mismatch")
     return validate_mutation_inventory(executed_ids, mutation_inventory)
+
+def validate_canonical_fingerprint(path_value: str, record: dict[str, Any]) -> None:
+    canonical = CANONICAL_SOURCE_FINGERPRINTS.get(path_value)
+    require(canonical is not None, f"{path_value}: canonical fingerprint is missing")
+    require(record.get("git_blob_sha") == canonical["git_blob_sha"], f"{path_value}: git blob fingerprint changed")
+    require(record.get("sha256") == canonical["sha256"], f"{path_value}: file sha256 fingerprint changed")
+    require(record.get("size_bytes") == canonical["size_bytes"], f"{path_value}: file size fingerprint changed")
+    canonical_ranges = canonical["ranges"]
+    ranges = record.get("ranges")
+    require(isinstance(ranges, list), f"{path_value}: ranges must be a list")
+    require({(item.get("start"), item.get("end")) for item in ranges if isinstance(item, dict)} == set(canonical_ranges), f"{path_value}: canonical range set changed")
+    for item in ranges:
+        key = (item["start"], item["end"])
+        expected = canonical_ranges[key]
+        require(item.get("sha256") == expected["sha256"], f"{path_value}:{key[0]}-{key[1]}: range sha fingerprint changed")
+        require(tuple(item.get("markers", ())) == expected["markers"], f"{path_value}:{key[0]}-{key[1]}: range markers changed")
+        require(item.get("why") == expected["why"], f"{path_value}:{key[0]}-{key[1]}: range rationale changed")
+
 
 def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None) -> int:
     require_keys(evidence, SOURCE_EVIDENCE_FIELDS, "source audit root")
@@ -1309,6 +1616,7 @@ def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None)
             require(isinstance(markers, list) and markers and all(isinstance(marker, str) and marker for marker in markers), f"{path_value}:{start}-{end}.markers are required")
             require(isinstance(line_range.get("why"), str) and line_range["why"], f"{path_value}:{start}-{end}.why is required")
 
+        validate_canonical_fingerprint(path_value, record)
         ranges_by_path[path_value] = range_keys
         if source_root is None:
             continue
@@ -1410,6 +1718,7 @@ def main(argv: list[str] | None = None) -> int:
         fixtures = load_json(root / "pty-attach-fixtures.json")
         file_count = validate_source_evidence(evidence, args.source_root)
         case_count = validate_fixtures(fixtures)
+        validate_replay_alias_unit_cases()
         mutation_count = run_mutation_checks(evidence, fixtures)
         duration_ns = time.perf_counter_ns() - started
         bytes_count = artifact_size(root)

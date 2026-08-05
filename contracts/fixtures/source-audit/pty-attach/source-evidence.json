@@ -197,16 +197,17 @@
         "hermes_cli/web_server.py:15720-15797"
       ],
       "source_observation": {
-        "summary": "A replacement attach closes the old socket with 4409; the old handler's later detach is ignored unless it is still the current socket.",
+        "summary": "PtySession.attach closes the old socket with 4409 before assigning the replacement WebSocket; the old handler's later detach is ignored unless it is still the current socket.",
         "assertions": {
           "replacement_close": "old_socket_4409",
+          "replacement_order": "close_old_before_assign_new",
           "stale_cleanup": "detach_ignored_when_not_current"
         }
       },
       "contract_result": {
-        "summary": "The replacement attaches first; the already-open stale socket then receives 4409, stops reading, and never retries or detaches the active replacement.",
+        "summary": "The already-open stale socket receives 4409 before the replacement is assigned; the replacement then becomes active, and the stale handler never retries or detaches it.",
         "assertions": {
-          "ordering": "replacement_attach_before_4409_close",
+          "ordering": "4409_close_before_replacement_assign",
           "stale_socket": "stop_reading_no_retry",
           "active_socket": "replacement_remains_attached",
           "close_code": 4409

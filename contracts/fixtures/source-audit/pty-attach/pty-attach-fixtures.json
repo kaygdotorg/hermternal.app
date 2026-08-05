@@ -81,6 +81,48 @@
       }
     },
     {
+      "id": "legacy-close-terminates",
+      "kind": "legacy_close",
+      "attach_handle": {
+        "present": false,
+        "classification": "missing"
+      },
+      "timeline": [
+        {
+          "step": 1,
+          "event": "socket.accept",
+          "socket": "synthetic-socket-legacy-close"
+        },
+        {
+          "step": 2,
+          "event": "pty.spawn",
+          "process_ref": "synthetic-legacy-close-pty",
+          "socket": "synthetic-socket-legacy-close"
+        },
+        {
+          "step": 3,
+          "event": "client.close",
+          "socket": "synthetic-socket-legacy-close"
+        },
+        {
+          "step": 4,
+          "event": "bridge.close",
+          "process_ref": "synthetic-legacy-close-pty"
+        }
+      ],
+      "expected": {
+        "state_after_close": "exited",
+        "process_lifetime": "terminated",
+        "close_action": "terminate_bridge",
+        "reattach": "prohibited",
+        "spawn_count": 1
+      },
+      "identity": {
+        "process_ref": "synthetic-legacy-close-pty",
+        "socket_ref": "synthetic-socket-legacy-close"
+      }
+    },
+    {
       "id": "attach-detach-reattach",
       "kind": "attach_detach_reattach",
       "attach_handle": {
@@ -250,17 +292,17 @@
         },
         {
           "step": 2,
-          "event": "session.attach",
-          "socket": "synthetic-socket-attach-b",
+          "event": "socket.close",
+          "socket": "synthetic-socket-attach-a",
+          "close_code": 4409,
           "handle_ref": "synthetic-handle-a",
           "session_ref": "synthetic-session-a",
           "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 3,
-          "event": "socket.close",
-          "socket": "synthetic-socket-attach-a",
-          "close_code": 4409,
+          "event": "session.attach",
+          "socket": "synthetic-socket-attach-b",
           "handle_ref": "synthetic-handle-a",
           "session_ref": "synthetic-session-a",
           "process_ref": "synthetic-attach-pty"
