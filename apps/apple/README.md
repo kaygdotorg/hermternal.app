@@ -1,9 +1,23 @@
 # Apple clients
 
-This directory will contain native SwiftUI clients for iOS and iPadOS. The same architecture will support macOS after the shared interaction model is proven.
+## Status
 
-The planned stack is Swift 6, SwiftUI, Observation, async/await, URLSession, URLSessionWebSocketTask, ASWebAuthenticationSession, Keychain Services, Swift Testing, and focused XCTest UI tests.
+This directory is in the planning, mock, and proof phase. It has no Xcode project, Swift package, signing configuration, credential, or live Hermes call.
 
-Future package boundaries should separate dashboard transport, authentication, session state, persistence, and platform UI. These implementations remain native even when they follow shared contracts and test fixtures.
+## v0.0.1 target
 
-No Xcode project, Swift package, signing configuration, credential, or live Hermes call exists here yet.
+The future Apple clients are native SwiftUI chat apps for iOS, iPadOS, and macOS. They share contracts and fixtures with the web client, but keep UI, networking, authentication, persistence, lifecycle, navigation, gestures, motion, and accessibility native.
+
+The chat surface has one profile, provider-neutral discovery, session restore, streaming, approvals, clarification, interruption, images only for attachments, private deep links under `/v1/c/...`, and no transcript mirror. Sharing is deferred to `v0.0.2`.
+
+An active model change applies immediately when the conversation is idle. During streaming, a normal deferred choice may apply to the next turn and does not interrupt the current stream. If the deferred choice needs expensive-model confirmation, the pinned server drops it; the client must confirm and submit it after the turn.
+
+The Apple clients do not include the Terminal. The full `/api/pty` Terminal is web-only. They do not add terminal-read, sudo, or secret operations.
+
+## Native transport boundary
+
+Native authentication may use the discovered username/password provider with an isolated `URLSession` cookie store and WebSocket tickets. Store only approved session material in the platform credential store; never share browser cookies with native code.
+
+Native OAuth/OIDC is supported only when the configured provider's reviewed callback transport is accepted by pinned Hermes revision `f5be9236e00ddf2f2a412697f267078fc4ee068e` and proven on the target Apple platform. An unsupported or unproven transport is blocked. There is no approved upstream change, so a client must not bypass this boundary with a hidden provider flow.
+
+Missing or mismatched deployment revision attestation, or a failed behavioral probe, blocks live operation. Use the [Dashboard contract](../../contracts/hermes-dashboard/README.md), [state models](../../contracts/state-models/README.md), and [security plan](../../docs/security/README.md) as the focused references.
