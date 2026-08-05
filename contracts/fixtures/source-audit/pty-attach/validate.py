@@ -12,7 +12,10 @@ lifecycle split: missing attach is legacy and terminates on disconnect; a
 previously accepted opaque handle keeps the PTY alive; retained output can
 race live output; prompt/tool output bytes may be retained; and no user input
 or action is replayed. Invalid handles are rejected
-before the source registry can interpret them as a new key.
+before the source registry can interpret them as a new key. Case IDs are bound
+to exact scenario kinds and required leaves use closed type/value checks so
+malformed object-shaped JSON fails deterministically before set or string
+operations can raise.
 """
 from __future__ import annotations
 
@@ -331,6 +334,66 @@ EXPECTED_FIELDS_BY_CASE = {
     "retained-output-truncation": frozenset({"truncated", "oldest_output_may_be_missing", "complete_replay_claim", "client_blocks_on_replay"}),
     "no-input-replay": frozenset({"input_sent_count", "resize_sent_count", "prompt_sent_count", "tool_action_sent_count", "input_replayed_count", "resize_replayed_count", "prompt_replayed_count", "tool_action_replayed_count", "output_snapshot_may_be_sent", "new_user_action_required"}),
 }
+CASE_KIND_BY_ID = {
+    "missing-attach-selects-legacy": "legacy_selection",
+    "legacy-disconnect-terminates": "legacy_disconnect",
+    "legacy-close-terminates": "legacy_close",
+    "attach-detach-reattach": "attach_detach_reattach",
+    "malformed-attach-fails-closed": "malformed_handle",
+    "expired-attach-fails-closed": "expired_handle",
+    "superseded-socket-fails-closed": "superseded_socket",
+    "retained-output-race": "retained_output_race",
+    "retained-output-truncation": "retained_output_cap",
+    "no-input-replay": "no_input_replay",
+}
+EXPECTED_VALUES_BY_CASE = {
+    "missing-attach-selects-legacy": {"mode": "legacy", "keep_alive": False, "fallback_to_attach": False},
+    "legacy-disconnect-terminates": {"state_after_disconnect": "exited", "process_lifetime": "terminated", "reattach": "prohibited", "spawn_count": 1, "input_replay_count": 0},
+    "legacy-close-terminates": {"state_after_close": "exited", "process_lifetime": "terminated", "close_action": "terminate_bridge", "reattach": "prohibited", "spawn_count": 1},
+    "attach-detach-reattach": {"state_sequence": ["attached", "detached", "attached"], "process_lifetime_during_detach": "alive", "session_identity_preserved": True, "spawn_count": 1, "reattach": "same_exact_handle", "input_replay_count": 0},
+    "malformed-attach-fails-closed": {"state": "failed", "client_action": "reject_without_open", "spawn_count": 0, "legacy_fallback": False, "retry_same_handle": False},
+    "expired-attach-fails-closed": {"state": "failed", "client_action": "reject_without_open", "spawn_count": 0, "legacy_fallback": False, "retry_same_handle": False, "fresh_session_implicit": False},
+    "superseded-socket-fails-closed": {"state": "detached", "active_socket": "synthetic-socket-attach-b", "active_session_state": "attached", "stale_socket_action": "stop_without_retry", "close_code": 4409, "active_detach_count": 0},
+    "retained-output-race": {"allowed_receive_orders": [["retained", "live"], ["live", "retained"]], "client_visible_boundary": False, "render_policy": "receive_order", "complete_replay_claim": False, "retained_bytes_are_transcript": False},
+    "retained-output-truncation": {"truncated": True, "oldest_output_may_be_missing": True, "complete_replay_claim": False, "client_blocks_on_replay": False},
+    "no-input-replay": {"input_sent_count": 1, "resize_sent_count": 1, "prompt_sent_count": 1, "tool_action_sent_count": 1, "input_replayed_count": 0, "resize_replayed_count": 0, "prompt_replayed_count": 0, "tool_action_replayed_count": 0, "output_snapshot_may_be_sent": True, "new_user_action_required": True},
+}
+HANDLE_VALUES_BY_CASE = {
+    "missing-attach-selects-legacy": {"present": False, "classification": "missing"},
+    "legacy-disconnect-terminates": {"present": False, "classification": "missing"},
+    "legacy-close-terminates": {"present": False, "classification": "missing"},
+    "attach-detach-reattach": {"present": True, "classification": "valid_exact_opaque_handle", "reference": "synthetic-handle-a"},
+    "malformed-attach-fails-closed": {"present": True, "classification": "malformed", "reference": "synthetic-malformed-handle"},
+    "expired-attach-fails-closed": {"present": True, "classification": "expired", "reference": "synthetic-expired-handle"},
+    "superseded-socket-fails-closed": {"present": True, "classification": "valid_exact_opaque_handle", "reference": "synthetic-handle-a"},
+    "retained-output-race": {"present": True, "classification": "valid_exact_opaque_handle", "reference": "synthetic-handle-a"},
+    "retained-output-truncation": {"present": True, "classification": "valid_exact_opaque_handle", "reference": "synthetic-handle-a"},
+    "no-input-replay": {"present": True, "classification": "valid_exact_opaque_handle", "reference": "synthetic-handle-a"},
+}
+IDENTITY_VALUES_BY_CASE = {
+    "legacy-disconnect-terminates": {"process_ref": "synthetic-legacy-pty", "socket_ref": "synthetic-socket-legacy-a"},
+    "legacy-close-terminates": {"process_ref": "synthetic-legacy-close-pty", "socket_ref": "synthetic-socket-legacy-close"},
+    "attach-detach-reattach": {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+    "superseded-socket-fails-closed": {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+    "retained-output-race": {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+    "retained-output-truncation": {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+    "no-input-replay": {"handle_ref": "synthetic-handle-a", "session_ref": "synthetic-session-a", "process_ref": "synthetic-attach-pty"},
+}
+SOURCE_HAZARD_VALUES_BY_CASE = {
+    "expired-attach-fails-closed": "Calling the pinned registry with the stale key after reap could spawn a fresh PTY; the client guard prevents that call.",
+}
+PAYLOAD_VALUES_BY_CASE = {
+    "retained-output-race": {"retained_hex": "52", "live_hex": "4c"},
+}
+SCHEDULE_VALUES_BY_CASE = {
+    "retained-output-race": [
+        {"name": "snapshot-first", "receive_order": ["retained", "live"]},
+        {"name": "live-first", "receive_order": ["live", "retained"]},
+    ],
+}
+RETENTION_OBSERVATION_VALUES_BY_CASE = {
+    "retained-output-truncation": {"buffer_cap_bytes": 1048576, "appended_bytes": 1048577, "oldest_bytes_dropped": 1},
+}
 HANDLE_FIELDS = frozenset({"present", "classification", "reference"})
 MISSING_HANDLE_FIELDS = frozenset({"present", "classification"})
 IDENTITY_FIELDS = frozenset({"handle_ref", "session_ref", "process_ref"})
@@ -534,9 +597,25 @@ def require(condition: bool, message: str) -> None:
 
 
 def require_keys(value: Any, expected: frozenset[str], label: str) -> dict[str, Any]:
-    require(isinstance(value, dict), f"{label} must be an object")
+    require(type(value) is dict, f"{label} must be an object")
     require(set(value) == expected, f"{label} fields changed")
     return value
+
+
+def validate_exact_value(value: Any, expected: Any, label: str) -> None:
+    """Require the fixture leaf to have the canonical type and allowed value."""
+    require(type(value) is type(expected), f"{label} has the wrong leaf type")
+    if type(expected) is dict:
+        require(set(value) == set(expected), f"{label} fields changed")
+        for key, expected_child in expected.items():
+            validate_exact_value(value[key], expected_child, f"{label}.{key}")
+        return
+    if type(expected) is list:
+        require(len(value) == len(expected), f"{label} length changed")
+        for index, (actual_child, expected_child) in enumerate(zip(value, expected)):
+            validate_exact_value(actual_child, expected_child, f"{label}[{index}]")
+        return
+    require(value == expected, f"{label} allowed value changed")
 
 
 def require_synthetic_ref(value: Any, label: str) -> str:
@@ -545,7 +624,9 @@ def require_synthetic_ref(value: Any, label: str) -> str:
 
 
 def validate_event_leaf_types(event: dict[str, Any], label: str) -> None:
+    require(type(event) is dict, f"{label} must be an object")
     for field, value in event.items():
+        require(type(field) is str, f"{label} field names must be text")
         field_label = f"{label}.{field}"
         if field in {"step", "close_code", "elapsed_seconds"}:
             require(type(value) is int, f"{field_label} must be an integer")
@@ -602,6 +683,7 @@ def walk_fixture_values(value: Any, path: str = "fixture") -> Iterable[tuple[str
 
 
 def validate_redaction(document: dict[str, Any], label: str) -> None:
+    require(type(document) is dict, f"{label} must be an object")
     redaction = require_keys(document.get("redaction"), REDACTION_FIELDS, f"{label} redaction policy")
     for key in REDACTION_FIELDS:
         require(redaction.get(key) is False, f"{label} redaction.{key} must be false")
@@ -609,6 +691,7 @@ def validate_redaction(document: dict[str, Any], label: str) -> None:
     for path, value in walk_fixture_values(document):
         if isinstance(value, dict):
             for key, child in value.items():
+                require(type(key) is str, f"{label} object keys must be text at {path}")
                 lowered_key = key.lower()
                 require(
                     lowered_key not in FORBIDDEN_REDACTION_KEYS,
@@ -679,7 +762,9 @@ def validate_timeline_schema(case_id: str, timeline: list[dict[str, Any]]) -> No
     require(len(timeline) == len(schema) == len(exact_values), f"{case_id}: timeline event count changed")
     for index, (expected_event, expected_fields) in enumerate(schema, start=1):
         event = timeline[index - 1]
+        require(type(event) is dict, f"{case_id}: timeline event must be an object")
         actual_event = event.get("event")
+        require(type(actual_event) is str, f"{case_id}: event name must be text")
         require(actual_event in EVENT_VOCABULARY, f"{case_id}: unknown event vocabulary")
         require(replay_alias_kind(actual_event) is None, f"{case_id}: replay alias is forbidden")
         require(actual_event == expected_event, f"{case_id}: event {index} changed")
@@ -700,12 +785,15 @@ def event_items(case: dict[str, Any], event: str) -> list[dict[str, Any]]:
     return [item for item in events(case) if item.get("event") == event]
 
 
+VALIDATION_FAILURES = (AssertionError, AttributeError, IndexError, KeyError, TypeError, ValueError)
+
+
 def expect_fixture_failure(fixtures: dict[str, Any], mutation: str, mutate: Any) -> None:
     mutated = copy.deepcopy(fixtures)
     mutate(mutated)
     try:
         validate_fixtures(mutated)
-    except AssertionError:
+    except VALIDATION_FAILURES:
         return
     fail(f"mutation check accepted unsafe fixture: {mutation}")
 
@@ -715,7 +803,7 @@ def expect_source_failure(evidence: dict[str, Any], mutation: str, mutate: Any) 
     mutate(mutated)
     try:
         validate_source_evidence(mutated, None)
-    except AssertionError:
+    except VALIDATION_FAILURES:
         return
     fail(f"source mutation check accepted unsafe audit evidence: {mutation}")
 
@@ -793,10 +881,22 @@ def missing_handle(case: dict[str, Any]) -> None:
 def validate_case(case: dict[str, Any]) -> None:
     case_id = case.get("id")
     kind = case.get("kind")
-    require(isinstance(case_id, str), "every case needs a string id")
-    require(isinstance(kind, str), f"{case_id}: every case needs a kind")
+    require(type(case_id) is str, "every case needs a string id")
+    require(type(kind) is str, f"{case_id}: every case needs a kind")
     require(case_id in CASE_ROOT_FIELDS, f"{case_id}: case schema is missing")
     require(set(case) == CASE_ROOT_FIELDS[case_id], f"{case_id}: case fields changed")
+    require(kind == CASE_KIND_BY_ID.get(case_id), f"{case_id}: scenario kind changed")
+    validate_exact_value(case.get("attach_handle"), HANDLE_VALUES_BY_CASE[case_id], f"{case_id}.attach_handle")
+    if case_id in IDENTITY_VALUES_BY_CASE:
+        validate_exact_value(case.get("identity"), IDENTITY_VALUES_BY_CASE[case_id], f"{case_id}.identity")
+    if case_id in SOURCE_HAZARD_VALUES_BY_CASE:
+        validate_exact_value(case.get("source_hazard"), SOURCE_HAZARD_VALUES_BY_CASE[case_id], f"{case_id}.source_hazard")
+    if case_id in PAYLOAD_VALUES_BY_CASE:
+        validate_exact_value(case.get("payloads"), PAYLOAD_VALUES_BY_CASE[case_id], f"{case_id}.payloads")
+    if case_id in SCHEDULE_VALUES_BY_CASE:
+        validate_exact_value(case.get("schedule_variants"), SCHEDULE_VALUES_BY_CASE[case_id], f"{case_id}.schedule_variants")
+    if case_id in RETENTION_OBSERVATION_VALUES_BY_CASE:
+        validate_exact_value(case.get("retention_observation"), RETENTION_OBSERVATION_VALUES_BY_CASE[case_id], f"{case_id}.retention_observation")
     timeline = events(case)
     validate_timeline_schema(case_id, timeline)
     names = [item["event"] for item in timeline]
@@ -805,6 +905,7 @@ def validate_case(case: dict[str, Any]) -> None:
     _, replayed_counts = action_counts(names)
     require(all(count == 0 for count in replayed_counts.values()), f"{case_id}: non-replayable action replay is forbidden")
     expected = require_keys(case.get("expected"), EXPECTED_FIELDS_BY_CASE[case_id], f"{case_id} expected")
+    validate_exact_value(expected, EXPECTED_VALUES_BY_CASE[case_id], f"{case_id}.expected")
 
     if case_id == "missing-attach-selects-legacy":
         missing_handle(case)
@@ -1062,14 +1163,16 @@ def validate_case(case: dict[str, Any]) -> None:
 
 
 def validate_fixtures(fixtures: dict[str, Any]) -> int:
+    require(type(fixtures) is dict, "fixtures must be an object")
     require(set(fixtures) == FIXTURE_ROOT_FIELDS, "fixture root fields changed")
-    require(fixtures.get("schema") == "hermternal.fixture.pty-attach.v1", "fixture schema changed")
-    require(fixtures.get("contract") == CONTRACT, "fixture contract changed")
-    require(fixtures.get("source_revision") == REVISION, "fixture source revision changed")
-    require(fixtures.get("surface") == "web-only", "PTY fixture surface must remain web-only")
-    require(fixtures.get("synthetic") is True, "fixtures must be synthetic")
+    validate_exact_value(fixtures.get("schema"), "hermternal.fixture.pty-attach.v1", "fixture.schema")
+    validate_exact_value(fixtures.get("contract"), CONTRACT, "fixture.contract")
+    validate_exact_value(fixtures.get("source_revision"), REVISION, "fixture.source_revision")
+    validate_exact_value(fixtures.get("surface"), "web-only", "fixture.surface")
+    validate_exact_value(fixtures.get("synthetic"), True, "fixture.synthetic")
     retention = require_keys(fixtures.get("retention"), RETENTION_FIELDS, "fixture retention")
-    require(retention == {"ttl_seconds": 1800, "buffer_cap_bytes": 1048576}, "retention contract changed")
+    validate_exact_value(retention, {"ttl_seconds": 1800, "buffer_cap_bytes": 1048576}, "fixture.retention")
+    validate_exact_value(fixtures.get("redaction"), {"raw_handles": False, "live_data": False, "credentials": False, "transcript_mirror": False}, "fixture.redaction")
     validate_redaction(fixtures, "fixture")
 
     cases = fixtures.get("cases")
@@ -1134,6 +1237,15 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
             "source.canonical_range_marker",
             "source.canonical_range_rationale",
             "source.secret_shaped_prose",
+            "fixture.kind_mismatch_malformed",
+            "fixture.kind_mismatch_expired",
+            "fixture.source_hazard_none",
+            "fixture.source_hazard_object",
+            "fixture.expected_state_none",
+            "fixture.expected_state_object",
+            "fixture.schedule_name_none",
+            "fixture.schedule_name_object",
+            "fixture.object_event_name",
             "fixture.reused_session_identity",
             "fixture.attach_handle_reference",
             "fixture.detach_socket_identity",
@@ -1287,6 +1399,24 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
 
     def mutate_source_secret_shaped_prose(mutated: dict[str, Any]) -> None:
         mutated["source"]["note"] = "Bearer abcdefghijkl"
+
+    def mutate_kind_mismatch(mutated: dict[str, Any], case_id: str, wrong_kind: str) -> None:
+        fixture_case(mutated, case_id)["kind"] = wrong_kind
+
+    def mutate_source_hazard_none(mutated: dict[str, Any]) -> None:
+        fixture_case(mutated, "expired-attach-fails-closed")["source_hazard"] = None
+
+    def mutate_source_hazard_object(mutated: dict[str, Any]) -> None:
+        fixture_case(mutated, "expired-attach-fails-closed")["source_hazard"] = {"text": "synthetic-hazard"}
+
+    def mutate_expected_state(mutated: dict[str, Any], value: Any) -> None:
+        fixture_case(mutated, "malformed-attach-fails-closed")["expected"]["state"] = value
+
+    def mutate_schedule_name(mutated: dict[str, Any], value: Any) -> None:
+        fixture_case(mutated, "retained-output-race")["schedule_variants"][0]["name"] = value
+
+    def mutate_object_event_name(mutated: dict[str, Any]) -> None:
+        fixture_case(mutated, "malformed-attach-fails-closed")["timeline"][0]["event"] = {"name": "client.validate_handle"}
 
     def mutate_reused_session_identity(mutated: dict[str, Any]) -> None:
         case = fixture_case(mutated, "attach-detach-reattach")
@@ -1493,6 +1623,16 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
     expect_source("source.canonical_range_rationale", "source evidence forges a range rationale", mutate_canonical_range_rationale)
     expect_source("source.secret_shaped_prose", "source evidence contains secret-shaped free prose", mutate_source_secret_shaped_prose)
 
+    expect_fixture("fixture.kind_mismatch_malformed", "malformed case uses the expired scenario kind", lambda mutated: mutate_kind_mismatch(mutated, "malformed-attach-fails-closed", "expired_handle"))
+    expect_fixture("fixture.kind_mismatch_expired", "expired case uses the malformed scenario kind", lambda mutated: mutate_kind_mismatch(mutated, "expired-attach-fails-closed", "malformed_handle"))
+    expect_fixture("fixture.source_hazard_none", "expired case omits source hazard text", mutate_source_hazard_none)
+    expect_fixture("fixture.source_hazard_object", "expired case uses an object source hazard", mutate_source_hazard_object)
+    expect_fixture("fixture.expected_state_none", "malformed case omits expected state", lambda mutated: mutate_expected_state(mutated, None))
+    expect_fixture("fixture.expected_state_object", "malformed case uses an object expected state", lambda mutated: mutate_expected_state(mutated, {"state": "failed"}))
+    expect_fixture("fixture.schedule_name_none", "race schedule omits its name", lambda mutated: mutate_schedule_name(mutated, None))
+    expect_fixture("fixture.schedule_name_object", "race schedule uses an object name", lambda mutated: mutate_schedule_name(mutated, {"name": "snapshot-first"}))
+    expect_fixture("fixture.object_event_name", "timeline event name is an object", mutate_object_event_name)
+
     expect_fixture("fixture.reused_session_identity", "registry reuse points at a different PTY session", mutate_reused_session_identity)
     expect_fixture("fixture.attach_handle_reference", "attach handle reference differs from expected identity", mutate_attach_handle_reference)
     expect_fixture("fixture.detach_socket_identity", "registry detach targets the replacement socket", mutate_detach_socket_identity)
@@ -1657,6 +1797,8 @@ def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None)
         require(isinstance(contract_semantics.get("summary"), str), f"{observation_id}: contract summary must be text")
         require(isinstance(source_semantics.get("assertions"), dict), f"{observation_id}: source assertions must be an object")
         require(isinstance(contract_semantics.get("assertions"), dict), f"{observation_id}: contract assertions must be an object")
+        validate_exact_value(source_semantics, expected["source_observation"], f"{observation_id}.source_observation")
+        validate_exact_value(contract_semantics, expected["contract_result"], f"{observation_id}.contract_result")
         source_ranges = observation.get("source_ranges")
         require(isinstance(source_ranges, list) and source_ranges, f"{observation_id}: source ranges are required")
         parsed_ranges = []
@@ -1731,7 +1873,7 @@ def main(argv: list[str] | None = None) -> int:
                 mutation_count,
                 args.source_root is not None,
             )
-    except AssertionError as exc:
+    except VALIDATION_FAILURES as exc:
         print(f"validation failed: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:

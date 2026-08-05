@@ -30,6 +30,8 @@ No Hermes code is vendored or executed by this repository. All fixture identifie
 
 The standard-library validator requires the exact unique three-file audit set, binds each observation ID to its exact expected range set, and compares required structured `source_observation` and `contract_result` semantics plus their prose. It rejects duplicate or omitted audited files, wrong-but-valid ranges, missing semantic fields, false prose, or a syntactically valid but unaudited source range. The recorded observations explain the contract guard where the pinned implementation is permissive. A later Hermes revision requires a new source audit; matching only the route name is not compatibility evidence. The same redaction and no-raw-handle policy applies to both fixture and source-evidence JSON.
 
+Each fixture ID has one exact scenario kind, and every required leaf has a closed type and allowed value, including expected outcomes, source-hazard prose, race schedule names/orders, identities, handles, payload metadata, and retention measurements. Type guards run before set membership or string operations, and the CLI converts malformed object-shaped values into a deterministic validation failure without a traceback.
+
 ## Fixtures
 
 `pty-attach-fixtures.json` is a deterministic, language-neutral set with these cases:
