@@ -1,0 +1,208 @@
+{
+  "schema": "hermternal.compatibility-gate.v1",
+  "operation": "P0-02",
+  "contract": "dashboard-v0.0.1",
+  "source": {
+    "repository": "NousResearch/hermes-agent",
+    "sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e"
+  },
+  "merged_dev": {
+    "ref": "dev",
+    "head": "8465bd4cacc87fe62ff952c38d7f3c2b5927bfbd",
+    "tree": "aede9b87932f5cc28462120ef28be52a9a4aba7f",
+    "merged_prs": [
+      {
+        "number": 221,
+        "merge_commit": "203dfca63eb073e5d4ddc27921447b5d0ab64a51"
+      },
+      {
+        "number": 216,
+        "merge_commit": "8465bd4cacc87fe62ff952c38d7f3c2b5927bfbd"
+      },
+      {
+        "number": 218,
+        "merge_commit": "c3c29992a85737dc0487772947780ed3239705fd"
+      },
+      {
+        "number": 219,
+        "merge_commit": "41211da8e27c4dceeeac5782208d8140034a19de"
+      },
+      {
+        "number": 220,
+        "merge_commit": "f32d4782b041a12347acba2d7d36172594dec6f7"
+      }
+    ]
+  },
+  "artifacts": {
+    "algorithm": "sha256",
+    "files": [
+      {
+        "path": "contracts/fixtures/source-audit/model-options/absent.json",
+        "sha256": "c850fa9d5276ab6f0a3929c9f97bc8b997df9c78ddaf404dd05006c1b9553637",
+        "size_bytes": 769
+      },
+      {
+        "path": "contracts/fixtures/source-audit/model-options/empty.json",
+        "sha256": "12b8e155cba83bb50efbef4dda698b844a451454d5580465f4c1a3b7059ca74d",
+        "size_bytes": 815
+      },
+      {
+        "path": "contracts/fixtures/source-audit/model-options/malformed.json",
+        "sha256": "e75fe09973cd14cd618601d0d3b180ba8a7dac7f63874df2ccfd1956b3a88054",
+        "size_bytes": 987
+      },
+      {
+        "path": "contracts/fixtures/source-audit/model-options/present.json",
+        "sha256": "c9850521d8d0deb1a571d3284d7f1f994550871d10ad5b6a1823b9ab2edb4d3a",
+        "size_bytes": 1275
+      },
+      {
+        "path": "contracts/fixtures/source-audit/model-options/test_model_options.py",
+        "sha256": "35cbd50542f7cafb3322ab240a4320c87b7523079aee14f484f4789e6c696a9d",
+        "size_bytes": 29971
+      },
+      {
+        "path": "contracts/fixtures/source-audit/model-options/unknown-operation.json",
+        "sha256": "84195ae496a31c5e9d484e2634832c70a117138fa133d6d6f3c1427ce08ff23b",
+        "size_bytes": 835
+      },
+      {
+        "path": "contracts/fixtures/source-audit/native-bearer/README.md",
+        "sha256": "0dd3d1b68658107bd3b7ec5cee236ef196e4dc34f82edd9426eb1a0cb1787308",
+        "size_bytes": 5677
+      },
+      {
+        "path": "contracts/fixtures/source-audit/native-bearer/cases.json",
+        "sha256": "56d5c98a29672d8b383c1f0200abd389ea945d54b722313db088de7360274439",
+        "size_bytes": 22650
+      },
+      {
+        "path": "contracts/fixtures/source-audit/native-bearer/source_audit.json",
+        "sha256": "bc12353629eceaf157ba6320cafcf8e8393d001c41390f14449b14daf682ff70",
+        "size_bytes": 17900
+      },
+      {
+        "path": "contracts/fixtures/source-audit/native-bearer/test_native_bearer.py",
+        "sha256": "2ae703faf534e3460ce31e05d1b5e789cf6b51777120cf6a241b3dbb2f71620b",
+        "size_bytes": 35389
+      },
+      {
+        "path": "contracts/fixtures/source-audit/oauth-browser/README.md",
+        "sha256": "274dc2a26553b937c77e8e5d0fb51cc1aa85bb1e7b2d6e44c4cbdc3701e8f45e",
+        "size_bytes": 7378
+      },
+      {
+        "path": "contracts/fixtures/source-audit/oauth-browser/cases.json",
+        "sha256": "a0961278dc2f34562b16ab7d30776972d12d201de74edd7e08463cdbd5f50178",
+        "size_bytes": 7512
+      },
+      {
+        "path": "contracts/fixtures/source-audit/oauth-browser/source_audit.json",
+        "sha256": "7b7758611a9aeb520353b473e6af00136a229d623ea77c806f49f2c2c5b3e131",
+        "size_bytes": 6881
+      },
+      {
+        "path": "contracts/fixtures/source-audit/oauth-browser/source_excerpts/cookies.py.txt",
+        "sha256": "4061f5e075fee015151a14ab75c7b77661400bb2ec0fa402559c0d49cae36f3e",
+        "size_bytes": 418
+      },
+      {
+        "path": "contracts/fixtures/source-audit/oauth-browser/source_excerpts/nous_provider.py.txt",
+        "sha256": "53f633d5e405459ad0d042470e06af545fad6d1d02b86f23a473ece283ce8c87",
+        "size_bytes": 1898
+      },
+      {
+        "path": "contracts/fixtures/source-audit/oauth-browser/source_excerpts/routes_auth.py.txt",
+        "sha256": "7a748fc29acee3d055049f0b1a12bba9e7d8aa13bc4852827888a0ebaaa507b4",
+        "size_bytes": 3456
+      },
+      {
+        "path": "contracts/fixtures/source-audit/oauth-browser/test_oauth_browser.py",
+        "sha256": "0445ff899949e29a760c1dff2471100914f0fa608e25f588804fd2bd101a8396",
+        "size_bytes": 61959
+      },
+      {
+        "path": "contracts/fixtures/source-audit/planning-reconciliation/README.md",
+        "sha256": "39cd6aae225fe883a87558d2a52ba7800424ed269aa553f850a3071d25beb89d",
+        "size_bytes": 4870
+      },
+      {
+        "path": "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
+        "sha256": "0a84cba82e6e966ab35de187f560fd38d6e10c43dd2204062d6ebf2bc5c32077",
+        "size_bytes": 20045
+      },
+      {
+        "path": "contracts/fixtures/source-audit/planning-reconciliation/test_validate.py",
+        "sha256": "4e912278671dc7809216fc26e280e191cf7279180186d45390b41b892b24407f",
+        "size_bytes": 23038
+      },
+      {
+        "path": "contracts/fixtures/source-audit/planning-reconciliation/validate.py",
+        "sha256": "09f5b87f7ebb49de73a706508ab2ec26ac4b8bd734c6532a16d0b7ddd6c26587",
+        "size_bytes": 51103
+      },
+      {
+        "path": "contracts/fixtures/source-audit/pty-attach/README.md",
+        "sha256": "3f1172482e5b0373ebbfbc9b4b5a85104a324fa801b9fe6f9da3a5b2a25e586b",
+        "size_bytes": 7940
+      },
+      {
+        "path": "contracts/fixtures/source-audit/pty-attach/pty-attach-fixtures.json",
+        "sha256": "0e32d184fa2ef693a126ecfc284eb6566fd2b0e55f662003c3f36f2209456d7a",
+        "size_bytes": 16276
+      },
+      {
+        "path": "contracts/fixtures/source-audit/pty-attach/source-evidence.json",
+        "sha256": "90291fcff446327a2c5f13758d3d6d78efe076ebbc78fb5fc72f1c5d7bd97fc3",
+        "size_bytes": 10812
+      },
+      {
+        "path": "contracts/fixtures/source-audit/pty-attach/validate.py",
+        "sha256": "14c312b23037e7a23495ccce169ad4c26fd3b2917b7229dd508c5867cbbba694",
+        "size_bytes": 115214
+      },
+      {
+        "path": "contracts/fixtures/source-audit/pty-attach/validation-baseline.json",
+        "sha256": "496f989e8a0399ff1eef0f98c66186014e40668633d99786619b1f5d24149d6d",
+        "size_bytes": 460
+      },
+      {
+        "path": "contracts/hermes-dashboard/model-options/README.md",
+        "sha256": "593cd24515b8a6c2f12a9fadd28964c88ba74ce0c882c6f0116cb9c532fb5cbd",
+        "size_bytes": 4785
+      },
+      {
+        "path": "contracts/hermes-dashboard/model-options/source-audit.json",
+        "sha256": "3f0f4c65360fbf0dd9e08529e37b1649386a09a8fa7ace00d86ce74d2e310869",
+        "size_bytes": 2561
+      }
+    ],
+    "set_sha256": "be8cc598bfef973560a26d04d00e9d44aa17d4b9f37240f2d90d7c93ea34c3cd"
+  },
+  "status": {
+    "compatible": false,
+    "live_run": false,
+    "deployment_attestation": "absent",
+    "behavioral_probe": "not_run",
+    "proxy_proof": "not_run",
+    "parity_evidence": "not_recorded",
+    "benchmark_evidence": "not_recorded"
+  },
+  "redaction": {
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_hosts": false,
+    "contains_raw_tickets": false,
+    "contains_prompts": false,
+    "contains_transcripts": false,
+    "contains_pty_bytes": false
+  },
+  "blockers": [
+    "deployment_attestation_absent",
+    "behavioral_probe_not_run",
+    "proxy_proof_not_run",
+    "parity_and_accessibility_evidence_not_recorded",
+    "benchmark_evidence_not_recorded",
+    "fixture_only_scope_cannot_close_live_compatibility_gate"
+  ]
+}
