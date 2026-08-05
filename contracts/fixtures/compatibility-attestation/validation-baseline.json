@@ -1,0 +1,42 @@
+{
+  "schema": "hermternal.revision-attestation-baseline.v1",
+  "validator": "contracts/fixtures/compatibility-attestation/validate.py",
+  "command": "python3 contracts/fixtures/compatibility-attestation/validate.py",
+  "build_mode": "N/A",
+  "artifact_files": [
+    {
+      "path": "contracts/fixtures/compatibility-attestation/README.md",
+      "size_bytes": 6045
+    },
+    {
+      "path": "contracts/fixtures/compatibility-attestation/revision_attestation.json",
+      "size_bytes": 1679
+    },
+    {
+      "path": "contracts/fixtures/compatibility-attestation/cases.json",
+      "size_bytes": 6931
+    },
+    {
+      "path": "contracts/fixtures/compatibility-attestation/validate.py",
+      "size_bytes": 26873
+    },
+    {
+      "path": "contracts/fixtures/compatibility-attestation/test_validate.py",
+      "size_bytes": 4798
+    }
+  ],
+  "artifact_bytes": 46326,
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "repetitions": 30,
+  "duration_ms": {
+    "min": 76.323,
+    "p50": 80.679,
+    "p95": 91.231,
+    "max": 96.954,
+    "mean": 82.327
+  },
+  "threshold": null
+}
