@@ -400,13 +400,13 @@
     "source_verified": false,
     "repetitions": 7,
     "distribution_ms": {
-      "min": 1.669791,
-      "median": 1.690541,
-      "p95": 1.795625,
-      "max": 1.795625,
-      "mean": 1.711339142857143
+      "min": 5.852375,
+      "median": 6.099875,
+      "p95": 6.210583,
+      "max": 6.210583,
+      "mean": 6.087309428571428
     },
-    "artifact_size_bytes": 97608,
+    "artifact_size_bytes": 123795,
     "environment": {
       "python": "3.14.6",
       "implementation": "CPython",

@@ -76,6 +76,14 @@ The client may use the active profile's session family:
 | `GET` | `/api/sessions/{session_id}/messages` | Restore the server transcript projection. |
 | `PATCH` | `/api/sessions/{session_id}` | Update supported session metadata only when a reviewed fixture covers the operation. |
 
+The `session_id` placeholder is an opaque ASCII single-segment value: one
+character, or 2–128 characters with an ASCII letter or digit at both ends and
+only ASCII letters, digits, `.`, `_`, `-`, or `~` internally. Matching is exact
+and non-normalizing: the client does not URL-decode, strip, resolve dot
+segments, or apply broad prefixes. Query strings, fragments, percent escapes
+(including encoded slashes), controls, non-ASCII, backslashes, empty or double
+segments, trailing slashes, `.`, `..`, and ticket-bearing values are rejected.
+
 The client does not mirror the transcript in local storage. A memory cache may render the current view. The server remains the source of truth after refresh, reconnect, resume, or process restart.
 
 Session creation, resume, interruption, close, and chat turns use the JSON-RPC channel below. A newly created empty session is not durable until the first prompt causes Hermes to persist it. Bulk delete, import, prune, profile session views, and profile management are blocked.

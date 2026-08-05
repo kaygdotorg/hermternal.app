@@ -13,6 +13,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import platform
 import re
 import statistics
@@ -35,6 +36,40 @@ PINNED_TREE_SHA = "886db5eb1150f819344d67fedc81aef0caab09ff"
 REPOSITORY = "NousResearch/hermes-agent"
 REPOSITORY_URL = "https://github.com/NousResearch/hermes-agent"
 AUDIT_ID = "route-allowlist-c01-f5be9236"
+BASELINE_REPETITIONS = 7
+README_PATH = ROOT / "README.md"
+MANIFEST_PATH = ROOT.parent.parent / "hermes-dashboard" / "manifest.md"
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._~-]{0,126}[A-Za-z0-9])?\Z")
+
+
+EXPECTED_AUDIT_SCOPE = {
+    "purpose": "Freeze the reviewed Hermternal client Dashboard route, upgrade, JSON-RPC operation, and event allowlist from pinned source evidence.",
+    "source_inventory_complete": False,
+    "client_allowlist_complete": True,
+    "future_external_proxy_allowlist": "not_frozen",
+    "live_compatibility": False,
+    "integration_mode": "mock_and_proof_only",
+    "source_root_verification": "optional_git_checkout_or_content_only_snapshot",
+    "unknown_policy": "default_deny",
+}
+EXPECTED_REDACTION = {
+    "synthetic_only": True,
+    "raw_credentials": False,
+    "raw_cookies": False,
+    "raw_bearer_values": False,
+    "raw_websocket_tickets": False,
+    "raw_pty_handles": False,
+    "transcripts": False,
+    "hostnames": False,
+    "user_data": False,
+    "log_policy": "record credential class and bounded rejection reason only; never raw ticket, bearer, PTY input, PTY output, or transcript",
+}
+EXPECTED_ACCESSIBILITY = {
+    "status": "N/A",
+    "reason": "C-01 freezes protocol and source-audit artifacts only; it adds no UI, interaction, focus order, semantics, Dynamic Type, VoiceOver, Switch Control, browser zoom, contrast, motion, transparency, or touch-target surface.",
+    "preservation": "The allowlist does not remove or redefine the existing web and native accessibility obligations in the Hermternal product contracts.",
+}
+EXPECTED_FUTURE_PROXY_NOTE = "A reverse proxy or external gateway must receive a separate reviewed allowlist; this client contract is not proxy authorization and does not grant broader upstream access."
 
 
 class ContractError(ValueError):
@@ -71,14 +106,40 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _reject_nonfinite_json_constant(value: str) -> Any:
+    raise ContractError(f"non-finite JSON number is not allowed: {value}")
+
+
 def load_json(path: Path) -> dict[str, Any]:
     try:
         with path.open(encoding="utf-8") as stream:
-            value = json.load(stream, object_pairs_hook=_reject_duplicate_keys)
+            value = json.load(
+                stream,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
     except (ContractError, OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ContractError(f"{path}: invalid JSON input: {exc}") from None
     _require(isinstance(value, dict), f"{path}: top level must be an object")
     return value
+
+
+def _validate_json_tree(value: Any, context: str = "document") -> None:
+    """Reject non-JSON objects and non-finite floats before schema checks."""
+
+    if type(value) is dict:
+        for key, child in value.items():
+            _require(type(key) is str, f"{context}: object key must be string")
+            _validate_json_tree(child, f"{context}.{key}")
+        return
+    if type(value) is list:
+        for index, child in enumerate(value):
+            _validate_json_tree(child, f"{context}[{index}]")
+        return
+    if type(value) is float:
+        _require(math.isfinite(value), f"{context}: non-finite number is not allowed")
+        return
+    _require(value is None or type(value) in (str, bool, int), f"{context}: unsupported JSON value type")
 
 
 def _keyset(value: dict[str, Any], expected: set[str], context: str) -> None:
@@ -295,6 +356,113 @@ EXPECTED_CITATION_FILES = {
     "chat-events": ("tui_gateway/server.py", [1726, 5604], "e4bd9009827ffd224cc85c8b17ad7baba0f560d643d688e265be5a06fe8ba29c", "9d5fd00ce7d0becfd4581a5a3867c516a6d3b20a"),
 }
 
+EXPECTED_CITATION_SEMANTICS: dict[str, tuple[tuple[str, ...], str]] = {
+    "rest-auth-routes": (
+        (
+            '@router.get("/login"', '@router.get("/api/auth/providers"',
+            '@router.get("/auth/login"', '@router.get("/auth/native/authorize"',
+            '@router.get("/auth/callback"', '@router.post("/auth/password-login"',
+            '@router.post("/auth/logout"', '@router.get("/api/auth/me"',
+            '@router.post("/api/auth/ws-ticket"', '@router.post("/auth/native/token"',
+            '@router.post("/auth/native/refresh"', "/api/console",
+        ),
+        "The selected authentication and identity REST route decorators are present; the ticket doc names additional source-sidecar upgrade paths that are not client allowlisted.",
+    ),
+    "rest-session-routes": (
+        (
+            '@list_router.get("/api/sessions")', '@search_router.get("/api/sessions/search")',
+            '@manage_router.get("/api/sessions/{session_id}")',
+            '@manage_router.get("/api/sessions/{session_id}/messages")',
+            '@manage_router.patch("/api/sessions/{session_id}")',
+        ),
+        "The five selected session REST method/path pairs are present; neighboring source routes such as delete and latest-descendant remain outside the client allowlist.",
+    ),
+    "rest-image-upload": (
+        ('@app.post("/api/chat/image-upload")',),
+        "The selected image-only upload route is present. Arbitrary file, filesystem, and media routes are not granted by this evidence.",
+    ),
+    "rest-model-options": (
+        ('@app.get("/api/model/options")', 'REST equivalent of the ``model.options`` JSON-RPC'),
+        "A source-present REST equivalent exists, but the focused client fixture freezes the JSON-RPC operation and does not add this REST transport to the Hermternal allowlist.",
+    ),
+    "source-public-paths": (
+        (
+            "PUBLIC_API_PATHS", '"/api/health"', '"/api/status"', '"/api/config/defaults"',
+            '"/api/config/schema"', '"/api/model/info"', '"/api/dashboard/themes"',
+            '"/api/dashboard/plugins"', '"/api/cron/fire"',
+        ),
+        "The pinned source's exact public API bypass inventory is recorded as source evidence; public does not mean client-approved.",
+    ),
+    "source-public-prefixes": (
+        ('_GATE_PUBLIC_PREFIXES', '"/api/mcp/oauth/callback/"', '"/assets/"', 'path == prefix or path.startswith(prefix)'),
+        "Source public-prefix matching uses exact equality or source prefix semantics; client route matching remains exact and default-deny.",
+    ),
+    "native-bearer": (
+        ('Authorization: Bearer <access_token>', 'if bearer:', 'return _unauth_response(request, reason="invalid_or_expired_session")'),
+        "Reviewed native bearer requests use the provider stack; a presented invalid bearer is rejected without cookie fallback.",
+    ),
+    "ticket-lifecycle": (
+        ('TTL_SECONDS = 30', 'entry = _tickets.pop(ticket, None)', 'truncated = (ticket[:8] + "…") if ticket else "<empty>"', 'raise TicketInvalid("expired")'),
+        "Gated WebSocket tickets are 30-second, single-use values and invalid-ticket diagnostics retain only a bounded fragment.",
+    ),
+    "websocket-auth": (
+        ('def _ws_auth_mode()', '?ticket=<single-use>', '?internal=<process-credential>', 'The legacy ``?token=`` path is unconditionally rejected in gated mode', 'audit_log(', 'path=ws.url.path'),
+        "Gated upgrades accept a fresh ticket or server-internal credential; the legacy query token is only for non-gated local mode, and audit logging identifies credential type without recording the raw ticket.",
+    ),
+    "chat-websocket": (
+        ('@app.websocket("/api/ws")', 'await handle_ws(ws)'),
+        "The selected structured chat upgrade is the Dashboard /api/ws WebSocket.",
+    ),
+    "pty-websocket": (
+        ('_RESIZE_RE = re.compile(rb"\\x1b\\[RESIZE:(\\d+);(\\d+)\\]")', 'ttl=30 * 60', 'buffer_cap=1 * 1024 * 1024', '@app.websocket("/api/pty")', 'attach_token = ws.query_params.get("attach") or None', 'PTY_REGISTRY.detach(attach_token, ws)'),
+        "The full PTY upgrade is web-only, source-defined as an attachable POSIX/WSL surface with bounded replay and detach behavior; native clients do not use it in v0.0.1.",
+    ),
+    "source-sidecar-surfaces": (
+        ('/api/pub', '/api/events', '@app.websocket("/api/pub")', '@app.websocket("/api/events")'),
+        "Source-sidecar pub/events channels exist for the embedded TUI but are outside the direct Hermternal client route allowlist.",
+    ),
+    "blocked-management-routes": (
+        ('@app.get("/api/media")', '@app.get("/api/files")', '@app.get("/api/ssh/ownership")', '@app.post("/api/gateway/restart")', '@app.post("/api/gateway/drain")'),
+        "Source-present filesystem, SSH, media, and gateway-management routes are blocked from the Hermternal client allowlist; conditional drain behavior remains covered by the native-bearer audit instead.",
+    ),
+    "pty-resize": (
+        ('_MIN_DIMENSION = 1', '_MAX_COLS = 2000', '_MAX_ROWS = 1000'),
+        "The source bounds PTY dimensions to 1-2000 columns and 1-1000 rows.",
+    ),
+    "pty-lifecycle": (
+        ('WS_CLOSE_PROCESS_EXITED = 4410', 'WS_CLOSE_SUPERSEDED = 4409', 'await ws.send_bytes(snap)', 'if self._ws is not ws:', '(now - s.last_detached_at) > self._ttl'),
+        "The source retains bounded output, supersedes stale sockets with 4409, preserves a valid attach session, and reaps detached sessions after the TTL.",
+    ),
+    "chat-transport": (
+        ('newline-delimited JSON-RPC', '@app.websocket("/api/ws")', '"message.delta"', '"reasoning.delta"', '"thinking.delta"', 'gateway.ready', '"parse error"', '"internal error"'),
+        "The selected chat transport uses JSON-RPC over /api/ws and exposes the ready, streaming, and parse/dispatch error observations frozen by the client contract.",
+    ),
+    "rpc-session-methods": (
+        ('@method("session.create")', '@method("session.list")', '@method("session.most_recent")', '@method("session.resume")', '@method("session.active_list")', '@method("session.status")', '@method("session.history")', '@method("session.close")', '@method("session.interrupt")'),
+        "The selected session and interrupt JSON-RPC decorators are present; adjacent session-management methods are not client-approved.",
+    ),
+    "rpc-prompt-methods": (
+        ('@method("prompt.submit")', '@method("clarify.respond")', '@method("approval.respond")', '@method("sudo.respond")', '@method("secret.respond")'),
+        "Prompt submission and approval/clarification responses are selected; terminal-read, sudo, secret, and other adjacent operations are not approved.",
+    ),
+    "rpc-model-options": (
+        ('@method("model.options")',),
+        "The pinned gateway registers model.options; the fixture uses this JSON-RPC operation rather than inventing a REST dependency.",
+    ),
+    "rpc-config-set": (
+        ('@method("config.set")', 'if key == "model":'),
+        "config.set is selected only with the source-defined model key; other configuration keys are blocked.",
+    ),
+    "model-options-builder": (
+        ('"providers": rows', '"model": ctx.current_model', '"provider": ctx.current_provider', 'def build_model_options_payload('),
+        "The shared model-options builder supplies the source-defined providers/model/provider result shape.",
+    ),
+    "chat-events": (
+        ('"session.info"', '"approval.request"', '"clarify.request"', '"error"', '"tool.start"', '"tool.complete"', '"message.complete"'),
+        "The selected session, tool, approval, clarification, completion, and error event emissions are present.",
+    ),
+}
+
 
 def _validate_source_citations(audit: dict[str, Any]) -> None:
     citations = audit["source_citations"]
@@ -308,14 +476,14 @@ def _validate_source_citations(audit: dict[str, Any]) -> None:
         _keyset(citation, {"id", "path", "lines", "markers", "sha256", "git_blob_sha", "url", "claim"}, context)
         citation_id = _string(citation["id"], f"{context}.id")
         expected_path, expected_lines, expected_sha, expected_blob = EXPECTED_CITATION_FILES[citation_id]
-        _require(citation["path"] == expected_path, f"{context}: path changed")
+        expected_markers, expected_claim = EXPECTED_CITATION_SEMANTICS[citation_id]
+        _require(type(citation["path"]) is str and citation["path"] == expected_path, f"{context}: path changed")
         _require(_strict_equal(citation["lines"], expected_lines), f"{context}: line range changed")
-        _require(citation["sha256"] == expected_sha, f"{context}: source digest changed")
-        _require(citation["git_blob_sha"] == expected_blob, f"{context}: Git blob changed")
-        _require(citation["url"] == f"{REPOSITORY_URL}/blob/{PINNED_SHA}/{expected_path}", f"{context}: pinned URL changed")
-        _require(isinstance(citation["markers"], list) and citation["markers"], f"{context}: markers required")
-        _require(all(type(marker) is str and marker for marker in citation["markers"]), f"{context}: invalid marker")
-        _require(type(citation["claim"]) is str and citation["claim"], f"{context}: claim required")
+        _require(type(citation["sha256"]) is str and citation["sha256"] == expected_sha, f"{context}: source digest changed")
+        _require(type(citation["git_blob_sha"]) is str and citation["git_blob_sha"] == expected_blob, f"{context}: Git blob changed")
+        _require(type(citation["url"]) is str and citation["url"] == f"{REPOSITORY_URL}/blob/{PINNED_SHA}/{expected_path}", f"{context}: pinned URL changed")
+        _require(_strict_equal(citation["markers"], list(expected_markers)), f"{context}: markers changed")
+        _require(type(citation["claim"]) is str and citation["claim"] == expected_claim, f"{context}: claim changed")
         parsed = urlsplit(citation["url"])
         _require(parsed.scheme == "https" and parsed.netloc == "github.com", f"{context}: untrusted source URL")
         _require(not parsed.query and not parsed.fragment, f"{context}: source URL has query or fragment")
@@ -332,40 +500,45 @@ def validate_audit(audit: dict[str, Any]) -> None:
     _require(audit["hermes_repository_url"] == REPOSITORY_URL, "audit: repository URL changed")
     _require(audit["hermes_source_sha"] == PINNED_SHA, "audit: source SHA changed")
     _require(audit["hermes_tree_sha"] == PINNED_TREE_SHA, "audit: tree SHA changed")
-    _keyset(audit["audit_scope"], {"purpose", "source_inventory_complete", "client_allowlist_complete", "future_external_proxy_allowlist", "live_compatibility", "integration_mode", "source_root_verification", "unknown_policy"}, "audit scope")
-    _require(audit["audit_scope"]["source_inventory_complete"] is False, "audit: upstream inventory must not be claimed complete")
-    _require(audit["audit_scope"]["client_allowlist_complete"] is True, "audit: client allowlist must be frozen")
-    _require(audit["audit_scope"]["future_external_proxy_allowlist"] == "not_frozen", "audit: future proxy status changed")
-    _require(audit["audit_scope"]["live_compatibility"] is False, "audit: live compatibility must not be claimed")
-    _require(audit["audit_scope"]["integration_mode"] == "mock_and_proof_only", "audit: integration mode changed")
-    _require(audit["audit_scope"]["unknown_policy"] == "default_deny", "audit: unknown policy changed")
+    _keyset(audit["audit_scope"], set(EXPECTED_AUDIT_SCOPE), "audit scope")
+    _require(_strict_equal(audit["audit_scope"], EXPECTED_AUDIT_SCOPE), "audit: scope semantics changed")
     _validate_source_citations(audit)
     _keyset(audit["blocked_examples"], {"rest_management", "json_rpc_sensitive", "reason"}, "blocked examples")
-    _require(audit["blocked_examples"]["rest_management"] == ["GET /api/config/defaults", "GET /api/config/schema", "GET /api/dashboard/plugins", "POST /api/gateway/restart", "GET /api/files", "GET /api/ssh/ownership"], "audit: blocked REST examples changed")
-    _require(audit["blocked_examples"]["json_rpc_sensitive"] == ["session.delete", "session.activate", "session.title", "message.react", "llm.oneshot", "model.save_key", "model.disconnect", "complete.path", "complete.slash", "sudo.respond", "secret.respond", "terminal.read.respond", "file.attach"], "audit: blocked JSON-RPC examples changed")
-    _keyset(audit["redaction"], {"synthetic_only", "raw_credentials", "raw_cookies", "raw_bearer_values", "raw_websocket_tickets", "raw_pty_handles", "transcripts", "hostnames", "user_data", "log_policy"}, "redaction")
-    for key in ("synthetic_only", "raw_credentials", "raw_cookies", "raw_bearer_values", "raw_websocket_tickets", "raw_pty_handles", "transcripts", "hostnames", "user_data"):
-        expected = key == "synthetic_only"
-        _require(audit["redaction"][key] is expected, f"redaction: {key} changed")
-    _require("raw ticket" in audit["redaction"]["log_policy"] and "PTY input" in audit["redaction"]["log_policy"] and "PTY output" in audit["redaction"]["log_policy"], "redaction: log policy is incomplete")
-    _keyset(audit["accessibility"], {"status", "reason", "preservation"}, "accessibility")
-    _require(audit["accessibility"]["status"] == "N/A", "accessibility: non-UI status changed")
-    _require("no UI" in audit["accessibility"]["reason"] or "no user-facing" in audit["accessibility"]["reason"], "accessibility: N/A reason missing")
-    _require(type(audit["accessibility"]["preservation"]) is str and audit["accessibility"]["preservation"], "accessibility: preservation rationale missing")
+    _require(_strict_equal(audit["blocked_examples"]["rest_management"], ["GET /api/config/defaults", "GET /api/config/schema", "GET /api/dashboard/plugins", "POST /api/gateway/restart", "GET /api/files", "GET /api/ssh/ownership"]), "audit: blocked REST examples changed")
+    _require(_strict_equal(audit["blocked_examples"]["json_rpc_sensitive"], ["session.delete", "session.activate", "session.title", "message.react", "llm.oneshot", "model.save_key", "model.disconnect", "complete.path", "complete.slash", "sudo.respond", "secret.respond", "terminal.read.respond", "file.attach"]), "audit: blocked JSON-RPC examples changed")
+    _keyset(audit["redaction"], set(EXPECTED_REDACTION), "redaction")
+    _require(_strict_equal(audit["redaction"], EXPECTED_REDACTION), "redaction: semantics changed")
+    _keyset(audit["accessibility"], set(EXPECTED_ACCESSIBILITY), "accessibility")
+    _require(_strict_equal(audit["accessibility"], EXPECTED_ACCESSIBILITY), "accessibility: semantics changed")
     _validate_baseline(audit["baseline"])
+
+
+def _finite_nonnegative_number(value: Any, context: str) -> int | float:
+    _require(type(value) in (int, float) and not isinstance(value, bool), f"{context}: expected numeric value")
+    try:
+        finite = math.isfinite(value)
+    except (OverflowError, TypeError):
+        finite = False
+    _require(finite, f"{context}: expected finite value")
+    _require(value >= 0, f"{context}: expected non-negative value")
+    return value
 
 
 def _validate_baseline(baseline: dict[str, Any]) -> None:
     _keyset(baseline, {"raw_command", "validator", "build_mode", "source_verified", "repetitions", "distribution_ms", "artifact_size_bytes", "environment", "threshold"}, "baseline")
-    _require(baseline["raw_command"] == "python3 contracts/fixtures/route-allowlist/test_route_allowlist.py", "baseline: raw command changed")
-    _require(baseline["validator"] == "Python standard library only", "baseline: validator changed")
-    _require(baseline["build_mode"].startswith("N/A"), "baseline: build mode must be N/A")
-    _require(baseline["source_verified"] is False, "baseline: source verification must be explicit")
+    _require(_string(baseline["raw_command"], "baseline.raw_command") == "python3 contracts/fixtures/route-allowlist/test_route_allowlist.py", "baseline: raw command changed")
+    _require(_string(baseline["validator"], "baseline.validator") == "Python standard library only", "baseline: validator changed")
+    _require(_string(baseline["build_mode"], "baseline.build_mode").startswith("N/A"), "baseline: build mode must be N/A")
+    _require(_bool(baseline["source_verified"], "baseline.source_verified") is False, "baseline: source verification must be explicit")
     repetitions = _int(baseline["repetitions"], "baseline.repetitions")
-    _require(repetitions >= 3, "baseline: repetitions must be at least three")
+    _require(repetitions == BASELINE_REPETITIONS, f"baseline: repetitions must equal {BASELINE_REPETITIONS}")
     _keyset(baseline["distribution_ms"], {"min", "median", "p95", "max", "mean"}, "baseline distribution")
-    for key, value in baseline["distribution_ms"].items():
-        _require(type(value) in (int, float) and not isinstance(value, bool) and value >= 0, f"baseline distribution {key}: invalid number")
+    distribution = {
+        key: _finite_nonnegative_number(baseline["distribution_ms"][key], f"baseline.distribution_ms.{key}")
+        for key in ("min", "median", "p95", "max", "mean")
+    }
+    _require(distribution["min"] <= distribution["median"] <= distribution["p95"] <= distribution["max"], "baseline: quantile ordering is incoherent")
+    _require(distribution["min"] <= distribution["mean"] <= distribution["max"], "baseline: mean is outside observed range")
     _nonnegative_int(baseline["artifact_size_bytes"], "baseline.artifact_size_bytes")
     _keyset(baseline["environment"], {"python", "implementation", "platform", "machine"}, "baseline environment")
     for key, value in baseline["environment"].items():
@@ -380,7 +553,7 @@ def validate_allowlist(allowlist: dict[str, Any], audit: dict[str, Any]) -> None
     _require(allowlist["hermes_source_sha"] == PINNED_SHA, "allowlist: source SHA changed")
     _require(allowlist["source_audit_id"] == AUDIT_ID == audit["audit_id"], "allowlist: source audit binding changed")
     _keyset(allowlist["policy"], {"default_route_decision", "default_operation_decision", "unknown_event_policy", "source_inventory_complete", "client_allowlist_is_conservative", "future_proxy_allowlist_separate", "live_compatibility_claim"}, "allowlist policy")
-    _require(allowlist["policy"] == {"default_route_decision": "deny", "default_operation_decision": "deny", "unknown_event_policy": "ignore_additive_noninteractive_only", "source_inventory_complete": False, "client_allowlist_is_conservative": True, "future_proxy_allowlist_separate": True, "live_compatibility_claim": False}, "allowlist: policy changed")
+    _require(_strict_equal(allowlist["policy"], {"default_route_decision": "deny", "default_operation_decision": "deny", "unknown_event_policy": "ignore_additive_noninteractive_only", "source_inventory_complete": False, "client_allowlist_is_conservative": True, "future_proxy_allowlist_separate": True, "live_compatibility_claim": False}), "allowlist: policy changed")
 
     source = allowlist["source_present"]
     _keyset(source, {"inventory_status", "public_bypass_inventory_complete", "public_api_exact_paths", "gate_public_prefixes", "selected_rest_routes", "selected_upgrade_surfaces", "selected_json_rpc_operations", "selected_json_rpc_events"}, "source-present")
@@ -403,33 +576,60 @@ def validate_allowlist(allowlist: dict[str, Any], audit: dict[str, Any]) -> None
     _require(rpc["framing"] == "one_text_json_rpc_object_per_websocket_message", "JSON-RPC: framing changed")
     _require(_strict_equal(rpc["operations"], EXPECTED_RPC_OPERATIONS), "JSON-RPC: operation set widened or mutated")
     _require(_strict_equal(rpc["events"], EXPECTED_RPC_EVENTS), "JSON-RPC: event set widened or mutated")
-    _require(rpc["error_codes"] == {"parse_error": -32700, "dispatch_error": -32603}, "JSON-RPC: error codes changed")
+    _require(_strict_equal(rpc["error_codes"], {"parse_error": -32700, "dispatch_error": -32603}), "JSON-RPC: error codes changed")
     _require(rpc["unknown_operation"] == "deny_without_fallback", "JSON-RPC: unknown operation policy changed")
     _require(rpc["unknown_interactive_event"] == "never_promote_to_approval_or_clarification", "JSON-RPC: unknown event policy changed")
     _keyset(client["default_deny"], {"unknown_rest_method_or_path", "source_present_not_client_allowlisted", "unknown_json_rpc_operation", "unknown_interactive_event", "unknown_noninteractive_event"}, "default deny")
-    _require(client["default_deny"] == {"unknown_rest_method_or_path": "deny", "source_present_not_client_allowlisted": "deny", "unknown_json_rpc_operation": "deny_without_fallback", "unknown_interactive_event": "surface_as_unsupported_and_do_not_act", "unknown_noninteractive_event": "ignore_only_when_additive_and_noninteractive"}, "default deny policy changed")
+    _require(_strict_equal(client["default_deny"], {"unknown_rest_method_or_path": "deny", "source_present_not_client_allowlisted": "deny", "unknown_json_rpc_operation": "deny_without_fallback", "unknown_interactive_event": "surface_as_unsupported_and_do_not_act", "unknown_noninteractive_event": "ignore_only_when_additive_and_noninteractive"}), "default deny policy changed")
 
     proxy = allowlist["future_external_proxy_allowlist"]
     _keyset(proxy, {"status", "rest", "websocket_upgrades", "json_rpc_operations", "json_rpc_events", "note"}, "future proxy allowlist")
     _require(proxy["status"] == "not_frozen_future_review_required", "future proxy: status changed")
     for key in ("rest", "websocket_upgrades", "json_rpc_operations", "json_rpc_events"):
         _require(proxy[key] == [], f"future proxy: {key} must remain empty")
-    _require(type(proxy["note"]) is str and "separate" in proxy["note"], "future proxy: separation note missing")
+    _require(type(proxy["note"]) is str and proxy["note"] == EXPECTED_FUTURE_PROXY_NOTE, "future proxy: note semantics changed")
 
 
-def _normalize_route_path(path: str) -> str:
+def _is_canonical_rest_path(path: Any) -> bool:
+    if type(path) is not str or not path.startswith("/"):
+        return False
+    if any(ord(character) < 0x21 or ord(character) > 0x7E for character in path):
+        return False
+    if any(marker in path for marker in ("?", "#", "%", "\\")):
+        return False
+    segments = path.split("/")
+    return segments[0] == "" and all(segment not in ("", ".", "..") for segment in segments[1:])
+
+
+def _is_safe_session_id(value: Any) -> bool:
+    if type(value) is not str or "ticket" in value.casefold():
+        return False
+    return SESSION_ID_RE.fullmatch(value) is not None
+
+
+def _route_template_for_path(path: Any) -> str | None:
+    """Match exact paths without decoding, stripping, or resolving segments."""
+
+    if not _is_canonical_rest_path(path):
+        return None
     if path == "/api/sessions/search":
         return path
-    if re.fullmatch(r"/api/sessions/[^/]+", path):
+    segments = path.split("/")
+    if len(segments) == 4 and segments[:3] == ["", "api", "sessions"] and _is_safe_session_id(segments[3]):
         return "/api/sessions/{session_id}"
-    if re.fullmatch(r"/api/sessions/[^/]+/messages", path):
+    if len(segments) == 5 and segments[:3] == ["", "api", "sessions"] and segments[4] == "messages" and _is_safe_session_id(segments[3]):
         return "/api/sessions/{session_id}/messages"
     return path
 
 
 def route_is_allowlisted(allowlist: dict[str, Any], method: str, path: str, applicability: str | None = None) -> bool:
+    if type(method) is not str:
+        return False
+    template = _route_template_for_path(path)
+    if template is None:
+        return False
     for route in allowlist["client_allowlist"]["rest"]:
-        if route["method"] != method or _normalize_route_path(path) != route["path"]:
+        if route["method"] != method or template != route["path"]:
             continue
         if applicability is not None and applicability not in route["applicability"]:
             continue
@@ -441,39 +641,81 @@ def operation_is_allowlisted(allowlist: dict[str, Any], operation: str) -> bool:
     return any(item["name"] == operation for item in allowlist["client_allowlist"]["json_rpc"]["operations"])
 
 
+def _rest_policy_for_request(allowlist: dict[str, Any], method: str, path: str, applicability: str) -> dict[str, Any] | None:
+    template = _route_template_for_path(path)
+    if template is None:
+        return None
+    for route in allowlist["client_allowlist"]["rest"]:
+        if route["method"] == method and route["path"] == template and applicability in route["applicability"]:
+            return route
+    return None
+
+
+def _validate_rest_case_auth(case_id: str, request: dict[str, Any], expected: dict[str, Any], allowlist: dict[str, Any]) -> None:
+    mode = request["auth_mode"]
+    _require(mode in {"browser_cookie", "native_bearer", "native_cookie", "public"}, f"{case_id}: REST auth mode is not a client REST mode")
+    policy = _rest_policy_for_request(allowlist, request["method"], request["path"], request["applicability"])
+    if policy is None:
+        _require(mode != "public", f"{case_id}: unmatched REST public mode is invalid")
+        _require(expected["route_class"] != "client_allowlist", f"{case_id}: expected client route has no matching policy")
+        return
+    _require(expected["route_class"] == "client_allowlist", f"{case_id}: matched route must be classified as client allowlist")
+    policy_mode = policy["auth_mode"]
+    if mode == "native_bearer":
+        _require(policy_mode == "browser_cookie_or_native_bearer" and request["applicability"] == "native", f"{case_id}: native bearer is not approved for this REST pair")
+    elif mode == "browser_cookie":
+        _require(policy_mode in {"browser_cookie_or_native_bearer", "browser_cookie_or_native_cookie"} and request["applicability"] == "browser", f"{case_id}: browser cookie is not approved for this REST pair")
+    elif mode == "native_cookie":
+        _require(policy_mode == "browser_cookie_or_native_cookie" and request["applicability"] == "native", f"{case_id}: native cookie is not approved for this REST pair")
+    else:
+        _require(policy_mode.startswith("public"), f"{case_id}: public auth does not match the REST policy")
+
+
+ALLOWED_SENSITIVE_METADATA_KEYS = frozenset({"user_data"})
+FORBIDDEN_SENSITIVE_KEYS = frozenset({
+    "token", "ticket", "cookie", "authorization", "bearer", "secret", "password",
+    "credential", "transcript", "hostname", "user_data", "pty_handle", "raw_ticket",
+    "raw_bearer", "raw_cookie", "raw_password", "raw_secret",
+})
+CREDENTIAL_VALUE_PATTERNS = (
+    re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.IGNORECASE),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]+\b", re.IGNORECASE),
+    re.compile(r"\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}\b", re.IGNORECASE),
+    re.compile(r"\b(?:authorization|cookie|password|secret|ticket|token|bearer)\s*[:=]\s*[A-Za-z0-9._~+/=-]{8,}\b", re.IGNORECASE),
+    re.compile(r"\b(?:sk-|ghp_|xoxb-|eyJ)[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
+    re.compile(r"synthetic-(?:api-key|secret|ticket-value|bearer-value|cookie-value|password-value|pty-(?:input|output|handle))", re.IGNORECASE),
+    re.compile(r"my-secret-value", re.IGNORECASE),
+)
+
+
 def _validate_redaction(value: Any, path: str = "fixture") -> None:
-    safe_keys = {
-        "contract", "hermes_source_sha", "source_audit_id", "fixture_policy", "synthetic_only", "cases",
-        "id", "kind", "surface", "request", "expected", "notes", "method", "path", "applicability",
-        "auth_mode", "credential_state", "cookie_state", "framing", "handler_result", "decision", "route_class",
-        "auth_result", "http_status", "upgrade_auth", "close_code", "retry", "host_class", "attach_state",
-        "native_policy", "pty_input_policy", "pty_logging_policy", "operation", "config_key", "operation_class",
-        "fallback", "error", "event_name", "event_class", "ui_action", "logging", "credential_class",
-        "path_observed", "bounded_reason_observed", "sensitive_values_recorded", "pty_bytes_recorded", "encoding",
-        "input_state", "exit_status", "stderr_policy", "source_result",
-    }
-    forbidden_keys = {"token", "ticket", "cookie", "authorization", "bearer", "secret", "password", "credential", "transcript", "hostname", "user_data", "pty_handle", "raw_ticket", "raw_bearer"}
-    forbidden_patterns = (
-        re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
-        re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.IGNORECASE),
-        re.compile(r"\bgithub_pat_[A-Za-z0-9_]+\b", re.IGNORECASE),
-        re.compile(r"\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}\b", re.IGNORECASE),
-        re.compile(r"\b(?:sk-|ghp_|xoxb-|eyJ)[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
-        re.compile(r"synthetic-(?:api-key|secret|ticket-value|bearer-value|cookie-value)", re.IGNORECASE),
-        re.compile(r"my-secret-value", re.IGNORECASE),
-    )
-    if isinstance(value, dict):
+    """Scan all fixture values while allowing public protocol terminology."""
+
+    if type(value) is dict:
         for key, child in value.items():
             _require(type(key) is str, f"{path}: object key must be string")
             normalized = key.casefold()
-            _require(key in safe_keys or normalized not in forbidden_keys, f"{path}.{key}: sensitive key is not allowed")
+            _require(normalized in ALLOWED_SENSITIVE_METADATA_KEYS or normalized not in FORBIDDEN_SENSITIVE_KEYS, f"{path}.{key}: sensitive key is not allowed")
             _validate_redaction(child, f"{path}.{key}")
-    elif isinstance(value, list):
+    elif type(value) is list:
         for index, child in enumerate(value):
             _validate_redaction(child, f"{path}[{index}]")
-    elif isinstance(value, str):
-        for pattern in forbidden_patterns:
+    elif type(value) is str:
+        for pattern in CREDENTIAL_VALUE_PATTERNS:
             _require(pattern.search(value) is None, f"{path}: credential-like value is not allowed")
+    elif type(value) is float:
+        _require(math.isfinite(value), f"{path}: non-finite number is not allowed")
+    else:
+        _require(value is None or type(value) in (bool, int), f"{path}: unsupported fixture value type")
+
+
+def _validate_text_evidence(path: Path) -> None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ContractError(f"{path}: unable to read evidence: {exc}") from None
+    _validate_redaction(text, str(path))
 
 
 EXPECTED_CASE_IDS = {
@@ -551,6 +793,8 @@ def validate_cases(cases: dict[str, Any], allowlist: dict[str, Any], audit: dict
         _require(isinstance(case["expected"], dict), f"{case_id}: expected must be an object")
         _validate_case_leaf_types(case_id, case["request"], case["expected"])
         _string(case["notes"], f"{case_id}.notes")
+        if case["surface"] == "rest":
+            _validate_rest_case_auth(case_id, case["request"], case["expected"], allowlist)
 
     _require(by_id["rest-approved-native-bearer"]["request"] == {"method": "GET", "path": "/api/sessions/synthetic-session-001", "applicability": "native", "auth_mode": "native_bearer", "credential_state": "valid"}, "cases: native route fixture changed")
     _require(route_is_allowlisted(allowlist, "GET", "/api/sessions/synthetic-session-001", "native"), "cases: approved native route does not match")
@@ -593,9 +837,11 @@ def _validate_source_root(audit: dict[str, Any], source_root: Path) -> str:
     if git_dir.exists():
         try:
             head = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+            tree = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
         except (OSError, subprocess.CalledProcessError) as exc:
-            raise ContractError(f"source root: unable to verify Git HEAD: {exc}") from None
+            raise ContractError(f"source root: unable to verify Git HEAD/tree: {exc}") from None
         _require(head == PINNED_SHA, "source root: Git HEAD is not the pinned Hermes revision")
+        _require(tree == PINNED_TREE_SHA, "source root: Git tree is not the pinned Hermes tree")
         mode = "git_checkout_verified"
     for citation in audit["source_citations"]:
         path = source_root / citation["path"]
@@ -606,7 +852,8 @@ def _validate_source_root(audit: dict[str, Any], source_root: Path) -> str:
         start, end = citation["lines"]
         _require(1 <= start <= end <= len(lines), f"source root: invalid range for {citation['id']}")
         excerpt = "\n".join(lines[start - 1:end])
-        for marker in citation["markers"]:
+        expected_markers, _ = EXPECTED_CITATION_SEMANTICS[citation["id"]]
+        for marker in expected_markers:
             _require(marker in excerpt, f"source root: marker missing for {citation['id']}: {marker}")
     return mode
 
@@ -621,6 +868,14 @@ def artifact_size_bytes() -> int:
 
 
 def validate_all(allowlist: dict[str, Any], audit: dict[str, Any], cases: dict[str, Any], source_root: Path | None = None) -> str | None:
+    _validate_json_tree(allowlist, "route_allowlist")
+    _validate_json_tree(audit, "source_audit")
+    _validate_json_tree(cases, "cases")
+    _validate_redaction(allowlist, "route_allowlist")
+    _validate_redaction(audit, "source_audit")
+    _validate_redaction(cases, "cases")
+    _validate_text_evidence(README_PATH)
+    _validate_text_evidence(MANIFEST_PATH)
     validate_audit(audit)
     validate_allowlist(allowlist, audit)
     validate_cases(cases, allowlist, audit)
@@ -664,6 +919,85 @@ class RouteAllowlistTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_allowlist(forged_allowlist, self.audit)
 
+        forged_allowlist = copy.deepcopy(self.allowlist)
+        forged_allowlist["policy"]["source_inventory_complete"] = 0
+        with self.assertRaises(ContractError):
+            validate_allowlist(forged_allowlist, self.audit)
+
+    def test_nonfinite_json_and_baseline_metrics_fail_closed(self) -> None:
+        for literal in ("NaN", "Infinity", "-Infinity"):
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                stream.write('{"value": ' + literal + "}")
+                stream.flush()
+                with self.assertRaises(ContractError):
+                    load_json(Path(stream.name))
+
+        for metric in ("mean", "p95"):
+            for forged_value in (float("nan"), float("inf"), float("-inf")):
+                forged = copy.deepcopy(self.audit)
+                forged["baseline"]["distribution_ms"][metric] = forged_value
+                with self.assertRaises(ContractError):
+                    validate_all(self.allowlist, forged, self.cases)
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    json.dump(forged, stream)
+                    stream.flush()
+                    for optimized in (False, True):
+                        command = [sys.executable]
+                        if optimized:
+                            command.append("-O")
+                        command.extend([str(Path(__file__)), "--audit", stream.name])
+                        result = subprocess.run(command, capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 2, (metric, forged_value, optimized, result.stderr))
+                        self.assertNotIn("Traceback", result.stderr + result.stdout)
+
+    def test_baseline_repetitions_ordering_and_numeric_types_are_frozen(self) -> None:
+        forged = copy.deepcopy(self.audit)
+        forged["baseline"]["repetitions"] = BASELINE_REPETITIONS - 1
+        with self.assertRaises(ContractError):
+            validate_audit(forged)
+
+        for mutation in (
+            {"min": -1.0},
+            {"median": 0.0},
+            {"p95": 0.0},
+            {"max": 0.0},
+            {"mean": -1.0},
+            {"mean": True},
+        ):
+            forged = copy.deepcopy(self.audit)
+            forged["baseline"]["distribution_ms"].update(mutation)
+            with self.assertRaises(ContractError):
+                validate_audit(forged)
+
+    def test_rest_paths_reject_noncanonical_components_and_tickets(self) -> None:
+        valid_paths = (
+            "/api/sessions/a",
+            "/api/sessions/Ab_-.~9",
+            "/api/sessions/synthetic-session-001/messages",
+        )
+        for path in valid_paths:
+            self.assertTrue(route_is_allowlisted(self.allowlist, "GET", path, "native"), path)
+
+        invalid_paths = (
+            "/api/sessions/foo?ticket=synthetic-ticket-value",
+            "/api/sessions/foo#fragment",
+            "/api/sessions/foo%2Fbar",
+            "/api/sessions/foo%",
+            "/api/sessions/.",
+            "/api/sessions/..",
+            "/api/sessions/foo\\\\bar",
+            "/api/sessions/foo" + "\x00" + "bar",
+            "/api/sessions/café",
+            "/api/sessions/",
+            "/api/sessions//foo",
+            "/api/sessions/foo/",
+            "/api/sessions/ticket-value",
+            "/api/sessions/foo/messages?ticket=synthetic-ticket-value",
+            "/api/sessions/foo/messages//",
+        )
+        for path in invalid_paths:
+            self.assertFalse(route_is_allowlisted(self.allowlist, "GET", path, "native"), path)
+
     def test_route_widening_and_prefix_confusion_fail(self) -> None:
         forged = copy.deepcopy(self.allowlist)
         forged["client_allowlist"]["rest"][13]["path"] = "/api/sessions/{session_id}/"
@@ -691,6 +1025,50 @@ class RouteAllowlistTests(unittest.TestCase):
 
         forged = copy.deepcopy(self.cases)
         forged["cases"][10]["request"]["credential_state"] = "fresh_single_use"
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.allowlist, self.audit)
+
+    def test_rest_auth_modes_bind_to_exact_route_policy(self) -> None:
+        _validate_rest_case_auth(
+            "public-native-provider-discovery",
+            {"method": "GET", "path": "/api/auth/providers", "applicability": "native", "auth_mode": "public"},
+            {"route_class": "client_allowlist"},
+            self.allowlist,
+        )
+        _validate_rest_case_auth(
+            "native-cookie-logout",
+            {"method": "POST", "path": "/auth/logout", "applicability": "native", "auth_mode": "native_cookie"},
+            {"route_class": "client_allowlist"},
+            self.allowlist,
+        )
+
+        for ticket_mode in ("gated_ticket", "raw_ticket"):
+            forged = copy.deepcopy(self.cases)
+            forged["cases"][0]["request"]["auth_mode"] = ticket_mode
+            with self.assertRaises(ContractError):
+                validate_cases(forged, self.allowlist, self.audit)
+
+        forged = copy.deepcopy(self.cases)
+        native_case = next(item for item in forged["cases"] if item["id"] == "rest-approved-native-bearer")
+        native_case["request"]["auth_mode"] = "browser_cookie"
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.allowlist, self.audit)
+
+        forged = copy.deepcopy(self.cases)
+        browser_case = next(item for item in forged["cases"] if item["id"] == "rest-approved-browser-cookie")
+        browser_case["request"].update({"path": "/login", "applicability": "native", "auth_mode": "native_bearer"})
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.allowlist, self.audit)
+
+        forged = copy.deepcopy(self.cases)
+        browser_case = next(item for item in forged["cases"] if item["id"] == "rest-approved-browser-cookie")
+        browser_case["request"].update({"path": "/auth/native/authorize", "applicability": "browser", "auth_mode": "browser_cookie"})
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.allowlist, self.audit)
+
+        forged = copy.deepcopy(self.cases)
+        invalid_bearer = next(item for item in forged["cases"] if item["id"] == "rest-invalid-bearer-no-cookie-fallback")
+        invalid_bearer["request"]["auth_mode"] = "browser_cookie"
         with self.assertRaises(ContractError):
             validate_cases(forged, self.allowlist, self.audit)
 
@@ -749,11 +1127,121 @@ class RouteAllowlistTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_cases(forged, self.allowlist, self.audit)
 
+    def test_provenance_redaction_and_free_text_guards_are_recursive(self) -> None:
+        for value in (False, 1, float("inf"), {}, [], None, "Bearer synthetic-bearer-value"):
+            forged = copy.deepcopy(self.audit)
+            forged["audit_scope"]["purpose"] = value
+            with self.assertRaises(ContractError):
+                validate_all(self.allowlist, forged, self.cases)
+
+        for value in ("none", False, 1, float("nan"), {}, [], None):
+            forged = copy.deepcopy(self.audit)
+            forged["audit_scope"]["source_root_verification"] = value
+            with self.assertRaises(ContractError):
+                validate_all(self.allowlist, forged, self.cases)
+
+        forged = copy.deepcopy(self.audit)
+        forged["source_citations"][0]["markers"] = ["placeholder-marker"]
+        with self.assertRaises(ContractError):
+            validate_all(self.allowlist, forged, self.cases)
+
+        forged = copy.deepcopy(self.audit)
+        forged["source_citations"][0]["claim"] = "secret=synthetic-secret-value"
+        with self.assertRaises(ContractError):
+            validate_all(self.allowlist, forged, self.cases)
+
+        for redaction_value in (
+            "record ticket: synthetic-ticket-value",
+            "Bearer synthetic-bearer-value",
+            "cookie=synthetic-cookie-value",
+            "password=synthetic-password-value",
+            "secret=synthetic-secret-value",
+            "PTY input synthetic-pty-input",
+            "PTY output synthetic-pty-output",
+        ):
+            forged = copy.deepcopy(self.audit)
+            forged["redaction"]["log_policy"] = redaction_value
+            with self.assertRaises(ContractError):
+                validate_all(self.allowlist, forged, self.cases)
+
+        forged = copy.deepcopy(self.allowlist)
+        forged["future_external_proxy_allowlist"]["note"] = "Bearer synthetic-bearer-value"
+        with self.assertRaises(ContractError):
+            validate_all(forged, self.audit, self.cases)
+
+        forged = copy.deepcopy(self.allowlist)
+        forged["future_external_proxy_allowlist"]["credential"] = "synthetic-secret-value"
+        with self.assertRaises(ContractError):
+            validate_all(forged, self.audit, self.cases)
+
+        forged = copy.deepcopy(self.audit)
+        forged["source_citations"][0]["claim"] = "cookie=synthetic-cookie-value"
+        with self.assertRaises(ContractError):
+            validate_all(self.allowlist, forged, self.cases)
+
+        forged = copy.deepcopy(self.cases)
+        forged["cases"][0]["request"]["password"] = "synthetic-password-value"
+        with self.assertRaises(ContractError):
+            validate_all(self.allowlist, self.audit, forged)
+
+        for evidence in (
+            "ticket=synthetic-ticket-value",
+            "Bearer synthetic-bearer-value",
+            "cookie=synthetic-cookie-value",
+            "password=synthetic-password-value",
+            "secret=synthetic-secret-value",
+            "PTY input synthetic-pty-input",
+            "PTY output synthetic-pty-output",
+        ):
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt") as stream:
+                stream.write(evidence)
+                stream.flush()
+                with self.assertRaises(ContractError):
+                    _validate_text_evidence(Path(stream.name))
+
     def test_future_proxy_allowlist_is_not_silently_filled(self) -> None:
         forged = copy.deepcopy(self.allowlist)
         forged["future_external_proxy_allowlist"]["rest"].append({"method": "GET", "path": "/api/ws"})
         with self.assertRaises(ContractError):
             validate_allowlist(forged, self.audit)
+
+    def test_malformed_document_types_are_controlled_in_both_modes(self) -> None:
+        document_specs = (
+            ("allowlist", self.allowlist, "policy", "--allowlist"),
+            ("audit", self.audit, "audit_scope", "--audit"),
+            ("cases", self.cases, "cases", "--cases"),
+        )
+        for label, document, field, option in document_specs:
+            for replacement in (True, {}, [], None):
+                forged = copy.deepcopy(document)
+                forged[field] = replacement
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    json.dump(forged, stream)
+                    stream.flush()
+                    for optimized in (False, True):
+                        command = [sys.executable]
+                        if optimized:
+                            command.append("-O")
+                        command.extend([str(Path(__file__)), option, stream.name])
+                        result = subprocess.run(command, capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 2, (label, replacement, optimized, result.stderr))
+                        self.assertNotIn("Traceback", result.stderr + result.stdout)
+                        self.assertIn("validation error", result.stderr.lower())
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+            forged = copy.deepcopy(self.audit)
+            forged["redaction"]["log_policy"] = True
+            json.dump(forged, stream)
+            stream.flush()
+            for optimized in (False, True):
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.extend([str(Path(__file__)), "--audit", stream.name])
+                result = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, ("audit.redaction.log_policy", optimized, result.stderr))
+                self.assertNotIn("Traceback", result.stderr + result.stdout)
+                self.assertIn("validation error", result.stderr.lower())
 
     def test_malformed_cli_input_has_no_traceback(self) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
@@ -802,7 +1290,7 @@ def main(argv: list[str] | None = None) -> int:
         audit = load_json(args.audit)
         cases = load_json(args.cases)
         source_mode = validate_all(allowlist, audit, cases, args.source_root)
-    except ContractError as exc:
+    except (ContractError, KeyError, TypeError, ValueError, OSError, UnicodeError) as exc:
         print(f"validation error: {exc}", file=sys.stderr)
         return 2
 

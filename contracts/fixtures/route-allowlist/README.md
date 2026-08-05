@@ -56,12 +56,19 @@ The exact client-approved pairs are:
 | `PATCH` | `/api/sessions/{session_id}` | browser, native | cookie or reviewed native bearer |
 | `POST` | `/api/chat/image-upload` | browser, native | cookie or reviewed native bearer |
 
-The session template accepts one non-empty `session_id` path segment. A method
-mutation, suffix, extra segment, prefix lookalike, or broad wildcard is denied.
-The image route is the only approved upload route; arbitrary files, filesystem
-access, media, SSH, gateway administration, configuration, plugin management,
-and cron or MCP management remain outside the client allowlist even when the
-pinned source exposes a route or public bypass.
+The `session_id` template accepts one opaque ASCII path segment with this
+conservative grammar: one character, or 2–128 characters whose first and last
+characters are ASCII letters or digits and whose internal characters are ASCII
+letters, digits, `.`, `_`, `-`, or `~`. The matcher does not URL-decode, strip,
+resolve dot segments, or treat a prefix as a match. It rejects empty or double
+segments, trailing slashes, `.`, `..`, controls, non-ASCII, backslashes, percent
+escapes (including encoded slashes), query strings, fragments, and any
+ticket-bearing path value. A method mutation, suffix, extra segment, prefix
+lookalike, or broad wildcard is denied. The image route is the only approved
+upload route; arbitrary files, filesystem access, media, SSH, gateway
+administration, configuration, plugin management, and cron or MCP management
+remain outside the client allowlist even when the pinned source exposes a route
+or public bypass.
 
 `GET /api/model/options` is recorded as source-present but not client-
 allowlisted. The focused model fixture freezes `model.options` over JSON-RPC;
@@ -120,11 +127,14 @@ management/admin exposure, JSON-RPC key and operation denial, event policy,
 PTY logging redaction, and malformed input.
 
 [`test_route_allowlist.py`](test_route_allowlist.py) uses only Python's standard
-library. It rejects duplicate JSON object keys, unknown schema keys, wrong
-leaf types, JSON booleans where integers are required, route widening, method
+library. It rejects duplicate JSON object keys, `NaN`/`Infinity`/`-Infinity`,
+unknown schema keys, wrong leaf types, JSON booleans where integers are
+required, incoherent or stale baseline evidence, route widening, method
 mutation, source/provenance drift, credential-like redaction markers, and
-malformed inputs that would otherwise produce a traceback. It can optionally
-verify the recorded full-file SHA-256 digests and citation markers against an
+malformed inputs that would otherwise produce a traceback. Redaction scanning
+covers all three JSON documents and credential-shaped values in this README
+and the manifest. It can optionally verify the pinned Git commit/tree, recorded
+full-file SHA-256 digests, and canonical citation markers against an
 independently fetched source root:
 
 ```text
