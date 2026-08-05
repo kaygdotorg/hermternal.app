@@ -10,7 +10,7 @@ This document and its disposable proofs are not production credentials, producti
 
 | Client | Discovery | Approved v0.0.1 path | Session material | Release status |
 | --- | --- | --- | --- | --- |
-| Web browser | Read provider-neutral Dashboard discovery over the configured HTTPS origin | Follow the provider's Dashboard browser flow. OAuth or OIDC is supported when the Dashboard exposes a reviewed browser callback. A provider with `supports_password: true`, including the pinned `basic` plugin implemented by `BasicAuthProvider`, MAY use its reviewed username/password form. This is not an HTTP Basic header flow. | Browser-managed protected `HttpOnly` provider cookie. It MAY contain server-managed refresh material. The client does not read or copy the cookie. | In scope when discovery, callback, cookie, ticket, and route evidence pass. |
+| Web browser | Read provider-neutral Dashboard discovery over the configured HTTPS origin | Follow the provider's Dashboard browser flow. OAuth or OIDC is supported when the Dashboard exposes a reviewed browser callback. A provider with `supports_password: true`, including the pinned `basic` plugin implemented by `BasicAuthProvider`, MAY use its reviewed username/password form. This is not an HTTP Basic header flow. PKCE applies only to the reviewed OAuth or OIDC browser path; it is not required for the username/password path. | Browser-managed protected `HttpOnly` provider cookie. It MAY contain server-managed refresh material. The client does not read or copy the cookie. | In scope when discovery, callback, cookie, ticket, and route evidence pass. |
 | iOS and iPadOS | Read the same provider-neutral discovery over HTTPS | The native password-provider cookie path is approved when discovery reports `supports_password: true`; the pinned `basic` plugin is implemented by `BasicAuthProvider`. Native OAuth or OIDC MAY be used only for a provider with a reviewed callback transport supported by the platform. | Password path: isolated protected provider cookie session; the cookie MAY contain server-managed refresh material. Supported native OAuth or OIDC path: source-issued bearer access and refresh material protected by Keychain Services and never copied into cookies, links, fixtures, or logs. | `BasicAuthProvider` is in scope. OAuth or OIDC is blocked for unsupported callback transport and when target-platform proof is absent or fails. |
 | macOS | Same provider-neutral model as iOS and iPadOS | The native password-provider path, including the pinned `basic` plugin implemented by `BasicAuthProvider`, and supported native OAuth or OIDC callback paths are v0.0.1 targets after the shared Apple contract and authentication layer is stable. | Password path: isolated protected provider cookie session; the cookie MAY contain server-managed refresh material. Supported native OAuth or OIDC path: source-issued bearer access and refresh material protected by Keychain Services and never copied into cookies, links, fixtures, or logs. | In scope after the shared Apple contract and authentication layer is stable. macOS MUST NOT invoke `/api/pty`. |
 
@@ -33,19 +33,39 @@ A provider discovery response MUST NOT cause the client to contact an arbitrary 
 
 The web client MUST use the Dashboard browser flow on the same public HTTPS origin. It MUST use an approved OAuth or OIDC callback when that provider is discovered. If discovery reports a provider with `supports_password: true`, the browser MAY use its reviewed Dashboard form. The pinned provider named `basic` is implemented by `BasicAuthProvider`. The browser implementation MUST NOT create a Hermternal-specific password endpoint or send an HTTP Basic header in place of the provider flow.
 
+PKCE is conditional on the reviewed provider mode, not on browser use in general. A `supports_password: true` provider follows its reviewed username/password form and does not enter the OAuth state or PKCE exchange. Only a reviewed OAuth or OIDC provider with callback evidence enters the state and PKCE requirements below.
+
 The browser MUST:
 
 - rely on the Dashboard to issue and refresh the provider cookie;
 - keep the cookie in the browser's protected cookie mechanism;
 - allow server-managed refresh material to remain inside the protected `HttpOnly` provider cookie, but never read, copy, export, or serialise it from JavaScript;
 - avoid storing a password, reusable credential, access token, refresh token, ticket, or provider state in `localStorage`, `sessionStorage`, IndexedDB, a navigable URL, URL fragment, browser history, or source control;
-- validate the authentication state and nonce returned by the reviewed flow;
+- for a reviewed OAuth or OIDC provider, validate the callback state against the server-managed pending state; for the pinned Nous OAuth browser flow, require the provider exchange to validate the PKCE verifier. The username/password path for a `supports_password: true` provider does not create OAuth state or PKCE;
+- apply a provider-specific OIDC `nonce` requirement only when the compatibility record covers it. The pinned Nous browser flow does not expose a separate `nonce`, so Hermternal MUST NOT invent a `nonce` requirement for that provider. Hermternal MUST NOT impose an unscoped global nonce requirement; a positive nonce rule must name its reviewed provider scope and compatibility condition;
 - return only to the validated same-origin application target;
 - clear pending navigation state after success, cancellation, failure, or logout.
 
 A WebSocket ticket is an exception only for the in-memory, ephemeral upgrade URL. It MAY appear as `?ticket=` on the `/api/ws` or `/api/pty` upgrade request. It MUST NOT become a page URL, bookmark, navigation entry, application state value, or user-visible error. The browser MUST NOT treat an access token or a ticket in a URL as a session. It MUST NOT accept an arbitrary `return_to`, redirect, or provider origin from a user-supplied link.
 
 REST requests use the protected provider cookie. They MUST NOT use a WebSocket query ticket.
+
+### Pinned browser OAuth source audit
+
+The browser contract is frozen to [`NousResearch/hermes-agent@f5be9236e00ddf2f2a412697f267078fc4ee068e`](https://github.com/NousResearch/hermes-agent/tree/f5be9236e00ddf2f2a412697f267078fc4ee068e). The synthetic audit in [`contracts/fixtures/source-audit/oauth-browser/`](../../contracts/fixtures/source-audit/oauth-browser/) records the observable behavior without contacting a provider.
+
+At this revision, for the pinned Nous browser OAuth flow:
+
+- `hermes_cli/dashboard_auth/routes.py:auth_login` returns the reviewed password form before calling `start_login` when the provider reports `supports_password: true`. Only the OAuth branch receives `state` and a PKCE verifier from `start_login` and stores them in the short-lived `hermes_session_pkce` cookie. The route marks that cookie `HttpOnly`, `SameSite=Lax`, and secure when the request is HTTPS.
+- `hermes_cli/dashboard_auth/routes.py:auth_callback` fails closed for a missing PKCE cookie, provider cancellation/error, a missing or mismatched callback state, or a provider `InvalidCodeError`. It passes the stored `code_verifier` to `complete_login`; a rejected code or verifier does not issue a session cookie.
+- `plugins/dashboard_auth/nous/__init__.py:NousDashboardAuthProvider.start_login` builds the outbound authorization parameter map with `state`, `code_challenge`, and `code_challenge_method=S256`. Its cookie payload contains `state` and `verifier`; its `complete_login` sends `code_verifier` to the token endpoint and maps an HTTP 400 auth-code response to `InvalidCodeError`.
+- No separate OAuth/OIDC `nonce` is exposed or required by this pinned Nous flow. This does not override reviewed OIDC nonce semantics for another provider. Hermternal MUST NOT add nonce validation or claim nonce support for a provider that does not expose it.
+
+The machine-readable audit uses an exact provider-scoped nonce policy: the pinned Nous scope has no required or exposed nonce, the global requirement is false, and a reviewed OIDC provider may require a nonce only when its compatibility record says so. No unscoped global positive nonce requirement is allowed.
+
+The pinned failure semantics are exact: a missing PKCE cookie rejects the callback; cancellation or provider error rejects without a session; missing or mismatched state rejects before exchange; code or PKCE rejection and `InvalidCodeError` reject without a session; a malformed callback fails closed without a session; and provider-unreachable during login start returns the pinned provider-unreachable error. The Nous provider's pinned HTTP 400-to-`InvalidCodeError` mapping source-binds the code/PKCE and empty-code callback outcomes. Retry starts a fresh login attempt. These claims are checked against ordered markers in the commit-pinned route and provider excerpts.
+
+A successful OAuth callback issues the provider-managed session cookie and clears the PKCE cookie. Cancellation and other callback failures do not create a session; a fresh login attempt is required. The provider's short-lived PKCE cookie remains server-managed and must never be copied into browser-readable storage.
 
 ## Native password-provider cookie path
 
@@ -87,7 +107,7 @@ The web and Apple test suites MUST cover:
 
 - provider discovery with the pinned provider name `basic`, `supports_password: true`, OAuth or OIDC providers, multiple providers, unknown providers, malformed providers, and no providers;
 - same-origin and wrong-origin discovery and callbacks;
-- browser OAuth or OIDC state, nonce, cancellation, callback failure, and safe return behavior;
+- browser OAuth or OIDC state and PKCE validation for each reviewed provider, cancellation, callback failure, safe return behavior, pinned Nous rejection of an unsupported separate nonce requirement, and reviewed-provider OIDC nonce semantics when declared by the compatibility record;
 - native password-provider success, wrong password, expired cookie, logout, session renewal, isolated cookie storage, protected-cookie refresh material, and Keychain clearing, using the pinned `basic` provider fixture where applicable;
 - native OAuth or OIDC success for a source-accepted, platform-proven callback transport, plus rejection for unsupported transport and for absent or failed target-platform proof;
 - cookie prefix, `Secure`, `HttpOnly`, `SameSite`, Domain, and Path checks;

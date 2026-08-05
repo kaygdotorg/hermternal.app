@@ -1,0 +1,53 @@
+    def start_login(self, *, redirect_uri: str) -> LoginStart:
+        self._validate_redirect_uri(redirect_uri)
+
+        code_verifier = _b64url_no_pad(secrets.token_bytes(64))  # ~86 chars
+        code_challenge = _b64url_no_pad(
+            hashlib.sha256(code_verifier.encode("ascii")).digest()
+        )
+        state = _b64url_no_pad(secrets.token_bytes(32))
+
+        params = {
+            "response_type": "code",
+            "client_id": self._client_id,
+            "redirect_uri": redirect_uri,
+            "scope": _SCOPE,
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+        redirect_url = f"{self._authorize_url}?{urllib.parse.urlencode(params)}"
+        cookie_payload = {
+            "hermes_session_pkce": f"state={state};verifier={code_verifier}",
+        }
+        return LoginStart(redirect_url=redirect_url, cookie_payload=cookie_payload)
+
+    def complete_login(
+        self,
+        *,
+        code: str,
+        state: str,
+        code_verifier: str,
+        redirect_uri: str,
+    ) -> Session:
+        _ = state
+
+        response = httpx.post(
+            self._token_url,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": self._client_id,
+                "code_verifier": code_verifier,
+            },
+            headers={"Accept": "application/json"},
+            timeout=_TOKEN_ENDPOINT_TIMEOUT_SEC,
+        )
+
+        # The dashboard auth-code grant now issues a rotating refresh token
+        # (24h session, reuse-detected) — Portal NAS PR #293. A 400 here means
+        # the code/PKCE/redirect_uri failed, surfaced as InvalidCodeError.
+        return self._token_response_to_session(
+            response, bad_request_exc=InvalidCodeError
+        )

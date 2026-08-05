@@ -1,0 +1,187 @@
+{
+  "fixture_id": "oauth-browser-source-audit-199",
+  "contract": "dashboard-v0.0.1",
+  "flow": "browser-oauth",
+  "source": {
+    "repository": "NousResearch/hermes-agent",
+    "sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "tree_sha": "886db5eb1150f819344d67fedc81aef0caab09ff",
+    "refs": [
+      {
+        "path": "hermes_cli/dashboard_auth/routes.py",
+        "excerpt": "source_excerpts/routes_auth.py.txt",
+        "excerpt_sha256": "7a748fc29acee3d055049f0b1a12bba9e7d8aa13bc4852827888a0ebaaa507b4",
+        "blob_sha": "0c142963bcc83f38fddbdcec29c35608f14f7bc1",
+        "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/routes.py",
+        "observations": {
+          "password_provider_short_circuits_oauth_start": true,
+          "oauth_start_returns_state_and_verifier_cookie_payload": true,
+          "callback_rejects_missing_or_mismatched_state_before_exchange": true,
+          "callback_passes_cookie_verifier_to_complete_login": true,
+          "callback_issues_and_clears_session_only_after_exchange": true
+        }
+      },
+      {
+        "path": "plugins/dashboard_auth/nous/__init__.py",
+        "excerpt": "source_excerpts/nous_provider.py.txt",
+        "excerpt_sha256": "53f633d5e405459ad0d042470e06af545fad6d1d02b86f23a473ece283ce8c87",
+        "blob_sha": "69acd18e36b545fd20df5578809de65afb0d4df4",
+        "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/plugins/dashboard_auth/nous/__init__.py",
+        "observations": {
+          "authorization_params_include_state": true,
+          "authorization_params_include_s256_pkce": true,
+          "authorization_params_exclude_nonce": true,
+          "cookie_payload_contains_state_and_verifier": true,
+          "token_exchange_sends_code_verifier": true,
+          "token_exchange_http_400_maps_to_invalid_code_error": true
+        }
+      },
+      {
+        "path": "hermes_cli/dashboard_auth/cookies.py",
+        "excerpt": "source_excerpts/cookies.py.txt",
+        "excerpt_sha256": "4061f5e075fee015151a14ab75c7b77661400bb2ec0fa402559c0d49cae36f3e",
+        "blob_sha": "8bcd9db78eb6a8e9209e1b3087ab4e85b8997f1e",
+        "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/cookies.py",
+        "observations": {
+          "pkce_cookie_is_short_lived": true,
+          "pkce_cookie_is_http_only_lax_and_secure_for_https": true,
+          "csrf_nonce_label_is_state_not_provider_nonce": true
+        }
+      }
+    ]
+  },
+  "requirements": {
+    "scope": "pinned Nous browser OAuth flow only",
+    "state": {
+      "required": true,
+      "comparison": "callback state must equal the state stored in the server-managed PKCE cookie"
+    },
+    "pkce": {
+      "required": true,
+      "applies_to": "reviewed OAuth or OIDC browser providers only",
+      "method": "S256",
+      "comparison": "the provider exchange receives the verifier paired with the authorization request challenge"
+    },
+    "nonce": {
+      "policy": "provider_scoped",
+      "global_requirement": {
+        "required": false,
+        "scope": null
+      },
+      "positive_requirements_require_compatibility_scope": true,
+      "provider_scopes": [
+        {
+          "provider": "pinned Nous",
+          "scope": "pinned Nous browser OAuth flow only",
+          "required": false,
+          "condition": null,
+          "exposed": false
+        },
+        {
+          "provider": "reviewed OIDC provider",
+          "scope": "reviewed OIDC compatibility record",
+          "required": true,
+          "condition": "only when compatibility record says so",
+          "exposed": true
+        }
+      ]
+    },
+    "password_provider": {
+      "supports_password": true,
+      "oauth_state_required": false,
+      "pkce_required": false,
+      "reason": "auth_login returns before provider.start_login for a password provider"
+    }
+  },
+  "failure_semantics": {
+    "missing_pkce_cookie": {
+      "outcome": "reject callback",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "if not pkce_raw:",
+        "detail=\"Missing PKCE state cookie\""
+      ]
+    },
+    "missing_or_mismatched_state": {
+      "outcome": "reject callback before provider exchange",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "if not state or state != expected_state:",
+        "detail=\"OAuth state mismatch (CSRF check failed)\"",
+        "p.complete_login("
+      ]
+    },
+    "provider_cancellation": {
+      "outcome": "reject callback without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "if error:",
+        "detail=f\"OAuth error from provider: {error} ({error_description})\""
+      ]
+    },
+    "provider_error": {
+      "outcome": "reject callback without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "if error:",
+        "raise HTTPException(",
+        "detail=f\"OAuth error from provider: {error} ({error_description})\""
+      ]
+    },
+    "pkce_or_code_rejection": {
+      "outcome": "reject callback without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "code_verifier=verifier,",
+        "except InvalidCodeError as e:",
+        "detail=f\"Invalid code: {e}\""
+      ]
+    },
+    "malformed_callback": {
+      "outcome": "fail closed without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "code: str = \"\"",
+        "session = p.complete_login(",
+        "except InvalidCodeError as e:"
+      ]
+    },
+    "invalid_code_error": {
+      "outcome": "reject callback without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "except InvalidCodeError as e:",
+        "status_code=400",
+        "detail=f\"Invalid code: {e}\""
+      ]
+    },
+    "provider_unreachable": {
+      "outcome": "fail login start with provider-unreachable error",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "except ProviderError as e:",
+        "reason=\"provider_unreachable\"",
+        "status_code=503",
+        "detail=f\"Provider unreachable: {e}\""
+      ]
+    },
+    "retry": {
+      "outcome": "start a fresh login attempt",
+      "source_ref": null,
+      "markers": []
+    }
+  },
+  "redaction": {
+    "synthetic_cookie_shaped_values": true,
+    "public_source_urls": true,
+    "live_secrets": false,
+    "live_cookie_contents": false,
+    "live_host_data": false,
+    "transcripts": false,
+    "user_data": false
+  },
+  "synthetic_only": true,
+  "network_access": false,
+  "apple_behavior": false,
+  "superdesign_output": false
+}
