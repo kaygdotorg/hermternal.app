@@ -20,6 +20,7 @@ from typing import Callable, Iterable, List
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "validate_proof_gates.py"
 CHECKLIST = ROOT / "docs" / "product" / "implementation-proof-gates.md"
+TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "roadmap.md"
 
 spec = importlib.util.spec_from_file_location("validate_proof_gates", SCRIPT)
 if spec is None or spec.loader is None:
@@ -117,6 +118,20 @@ class ProofGateValidationTests(unittest.TestCase):
         second_index = lines.index(second)
         lines[first_index], lines[second_index] = lines[second_index], lines[first_index]
         return "".join(lines)
+
+    @classmethod
+    def visible_template_dod(cls) -> tuple[str, ...]:
+        visible = False
+        values: List[str] = []
+        for line in TEMPLATE.read_text(encoding="utf-8").splitlines():
+            if line == "## 10. Definition of done":
+                visible = True
+                continue
+            if visible and line.startswith("## "):
+                break
+            if visible and line.startswith("- [ ] "):
+                values.append(line.removeprefix("- [ ] "))
+        return tuple(values)
 
     def test_checked_in_checklist_is_valid(self) -> None:
         result = validator.validate_file(CHECKLIST)
@@ -277,21 +292,76 @@ class ProofGateValidationTests(unittest.TestCase):
         self.assertNotIn("na-rationale", self.codes(self.result(good)))
 
     def test_no_invented_performance_threshold(self) -> None:
-        mutated = self.checklist_text.replace(
-            "- **Metric:** Artifact bytes and local validator duration only; product latency, memory, bundle, render, and startup budgets are not measured here.",
-            "- **Metric:** Artifact bytes and local validator duration only; p95 latency must be under 50 ms.",
-            1,
+        original = "- **Metric:** Artifact bytes and local validator duration only; product latency, memory, bundle, render, and startup budgets are not measured here."
+        variants = (
+            "p95 target is 50 ms.",
+            "latency budget: 50 ms.",
+            "performance SLO < 200 ms.",
+            "startup limit 2 s.",
+            "response time should be within 500 ms.",
+            "latency must be under 50 ms.",
         )
-        self.assertCode(self.result(mutated), "invented-performance-threshold")
-        self.assertCode(self.result(mutated), "threshold-statement")
+        for variant in variants:
+            with self.subTest(variant=variant):
+                mutated = self.checklist_text.replace(
+                    original,
+                    f"- **Metric:** {variant}",
+                    1,
+                )
+                self.assertCode(self.result(mutated), "invented-performance-threshold")
+                self.assertCode(self.result(mutated), "threshold-statement")
 
-    def test_live_or_production_success_claim_fails(self) -> None:
+    def test_measured_evidence_may_report_observations_without_claiming_a_budget(self) -> None:
         mutated = self.checklist_text.replace(
-            "- **Review result:** Review records the exact command, exit status, output artifact, and remaining limitation; a failed or unrun command is not reported as passed.",
-            "- **Review result:** Production deployment is complete and live integration passed.",
+            "- **Validator-duration evidence:** Same checkout; ten samples `56.827, 58.489, 57.996, 58.807, 56.066, 56.437, 56.874, 56.946, 57.372, 57.641` ms; min `56.066` ms, mean `57.345` ms, median `57.159` ms, p95 `58.664` ms, and max `58.807` ms; p99 is not meaningful for ten samples and no threshold is inferred.",
+            "- **Validator-duration evidence:** Same checkout; ten samples; min 56 ms, mean 57 ms, median 57 ms, p95 target observation was 58.664 ms, and max 58.807 ms; no threshold is inferred.",
             1,
         )
-        self.assertCode(self.result(mutated), "live-production-claim")
+        self.assertTrue(self.result(mutated)["ok"], self.result(mutated))
+
+    def test_live_or_production_success_claim_fails_by_clause(self) -> None:
+        review_line = "- **Review result:** Review records the exact command, exit status, output artifact, and remaining limitation; a failed or unrun command is not reported as passed."
+        for claim in (
+            "No live claim is allowed; production deployment passed.",
+            "Production release shipped.",
+            "Live integration works.",
+        ):
+            with self.subTest(claim=claim):
+                mutated = self.checklist_text.replace(
+                    review_line,
+                    f"- **Review result:** {claim}",
+                    1,
+                )
+                self.assertCode(self.result(mutated), "live-production-claim")
+        negative = self.checklist_text.replace(
+            review_line,
+            "- **Review result:** No live or production success is asserted; the mock boundary remains blocked.",
+            1,
+        )
+        self.assertNotIn("live-production-claim", self.codes(self.result(negative)))
+
+    def test_preservation_evidence_requires_accessibility_semantics_and_reason(self) -> None:
+        weak = self.checklist_text.replace(
+            "- **Preservation evidence:** The checklist and validator preserve keyboard/focus, semantic-name, screen-reader/VoiceOver, Switch Control, zoom/Dynamic Type, contrast, reduced-motion/transparency, and touch-target behavior requirements because they only read bytes and emit diagnostics; missing evidence stays blocked.",
+            "- **Preservation evidence:** no.",
+            1,
+        )
+        self.assertCode(self.result(weak), "preservation-evidence")
+
+    def test_template_definition_of_done_is_exact_and_each_phrase_is_guarded(self) -> None:
+        visible_template = self.visible_template_dod()
+        self.assertEqual(visible_template, validator.TEMPLATE_DOD)
+        self.assertEqual(len(visible_template), 12)
+        for index, expected in enumerate(visible_template, start=1):
+            key = f"D-{index:02d}"
+            row = self.table_row(self.checklist_text, key)
+            mutated = self.replace_once(
+                self.checklist_text,
+                row,
+                row.replace(expected, expected + " [mutated]", 1),
+            )
+            with self.subTest(key=key):
+                self.assertCode(self.result(mutated), "parity-dod-value")
 
     def test_parity_tables_reject_missing_duplicate_unknown_and_reorder(self) -> None:
         row = "| `F-01` | `Owner` | One responsible owner remains named. |\n"

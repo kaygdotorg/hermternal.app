@@ -91,7 +91,7 @@ blocker, not an implicit pass.
 ### Non-UI accessibility
 
 - **Paper applicability:** N/A — this is a planning/tooling artifact with no direct UI; Paper states remain preserved by the linked design source and downstream Paper issues.
-- **Preservation evidence:** The checklist and validator do not rewrite Paper, keyboard, semantic-name, screen-reader/VoiceOver, Switch Control, zoom/Dynamic Type, contrast, reduced-motion/transparency, or touch-target requirements; missing evidence stays blocked.
+- **Preservation evidence:** The checklist and validator preserve keyboard/focus, semantic-name, screen-reader/VoiceOver, Switch Control, zoom/Dynamic Type, contrast, reduced-motion/transparency, and touch-target behavior requirements because they only read bytes and emit diagnostics; missing evidence stays blocked.
 
 ### Reproducible benchmark evidence
 
@@ -105,8 +105,8 @@ budget. No threshold is claimed.
 - **Repetitions and distribution:** 10 fresh subprocess runs; all returned valid checklist JSON; record all ten samples plus min, mean, median, p95, and max in milliseconds; p99 is not meaningful for ten samples.
 - **Trace artifact:** Local command output only; no upload or service trace.
 - **Raw command:** `python3 -c 'import json,platform,statistics,subprocess,sys,time; p=["scripts/validate_proof_gates.py","docs/product/implementation-proof-gates.md"]; samples=[]; [samples.append((lambda t: (subprocess.run([sys.executable,*p],check=True,capture_output=True), (time.perf_counter()-t)*1000)[1])(time.perf_counter())) for _ in range(10)]; print(json.dumps({"environment":platform.platform(),"python":sys.version.split()[0],"repetitions":10,"distribution_ms":{"min":min(samples),"mean":statistics.mean(samples),"median":statistics.median(samples),"p95":statistics.quantiles(samples,n=20,method="inclusive")[18],"max":max(samples),"samples":samples}}))'`
-- **Artifact-size evidence:** Same checkout; `scripts/validate_proof_gates.py` `69,524` bytes, `scripts/test_validate_proof_gates.py` `19,365` bytes, and `docs/product/implementation-proof-gates.md` `28,736` bytes.
-- **Validator-duration evidence:** Same checkout; ten samples `56.827, 58.489, 57.996, 58.807, 56.066, 56.437, 56.874, 56.946, 57.372, 57.641` ms; min `56.066` ms, mean `57.345` ms, median `57.159` ms, p95 `58.664` ms, and max `58.807` ms; p99 is not meaningful for ten samples and no threshold is inferred.
+- **Artifact-size evidence:** Same checkout; `scripts/validate_proof_gates.py` `74,100` bytes, `scripts/test_validate_proof_gates.py` `22,986` bytes, and `docs/product/implementation-proof-gates.md` `28,835` bytes.
+- **Validator-duration evidence:** Same checkout; ten samples `64.527, 63.582, 63.897, 66.101, 64.632, 65.053, 65.897, 65.867, 64.518, 63.805` ms; min `63.582` ms, mean `64.788` ms, median `64.579` ms, p95 `66.009` ms, and max `66.101` ms; p99 is not meaningful for ten samples and no threshold is inferred.
 - **Threshold statement:** No threshold is claimed.
 
 The benchmark record must include environment, repetitions, distribution, build
@@ -219,7 +219,7 @@ backtick or tilde fences do not count as contract content.
 | `D-08` | Security and privacy boundaries pass where applicable. | Security and privacy evidence remains required. |
 | `D-09` | `rtk diff` was reviewed. | Diff review remains required. |
 | `D-10` | `code-review-graph update --brief` and change impact review are complete. | Graph update and impact review remain required. |
-| `D-11` | The assigned subagent left a final issue comment with the current state, completed work, remaining limitations, and child issues. | The final issue comment remains required. |
+| `D-11` | The assigned subagent left a final issue comment with the current state, completed work, verification results, remaining limitations, and child issues. | The final issue comment and verification results remain required. |
 | `D-12` | The focused commit and pull request are reviewed and integrated into `dev`. | Focused dev integration remains required. |
 
 ## 7. Review and dev integration

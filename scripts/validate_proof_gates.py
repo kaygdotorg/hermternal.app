@@ -413,6 +413,9 @@ PARITY_FIELDS: Tuple[str, ...] = (
     "Security and redaction review",
 )
 
+# Exact visible unchecked lines from .github/ISSUE_TEMPLATE/roadmap.md.  Keep
+# this local copy synchronized so checklist parity fails closed when the atomic
+# issue contract changes, including its required verification-results evidence.
 TEMPLATE_DOD: Tuple[str, ...] = (
     "The one operation is complete.",
     "Required normal and failure states pass.",
@@ -424,7 +427,7 @@ TEMPLATE_DOD: Tuple[str, ...] = (
     "Security and privacy boundaries pass where applicable.",
     "`rtk diff` was reviewed.",
     "`code-review-graph update --brief` and change impact review are complete.",
-    "The assigned subagent left a final issue comment with the current state, completed work, remaining limitations, and child issues.",
+    "The assigned subagent left a final issue comment with the current state, completed work, verification results, remaining limitations, and child issues.",
     "The focused commit and pull request are reviewed and integrated into `dev`.",
 )
 
@@ -1156,6 +1159,46 @@ def _validate_section_fields(h2: Sequence[Heading], scanned: Sequence[MarkdownLi
         if section == "4. Accessibility and performance":
             if "Paper applicability" in values and not values["Paper applicability"].startswith("N/A"):
                 errors.append(_error("paper-na", next(line.number for label, line, _value in records if label == "Paper applicability"), "This non-UI artifact must record Paper applicability as N/A with a reason."))
+            if "Preservation evidence" in values:
+                preservation = values["Preservation evidence"]
+                preservation_line = next(
+                    line.number
+                    for label, line, _value in records
+                    if label == "Preservation evidence"
+                )
+                has_preservation_semantics = bool(
+                    re.search(
+                        r"\b(?:preserv\w*|retain\w*|keep\w*|does not (?:rewrite|remove|alter|drop)|never (?:rewrite|remove|alter|drop))\b",
+                        preservation,
+                        re.I,
+                    )
+                )
+                has_accessibility_surface = bool(
+                    re.search(
+                        r"\b(?:accessibility|keyboard|focus|semantic(?:[- ]name|s)?|screen[- ]reader|voiceover|switch control|dynamic type|browser zoom|zoom|contrast|reduced[- ]motion|reduced[- ]transparency|touch[- ]target|behavior|requirement)\b",
+                        preservation,
+                        re.I,
+                    )
+                )
+                has_reason = bool(
+                    re.search(
+                        r"\b(?:because|so that|since|only|remains?|stays?|blocked|downstream|evidence|reason)\b",
+                        preservation,
+                        re.I,
+                    )
+                )
+                if not (
+                    has_preservation_semantics
+                    and has_accessibility_surface
+                    and has_reason
+                ):
+                    errors.append(
+                        _error(
+                            "preservation-evidence",
+                            preservation_line,
+                            "Preservation evidence must state which accessibility behavior is preserved or not removed and why.",
+                        )
+                    )
             if "Build mode" in values and not values["Build mode"].startswith("N/A"):
                 errors.append(_error("benchmark-build-mode", next(line.number for label, line, _value in records if label == "Build mode"), "Build mode must be N/A with a tooling reason."))
             repetitions = values.get("Repetitions and distribution", "").casefold()
@@ -1339,13 +1382,49 @@ def _validate_checklist_dod(h2: Sequence[Heading], scanned: Sequence[MarkdownLin
 def _validate_semantic_rules(scanned: Sequence[MarkdownLine]) -> List[ValidationError]:
     errors: List[ValidationError] = []
     live_claim_patterns = (
-        re.compile(r"\b(?:live|production)\s+(?:integration|deployment|environment|traffic|service|credentials?|release)\s+(?:is|are|has|have|passes?|passed|verified|approved|ready|complete|successful|succeeded)\b", re.I),
-        re.compile(r"\b(?:passes?|passed|verified|approved|ready|complete|successful|succeeded)\s+(?:in|for)\s+(?:live|production)\b", re.I),
+        re.compile(
+            r"\b(?:live|production)\s+(?:integration|deployment|environment|traffic|service|credentials?|release)\s+"
+            r"(?:is|are|has|have|passes?|passed|verified|approved|ready|complete|successful|succeeded|works?|working|shipped|deployed|released)\b",
+            re.I,
+        ),
+        re.compile(
+            r"\b(?:passes?|passed|verified|approved|ready|complete|successful|succeeded|works?|working|shipped|deployed|released)\s+"
+            r"(?:in|for)\s+(?:live|production)\b",
+            re.I,
+        ),
         re.compile(r"\b(?:deploy|release|ship|promote)\w*\s+(?:to|in)\s+production\b", re.I),
     )
+    performance_terms = r"(?:p(?:50|75|90|95|99)|latency|memory|bundle|startup|render(?:ing)?|response(?:\s+time)?|throughput|performance|duration|slo)"
+    numeric_value = r"\d+(?:\.\d+)?(?:\s*(?:ms|s|sec|mib|mb|kb|%))?\b"
     threshold_patterns = (
-        re.compile(r"(?:threshold|budget|p95|p99|latency|memory|bundle|duration|startup)[^\n]{0,40}(?:<|>|<=|>=|\bunder\b|\bbelow\b|\bat most\b)\s*\d", re.I),
-        re.compile(r"(?:<|>|<=|>=)\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|mib|mb|kb|%)\b", re.I),
+        re.compile(
+            r"\b"
+            + performance_terms
+            + r"\b[^|\n]{0,80}\b(?:target|budget|slo|limit|ceiling|threshold)\b"
+            r"[^|\n]{0,24}?(?:is|of|at|must be|should be|:|=|<|<=|>|>=)?\s*"
+            r"(?:under|below|within|at most|no more than|less than(?: or equal to)?)?\s*"
+            + numeric_value,
+            re.I,
+        ),
+        re.compile(
+            r"\b"
+            + performance_terms
+            + r"\b[^|\n]{0,60}\b(?:under|below|within|at most|no more than|less than(?: or equal to)?)\s*"
+            + numeric_value,
+            re.I,
+        ),
+        re.compile(
+            r"\b(?:target|budget|slo|limit|ceiling|threshold)\b\s*(?::|=)\s*"
+            + numeric_value,
+            re.I,
+        ),
+        re.compile(
+            r"\b"
+            + performance_terms
+            + r"\b[^|\n]{0,24}(?:<|<=|>|>=|=)\s*"
+            + numeric_value,
+            re.I,
+        ),
     )
     for line in _visible(scanned):
         text = line.text
@@ -1356,36 +1435,66 @@ def _validate_semantic_rules(scanned: Sequence[MarkdownLine]) -> List[Validation
             re.I,
         ):
             errors.append(_error("gate-waived", line.source.number, "A proof gate cannot be waived, skipped, or made optional."))
-        negative_context = bool(
-            re.search(
-                r"\b(?:no|not|never|cannot|does not|must not|without|blocked|pending)\b[^.]{0,80}\b(?:live|production)\b",
-                text,
-                re.I,
+        # Evaluate each punctuation-delimited clause independently.  A
+        # negated boundary clause must not suppress a later positive live claim
+        # on the same Markdown line.
+        clauses = [clause.strip() for clause in re.split(r"[;.!?]+", text) if clause.strip()]
+        for clause in clauses:
+            negative_context = bool(
+                re.search(
+                    r"\b(?:no|not|never|cannot|can't|does not|do not|must not|without|blocked|pending|remains blocked|not yet|has not|have not|is not|are not)\b",
+                    clause,
+                    re.I,
+                )
             )
+            if negative_context:
+                continue
+            for pattern in live_claim_patterns:
+                if pattern.search(clause):
+                    errors.append(
+                        _error(
+                            "live-production-claim",
+                            line.source.number,
+                            "The checklist must not claim live or production success.",
+                        )
+                    )
+                    break
+
+        field_match = _BULLET_FIELD_RE.fullmatch(text)
+        measured_evidence_field = bool(
+            field_match
+            and field_match.group(1)
+            in {
+                "Repetitions and distribution",
+                "Raw command",
+                "Artifact-size evidence",
+                "Validator-duration evidence",
+            }
         )
-        for pattern in live_claim_patterns:
-            if not negative_context and pattern.search(text):
-                errors.append(_error("live-production-claim", line.source.number, "The checklist must not claim live or production success."))
-                break
-        for pattern in threshold_patterns:
-            if pattern.search(text):
-                errors.append(
-                    _error(
-                        "invented-performance-threshold",
-                        line.source.number,
-                        "Do not invent a numeric performance threshold or budget in the planning checklist.",
+        # Numeric observations are allowed only in explicitly measured
+        # evidence fields.  Prose targets, budgets, SLOs, limits, and bounds
+        # remain forbidden even when a separate no-threshold line is present.
+        if not measured_evidence_field:
+            for pattern in threshold_patterns:
+                if pattern.search(text):
+                    errors.append(
+                        _error(
+                            "invented-performance-threshold",
+                            line.source.number,
+                            "Do not invent a numeric performance threshold or budget in the planning checklist.",
+                        )
                     )
-                )
-                # A numeric budget also contradicts the explicit no-threshold
-                # record, even when the mutation leaves that field untouched.
-                errors.append(
-                    _error(
-                        "threshold-statement",
-                        line.source.number,
-                        "The benchmark section must state exactly `No threshold is claimed.` and contain no numeric budget.",
+                    # A numeric budget also contradicts the explicit
+                    # no-threshold record, even when the mutation leaves that
+                    # field untouched.
+                    errors.append(
+                        _error(
+                            "threshold-statement",
+                            line.source.number,
+                            "The benchmark section must state exactly `No threshold is claimed.` and contain no numeric budget.",
+                        )
                     )
-                )
-                break
+                    break
 
         # Match executable command/import/call shapes, not prose literals.  The
         # module names are assembled from fragments so this validator remains a
