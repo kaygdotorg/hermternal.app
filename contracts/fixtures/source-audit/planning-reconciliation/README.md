@@ -28,7 +28,9 @@ claim-level anchors and digests, source references, document references,
 summaries, exceptions, and deferred ownership. It rejects absolute paths,
 `..` traversal, and resolved symlinks that escape the approved repository or
 pinned source root. Required references must be real local Markdown link targets,
-not matching prose or decoy paths. These checks run in both full and
+not matching prose or decoy paths. The standard-library scanner ignores
+Markdown-like links inside fenced code blocks and HTML comments before applying
+repository containment checks. These checks run in both full and
 document-only modes when a source root is supplied, so a matching digest or
 anchor cannot make an out-of-root path valid.
 

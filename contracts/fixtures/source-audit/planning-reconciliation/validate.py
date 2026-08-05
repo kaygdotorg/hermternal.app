@@ -612,6 +612,8 @@ def _git_index_flags(source_root: Path) -> list[str] | None:
 
 
 _MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]\n]+\]\(([^)\s]+)(?:\s+[^)]*)?\)")
+_MARKDOWN_FENCE_OPEN_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
+_MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})[ \t]*$")
 
 
 def _line_numbers(text: str, literal: str) -> list[int]:
@@ -623,8 +625,64 @@ def _line_numbers(text: str, literal: str) -> list[int]:
 
 
 def _markdown_link_targets(text: str) -> list[str]:
-    """Extract actual Markdown link destinations, excluding image syntax."""
-    return _MARKDOWN_LINK_RE.findall(text)
+    """Extract link destinations outside fenced code and HTML comments."""
+    targets: list[str] = []
+    fence_char: str | None = None
+    fence_length = 0
+    in_html_comment = False
+
+    for line in text.splitlines():
+        if fence_char is not None:
+            closing = _MARKDOWN_FENCE_CLOSE_RE.match(line)
+            if (
+                closing is not None
+                and closing.group(2)[0] == fence_char
+                and len(closing.group(2)) >= fence_length
+            ):
+                fence_char = None
+                fence_length = 0
+            continue
+
+        # A fence can only begin at the start of a Markdown line. If a comment
+        # is open, scan it first so fence-like text inside the comment stays
+        # ignored until the comment closes.
+        if not in_html_comment:
+            opening = _MARKDOWN_FENCE_OPEN_RE.match(line)
+            if opening is not None:
+                marker = opening.group(2)
+                info = opening.group(3)
+                if marker[0] != "`" or "`" not in info:
+                    fence_char = marker[0]
+                    fence_length = len(marker)
+                    continue
+
+        cursor = 0
+        while cursor < len(line):
+            if in_html_comment:
+                comment_end = line.find("-->", cursor)
+                if comment_end < 0:
+                    break
+                in_html_comment = False
+                cursor = comment_end + 3
+                continue
+
+            comment_start = line.find("<!--", cursor)
+            if comment_start < 0:
+                visible = line[cursor:]
+                if visible:
+                    targets.extend(_MARKDOWN_LINK_RE.findall(visible))
+                break
+
+            visible = line[cursor:comment_start]
+            if visible:
+                targets.extend(_MARKDOWN_LINK_RE.findall(visible))
+            comment_end = line.find("-->", comment_start + 4)
+            if comment_end < 0:
+                in_html_comment = True
+                break
+            cursor = comment_end + 3
+
+    return targets
 
 
 def _is_unsafe_relative_path(value: str) -> bool:

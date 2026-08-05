@@ -286,6 +286,38 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         for errors in (full_errors, docs_errors):
             self.assertTrue(any("Markdown link target" in error for error in errors))
 
+    def test_fenced_code_link_decoy_fails_full_mode(self) -> None:
+        (self.repo_root / "README.md").write_text(
+            "```markdown\n[decoy](README.md)\n```\n",
+            encoding="utf-8",
+        )
+        errors = self._validate()
+        self.assertTrue(any("Markdown link target" in error for error in errors))
+
+    def test_fenced_code_link_decoy_fails_docs_only_mode(self) -> None:
+        (self.repo_root / "README.md").write_text(
+            "~~~markdown\n[decoy](README.md)\n~~~\n",
+            encoding="utf-8",
+        )
+        _full_errors, docs_errors = self._validate_both_modes()
+        self.assertTrue(any("Markdown link target" in error for error in docs_errors))
+
+    def test_html_comment_link_decoy_fails_full_mode(self) -> None:
+        (self.repo_root / "README.md").write_text(
+            "<!-- [decoy](README.md) -->\n",
+            encoding="utf-8",
+        )
+        errors = self._validate()
+        self.assertTrue(any("Markdown link target" in error for error in errors))
+
+    def test_html_comment_link_decoy_fails_docs_only_mode(self) -> None:
+        (self.repo_root / "README.md").write_text(
+            "<!--\n[decoy](README.md)\n-->\n",
+            encoding="utf-8",
+        )
+        _full_errors, docs_errors = self._validate_both_modes()
+        self.assertTrue(any("Markdown link target" in error for error in docs_errors))
+
     def test_missing_anchor_fails_closed(self) -> None:
         with mock.patch.object(validate, "_git_blob", return_value=b"OTHER\n"):
             errors = self._validate()
