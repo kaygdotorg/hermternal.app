@@ -19,7 +19,7 @@ Every release candidate MUST carry a compatibility record with these values:
 - `behavioral_probe`: the redacted live-deployment probe and its expected results for the supported REST, authentication, WebSocket, edge, and Terminal behavior.
 - `proof_run`: the date, tool versions, proxy variants, host class, and pass or fail result for the disposable proof.
 
-At this source pin, Hermes has no server-observable source SHA field and no server-observable protocol-version field. The compatibility record MUST NOT require a version endpoint, response header, or guessed `dashboard_protocol_version`. The full SHA and deployment identity come from the out-of-band attestation. The behavioral probe is additional evidence; it does not replace the attestation.
+For the selected v0.0.1 Dashboard surface at this source pin, Hermes has no server-observable source SHA field or stable protocol-version field. The separate `/api/ssh/ownership` route returns `protocolVersion: 1`, but that SSH ownership protocol is explicitly blocked and outside this compatibility contract. The compatibility record MUST NOT require a version endpoint, response header, or guessed `dashboard_protocol_version` for the selected surface. The full SHA and deployment identity come from the out-of-band attestation. The behavioral probe is additional evidence; it does not replace the attestation.
 
 The deployment or release gate MUST fail closed when the attestation is absent, malformed, unverifiable, or different from the pinned SHA, route-manifest revision, or reviewed proxy proof. It MUST also fail closed when the behavioral probe is missing or fails. A placeholder, missing value, or `unknown` source SHA means **not compatible** and MUST block the release.
 
@@ -61,7 +61,7 @@ The check MUST fail closed if the deployment attestation is absent or mismatched
 
 The client MUST show a safe, actionable incompatibility state when the check fails. The state MAY expose a deployment identifier, expected SHA, attestation status, or safe probe name, but MUST NOT expose cookies, passwords, refresh material, tickets, provider state, prompt text, transcript text, malformed payloads, or raw headers.
 
-There is no server-observed protocol version to compare at this source pin. Missing server version metadata is expected and MUST NOT be converted into a guessed version. Missing or invalid attestation and failed behavioral evidence mean blocked. There is no best-effort mode in v0.0.1.
+There is no server-observed protocol version to compare for the selected Dashboard surface at this source pin. The blocked `/api/ssh/ownership` `protocolVersion: 1` response is not evidence for this contract and MUST NOT be used as a negotiated version. Missing selected-surface version metadata is expected and MUST NOT be converted into a guessed version. Missing or invalid attestation and failed behavioral evidence mean blocked. There is no best-effort mode in v0.0.1.
 
 ## Evidence rules
 
@@ -69,6 +69,8 @@ A compatibility record is valid only when all of the following evidence exists:
 
 - source inspection or an equivalent reviewed record for the pinned SHA;
 - a verifiable out-of-band deployment attestation for that SHA, route-manifest revision, and proxy proof;
+
+For the planning phase, [`planning_review.json`](../../contracts/fixtures/source-audit/planning-reconciliation/planning_review.json) is the reproducible source-inspection record, and [`validate.py`](../../contracts/fixtures/source-audit/planning-reconciliation/validate.py) checks it against a local pinned checkout. A passing source review is necessary but not sufficient: deployment attestation, behavioral probes, proxy proofs, redacted fixtures, and parity checks remain separate gates.
 - a behavioral probe for cookie-authenticated browser and password-provider REST, bearer-authenticated supported native OAuth or OIDC REST, fresh `?ticket=` upgrades on `/api/ws` and `/api/pty`, single-use and short-lived ticket rejection, and the fact that tickets are not session-bound;
 - proof that ticket query values exist only in ephemeral upgrade URLs and that full values plus the pinned source's bounded invalid-ticket fragment are removed from retained access logs, error logs, debug output, browser history, fixtures, and user-visible errors;
 - redacted fixtures for every supported behavior class;

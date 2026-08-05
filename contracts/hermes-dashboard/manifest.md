@@ -132,7 +132,7 @@ Model selection changes the active session, not every session on the server.
 - `dashboard-v0.0.1` is tested against exactly `f5be9236e00ddf2f2a412697f267078fc4ee068e`.
 - A patch-level Hermes change may use this contract only when all selected route names, auth behavior, WebSocket framing, method names, events, model-switch rules, PTY rules, and state fixtures remain unchanged.
 - A route rename, auth change, WebSocket framing change, method removal, required-field change, model-switch change, approval or clarification change, PTY close/replay change, or profile-scope change requires a new contract review and contract version.
-- The pinned Dashboard does not expose its source SHA or a stable protocol-version field. A deployment must provide reviewed out-of-band attestation for the installed Hermes SHA, and the client or proof harness must also run a non-destructive behavioral probe before enabling chat. Missing or mismatched attestation blocks the connection.
+- The selected v0.0.1 Dashboard surface does not expose its source SHA or a stable protocol-version field. The separate `/api/ssh/ownership` route returns `protocolVersion: 1`, but that SSH ownership protocol is explicitly blocked and outside this contract. A deployment must provide reviewed out-of-band attestation for the installed Hermes SHA, and the client or proof harness must also run a non-destructive behavioral probe before enabling chat. Missing or mismatched attestation blocks the connection.
 - Compatibility is not negotiated by an invented Hermes header or query parameter. The deployment attestation, manifest, behavioral probe, and fixture revision form the compatibility record until Hermes publishes a stable wire version.
 
 ## Explicitly blocked surface
@@ -151,14 +151,18 @@ An unsupported method or route is not a hidden feature. It is a compatibility or
 
 ## Review evidence
 
+The source-only planning reconciliation is recorded in [`planning_review.json`](../fixtures/source-audit/planning-reconciliation/planning_review.json). Run [`validate.py`](../fixtures/source-audit/planning-reconciliation/validate.py) against a local checkout of the exact source SHA to verify file digests and anchors. This is a source review only; it does not replace deployment attestation, behavioral probes, or later focused fixture audits.
+
 Review the pinned source paths before changing this manifest:
 
 - `hermes_cli/dashboard_auth/routes.py`
+- `hermes_cli/dashboard_auth/ws_tickets.py`
 - `hermes_cli/web_routers/sessions.py`
 - `hermes_cli/web_server.py`
 - `hermes_cli/pty_session.py`
 - `hermes_cli/pty_bridge.py`
 - `tui_gateway/methods_prompt.py`
 - `tui_gateway/methods_session.py`
+- `tui_gateway/methods_complete.py`
 - `tui_gateway/server.py`
 - `tui_gateway/ws.py`
