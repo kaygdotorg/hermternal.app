@@ -1,0 +1,273 @@
+{
+  "schema": "hermternal.source-audit.pty-attach.v1",
+  "contract": "dashboard-v0.0.1",
+  "source": {
+    "repository": "NousResearch/hermes-agent",
+    "revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "revision_url": "https://github.com/NousResearch/hermes-agent/commit/f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "note": "Evidence is recorded from the immutable source revision. This repository does not vendor or execute Hermes."
+  },
+  "files": [
+    {
+      "path": "hermes_cli/pty_bridge.py",
+      "git_blob_sha": "cf4a4e60a75eab4490fa718db8651c079c5ff828",
+      "sha256": "e24515762a8ee3c9089369b7ecba20307af62c7cfb6d02abf04261ecacaa6095",
+      "size_bytes": 11287,
+      "ranges": [
+        {
+          "start": 208,
+          "end": 223,
+          "sha256": "b47ef01af464b50c8ea8547f2a6172f2a30b951762157fa53430d50f14517edb",
+          "markers": [
+            "def write(self, data: bytes) -> None:",
+            "if self._closed or not data:",
+            "os.write(self._fd, view)"
+          ],
+          "why": "Input is written directly to the PTY and is not a retained-session replay source."
+        },
+        {
+          "start": 250,
+          "end": 286,
+          "sha256": "7e7a52539df866e073afb4f20c607d9225a62b64d7e857098a6b55446396fb36",
+          "markers": [
+            "def close(self) -> None:",
+            "signal.SIGHUP",
+            "signal.SIGTERM",
+            "signal.SIGKILL"
+          ],
+          "why": "The bridge close path terminates and reaps the child used by the legacy socket path."
+        }
+      ]
+    },
+    {
+      "path": "hermes_cli/pty_session.py",
+      "git_blob_sha": "43910be9deb4655c6eb2dbad62b0b4aa1d81c0fa",
+      "sha256": "617448d953ec978f1b3287b02ac0dd2ad61c255d3366e0ca45efdf829146d8c5",
+      "size_bytes": 6769,
+      "ranges": [
+        {
+          "start": 19,
+          "end": 39,
+          "sha256": "5377a211167f9a94202f241728b650dabeede5aeed7261554c4aaf5cae6c8161",
+          "markers": [
+            "class RingBuffer:",
+            "self._buf.extend(data)",
+            "self._truncated = True"
+          ],
+          "why": "Detached output is bounded to the newest configured bytes and may be truncated."
+        },
+        {
+          "start": 42,
+          "end": 105,
+          "sha256": "7eb9380f292579da9f9f272cb3dea00b792d9977cb965566a191d57dfb989636",
+          "markers": [
+            "class PtySession:",
+            "await ws.send_bytes(snap)",
+            "await ws.send_bytes(chunk)",
+            "WS_CLOSE_SUPERSEDED",
+            "if self._ws is not ws:"
+          ],
+          "why": "A valid handle keeps one PTY alive across socket detach, sends retained bytes on attach, races live sends without a boundary, and protects the replacement socket from a stale detach."
+        },
+        {
+          "start": 139,
+          "end": 191,
+          "sha256": "24751a22ce6d297089cee6599c0219a33bc88a92b105d157c1ffae5aff09a6f3",
+          "markers": [
+            "class PtySessionRegistry:",
+            "if existing is not None and existing.alive:",
+            "if (not s.alive)",
+            "(now - s.last_detached_at) > self._ttl"
+          ],
+          "why": "The registry reuses live sessions, reaps expired detached entries, and otherwise can spawn a new session for a key that the client must no longer reuse."
+        }
+      ]
+    },
+    {
+      "path": "hermes_cli/web_server.py",
+      "git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+      "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+      "size_bytes": 703915,
+      "ranges": [
+        {
+          "start": 14416,
+          "end": 14500,
+          "sha256": "8d941a08e658821446b8eeb321d27a946982d49c6253faa7ff2ae38de04b56ff",
+          "markers": [
+            "async def _legacy_pump(ws: \"WebSocket\", bridge) -> None:",
+            "await asyncio.to_thread(bridge.close)",
+            "if msg.get(\"type\") == \"websocket.disconnect\""
+          ],
+          "why": "The no-handle path is one socket to one bridge and closes the bridge when the socket ends."
+        },
+        {
+          "start": 15720,
+          "end": 15797,
+          "sha256": "62954abe342c1737e4c987520ccea14f98f2dc8e9dd8735fc0705f20418a719d",
+          "markers": [
+            "attach_token = ws.query_params.get(\"attach\") or None",
+            "if attach_token is None:",
+            "await PTY_REGISTRY.attach_or_spawn(",
+            "await session.attach(ws)",
+            "PTY_REGISTRY.detach(attach_token, ws)"
+          ],
+          "why": "The query-value presence split selects legacy termination or registry-backed detach/reattach. The source does not validate a client-visible handle grammar."
+        }
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "id": "legacy-disconnect-terminates",
+      "source_ranges": [
+        "hermes_cli/web_server.py:14416-14500",
+        "hermes_cli/web_server.py:15720-15797",
+        "hermes_cli/pty_bridge.py:250-286"
+      ],
+      "source_observation": {
+        "summary": "Missing or empty attach selects _legacy_pump; its finally block closes the bridge, and PtyBridge.close terminates the child.",
+        "assertions": {
+          "attach_selection": "missing_or_empty_selects_legacy_pump",
+          "disconnect_operation": "bridge_close",
+          "child_lifecycle": "terminate_and_reap"
+        }
+      },
+      "contract_result": {
+        "summary": "A legacy socket disconnect enters exited and cannot reattach.",
+        "assertions": {
+          "mode": "legacy",
+          "disconnect_state": "exited",
+          "reattach": "prohibited"
+        }
+      }
+    },
+    {
+      "id": "attach-detach-reattach",
+      "source_ranges": [
+        "hermes_cli/web_server.py:15720-15797",
+        "hermes_cli/pty_session.py:42-105",
+        "hermes_cli/pty_session.py:139-191"
+      ],
+      "source_observation": {
+        "summary": "A non-empty attach key is registry-backed; socket teardown calls detach while the session drain task and PTY remain alive until exit or reaper cleanup.",
+        "assertions": {
+          "attach_selection": "non_empty_registry_key",
+          "disconnect_operation": "detach_socket_only",
+          "pty_lifetime": "alive_until_exit_or_reaper_cleanup"
+        }
+      },
+      "contract_result": {
+        "summary": "A valid exact handle may reattach during the retention window and keeps server-owned PTY identity.",
+        "assertions": {
+          "handle": "same_exact_handle",
+          "socket_lifecycle": "attached_detached_attached",
+          "session_identity": "preserved",
+          "retention": "reattach_during_retention_window"
+        }
+      }
+    },
+    {
+      "id": "malformed-expired-fail-closed",
+      "source_ranges": [
+        "hermes_cli/web_server.py:15720-15797",
+        "hermes_cli/pty_session.py:139-191"
+      ],
+      "source_observation": {
+        "summary": "The source accepts any non-empty string as a registry key and does not expose a handle grammar or explicit expired-handle rejection; after reaping, a stale key can be used to spawn a new PTY.",
+        "assertions": {
+          "query_validation": "any_non_empty_string_is_accepted",
+          "expiry_rejection": "not_exposed_by_pinned_source",
+          "post_reap_behavior": "stale_key_can_spawn_fresh_pty"
+        }
+      },
+      "contract_result": {
+        "summary": "Client and fixture gates reject malformed or expired handles before opening the route, with no legacy fallback and no replacement spawn.",
+        "assertions": {
+          "preflight": "reject_before_api_pty_open",
+          "fallback": "none",
+          "replacement_spawn": "none",
+          "retry": "none"
+        }
+      }
+    },
+    {
+      "id": "superseded-socket-fail-closed",
+      "source_ranges": [
+        "hermes_cli/pty_session.py:42-105",
+        "hermes_cli/web_server.py:15720-15797"
+      ],
+      "source_observation": {
+        "summary": "PtySession.attach closes the old socket with 4409 before assigning the replacement WebSocket; the old handler's later detach is ignored unless it is still the current socket.",
+        "assertions": {
+          "replacement_close": "old_socket_4409",
+          "replacement_order": "close_old_before_assign_new",
+          "stale_cleanup": "detach_ignored_when_not_current"
+        }
+      },
+      "contract_result": {
+        "summary": "The already-open stale socket receives 4409 before the replacement is assigned; the replacement then becomes active, and the stale handler never retries or detaches it.",
+        "assertions": {
+          "ordering": "4409_close_before_replacement_assign",
+          "stale_socket": "stop_reading_no_retry",
+          "active_socket": "replacement_remains_attached",
+          "close_code": 4409
+        }
+      }
+    },
+    {
+      "id": "retained-output-race",
+      "source_ranges": [
+        "hermes_cli/pty_session.py:42-105"
+      ],
+      "source_observation": {
+        "summary": "The drain task appends and sends live chunks while attach snapshots and sends retained bytes; no replay boundary or replay-before-live ordering is provided.",
+        "assertions": {
+          "retained_send": "attach_snapshot_sends_buffer",
+          "live_send": "drain_sends_live_chunks",
+          "ordering": "no_boundary_or_order_guarantee"
+        }
+      },
+      "contract_result": {
+        "summary": "Render receive order, allow retained/live race, and do not claim a complete ordered transcript.",
+        "assertions": {
+          "render": "receive_order",
+          "complete_replay": false,
+          "transcript": false
+        }
+      }
+    },
+    {
+      "id": "no-input-replay",
+      "source_ranges": [
+        "hermes_cli/web_server.py:15720-15797",
+        "hermes_cli/pty_bridge.py:208-223",
+        "hermes_cli/pty_session.py:42-105"
+      ],
+      "source_observation": {
+        "summary": "Writer input is forwarded directly to the bridge; attach sends only the output buffer snapshot and never replays prior input.",
+        "assertions": {
+          "input_path": "direct_bridge_write",
+          "snapshot_payload": "output_buffer_only",
+          "input_replay": "not_provided_by_attach"
+        }
+      },
+      "contract_result": {
+        "summary": "Reconnect must not resend input, resize controls, prompts, or tool actions; prompt and tool output bytes may still appear in retained PTY output.",
+        "assertions": {
+          "input": "not_replayed",
+          "resize": "not_replayed",
+          "prompt": "not_replayed",
+          "tool_action": "not_replayed",
+          "output": "may_be_retained",
+          "retry": "new_explicit_user_action"
+        }
+      }
+    }
+  ],
+  "redaction": {
+    "raw_handles": false,
+    "live_data": false,
+    "credentials": false,
+    "transcript_mirror": false
+  }
+}
