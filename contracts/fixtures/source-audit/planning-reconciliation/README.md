@@ -22,6 +22,12 @@ fixtures.
   missing, changed, and malformed evidence cases with temporary synthetic
   source trees.
 
+The validator freezes the required-link set and claim IDs, statuses, source
+references, document references, and summaries. It also rejects absolute paths,
+`..` traversal, and resolved symlinks that escape the approved repository or
+pinned source root. These checks run in both full and document-only modes, so a
+matching digest or anchor cannot make an out-of-root path valid.
+
 ## Reproduce the review
 
 Fetch the public source outside this repository, pin the immutable commit, and
