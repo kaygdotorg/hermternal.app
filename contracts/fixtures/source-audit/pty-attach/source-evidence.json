@@ -4,7 +4,7 @@
   "source": {
     "repository": "NousResearch/hermes-agent",
     "revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
-    "revision_url": "https://github.com/NousResearch/hermes-agent/tree/f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "revision_url": "https://github.com/NousResearch/hermes-agent/commit/f5be9236e00ddf2f2a412697f267078fc4ee068e",
     "note": "Evidence is recorded from the immutable source revision. This repository does not vendor or execute Hermes."
   },
   "files": [

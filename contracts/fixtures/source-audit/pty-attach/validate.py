@@ -111,6 +111,111 @@ SNAPSHOT_EVENT_FIELDS = frozenset(
     }
 )
 SNAPSHOT_PAYLOAD_FIELDS = frozenset({"kind", "bytes_ref"})
+
+
+def event_schema(event: str, *fields: str) -> tuple[str, frozenset[str]]:
+    return event, frozenset({"step", "event", *fields})
+
+
+TIMELINE_SCHEMAS = {
+    "missing-attach-selects-legacy": (
+        event_schema("request.prepare"),
+        event_schema("legacy.branch.selected"),
+    ),
+    "legacy-disconnect-terminates": (
+        event_schema("socket.accept", "socket"),
+        event_schema("pty.spawn", "process_ref", "socket"),
+        event_schema("socket.disconnect", "socket"),
+        event_schema("bridge.close", "process_ref"),
+    ),
+    "attach-detach-reattach": (
+        event_schema("socket.accept", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("registry.spawn", "handle_ref", "process_ref", "session_ref"),
+        event_schema("session.attach", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("socket.disconnect", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("registry.detach", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("socket.accept", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("registry.reuse", "handle_ref", "process_ref", "session_ref"),
+        event_schema("session.attach", "handle_ref", "process_ref", "session_ref", "socket"),
+    ),
+    "malformed-attach-fails-closed": (
+        event_schema("client.validate_handle"),
+        event_schema("client.reject_without_upgrade", "reason"),
+    ),
+    "expired-attach-fails-closed": (
+        event_schema("reaper.reap", "elapsed_seconds"),
+        event_schema("client.observe_expired_handle"),
+        event_schema("client.reject_without_upgrade", "reason"),
+    ),
+    "superseded-socket-fails-closed": (
+        event_schema("session.attach", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("session.attach", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("socket.close", "close_code", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("stale_socket.finally", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("stale_socket.detach_ignored", "handle_ref", "process_ref", "session_ref", "socket"),
+    ),
+    "retained-output-race": (
+        event_schema("session.attach", "handle_ref", "process_ref", "session_ref"),
+        event_schema("attach.snapshot_send", "handle_ref", "payload_ref", "process_ref", "session_ref"),
+        event_schema("drain.live_send", "handle_ref", "payload_ref", "process_ref", "session_ref"),
+    ),
+    "retained-output-truncation": (
+        event_schema("drain.append_output", "handle_ref", "process_ref", "session_ref"),
+        event_schema("ring_buffer.truncate_oldest", "handle_ref", "process_ref", "session_ref"),
+        event_schema("session.attach", "handle_ref", "process_ref", "session_ref"),
+    ),
+    "no-input-replay": (
+        event_schema("input.send", "handle_ref", "input_ref", "process_ref", "session_ref", "socket"),
+        event_schema("resize.send", "handle_ref", "process_ref", "resize_ref", "session_ref", "socket"),
+        event_schema("prompt.submit", "handle_ref", "process_ref", "prompt_ref", "session_ref", "socket"),
+        event_schema("tool.action.send", "handle_ref", "process_ref", "session_ref", "socket", "tool_action_ref"),
+        event_schema("socket.disconnect", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("session.attach", "handle_ref", "process_ref", "session_ref", "socket"),
+        event_schema("attach.snapshot_send", "handle_ref", "payload", "payload_ref", "process_ref", "session_ref", "socket"),
+    ),
+}
+EVENT_VOCABULARY = frozenset(event for schema in TIMELINE_SCHEMAS.values() for event, _ in schema)
+CASE_ROOT_FIELDS = {
+    "missing-attach-selects-legacy": frozenset({"id", "kind", "attach_handle", "timeline", "expected"}),
+    "legacy-disconnect-terminates": frozenset({"id", "kind", "attach_handle", "timeline", "expected", "identity"}),
+    "attach-detach-reattach": frozenset({"id", "kind", "attach_handle", "timeline", "expected", "identity"}),
+    "malformed-attach-fails-closed": frozenset({"id", "kind", "attach_handle", "timeline", "expected"}),
+    "expired-attach-fails-closed": frozenset({"id", "kind", "attach_handle", "timeline", "source_hazard", "expected"}),
+    "superseded-socket-fails-closed": frozenset({"id", "kind", "attach_handle", "timeline", "expected", "identity"}),
+    "retained-output-race": frozenset({"id", "kind", "attach_handle", "timeline", "expected", "identity", "payloads", "schedule_variants"}),
+    "retained-output-truncation": frozenset({"id", "kind", "attach_handle", "timeline", "expected", "identity", "retention_observation"}),
+    "no-input-replay": frozenset({"id", "kind", "attach_handle", "timeline", "expected", "identity"}),
+}
+FIXTURE_ROOT_FIELDS = frozenset({"schema", "contract", "source_revision", "surface", "synthetic", "redaction", "retention", "cases"})
+RETENTION_FIELDS = frozenset({"ttl_seconds", "buffer_cap_bytes"})
+PAYLOAD_FIELDS = frozenset({"retained_hex", "live_hex"})
+SCHEDULE_FIELDS = frozenset({"name", "receive_order"})
+RETENTION_OBSERVATION_FIELDS = frozenset({"buffer_cap_bytes", "appended_bytes", "oldest_bytes_dropped"})
+PINNED_REVISION_URL = f"https://github.com/NousResearch/hermes-agent/commit/{REVISION}"
+
+EXPECTED_FIELDS_BY_CASE = {
+    "missing-attach-selects-legacy": frozenset({"mode", "keep_alive", "fallback_to_attach"}),
+    "legacy-disconnect-terminates": frozenset({"state_after_disconnect", "process_lifetime", "reattach", "spawn_count", "input_replay_count"}),
+    "attach-detach-reattach": frozenset({"state_sequence", "process_lifetime_during_detach", "session_identity_preserved", "spawn_count", "reattach", "input_replay_count"}),
+    "malformed-attach-fails-closed": frozenset({"state", "client_action", "spawn_count", "legacy_fallback", "retry_same_handle"}),
+    "expired-attach-fails-closed": frozenset({"state", "client_action", "spawn_count", "legacy_fallback", "retry_same_handle", "fresh_session_implicit"}),
+    "superseded-socket-fails-closed": frozenset({"state", "active_socket", "active_session_state", "stale_socket_action", "close_code", "active_detach_count"}),
+    "retained-output-race": frozenset({"allowed_receive_orders", "client_visible_boundary", "render_policy", "complete_replay_claim", "retained_bytes_are_transcript"}),
+    "retained-output-truncation": frozenset({"truncated", "oldest_output_may_be_missing", "complete_replay_claim", "client_blocks_on_replay"}),
+    "no-input-replay": frozenset({"input_sent_count", "resize_sent_count", "prompt_sent_count", "tool_action_sent_count", "input_replayed_count", "resize_replayed_count", "prompt_replayed_count", "tool_action_replayed_count", "output_snapshot_may_be_sent", "new_user_action_required"}),
+}
+HANDLE_FIELDS = frozenset({"present", "classification", "reference"})
+MISSING_HANDLE_FIELDS = frozenset({"present", "classification"})
+IDENTITY_FIELDS = frozenset({"handle_ref", "session_ref", "process_ref"})
+LEGACY_IDENTITY_FIELDS = frozenset({"process_ref", "socket_ref"})
+SOURCE_EVIDENCE_FIELDS = frozenset({"schema", "contract", "source", "files", "observations", "redaction"})
+SOURCE_METADATA_FIELDS = frozenset({"repository", "revision", "revision_url", "note"})
+SOURCE_FILE_FIELDS = frozenset({"path", "git_blob_sha", "sha256", "size_bytes", "ranges"})
+SOURCE_RANGE_FIELDS = frozenset({"start", "end", "sha256", "markers", "why"})
+OBSERVATION_FIELDS = frozenset({"id", "source_ranges", "source_observation", "contract_result"})
+SEMANTIC_FIELDS = frozenset({"summary", "assertions"})
+REDACTION_FIELDS = frozenset({"raw_handles", "live_data", "credentials", "transcript_mirror"})
+REF_LIKE_KEYS = frozenset({"reference", "socket", "socket_ref", "active_socket"})
 NON_REPLAYABLE_SEND_EVENTS = {
     "input": "input.send",
     "resize": "resize.send",
@@ -300,6 +405,12 @@ def require(condition: bool, message: str) -> None:
         fail(message)
 
 
+def require_keys(value: Any, expected: frozenset[str], label: str) -> dict[str, Any]:
+    require(isinstance(value, dict), f"{label} must be an object")
+    require(set(value) == expected, f"{label} fields changed")
+    return value
+
+
 def load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -341,13 +452,8 @@ def walk_fixture_values(value: Any, path: str = "fixture") -> Iterable[tuple[str
 
 
 def validate_redaction(document: dict[str, Any], label: str) -> None:
-    redaction = document.get("redaction")
-    require(isinstance(redaction, dict), f"{label} redaction policy is required")
-    require(
-        set(redaction) == {"raw_handles", "live_data", "credentials", "transcript_mirror"},
-        f"{label} redaction policy changed",
-    )
-    for key in ("raw_handles", "live_data", "credentials", "transcript_mirror"):
+    redaction = require_keys(document.get("redaction"), REDACTION_FIELDS, f"{label} redaction policy")
+    for key in REDACTION_FIELDS:
         require(redaction.get(key) is False, f"{label} redaction.{key} must be false")
 
     for path, value in walk_fixture_values(document):
@@ -358,14 +464,17 @@ def validate_redaction(document: dict[str, Any], label: str) -> None:
                     lowered_key not in FORBIDDEN_REDACTION_KEYS,
                     f"forbidden {label} key at {path}.{key}",
                 )
-                if isinstance(child, str) and (
-                    "handle" in lowered_key
-                    or lowered_key.endswith("_token")
-                    or lowered_key in {"reference", "websocket_ticket"}
-                ):
+                ref_like = (
+                    not (path.endswith(".assertions") or ".assertions." in path)
+                    and (
+                        lowered_key.endswith("_ref")
+                        or lowered_key in {key_name.lower() for key_name in REF_LIKE_KEYS}
+                    )
+                )
+                if ref_like and isinstance(child, str):
                     require(
-                        child.startswith("synthetic-") or child == "same_exact_handle",
-                        f"raw handle-like {label} value at {path}.{key}",
+                        child.startswith("synthetic-"),
+                        f"non-synthetic {label} reference at {path}.{key}",
                     )
         if isinstance(value, str):
             # These markers catch accidental pasting of common credential forms
@@ -389,6 +498,46 @@ def event_names(case: dict[str, Any]) -> list[str]:
         require(isinstance(name, str), f"{case.get('id')}: event name is required")
         result.append(name)
     return result
+
+
+def replay_alias_kind(event_name: str) -> str | None:
+    """Classify replay aliases even when clients add separators or versions."""
+    normalized = re.sub(r"[-_]+", ".", event_name.lower())
+    parts = [part for part in normalized.split(".") if part]
+    if not parts:
+        return None
+    if parts[-1].startswith("v") and parts[-1][1:].isdigit():
+        parts.pop()
+    if parts and parts[-1].startswith("version") and parts[-1][7:].isdigit():
+        parts.pop()
+    if not parts or parts[-1] != "replay":
+        return None
+    prefix = parts[:-1]
+    if not prefix:
+        return None
+    if prefix[0] == "input":
+        return "input"
+    if prefix[0] == "resize":
+        return "resize"
+    if prefix[0] == "prompt":
+        return "prompt"
+    if prefix[0] in {"tool", "action"}:
+        return "tool_action"
+    return None
+
+
+def validate_timeline_schema(case_id: str, timeline: list[dict[str, Any]]) -> None:
+    schema = TIMELINE_SCHEMAS.get(case_id)
+    require(schema is not None, f"{case_id}: closed timeline schema is missing")
+    require(len(timeline) == len(schema), f"{case_id}: timeline event count changed")
+    for index, (expected_event, expected_fields) in enumerate(schema, start=1):
+        event = timeline[index - 1]
+        actual_event = event.get("event")
+        require(actual_event in EVENT_VOCABULARY, f"{case_id}: unknown event vocabulary")
+        require(replay_alias_kind(actual_event) is None, f"{case_id}: replay alias is forbidden")
+        require(actual_event == expected_event, f"{case_id}: event {index} changed")
+        require(set(event) == expected_fields, f"{case_id}: {expected_event} fields changed")
+        require(event.get("step") == index, f"{case_id}: timeline step {index} changed")
 
 
 def assert_order(names: list[str], before: str, after: str, case_id: str) -> None:
@@ -423,8 +572,7 @@ def expect_source_failure(evidence: dict[str, Any], mutation: str, mutate: Any) 
 
 def valid_handle(case: dict[str, Any]) -> dict[str, str]:
     case_id = case.get("id")
-    handle = case.get("attach_handle")
-    require(isinstance(handle, dict), f"{case_id}: attach_handle is required")
+    handle = require_keys(case.get("attach_handle"), HANDLE_FIELDS, f"{case_id} attach_handle")
     require(handle.get("present") is True, f"{case_id}: handle must be present")
     require(handle.get("classification") == "valid_exact_opaque_handle", f"{case_id}: handle is not exact opaque")
     reference = handle.get("reference")
@@ -474,10 +622,10 @@ def action_counts(names: list[str]) -> tuple[dict[str, int], dict[str, int]]:
 
 
 def missing_handle(case: dict[str, Any]) -> None:
-    handle = case.get("attach_handle")
-    require(isinstance(handle, dict), f"{case.get('id')}: attach_handle is required")
-    require(handle.get("present") is False, f"{case.get('id')}: handle must be absent")
-    require(handle.get("classification") == "missing", f"{case.get('id')}: missing classification is required")
+    case_id = case.get("id")
+    handle = require_keys(case.get("attach_handle"), MISSING_HANDLE_FIELDS, f"{case_id} attach_handle")
+    require(handle.get("present") is False, f"{case_id}: handle must be absent")
+    require(handle.get("classification") == "missing", f"{case_id}: missing classification is required")
 
 
 def validate_case(case: dict[str, Any]) -> None:
@@ -485,11 +633,16 @@ def validate_case(case: dict[str, Any]) -> None:
     kind = case.get("kind")
     require(isinstance(case_id, str), "every case needs a string id")
     require(isinstance(kind, str), f"{case_id}: every case needs a kind")
-    names = event_names(case)
+    require(case_id in CASE_ROOT_FIELDS, f"{case_id}: case schema is missing")
+    require(set(case) == CASE_ROOT_FIELDS[case_id], f"{case_id}: case fields changed")
+    timeline = events(case)
+    validate_timeline_schema(case_id, timeline)
+    names = [item["event"] for item in timeline]
+    for name in names:
+        require(replay_alias_kind(name) is None, f"{case_id}: non-replayable action replay is forbidden")
     _, replayed_counts = action_counts(names)
     require(all(count == 0 for count in replayed_counts.values()), f"{case_id}: non-replayable action replay is forbidden")
-    expected = case.get("expected")
-    require(isinstance(expected, dict), f"{case_id}: expected object is required")
+    expected = require_keys(case.get("expected"), EXPECTED_FIELDS_BY_CASE[case_id], f"{case_id} expected")
 
     if case_id == "missing-attach-selects-legacy":
         missing_handle(case)
@@ -502,7 +655,7 @@ def validate_case(case: dict[str, Any]) -> None:
         missing_handle(case)
         require(kind == "legacy_disconnect", f"{case_id}: wrong kind")
         identity = case.get("identity")
-        require(identity == {"process_ref": "synthetic-legacy-pty", "socket_ref": "legacy-a"}, f"{case_id}: legacy identity changed")
+        require(identity == {"process_ref": "synthetic-legacy-pty", "socket_ref": "synthetic-socket-legacy-a"}, f"{case_id}: legacy identity changed")
         require(set(names).isdisjoint({"registry.attach", "registry.spawn", "registry.detach", "registry.reuse", "session.attach"}), f"{case_id}: legacy path entered registry")
         accepts = event_items(case, "socket.accept")
         spawns = event_items(case, "pty.spawn")
@@ -519,7 +672,7 @@ def validate_case(case: dict[str, Any]) -> None:
         require(expected.get("process_lifetime") == "terminated", f"{case_id}: bridge must terminate")
         require(expected.get("reattach") == "prohibited", f"{case_id}: legacy reattach must be prohibited")
         require(expected.get("spawn_count") == len(spawns) == 1, f"{case_id}: expected one spawn")
-        require(expected.get("input_replay_count") == 0, f"{case_id}: input replay is forbidden")
+        require(expected.get("input_replay_count") == replayed_counts["input"], f"{case_id}: input replay count changed")
         return
 
     if case_id == "attach-detach-reattach":
@@ -540,12 +693,12 @@ def validate_case(case: dict[str, Any]) -> None:
         require(len(accepts) == 2 and len(spawn_events) == len(reuse_events) == 1, f"{case_id}: expected two accepts, one spawn, and one reuse")
         require(len(disconnects) == len(detaches) == 1, f"{case_id}: expected one detach sequence")
         for event, name, socket in (
-            (accepts[0], "socket.accept", "attach-a"),
-            (accepts[1], "socket.accept", "attach-b"),
-            (attach_events[0], "session.attach", "attach-a"),
-            (attach_events[1], "session.attach", "attach-b"),
-            (disconnects[0], "socket.disconnect", "attach-a"),
-            (detaches[0], "registry.detach", "attach-a"),
+            (accepts[0], "socket.accept", "synthetic-socket-attach-a"),
+            (accepts[1], "socket.accept", "synthetic-socket-attach-b"),
+            (attach_events[0], "session.attach", "synthetic-socket-attach-a"),
+            (attach_events[1], "session.attach", "synthetic-socket-attach-b"),
+            (disconnects[0], "socket.disconnect", "synthetic-socket-attach-a"),
+            (detaches[0], "registry.detach", "synthetic-socket-attach-a"),
             (spawn_events[0], "registry.spawn", None),
             (reuse_events[0], "registry.reuse", None),
         ):
@@ -558,20 +711,21 @@ def validate_case(case: dict[str, Any]) -> None:
         require(expected.get("session_identity_preserved") is True, f"{case_id}: identity must survive reattach")
         require(expected.get("spawn_count") == len(spawn_events) == 1, f"{case_id}: reattach must reuse one spawn")
         require(expected.get("reattach") == "same_exact_handle", f"{case_id}: handle replacement is unsafe")
-        require(expected.get("input_replay_count") == 0, f"{case_id}: input replay is forbidden")
+        require(expected.get("input_replay_count") == replayed_counts["input"], f"{case_id}: input replay count changed")
         return
 
     if case_id in {"malformed-attach-fails-closed", "expired-attach-fails-closed"}:
         require(kind in {"malformed_handle", "expired_handle"}, f"{case_id}: wrong kind")
-        handle = case.get("attach_handle")
-        require(isinstance(handle, dict) and handle.get("present") is True, f"{case_id}: invalid handle must be represented")
+        handle = require_keys(case.get("attach_handle"), HANDLE_FIELDS, f"{case_id} attach_handle")
+        require(handle.get("present") is True, f"{case_id}: invalid handle must be represented")
         require(handle.get("classification") == ("malformed" if case_id.startswith("malformed") else "expired"), f"{case_id}: classification changed")
         reference = handle.get("reference")
         require(isinstance(reference, str) and reference.startswith("synthetic-"), f"{case_id}: invalid handle reference must be synthetic")
         validate_preflight(case_id, names)
+        spawn_count = len(event_items(case, "pty.spawn")) + len(event_items(case, "registry.spawn"))
         require(expected.get("state") == "failed", f"{case_id}: invalid handle must fail")
         require(expected.get("client_action") == "reject_without_open", f"{case_id}: invalid handle action changed")
-        require(expected.get("spawn_count") == 0, f"{case_id}: invalid handle must not spawn")
+        require(expected.get("spawn_count") == spawn_count == 0, f"{case_id}: invalid handle must not spawn")
         require(expected.get("legacy_fallback") is False, f"{case_id}: invalid handle must not fall back to legacy")
         require(expected.get("retry_same_handle") is False, f"{case_id}: invalid handle must not retry")
         if case_id.startswith("expired"):
@@ -584,18 +738,18 @@ def validate_case(case: dict[str, Any]) -> None:
         attach_events = event_items(case, "session.attach")
         require(len(attach_events) == 2, f"{case_id}: expected old and replacement attaches")
         stale_attach, replacement_attach = attach_events
-        require_identity(stale_attach, identity, case_id, "session.attach", "attach-a")
-        require_identity(replacement_attach, identity, case_id, "session.attach", "attach-b")
+        require_identity(stale_attach, identity, case_id, "session.attach", "synthetic-socket-attach-a")
+        require_identity(replacement_attach, identity, case_id, "session.attach", "synthetic-socket-attach-b")
         close_events = event_items(case, "socket.close")
         require(len(close_events) == 1, f"{case_id}: expected one superseded close")
         close_event = close_events[0]
-        require_identity(close_event, identity, case_id, "socket.close", "attach-a")
+        require_identity(close_event, identity, case_id, "socket.close", "synthetic-socket-attach-a")
         require(close_event.get("close_code") == 4409, f"{case_id}: close code must be 4409")
         ignored_events = event_items(case, "stale_socket.detach_ignored")
         finally_events = event_items(case, "stale_socket.finally")
         require(len(ignored_events) == len(finally_events) == 1, f"{case_id}: stale cleanup events are required")
-        require_identity(finally_events[0], identity, case_id, "stale_socket.finally", "attach-a")
-        require_identity(ignored_events[0], identity, case_id, "stale_socket.detach_ignored", "attach-a")
+        require_identity(finally_events[0], identity, case_id, "stale_socket.finally", "synthetic-socket-attach-a")
+        require_identity(ignored_events[0], identity, case_id, "stale_socket.detach_ignored", "synthetic-socket-attach-a")
         names_indexes = {
             "stale_attach": names.index("session.attach"),
             "replacement_attach": names.index("session.attach", names.index("session.attach") + 1),
@@ -605,20 +759,26 @@ def validate_case(case: dict[str, Any]) -> None:
         require(names_indexes["stale_attach"] < names_indexes["replacement_attach"], f"{case_id}: replacement attach must follow stale attach")
         require(names_indexes["replacement_attach"] < names_indexes["socket.close"], f"{case_id}: replacement must attach before stale close")
         require(names_indexes["socket.close"] < names_indexes["stale_socket.detach_ignored"], f"{case_id}: stale cleanup must follow superseded close")
-        require(expected.get("active_socket") == "attach-b", f"{case_id}: replacement must remain active")
+        require(expected.get("active_socket") == "synthetic-socket-attach-b", f"{case_id}: replacement must remain active")
         require(expected.get("active_session_state") == "attached", f"{case_id}: replacement must remain attached")
         require(expected.get("stale_socket_action") == "stop_without_retry", f"{case_id}: stale socket must fail closed")
         require(expected.get("close_code") == 4409, f"{case_id}: expected superseded close code")
-        require(expected.get("active_detach_count") == 0, f"{case_id}: stale finally detached the replacement")
+        active_detach_count = sum(
+            1 for event in event_items(case, "registry.detach")
+            if event.get("socket") == expected.get("active_socket")
+        )
+        require(expected.get("active_detach_count") == active_detach_count == 0, f"{case_id}: stale finally detached the replacement")
         return
 
     if case_id == "retained-output-race":
         identity = valid_handle(case)
         require(kind == "retained_output_race", f"{case_id}: wrong kind")
-        payloads = case.get("payloads")
+        payloads = require_keys(case.get("payloads"), PAYLOAD_FIELDS, f"{case_id} payloads")
         require(payloads == {"retained_hex": "52", "live_hex": "4c"}, f"{case_id}: payload markers changed")
         schedules = case.get("schedule_variants")
         require(isinstance(schedules, list) and len(schedules) == 2, f"{case_id}: two race schedules are required")
+        for index, schedule in enumerate(schedules):
+            require_keys(schedule, SCHEDULE_FIELDS, f"{case_id} schedule_variants[{index}]")
         received = [item.get("receive_order") for item in schedules]
         allowed = [["retained", "live"], ["live", "retained"]]
         require(received == allowed, f"{case_id}: race orders must remain explicit and bounded")
@@ -639,7 +799,7 @@ def validate_case(case: dict[str, Any]) -> None:
     if case_id == "retained-output-truncation":
         identity = valid_handle(case)
         require(kind == "retained_output_cap", f"{case_id}: wrong kind")
-        observation = case.get("retention_observation")
+        observation = require_keys(case.get("retention_observation"), RETENTION_OBSERVATION_FIELDS, f"{case_id} retention_observation")
         require(observation == {"buffer_cap_bytes": 1048576, "appended_bytes": 1048577, "oldest_bytes_dropped": 1}, f"{case_id}: ring-buffer workload changed")
         assert_order(names, "drain.append_output", "ring_buffer.truncate_oldest", case_id)
         assert_order(names, "ring_buffer.truncate_oldest", "session.attach", case_id)
@@ -679,18 +839,18 @@ def validate_case(case: dict[str, Any]) -> None:
             action_items = event_items(case, event_name)
             require(len(action_items) == sent_counts[kind_name], f"{case_id}: action event count changed")
             for event in action_items:
-                require_identity(event, identity, case_id, event_name, "attach-a")
+                require_identity(event, identity, case_id, event_name, "synthetic-socket-attach-a")
         snapshot_events = event_items(case, "attach.snapshot_send")
         attach_events = event_items(case, "session.attach")
         disconnect_events = event_items(case, "socket.disconnect")
         require(len(attach_events) == len(disconnect_events) == len(snapshot_events) == 1, f"{case_id}: exactly one detach and reattach sequence is required")
-        require_identity(disconnect_events[0], identity, case_id, "socket.disconnect", "attach-a")
-        require_identity(attach_events[0], identity, case_id, "session.attach", "attach-b")
+        require_identity(disconnect_events[0], identity, case_id, "socket.disconnect", "synthetic-socket-attach-a")
+        require_identity(attach_events[0], identity, case_id, "session.attach", "synthetic-socket-attach-b")
         snapshot = snapshot_events[0]
-        require_identity(snapshot, identity, case_id, "attach.snapshot_send", "attach-b")
+        require_identity(snapshot, identity, case_id, "attach.snapshot_send", "synthetic-socket-attach-b")
         require(set(snapshot) == SNAPSHOT_EVENT_FIELDS, f"{case_id}: snapshot has extra or missing fields")
         snapshot_payload_ref = snapshot.get("payload_ref")
-        require(snapshot_payload_ref == "output-only", f"{case_id}: reattach snapshot must contain output bytes only")
+        require(snapshot_payload_ref == "synthetic-output-only", f"{case_id}: reattach snapshot must contain output bytes only")
         require(isinstance(snapshot_payload_ref, str), f"{case_id}: snapshot payload reference is required")
         for marker in ("input", "resize", "prompt", "tool", "action", "command"):
             require(marker not in snapshot_payload_ref.lower(), f"{case_id}: snapshot payload reference contains a replayable {marker}")
@@ -711,12 +871,13 @@ def validate_case(case: dict[str, Any]) -> None:
 
 
 def validate_fixtures(fixtures: dict[str, Any]) -> int:
+    require(set(fixtures) == FIXTURE_ROOT_FIELDS, "fixture root fields changed")
     require(fixtures.get("schema") == "hermternal.fixture.pty-attach.v1", "fixture schema changed")
     require(fixtures.get("contract") == CONTRACT, "fixture contract changed")
     require(fixtures.get("source_revision") == REVISION, "fixture source revision changed")
     require(fixtures.get("surface") == "web-only", "PTY fixture surface must remain web-only")
     require(fixtures.get("synthetic") is True, "fixtures must be synthetic")
-    retention = fixtures.get("retention")
+    retention = require_keys(fixtures.get("retention"), RETENTION_FIELDS, "fixture retention")
     require(retention == {"ttl_seconds": 1800, "buffer_cap_bytes": 1048576}, "retention contract changed")
     validate_redaction(fixtures, "fixture")
 
@@ -739,8 +900,81 @@ def fixture_case(fixtures: dict[str, Any], case_id: str) -> dict[str, Any]:
     return matches[0]
 
 
+def validate_mutation_inventory(
+    executed_ids: set[str],
+    expected_ids: frozenset[str],
+    reported_count: int | None = None,
+) -> int:
+    """Require the mutation result to match the executable mutation inventory."""
+    require(len(executed_ids) == len(expected_ids), "mutation inventory count changed")
+    require(executed_ids == set(expected_ids), "mutation inventory membership changed")
+    count = len(executed_ids)
+    if reported_count is not None:
+        require(reported_count == count, "mutation report count changed")
+    return count
+
+
 def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> int:
-    """Prove the validator rejects known source, identity, preflight, and replay bypasses."""
+    """Prove the validator rejects known source, identity, schema, and replay bypasses."""
+    mutation_inventory = frozenset(
+        {
+            "source.duplicate_session_file",
+            "source.omit_bridge_file",
+            "source.unbound_observation_range",
+            "source.wrong_valid_observation_range",
+            "source.missing_source_observation",
+            "source.false_source_prose",
+            "source.missing_contract_result",
+            "source.false_contract_prose",
+            "source.false_structured_contract_assertion",
+            "source.redaction_flag",
+            "source.raw_handle_key",
+            "source.extra_root_field",
+            "source.extra_metadata_field",
+            "source.extra_file_field",
+            "source.extra_range_field",
+            "source.extra_observation_field",
+            "source.extra_semantic_field",
+            "source.wrong_revision_url",
+            "fixture.reused_session_identity",
+            "fixture.attach_handle_reference",
+            "fixture.detach_socket_identity",
+            "fixture.legacy_bridge_process_identity",
+            "fixture.attach_process_identity",
+            "fixture.legacy_registry_attach",
+            "fixture.legacy_registry_spawn",
+            "fixture.input_snapshot_ref",
+            "fixture.tool_action_snapshot_ref",
+            "fixture.extra_snapshot_input_field",
+            "fixture.nested_snapshot_input_field",
+            "fixture.nested_snapshot_tool_action_field",
+            "fixture.malformed_socket_accept",
+            "fixture.malformed_websocket_accept",
+            "fixture.malformed_registry_lookup",
+            "fixture.malformed_route_dispatch",
+            "fixture.malformed_session_attach",
+            "fixture.replay_input",
+            "fixture.replay_resize",
+            "fixture.replay_prompt",
+            "fixture.replay_tool_action",
+            "fixture.replay_input_v2",
+            "fixture.replay_resize_v2",
+            "fixture.replay_prompt_v2",
+            "fixture.replay_tool_action_v2",
+            "fixture.superseded_close_binding",
+            "fixture.superseded_close_order",
+            "fixture.extra_active_replacement_detach",
+            "fixture.superseded_client_retry",
+            "fixture.superseded_session_detach",
+            "fixture.superseded_client_validate_handle",
+            "fixture.extra_pty_spawn",
+            "fixture.mismatched_identity_event",
+            "fixture.non_synthetic_ref",
+            "fixture.extra_case_field",
+        }
+    )
+    executed_ids: set[str] = set()
+
     def source_files(mutated: dict[str, Any]) -> list[dict[str, Any]]:
         files = mutated.get("files")
         require(isinstance(files, list), "source mutation target must have a files list")
@@ -792,7 +1026,28 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
         mutated["redaction"]["raw_handles"] = True
 
     def mutate_source_raw_handle_key(mutated: dict[str, Any]) -> None:
-        mutated["raw_handle"] = "synthetic-raw-handle"
+        mutated["source"]["raw_handle"] = "synthetic-raw-handle"
+
+    def mutate_source_extra_root_field(mutated: dict[str, Any]) -> None:
+        mutated["unexpected"] = "synthetic-extra"
+
+    def mutate_source_extra_metadata_field(mutated: dict[str, Any]) -> None:
+        mutated["source"]["unexpected"] = "synthetic-extra"
+
+    def mutate_source_extra_file_field(mutated: dict[str, Any]) -> None:
+        mutated["files"][0]["unexpected"] = "synthetic-extra"
+
+    def mutate_source_extra_range_field(mutated: dict[str, Any]) -> None:
+        mutated["files"][0]["ranges"][0]["unexpected"] = "synthetic-extra"
+
+    def mutate_source_extra_observation_field(mutated: dict[str, Any]) -> None:
+        observation(mutated)["unexpected"] = "synthetic-extra"
+
+    def mutate_source_extra_semantic_field(mutated: dict[str, Any]) -> None:
+        observation(mutated)["source_observation"]["unexpected"] = "synthetic-extra"
+
+    def mutate_wrong_revision_url(mutated: dict[str, Any]) -> None:
+        mutated["source"]["revision_url"] = "https://github.com/NousResearch/hermes-agent/tree/main"
 
     def mutate_reused_session_identity(mutated: dict[str, Any]) -> None:
         case = fixture_case(mutated, "attach-detach-reattach")
@@ -808,7 +1063,7 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
         case = fixture_case(mutated, "attach-detach-reattach")
         detach = event_items(case, "registry.detach")
         require(len(detach) == 1, "mutation target must have one registry.detach event")
-        detach[0]["socket"] = "attach-b"
+        detach[0]["socket"] = "synthetic-socket-attach-b"
 
     def mutate_legacy_bridge_process_identity(mutated: dict[str, Any]) -> None:
         case = fixture_case(mutated, "legacy-disconnect-terminates")
@@ -866,7 +1121,7 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
         case = fixture_case(mutated, "superseded-socket-fails-closed")
         close = event_items(case, "socket.close")
         require(len(close) == 1, "mutation target must have one socket.close event")
-        close[0]["socket"] = "attach-b"
+        close[0]["socket"] = "synthetic-socket-attach-b"
 
     def mutate_superseded_close_order(mutated: dict[str, Any]) -> None:
         case = fixture_case(mutated, "superseded-socket-fails-closed")
@@ -874,50 +1129,151 @@ def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> i
         close_index = next(index for index, item in enumerate(timeline) if item.get("event") == "socket.close")
         replacement_index = next(
             index for index, item in enumerate(timeline)
-            if item.get("event") == "session.attach" and item.get("socket") == "attach-b"
+            if item.get("event") == "session.attach" and item.get("socket") == "synthetic-socket-attach-b"
         )
         close_event = timeline.pop(close_index)
         timeline.insert(replacement_index - (1 if close_index < replacement_index else 0), close_event)
 
-    expect_source_failure(evidence, "duplicate pty_session audit record", mutate_duplicate_session_file)
-    expect_source_failure(evidence, "omitted pty_bridge audit record", mutate_omit_bridge_file)
-    expect_source_failure(evidence, "observation references an unaudited source range", mutate_unbound_observation_range)
-    expect_source_failure(evidence, "observation references a different audited range", mutate_wrong_valid_observation_range)
-    expect_source_failure(evidence, "observation omits source_observation semantics", mutate_missing_source_observation)
-    expect_source_failure(evidence, "observation contains false source prose", mutate_false_source_prose)
-    expect_source_failure(evidence, "observation omits contract_result semantics", mutate_missing_contract_result)
-    expect_source_failure(evidence, "observation contains false contract prose", mutate_false_contract_prose)
-    expect_source_failure(evidence, "observation contains false structured semantics", mutate_false_structured_contract_assertion)
-    expect_source_failure(evidence, "source redaction flag permits raw handles", mutate_source_redaction_flag)
-    expect_source_failure(evidence, "source evidence contains a raw handle key", mutate_source_raw_handle_key)
-    expect_fixture_failure(fixtures, "registry reuse points at a different PTY session", mutate_reused_session_identity)
-    expect_fixture_failure(fixtures, "attach handle reference differs from expected identity", mutate_attach_handle_reference)
-    expect_fixture_failure(fixtures, "registry detach targets the replacement socket", mutate_detach_socket_identity)
-    expect_fixture_failure(fixtures, "legacy bridge closes a different process", mutate_legacy_bridge_process_identity)
-    expect_fixture_failure(fixtures, "registry reuse points at a different PTY process", mutate_attach_process_identity)
-    for event_name in ("registry.attach", "registry.spawn"):
-        expect_fixture_failure(fixtures, f"legacy path enters {event_name}", mutate_legacy_registry_event(event_name))
-    expect_fixture_failure(fixtures, "reattach snapshot includes synthetic input in payload_ref", mutate_input_snapshot_ref)
-    expect_fixture_failure(fixtures, "reattach snapshot includes a tool action in payload_ref", mutate_tool_action_snapshot_ref)
-    expect_fixture_failure(fixtures, "reattach snapshot adds an extra top-level input field", mutate_extra_snapshot_input_field)
-    expect_fixture_failure(fixtures, "reattach snapshot adds a nested input field", mutate_nested_snapshot_input_field)
-    expect_fixture_failure(fixtures, "reattach snapshot adds a nested tool-action field", mutate_nested_snapshot_tool_action_field)
-    for event_name in ("socket.accept", "websocket.accept", "registry.lookup", "route.dispatch", "session.attach"):
-        expect_fixture_failure(fixtures, f"malformed preflight permits {event_name}", mutate_malformed_event(event_name))
-    for event_name in ("input.replay", "resize.replay", "prompt.replay", "tool.action.replay"):
-        expect_fixture_failure(fixtures, f"reattach replays {event_name}", mutate_replay_event(event_name))
-    expect_fixture_failure(fixtures, "superseded close code binds to the replacement socket", mutate_superseded_close_binding)
-    expect_fixture_failure(fixtures, "superseded close precedes replacement attach", mutate_superseded_close_order)
-    return 34
+    def supersession_case(mutated: dict[str, Any]) -> dict[str, Any]:
+        return fixture_case(mutated, "superseded-socket-fails-closed")
 
+    def mutate_extra_active_replacement_detach(mutated: dict[str, Any]) -> None:
+        case = supersession_case(mutated)
+        event = copy.deepcopy(event_items(case, "stale_socket.detach_ignored")[0])
+        event["event"] = "registry.detach"
+        event["step"] = 99
+        event["socket"] = "synthetic-socket-attach-b"
+        case["timeline"].insert(3, event)
+
+    def mutate_superseded_client_retry(mutated: dict[str, Any]) -> None:
+        case = supersession_case(mutated)
+        case["timeline"].insert(3, {"step": 99, "event": "client.retry"})
+
+    def mutate_superseded_session_detach(mutated: dict[str, Any]) -> None:
+        case = supersession_case(mutated)
+        event = copy.deepcopy(event_items(case, "stale_socket.detach_ignored")[0])
+        event["event"] = "session.detach"
+        event["step"] = 99
+        case["timeline"].insert(3, event)
+
+    def mutate_superseded_client_validate_handle(mutated: dict[str, Any]) -> None:
+        case = supersession_case(mutated)
+        case["timeline"].insert(1, {"step": 99, "event": "client.validate_handle"})
+
+    def mutate_extra_pty_spawn(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "attach-detach-reattach")
+        case["timeline"].insert(2, {
+            "step": 99,
+            "event": "pty.spawn",
+            "process_ref": "synthetic-extra-pty",
+            "socket": "synthetic-socket-attach-a",
+        })
+
+    def mutate_mismatched_identity_event(mutated: dict[str, Any]) -> None:
+        case = supersession_case(mutated)
+        replacement = event_items(case, "session.attach")[1]
+        replacement["process_ref"] = "synthetic-other-pty"
+
+    def mutate_non_synthetic_ref(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "legacy-disconnect-terminates")
+        event_items(case, "socket.accept")[0]["socket"] = "socket-raw"
+
+    def mutate_extra_case_field(mutated: dict[str, Any]) -> None:
+        fixture_case(mutated, "missing-attach-selects-legacy")["unexpected"] = "synthetic-extra"
+
+    def expect_fixture(mutation_id: str, description: str, mutate: Any) -> None:
+        require(mutation_id in mutation_inventory, f"unlisted fixture mutation {mutation_id}")
+        require(mutation_id not in executed_ids, f"duplicate fixture mutation {mutation_id}")
+        expect_fixture_failure(fixtures, description, mutate)
+        executed_ids.add(mutation_id)
+
+    def expect_source(mutation_id: str, description: str, mutate: Any) -> None:
+        require(mutation_id in mutation_inventory, f"unlisted source mutation {mutation_id}")
+        require(mutation_id not in executed_ids, f"duplicate source mutation {mutation_id}")
+        expect_source_failure(evidence, description, mutate)
+        executed_ids.add(mutation_id)
+
+    expect_source("source.duplicate_session_file", "duplicate pty_session audit record", mutate_duplicate_session_file)
+    expect_source("source.omit_bridge_file", "omitted pty_bridge audit record", mutate_omit_bridge_file)
+    expect_source("source.unbound_observation_range", "observation references an unaudited source range", mutate_unbound_observation_range)
+    expect_source("source.wrong_valid_observation_range", "observation references a different audited range", mutate_wrong_valid_observation_range)
+    expect_source("source.missing_source_observation", "observation omits source_observation semantics", mutate_missing_source_observation)
+    expect_source("source.false_source_prose", "observation contains false source prose", mutate_false_source_prose)
+    expect_source("source.missing_contract_result", "observation omits contract_result semantics", mutate_missing_contract_result)
+    expect_source("source.false_contract_prose", "observation contains false contract prose", mutate_false_contract_prose)
+    expect_source("source.false_structured_contract_assertion", "observation contains false structured semantics", mutate_false_structured_contract_assertion)
+    expect_source("source.redaction_flag", "source redaction flag permits raw handles", mutate_source_redaction_flag)
+    expect_source("source.raw_handle_key", "source evidence contains an extra raw-handle field", mutate_source_raw_handle_key)
+    expect_source("source.extra_root_field", "source evidence contains an unknown root field", mutate_source_extra_root_field)
+    expect_source("source.extra_metadata_field", "source evidence contains an unknown source field", mutate_source_extra_metadata_field)
+    expect_source("source.extra_file_field", "source evidence contains an unknown file field", mutate_source_extra_file_field)
+    expect_source("source.extra_range_field", "source evidence contains an unknown range field", mutate_source_extra_range_field)
+    expect_source("source.extra_observation_field", "source evidence contains an unknown observation field", mutate_source_extra_observation_field)
+    expect_source("source.extra_semantic_field", "source evidence contains an unknown semantic field", mutate_source_extra_semantic_field)
+    expect_source("source.wrong_revision_url", "source evidence uses an unpinned revision URL", mutate_wrong_revision_url)
+
+    expect_fixture("fixture.reused_session_identity", "registry reuse points at a different PTY session", mutate_reused_session_identity)
+    expect_fixture("fixture.attach_handle_reference", "attach handle reference differs from expected identity", mutate_attach_handle_reference)
+    expect_fixture("fixture.detach_socket_identity", "registry detach targets the replacement socket", mutate_detach_socket_identity)
+    expect_fixture("fixture.legacy_bridge_process_identity", "legacy bridge closes a different process", mutate_legacy_bridge_process_identity)
+    expect_fixture("fixture.attach_process_identity", "registry reuse points at a different PTY process", mutate_attach_process_identity)
+    expect_fixture("fixture.legacy_registry_attach", "legacy path enters registry.attach", mutate_legacy_registry_event("registry.attach"))
+    expect_fixture("fixture.legacy_registry_spawn", "legacy path enters registry.spawn", mutate_legacy_registry_event("registry.spawn"))
+    expect_fixture("fixture.input_snapshot_ref", "reattach snapshot includes synthetic input in payload_ref", mutate_input_snapshot_ref)
+    expect_fixture("fixture.tool_action_snapshot_ref", "reattach snapshot includes a tool action in payload_ref", mutate_tool_action_snapshot_ref)
+    expect_fixture("fixture.extra_snapshot_input_field", "reattach snapshot adds an extra top-level input field", mutate_extra_snapshot_input_field)
+    expect_fixture("fixture.nested_snapshot_input_field", "reattach snapshot adds a nested input field", mutate_nested_snapshot_input_field)
+    expect_fixture("fixture.nested_snapshot_tool_action_field", "reattach snapshot adds a nested tool-action field", mutate_nested_snapshot_tool_action_field)
+    expect_fixture("fixture.malformed_socket_accept", "malformed preflight permits socket.accept", mutate_malformed_event("socket.accept"))
+    expect_fixture("fixture.malformed_websocket_accept", "malformed preflight permits websocket.accept", mutate_malformed_event("websocket.accept"))
+    expect_fixture("fixture.malformed_registry_lookup", "malformed preflight permits registry.lookup", mutate_malformed_event("registry.lookup"))
+    expect_fixture("fixture.malformed_route_dispatch", "malformed preflight permits route.dispatch", mutate_malformed_event("route.dispatch"))
+    expect_fixture("fixture.malformed_session_attach", "malformed preflight permits session.attach", mutate_malformed_event("session.attach"))
+    expect_fixture("fixture.replay_input", "reattach replays input.replay", mutate_replay_event("input.replay"))
+    expect_fixture("fixture.replay_resize", "reattach replays resize.replay", mutate_replay_event("resize.replay"))
+    expect_fixture("fixture.replay_prompt", "reattach replays prompt.replay", mutate_replay_event("prompt.replay"))
+    expect_fixture("fixture.replay_tool_action", "reattach replays tool.action.replay", mutate_replay_event("tool.action.replay"))
+    expect_fixture("fixture.replay_input_v2", "reattach replays input.replay.v2", mutate_replay_event("input.replay.v2"))
+    expect_fixture("fixture.replay_resize_v2", "reattach replays resize_replay_v2", mutate_replay_event("resize_replay_v2"))
+    expect_fixture("fixture.replay_prompt_v2", "reattach replays prompt-replay-v2", mutate_replay_event("prompt-replay-v2"))
+    expect_fixture("fixture.replay_tool_action_v2", "reattach replays tool_action.replay.v2", mutate_replay_event("tool_action.replay.v2"))
+    expect_fixture("fixture.superseded_close_binding", "superseded close code binds to the replacement socket", mutate_superseded_close_binding)
+    expect_fixture("fixture.superseded_close_order", "superseded close precedes replacement attach", mutate_superseded_close_order)
+    expect_fixture("fixture.extra_active_replacement_detach", "supersession detaches the active replacement", mutate_extra_active_replacement_detach)
+    expect_fixture("fixture.superseded_client_retry", "superseded stale socket retries after 4409", mutate_superseded_client_retry)
+    expect_fixture("fixture.superseded_session_detach", "stale cleanup detaches after reattach", mutate_superseded_session_detach)
+    expect_fixture("fixture.superseded_client_validate_handle", "supersession validates a handle after attach", mutate_superseded_client_validate_handle)
+    expect_fixture("fixture.extra_pty_spawn", "attach timeline spawns an extra PTY", mutate_extra_pty_spawn)
+    expect_fixture("fixture.mismatched_identity_event", "supersession event changes process identity", mutate_mismatched_identity_event)
+    expect_fixture("fixture.non_synthetic_ref", "fixture contains a non-synthetic reference", mutate_non_synthetic_ref)
+    expect_fixture("fixture.extra_case_field", "fixture case contains an unknown field", mutate_extra_case_field)
+
+    reported_count = len(executed_ids)
+    validate_mutation_inventory(executed_ids, mutation_inventory, reported_count)
+    missing_id = next(iter(mutation_inventory))
+    try:
+        validate_mutation_inventory(executed_ids - {missing_id}, mutation_inventory, reported_count - 1)
+    except AssertionError:
+        pass
+    else:
+        fail("mutation inventory regression accepted a removed mutation")
+    try:
+        validate_mutation_inventory(executed_ids, mutation_inventory, reported_count - 1)
+    except AssertionError:
+        pass
+    else:
+        fail("mutation inventory regression accepted a count mismatch")
+    return validate_mutation_inventory(executed_ids, mutation_inventory)
 
 def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None) -> int:
+    require_keys(evidence, SOURCE_EVIDENCE_FIELDS, "source audit root")
     require(evidence.get("schema") == "hermternal.source-audit.pty-attach.v1", "source audit schema changed")
     require(evidence.get("contract") == CONTRACT, "source audit contract changed")
-    source = evidence.get("source")
-    require(isinstance(source, dict), "source audit metadata is required")
+    source = require_keys(evidence.get("source"), SOURCE_METADATA_FIELDS, "source audit metadata")
     require(source.get("repository") == "NousResearch/hermes-agent", "source repository changed")
     require(source.get("revision") == REVISION, "source revision changed")
+    require(source.get("revision_url") == PINNED_REVISION_URL, "source revision URL changed")
+    require(isinstance(source.get("note"), str) and source["note"], "source audit note is required")
     validate_redaction(evidence, "source audit")
 
     files = evidence.get("files")
@@ -932,6 +1288,7 @@ def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None)
     records_by_path = {record["path"]: record for record in files}
     ranges_by_path: dict[str, set[tuple[int, int]]] = {}
     for path_value, record in records_by_path.items():
+        record = require_keys(record, SOURCE_FILE_FIELDS, f"{path_value} source file")
         require(path_value.startswith("hermes_cli/"), "source audit path must be a Hermes path")
         hex_string(record.get("git_blob_sha"), 40, f"{path_value}.git_blob_sha")
         hex_string(record.get("sha256"), 64, f"{path_value}.sha256")
@@ -941,7 +1298,7 @@ def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None)
         require(isinstance(ranges, list) and ranges, f"{path_value}.ranges are required")
         range_keys: set[tuple[int, int]] = set()
         for line_range in ranges:
-            require(isinstance(line_range, dict), f"{path_value}: line range must be an object")
+            line_range = require_keys(line_range, SOURCE_RANGE_FIELDS, f"{path_value} source range")
             start = line_range.get("start")
             end = line_range.get("end")
             require(isinstance(start, int) and isinstance(end, int) and 1 <= start <= end, f"{path_value}: invalid line range")
@@ -950,6 +1307,7 @@ def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None)
             hex_string(line_range.get("sha256"), 64, f"{path_value}:{start}-{end}.sha256")
             markers = line_range.get("markers")
             require(isinstance(markers, list) and markers and all(isinstance(marker, str) and marker for marker in markers), f"{path_value}:{start}-{end}.markers are required")
+            require(isinstance(line_range.get("why"), str) and line_range["why"], f"{path_value}:{start}-{end}.why is required")
 
         ranges_by_path[path_value] = range_keys
         if source_root is None:
@@ -981,9 +1339,16 @@ def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None)
     require(len(observation_ids) == len(set(observation_ids)), "source audit observation ids must be unique")
     require(set(observation_ids) == REQUIRED_OBSERVATIONS, "source audit observations are incomplete or unexpected")
     for observation in observations:
+        observation = require_keys(observation, OBSERVATION_FIELDS, "source audit observation")
         observation_id = observation["id"]
         expected = OBSERVATION_EXPECTATIONS.get(observation_id)
         require(expected is not None, f"{observation_id}: observation expectations are missing")
+        source_semantics = require_keys(observation.get("source_observation"), SEMANTIC_FIELDS, f"{observation_id} source_observation")
+        contract_semantics = require_keys(observation.get("contract_result"), SEMANTIC_FIELDS, f"{observation_id} contract_result")
+        require(isinstance(source_semantics.get("summary"), str), f"{observation_id}: source summary must be text")
+        require(isinstance(contract_semantics.get("summary"), str), f"{observation_id}: contract summary must be text")
+        require(isinstance(source_semantics.get("assertions"), dict), f"{observation_id}: source assertions must be an object")
+        require(isinstance(contract_semantics.get("assertions"), dict), f"{observation_id}: contract assertions must be an object")
         source_ranges = observation.get("source_ranges")
         require(isinstance(source_ranges, list) and source_ranges, f"{observation_id}: source ranges are required")
         parsed_ranges = []
