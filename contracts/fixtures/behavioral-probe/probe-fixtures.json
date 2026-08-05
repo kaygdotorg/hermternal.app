@@ -12,17 +12,20 @@
     "compatible": false,
     "unknown_result_policy": "block_and_reread_source_state",
     "retry_policy": "retry_idempotent_collection_only_after_safe_state_reread",
-    "required_case_count": 27,
+    "required_case_count": 64,
     "required_state_count": 6,
     "required_lifecycle_count": 3,
-    "required_proxy_pair_count": 4
+    "required_proxy_pair_count": 5
   },
   "proof_run": {
-    "status": "not_run",
-    "attestation_state": "absent",
-    "proxy_variants": ["caddy", "traefik"],
+    "status": "synthetic_observed",
+    "attestation_state": "synthetic_match_and_mismatch_recorded",
+    "proxy_variants": [
+      "caddy",
+      "traefik"
+    ],
     "host_class": "synthetic_only",
-    "tool_versions": "not_recorded",
+    "tool_versions": "standard_library_only",
     "live_result": "not_recorded"
   },
   "evidence_requirements": [
@@ -33,38 +36,165 @@
     "redaction_and_log_policy_passes",
     "shared_fixture_parity_is_recorded",
     "caddy_and_traefik_results_match",
+    "synthetic_attestation_observations_are_recorded",
+    "synthetic_proxy_observations_are_recorded",
+    "synthetic_platform_observations_are_recorded",
     "measured_baseline_is_present"
+  ],
+  "attestation_observations": [
+    {
+      "id": "attestation-pinned-match",
+      "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "manifest_sha256": "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197",
+      "observed_result": "match",
+      "gate_decision": "blocked_live_compatibility",
+      "live_claim": false
+    },
+    {
+      "id": "attestation-source-mismatch",
+      "source_sha": "mismatch_not_pinned",
+      "manifest_sha256": "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197",
+      "observed_result": "mismatch",
+      "gate_decision": "blocked",
+      "live_claim": false
+    }
+  ],
+  "proxy_observations": [
+    {
+      "id": "proxy-caddy-approved",
+      "proxy": "caddy",
+      "case_id": "proxy-caddy-approved-mapped-headers-observed",
+      "request_outcome": "approved",
+      "http_status": 101,
+      "mapped_headers": "forwarded_host_origin_and_upgrade_only",
+      "upstream_called": true,
+      "observed_result": "synthetic_equivalent",
+      "live_claim": false
+    },
+    {
+      "id": "proxy-caddy-denied",
+      "proxy": "caddy",
+      "case_id": "proxy-caddy-denied-edge-observed",
+      "request_outcome": "edge_denied",
+      "http_status": 403,
+      "mapped_headers": "none",
+      "upstream_called": false,
+      "observed_result": "synthetic_equivalent",
+      "live_claim": false
+    },
+    {
+      "id": "proxy-traefik-approved",
+      "proxy": "traefik",
+      "case_id": "proxy-traefik-approved-mapped-headers-observed",
+      "request_outcome": "approved",
+      "http_status": 101,
+      "mapped_headers": "forwarded_host_origin_and_upgrade_only",
+      "upstream_called": true,
+      "observed_result": "synthetic_equivalent",
+      "live_claim": false
+    },
+    {
+      "id": "proxy-traefik-denied",
+      "proxy": "traefik",
+      "case_id": "proxy-traefik-denied-edge-observed",
+      "request_outcome": "edge_denied",
+      "http_status": 403,
+      "mapped_headers": "none",
+      "upstream_called": false,
+      "observed_result": "synthetic_equivalent",
+      "live_claim": false
+    }
+  ],
+  "platform_observations": [
+    {
+      "id": "platform-web",
+      "platform": "web",
+      "case_id": "platform-web-consumer-observed",
+      "consumer_result": "shared_fixture_consumed",
+      "pty_result": "web_route_reviewed",
+      "live_claim": false
+    },
+    {
+      "id": "platform-ios",
+      "platform": "ios",
+      "case_id": "platform-ios-consumer-observed",
+      "consumer_result": "shared_fixture_consumed",
+      "pty_result": "pty_denied_no_request",
+      "live_claim": false
+    },
+    {
+      "id": "platform-ipados",
+      "platform": "ipados",
+      "case_id": "platform-ipados-consumer-observed",
+      "consumer_result": "shared_fixture_consumed",
+      "pty_result": "pty_denied_no_request",
+      "live_claim": false
+    },
+    {
+      "id": "platform-macos",
+      "platform": "macos",
+      "case_id": "platform-macos-consumer-observed",
+      "consumer_result": "shared_fixture_consumed",
+      "pty_result": "pty_denied_no_request",
+      "live_claim": false
+    }
   ],
   "proxy_matrix": [
     {
       "id": "edge-origin-denial",
       "case_id": "edge-wrong-public-origin-denied",
-      "variants": ["caddy", "traefik"],
+      "variants": [
+        "caddy",
+        "traefik"
+      ],
       "expected_equivalence": "same_edge_denial_without_upstream_call"
     },
     {
       "id": "edge-host-denial",
       "case_id": "edge-unsupported-host-denied",
-      "variants": ["caddy", "traefik"],
+      "variants": [
+        "caddy",
+        "traefik"
+      ],
       "expected_equivalence": "same_edge_denial_without_upstream_call"
+    },
+    {
+      "id": "edge-404-preservation",
+      "case_id": "edge-unknown-path-404",
+      "variants": [
+        "caddy",
+        "traefik"
+      ],
+      "expected_equivalence": "same_edge_not_found_without_upstream_call"
     },
     {
       "id": "upstream-400-preservation",
       "case_id": "upstream-hermes-400-preserved",
-      "variants": ["caddy", "traefik"],
+      "variants": [
+        "caddy",
+        "traefik"
+      ],
       "expected_equivalence": "same_upstream_status_and_mapped_headers"
     },
     {
       "id": "upstream-4403-preservation",
       "case_id": "upstream-hermes-4403-preserved",
-      "variants": ["caddy", "traefik"],
+      "variants": [
+        "caddy",
+        "traefik"
+      ],
       "expected_equivalence": "same_upstream_status_and_mapped_headers"
     }
   ],
   "parity": {
-    "status": "not_run",
+    "status": "synthetic_observed",
     "fixture_source": "one_shared_case_inventory",
-    "platforms": ["web", "ios", "ipados", "macos"],
+    "platforms": [
+      "web",
+      "ios",
+      "ipados",
+      "macos"
+    ],
     "pty_policy": "web_only_apple_blocked",
     "missing_result_policy": "block",
     "result_equivalence": "semantic_outcome_not_platform_specific_wire_bytes"
@@ -320,13 +450,16 @@
       "request": {
         "path": "/api/ws",
         "applicability": "browser",
+        "platform": "web",
         "auth_mode": "gated_ticket",
         "credential_state": "fresh_single_use",
         "origin_policy": "approved",
         "host_class": "attested_dashboard_host",
         "framing": "one_text_json_rpc_object_per_websocket_message",
         "source_result": "not_asserted",
-        "session_scope": "not_required"
+        "session_scope": "not_required",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "allow_reviewed_upgrade",
@@ -336,6 +469,7 @@
         "close_code": null,
         "http_status": null,
         "ticket_policy": "fresh_short_lived_single_use_not_session_bound",
+        "ticket_ttl_seconds": 30,
         "fallback": "none",
         "observed_layer": "not_asserted",
         "log_policy": "semantic_only"
@@ -350,13 +484,16 @@
       "request": {
         "path": "/api/ws",
         "applicability": "native",
+        "platform": "ios",
         "auth_mode": "gated_ticket_from_native_oauth_oidc_bearer",
         "credential_state": "fresh_single_use",
         "origin_policy": "approved",
         "host_class": "attested_dashboard_host",
         "framing": "one_text_json_rpc_object_per_websocket_message",
         "source_result": "not_asserted",
-        "session_scope": "not_required"
+        "session_scope": "not_required",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "allow_reviewed_upgrade",
@@ -366,6 +503,7 @@
         "close_code": null,
         "http_status": null,
         "ticket_policy": "fresh_short_lived_single_use_not_session_bound",
+        "ticket_ttl_seconds": 30,
         "fallback": "none",
         "observed_layer": "not_asserted",
         "log_policy": "semantic_only"
@@ -380,13 +518,16 @@
       "request": {
         "path": "/api/ws",
         "applicability": "browser",
+        "platform": "web",
         "auth_mode": "gated_ticket",
         "credential_state": "missing",
         "origin_policy": "approved",
         "host_class": "attested_dashboard_host",
         "framing": "one_text_json_rpc_object_per_websocket_message",
         "source_result": "not_asserted",
-        "session_scope": "not_required"
+        "session_scope": "not_required",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "deny_upgrade",
@@ -396,6 +537,7 @@
         "close_code": 4401,
         "http_status": null,
         "ticket_policy": "no_fallback",
+        "ticket_ttl_seconds": null,
         "fallback": "mint_fresh_ticket",
         "observed_layer": "client_boundary",
         "log_policy": "semantic_only"
@@ -410,13 +552,16 @@
       "request": {
         "path": "/api/ws",
         "applicability": "browser",
+        "platform": "web",
         "auth_mode": "gated_ticket",
         "credential_state": "already_consumed",
         "origin_policy": "approved",
         "host_class": "attested_dashboard_host",
         "framing": "one_text_json_rpc_object_per_websocket_message",
         "source_result": "not_asserted",
-        "session_scope": "not_required"
+        "session_scope": "not_required",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "deny_upgrade",
@@ -426,6 +571,7 @@
         "close_code": 4401,
         "http_status": null,
         "ticket_policy": "single_use",
+        "ticket_ttl_seconds": 30,
         "fallback": "mint_fresh_ticket",
         "observed_layer": "upstream_auth",
         "log_policy": "semantic_only_bounded_reason"
@@ -440,13 +586,16 @@
       "request": {
         "path": "/api/ws",
         "applicability": "browser",
+        "platform": "web",
         "auth_mode": "gated_ticket",
         "credential_state": "expired",
         "origin_policy": "approved",
         "host_class": "attested_dashboard_host",
         "framing": "one_text_json_rpc_object_per_websocket_message",
         "source_result": "not_asserted",
-        "session_scope": "not_required"
+        "session_scope": "not_required",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "deny_upgrade",
@@ -456,6 +605,7 @@
         "close_code": 4401,
         "http_status": null,
         "ticket_policy": "short_lived",
+        "ticket_ttl_seconds": 30,
         "fallback": "mint_fresh_ticket",
         "observed_layer": "upstream_auth",
         "log_policy": "semantic_only_bounded_reason"
@@ -470,13 +620,16 @@
       "request": {
         "path": "/api/ws",
         "applicability": "browser",
+        "platform": "web",
         "auth_mode": "gated_legacy_query_token",
         "credential_state": "present",
         "origin_policy": "approved",
         "host_class": "attested_dashboard_host",
         "framing": "one_text_json_rpc_object_per_websocket_message",
         "source_result": "not_asserted",
-        "session_scope": "not_required"
+        "session_scope": "not_required",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "deny_upgrade",
@@ -486,6 +639,7 @@
         "close_code": 4401,
         "http_status": null,
         "ticket_policy": "no_legacy_fallback",
+        "ticket_ttl_seconds": null,
         "fallback": "mint_fresh_ticket",
         "observed_layer": "client_boundary",
         "log_policy": "semantic_only"
@@ -500,14 +654,17 @@
       "request": {
         "path": "/api/pty",
         "applicability": "browser",
+        "platform": "web",
         "auth_mode": "gated_ticket",
         "credential_state": "fresh_single_use",
         "origin_policy": "approved",
-        "host_class": "attested_posix_or_wsl",
+        "host_class": "attested_posix",
         "framing": "byte_stream_with_source_defined_resize_control",
         "source_result": "not_asserted",
         "session_scope": "not_required",
-        "attach_state": "opaque_source_handle_state"
+        "attach_state": "opaque_source_handle_state",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "allow_reviewed_upgrade",
@@ -517,6 +674,7 @@
         "close_code": null,
         "http_status": null,
         "ticket_policy": "fresh_short_lived_single_use_not_session_bound",
+        "ticket_ttl_seconds": 30,
         "fallback": "none",
         "observed_layer": "not_asserted",
         "log_policy": "no_raw_handle_or_bytes"
@@ -531,6 +689,7 @@
       "request": {
         "path": "/api/pty",
         "applicability": "native",
+        "platform": "ios",
         "auth_mode": "gated_ticket_from_native_oauth_oidc_bearer",
         "credential_state": "fresh_single_use",
         "origin_policy": "approved",
@@ -538,7 +697,9 @@
         "framing": "byte_stream_with_source_defined_resize_control",
         "source_result": "not_asserted",
         "session_scope": "not_required",
-        "attach_state": "not_applicable"
+        "attach_state": "not_applicable",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "deny_default",
@@ -548,6 +709,7 @@
         "close_code": null,
         "http_status": 403,
         "ticket_policy": "not_applicable",
+        "ticket_ttl_seconds": null,
         "fallback": "none",
         "observed_layer": "client_boundary",
         "log_policy": "semantic_only"
@@ -562,6 +724,7 @@
       "request": {
         "path": "/api/pty",
         "applicability": "browser",
+        "platform": "web",
         "auth_mode": "gated_ticket",
         "credential_state": "fresh_single_use",
         "origin_policy": "approved",
@@ -569,7 +732,9 @@
         "framing": "byte_stream_with_source_defined_resize_control",
         "source_result": "not_asserted",
         "session_scope": "not_required",
-        "attach_state": "opaque_source_handle_state"
+        "attach_state": "opaque_source_handle_state",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "deny_incompatible_host",
@@ -579,6 +744,7 @@
         "close_code": null,
         "http_status": 421,
         "ticket_policy": "not_applicable",
+        "ticket_ttl_seconds": null,
         "fallback": "none",
         "observed_layer": "client_boundary",
         "log_policy": "semantic_only"
@@ -591,13 +757,16 @@
       "kind": "negative",
       "surface": "edge",
       "request": {
+        "method": "GET",
         "path": "/api/ws",
         "applicability": "browser",
         "origin_policy": "wrong_public_origin",
         "host_class": "attested_dashboard_host",
         "auth_mode": "gated_ticket",
         "credential_state": "fresh_single_use",
-        "source_result": "not_asserted"
+        "source_result": "not_asserted",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "deny_edge_policy",
@@ -605,6 +774,7 @@
         "http_status": 403,
         "upstream_called": false,
         "source_status": null,
+        "mapped_headers": "none",
         "fallback": "none"
       },
       "notes": "The edge denial is not a Hermes upstream result."
@@ -615,13 +785,16 @@
       "kind": "negative",
       "surface": "edge",
       "request": {
+        "method": "GET",
         "path": "/api/ws",
         "applicability": "browser",
         "origin_policy": "approved",
         "host_class": "unsupported_public_host_class",
         "auth_mode": "gated_ticket",
         "credential_state": "fresh_single_use",
-        "source_result": "not_asserted"
+        "source_result": "not_asserted",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "deny_edge_policy",
@@ -629,6 +802,7 @@
         "http_status": 421,
         "upstream_called": false,
         "source_status": null,
+        "mapped_headers": "none",
         "fallback": "none"
       },
       "notes": "Unsupported public host classes stop before the upstream process."
@@ -639,13 +813,16 @@
       "kind": "negative",
       "surface": "edge",
       "request": {
+        "method": "GET",
         "path": "/api/ws",
         "applicability": "browser",
         "origin_policy": "approved",
         "host_class": "attested_dashboard_host",
         "auth_mode": "gated_ticket",
         "credential_state": "fresh_single_use",
-        "source_result": "hermes_400"
+        "source_result": "hermes_400",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "preserve_upstream_result",
@@ -653,6 +830,7 @@
         "http_status": 400,
         "upstream_called": true,
         "source_status": 400,
+        "mapped_headers": "forwarded_host_origin_and_upgrade_only",
         "fallback": "none"
       },
       "notes": "A Hermes 400 stays distinct from an edge denial."
@@ -663,13 +841,16 @@
       "kind": "negative",
       "surface": "edge",
       "request": {
+        "method": "GET",
         "path": "/api/ws",
         "applicability": "browser",
         "origin_policy": "approved",
         "host_class": "attested_dashboard_host",
         "auth_mode": "gated_ticket",
         "credential_state": "invalid",
-        "source_result": "hermes_4403"
+        "source_result": "hermes_4403",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "preserve_upstream_result",
@@ -677,6 +858,7 @@
         "http_status": 4403,
         "upstream_called": true,
         "source_status": 4403,
+        "mapped_headers": "forwarded_host_origin_and_upgrade_only",
         "fallback": "none"
       },
       "notes": "A Hermes 4403 is not an edge 403."
@@ -693,7 +875,8 @@
         "credential_state": "fresh_single_use",
         "operation": "prompt.submit",
         "config_key": null,
-        "input_state": "well_formed"
+        "input_state": "well_formed",
+        "warning_source": null
       },
       "expected": {
         "decision": "allow_reviewed_operation",
@@ -702,7 +885,10 @@
         "error": null,
         "ui_action": "not_asserted",
         "traceback": false,
-        "warning_payload_policy": "not_applicable"
+        "warning_payload_policy": "not_applicable",
+        "warning_marker": null,
+        "warning_source_cap": null,
+        "warning_retention": null
       },
       "notes": "The operation is approved without storing prompt text or a transcript."
     },
@@ -718,7 +904,8 @@
         "credential_state": "fresh_single_use",
         "operation": "session.export",
         "config_key": null,
-        "input_state": "well_formed"
+        "input_state": "well_formed",
+        "warning_source": null
       },
       "expected": {
         "decision": "deny_operation",
@@ -727,7 +914,10 @@
         "error": "method_not_found_or_unsupported",
         "ui_action": "surface_unsupported",
         "traceback": false,
-        "warning_payload_policy": "not_applicable"
+        "warning_payload_policy": "not_applicable",
+        "warning_marker": null,
+        "warning_source_cap": null,
+        "warning_retention": null
       },
       "notes": "Unknown operations do not trigger a guessed route or best-effort fallback."
     },
@@ -743,7 +933,8 @@
         "credential_state": "fresh_single_use",
         "operation": "config.set",
         "config_key": "logging.level",
-        "input_state": "well_formed"
+        "input_state": "well_formed",
+        "warning_source": null
       },
       "expected": {
         "decision": "deny_operation",
@@ -752,7 +943,10 @@
         "error": "unsupported_configuration_key",
         "ui_action": "surface_unsupported",
         "traceback": false,
-        "warning_payload_policy": "not_applicable"
+        "warning_payload_policy": "not_applicable",
+        "warning_marker": null,
+        "warning_source_cap": null,
+        "warning_retention": null
       },
       "notes": "Only the source-defined model key is in scope."
     },
@@ -768,7 +962,8 @@
         "credential_state": "fresh_single_use",
         "operation": null,
         "config_key": null,
-        "input_state": "duplicate_key_or_wrong_top_level_type"
+        "input_state": "duplicate_key_or_wrong_top_level_type",
+        "warning_source": "parse_error_-32700"
       },
       "expected": {
         "decision": "reject_without_traceback",
@@ -777,7 +972,10 @@
         "error": "parse_error_-32700",
         "ui_action": "surface_transport_error",
         "traceback": false,
-        "warning_payload_policy": "non_sensitive_marker_capped_at_240_before_retention"
+        "warning_payload_policy": "non_sensitive_marker_capped_at_240_before_retention",
+        "warning_marker": "parse_error_-32700",
+        "warning_source_cap": "240",
+        "warning_retention": "marker_only_no_raw_source"
       },
       "notes": "Malformed input uses only a non-sensitive marker and is capped before log retention."
     },
@@ -833,14 +1031,17 @@
       "request": {
         "path": "/api/pty",
         "applicability": "browser",
+        "platform": "web",
         "auth_mode": "gated_ticket",
         "credential_state": "invalid",
         "origin_policy": "approved",
-        "host_class": "attested_posix_or_wsl",
+        "host_class": "attested_posix",
         "framing": "byte_stream_with_source_defined_resize_control",
         "source_result": "invalid_ticket",
         "session_scope": "not_required",
-        "attach_state": "opaque_source_handle_state"
+        "attach_state": "opaque_source_handle_state",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
       },
       "expected": {
         "decision": "deny_upgrade",
@@ -850,11 +1051,1032 @@
         "close_code": 4401,
         "http_status": null,
         "ticket_policy": "bounded_reason_only",
+        "ticket_ttl_seconds": 30,
         "fallback": "mint_fresh_ticket",
         "observed_layer": "upstream_auth",
         "log_policy": "credential_class_and_bounded_reason_only_no_raw_values"
       },
       "notes": "Logs retain no ticket, attach handle, input, output, or transcript bytes."
+    },
+    {
+      "id": "rest-provider-discovery-approved",
+      "synthetic": true,
+      "kind": "positive",
+      "surface": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "applicability": "browser",
+        "auth_mode": "provider_discovery",
+        "credential_state": "not_required",
+        "cookie_state": "absent",
+        "origin_policy": "approved"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "reviewed_provider_discovery",
+        "auth_result": "provider_catalog_observed",
+        "handler_result": "not_asserted",
+        "http_status": null,
+        "fallback": "none",
+        "observed_layer": "not_asserted"
+      },
+      "notes": "Provider discovery is semantic and never stores provider credentials."
+    },
+    {
+      "id": "rest-password-login-approved",
+      "synthetic": true,
+      "kind": "positive",
+      "surface": "rest",
+      "request": {
+        "method": "POST",
+        "path": "/auth/password-login",
+        "applicability": "native",
+        "auth_mode": "password_provider_login",
+        "credential_state": "synthetic_valid",
+        "cookie_state": "absent",
+        "origin_policy": "approved"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "reviewed_password_login",
+        "auth_result": "isolated_cookie_session_issued",
+        "handler_result": "not_asserted",
+        "http_status": null,
+        "fallback": "none",
+        "observed_layer": "not_asserted"
+      },
+      "notes": "Password-provider login is represented without password text or cookie values."
+    },
+    {
+      "id": "rest-ws-ticket-password-cookie-approved",
+      "synthetic": true,
+      "kind": "positive",
+      "surface": "rest",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "applicability": "native",
+        "auth_mode": "native_password_cookie",
+        "credential_state": "valid",
+        "cookie_state": "present",
+        "origin_policy": "approved"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "reviewed_ws_ticket_mint",
+        "auth_result": "fresh_single_use_ticket_issued",
+        "handler_result": "not_asserted",
+        "http_status": null,
+        "fallback": "none",
+        "observed_layer": "not_asserted"
+      },
+      "notes": "The protected cookie mints a fresh gated ticket without retaining its value."
+    },
+    {
+      "id": "rest-ws-ticket-native-bearer-approved",
+      "synthetic": true,
+      "kind": "positive",
+      "surface": "rest",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "applicability": "native",
+        "auth_mode": "native_oauth_oidc_bearer",
+        "credential_state": "valid",
+        "cookie_state": "absent",
+        "origin_policy": "approved"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "reviewed_ws_ticket_mint",
+        "auth_result": "fresh_single_use_ticket_issued",
+        "handler_result": "not_asserted",
+        "http_status": null,
+        "fallback": "none",
+        "observed_layer": "not_asserted"
+      },
+      "notes": "The reviewed native bearer route mints a fresh gated ticket without storing bearer material."
+    },
+    {
+      "id": "rest-native-authorize-reviewed",
+      "synthetic": true,
+      "kind": "positive",
+      "surface": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/auth/native/authorize",
+        "applicability": "native",
+        "auth_mode": "native_oauth_oidc_authorize",
+        "credential_state": "missing",
+        "cookie_state": "absent",
+        "origin_policy": "approved"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "reviewed_native_authorize",
+        "auth_result": "authorization_flow_started",
+        "handler_result": "not_asserted",
+        "http_status": null,
+        "fallback": "none",
+        "observed_layer": "not_asserted"
+      },
+      "notes": "Native authorization is reviewed only when the deployment advertises the route."
+    },
+    {
+      "id": "rest-native-token-reviewed",
+      "synthetic": true,
+      "kind": "positive",
+      "surface": "rest",
+      "request": {
+        "method": "POST",
+        "path": "/auth/native/token",
+        "applicability": "native",
+        "auth_mode": "native_oauth_oidc_bearer",
+        "credential_state": "valid",
+        "cookie_state": "absent",
+        "origin_policy": "approved"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "reviewed_native_token",
+        "auth_result": "native_bearer_result_observed",
+        "handler_result": "not_asserted",
+        "http_status": null,
+        "fallback": "none",
+        "observed_layer": "not_asserted"
+      },
+      "notes": "Native token exchange is represented as a reviewed route result without token material."
+    },
+    {
+      "id": "rest-native-refresh-reviewed",
+      "synthetic": true,
+      "kind": "positive",
+      "surface": "rest",
+      "request": {
+        "method": "POST",
+        "path": "/auth/native/refresh",
+        "applicability": "native",
+        "auth_mode": "native_oauth_oidc_bearer",
+        "credential_state": "valid",
+        "cookie_state": "absent",
+        "origin_policy": "approved"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "reviewed_native_refresh",
+        "auth_result": "native_bearer_result_observed",
+        "handler_result": "not_asserted",
+        "http_status": null,
+        "fallback": "none",
+        "observed_layer": "not_asserted"
+      },
+      "notes": "Native refresh is represented as a reviewed route result without refresh material."
+    },
+    {
+      "id": "ws-chat-missing-upgrade-denied",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "chat_websocket",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "platform": "web",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "origin_policy": "approved",
+        "host_class": "attested_dashboard_host",
+        "framing": "one_text_json_rpc_object_per_websocket_message",
+        "source_result": "not_asserted",
+        "session_scope": "not_required",
+        "upgrade_header": null,
+        "connection_header": "upgrade"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "route_class": "client_allowlist",
+        "upgrade_auth": "missing_http_upgrade_headers",
+        "source_result": "not_called",
+        "close_code": 400,
+        "http_status": null,
+        "ticket_policy": "no_fallback",
+        "ticket_ttl_seconds": null,
+        "fallback": "none",
+        "observed_layer": "client_boundary",
+        "log_policy": "semantic_only"
+      },
+      "notes": "A fresh ticket does not compensate for missing Upgrade and Connection headers."
+    },
+    {
+      "id": "ws-chat-malformed-ticket-denied",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "chat_websocket",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "platform": "web",
+        "auth_mode": "gated_ticket",
+        "credential_state": "malformed",
+        "origin_policy": "approved",
+        "host_class": "attested_dashboard_host",
+        "framing": "one_text_json_rpc_object_per_websocket_message",
+        "source_result": "not_asserted",
+        "session_scope": "not_required",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "route_class": "client_allowlist",
+        "upgrade_auth": "ticket_malformed",
+        "source_result": "not_called",
+        "close_code": 4401,
+        "http_status": null,
+        "ticket_policy": "malformed_ticket_no_fallback",
+        "ticket_ttl_seconds": null,
+        "fallback": "mint_fresh_ticket",
+        "observed_layer": "upstream_auth",
+        "log_policy": "semantic_only_bounded_reason"
+      },
+      "notes": "Malformed ticket syntax is denied separately from missing, expired, reused, or invalid tickets."
+    },
+    {
+      "id": "ws-pty-missing-upgrade-denied",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "pty_websocket",
+      "request": {
+        "path": "/api/pty",
+        "applicability": "browser",
+        "platform": "web",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "origin_policy": "approved",
+        "host_class": "attested_posix",
+        "framing": "byte_stream_with_source_defined_resize_control",
+        "source_result": "not_asserted",
+        "session_scope": "not_required",
+        "attach_state": "opaque_source_handle_state",
+        "upgrade_header": "websocket",
+        "connection_header": null
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "route_class": "client_allowlist_web_only",
+        "upgrade_auth": "missing_http_upgrade_headers",
+        "source_result": "not_called",
+        "close_code": null,
+        "http_status": 400,
+        "ticket_policy": "no_fallback",
+        "ticket_ttl_seconds": null,
+        "fallback": "none",
+        "observed_layer": "client_boundary",
+        "log_policy": "semantic_only"
+      },
+      "notes": "PTY requires both HTTP upgrade headers in addition to a fresh ticket."
+    },
+    {
+      "id": "ws-pty-malformed-ticket-denied",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "pty_websocket",
+      "request": {
+        "path": "/api/pty",
+        "applicability": "browser",
+        "platform": "web",
+        "auth_mode": "gated_ticket",
+        "credential_state": "malformed",
+        "origin_policy": "approved",
+        "host_class": "attested_posix",
+        "framing": "byte_stream_with_source_defined_resize_control",
+        "source_result": "not_asserted",
+        "session_scope": "not_required",
+        "attach_state": "opaque_source_handle_state",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "route_class": "client_allowlist_web_only",
+        "upgrade_auth": "ticket_malformed",
+        "source_result": "not_called",
+        "close_code": 4401,
+        "http_status": null,
+        "ticket_policy": "malformed_ticket_no_fallback",
+        "ticket_ttl_seconds": null,
+        "fallback": "mint_fresh_ticket",
+        "observed_layer": "upstream_auth",
+        "log_policy": "no_raw_handle_or_bytes"
+      },
+      "notes": "Malformed PTY ticket syntax is denied without retaining the ticket or attach handle."
+    },
+    {
+      "id": "ws-pty-wsl-fresh-ticket-approved",
+      "synthetic": true,
+      "kind": "positive",
+      "surface": "pty_websocket",
+      "request": {
+        "path": "/api/pty",
+        "applicability": "browser",
+        "platform": "web",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "origin_policy": "approved",
+        "host_class": "attested_wsl",
+        "framing": "byte_stream_with_source_defined_resize_control",
+        "source_result": "not_asserted",
+        "session_scope": "not_required",
+        "attach_state": "opaque_source_handle_state",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
+      },
+      "expected": {
+        "decision": "allow_reviewed_upgrade",
+        "route_class": "client_allowlist_web_only",
+        "upgrade_auth": "ticket_consumed_once",
+        "source_result": "handler_result_not_asserted",
+        "close_code": null,
+        "http_status": null,
+        "ticket_policy": "30_second_ttl_single_use_not_session_bound",
+        "ticket_ttl_seconds": 30,
+        "fallback": "none",
+        "observed_layer": "not_asserted",
+        "log_policy": "no_raw_handle_or_bytes"
+      },
+      "notes": "WSL is a separately observed supported web PTY host class."
+    },
+    {
+      "id": "ws-pty-ios-denied",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "pty_websocket",
+      "request": {
+        "path": "/api/pty",
+        "applicability": "native",
+        "platform": "ios",
+        "auth_mode": "gated_ticket_from_native_oauth_oidc_bearer",
+        "credential_state": "fresh_single_use",
+        "origin_policy": "approved",
+        "host_class": "attested_posix",
+        "framing": "byte_stream_with_source_defined_resize_control",
+        "source_result": "not_asserted",
+        "session_scope": "not_required",
+        "attach_state": "not_applicable",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
+      },
+      "expected": {
+        "decision": "deny_default",
+        "route_class": "web_only_not_native",
+        "upgrade_auth": "not_attempted",
+        "source_result": "not_called",
+        "close_code": null,
+        "http_status": 403,
+        "ticket_policy": "not_applicable",
+        "ticket_ttl_seconds": null,
+        "fallback": "none",
+        "observed_layer": "client_boundary",
+        "log_policy": "semantic_only"
+      },
+      "notes": "iOS does not request the web-only PTY route."
+    },
+    {
+      "id": "ws-pty-ipados-denied",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "pty_websocket",
+      "request": {
+        "path": "/api/pty",
+        "applicability": "native",
+        "platform": "ipados",
+        "auth_mode": "gated_ticket_from_native_oauth_oidc_bearer",
+        "credential_state": "fresh_single_use",
+        "origin_policy": "approved",
+        "host_class": "attested_posix",
+        "framing": "byte_stream_with_source_defined_resize_control",
+        "source_result": "not_asserted",
+        "session_scope": "not_required",
+        "attach_state": "not_applicable",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
+      },
+      "expected": {
+        "decision": "deny_default",
+        "route_class": "web_only_not_native",
+        "upgrade_auth": "not_attempted",
+        "source_result": "not_called",
+        "close_code": null,
+        "http_status": 403,
+        "ticket_policy": "not_applicable",
+        "ticket_ttl_seconds": null,
+        "fallback": "none",
+        "observed_layer": "client_boundary",
+        "log_policy": "semantic_only"
+      },
+      "notes": "iPadOS does not request the web-only PTY route."
+    },
+    {
+      "id": "ws-pty-macos-denied",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "pty_websocket",
+      "request": {
+        "path": "/api/pty",
+        "applicability": "native",
+        "platform": "macos",
+        "auth_mode": "gated_ticket_from_native_oauth_oidc_bearer",
+        "credential_state": "fresh_single_use",
+        "origin_policy": "approved",
+        "host_class": "attested_posix",
+        "framing": "byte_stream_with_source_defined_resize_control",
+        "source_result": "not_asserted",
+        "session_scope": "not_required",
+        "attach_state": "not_applicable",
+        "upgrade_header": "websocket",
+        "connection_header": "upgrade"
+      },
+      "expected": {
+        "decision": "deny_default",
+        "route_class": "web_only_not_native",
+        "upgrade_auth": "not_attempted",
+        "source_result": "not_called",
+        "close_code": null,
+        "http_status": 403,
+        "ticket_policy": "not_applicable",
+        "ticket_ttl_seconds": null,
+        "fallback": "none",
+        "observed_layer": "client_boundary",
+        "log_policy": "semantic_only"
+      },
+      "notes": "macOS does not request the web-only PTY route."
+    },
+    {
+      "id": "edge-unknown-path-404",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "edge",
+      "request": {
+        "method": "GET",
+        "path": "/api/not-found",
+        "applicability": "browser",
+        "origin_policy": "approved",
+        "host_class": "attested_dashboard_host",
+        "auth_mode": "none",
+        "credential_state": "missing",
+        "source_result": "not_asserted",
+        "upgrade_header": null,
+        "connection_header": null
+      },
+      "expected": {
+        "decision": "deny_edge_not_found",
+        "observed_layer": "edge",
+        "http_status": 404,
+        "upstream_called": false,
+        "source_status": null,
+        "mapped_headers": "none",
+        "fallback": "none"
+      },
+      "notes": "An unknown reviewed-path boundary returns an edge 404 without calling Hermes upstream."
+    },
+    {
+      "id": "rpc-duplicate-key-rejected",
+      "synthetic": true,
+      "kind": "malformed_input",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": null,
+        "config_key": null,
+        "input_state": "duplicate_key",
+        "warning_source": "duplicate_json_key_rejected"
+      },
+      "expected": {
+        "decision": "reject_without_traceback",
+        "operation_class": "malformed_input",
+        "fallback": "none",
+        "error": "parse_error_-32700",
+        "ui_action": "surface_transport_error",
+        "traceback": false,
+        "warning_payload_policy": "non_sensitive_marker_capped_at_240_before_retention",
+        "warning_marker": "parse_error_-32700",
+        "warning_source_cap": "240",
+        "warning_retention": "marker_only_no_raw_source"
+      },
+      "notes": "Duplicate JSON keys are rejected before a later value can hide a mutation."
+    },
+    {
+      "id": "rpc-wrong-top-level-rejected",
+      "synthetic": true,
+      "kind": "malformed_input",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": null,
+        "config_key": null,
+        "input_state": "wrong_top_level",
+        "warning_source": "wrong_top_level_rejected"
+      },
+      "expected": {
+        "decision": "reject_without_traceback",
+        "operation_class": "malformed_input",
+        "fallback": "none",
+        "error": "parse_error_-32700",
+        "ui_action": "surface_transport_error",
+        "traceback": false,
+        "warning_payload_policy": "non_sensitive_marker_capped_at_240_before_retention",
+        "warning_marker": "parse_error_-32700",
+        "warning_source_cap": "240",
+        "warning_retention": "marker_only_no_raw_source"
+      },
+      "notes": "A JSON array or scalar top level is rejected without retaining its contents."
+    },
+    {
+      "id": "rpc-invalid-utf8-rejected",
+      "synthetic": true,
+      "kind": "malformed_input",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": null,
+        "config_key": null,
+        "input_state": "invalid_utf8",
+        "warning_source": "invalid_utf8_rejected"
+      },
+      "expected": {
+        "decision": "reject_without_traceback",
+        "operation_class": "malformed_input",
+        "fallback": "none",
+        "error": "parse_error_-32700",
+        "ui_action": "surface_transport_error",
+        "traceback": false,
+        "warning_payload_policy": "non_sensitive_marker_capped_at_240_before_retention",
+        "warning_marker": "parse_error_-32700",
+        "warning_source_cap": "240",
+        "warning_retention": "marker_only_no_raw_source"
+      },
+      "notes": "Invalid UTF-8 is rejected with a semantic marker and no source bytes."
+    },
+    {
+      "id": "rpc-syntax-error-rejected",
+      "synthetic": true,
+      "kind": "malformed_input",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": null,
+        "config_key": null,
+        "input_state": "syntax_error",
+        "warning_source": "syntax_error_rejected"
+      },
+      "expected": {
+        "decision": "reject_without_traceback",
+        "operation_class": "malformed_input",
+        "fallback": "none",
+        "error": "parse_error_-32700",
+        "ui_action": "surface_transport_error",
+        "traceback": false,
+        "warning_payload_policy": "non_sensitive_marker_capped_at_240_before_retention",
+        "warning_marker": "parse_error_-32700",
+        "warning_source_cap": "240",
+        "warning_retention": "marker_only_no_raw_source"
+      },
+      "notes": "Malformed JSON syntax maps to JSON-RPC parse error -32700."
+    },
+    {
+      "id": "rpc-oversized-integer-rejected",
+      "synthetic": true,
+      "kind": "malformed_input",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": null,
+        "config_key": null,
+        "input_state": "oversized_integer",
+        "warning_source": "oversized_integer_rejected"
+      },
+      "expected": {
+        "decision": "reject_without_traceback",
+        "operation_class": "malformed_input",
+        "fallback": "none",
+        "error": "parse_error_-32700",
+        "ui_action": "surface_transport_error",
+        "traceback": false,
+        "warning_payload_policy": "non_sensitive_marker_capped_at_240_before_retention",
+        "warning_marker": "parse_error_-32700",
+        "warning_source_cap": "240",
+        "warning_retention": "marker_only_no_raw_source"
+      },
+      "notes": "Oversized valid JSON integers are rejected before numeric conversion."
+    },
+    {
+      "id": "rpc-deep-nesting-rejected",
+      "synthetic": true,
+      "kind": "malformed_input",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": null,
+        "config_key": null,
+        "input_state": "deep_nesting",
+        "warning_source": "deep_nesting_rejected"
+      },
+      "expected": {
+        "decision": "reject_without_traceback",
+        "operation_class": "malformed_input",
+        "fallback": "none",
+        "error": "parse_error_-32700",
+        "ui_action": "surface_transport_error",
+        "traceback": false,
+        "warning_payload_policy": "non_sensitive_marker_capped_at_240_before_retention",
+        "warning_marker": "parse_error_-32700",
+        "warning_source_cap": "240",
+        "warning_retention": "marker_only_no_raw_source"
+      },
+      "notes": "Deep JSON nesting is rejected before a path or payload is retained."
+    },
+    {
+      "id": "rpc-secret-shaped-huge-key-rejected",
+      "synthetic": true,
+      "kind": "malformed_input",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": null,
+        "config_key": null,
+        "input_state": "secret_shaped_huge_key",
+        "warning_source": "secret_shaped_huge_key_rejected"
+      },
+      "expected": {
+        "decision": "reject_without_traceback",
+        "operation_class": "malformed_input",
+        "fallback": "none",
+        "error": "parse_error_-32700",
+        "ui_action": "surface_transport_error",
+        "traceback": false,
+        "warning_payload_policy": "non_sensitive_marker_capped_at_240_before_retention",
+        "warning_marker": "parse_error_-32700",
+        "warning_source_cap": "240",
+        "warning_retention": "marker_only_no_raw_source"
+      },
+      "notes": "Secret-shaped and huge object keys are rejected without echoing the key."
+    },
+    {
+      "id": "chat-reconnect-fresh-ticket-approved",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "chat_lifecycle",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "platform": "web",
+        "event": "reconnect",
+        "transport_state": "transport_lost",
+        "session_scope": "server_owned_session",
+        "input_state": "safe_to_reconnect"
+      },
+      "expected": {
+        "decision": "allow_reconnect",
+        "session_result": "new_connection_with_fresh_ticket",
+        "retry_policy": "fresh_ticket_only",
+        "duplicate_action": "never_resend_prompt",
+        "close_semantics": "reconnect_preserves_server_session",
+        "live_claim": false
+      },
+      "notes": "Reconnect uses a fresh ticket and does not replay a prompt."
+    },
+    {
+      "id": "chat-close-detach-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "chat_lifecycle",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "platform": "web",
+        "event": "session.close",
+        "transport_state": "connected",
+        "session_scope": "server_owned_session",
+        "input_state": "close_requested"
+      },
+      "expected": {
+        "decision": "record_close",
+        "session_result": "server_session_detached",
+        "retry_policy": "none",
+        "duplicate_action": "no_duplicate_action",
+        "close_semantics": "close_means_detach",
+        "live_claim": false
+      },
+      "notes": "Chat close is a detach observation, not an immediate server kill."
+    },
+    {
+      "id": "chat-session-resume-approved",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "chat_lifecycle",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "platform": "web",
+        "event": "session.resume",
+        "transport_state": "reconnected",
+        "session_scope": "server_owned_session",
+        "input_state": "resume_requested"
+      },
+      "expected": {
+        "decision": "allow_resume",
+        "session_result": "same_server_session_identity",
+        "retry_policy": "resume_only",
+        "duplicate_action": "never_resend_prompt",
+        "close_semantics": "resume_restores_server_projection",
+        "live_claim": false
+      },
+      "notes": "Session resume restores the server-owned identity before any prompt retry."
+    },
+    {
+      "id": "chat-connection-loss-uncertain-prompt",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "chat_lifecycle",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "platform": "web",
+        "event": "prompt.submit",
+        "transport_state": "transport_lost_during_delivery",
+        "session_scope": "server_owned_session",
+        "input_state": "delivery_uncertain"
+      },
+      "expected": {
+        "decision": "preserve_uncertain_delivery",
+        "session_result": "delivery_status_unknown",
+        "retry_policy": "reread_source_state_before_retry",
+        "duplicate_action": "never_resend_prompt",
+        "close_semantics": "loss_is_not_success",
+        "live_claim": false
+      },
+      "notes": "Transport loss never becomes an automatic duplicate prompt submission."
+    },
+    {
+      "id": "attestation-pinned-match-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "attestation",
+        "subject": "source_and_manifest_pin",
+        "applicability": "shared",
+        "variant": "pinned",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "record_synthetic_observation",
+        "result": "match",
+        "gate_decision": "blocked_live_compatibility",
+        "live_claim": false,
+        "mapped_headers": "not_applicable",
+        "upstream_called": false,
+        "http_status": null,
+        "warning": null
+      },
+      "notes": "Synthetic attestation match is recorded but cannot enable compatibility."
+    },
+    {
+      "id": "attestation-source-mismatch-denied",
+      "synthetic": true,
+      "kind": "negative",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "attestation",
+        "subject": "source_sha",
+        "applicability": "shared",
+        "variant": "mismatch",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "deny_synthetic_observation",
+        "result": "mismatch",
+        "gate_decision": "blocked",
+        "live_claim": false,
+        "mapped_headers": "not_applicable",
+        "upstream_called": false,
+        "http_status": null,
+        "warning": "mismatch_requires_block"
+      },
+      "notes": "A source mismatch blocks the gate and remains non-live."
+    },
+    {
+      "id": "proxy-caddy-approved-mapped-headers-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "proxy",
+        "subject": "/api/ws",
+        "applicability": "shared",
+        "variant": "caddy",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "record_synthetic_observation",
+        "result": "approved_upstream_mapping",
+        "gate_decision": "blocked_live_compatibility",
+        "live_claim": false,
+        "mapped_headers": "forwarded_host_origin_and_upgrade_only",
+        "upstream_called": true,
+        "http_status": 101,
+        "warning": null
+      },
+      "notes": "Caddy approval records only reviewed mapped headers."
+    },
+    {
+      "id": "proxy-caddy-denied-edge-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "proxy",
+        "subject": "/api/ws",
+        "applicability": "shared",
+        "variant": "caddy",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "record_synthetic_observation",
+        "result": "edge_403_denial",
+        "gate_decision": "blocked_live_compatibility",
+        "live_claim": false,
+        "mapped_headers": "none",
+        "upstream_called": false,
+        "http_status": 403,
+        "warning": null
+      },
+      "notes": "Caddy edge denial is kept separate from upstream results."
+    },
+    {
+      "id": "proxy-traefik-approved-mapped-headers-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "proxy",
+        "subject": "/api/ws",
+        "applicability": "shared",
+        "variant": "traefik",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "record_synthetic_observation",
+        "result": "approved_upstream_mapping",
+        "gate_decision": "blocked_live_compatibility",
+        "live_claim": false,
+        "mapped_headers": "forwarded_host_origin_and_upgrade_only",
+        "upstream_called": true,
+        "http_status": 101,
+        "warning": null
+      },
+      "notes": "Traefik approval records the same semantic mapped headers."
+    },
+    {
+      "id": "proxy-traefik-denied-edge-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "proxy",
+        "subject": "/api/ws",
+        "applicability": "shared",
+        "variant": "traefik",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "record_synthetic_observation",
+        "result": "edge_403_denial",
+        "gate_decision": "blocked_live_compatibility",
+        "live_claim": false,
+        "mapped_headers": "none",
+        "upstream_called": false,
+        "http_status": 403,
+        "warning": null
+      },
+      "notes": "Traefik edge denial is kept separate from upstream results."
+    },
+    {
+      "id": "platform-web-consumer-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "platform_consumer",
+        "subject": "dashboard-v0.0.1",
+        "applicability": "shared",
+        "variant": "web",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "record_synthetic_observation",
+        "result": "shared_fixture_consumed",
+        "gate_decision": "blocked_live_compatibility",
+        "live_claim": false,
+        "mapped_headers": "not_applicable",
+        "upstream_called": false,
+        "http_status": null,
+        "warning": "web_route_reviewed"
+      },
+      "notes": "Web consumes the shared semantic fixture and owns the Terminal route."
+    },
+    {
+      "id": "platform-ios-consumer-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "platform_consumer",
+        "subject": "dashboard-v0.0.1",
+        "applicability": "shared",
+        "variant": "ios",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "record_synthetic_observation",
+        "result": "shared_fixture_consumed",
+        "gate_decision": "blocked_live_compatibility",
+        "live_claim": false,
+        "mapped_headers": "not_applicable",
+        "upstream_called": false,
+        "http_status": null,
+        "warning": "pty_denied_no_request"
+      },
+      "notes": "iOS consumes the shared semantic fixture and never requests PTY."
+    },
+    {
+      "id": "platform-ipados-consumer-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "platform_consumer",
+        "subject": "dashboard-v0.0.1",
+        "applicability": "shared",
+        "variant": "ipados",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "record_synthetic_observation",
+        "result": "shared_fixture_consumed",
+        "gate_decision": "blocked_live_compatibility",
+        "live_claim": false,
+        "mapped_headers": "not_applicable",
+        "upstream_called": false,
+        "http_status": null,
+        "warning": "pty_denied_no_request"
+      },
+      "notes": "iPadOS consumes the shared semantic fixture and never requests PTY."
+    },
+    {
+      "id": "platform-macos-consumer-observed",
+      "synthetic": true,
+      "kind": "compatibility",
+      "surface": "observation",
+      "request": {
+        "observation_kind": "platform_consumer",
+        "subject": "dashboard-v0.0.1",
+        "applicability": "shared",
+        "variant": "macos",
+        "input_state": "synthetic_fixture"
+      },
+      "expected": {
+        "decision": "record_synthetic_observation",
+        "result": "shared_fixture_consumed",
+        "gate_decision": "blocked_live_compatibility",
+        "live_claim": false,
+        "mapped_headers": "not_applicable",
+        "upstream_called": false,
+        "http_status": null,
+        "warning": "pty_denied_no_request"
+      },
+      "notes": "macOS consumes the shared semantic fixture and never requests PTY."
     }
   ],
   "redaction": {
