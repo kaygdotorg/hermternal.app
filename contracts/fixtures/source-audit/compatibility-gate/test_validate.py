@@ -17,6 +17,7 @@ import validate
 
 FIXTURE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = FIXTURE_DIR.parents[3]
+README_PATH = FIXTURE_DIR / "README.md"
 RECORD_PATH = FIXTURE_DIR / "compatibility_record.json"
 
 
@@ -143,6 +144,31 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         commit = copy.deepcopy(self.record)
         commit["merged_dev"]["merged_prs"][0]["merge_commit"] = "0" * 40
         self.assert_rejected(commit)
+
+    def test_artifact_paths_use_canonical_lexicographic_order(self) -> None:
+        self.assertEqual(validate.ARTIFACT_PATHS, tuple(sorted(validate.ARTIFACT_PATHS)))
+        self.assertEqual(
+            tuple(item["path"] for item in self.record["artifacts"]["files"]),
+            validate.ARTIFACT_PATHS,
+        )
+
+    def test_readme_preserves_accessibility_and_benchmark_requirements(self) -> None:
+        readme = " ".join(README_PATH.read_text(encoding="utf-8").split())
+        for marker in (
+            "## Accessibility",
+            "Accessibility verification is N/A for this operation because it produces no UI",
+            "preserves rather than removes those future accessibility requirements",
+            "## Reproducible tooling benchmark",
+            "production or release build mode is N/A",
+            "artifact bytes and validator-duration distribution",
+            "no invented performance threshold",
+            "30 validations against immutable local Git blobs",
+            "raw command and output",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, readme)
+        self.assertNotIn("issue's requested order", readme)
+        self.assertNotIn("P0-01 blocker", readme)
 
     def test_artifact_and_merge_order_mutations_are_rejected(self) -> None:
         artifacts = copy.deepcopy(self.record)

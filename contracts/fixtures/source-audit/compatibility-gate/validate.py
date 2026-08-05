@@ -34,9 +34,10 @@ DEV_REF = "dev"
 DEV_HEAD = "8465bd4cacc87fe62ff952c38d7f3c2b5927bfbd"
 DEV_TREE = "aede9b87932f5cc28462120ef28be52a9a4aba7f"
 
-# The order is the issue's requested audit order, not a claim about when the
-# merge commits landed. The validator separately checks that every commit is
-# an ancestor of the pinned merged dev head.
+# The merged PR entries use the fixture's canonical recorded order, not a claim
+# about issue-defined ordering or when the commits landed. The validator
+# separately checks that every commit is an ancestor of the pinned merged dev
+# head. Artifact paths below use canonical lexicographic ordering.
 MERGED_PRS = (
     (221, "203dfca63eb073e5d4ddc27921447b5d0ab64a51"),
     (216, "8465bd4cacc87fe62ff952c38d7f3c2b5927bfbd"),

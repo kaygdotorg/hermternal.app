@@ -14,9 +14,11 @@ run Hermes, contact a provider, contact a proxy, or claim compatibility.
   commit; and
 - an explicitly blocked status with `compatible: false` and `live_run: false`.
 
-The merged PR list preserves the issue's requested order (`#221`, `#216`,
-`#218`, `#219`, `#220`). The validator also checks that every recorded merge
-commit exists locally and is an ancestor of the pinned merged `dev` head.
+The merged PR list uses the fixture's canonical recorded order (`#221`,
+`#216`, `#218`, `#219`, `#220`); issue #41 does not prescribe an order. Artifact
+paths use canonical lexicographic ordering. The validator checks both exact
+ordering and that every recorded merge commit exists locally and is an ancestor
+of the pinned merged `dev` head.
 
 This record is not a deployment attestation. It does not contain a deployment
 identity, public host, proxy configuration, credentials, cookies, bearer values,
@@ -70,6 +72,72 @@ local Git object database. A passing run proves only the checked-in record,
 merged-dev identity, containment rules, and artifact bytes. It does not prove a
 live service or a deployment.
 
+## Accessibility
+
+Accessibility verification is N/A for this operation because it produces no UI
+and changes no interaction, focus, semantic-name, VoiceOver, Switch Control,
+Dynamic Type, browser-zoom, contrast, motion, transparency, or touch-target
+behavior. The fixture preserves rather than removes those future accessibility
+requirements; any later UI contract must still provide its platform-specific
+checks.
+
+## Reproducible tooling benchmark
+
+This is an offline command-line validator, so production or release build mode
+is N/A: this change does not build or ship an executable, service, or client.
+The benchmark records fixture artifact bytes and validator-duration distribution
+only. It has no invented performance threshold; the measurements are review
+evidence, not normative compatibility requirements.
+
+Run this from the repository root to repeat the recorded benchmark. It uses
+30 validations against immutable local Git blobs and prints the artifact byte
+count plus min, p50, p95, max, and mean duration in milliseconds:
+
+```sh
+python3 - <<'PY'
+import json
+import math
+import platform
+import statistics
+import sys
+import time
+from pathlib import Path
+
+root = Path.cwd()
+fixture = root / "contracts/fixtures/source-audit/compatibility-gate"
+sys.path.insert(0, str(fixture))
+import validate
+
+record = validate.load_record(fixture / "compatibility_record.json")
+durations = []
+for _ in range(30):
+    started = time.perf_counter()
+    validate.validate_record(record, root)
+    durations.append((time.perf_counter() - started) * 1000)
+ordered = sorted(durations)
+def percentile(fraction):
+    return ordered[min(len(ordered) - 1, max(0, math.ceil(fraction * len(ordered)) - 1))]
+print(json.dumps({
+    "artifact_bytes": sum(item["size_bytes"] for item in record["artifacts"]["files"]),
+    "artifact_count": len(record["artifacts"]["files"]),
+    "environment": platform.platform(),
+    "python": sys.version.split()[0],
+    "repetitions": len(durations),
+    "duration_ms": {
+        "min": round(min(durations), 3),
+        "p50": round(percentile(0.50), 3),
+        "p95": round(percentile(0.95), 3),
+        "max": round(max(durations), 3),
+        "mean": round(statistics.mean(durations), 3),
+    },
+}, sort_keys=True))
+PY
+```
+
+The raw command and output for the checked-in run are included in the review
+PR and final issue evidence. Repeat the command on the target environment
+before using the measurements for a performance decision.
+
 ## Related fixture validators
 
 The compatibility gate aggregates the existing synthetic source-audit artifacts;
@@ -90,19 +158,19 @@ The planning review's full mode additionally needs a separately checked-out
 Hermes source tree at the pinned SHA. No such checkout is created by this
 fixture-only gate.
 
-## Explicit remaining blockers
+## Fail-closed status boundary
 
-The record remains incompatible because fixture-only work cannot supply:
+The record intentionally remains incompatible because this fixture-only gate
+cannot claim deployment, runtime, proxy, parity, accessibility, or benchmark
+proof. Those statuses are record-level fail-closed metadata, not a dependency
+claim that downstream runtime-proof contracts must complete before this issue
+can be reviewed. Issue #41 blocks downstream issues #51 and #52; they do not
+block this synthetic fixture operation.
 
-1. a verifiable out-of-band deployment attestation;
-2. a redacted behavioral probe against a deployment;
-3. edge/proxy proof for the approved variants;
-4. web and Apple parity plus the required accessibility evidence; or
-5. benchmark environment, repetition, trace, and budget evidence.
-
-Those are exact blockers for the issue's full definition of done. This change
-records them without inventing a live result, best-effort compatibility, or a
-replacement integration.
+This change records the missing live evidence without inventing a live result,
+best-effort compatibility, or a replacement integration. Review may decide the
+scoped issue outcome from this artifact; downstream proof remains outside this
+four-file change.
 
 ## Scope boundary
 
