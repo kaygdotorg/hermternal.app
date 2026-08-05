@@ -55,8 +55,10 @@ Create one GitHub milestone for each milestone in this file. Use the stable key 
 | --- | --- | --- | --- |
 | `C-01` | [#47](https://github.com/kaygdotorg/hermternal/issues/47) | Freeze the Dashboard route and method allowlist. | `P0-02` |
 | `C-02` | [#48](https://github.com/kaygdotorg/hermternal/issues/48) | Freeze provider discovery behavior. | `C-01` |
-| `C-02A` | [#49](https://github.com/kaygdotorg/hermternal/issues/49) | Freeze browser authentication behavior. | `C-01` |
-| `C-03` | [#50](https://github.com/kaygdotorg/hermternal/issues/50) | Freeze native password-provider cookie and ticket behavior. | `C-02` |
+| `C-02B` | [#199](https://github.com/kaygdotorg/hermternal/issues/199) | Correct browser OAuth state and PKCE behavior against the pinned source. | `C-01` |
+| `C-02A` | [#49](https://github.com/kaygdotorg/hermternal/issues/49) | Freeze browser authentication behavior. | `C-01`, `C-02B` |
+| `C-03A` | [#200](https://github.com/kaygdotorg/hermternal/issues/200) | Verify the native bearer-authenticated Dashboard routes. | `C-02` |
+| `C-03` | [#50](https://github.com/kaygdotorg/hermternal/issues/50) | Freeze native password-provider cookie and ticket behavior. | `C-02`, `C-03A` |
 | `C-04` | [#51](https://github.com/kaygdotorg/hermternal/issues/51) | Define out-of-band Hermes revision attestation. | `P0-02`, `C-01` |
 | `C-04A` | [#52](https://github.com/kaygdotorg/hermternal/issues/52) | Define the Hermes behavioral compatibility probe. | `P0-02`, `C-01` |
 | `C-05` | [#53](https://github.com/kaygdotorg/hermternal/issues/53) | Define connection and restoration state transitions. | `C-01`, `C-02`, `C-02A` |
@@ -68,13 +70,15 @@ Create one GitHub milestone for each milestone in this file. Use the stable key 
 | `C-09` | [#59](https://github.com/kaygdotorg/hermternal/issues/59) | Define tool lifecycle fixtures. | `C-08` |
 | `C-10` | [#60](https://github.com/kaygdotorg/hermternal/issues/60) | Define approval and clarification fixtures. | `C-08` |
 | `C-11` | [#61](https://github.com/kaygdotorg/hermternal/issues/61) | Define interruption and recovery fixtures. | `C-06`, `C-08` |
-| `C-12` | [#62](https://github.com/kaygdotorg/hermternal/issues/62) | Define active-session model-switch fixtures, including deferred confirmation loss. | `C-08` |
+| `C-12A` | [#201](https://github.com/kaygdotorg/hermternal/issues/201) | Verify the active-model options surface at the pinned source. | `C-08` |
+| `C-12` | [#62](https://github.com/kaygdotorg/hermternal/issues/62) | Define active-session model-switch fixtures, including deferred confirmation loss. | `C-08`, `C-12A` |
 | `C-13` | [#63](https://github.com/kaygdotorg/hermternal/issues/63) | Define the images-only attachment policy. | `C-01` |
 | `C-14` | [#64](https://github.com/kaygdotorg/hermternal/issues/64) | Add image preprocessing, progress, cancellation, retry, and failure fixtures. | `C-13` |
 | `C-15` | [#65](https://github.com/kaygdotorg/hermternal/issues/65) | Freeze the private deep-link grammar. | `P0-01` |
 | `C-16` | [#66](https://github.com/kaygdotorg/hermternal/issues/66) | Define deep-link resolution, lineage, and message-anchor fixtures. | `C-07`, `C-07B`, `C-15` |
 | `C-17` | [#67](https://github.com/kaygdotorg/hermternal/issues/67) | Freeze the PTY byte, resize, attach, and close-code contract. | `C-01` |
-| `C-18` | [#68](https://github.com/kaygdotorg/hermternal/issues/68) | Add PTY detach, retained-output race, truncation, and expiry fixtures. | `C-17` |
+| `C-18A` | [#202](https://github.com/kaygdotorg/hermternal/issues/202) | Freeze PTY attach-token and legacy disconnect semantics. | `C-17` |
+| `C-18` | [#68](https://github.com/kaygdotorg/hermternal/issues/68) | Add PTY detach, retained-output race, truncation, and expiry fixtures. | `C-17`, `C-18A` |
 | `C-19` | [#69](https://github.com/kaygdotorg/hermternal/issues/69) | Build the language-neutral contract fixture validator. | `C-02`, `C-02A`, `C-03`, `C-05`, `C-08`, `C-13`, `C-15`, `C-17` |
 | `C-20` | [#70](https://github.com/kaygdotorg/hermternal/issues/70) | Add TypeScript contract parity tests. | `C-19` |
 | `C-21` | [#71](https://github.com/kaygdotorg/hermternal/issues/71) | Add Swift contract parity tests. | `C-19` |
@@ -177,6 +181,7 @@ The order is deliberate. Define fixtures and evidence first. Add harnesses secon
 | `W-24` | [#146](https://github.com/kaygdotorg/hermternal/issues/146) | Add Paper visual-regression coverage for shipped web states. | `D-15`, `W-20`, `W-23` |
 | `W-25` | [#147](https://github.com/kaygdotorg/hermternal/issues/147) | Enforce web regression budgets. | `B-08`, `B-08A`, `W-20`, `W-21`, `W-21A`, `W-21B`, `W-21C` |
 | `W-25A` | [#148](https://github.com/kaygdotorg/hermternal/issues/148) | Enforce PTY regression budgets. | `B-08`, `B-08A`, `W-22`, `W-22A`, `W-23` |
+| `W-26` | [#203](https://github.com/kaygdotorg/hermternal/issues/203) | Prove the fixture-driven web mock exit gate with no live network egress. | `C-20`, `D-15`, `W-02`, `W-02A`, `W-10`, `W-10A`, `W-11`, `W-13`, `W-14`, `W-15`, `W-16`, `W-17`, `W-18`, `W-18A`, `W-19`, `W-24`, `W-25`, `W-25A` |
 
 ## M6 — Apple clients
 
