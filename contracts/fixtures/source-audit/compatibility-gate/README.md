@@ -12,20 +12,23 @@ run Hermes, contact a provider, contact a proxy, or claim compatibility.
 - `merged_dev`, the immutable historical review at commit
   `8465bd4cacc87fe62ff952c38d7f3c2b5927bfbd` and tree
   `aede9b87932f5cc28462120ef28be52a9a4aba7f`;
-- `integration_dev`, the explicit current `dev` snapshot at commit
-  `3a279cf209a41d47e3bcef471ccf977c08c3cb7a` and tree
-  `39fff048fcd35cf54799c9207ff2d7063daeb000`;
-- the ordered, source-audit artifact inventory verified against both commits;
-- observational artifact-size and validator-duration measurements with no
-  performance threshold; and
+- `integration_dev`, the explicit captured `origin/dev` snapshot at commit
+  `0671593b42235d4fbad2f7f3e04255c9f51b257d` and tree
+  `16fac2e9d6aa64dd2631b9f4b445146c115acfb0`;
+- the ordered, source-audit artifact inventory verified against the historical,
+  integration, and executing-validator snapshots;
+- raw normal and optimized validator-duration samples with distributions and
+  `threshold: null`; and
 - an explicitly blocked status with `compatible: false` and `live_run: false`.
 
-`merged_dev` is historical evidence. `integration_dev` is a current-dev
-integration check, not a replacement review and not a live compatibility claim.
-The current branch name is used only to locate the expected local ref; the
-recorded full commit and tree must match, so moving `dev` cannot silently
-change the evidence target. A refresh must record a new explicit commit and
-rerun the immutable checks.
+`merged_dev` is historical evidence. `integration_dev` is one explicit
+captured `origin/dev` snapshot, not a replacement review and not a live
+compatibility claim. The validator captures `HEAD` once for the executing
+snapshot, reads the canonical record and validator bytes from that commit, and
+compares both working-tree files byte-for-byte. It captures `origin/dev` once,
+reads all evidence blobs from that commit, and rechecks the ref before success;
+a moved ref fails closed. A refresh must record a new explicit commit and rerun
+the immutable checks.
 
 The merged PR list uses the fixture's canonical recorded order (`#221`,
 `#216`, `#218`, `#219`, `#220`); issue #41 does not prescribe an order. Artifact
@@ -41,29 +44,36 @@ raw WebSocket tickets, prompt text, transcripts, PTY bytes, or live results.
 
 The standard-library-only `validate.py` rejects:
 
+- a non-canonical `--record` path, a working-tree record replacement, or a
+  validator whose bytes do not match the captured committed snapshot;
 - duplicate JSON object keys at any nesting level;
-- `NaN`, `Infinity`, exponent overflow, unsupported values, and nesting deeper
-  than the bounded JSON depth;
+- `NaN`, `Infinity`, exponent overflow, oversized integers, oversized input,
+  strings, containers, nodes, unsupported values, and nesting deeper than the
+  bounded JSON limits;
 - unknown keys, wrong exact types (including booleans where integers are
   required), changed key ordering, reordered PRs, or reordered artifact paths;
 - absolute paths, Windows paths, NULs, `..` traversal, and symlink resolution
   that escapes the repository root;
-- a missing, malformed, replaced, or different historical/current commit or
-  tree, and a moving `dev` ref that does not match the recorded full OID;
+- a missing, malformed, replaced, or different historical/integration/captured
+  commit or tree, and a moving `dev` ref that does not match the recorded full
+  OID;
 - changed artifact SHA-256 values, sizes, or the canonical artifact-set digest;
-- wrong or missing Git objects, wrong object types, and truncated `cat-file`
-  batch output;
+- wrong or missing Git objects, wrong object types, wrong blob OIDs, truncated
+  or extra `cat-file` batch output;
 - `compatible: true`, `live_run: true`, positive proof statuses, or added
   observed/live-proof fields; and
-- sensitive keys or credential-shaped values.
+- sensitive keys or credential-shaped values. CLI failures are one bounded,
+  redacted JSON object and do not echo absolute paths or record content.
 
 Git verification clears inherited Git redirects and sets both
 `GIT_NO_REPLACE_OBJECTS=1` and `GIT_NO_LAZY_FETCH=1`. It captures an explicit
-full commit OID, then reads each artifact's type, size, and bytes from one
+full `HEAD` snapshot for the canonical record and executing validator, then
+captures one full `origin/dev` OID for integration evidence. Each artifact's
+exact blob OID, type, size, and bytes come from one complete
 `git cat-file --batch` response. The digest and size checks use that same
-buffer and commit. The mutable worktree is used only for path containment
-checks. The artifact-set digest is SHA-256 over UTF-8 lines in the recorded
-order, where each line is:
+buffer and commit. The mutable worktree is used only for path containment and
+byte-for-byte snapshot checks. The artifact-set digest is SHA-256 over UTF-8
+lines in the recorded order, where each line is:
 
 ```text
 relative/path\0file_sha256\0size_bytes\n
@@ -85,19 +95,19 @@ python3 -O contracts/fixtures/source-audit/compatibility-gate/test_validate.py
 python3 -m unittest discover \
   -s contracts/fixtures/source-audit/compatibility-gate \
   -p 'test_validate.py'
-python3 -m py_compile \
+PYTHONPYCACHEPREFIX=/tmp/hermternal-pycache python3 -m py_compile \
   contracts/fixtures/source-audit/compatibility-gate/validate.py \
   contracts/fixtures/source-audit/compatibility-gate/test_validate.py
-rm -rf contracts/fixtures/source-audit/compatibility-gate/__pycache__
 ```
 
 The validator is offline and uses only the Python standard library plus the
-local Git object database. A passing run proves only the checked-in record,
-the historical reviewed commit, the current-dev integration snapshot,
-containment rules, and artifact bytes. Its JSON output names both the
-`historical_reviewed_commit` and the `verified_commit` with
-`verified_commit_kind: current_dev_integration`. It does not prove a live
-service or a deployment.
+local Git object database. A passing run proves only the canonical committed
+record and validator bytes, the historical reviewed commit, the captured
+integration snapshot, containment rules, and artifact bytes. Its JSON output
+names the `historical_reviewed_commit`, `captured_snapshot_tree`, exact record
+and validator blobs, and `verified_commit_kind: captured_snapshot`. It does not
+prove a live service or a deployment. An alternate `--record` path is rejected
+before parsing and can never claim current-dev or captured-snapshot evidence.
 
 ## Accessibility
 
@@ -112,15 +122,16 @@ checks.
 
 This is an offline command-line validator, so production or release build mode
 is N/A: this change does not build or ship an executable, service, or client.
-The benchmark records fixture artifact bytes and validator-duration distribution
-only. The checked-in `observations` object records the committed artifact byte
-total, repetition count, and one local duration distribution as observational
-evidence. It has no invented performance threshold; the measurements are review
-evidence, not normative compatibility requirements.
+The checked-in `observations.validator_duration_ms` object contains 30 raw
+subprocess samples for both normal and optimized Python execution. Each mode
+records its exact command, integration snapshot commit, environment, artifact
+set digest, artifact size, and min/p50/p95/p99/max/mean distribution. Both
+modes use `threshold: null`; these are review measurements, not normative
+compatibility requirements.
 
-Run this from the repository root to repeat the recorded benchmark. It uses
-30 validations against immutable local Git blobs and prints the artifact byte
-count plus min, p50, p95, max, and mean duration in milliseconds:
+Run this from the repository root to repeat the recorded benchmark. It invokes
+30 normal and 30 optimized subprocess validations against immutable local Git
+objects and prints the raw samples plus distributions:
 
 ```sh
 python3 - <<'PY'
@@ -128,44 +139,59 @@ import json
 import math
 import platform
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 root = Path.cwd()
 fixture = root / "contracts/fixtures/source-audit/compatibility-gate"
-sys.path.insert(0, str(fixture))
-import validate
-
-record = validate.load_record(fixture / "compatibility_record.json")
-durations = []
-for _ in range(30):
-    started = time.perf_counter()
-    validate.validate_record(record, root)
-    durations.append((time.perf_counter() - started) * 1000)
-ordered = sorted(durations)
-def percentile(fraction):
+record_path = fixture / "compatibility_record.json"
+record = json.loads(record_path.read_text(encoding="utf-8"))
+commands = {
+    "normal": ["python3", str(fixture / "validate.py"), "--repo-root", ".", "--record", str(record_path)],
+    "optimized": ["python3", "-O", str(fixture / "validate.py"), "--repo-root", ".", "--record", str(record_path)],
+}
+def percentile(ordered, fraction):
     return ordered[min(len(ordered) - 1, max(0, math.ceil(fraction * len(ordered)) - 1))]
-print(json.dumps({
-    "artifact_bytes": sum(item["size_bytes"] for item in record["artifacts"]["files"]),
-    "artifact_count": len(record["artifacts"]["files"]),
-    "environment": platform.platform(),
-    "python": sys.version.split()[0],
-    "repetitions": len(durations),
-    "duration_ms": {
-        "min": round(min(durations), 3),
-        "p50": round(percentile(0.50), 3),
-        "p95": round(percentile(0.95), 3),
-        "max": round(max(durations), 3),
-        "mean": round(statistics.mean(durations), 3),
-    },
-}, sort_keys=True))
+def distribution(samples):
+    ordered = sorted(samples)
+    return {
+        "min": round(min(samples), 3),
+        "p50": round(percentile(ordered, 0.50), 3),
+        "p95": round(percentile(ordered, 0.95), 3),
+        "p99": round(percentile(ordered, 0.99), 3),
+        "max": round(max(samples), 3),
+        "mean": round(statistics.mean(samples), 3),
+    }
+output = {}
+for mode, command in commands.items():
+    samples = []
+    for _ in range(30):
+        started = time.perf_counter()
+        completed = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+        elapsed = (time.perf_counter() - started) * 1000
+        if completed.returncode != 0:
+            raise SystemExit(completed.stdout or completed.stderr)
+        samples.append(round(elapsed, 3))
+    output[mode] = {
+        "command": " ".join(command),
+        "commit": record["observations"]["validator_duration_ms"][mode]["commit"],
+        "environment": {"platform": platform.platform(), "python": sys.version.split()[0]},
+        "artifact_set_sha256": record["artifacts"]["set_sha256"],
+        "artifact_size_bytes": sum(item["size_bytes"] for item in record["artifacts"]["files"]),
+        "samples_ms": samples,
+        "distribution": distribution(samples),
+        "threshold": None,
+    }
+print(json.dumps(output, indent=2, sort_keys=True))
 PY
 ```
 
-The raw command and output for the checked-in run are included in the review
-PR and final issue evidence. Repeat the command on the target environment
-before using the measurements for a performance decision.
+The raw command and output for the checked-in run are included in
+`compatibility_record.json`, the review PR, and final issue evidence. Repeat
+the command on the target environment before using the measurements for a
+performance decision.
 
 ## Related fixture validators
 

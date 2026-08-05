@@ -35,8 +35,8 @@
   },
   "integration_dev": {
     "ref": "dev",
-    "head": "3a279cf209a41d47e3bcef471ccf977c08c3cb7a",
-    "tree": "39fff048fcd35cf54799c9207ff2d7063daeb000"
+    "head": "0671593b42235d4fbad2f7f3e04255c9f51b257d",
+    "tree": "16fac2e9d6aa64dd2631b9f4b445146c115acfb0"
   },
   "artifacts": {
     "algorithm": "sha256",
@@ -186,12 +186,110 @@
   },
   "observations": {
     "artifact_size_bytes": 462874,
+    "artifact_set_sha256": "be8cc598bfef973560a26d04d00e9d44aa17d4b9f37240f2d90d7c93ea34c3cd",
     "validator_duration_ms": {
-      "min": 769.818,
-      "p50": 823.983,
-      "p95": 935.495,
-      "max": 938.086,
-      "mean": 835.766
+      "normal": {
+        "command": "python3 contracts/fixtures/source-audit/compatibility-gate/validate.py --repo-root . --record contracts/fixtures/source-audit/compatibility-gate/compatibility_record.json",
+        "commit": "0671593b42235d4fbad2f7f3e04255c9f51b257d",
+        "environment": {
+          "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+          "python": "3.14.6"
+        },
+        "artifact_set_sha256": "be8cc598bfef973560a26d04d00e9d44aa17d4b9f37240f2d90d7c93ea34c3cd",
+        "artifact_size_bytes": 462874,
+        "samples_ms": [
+          2049.978,
+          2002.51,
+          2021.363,
+          2062.301,
+          2227.647,
+          2223.627,
+          2262.947,
+          2287.219,
+          2338.293,
+          2243.646,
+          2381.395,
+          2439.645,
+          2307.475,
+          2255.21,
+          2285.117,
+          2154.41,
+          2174.696,
+          2091.615,
+          2068.824,
+          2056.608,
+          2096.637,
+          2300.332,
+          2398.734,
+          2210.446,
+          2291.526,
+          2465.412,
+          2441.959,
+          2372.547,
+          2279.312,
+          2466.674
+        ],
+        "distribution": {
+          "min": 2002.51,
+          "p50": 2255.21,
+          "p95": 2465.412,
+          "p99": 2466.674,
+          "max": 2466.674,
+          "mean": 2241.937
+        },
+        "threshold": null
+      },
+      "optimized": {
+        "command": "python3 -O contracts/fixtures/source-audit/compatibility-gate/validate.py --repo-root . --record contracts/fixtures/source-audit/compatibility-gate/compatibility_record.json",
+        "commit": "0671593b42235d4fbad2f7f3e04255c9f51b257d",
+        "environment": {
+          "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+          "python": "3.14.6"
+        },
+        "artifact_set_sha256": "be8cc598bfef973560a26d04d00e9d44aa17d4b9f37240f2d90d7c93ea34c3cd",
+        "artifact_size_bytes": 462874,
+        "samples_ms": [
+          2507.899,
+          2582.745,
+          2371.93,
+          2343.315,
+          2219.219,
+          2297.299,
+          2225.032,
+          2324.468,
+          2466.492,
+          2458.569,
+          2338.518,
+          2333.944,
+          2259.102,
+          2365.997,
+          2498.826,
+          2434.929,
+          2171.251,
+          2090.225,
+          2303.578,
+          2352.029,
+          2227.952,
+          2308.923,
+          2462.297,
+          2550.03,
+          2367.59,
+          2322.423,
+          2465.635,
+          2559.512,
+          2456.841,
+          2295.981
+        ],
+        "distribution": {
+          "min": 2090.225,
+          "p50": 2343.315,
+          "p95": 2559.512,
+          "p99": 2582.745,
+          "max": 2582.745,
+          "mean": 2365.418
+        },
+        "threshold": null
+      }
     },
     "repetitions": 30
   },
