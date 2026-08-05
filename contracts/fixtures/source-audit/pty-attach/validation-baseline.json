@@ -5,9 +5,9 @@
   "source_verified": false,
   "case_count": 10,
   "mutation_check_count": 77,
-  "fixture_artifact_bytes": 150022,
-  "validation_duration_ns": 63732125,
-  "validation_duration_ms": 63.732,
+  "fixture_artifact_bytes": 150242,
+  "validation_duration_ns": 64241084,
+  "validation_duration_ms": 64.241,
   "environment": {
     "python": "3.14.6",
     "implementation": "CPython",

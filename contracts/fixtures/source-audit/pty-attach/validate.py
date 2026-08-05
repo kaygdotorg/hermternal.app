@@ -1178,6 +1178,7 @@ def validate_fixtures(fixtures: dict[str, Any]) -> int:
     cases = fixtures.get("cases")
     require(isinstance(cases, list), "fixtures.cases must be a list")
     ids = [case.get("id") for case in cases if isinstance(case, dict)]
+    require(all(type(case_id) is str for case_id in ids), "fixture case ids must be text")
     require(len(ids) == len(set(ids)), "fixture case ids must be unique")
     require(REQUIRED_CASES.issubset(set(ids)), f"missing required cases: {sorted(REQUIRED_CASES - set(ids))}")
     for case in cases:
@@ -1784,6 +1785,7 @@ def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None)
     require(len(observations) == len(REQUIRED_OBSERVATIONS), "source audit observations must be complete and unique")
     observation_ids = [item.get("id") for item in observations if isinstance(item, dict)]
     require(len(observation_ids) == len(observations), "source audit observation records must be objects")
+    require(all(type(observation_id) is str for observation_id in observation_ids), "source audit observation ids must be text")
     require(len(observation_ids) == len(set(observation_ids)), "source audit observation ids must be unique")
     require(set(observation_ids) == REQUIRED_OBSERVATIONS, "source audit observations are incomplete or unexpected")
     for observation in observations:
