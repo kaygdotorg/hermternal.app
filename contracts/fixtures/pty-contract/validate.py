@@ -20,10 +20,17 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_FIXTURE = ROOT / "pty-contract-fixtures.json"
+DEFAULT_BASELINE = ROOT / "validation-baseline.json"
 SOURCE_AUDIT_ROOT = ROOT.parent / "source-audit" / "pty-attach"
 PINNED_HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 MAX_JSON_DEPTH = 128
+MAX_ERROR_LENGTH = 240
+ERROR_SUFFIX = "... [truncated]"
 SYNTHETIC_REF = re.compile(r"^synthetic-[a-z0-9-]+$")
+REPLAY_SEGMENT_PROVENANCE = (
+    ("synthetic-output-old", "evicted-prefix"),
+    ("synthetic-output-new", "retained-tail"),
+)
 HEX_VALUE = re.compile(r"^[0-9a-f]*$")
 SHA1_VALUE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_VALUE = re.compile(r"^[0-9a-f]{64}$")
@@ -83,8 +90,22 @@ EXPECTED_CASES = {
 }
 
 
+def bound_error(text: str) -> str:
+    """Keep direct and CLI validation failures bounded for safe diagnostics."""
+
+    if len(text) <= MAX_ERROR_LENGTH:
+        return text
+    keep = MAX_ERROR_LENGTH - len(ERROR_SUFFIX)
+    prefix_length = keep // 2
+    suffix_length = keep - prefix_length
+    return text[:prefix_length] + ERROR_SUFFIX + text[-suffix_length:]
+
+
 class ValidationError(ValueError):
     """A deterministic, user-facing fixture validation failure."""
+
+    def __init__(self, message: object) -> None:
+        super().__init__(bound_error(str(message)))
 
 
 def fail(path: str, message: str) -> None:
@@ -188,6 +209,9 @@ def expect_synthetic_ref(value: Any, path: str) -> str:
     text = expect_string(value, path)
     if SYNTHETIC_REF.fullmatch(text) is None:
         fail(path, "must be a synthetic reference")
+    suffix = text.removeprefix("synthetic-")
+    if suffix and len(suffix) % 2 == 0 and HEX_VALUE.fullmatch(suffix) is not None:
+        fail(path, "must not encode payload bytes in a synthetic reference")
     return text
 
 
@@ -347,7 +371,10 @@ def validate_source_audit(value: Any) -> None:
 
 
 def segment_bytes(segment: dict[str, Any], path: str) -> bytes:
-    exact_keys(segment, {"ref", "byte_hex", "repeat"}, path)
+    keys = {"ref", "byte_hex", "repeat"}
+    if type(segment) is dict and "role" in segment:
+        keys.add("role")
+    exact_keys(segment, keys, path)
     expect_synthetic_ref(segment["ref"], f"{path}.ref")
     byte_hex = expect_hex(segment["byte_hex"], f"{path}.byte_hex", one_byte=True)
     repeat = expect_int(segment["repeat"], f"{path}.repeat")
@@ -673,6 +700,8 @@ def validate_attach(case: dict[str, Any], constants: dict[str, Any]) -> None:
         "socket.accept",
         "registry.reuse",
         "session.attach",
+        "client.close",
+        "registry.detach",
     ]
     expected_sockets = [
         "synthetic-socket-attach-a",
@@ -683,9 +712,11 @@ def validate_attach(case: dict[str, Any], constants: dict[str, Any]) -> None:
         "synthetic-socket-attach-b",
         None,
         "synthetic-socket-attach-b",
+        "synthetic-socket-attach-b",
+        "synthetic-socket-attach-b",
     ]
     if len(events) != len(expected_names):
-        fail(f"{path}.input.events", "must prove spawn, detach, registry reuse, and second-socket attach")
+        fail(f"{path}.input.events", "must prove spawn, detach, registry reuse, second-socket attach, and explicit Close")
     observed_names: list[str] = []
     observed_sockets: list[str] = []
     for index, event in enumerate(events):
@@ -723,8 +754,8 @@ def validate_attach(case: dict[str, Any], constants: dict[str, Any]) -> None:
         fail(f"{path}.expected.event_sequence", "must equal the executable attach timeline")
     expect_list(expected["event_sequence"], f"{path}.expected.event_sequence")
     expect_list(expected["state_sequence"], f"{path}.expected.state_sequence")
-    if expected["state_sequence"] != ["attached", "detached", "attached"]:
-        fail(f"{path}.expected.state_sequence", "must prove detach followed by reattach")
+    if expected["state_sequence"] != ["attached", "detached", "attached", "detached"]:
+        fail(f"{path}.expected.state_sequence", "must prove detach, reattach, and explicit Close detach")
     expect_list(expected["socket_sequence"], f"{path}.expected.socket_sequence")
     if expected["socket_sequence"] != observed_sockets:
         fail(f"{path}.expected.socket_sequence", "must preserve the first and second socket identities")
@@ -910,7 +941,12 @@ def validate_replay_ring(case: dict[str, Any], constants: dict[str, Any]) -> Non
     rendered: list[bytes] = []
     for index, segment in enumerate(segments):
         segment_path = f"{path}.input.output_segments[{index}]"
-        ref = expect_synthetic_ref(segment.get("ref"), f"{segment_path}.ref") if type(segment) is dict else ""
+        segment = exact_keys(segment, {"ref", "role", "byte_hex", "repeat"}, segment_path)
+        ref = expect_synthetic_ref(segment["ref"], f"{segment_path}.ref")
+        role = expect_string(segment["role"], f"{segment_path}.role")
+        expected_ref, expected_role = REPLAY_SEGMENT_PROVENANCE[index]
+        expect_string(segment["ref"], f"{segment_path}.ref", expected_ref)
+        expect_string(segment["role"], f"{segment_path}.role", expected_role)
         if ref in refs:
             fail(segment_path, "segment references must be unique")
         refs.append(ref)
@@ -919,13 +955,13 @@ def validate_replay_ring(case: dict[str, Any], constants: dict[str, Any]) -> Non
     capacity = constants["replay_capacity_bytes"]
     tail = output[-capacity:]
     expect_int(expected["capacity_bytes"], f"{path}.expected.capacity_bytes", capacity)
-    expect_string(expected["tail_ref"], f"{path}.expected.tail_ref", refs[-1])
+    expect_string(expected["tail_ref"], f"{path}.expected.tail_ref", REPLAY_SEGMENT_PROVENANCE[-1][0])
     expect_int(expected["tail_length"], f"{path}.expected.tail_length", capacity)
     expect_string(expected["older_output"], f"{path}.expected.older_output", "may-be-missing")
     expect_string(expected["frame_type"], f"{path}.expected.frame_type", "binary")
     newest = rendered[-1]
-    if len(newest) <= capacity:
-        fail(f"{path}.input.output_segments[1].repeat", "newest output must exceed capacity")
+    if len(newest) < capacity:
+        fail(f"{path}.input.output_segments[1].repeat", "newest output must meet or exceed capacity")
     if tail != newest[-capacity:]:
         fail(path, "replay is not the newest byte tail")
     if len(tail) != capacity:
@@ -1571,19 +1607,23 @@ def artifact_bytes() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
+    parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     args = parser.parse_args(argv)
     try:
         data = load_fixture(args.fixture)
         summary = validate_contract(data)
+        baseline = load_fixture(args.baseline)
+        baseline_summary = validate_baseline(baseline)
         mutation_count = validate_mutations(data)
     except (ValidationError, OSError, TypeError, RecursionError) as exc:
-        print(f"validation failed: {exc}", file=sys.stderr)
+        print(bound_error(f"validation failed: {exc}"), file=sys.stderr)
         return 1
     print(
         "validated "
         f"cases={summary['case_count']} "
         f"mutation_checks={mutation_count} "
-        f"fixture_artifact_bytes={artifact_bytes()}"
+        f"fixture_artifact_bytes={artifact_bytes()} "
+        f"baseline_artifact_bytes={baseline_summary['artifact_size_bytes']}"
     )
     return 0
 

@@ -13,65 +13,65 @@
       "mode": "normal",
       "command": "python3 validate.py",
       "samples_ms": [
-        106.984,
-        109.66,
-        108.368,
-        108.987,
-        107.592,
-        106.215,
-        107.058,
-        106.206,
-        110.319,
-        106.478
+        112.295,
+        113.802,
+        110.705,
+        110.796,
+        110.61,
+        112.477,
+        112.738,
+        112.77,
+        116.444,
+        119.196
       ],
       "distribution": {
-        "min_ms": 106.206,
-        "median_ms": 107.325,
-        "p95_ms": 110.319,
-        "max_ms": 110.319
+        "min_ms": 110.61,
+        "median_ms": 112.608,
+        "p95_ms": 119.196,
+        "max_ms": 119.196
       }
     },
     {
       "mode": "optimized",
       "command": "python3 -O validate.py",
       "samples_ms": [
-        106.232,
-        110.123,
-        110.534,
-        111.007,
-        107.476,
-        108.404,
-        107.867,
-        106.644,
-        106.396,
-        106.87
+        118.454,
+        119.685,
+        120.718,
+        122.411,
+        123.676,
+        121.147,
+        115.151,
+        115.964,
+        117.26,
+        119.855
       ],
       "distribution": {
-        "min_ms": 106.232,
-        "median_ms": 107.672,
-        "p95_ms": 111.007,
-        "max_ms": 111.007
+        "min_ms": 115.151,
+        "median_ms": 119.77,
+        "p95_ms": 123.676,
+        "max_ms": 123.676
       }
     }
   ],
   "artifact_size_bytes": {
     "scope": "owned fixture files excluding this mutable baseline record",
     "files": {
-      "README.md": 6188,
-      "pty-contract-fixtures.json": 27094,
-      "validate.py": 79757,
-      "test_validate.py": 15364
+      "README.md": 6883,
+      "pty-contract-fixtures.json": 27864,
+      "validate.py": 81576,
+      "test_validate.py": 19426
     },
-    "total": 128403
+    "total": 135749
   },
   "artifact_content_sha256": {
     "files": {
-      "README.md": "92e8aeaf9881151a798fecaebfc7a4ed0254adfef6e4d06bf0cea2846bf112aa",
-      "pty-contract-fixtures.json": "a4a20921f74bb6062a945a135b09bb9a5fc065bd3cff90466b5f0c5f73957f3d",
-      "validate.py": "e9331cc859a14669a6d1a881005f32c26b4293a0ef986f3dcc4519ffa6392ffb",
-      "test_validate.py": "6b6597d1f3805a32b8c02f4ef445a9d56cb2f6da0f2bb6dff23fa385f78e046e"
+      "README.md": "aa32371e4703ddfdf5a96ce1c8b57abd5ece1c91076566e45941b76909d9df96",
+      "pty-contract-fixtures.json": "4a8e7d9988c3414360b1d0b0a929214291042576b6b1ffb7fdc287203632448e",
+      "validate.py": "7a240e5028e49c3f71d5ed1e89bacd0c867d3b282a5c86c1e8aefc716441ebdc",
+      "test_validate.py": "cd9ba26d566fa5d9963611b0d38f222b702c6ce1236b6c4bf9aa007e21f31b14"
     },
-    "manifest": "830cad86bdcda0119bb1e5f1e2171becd6b74011af5dd647eb17bca1b7d2860f"
+    "manifest": "8b64be3f64b32b859a1338a5ba1cb9abdd29debb73cead91062ddcc34774c8df"
   },
   "approved_budget": null,
   "notes": "Observation only; no approved performance threshold exists. This is fixture-validator timing, not PTY runtime latency."

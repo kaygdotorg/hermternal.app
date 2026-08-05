@@ -75,6 +75,22 @@ class PtyContractValidationTests(unittest.TestCase):
         self.assertIn("cases: must be an array", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+        oversized = copy.deepcopy(self.data)
+        oversized.update({f"unexpected-{index:05d}": True for index in range(10_000)})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized-error.json"
+            path.write_text(json.dumps(oversized), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--fixture", str(path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertLessEqual(len(result.stderr.rstrip("\n")), validate.MAX_ERROR_LENGTH)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("[truncated]", result.stderr)
+
     def test_deeply_nested_data_fails_closed_during_direct_validation(self) -> None:
         malformed = copy.deepcopy(self.data)
         nested: object = []
@@ -179,6 +195,14 @@ class PtyContractValidationTests(unittest.TestCase):
         self.assertEqual(events[6]["name"], "registry.reuse")
         self.assertEqual(events[7]["session_ref"], case["input"]["session_ref"])
         self.assertEqual(events[7]["process_ref"], case["input"]["process_ref"])
+        self.assertEqual(events[8]["name"], "client.close")
+        self.assertEqual(events[8]["socket_ref"], "synthetic-socket-attach-b")
+        self.assertEqual(events[9]["name"], "registry.detach")
+        self.assertEqual(events[9]["socket_ref"], "synthetic-socket-attach-b")
+        self.assertEqual(events[8]["handle_ref"], events[9]["handle_ref"])
+        self.assertEqual(events[8]["session_ref"], events[9]["session_ref"])
+        self.assertEqual(events[8]["process_ref"], events[9]["process_ref"])
+        self.assertEqual(case["expected"]["state_sequence"], ["attached", "detached", "attached", "detached"])
         self.assertEqual(case["expected"]["spawn_count"], 1)
         self.assertEqual(case["expected"]["registry_reuse_count"], 1)
         validate.validate_contract(self.data)
@@ -234,12 +258,62 @@ class PtyContractValidationTests(unittest.TestCase):
         replay_case["input"]["output_segments"][0]["byte_hex"] = "42"
         validate.validate_contract(candidate)
 
+        exact_capacity = copy.deepcopy(self.data)
+        replay_case = next(case for case in exact_capacity["cases"] if case["id"] == "replay-newest-tail")
+        replay_case["input"]["output_segments"][1]["repeat"] = 1_048_576
+        validate.validate_contract(exact_capacity)
+
+        relabeled = copy.deepcopy(self.data)
+        replay_case = next(case for case in relabeled["cases"] if case["id"] == "replay-newest-tail")
+        replay_case["input"]["output_segments"][0]["ref"] = "synthetic-output-prefix"
+        replay_case["input"]["output_segments"][1]["ref"] = "synthetic-output-tail"
+        replay_case["expected"]["tail_ref"] = "synthetic-output-tail"
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_contract(relabeled)
+
+        payload_ref = copy.deepcopy(self.data)
+        replay_case = next(case for case in payload_ref["cases"] if case["id"] == "replay-newest-tail")
+        replay_case["input"]["output_segments"][0]["ref"] = "synthetic-4f4b0a"
+        with self.assertRaisesRegex(validate.ValidationError, "must not encode payload bytes"):
+            validate.validate_contract(payload_ref)
+
+        action_payload_ref = copy.deepcopy(self.data)
+        action_case = next(case for case in action_payload_ref["cases"] if case["id"] == "replay-action-exclusion")
+        action_case["input"]["actions"][0]["action_ref"] = "synthetic-696e707574"
+        with self.assertRaisesRegex(validate.ValidationError, "must not encode payload bytes"):
+            validate.validate_contract(action_payload_ref)
+
     def test_baseline_json_schema_is_strict_and_derived(self) -> None:
         baseline_path = ROOT / "validation-baseline.json"
         baseline = validate.load_fixture(baseline_path)
         summary = validate.validate_baseline(baseline)
         self.assertEqual(summary["run_count"], 2)
         self.assertEqual(summary["artifact_size_bytes"], validate.artifact_bytes())
+
+        canonical = subprocess.run(
+            [sys.executable, str(ROOT / "validate.py")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(canonical.returncode, 0, canonical.stderr)
+        self.assertIn("baseline_artifact_bytes=", canonical.stdout)
+        self.assertNotIn("Traceback", canonical.stderr)
+
+        drifted = copy.deepcopy(baseline)
+        drifted["artifact_size_bytes"]["total"] += 1
+        with tempfile.TemporaryDirectory() as directory:
+            drift_path = Path(directory) / "drifted-baseline.json"
+            drift_path.write_text(json.dumps(drifted), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--baseline", str(drift_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("baseline.artifact_size_bytes.total", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_baseline_schema_mutations_fail_closed(self) -> None:
         baseline = validate.load_fixture(ROOT / "validation-baseline.json")

@@ -502,6 +502,22 @@
             "handle_ref": "synthetic-opaque-handle-a",
             "session_ref": "synthetic-session-attach-a",
             "process_ref": "synthetic-process-attach-a"
+          },
+          {
+            "step": 9,
+            "name": "client.close",
+            "socket_ref": "synthetic-socket-attach-b",
+            "handle_ref": "synthetic-opaque-handle-a",
+            "session_ref": "synthetic-session-attach-a",
+            "process_ref": "synthetic-process-attach-a"
+          },
+          {
+            "step": 10,
+            "name": "registry.detach",
+            "socket_ref": "synthetic-socket-attach-b",
+            "handle_ref": "synthetic-opaque-handle-a",
+            "session_ref": "synthetic-session-attach-a",
+            "process_ref": "synthetic-process-attach-a"
           }
         ]
       },
@@ -526,12 +542,15 @@
           "registry.detach",
           "socket.accept",
           "registry.reuse",
-          "session.attach"
+          "session.attach",
+          "client.close",
+          "registry.detach"
         ],
         "state_sequence": [
           "attached",
           "detached",
-          "attached"
+          "attached",
+          "detached"
         ],
         "socket_sequence": [
           "synthetic-socket-attach-a",
@@ -680,13 +699,15 @@
         "output_segments": [
           {
             "ref": "synthetic-output-old",
+            "role": "evicted-prefix",
             "byte_hex": "41",
             "repeat": 17
           },
           {
             "ref": "synthetic-output-new",
+            "role": "retained-tail",
             "byte_hex": "42",
-            "repeat": 1048580
+            "repeat": 1048576
           }
         ]
       },
