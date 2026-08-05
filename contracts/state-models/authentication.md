@@ -53,6 +53,16 @@ At the pinned Hermes revision, native OAuth or OIDC is supported only when the p
 
 The configured password path is supported when provider discovery advertises it. A deployment may also expose a supported native provider. The client must report the provider capability that it observed.
 
+## Native bearer REST boundary
+
+The web contract claims native bearer authentication only for the exact method/path pairs proven by the pinned source audit. The frozen reviewed set is `GET /api/auth/me`, `POST /api/auth/ws-ticket`, `GET /api/sessions`, `GET /api/sessions/search`, `GET /api/sessions/{session_id}`, `GET /api/sessions/{session_id}/messages`, `PATCH /api/sessions/{session_id}`, and `POST /api/chat/image-upload`. Parameterized session IDs match one non-empty path segment; a method change or path suffix is not covered. This is a conservative Hermternal allowlist, not a complete upstream bearer-acceptance inventory: the pinned gated middleware attempts bearer verification on every non-public path.
+
+A valid `Authorization: Bearer` session continues to a reviewed handler. An invalid or expired bearer enters the structured `401` recovery path even when a valid cookie is present; it must not fall through to cookie authentication. A reachable provider that accepts succeeds despite another provider outage. All reachable providers rejecting the bearer produce `401`; no acceptance plus at least one unreachable provider produces `503`. Public discovery, login, callback, password, logout, native authorize/token/refresh, and asset/API bypasses follow the complete source inventory in the fixture.
+
+`POST /api/gateway/drain` is conditional, not an unconditional separate seam. When the drain plugin registers the exact path, the service-token seam owns it and does not fall back to cookies. When the plugin is absent or declines registration, `token_auth.py` passes it through to the gated or loopback session gate; on a gated bind the broad source middleware may attempt native bearer verification, but Hermternal does not freeze that route as supported native bearer coverage.
+
+Anything outside the reviewed method/path set is `blocked_unverified`: Hermternal must not claim support for it until a new source audit proves the route. This is a contract boundary for the web mock/proof and does not add a live Hermes integration. The deterministic evidence lives in [`native-bearer/README.md`](../fixtures/source-audit/native-bearer/README.md), [`source_audit.json`](../fixtures/source-audit/native-bearer/source_audit.json), and [`cases.json`](../fixtures/source-audit/native-bearer/cases.json); run [`test_native_bearer.py`](../fixtures/source-audit/native-bearer/test_native_bearer.py) to check the frozen inventory and negative cases.
+
 ## Recovery rules
 
 - After a `401`, invalidate the current ticket and enter `expired`.

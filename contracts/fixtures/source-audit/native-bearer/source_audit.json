@@ -1,0 +1,570 @@
+{
+  "schema": "hermternal.source-audit.native-bearer.v2",
+  "contract_version": "dashboard-v0.0.1",
+  "hermes_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "scope": {
+    "platform": "web",
+    "auth_family": "native_bearer_session",
+    "source_checkout": "git_checkout_or_content_only_snapshot",
+    "integration_mode": "mock_and_proof_only",
+    "unverified_route_policy": "blocked_unverified",
+    "source_middleware_behavior": "gated_auth_attempts_bearer_on_every_non_public_path",
+    "supported_route_policy": "conservative_reviewed_allowlist",
+    "supported_route_inventory_complete": false
+  },
+  "source_provenance": {
+    "pinned_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "verification": "sha256_digests_and_git_head_when_git_metadata_present",
+    "source_root_modes": {
+      "git_checkout": "git_head_must_equal_pinned_revision",
+      "content_only_snapshot": "sha256_only_never_checkout_verified"
+    },
+    "verification_command": "python3 test_native_bearer.py --source-root <pinned-Hermes-checkout>",
+    "citation_marker_policy": "marker_must_bind_to_expected_route_or_prefix_and_occur_in_cited_source_range_when_source_root_is_supplied",
+    "files": [
+      {
+        "path": "hermes_cli/dashboard_auth/middleware.py",
+        "sha256": "a7ed66ee8334458a53029ee2ca8ad59682ac830b1e65c881cde486752d212d4e"
+      },
+      {
+        "path": "hermes_cli/dashboard_auth/public_paths.py",
+        "sha256": "18dad29df79d0ee6111926249d859704b2afc61ffa974ae4589d3667c7fa02ce"
+      },
+      {
+        "path": "hermes_cli/dashboard_auth/routes.py",
+        "sha256": "d42be557b9b1ba798c038c91246cba0bf046e89ebe34a27db0c7803c517e9c20"
+      },
+      {
+        "path": "hermes_cli/web_routers/sessions.py",
+        "sha256": "f8debdab79430829245352ebdb7f50603c3a42c11d4609eb3287c35b9a2bf0ba"
+      },
+      {
+        "path": "hermes_cli/web_server.py",
+        "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a"
+      },
+      {
+        "path": "hermes_cli/dashboard_auth/token_auth.py",
+        "sha256": "c3f5a3b17f28371f6d4fd794540e15b6a05010d308b9ff6a905a9cf1dc24bd09"
+      },
+      {
+        "path": "plugins/dashboard_auth/drain/__init__.py",
+        "sha256": "3b737b4964df2f509f536a413a502a620a4fae3ca5f03acad74887e4f003afbc"
+      }
+    ]
+  },
+  "source_evidence": [
+    {
+      "id": "middleware-public-gate",
+      "file": "hermes_cli/dashboard_auth/middleware.py",
+      "lines": "49-86",
+      "claim": "_GATE_PUBLIC_PREFIXES and _path_is_public define prefix bypasses and exact public API checks."
+    },
+    {
+      "id": "public-api-inventory",
+      "file": "hermes_cli/dashboard_auth/public_paths.py",
+      "lines": "33-60",
+      "claim": "PUBLIC_API_PATHS is the complete exact public API allowlist shared by the two auth gates."
+    },
+    {
+      "id": "middleware-bearer-verification",
+      "file": "hermes_cli/dashboard_auth/middleware.py",
+      "lines": "281-320",
+      "claim": "Native bearer extraction and provider stacking return on acceptance, otherwise distinguish reachable invalid from provider outage."
+    },
+    {
+      "id": "middleware-gated-bearer",
+      "file": "hermes_cli/dashboard_auth/middleware.py",
+      "lines": "323-373",
+      "claim": "Every non-public path attempts bearer verification before cookies; valid bearer continues, provider outage is 503, and invalid bearer is 401 without cookie fallback."
+    },
+    {
+      "id": "routes-auth-public",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "132-182",
+      "claim": "Login page, provider discovery, and interactive login routes are registered."
+    },
+    {
+      "id": "routes-native-authorize",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "289-289",
+      "claim": "Native authorization route is registered."
+    },
+    {
+      "id": "routes-auth-callback",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "379-379",
+      "claim": "OAuth callback route is registered."
+    },
+    {
+      "id": "routes-password-login",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "650-650",
+      "claim": "Password login route is registered."
+    },
+    {
+      "id": "routes-logout",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "742-742",
+      "claim": "Logout route is registered."
+    },
+    {
+      "id": "routes-auth-rest",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "778-817",
+      "claim": "The reviewed auth REST routes are GET /api/auth/me and POST /api/auth/ws-ticket."
+    },
+    {
+      "id": "routes-native-token-refresh",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "841-894",
+      "claim": "Native token issuance and refresh routes are registered."
+    },
+    {
+      "id": "sessions-list",
+      "file": "hermes_cli/web_routers/sessions.py",
+      "lines": "50-51",
+      "claim": "GET /api/sessions is registered."
+    },
+    {
+      "id": "sessions-search",
+      "file": "hermes_cli/web_routers/sessions.py",
+      "lines": "166-167",
+      "claim": "GET /api/sessions/search is registered."
+    },
+    {
+      "id": "sessions-detail",
+      "file": "hermes_cli/web_routers/sessions.py",
+      "lines": "552-553",
+      "claim": "GET /api/sessions/{session_id} is registered."
+    },
+    {
+      "id": "sessions-messages",
+      "file": "hermes_cli/web_routers/sessions.py",
+      "lines": "598-599",
+      "claim": "GET /api/sessions/{session_id}/messages is registered."
+    },
+    {
+      "id": "sessions-patch",
+      "file": "hermes_cli/web_routers/sessions.py",
+      "lines": "661-662",
+      "claim": "PATCH /api/sessions/{session_id} is registered."
+    },
+    {
+      "id": "image-upload",
+      "file": "hermes_cli/web_server.py",
+      "lines": "2306-2306",
+      "claim": "POST /api/chat/image-upload is registered."
+    },
+    {
+      "id": "token-route-registration",
+      "file": "hermes_cli/dashboard_auth/token_auth.py",
+      "lines": "54-75",
+      "claim": "The service-token seam acts only on exact paths registered at startup and passes unregistered paths downstream."
+    },
+    {
+      "id": "token-route-decisions",
+      "file": "hermes_cli/dashboard_auth/token_auth.py",
+      "lines": "144-183",
+      "claim": "Registered service-token routes accept a token principal, return 503 for provider outage, and otherwise return 401."
+    },
+    {
+      "id": "drain-route-conditional-doc",
+      "file": "hermes_cli/web_server.py",
+      "lines": "4000-4011",
+      "claim": "The drain handler documents plugin-registered token auth when configured and cookie or legacy session gating when not configured."
+    },
+    {
+      "id": "drain-plugin-registration",
+      "file": "plugins/dashboard_auth/drain/__init__.py",
+      "lines": "229-291",
+      "claim": "The drain plugin is a no-op without a strong secret and registers both the provider and exact drain token route only after successful setup."
+    }
+  ],
+  "public_bypass_inventory": {
+    "public_api_exact_paths": [
+      {
+        "path": "/api/health",
+        "source_citation": {
+          "evidence_id": "public-api-inventory",
+          "lines": "38",
+          "marker": "/api/health"
+        }
+      },
+      {
+        "path": "/api/status",
+        "source_citation": {
+          "evidence_id": "public-api-inventory",
+          "lines": "44",
+          "marker": "/api/status"
+        }
+      },
+      {
+        "path": "/api/config/defaults",
+        "source_citation": {
+          "evidence_id": "public-api-inventory",
+          "lines": "46",
+          "marker": "/api/config/defaults"
+        }
+      },
+      {
+        "path": "/api/config/schema",
+        "source_citation": {
+          "evidence_id": "public-api-inventory",
+          "lines": "47",
+          "marker": "/api/config/schema"
+        }
+      },
+      {
+        "path": "/api/model/info",
+        "source_citation": {
+          "evidence_id": "public-api-inventory",
+          "lines": "50",
+          "marker": "/api/model/info"
+        }
+      },
+      {
+        "path": "/api/dashboard/themes",
+        "source_citation": {
+          "evidence_id": "public-api-inventory",
+          "lines": "52",
+          "marker": "/api/dashboard/themes"
+        }
+      },
+      {
+        "path": "/api/dashboard/plugins",
+        "source_citation": {
+          "evidence_id": "public-api-inventory",
+          "lines": "53",
+          "marker": "/api/dashboard/plugins"
+        }
+      },
+      {
+        "path": "/api/cron/fire",
+        "source_citation": {
+          "evidence_id": "public-api-inventory",
+          "lines": "59",
+          "marker": "/api/cron/fire"
+        }
+      }
+    ],
+    "gate_public_prefixes": [
+      {
+        "path": "/auth/login",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "50",
+          "marker": "/auth/login"
+        }
+      },
+      {
+        "path": "/auth/callback",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "51",
+          "marker": "/auth/callback"
+        }
+      },
+      {
+        "path": "/auth/native/authorize",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "52",
+          "marker": "/auth/native/authorize"
+        }
+      },
+      {
+        "path": "/auth/native/token",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "53",
+          "marker": "/auth/native/token"
+        }
+      },
+      {
+        "path": "/auth/native/refresh",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "54",
+          "marker": "/auth/native/refresh"
+        }
+      },
+      {
+        "path": "/auth/password-login",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "55",
+          "marker": "/auth/password-login"
+        }
+      },
+      {
+        "path": "/auth/logout",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "56",
+          "marker": "/auth/logout"
+        }
+      },
+      {
+        "path": "/login",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "57",
+          "marker": "/login"
+        }
+      },
+      {
+        "path": "/api/auth/providers",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "58",
+          "marker": "/api/auth/providers"
+        }
+      },
+      {
+        "path": "/api/mcp/oauth/callback/",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "59",
+          "marker": "/api/mcp/oauth/callback/"
+        }
+      },
+      {
+        "path": "/assets/",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "60",
+          "marker": "/assets/"
+        }
+      },
+      {
+        "path": "/favicon.ico",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "61",
+          "marker": "/favicon.ico"
+        }
+      },
+      {
+        "path": "/ds-assets/",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "62",
+          "marker": "/ds-assets/"
+        }
+      },
+      {
+        "path": "/fonts/",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "63",
+          "marker": "/fonts/"
+        }
+      },
+      {
+        "path": "/fonts-terminal/",
+        "source_citation": {
+          "evidence_id": "middleware-public-gate",
+          "lines": "64",
+          "marker": "/fonts-terminal/"
+        }
+      }
+    ],
+    "matching": "exact_paths_use_membership; prefixes_use_path_equals_prefix_or_path_startswith_prefix"
+  },
+  "route_sets": {
+    "native_bearer_supported": [
+      {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "source_citation": {
+          "evidence_id": "routes-auth-rest",
+          "lines": "778",
+          "marker": "/api/auth/me"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "source_citation": {
+          "evidence_id": "routes-auth-rest",
+          "lines": "799",
+          "marker": "/api/auth/ws-ticket"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions",
+        "source_citation": {
+          "evidence_id": "sessions-list",
+          "lines": "50",
+          "marker": "/api/sessions"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/search",
+        "source_citation": {
+          "evidence_id": "sessions-search",
+          "lines": "166",
+          "marker": "/api/sessions/search"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/{session_id}",
+        "source_citation": {
+          "evidence_id": "sessions-detail",
+          "lines": "552",
+          "marker": "/api/sessions/{session_id}"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/{session_id}/messages",
+        "source_citation": {
+          "evidence_id": "sessions-messages",
+          "lines": "598",
+          "marker": "/api/sessions/{session_id}/messages"
+        }
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/sessions/{session_id}",
+        "source_citation": {
+          "evidence_id": "sessions-patch",
+          "lines": "661",
+          "marker": "/api/sessions/{session_id}"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/chat/image-upload",
+        "source_citation": {
+          "evidence_id": "image-upload",
+          "lines": "2306",
+          "marker": "/api/chat/image-upload"
+        }
+      }
+    ],
+    "public_auth_routes": [
+      {
+        "method": "GET",
+        "path": "/login",
+        "source_citation": {
+          "evidence_id": "routes-auth-public",
+          "lines": "132",
+          "marker": "/login"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "source_citation": {
+          "evidence_id": "routes-auth-public",
+          "lines": "152",
+          "marker": "/api/auth/providers"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/auth/login",
+        "source_citation": {
+          "evidence_id": "routes-auth-public",
+          "lines": "182",
+          "marker": "/auth/login"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/auth/native/authorize",
+        "source_citation": {
+          "evidence_id": "routes-native-authorize",
+          "lines": "289",
+          "marker": "/auth/native/authorize"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/auth/callback",
+        "source_citation": {
+          "evidence_id": "routes-auth-callback",
+          "lines": "379",
+          "marker": "/auth/callback"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/auth/password-login",
+        "source_citation": {
+          "evidence_id": "routes-password-login",
+          "lines": "650",
+          "marker": "/auth/password-login"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/auth/logout",
+        "source_citation": {
+          "evidence_id": "routes-logout",
+          "lines": "742",
+          "marker": "/auth/logout"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/auth/native/token",
+        "source_citation": {
+          "evidence_id": "routes-native-token-refresh",
+          "lines": "841",
+          "marker": "/auth/native/token"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/auth/native/refresh",
+        "source_citation": {
+          "evidence_id": "routes-native-token-refresh",
+          "lines": "894",
+          "marker": "/auth/native/refresh"
+        }
+      }
+    ],
+    "conditional_service_token": [
+      {
+        "method": "POST",
+        "path": "/api/gateway/drain",
+        "registration_mode": "plugin_conditional",
+        "source_citation": {
+          "evidence_id": "drain-route-conditional-doc",
+          "lines": "4000-4011",
+          "marker": "/api/gateway/drain"
+        },
+        "registration_citation": {
+          "evidence_id": "drain-plugin-registration",
+          "lines": "229-280",
+          "marker": "register_token_route(DRAIN_ROUTE_PATH)"
+        }
+      }
+    ]
+  },
+  "decision_rules": {
+    "native_source_scope": "gated_auth_attempts_bearer_for_every_non_public_path",
+    "native_supported_scope": "only_the_eight_reviewed_method_path_pairs_above",
+    "native_supported_inventory_is_complete": false,
+    "native_route_match": "exact_method_and_path_shape",
+    "parameter_segment_rule": "{session_id} matches one non-empty path segment only",
+    "valid_bearer": "pass_through_to_handler",
+    "invalid_or_expired_bearer": "401_invalid_or_expired_session_even_when_valid_cookie_present",
+    "missing_bearer_with_valid_cookie": "cookie_session_pass_through",
+    "provider_stack_accept": "pass_through_even_if_another_provider_is_unreachable",
+    "provider_stack_all_reachable_invalid": "401_invalid_or_expired_session",
+    "provider_stack_no_accept_and_any_unreachable": "503_auth_provider_unreachable",
+    "public_exact_path": "bypass_native_bearer_gate",
+    "public_prefix": "bypass_native_bearer_gate_using_source_prefix_semantics",
+    "service_token_registered": "token_auth_seam_owns_exact_drain_path_only",
+    "service_token_registered_all_reachable_invalid": "401_service_token_only",
+    "service_token_unregistered": "token_auth_seam_passes_through; gated_or_legacy_session_gate_remains",
+    "unverified_route": "blocked_unverified",
+    "bearer_fallback": "never_fallback_to_cookie_after_present_bearer_fails"
+  }
+}
