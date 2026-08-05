@@ -2,6 +2,7 @@
   "audit_id": "hermes-dashboard-model-options-2026-08-05",
   "contract": "dashboard-v0.0.1",
   "hermes_repository": "NousResearch/hermes-agent",
+  "hermes_repository_url": "https://github.com/NousResearch/hermes-agent",
   "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
   "operation_present": true,
   "conclusion": "present",
@@ -42,10 +43,10 @@
     "operation_is_routed_off_reader_thread": true
   },
   "source_links": [
-    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/methods_complete.py#L327-L347",
-    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/inventory.py#L276-L313",
-    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py#L6238-L6280",
-    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/server.py#L223-L228"
+    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/methods_complete.py",
+    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/inventory.py",
+    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py",
+    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/server.py"
   ],
   "negative_controls": {
     "absent": "synthetic replacement-gateway control only; it does not describe the pinned source",

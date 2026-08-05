@@ -16,10 +16,13 @@ import re
 import time
 import unittest
 from typing import Any
+from urllib.parse import urlsplit
 
 
 PINNED_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 EXPECTED_OPERATION = "model.options"
+EXPECTED_REPOSITORY = "NousResearch/hermes-agent"
+EXPECTED_REPOSITORY_URL = "https://github.com/NousResearch/hermes-agent"
 EXPECTED_SOURCE_BLOB_SHA = "701c11f0eaed4d09b045c7046db3aa8443332db4"
 EXPECTED_PAYLOAD_BUILDER_BLOB_SHA = "4e95665d481f881be9885edd4997925d0cec78d6"
 EXPECTED_REQUEST_PARAMETERS = (
@@ -28,38 +31,108 @@ EXPECTED_REQUEST_PARAMETERS = (
     "include_unconfigured",
     "refresh",
 )
-EXPECTED_CASES = {
-    "present",
-    "absent",
-    "empty",
-    "malformed",
-    "unknown-operation",
+EXPECTED_REQUEST_KEYS_BY_CASE = {
+    "present": ("session_id", "explicit_only", "include_unconfigured", "refresh"),
+    "absent": (),
+    "empty": ("explicit_only",),
+    "malformed": (),
+    "unknown-operation": (),
 }
-FORBIDDEN_KEY_MARKERS = (
-    "token",
-    "credential",
+EXPECTED_REST_EQUIVALENT = {
+    "method": "GET",
+    "path": "/api/model/options",
+    "source_path": "hermes_cli/web_server.py",
+    "source_lines": [6238, 6280],
+    "source_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+    "uses_same_builder": True,
+    "included_in_fixture_surface": False,
+}
+EXPECTED_REGISTRY_EVIDENCE = {
+    "source_path": "tui_gateway/server.py",
+    "source_lines": [223, 228],
+    "source_blob_sha": "9d5fd00ce7d0becfd4581a5a3867c516a6d3b20a",
+    "operation_is_routed_off_reader_thread": True,
+}
+EXPECTED_SOURCE_LINKS = (
+    f"{EXPECTED_REPOSITORY_URL}/blob/{PINNED_SHA}/tui_gateway/methods_complete.py",
+    f"{EXPECTED_REPOSITORY_URL}/blob/{PINNED_SHA}/hermes_cli/inventory.py",
+    f"{EXPECTED_REPOSITORY_URL}/blob/{PINNED_SHA}/hermes_cli/web_server.py",
+    f"{EXPECTED_REPOSITORY_URL}/blob/{PINNED_SHA}/tui_gateway/server.py",
+)
+EXPECTED_CASES = set(EXPECTED_REQUEST_KEYS_BY_CASE)
+ALLOWED_METADATA_KEYS = {"authenticated", "auth_type"}
+FORBIDDEN_SENSITIVE_KEYS = {
+    "accesskey",
+    "apikey",
     "auth",
-    "password",
+    "authentication",
+    "authheader",
+    "authtoken",
+    "authorization",
+    "clientsecret",
     "cookie",
+    "cookies",
+    "credential",
+    "credentials",
+    "hostname",
+    "idtoken",
+    "password",
+    "privatekey",
+    "providerdata",
+    "refreshtoken",
+    "secret",
+    "secrets",
+    "ticket",
+    "tickets",
+    "token",
+    "tokens",
+    "transcript",
+    "transcripts",
+    "userdata",
+}
+FORBIDDEN_SENSITIVE_KEY_COMPONENTS = {
+    "credential",
+    "credentials",
+    "cookie",
+    "cookies",
+    "hostname",
+    "password",
+    "private",
+    "secret",
+    "secrets",
+    "ticket",
+    "tickets",
+    "token",
+    "tokens",
+    "transcript",
+    "transcripts",
+}
+FORBIDDEN_VALUE_MARKERS = {
+    "accesskey",
+    "accesstoken",
+    "apikey",
+    "auth",
+    "authentication",
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "hostname",
+    "password",
+    "providerdata",
     "secret",
     "ticket",
+    "token",
     "transcript",
-    "hostname",
-    "user_data",
-    "provider_data",
-    "apikey",
-    "accesskey",
-    "authorization",
-)
+    "userdata",
+}
 FORBIDDEN_VALUE_PATTERNS = (
-    re.compile(
-        r"\b(?:token|credential|auth(?:entication|orization)?|password|cookie|secret|ticket|transcript|hostname)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:user|provider)[ _-]+data\b", re.IGNORECASE),
-    re.compile(r"\b(?:access|api)[_-]?(?:token|key)\b", re.IGNORECASE),
-    re.compile(r"\b(?:bearer|basic)\s+", re.IGNORECASE),
-    re.compile(r"(?:sk-|ghp_|xoxb-|eyj)", re.IGNORECASE),
+    re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.IGNORECASE),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]+\b", re.IGNORECASE),
+    re.compile(r"\bBearer\s+\S+", re.IGNORECASE),
+    re.compile(r"\bBasic\s+\S+", re.IGNORECASE),
+    re.compile(r"\b(?:sk-[A-Za-z0-9_-]+|ghp_[A-Za-z0-9_]+|xoxb-[A-Za-z0-9-]+|eyJ[A-Za-z0-9_-]{8,})\b", re.IGNORECASE),
 )
 FIXTURE_DIR = Path(__file__).resolve().parent
 AUDIT_PATH = FIXTURE_DIR.parents[2] / "hermes-dashboard" / "model-options" / "source-audit.json"
@@ -85,6 +158,11 @@ def validate_audit(audit: dict[str, Any]) -> None:
     """Validate immutable source evidence and the exact request contract."""
 
     _require(audit["contract"] == "dashboard-v0.0.1", "audit: wrong contract")
+    _require(audit["hermes_repository"] == EXPECTED_REPOSITORY, "audit: wrong repository")
+    _require(
+        audit["hermes_repository_url"] == EXPECTED_REPOSITORY_URL,
+        "audit: wrong repository URL",
+    )
     _require(audit["hermes_source_sha"] == PINNED_SHA, "audit: SHA is not pinned")
     _require(audit["operation_present"] is True, "audit: model.options is not proven")
     _require(audit["conclusion"] == "present", "audit: conclusion is not present")
@@ -115,8 +193,27 @@ def validate_audit(audit: dict[str, Any]) -> None:
         "audit: payload builder source blob is not the pinned blob",
     )
 
-    for link in audit["source_links"]:
-        _require(PINNED_SHA in link, "audit: source link is not pinned")
+    _require(
+        audit["rest_equivalent"] == EXPECTED_REST_EQUIVALENT,
+        "audit: REST provenance changed",
+    )
+    _require(
+        audit["registry_evidence"] == EXPECTED_REGISTRY_EVIDENCE,
+        "audit: registry provenance changed",
+    )
+
+    source_links = audit.get("source_links")
+    _require(source_links == list(EXPECTED_SOURCE_LINKS), "audit: source links changed")
+    _require(len(source_links) == len(set(source_links)), "audit: source links are not unique")
+    for link in source_links:
+        parsed = urlsplit(link)
+        _require(parsed.scheme == "https", "audit: source link must use HTTPS")
+        _require(parsed.netloc == "github.com", "audit: source link has an unexpected host")
+        _require(not parsed.query and not parsed.fragment, "audit: source link has query or fragment")
+        _require(
+            link.startswith(f"{EXPECTED_REPOSITORY_URL}/blob/{PINNED_SHA}/"),
+            "audit: source link is not an expected pinned path",
+        )
 
 
 def load_audit() -> dict[str, Any]:
@@ -125,26 +222,42 @@ def load_audit() -> dict[str, Any]:
     return audit
 
 
-def _validate_redaction(value: Any, path: str = "fixture") -> None:
-    """Reject credential material and sensitive-key markers recursively.
+def _normalize_marker(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
 
-    The fixture rules prohibit credentials, cookies, tickets, ticket fragments,
-    live transcripts, hostnames, tokens, secrets, provider data, and user data.
-    Key-based checks catch labels even when a synthetic value looks harmless;
-    value patterns catch pasted bearer/basic material and common credential
-    prefixes without rejecting ordinary provider/model identifiers.
+
+def _key_tokens(key: str) -> set[str]:
+    return {
+        token.casefold()
+        for token in re.findall(r"[A-Z]+(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+|\d+", key)
+    }
+
+
+def _is_forbidden_sensitive_key(key: str) -> bool:
+    if key.casefold() in ALLOWED_METADATA_KEYS:
+        return False
+    normalized_key = _normalize_marker(key)
+    if normalized_key in FORBIDDEN_SENSITIVE_KEYS:
+        return True
+    return bool(_key_tokens(key) & FORBIDDEN_SENSITIVE_KEY_COMPONENTS)
+
+
+def _validate_redaction(value: Any, path: str = "fixture") -> None:
+    """Reject explicit sensitive keys and representative credential material.
+
+    The policy is intentionally explicit rather than a broad substring search:
+    source metadata such as ``authenticated`` and ``auth_type`` is legitimate,
+    while credential-bearing keys and recognizable PEM, AWS, GitHub, bearer, or
+    basic-auth material fail closed.
     """
 
     if isinstance(value, dict):
         for key, child in value.items():
             _require(isinstance(key, str), f"{path}: object keys must be strings")
-            normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
-            for marker in FORBIDDEN_KEY_MARKERS:
-                normalized_marker = re.sub(r"[^a-z0-9]", "", marker.lower())
-                _require(
-                    normalized_marker not in normalized_key,
-                    f"{path}.{key}: prohibited sensitive key marker {marker!r}",
-                )
+            _require(
+                not _is_forbidden_sensitive_key(key),
+                f"{path}.{key}: prohibited sensitive key marker",
+            )
             _validate_redaction(child, f"{path}.{key}")
         return
     if isinstance(value, list):
@@ -152,10 +265,14 @@ def _validate_redaction(value: Any, path: str = "fixture") -> None:
             _validate_redaction(child, f"{path}[{index}]")
         return
     if isinstance(value, str):
+        _require(
+            _normalize_marker(value) not in FORBIDDEN_VALUE_MARKERS,
+            f"{path}: prohibited sensitive value marker",
+        )
         for pattern in FORBIDDEN_VALUE_PATTERNS:
             _require(
                 pattern.search(value) is None,
-                f"{path}: prohibited credential or sensitive value marker",
+                f"{path}: prohibited credential material",
             )
 
 
@@ -219,8 +336,13 @@ def validate_fixture(fixture: dict[str, Any], audit: dict[str, Any]) -> None:
         and all(isinstance(key, str) for key in expected_parameter_keys),
         f"{case}: exact request parameter keys are required",
     )
+    frozen_parameter_keys = EXPECTED_REQUEST_KEYS_BY_CASE[case]
     _require(
-        parameter_keys == set(expected_parameter_keys),
+        tuple(expected_parameter_keys) == frozen_parameter_keys,
+        f"{case}: fixture metadata changed the frozen request keys",
+    )
+    _require(
+        parameter_keys == set(frozen_parameter_keys),
         f"{case}: request parameter keys do not match the frozen contract",
     )
 
@@ -342,15 +464,16 @@ class ModelOptionsFixtureTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_fixture(self.by_case["present"], forged_audit)
 
-    def test_request_parameter_contract_rejects_missing_parameter(self) -> None:
+    def test_request_parameter_contract_cannot_be_forged_with_metadata(self) -> None:
         forged_fixture = copy.deepcopy(self.by_case["present"])
-        forged_fixture["request"]["params"].pop("refresh")
+        forged_fixture["request"]["params"] = {}
+        forged_fixture["expected"]["request_parameter_keys"] = []
         with self.assertRaises(ContractError):
             validate_fixture(forged_fixture, self.audit)
 
-    def test_request_parameter_contract_rejects_invented_parameter(self) -> None:
         forged_fixture = copy.deepcopy(self.by_case["present"])
         forged_fixture["request"]["params"]["unexpected"] = False
+        forged_fixture["expected"]["request_parameter_keys"] = ["unexpected"]
         with self.assertRaises(ContractError):
             validate_fixture(forged_fixture, self.audit)
 
@@ -359,6 +482,13 @@ class ModelOptionsFixtureTests(unittest.TestCase):
         forged_fixture["response"]["result"]["providers"][0]["total_models"] = True
         with self.assertRaises(ContractError):
             validate_fixture(forged_fixture, self.audit)
+
+    def test_legitimate_auth_metadata_is_allowed(self) -> None:
+        forged_fixture = copy.deepcopy(self.by_case["present"])
+        result = forged_fixture["response"]["result"]
+        result["authenticated"] = True
+        result["auth_type"] = "oauth"
+        validate_fixture(forged_fixture, self.audit)
 
     def test_sensitive_keys_and_values_are_rejected(self) -> None:
         validate_fixture(self.by_case["present"], self.audit)
@@ -371,10 +501,12 @@ class ModelOptionsFixtureTests(unittest.TestCase):
                     validate_fixture(forged_fixture, self.audit)
 
         for value in (
-            "Bearer synthetic-marker",
+            "-----BEGIN RSA PRIVATE KEY-----\nsynthetic\n-----END RSA PRIVATE KEY-----",
+            "AKIAZZZZZZZZZZZZZZZZ",
+            "github_pat_synthetic_marker",
+            "Bearer synthetic-credential",
+            "Basic c3ludGhldGlj",
             "sk-synthetic-marker",
-            "access_token",
-            "api_key",
         ):
             with self.subTest(value=value):
                 forged_fixture = copy.deepcopy(self.by_case["present"])
@@ -387,6 +519,39 @@ class ModelOptionsFixtureTests(unittest.TestCase):
             with self.subTest(evidence_key=evidence_key):
                 forged_audit = copy.deepcopy(self.audit)
                 forged_audit["fixture_surface"][evidence_key] = "0" * 40
+                with self.assertRaises(ContractError):
+                    validate_audit(forged_audit)
+
+    def test_all_machine_readable_provenance_is_exactly_bound(self) -> None:
+        forged_audit = copy.deepcopy(self.audit)
+        forged_audit["hermes_repository"] = "evil/example"
+        with self.assertRaises(ContractError):
+            validate_audit(forged_audit)
+
+        forged_audit = copy.deepcopy(self.audit)
+        forged_audit["hermes_repository_url"] = "https://evil.example/hermes-agent"
+        with self.assertRaises(ContractError):
+            validate_audit(forged_audit)
+
+        for field in ("rest_equivalent", "registry_evidence"):
+            with self.subTest(field=field):
+                forged_audit = copy.deepcopy(self.audit)
+                forged_audit[field]["source_blob_sha"] = "0" * 40
+                with self.assertRaises(ContractError):
+                    validate_audit(forged_audit)
+
+        forged_source_links = (
+            [],
+            [EXPECTED_SOURCE_LINKS[0]],
+            [*EXPECTED_SOURCE_LINKS[:-1], EXPECTED_SOURCE_LINKS[0]],
+            [link + "?evil=1" for link in EXPECTED_SOURCE_LINKS],
+            [link + "#line=1" for link in EXPECTED_SOURCE_LINKS],
+            ["https://evil.example/blob/" + PINNED_SHA + "/tui_gateway/server.py"],
+        )
+        for source_links in forged_source_links:
+            with self.subTest(source_links=source_links):
+                forged_audit = copy.deepcopy(self.audit)
+                forged_audit["source_links"] = source_links
                 with self.assertRaises(ContractError):
                     validate_audit(forged_audit)
 
