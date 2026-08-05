@@ -129,6 +129,17 @@ Paper mockups must show the relevant resting, hover, focused, pressed, expanded,
 
 use selected pill material only for persistent state, such as the active conversation or workspace mode. `New chat` is an action and must never appear selected. the conversation title pill enters editing immediately; on mobile, center the editor above a dimmed, blurred background and show the keyboard state.
 
+### Paper design source of truth
+
+Paper file [`01KZ6BB66KCWR2C4J2TSWQGDM7`](https://app.paper.design/file/01KZ6BB66KCWR2C4J2TSWQGDM7/1-0) is the visual source of truth for Hermternal screens and component states.
+
+- inspect the relevant Paper artboard with Paper MCP before implementing or changing a user-facing screen.
+- use Paper MCP structure, computed styles, tokens, and image assets for exact implementation values. do not estimate values from screenshots.
+- implement each designed resting and interaction state represented by the relevant artboards. verify responsive behavior against the desktop and narrow artboards and their light and dark variants.
+- if a visual or interaction design must change, update the Paper design first. review the changed artboard, then implement the approved Paper state in code.
+- do not introduce an intentional visual deviation only in code. document necessary platform adaptations in Paper and in the nearby implementation documentation.
+- runtime behavior that Paper cannot prove, including motion, focus transfer, keyboard behavior, loading, error recovery, and reduced motion, must follow the interaction contracts in this guide and be verified in the local prototype.
+
 ## collaboration and git discipline
 
 ### branch model and releases
