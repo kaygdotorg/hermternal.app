@@ -35,6 +35,11 @@ OPERATION = "C-04"
 CONTRACT = "dashboard-v0.0.1"
 HERMES_REPOSITORY = "NousResearch/hermes-agent"
 HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
+# Immutable fixture data is reviewed against this exact prior PR head. The
+# executing validator is checked separately against the current HEAD blob so
+# this correction can evolve without a self-referential commit hash.
+REVIEWED_COMMIT = "1314b005a614d5b3ac6deedb789f6b84dbc47d2a"
+REVIEWED_TREE = "352c97341ac93d706ed03db9c8fa704875096282"
 VALIDATOR_PATH = "contracts/fixtures/compatibility-attestation/validate.py"
 VALIDATOR_COMMAND = "python3 contracts/fixtures/compatibility-attestation/validate.py"
 ATTESTATION_RELATIVE = "contracts/fixtures/compatibility-attestation/revision_attestation.json"
@@ -290,15 +295,27 @@ CASE_SPECS = (
 )
 CASE_IDS = tuple(item[0] for item in CASE_SPECS)
 MAX_REDACTION_DEPTH = 64
+MAX_JSON_BYTES = 1024 * 1024
+MAX_STRING_LENGTH = 16 * 1024
+MAX_ARRAY_LENGTH = 256
+MAX_OBJECT_KEYS = 64
+MAX_JSON_NODES = 4096
 MAX_INTEGER_BITS = 4096
 CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.IGNORECASE),
     re.compile(r"\b(?:ghp|github_pat|glpat|sk|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
-    re.compile(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE),
-    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
-    re.compile(r"\b(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|SECRET_KEY|API_KEY)\s*[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"\b(?:https?|ftp)://[^\s<>\"']*", re.IGNORECASE),
+    re.compile(r"\bwww\.[^\s<>\"']+", re.IGNORECASE),
+    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?::\d{1,5})?\b", re.IGNORECASE),
+    re.compile(r"\b[A-Z0-9._%+-]+@(?:localhost|[A-Z0-9-]+)(?::\d{1,5})?\b", re.IGNORECASE),
+    re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b"),
+    re.compile(r"(?<![A-Za-z0-9/_-])(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}(?::\d{1,5})?(?![A-Za-z0-9._/-])", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9])(?:prod|production|staging|stage|dev|localhost)(?:[./:_-][A-Za-z0-9._:/-]+)?(?![A-Za-z0-9])", re.IGNORECASE),
+    re.compile(r"\b(?:host|host[_-]?name)\s*[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"\b(?:api[_-]?key|x[_-]?api[_-]?key|aws[_-]?secret[_-]?access[_-]?key|set[_-]?cookie|raw[_-]?ticket|session[_-]?token|access[_-]?token|password|passphrase|token|authorization)\s*[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"\b(?:AWS_ACCESS_KEY_ID|SECRET_KEY)\s*[:=]\s*\S+", re.IGNORECASE),
     re.compile(r"\bBearer\s+\S+", re.IGNORECASE),
     re.compile(r"\bBasic\s+[A-Za-z0-9+/=_-]{12,}", re.IGNORECASE),
     re.compile(r"\b(?:cookie|set-cookie|ticket|raw-ticket)\s*[:=]\s*\S+", re.IGNORECASE),
@@ -308,12 +325,14 @@ FORBIDDEN_KEYS = frozenset(
         "access_token",
         "api_key",
         "authorization",
+        "aws_secret_access_key",
         "bearer",
         "cookie",
         "cookie_value",
         "credential",
         "credentials",
         "host",
+        "host_name",
         "hostname",
         "password",
         "prompt",
@@ -322,6 +341,7 @@ FORBIDDEN_KEYS = frozenset(
         "raw_ticket",
         "secret",
         "session_token",
+        "set_cookie",
         "ticket",
         "ticket_value",
         "token",
@@ -393,19 +413,36 @@ def _reject_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
 
-def _validate_json_numbers(value: Any, path: str = "$", *, depth: int = 0) -> None:
-    """Reject parser-produced infinities, including exponent overflow."""
+def _validate_json_shape(value: Any, path: str = "$", *, depth: int = 0) -> int:
+    """Reject oversized JSON structures before schema validation or retention."""
     require(depth <= MAX_REDACTION_DEPTH, f"{path}: JSON depth exceeds the bounded limit")
     if isinstance(value, dict):
+        require(len(value) <= MAX_OBJECT_KEYS, f"{path}: JSON object has too many keys")
+        nodes = 1
         for key, child in value.items():
-            _validate_json_numbers(child, f"{path}.{key}", depth=depth + 1)
-        return
+            require(type(key) is str, f"{path}: JSON object keys must be text")
+            require(len(key) <= MAX_STRING_LENGTH, f"{path}: JSON object key is too long")
+            nodes += _validate_json_shape(child, f"{path}.<field>", depth=depth + 1)
+            require(nodes <= MAX_JSON_NODES, f"{path}: JSON node count exceeds the bounded limit")
+        return nodes
     if isinstance(value, list):
-        for index, child in enumerate(value):
-            _validate_json_numbers(child, f"{path}[{index}]", depth=depth + 1)
-        return
+        require(len(value) <= MAX_ARRAY_LENGTH, f"{path}: JSON array is too long")
+        nodes = 1
+        for child in value:
+            nodes += _validate_json_shape(child, f"{path}[]", depth=depth + 1)
+            require(nodes <= MAX_JSON_NODES, f"{path}: JSON node count exceeds the bounded limit")
+        return nodes
+    if isinstance(value, str):
+        require(len(value) <= MAX_STRING_LENGTH, f"{path}: JSON string is too long")
+        return 1
     if type(value) is float:
         require(math.isfinite(value), f"{path}: non-finite JSON number is not allowed")
+    return 1
+
+
+def _validate_json_numbers(value: Any, path: str = "$", *, depth: int = 0) -> None:
+    """Reject non-finite numbers and oversized parsed JSON structures."""
+    _validate_json_shape(value, path, depth=depth)
 
 
 def _parse_json_text(text: str, label: str) -> Any:
@@ -425,33 +462,53 @@ def _parse_json_text(text: str, label: str) -> Any:
         raise ValidationError(f"cannot read strict JSON {label}: {exc}") from exc
 
 
-def load_json(path: Path) -> Any:
-    """Load JSON while rejecting duplicates, non-finite numbers, and bad UTF-8."""
+def _parse_json_bytes(data: bytes, label: str) -> Any:
+    require(type(data) is bytes, f"strict JSON {label} must be bytes")
+    require(len(data) <= MAX_JSON_BYTES, f"strict JSON {label} exceeds the input byte limit")
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        text = data.decode("utf-8")
+    except UnicodeError as exc:
+        raise ValidationError(f"cannot read strict JSON {label}: invalid UTF-8") from exc
+    return _parse_json_text(text, label)
+
+
+def load_json(path: Path) -> Any:
+    """Load bounded strict JSON without retaining oversized input values."""
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
         raise ValidationError(f"cannot read strict JSON {path}: {exc}") from exc
-    return _parse_json_text(text, str(path))
+    return _parse_json_bytes(data, str(path))
 
 
-def _validate_redaction(value: Any, path: str = "$", *, depth: int = 0) -> None:
+def _validate_redaction(value: Any, path: str = "$", *, depth: int = 0) -> int:
+    """Reject sensitive material and bound every retained JSON structure."""
     require(depth <= MAX_REDACTION_DEPTH, f"{path}: redaction depth exceeds the bounded limit")
     if isinstance(value, dict):
+        require(len(value) <= MAX_OBJECT_KEYS, f"{path}: object has too many keys")
+        nodes = 1
         for key, child in value.items():
             require(type(key) is str, f"{path}: object keys must be text")
-            normalized = key.casefold().replace("-", "_")
+            require(len(key) <= MAX_STRING_LENGTH, f"{path}: object key is too long")
+            normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
             if not normalized.startswith("contains_"):
-                require(normalized not in FORBIDDEN_KEYS, f"{path}.{key}: prohibited sensitive key")
-            _validate_redaction(child, f"{path}.{key}", depth=depth + 1)
-        return
+                require(normalized not in FORBIDDEN_KEYS, f"{path}: prohibited sensitive field")
+            nodes += _validate_redaction(child, f"{path}.<field>", depth=depth + 1)
+            require(nodes <= MAX_JSON_NODES, f"{path}: node count exceeds the bounded limit")
+        return nodes
     if isinstance(value, list):
-        for index, child in enumerate(value):
-            _validate_redaction(child, f"{path}[{index}]", depth=depth + 1)
-        return
+        require(len(value) <= MAX_ARRAY_LENGTH, f"{path}: array is too long")
+        nodes = 1
+        for child in value:
+            nodes += _validate_redaction(child, f"{path}[]", depth=depth + 1)
+            require(nodes <= MAX_JSON_NODES, f"{path}: node count exceeds the bounded limit")
+        return nodes
     if isinstance(value, str):
+        require(len(value) <= MAX_STRING_LENGTH, f"{path}: string is too long")
         require(CONTROL_PATTERN.search(value) is None, f"{path}: control character is not allowed")
         for pattern in SECRET_PATTERNS:
             require(pattern.search(value) is None, f"{path}: credential-shaped value")
+    return 1
 
 
 def _is_unsafe_relative_path(value: str) -> bool:
@@ -516,13 +573,70 @@ def _git_revision(repo_root: Path, expression: str) -> str | None:
     return result.stdout.strip()
 
 
+def _git_object_type(repo_root: Path, object_name: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "cat-file", "-t", object_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=_git_env(),
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _require_commit_object(repo_root: Path, commit: str, label: str) -> None:
+    resolved = _git_revision(repo_root, f"{commit}^{{commit}}")
+    require(resolved == commit, f"{label} is not the exact reviewed commit")
+    require(_git_object_type(repo_root, commit) == "commit", f"{label} is not a commit object")
+
+
+def validate_git_snapshot(repo_root: Path, snapshot: GitSnapshot) -> None:
+    """Require the supplied provenance pair to equal the reviewed constants."""
+    require(type(snapshot) is GitSnapshot, "immutable validation snapshot has the wrong type")
+    require(snapshot.commit == REVIEWED_COMMIT, "immutable validation target commit changed")
+    require(snapshot.tree == REVIEWED_TREE, "immutable validation target tree changed")
+    _require_commit_object(repo_root, snapshot.commit, "immutable validation target")
+    require(_git_revision(repo_root, f"{snapshot.commit}^{{tree}}") == snapshot.tree, "immutable validation target tree cannot be resolved")
+    require(_git_object_type(repo_root, snapshot.tree) == "tree", "immutable validation target is not a tree object")
+
+
 def capture_git_snapshot(repo_root: Path) -> GitSnapshot:
-    """Capture one commit/tree pair before reading any immutable blob."""
-    commit = _git_revision(repo_root, "HEAD")
-    require(commit is not None and HEX40.fullmatch(commit) is not None, "immutable HEAD commit is unavailable")
-    tree = _git_revision(repo_root, f"{commit}^{{tree}}")
-    require(tree is not None and HEX40.fullmatch(tree) is not None, "immutable HEAD tree is unavailable")
-    return GitSnapshot(commit=commit, tree=tree)
+    """Capture the exact reviewed commit/tree before reading immutable blobs."""
+    head = _git_revision(repo_root, "HEAD^{commit}")
+    require(head is not None and HEX40.fullmatch(head) is not None, "executing HEAD commit is unavailable")
+    _require_commit_object(repo_root, head, "executing HEAD")
+    commit = _git_revision(repo_root, f"{REVIEWED_COMMIT}^{{commit}}")
+    tree = _git_revision(repo_root, f"{REVIEWED_COMMIT}^{{tree}}")
+    snapshot = GitSnapshot(commit=commit or "", tree=tree or "")
+    validate_git_snapshot(repo_root, snapshot)
+    return snapshot
+
+
+def capture_execution_commit(repo_root: Path) -> str:
+    """Resolve HEAD as a real commit for validator self-integrity checking."""
+    commit = _git_revision(repo_root, "HEAD^{commit}")
+    require(commit is not None and HEX40.fullmatch(commit) is not None, "executing HEAD commit is unavailable")
+    _require_commit_object(repo_root, commit, "executing HEAD")
+    return commit
+
+
+def validate_executing_validator(repo_root: Path, execution_commit: str) -> None:
+    """Ensure the imported validator bytes are the current immutable Git blob."""
+    runtime_path = Path(__file__).resolve()
+    expected_path = resolve_under_root(repo_root, VALIDATOR_PATH)
+    require(runtime_path == expected_path, "executing validator path is outside the repository fixture")
+    try:
+        runtime_bytes = runtime_path.read_bytes()
+    except OSError as exc:
+        raise ValidationError("cannot read executing validator bytes") from exc
+    committed_bytes = _git_blob(repo_root, execution_commit, VALIDATOR_PATH)
+    require(committed_bytes is not None, "missing immutable executing validator blob")
+    require(runtime_bytes == committed_bytes, "executing validator differs from its immutable Git blob")
 
 
 def _git_blob(repo_root: Path, commit: str, relative: str) -> bytes | None:
@@ -544,11 +658,7 @@ def _git_blob(repo_root: Path, commit: str, relative: str) -> bytes | None:
 def _load_json_blob(repo_root: Path, snapshot: GitSnapshot, relative: str) -> Any:
     blob = _git_blob(repo_root, snapshot.commit, relative)
     require(blob is not None, f"missing immutable JSON fixture: {relative}")
-    try:
-        text = blob.decode("utf-8")
-    except UnicodeError as exc:
-        raise ValidationError(f"cannot read immutable JSON {relative}: invalid UTF-8") from exc
-    return _parse_json_text(text, f"{snapshot.commit}:{relative}")
+    return _parse_json_bytes(blob, f"{snapshot.commit}:{relative}")
 
 
 def _evidence_bytes(
@@ -615,6 +725,9 @@ def validate_attestation(
     """Validate the canonical detached attestation and its evidence bindings."""
     if verify_git and snapshot is None:
         snapshot = capture_git_snapshot(repo_root)
+    if verify_git:
+        require(snapshot is not None, "immutable validation requires a captured Git snapshot")
+        validate_git_snapshot(repo_root, snapshot)
     strict_keys(record, ATTESTATION_ROOT_KEYS, "attestation")
     require(record["schema"] == SCHEMA, "attestation schema changed")
     require(record["operation"] == OPERATION, "attestation operation changed")
@@ -829,6 +942,9 @@ def validate_baseline(
     """Validate measured evidence without creating a normative performance threshold."""
     if verify_git and snapshot is None:
         snapshot = capture_git_snapshot(repo_root)
+    if verify_git:
+        require(snapshot is not None, "immutable validation requires a captured Git snapshot")
+        validate_git_snapshot(repo_root, snapshot)
     strict_keys(baseline, BASELINE_ROOT_KEYS, "baseline")
     _validate_redaction(baseline)
     require(baseline["schema"] == BASELINE_SCHEMA, "baseline schema changed")
@@ -875,11 +991,16 @@ def validate_all(
     *,
     verify_git: bool = True,
     snapshot: GitSnapshot | None = None,
+    execution_commit: str | None = None,
 ) -> tuple[int, int]:
     if verify_git and snapshot is None:
         snapshot = capture_git_snapshot(repo_root)
     if verify_git:
         require(snapshot is not None, "immutable validation requires a captured Git snapshot")
+        validate_git_snapshot(repo_root, snapshot)
+        if execution_commit is None:
+            execution_commit = capture_execution_commit(repo_root)
+        validate_executing_validator(repo_root, execution_commit)
         record = _load_json_blob(repo_root, snapshot, ATTESTATION_RELATIVE)
         cases = _load_json_blob(repo_root, snapshot, CASES_RELATIVE)
         baseline = _load_json_blob(repo_root, snapshot, BASELINE_RELATIVE)
@@ -921,15 +1042,18 @@ def main(argv: list[str] | None = None) -> int:
     case_count = 0
     artifact_bytes = 0
     snapshot: GitSnapshot | None = None
+    execution_commit: str | None = None
     source_mode = "worktree" if args.worktree else "immutable_commit"
     try:
         repo_root = args.repo_root.resolve()
         if not args.worktree:
             snapshot = capture_git_snapshot(repo_root)
+            execution_commit = capture_execution_commit(repo_root)
         case_count, artifact_bytes = validate_all(
             repo_root,
             verify_git=not args.worktree,
             snapshot=snapshot,
+            execution_commit=execution_commit,
         )
     except (ValidationError, DuplicateKeyError, OSError, UnicodeError, TypeError, ValueError, OverflowError, RecursionError) as exc:
         errors.append(str(exc))
@@ -941,10 +1065,12 @@ def main(argv: list[str] | None = None) -> int:
         "source_mode": source_mode,
         "verified_commit": snapshot.commit if snapshot is not None else None,
         "verified_tree": snapshot.tree if snapshot is not None else None,
+        "executing_commit": execution_commit,
         "live_operation": False,
         "case_count": case_count,
         "artifact_bytes": artifact_bytes,
         "duration_ms": round(duration_ms, 3),
+        "measurement_authenticated": False,
         "errors": errors,
     }
     print(json.dumps(result, sort_keys=True))

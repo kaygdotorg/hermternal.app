@@ -67,7 +67,8 @@ The valid case with a matching probe is labelled `separate_probe_gate`, not
 
 - duplicate JSON object keys, `NaN`, `Infinity`, `-Infinity`, and exponent
   overflow such as `1e9999`;
-- bounded JSON and redaction traversal, with control characters rejected;
+- bounded JSON input bytes, strings, arrays, object widths, total nodes, and
+  redaction traversal, with control characters rejected;
 - unknown keys, reordered keys, changed fixture IDs, wrong leaf types, and
   booleans where integers are required;
 - missing, abbreviated, unknown, or mismatched Hermes revisions;
@@ -75,11 +76,17 @@ The valid case with a matching probe is labelled `separate_probe_gate`, not
 - changed SHA-256 digests or byte counts for the immutable policy evidence and
   measured baseline artifacts;
 - server-shaped source-revision or protocol-version fields; and
-- URLs, email addresses, secret/key assignments, bearer/basic values,
-  cookie/ticket markers, raw operational material, or user data.
+- URLs, email addresses, host forms, password/token/authorization and
+  secret/key assignments, bearer/basic values, cookie/ticket markers, raw
+  operational material, or user data. Sensitive field aliases are normalized
+  across case, hyphen, underscore, and separator variants.
 
-Run the default validator after the fixture is committed so the referenced
-files are read from `HEAD` Git blobs:
+The JSON and redaction limits are validator safety limits only; they are not
+product protocol limits.
+
+Run the default validator after the fixture is committed so the reviewed
+fixture snapshot and executing validator bytes are read from immutable Git
+objects:
 
 ```sh
 python3 contracts/fixtures/compatibility-attestation/validate.py
@@ -92,14 +99,19 @@ developing:
 python3 contracts/fixtures/compatibility-attestation/validate.py --worktree
 ```
 
-The default validator captures one immutable `HEAD` commit and tree, reads
-all three fixture JSON documents and measured artifacts from that commit, and
-reports the verified commit/tree provenance. Its successful result proves only
-the synthetic contract, executable case matrix, immutable policy bindings, and
-recorded baseline evidence. It does not prove a Hermes process, a proxy, a
-deployment identity, a behavioral probe, or live compatibility. `--worktree`
-is a development-only mutable check: it reports `fixture_valid` but never
-claims `attestation_verified`.
+The default validator requires reviewed commit
+`1314b005a614d5b3ac6deedb789f6b84dbc47d2a` and tree
+`352c97341ac93d706ed03db9c8fa704875096282`, requires commit/tree Git object
+types, reads all three fixture JSON documents
+and measured artifacts from that reviewed snapshot, and checks that the
+executing `validate.py` bytes equal the current immutable `HEAD` blob. Its
+successful result proves only the synthetic contract, executable case matrix,
+immutable policy bindings, and recorded baseline evidence. It does not prove a
+Hermes process, a proxy, a deployment identity, a behavioral probe, or live
+compatibility. The baseline is developer-observed evidence, not independently
+authenticated measurement; output therefore reports `measurement_authenticated`
+as `false`. `--worktree` is a development-only mutable check: it reports
+`fixture_valid` but never claims `attestation_verified`.
 
 ## Tests
 
@@ -130,9 +142,11 @@ attestation must not be hidden behind an unreviewed fallback screen.
 This is an offline Python validator, so production or release build mode is
 N/A. [`validation-baseline.json`](validation-baseline.json) records 30
 validator repetitions, the measured artifact byte count, the environment, and
-min/p50/p95/max/mean duration. `threshold` is `null`; the record is evidence,
-not an invented performance budget. Re-run the measurement on the target
-machine before using it for a performance decision.
+min/p50/p95/max/mean duration. These values and artifact hashes are
+self-authored, developer-observed evidence rather than an independently signed
+measurement trace. `threshold` is `null`; no performance budget is invented.
+Re-run the measurement on the target machine before using it for a performance
+decision.
 
 ## Security and redaction review
 

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent
@@ -30,6 +31,42 @@ class RevisionAttestationValidationTests(unittest.TestCase):
 
     def test_attestation_binds_immutable_policy_blobs(self) -> None:
         validate.validate_attestation(self.record, REPO_ROOT, verify_git=True)
+
+    def test_alternate_matching_snapshot_is_rejected(self) -> None:
+        alternate = validate.GitSnapshot(
+            commit="609f9a74b7b06a4ab28a5eee1687e7a6e76523e7",
+            tree="1f6d33d0b5ebee105b3f52ff235f8d3cf1366edc",
+        )
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_attestation(self.record, REPO_ROOT, verify_git=True, snapshot=alternate)
+
+    def test_incorrect_reviewed_tree_is_rejected(self) -> None:
+        snapshot = validate.GitSnapshot(validate.REVIEWED_COMMIT, "0" * 40)
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_git_snapshot(REPO_ROOT, snapshot)
+
+    def test_tree_valued_head_is_rejected_as_execution_commit(self) -> None:
+        with mock.patch.object(validate, "_git_revision", return_value=validate.REVIEWED_TREE), mock.patch.object(
+            validate, "_git_object_type", return_value="tree"
+        ):
+            with self.assertRaises(validate.ValidationError):
+                validate.capture_git_snapshot(REPO_ROOT)
+
+    def test_mutable_validator_copy_cannot_claim_immutable_attestation(self) -> None:
+        path = Path(validate.__file__).resolve()
+        original = path.read_bytes()
+        try:
+            path.write_bytes(original + b"\n# mutable substitution\n")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = validate.main(["--repo-root", str(REPO_ROOT)])
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(result, 1)
+            self.assertFalse(payload["attestation_verified"])
+            self.assertLess(len(json.dumps(payload)), 2048)
+            self.assertNotIn("mutable substitution", stdout.getvalue())
+        finally:
+            path.write_bytes(original)
 
     def test_cases_are_deterministic_and_fail_closed(self) -> None:
         validate.validate_cases(self.cases)
@@ -102,10 +139,29 @@ class RevisionAttestationValidationTests(unittest.TestCase):
     def test_case_text_redaction_rejects_hosts_emails_and_material_markers(self) -> None:
         markers = (
             "https://prod.example.com",
+            "ftp://prod.example.com",
+            "prod.example.com",
+            "prod/host",
+            "host=synthetic",
+            "www.example.com",
+            "192.0.2.10:443",
+            "foo@localhost",
+            "http://",
             "customer@example.com",
             "AWS_SECRET_ACCESS_KEY=synthetic",
+            "API-KEY: synthetic",
+            "X-API-Key=synthetic",
+            "AWS-SECRET-ACCESS-KEY=synthetic",
+            "password: synthetic",
+            "token=synthetic",
+            "Authorization: synthetic",
             "Bearer synthetic-marker",
             "Cookie: session=synthetic",
+            "set_cookie=synthetic",
+            "raw_ticket: synthetic",
+            "session-token=synthetic",
+            "access-token: synthetic",
+            "host-name=synthetic",
             "ticket=synthetic",
         )
         for marker in markers:
@@ -132,12 +188,49 @@ class RevisionAttestationValidationTests(unittest.TestCase):
                 with self.assertRaises(validate.ValidationError):
                     validate.validate_baseline(baseline, REPO_ROOT, verify_git=False)
 
+    def test_redaction_normalizes_sensitive_key_aliases(self) -> None:
+        aliases = (
+            "API-KEY",
+            "AWS-SECRET-ACCESS-KEY",
+            "set_cookie",
+            "Set-Cookie",
+            "raw_ticket",
+            "session-token",
+            "access-token",
+            "host_name",
+            "Host-Name",
+        )
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                with self.assertRaises(validate.ValidationError):
+                    validate._validate_redaction({alias: "synthetic"})
+
     def test_redaction_depth_is_bounded(self) -> None:
         nested: object = "leaf"
         for _ in range(validate.MAX_REDACTION_DEPTH + 1):
             nested = [nested]
         with self.assertRaises(validate.ValidationError):
             validate._validate_redaction(nested)
+
+    def test_json_shape_limits_reject_direct_values(self) -> None:
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_redaction("x" * (validate.MAX_STRING_LENGTH + 1))
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_redaction([0] * (validate.MAX_ARRAY_LENGTH + 1))
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_redaction({str(index): 0 for index in range(validate.MAX_OBJECT_KEYS + 1)})
+        nested = [[0] * validate.MAX_ARRAY_LENGTH for _ in range((validate.MAX_JSON_NODES // validate.MAX_ARRAY_LENGTH) + 1)]
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_redaction(nested)
+
+    def test_json_input_byte_limit_is_rejected_without_retaining_payload(self) -> None:
+        marker = "oversized-secret-marker"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized.json"
+            path.write_bytes(b'{"value":"' + (b"x" * validate.MAX_JSON_BYTES) + marker.encode("ascii") + b'"}')
+            with self.assertRaises(validate.ValidationError) as context:
+                validate.load_json(path)
+            self.assertNotIn(marker, str(context.exception))
 
     def test_unsafe_evidence_path_is_rejected(self) -> None:
         with self.assertRaises(validate.ValidationError):
@@ -242,6 +335,44 @@ class RevisionAttestationValidationTests(unittest.TestCase):
                 self.assertFalse(payload["ok"])
                 self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_cli_rejects_bounded_json_overflows_with_capped_output(self) -> None:
+        oversized_values = (
+            "string",
+            "array",
+            "object",
+            "nodes",
+            "bytes",
+        )
+        for kind in oversized_values:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                if kind == "string":
+                    value = "x" * (validate.MAX_STRING_LENGTH + 1)
+                elif kind == "array":
+                    value = [0] * (validate.MAX_ARRAY_LENGTH + 1)
+                elif kind == "object":
+                    value = {str(index): 0 for index in range(validate.MAX_OBJECT_KEYS + 1)}
+                elif kind == "nodes":
+                    value = [[0] * validate.MAX_ARRAY_LENGTH for _ in range((validate.MAX_JSON_NODES // validate.MAX_ARRAY_LENGTH) + 1)]
+                else:
+                    value = "x" * validate.MAX_JSON_BYTES
+                path = Path(directory) / "oversized.json"
+                path.write_text(json.dumps({"value": value}), encoding="utf-8")
+                original = validate.ATTESTATION_PATH
+                validate.ATTESTATION_PATH = path
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        result = validate.main(["--repo-root", str(REPO_ROOT), "--worktree"])
+                finally:
+                    validate.ATTESTATION_PATH = original
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(result, 1)
+                self.assertFalse(payload["ok"])
+                self.assertLess(len(json.dumps(payload)), 2048)
+                self.assertNotIn("oversized-secret-marker", stdout.getvalue())
+                self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_cli_rejects_oversized_baseline_integer_with_structured_output(self) -> None:
         baseline = copy.deepcopy(self.baseline)
         baseline["duration_ms"]["min"] = int("9" * 1000)
@@ -273,6 +404,8 @@ class RevisionAttestationValidationTests(unittest.TestCase):
         self.assertEqual(payload["source_mode"], "worktree")
         self.assertIsNone(payload["verified_commit"])
         self.assertIsNone(payload["verified_tree"])
+        self.assertIsNone(payload["executing_commit"])
+        self.assertFalse(payload["measurement_authenticated"])
         for item in self.cases["cases"]:
             self.assertNotEqual(item["expected"]["runtime_gate"], "enabled")
 
@@ -285,8 +418,10 @@ class RevisionAttestationValidationTests(unittest.TestCase):
         self.assertTrue(payload["fixture_valid"])
         self.assertTrue(payload["attestation_verified"])
         self.assertEqual(payload["source_mode"], "immutable_commit")
-        self.assertRegex(payload["verified_commit"], r"^[0-9a-f]{40}$")
-        self.assertRegex(payload["verified_tree"], r"^[0-9a-f]{40}$")
+        self.assertEqual(payload["verified_commit"], validate.REVIEWED_COMMIT)
+        self.assertEqual(payload["verified_tree"], validate.REVIEWED_TREE)
+        self.assertRegex(payload["executing_commit"], r"^[0-9a-f]{40}$")
+        self.assertFalse(payload["measurement_authenticated"])
 
 
 if __name__ == "__main__":

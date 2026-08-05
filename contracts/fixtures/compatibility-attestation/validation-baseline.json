@@ -6,8 +6,8 @@
   "artifact_files": [
     {
       "path": "contracts/fixtures/compatibility-attestation/README.md",
-      "sha256": "1238247ec42c3efefd232b4b3036d606d9a937c516aeb053df5219c1815f2ded",
-      "size_bytes": 6602
+      "sha256": "b29a28da81f59838c499d6223cfefe3f334e3d6d612421795d48fc54bac6d1d4",
+      "size_bytes": 7385
     },
     {
       "path": "contracts/fixtures/compatibility-attestation/revision_attestation.json",
@@ -21,16 +21,16 @@
     },
     {
       "path": "contracts/fixtures/compatibility-attestation/validate.py",
-      "sha256": "a7298634c735fe3c945f12ac9b5f56f2b3c84a10527416bf8f2bbff4e68ab8c0",
-      "size_bytes": 36464
+      "sha256": "22bc0bcf874a86c5f70a7b210902018c512d7759363a4ee8bcdf09e56a1c85f5",
+      "size_bytes": 43306
     },
     {
       "path": "contracts/fixtures/compatibility-attestation/test_validate.py",
-      "sha256": "12a00234c72f2a1f8bdc60d23c75b8c88f805c0091c36ad73c81e22dbe84d208",
-      "size_bytes": 14517
+      "sha256": "8b9b6dd77913e7d361f5c37e9c8d785b2bb7764c0a8bbf20144effeb652631ef",
+      "size_bytes": 21015
     }
   ],
-  "artifact_bytes": 66709,
+  "artifact_bytes": 80832,
   "environment": {
     "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
     "python": "3.14.6"
