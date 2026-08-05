@@ -151,14 +151,18 @@ An unsupported method or route is not a hidden feature. It is a compatibility or
 
 ## Review evidence
 
+The source-only planning reconciliation is recorded in [`planning_review.json`](../fixtures/source-audit/planning-reconciliation/planning_review.json). Run [`validate.py`](../fixtures/source-audit/planning-reconciliation/validate.py) against a local checkout of the exact source SHA to verify file digests and anchors. This is a source review only; it does not replace deployment attestation, behavioral probes, or later focused fixture audits.
+
 Review the pinned source paths before changing this manifest:
 
 - `hermes_cli/dashboard_auth/routes.py`
+- `hermes_cli/dashboard_auth/ws_tickets.py`
 - `hermes_cli/web_routers/sessions.py`
 - `hermes_cli/web_server.py`
 - `hermes_cli/pty_session.py`
 - `hermes_cli/pty_bridge.py`
 - `tui_gateway/methods_prompt.py`
 - `tui_gateway/methods_session.py`
+- `tui_gateway/methods_complete.py`
 - `tui_gateway/server.py`
 - `tui_gateway/ws.py`

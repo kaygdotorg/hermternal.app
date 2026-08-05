@@ -69,6 +69,8 @@ A compatibility record is valid only when all of the following evidence exists:
 
 - source inspection or an equivalent reviewed record for the pinned SHA;
 - a verifiable out-of-band deployment attestation for that SHA, route-manifest revision, and proxy proof;
+
+For the planning phase, [`planning_review.json`](../../contracts/fixtures/source-audit/planning-reconciliation/planning_review.json) is the reproducible source-inspection record, and [`validate.py`](../../contracts/fixtures/source-audit/planning-reconciliation/validate.py) checks it against a local pinned checkout. A passing source review is necessary but not sufficient: deployment attestation, behavioral probes, proxy proofs, redacted fixtures, and parity checks remain separate gates.
 - a behavioral probe for cookie-authenticated browser and password-provider REST, bearer-authenticated supported native OAuth or OIDC REST, fresh `?ticket=` upgrades on `/api/ws` and `/api/pty`, single-use and short-lived ticket rejection, and the fact that tickets are not session-bound;
 - proof that ticket query values exist only in ephemeral upgrade URLs and that full values plus the pinned source's bounded invalid-ticket fragment are removed from retained access logs, error logs, debug output, browser history, fixtures, and user-visible errors;
 - redacted fixtures for every supported behavior class;

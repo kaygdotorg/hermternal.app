@@ -8,6 +8,8 @@ This directory freezes the Hermes Dashboard surface for the future `v0.0.1` mile
 
 The contract is tied to the reviewed Hermes source revision `f5be9236e00ddf2f2a412697f267078fc4ee068e`. The pinned Dashboard does not report its source revision. A deployment must provide reviewed out-of-band revision attestation, and the client or proof harness must run the approved behavioral probe. Missing or mismatched evidence blocks live operation.
 
+The source-only planning reconciliation is recorded in [`planning_review.json`](../fixtures/source-audit/planning-reconciliation/planning_review.json) and can be checked locally with [`validate.py`](../fixtures/source-audit/planning-reconciliation/validate.py). The record verifies source file digests and anchors; it does not authorize a live connection or replace deployment proof.
+
 ## Supported surface
 
 The contract covers the selected Dashboard REST routes, browser authentication, native username/password provider authentication, isolated native `URLSession` cookies, WebSocket ticket creation, chat WebSocket messages, session operations, prompt operations, chat events, error forms, deployment attestation, and behavioral compatibility evidence.
