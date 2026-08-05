@@ -5,16 +5,44 @@
 **Pinned Hermes revision:** `f5be9236e00ddf2f2a412697f267078fc4ee068e6`
 **Surface:** web-only mock/proof
 
-This fixture set records the native bearer-authenticated REST routes that were
-proven from the pinned Hermes source. It is not a client implementation, does
-not call Hermes, and does not contain credentials, cookies, tickets, provider
-data, hostnames, transcripts, or user data. Every credential state in
-`cases.json` is a synthetic classification such as `valid` or `invalid`; no
-value is an access token.
+This fixture set records a conservative Hermternal client allowlist from the
+pinned Hermes source. It is not a client implementation, does not call Hermes,
+and does not contain credentials, cookies, tickets, provider data, hostnames,
+transcripts, or user data. Every credential state in `cases.json` is a
+synthetic classification such as `valid` or `invalid`; no value is an access
+token.
 
-## Decision
+## Source behavior versus supported coverage
 
-The frozen native bearer route set is:
+The pinned `gated_auth_middleware` is broader than this contract. On an auth-
+required bind it attempts native bearer verification for **every non-public
+path**, not only the eight routes listed below (`middleware.py:323-373`). The
+eight pairs are therefore a conservative, source-cited Hermternal reviewed
+allowlist, not a claim that the upstream bearer-acceptance inventory is
+complete. Any route outside the allowlist remains `blocked_unverified` in the
+Hermternal contract until separately reviewed.
+
+The source-defined public bypass inventory is complete in `source_audit.json`:
+
+- `PUBLIC_API_PATHS` exact paths: `/api/health`, `/api/status`,
+  `/api/config/defaults`, `/api/config/schema`, `/api/model/info`,
+  `/api/dashboard/themes`, `/api/dashboard/plugins`, and `/api/cron/fire`.
+- `_GATE_PUBLIC_PREFIXES`: `/auth/login`, `/auth/callback`,
+  `/auth/native/authorize`, `/auth/native/token`, `/auth/native/refresh`,
+  `/auth/password-login`, `/auth/logout`, `/login`, `/api/auth/providers`,
+  `/api/mcp/oauth/callback/`, `/assets/`, `/favicon.ico`, `/ds-assets/`,
+  `/fonts/`, and `/fonts-terminal/`.
+
+Exact public API paths use membership. Prefix entries use the pinned source
+expression `path == prefix or path.startswith(prefix)`. The fixtures include
+`/assets/app.js` as public and `/assetsleak` as blocked, plus exact-API and
+other slash-prefix boundary cases. The source's non-slash prefixes, such as
+`/favicon.ico`, intentionally retain their source semantics; the fixture does
+not silently improve or narrow them.
+
+## Conservative native bearer allowlist
+
+The reviewed native bearer method/path pairs are:
 
 - `GET /api/auth/me`
 - `POST /api/auth/ws-ticket`
@@ -27,60 +55,58 @@ The frozen native bearer route set is:
 
 The route templates are matched by exact HTTP method and exact path shape.
 Parameterized `session_id` segments must be non-empty single path segments.
-The source gate itself is path-based, but the contract keeps the registered
-method/path pairs narrow so a method or route expansion cannot be inferred
-without a new source review.
+A valid bearer lets a supported request continue to the handler; the fixture
+does not claim a handler response body or status.
 
-These routes are source-proven as *eligible for native bearer session
-verification*. A valid bearer lets the request continue to the handler; the
-fixture does not claim a handler response body or status. An invalid or
-expired bearer is rejected with the structured `401` path, and a provider
-outage is represented by the source's `503` path. A bearer is never silently
-converted to cookie authentication after bearer verification fails.
+An invalid or expired bearer is rejected with the structured `401` path even
+when a valid cookie is present. A bearer is never silently converted to cookie
+authentication after bearer verification fails. With no bearer, a valid cookie
+may authenticate the request. Provider stacking follows the pinned source:
 
-The following routes are intentionally not in the native bearer set:
+- a reachable accepting provider succeeds even when another provider is
+  unreachable;
+- all reachable providers rejecting the bearer produce `401`;
+- no acceptance plus at least one unreachable provider produces `503`.
 
-- `/api/auth/providers` and the native authorize/token/refresh endpoints are
-  public bootstrap or credential-issuance/rotation routes.
-- `POST /api/gateway/drain` belongs to the separate exact-path service-token
-  seam registered through `register_token_route`.
-- Any other method/path pair is `blocked_unverified` by this contract. That
-  label means Hermternal must not claim native bearer support; it does not
-  assert that every upstream route is unauthenticated.
+## Conditional drain route
 
-## Source evidence
+`POST /api/gateway/drain` is **not** an unconditional separate service-token
+route in this contract. The drain plugin is conditional:
 
-The audit uses these source facts from the pinned checkout. Line references
-are source-file line numbers at the audited revision.
+- when a strong drain secret enables the plugin, the plugin registers the exact
+  path with `register_token_route`; the token seam owns the request and does
+  not fall back to cookies;
+- when the plugin is absent or declines registration, `token_auth.py` passes the
+  path through, and the gated or loopback session gate remains authoritative.
+  On a gated bind, the broad source middleware may attempt native bearer
+  verification for this non-public path, but Hermternal does not freeze that
+  path as supported native bearer coverage.
 
-- `middleware.py:49-86` defines the public auth/bootstrap prefixes and exact
-  public API checks.
-- `middleware.py:281-320` extracts and verifies an `Authorization: Bearer`
-  value through the session-provider stack.
-- `middleware.py:323-373` bypasses public paths, accepts a verified native
-  bearer session, returns `503` for a provider outage, and returns structured
-  `401` for an invalid bearer without falling through to cookies.
-- `routes.py:778-817` registers `/api/auth/me` and `/api/auth/ws-ticket`.
-- `sessions.py:50-51`, `166-167`, `552-553`, `598-599`, and `661-662` register
-  the selected session list, search, detail, messages, and rename routes.
-- `web_server.py:2306` registers `/api/chat/image-upload`.
-- `routes.py:152`, `289`, `841`, and `894` identify provider discovery and
-  native authorization/token/refresh endpoints that are public bootstrap or
-  issuance paths.
-- `token_auth.py:60-75` defines exact-path service-token registration, while
-  `token_auth.py:144-183` defines its independent bearer-token decisions.
-- `web_server.py:4000-4011` documents `POST /api/gateway/drain` as using that
-  separate token-auth seam when configured.
+The conditional behavior is sourced from `web_server.py:4000-4011`,
+`token_auth.py:54-183`, and the plugin registration at
+`plugins/dashboard_auth/drain/__init__.py:229-291`.
 
-The machine-readable route inventory is in `source_audit.json`. Synthetic
-positive and negative requests are in `cases.json`. Run the standard-library
-validator from this directory:
+## Source provenance and validator
+
+`source_audit.json` pins the Hermes revision, the exact source evidence IDs and
+line ranges, and SHA-256 digests for every audited source file. Every native
+route citation is required to reference a source-evidence record and a line
+range inside that record. When the pinned checkout is available, verify the
+file digests with:
+
+```text
+python3 test_native_bearer.py --source-root <pinned-Hermes-checkout>
+```
+
+The standard-library-only validator checks the pinned revision, source digest
+metadata, citation bindings, complete public inventories, exact route policy,
+parameterized path shape, provider stacking, conditional drain modes,
+fail-closed unverified cases, and mutation regressions. It reports validation
+duration and fixture artifact size for repeatable review evidence.
 
 ```text
 python3 test_native_bearer.py
 ```
 
-The validator checks the pinned revision, exact frozen route inventory,
-parameterized path shape, public/service-token distinctions, fail-closed
-unverified cases, and the expected `401`/`503` bearer outcomes. It reports
-validation duration and fixture artifact size for repeatable review evidence.
+This is a web-only mock/proof artifact. It adds no live Hermes integration,
+production authentication, deployment configuration, or Apple implementation.
