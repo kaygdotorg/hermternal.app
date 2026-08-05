@@ -92,6 +92,88 @@ and changes to the frozen link inventory fail closed. The validator also runs
 an executable mutation inventory so changing both fixture data and metadata
 cannot silently make a regression pass.
 
+## Accessibility and platform preservation
+
+Accessibility verification is **N/A** for this artifact because it is a
+non-UI parser, JSON fixture, and documentation contract. It renders no
+controls, changes no focus order, and defines no touch, VoiceOver, Dynamic
+Type, contrast, reduced-motion, or Switch Control behavior. This N/A is a
+scope statement, not a waiver: later web and Apple clients must preserve their
+existing accessibility contracts while carrying the exact opaque IDs and safe
+diagnostics defined here.
+
+## Reproducible benchmark evidence
+
+The validator has no production or release build; **build mode: N/A**. The
+following evidence is a reproducibility record, not a performance budget. It
+uses the five owned artifact paths, 31 synthetic cases, 15 mutation checks, 30
+fresh process repetitions for each mode, and reports the observed distribution
+(minimum, maximum, mean, median, and p95). No latency or artifact-size
+threshold is invented.
+
+Environment used for the corrected head: CPython 3.14.6 at
+`/opt/homebrew/opt/python@3.14/bin/python3.14`, macOS 26.5.2 arm64, Apple
+Silicon.
+
+Raw artifact-size command:
+
+```sh
+wc -c \\
+  contracts/fixtures/deep-link-grammar/README.md \\
+  contracts/fixtures/deep-link-grammar/cases.json \\
+  contracts/fixtures/deep-link-grammar/validate.py \\
+  contracts/fixtures/deep-link-grammar/test_validate.py \\
+  docs/architecture/deep-links.md
+```
+
+Raw environment command:
+
+```sh
+python3 -c 'import platform,sys; print("python="+platform.python_version()); print("implementation="+platform.python_implementation()); print("platform="+platform.platform()); print("machine="+platform.machine()); print("executable="+sys.executable)'
+```
+
+Raw normal/optimized 30-repetition benchmark command:
+
+```sh
+python3 - <<'PY'
+import statistics, subprocess, sys, time
+script = "contracts/fixtures/deep-link-grammar/validate.py"
+for optimized in (False, True):
+    samples = []
+    command = [sys.executable] + (["-O"] if optimized else []) + [script]
+    for _ in range(30):
+        started = time.perf_counter_ns()
+        result = subprocess.run(command, check=False, capture_output=True)
+        elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+        if result.returncode:
+            raise SystemExit(result.stderr.decode())
+        samples.append(elapsed_ms)
+    ordered = sorted(samples)
+    print(
+        "optimized" if optimized else "normal",
+        "min_ms=%.3f max_ms=%.3f mean_ms=%.3f median_ms=%.3f p95_ms=%.3f"
+        % (
+            min(samples),
+            max(samples),
+            statistics.mean(samples),
+            statistics.median(samples),
+            ordered[28],
+        ),
+    )
+PY
+```
+
+Corrected-head output from those commands:
+
+```text
+artifact bytes: 73720
+normal:    min_ms=45.931 max_ms=51.503 mean_ms=48.703 median_ms=49.329 p95_ms=50.727
+optimized: min_ms=46.011 max_ms=49.270 mean_ms=47.220 median_ms=47.365 p95_ms=48.653
+```
+
+Rerunning the raw commands above is authoritative for a new machine or
+interpreter.
+
 ## Reproduce the proof
 
 Run from the repository root:

@@ -340,6 +340,10 @@ def parse_link(link: Any, configured_origin: str = DEFAULT_ORIGIN) -> LinkResult
             reasons.add("scheme")
         if parts is None or not parts.netloc or parts.username or parts.password:
             reasons.add("authority")
+        elif "@" in parts.netloc:
+            # Empty userinfo (`https://@host` or `https://:@host`) is still
+            # userinfo.  Truthiness alone would miss this authority violation.
+            reasons.add("authority")
         else:
             try:
                 _ = parts.port
@@ -444,6 +448,28 @@ _EXPECTED_CASES: dict[str, dict[str, Any]] = {
             "diagnostic": "deep-link[web;session=present;message=absent]",
         },
     },
+    "empty-userinfo": {
+        "link": f"https://@synthetic.hermternal.test/v1/c/{SESSION_1}",
+        "expected": {
+            "valid": False,
+            "kind": "web",
+            "session_id": SESSION_1,
+            "message_id": None,
+            "reasons": ["authority", "origin"],
+            "diagnostic": "deep-link[web;session=present;message=absent]",
+        },
+    },
+    "empty-password-userinfo": {
+        "link": f"https://:@synthetic.hermternal.test/v1/c/{SESSION_1}",
+        "expected": {
+            "valid": False,
+            "kind": "web",
+            "session_id": SESSION_1,
+            "message_id": None,
+            "reasons": ["authority", "origin"],
+            "diagnostic": "deep-link[web;session=present;message=absent]",
+        },
+    },
     "native-authority": {
         "link": f"hermternal://not-open/v1/c/{SESSION_1}",
         "expected": {
@@ -512,6 +538,17 @@ _EXPECTED_CASES: dict[str, dict[str, Any]] = {
     },
     "short-session-id": {
         "link": f"{DEFAULT_ORIGIN}/v1/c/short",
+        "expected": {
+            "valid": False,
+            "kind": "web",
+            "session_id": None,
+            "message_id": None,
+            "reasons": ["full_id"],
+            "diagnostic": "deep-link[web;session=present;message=absent]",
+        },
+    },
+    "ellipsis-session-id": {
+        "link": f"{DEFAULT_ORIGIN}/v1/c/synthetic-session-...",
         "expected": {
             "valid": False,
             "kind": "web",
@@ -758,15 +795,25 @@ def load_document(path: Path | str = Path(__file__).with_name("cases.json")) -> 
 
 
 def _validate_expected_shape(expected: Any, path: str) -> None:
+    """Validate expected-result scalars before membership or string operations."""
+
     _require(type(expected) is dict, f"{path} must be an object")
     required = {"valid", "kind", "session_id", "message_id", "reasons", "diagnostic"}
     _require(set(expected) == required, f"{path} has non-canonical keys")
     _require(type(expected["valid"]) is bool, f"{path}.valid must be boolean")
-    _require(expected["kind"] is None or expected["kind"] in {"web", "native"}, f"{path}.kind invalid")
+    kind = expected["kind"]
+    _require(
+        kind is None or (type(kind) is str and kind in {"web", "native"}),
+        f"{path}.kind invalid",
+    )
     for key in ("session_id", "message_id"):
-        _require(expected[key] is None or type(expected[key]) is str, f"{path}.{key} invalid")
+        value = expected[key]
+        _require(value is None or type(value) is str, f"{path}.{key} invalid")
     _require(type(expected["reasons"]) is list, f"{path}.reasons must be a list")
-    _require(all(type(reason) is str for reason in expected["reasons"]), f"{path}.reasons entries must be strings")
+    _require(
+        all(type(reason) is str for reason in expected["reasons"]),
+        f"{path}.reasons entries must be strings",
+    )
     _require(type(expected["diagnostic"]) is str, f"{path}.diagnostic must be a string")
 
 
@@ -849,15 +896,35 @@ def validate_mutations(document: Mapping[str, Any]) -> int:
     return completed
 
 
+ERROR_CODE = "deep_link_contract_invalid"
+
+
+def _error_json(error: Exception) -> str:
+    """Serialize one safe, machine-readable CLI failure without a traceback."""
+
+    message = str(error) or error.__class__.__name__
+    return json.dumps(
+        {"error": {"code": ERROR_CODE, "message": message}},
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Validate fixtures and mutation controls for normal or ``-O`` runs."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", type=Path, default=Path(__file__).with_name("cases.json"))
     args = parser.parse_args(argv)
-    document = load_document(args.cases)
-    validate_document(document)
-    mutation_count = validate_mutations(document)
+    try:
+        document = load_document(args.cases)
+        validate_document(document)
+        mutation_count = validate_mutations(document)
+    except Exception as error:
+        # Fixture input is untrusted.  Expected parser, JSON, and schema
+        # failures all use one JSON line in both normal and optimised mode.
+        print(_error_json(error))
+        return 1
     print(f"deep_link_cases={len(document['cases'])}")
     print(f"deep_link_mutation_checks={mutation_count}")
     print("deep_link_validation=ok")

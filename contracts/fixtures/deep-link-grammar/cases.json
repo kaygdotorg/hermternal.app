@@ -101,6 +101,32 @@
       }
     },
     {
+      "id": "empty-userinfo",
+      "synthetic": true,
+      "link": "https://@synthetic.hermternal.test/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": "synthetic-session-0001",
+        "message_id": null,
+        "reasons": ["authority", "origin"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "empty-password-userinfo",
+      "synthetic": true,
+      "link": "https://:@synthetic.hermternal.test/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": "synthetic-session-0001",
+        "message_id": null,
+        "reasons": ["authority", "origin"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
       "id": "native-authority",
       "synthetic": true,
       "link": "hermternal://not-open/v1/c/synthetic-session-0001",
@@ -182,6 +208,19 @@
       "id": "short-session-id",
       "synthetic": true,
       "link": "https://synthetic.hermternal.test/v1/c/short",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["full_id"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "ellipsis-session-id",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-...",
       "expected": {
         "valid": false,
         "kind": "web",

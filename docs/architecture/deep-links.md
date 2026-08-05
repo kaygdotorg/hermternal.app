@@ -172,3 +172,13 @@ It does not resolve a session, test authentication, prove ownership, inspect
 Hermes, call a network, create universal-link entitlements, implement iOS,
 iPadOS, or macOS routing, or define unknown-session/message result boards.
 Those behaviors require the approved downstream fixtures and platform work.
+
+## Non-UI accessibility evidence
+
+Accessibility verification is **N/A** for this grammar contract because it
+renders no UI and changes no focus order, semantic names, touch targets,
+VoiceOver, Dynamic Type, contrast, reduced-motion, reduced-transparency, or
+Switch Control behavior. This is an explicit boundary, not a waiver. Later
+web and Apple implementations must preserve their platform accessibility
+contracts while retaining the exact opaque IDs, fail-closed parsing, and
+non-reversible diagnostics specified here.

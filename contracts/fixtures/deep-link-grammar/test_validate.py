@@ -32,6 +32,26 @@ class DeepLinkGrammarTests(unittest.TestCase):
         validate.validate_document(cls.document)
         cls.cases = {case["id"]: case for case in cls.document["cases"]}
 
+    def _run_cli(self, path: Path, optimized: bool = False) -> subprocess.CompletedProcess[str]:
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend([str(FIXTURE_DIR / "validate.py"), "--cases", str(path)])
+        return subprocess.run(command, check=False, capture_output=True, text=True)
+
+    def _assert_structured_cli_failure(self, path: Path) -> None:
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                completed = self._run_cli(path, optimized=optimized)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(completed.stderr, "")
+                lines = [line for line in completed.stdout.splitlines() if line.strip()]
+                self.assertEqual(len(lines), 1)
+                payload = json.loads(lines[0])
+                self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                self.assertIsInstance(payload["error"]["message"], str)
+                self.assertNotIn("Traceback", completed.stdout + completed.stderr)
+
     def test_checked_in_document_validates(self) -> None:
         self.assertEqual(len(self.cases), len(validate.EXPECTED_CASE_IDS))
         self.assertEqual(tuple(self.cases), validate.EXPECTED_CASE_IDS)
@@ -77,6 +97,22 @@ class DeepLinkGrammarTests(unittest.TestCase):
         ):
             with self.subTest(origin=origin):
                 self.assertFalse(validate.is_canonical_origin(origin))
+
+    def test_empty_and_credential_userinfo_report_authority_before_origin(self) -> None:
+        base = "/v1/c/" + validate.SESSION_1
+        for prefix in ("https://@synthetic.hermternal.test", "https://:@synthetic.hermternal.test"):
+            with self.subTest(prefix=prefix):
+                result = validate.parse_link(prefix + base)
+                self.assertEqual(result.reasons, ("authority", "origin"))
+                self.assertFalse(result.valid)
+        for prefix in (
+            "https://synthetic-user@synthetic.hermternal.test",
+            "https://synthetic-user:synthetic-pass@synthetic.hermternal.test",
+        ):
+            with self.subTest(prefix=prefix):
+                result = validate.parse_link(prefix + base)
+                self.assertEqual(result.reasons, ("authority", "origin"))
+                self.assertFalse(result.valid)
 
     def test_all_lexical_rejections_fail_closed(self) -> None:
         base = self.cases["valid-web-session"]["link"]
@@ -157,6 +193,20 @@ class DeepLinkGrammarTests(unittest.TestCase):
             "deep-link[unknown;session=absent;message=absent]",
         )
 
+    def test_ellipsis_id_is_rejected_as_an_abbreviation(self) -> None:
+        result = validate.parse_link(self.cases["ellipsis-session-id"]["link"])
+        self.assertEqual(result.reasons, ("full_id",))
+        self.assertFalse(result.valid)
+        self.assertIsNone(result.session_id)
+
+    def test_malformed_kind_values_fail_with_contract_error(self) -> None:
+        for malformed in ([], {}, 1, True):
+            with self.subTest(malformed=malformed):
+                mutated = copy.deepcopy(self.document)
+                mutated["cases"][0]["expected"]["kind"] = malformed
+                with self.assertRaises(validate.ContractError):
+                    validate.validate_document(mutated)
+
     def test_strict_recursive_schema_rejects_extra_and_bool_values(self) -> None:
         mutations = []
 
@@ -183,6 +233,37 @@ class DeepLinkGrammarTests(unittest.TestCase):
             path.write_text('{"schema": "one", "schema": "two"}', encoding="utf-8")
             with self.assertRaises(validate.ContractError):
                 validate.load_document(path)
+
+    def test_non_finite_json_hook_rejects_nan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "non-finite.json"
+            path.write_text('{"schema": NaN}', encoding="utf-8")
+            with self.assertRaises(validate.ContractError):
+                validate.load_document(path)
+
+    def test_cli_returns_one_structured_error_for_duplicate_and_non_finite_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            duplicate = Path(directory) / "duplicate.json"
+            duplicate.write_text('{"schema": "one", "schema": "two"}', encoding="utf-8")
+            non_finite = Path(directory) / "non-finite.json"
+            non_finite.write_text('{"schema": NaN}', encoding="utf-8")
+            for path in (duplicate, non_finite):
+                with self.subTest(path=path.name):
+                    self._assert_structured_cli_failure(path)
+
+    def test_cli_returns_one_structured_error_for_malformed_roots_and_substitutions(self) -> None:
+        malformed_documents = (
+            None,
+            [],
+            {"schema": []},
+            {"schema": validate.SCHEMA, "cases": None},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, document in enumerate(malformed_documents):
+                path = Path(directory) / f"malformed-{index}.json"
+                path.write_text(json.dumps(document), encoding="utf-8")
+                with self.subTest(path=path.name):
+                    self._assert_structured_cli_failure(path)
 
     def test_mutation_inventory_is_executable(self) -> None:
         self.assertEqual(validate.validate_mutations(self.document), 15)
