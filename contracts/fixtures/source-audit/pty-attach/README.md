@@ -21,13 +21,13 @@ No Hermes code is vendored or executed by this repository. All fixture identifie
 
 ## Audit evidence
 
-`source-evidence.json` records the immutable source URL, Git blob SHA, full-file SHA-256, and selected line-range hashes for:
+`source-evidence.json` records the immutable source URL, Git blob SHA, full-file SHA-256, and selected line-range hashes for the exact three-file audit set:
 
 - `hermes_cli/web_server.py`: the legacy pump and the `attach` presence split;
 - `hermes_cli/pty_session.py`: bounded output, attach/detach, supersession, and expiry reaping;
 - `hermes_cli/pty_bridge.py`: direct input writes and child termination on bridge close.
 
-The recorded observations explain the contract guard where the pinned implementation is permissive. A later Hermes revision requires a new source audit; matching only the route name is not compatibility evidence.
+The standard-library validator rejects duplicate or omitted audited files and binds every observation range to one of the recorded file/range pairs. It also rejects an observation that points at a syntactically valid but unaudited source range. The recorded observations explain the contract guard where the pinned implementation is permissive. A later Hermes revision requires a new source audit; matching only the route name is not compatibility evidence.
 
 ## Fixtures
 
@@ -38,9 +38,9 @@ The recorded observations explain the contract guard where the pinned implementa
 | `missing-attach-selects-legacy` | Missing attach is not an implicit keep-alive request. |
 | `legacy-disconnect-terminates` | Legacy disconnect closes the bridge, exits the PTY, and prohibits reattach. |
 | `attach-detach-reattach` | One valid handle preserves the PTY identity across detach and reattach. |
-| `malformed-attach-fails-closed` | Malformed input is rejected before upgrade or spawn. |
+| `malformed-attach-fails-closed` | Malformed input is rejected before any socket accept, upgrade, route activity, or spawn. |
 | `expired-attach-fails-closed` | A reaped handle is rejected before the source can spawn a fresh PTY for its old key. |
-| `superseded-socket-fails-closed` | `4409` stops the stale socket without detaching the replacement. |
+| `superseded-socket-fails-closed` | `4409` is bound to the stale socket after the replacement attaches, without detaching the replacement. |
 | `retained-output-race` | Both retained/live receive orders are allowed; the client renders receive order without a replay boundary. |
 | `retained-output-truncation` | The newest 1 MiB is bounded and older output may be absent. |
 | `no-input-replay` | Reattach may send retained PTY output, including prompt/tool output bytes; no prior user input, resize control, prompt submission, or tool action is replayed. |
@@ -67,7 +67,7 @@ python3 contracts/fixtures/source-audit/pty-attach/validate.py \
   --baseline-output contracts/fixtures/source-audit/pty-attach/validation-baseline.json
 ```
 
-The validator also runs three in-process mutation checks: changing the reused session reference, placing `synthetic-input-a` in the reattach snapshot, and placing a synthetic tool action in that snapshot must each fail validation. The baseline measures the checked-in audit/fixture artifacts listed by `validate.py`; its duration is environment evidence, not a pass threshold. The command exits non-zero on schema drift, missing required cases, changed source fingerprints, unsafe replay expectations, or redaction violations.
+The validator also runs twelve in-process mutation checks: duplicate or omitted source files, an observation bound to an unaudited range, changed session identity, unsafe `payload_ref`, extra or nested input/tool-action snapshot fields, malformed-route activity, and incorrect supersession binding/order must each fail validation. The baseline measures the checked-in audit/fixture artifacts listed by `validate.py`; its duration is environment evidence, not a pass threshold. The command exits non-zero on schema drift, missing required cases, changed source fingerprints, unsafe replay expectations, or redaction violations.
 
 ## Scope notes
 

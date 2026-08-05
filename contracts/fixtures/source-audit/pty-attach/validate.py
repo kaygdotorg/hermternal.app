@@ -21,6 +21,7 @@ import copy
 import hashlib
 import json
 import platform
+import re
 import sys
 import time
 from pathlib import Path
@@ -46,6 +47,38 @@ REQUIRED_CASES = {
     "retained-output-truncation",
     "no-input-replay",
 }
+REQUIRED_AUDIT_FILES = frozenset(
+    {
+        "hermes_cli/pty_bridge.py",
+        "hermes_cli/pty_session.py",
+        "hermes_cli/web_server.py",
+    }
+)
+REQUIRED_OBSERVATIONS = frozenset(
+    {
+        "legacy-disconnect-terminates",
+        "attach-detach-reattach",
+        "malformed-expired-fail-closed",
+        "superseded-socket-fail-closed",
+        "retained-output-race",
+        "no-input-replay",
+    }
+)
+SOURCE_RANGE_RE = re.compile(r"^(?P<path>[^:]+):(?P<start>[1-9][0-9]*)-(?P<end>[1-9][0-9]*)$")
+MALFORMED_ROUTE_ACTIVITY = frozenset(
+    {
+        "socket.accept",
+        "websocket.upgrade",
+        "route.open",
+        "route.request",
+        "pty.spawn",
+        "registry.spawn",
+        "registry.attach",
+        "session.attach",
+    }
+)
+SNAPSHOT_EVENT_FIELDS = frozenset({"step", "event", "payload_ref", "payload"})
+SNAPSHOT_PAYLOAD_FIELDS = frozenset({"kind", "bytes_ref"})
 FORBIDDEN_FIXTURE_KEYS = {
     "access_token",
     "cookie_value",
@@ -88,6 +121,16 @@ def hex_string(value: Any, length: int, label: str) -> None:
 def git_blob_sha(data: bytes) -> str:
     header = f"blob {len(data)}\0".encode("ascii")
     return hashlib.sha1(header + data).hexdigest()
+
+
+def parse_source_range(value: Any, label: str) -> tuple[str, int, int]:
+    require(isinstance(value, str), f"{label} must be a source range string")
+    match = SOURCE_RANGE_RE.fullmatch(value)
+    require(match is not None, f"{label} has invalid source range syntax")
+    start = int(match.group("start"))
+    end = int(match.group("end"))
+    require(start <= end, f"{label} has reversed source range")
+    return match.group("path"), start, end
 
 
 def walk_fixture_values(value: Any, path: str = "fixture") -> Iterable[tuple[str, Any]]:
@@ -152,6 +195,16 @@ def expect_fixture_failure(fixtures: dict[str, Any], mutation: str, mutate: Any)
     except AssertionError:
         return
     fail(f"mutation check accepted unsafe fixture: {mutation}")
+
+
+def expect_source_failure(evidence: dict[str, Any], mutation: str, mutate: Any) -> None:
+    mutated = copy.deepcopy(evidence)
+    mutate(mutated)
+    try:
+        validate_source_evidence(mutated, None)
+    except AssertionError:
+        return
+    fail(f"source mutation check accepted unsafe audit evidence: {mutation}")
 
 
 def valid_handle(case: dict[str, Any]) -> None:
@@ -229,6 +282,11 @@ def validate_case(case: dict[str, Any]) -> None:
         require(isinstance(handle, dict) and handle.get("present") is True, f"{case_id}: invalid handle must be represented")
         require(handle.get("classification") == ("malformed" if case_id.startswith("malformed") else "expired"), f"{case_id}: classification changed")
         require("client.reject_without_upgrade" in names, f"{case_id}: client must reject before upgrade")
+        rejection_index = names.index("client.reject_without_upgrade")
+        require(
+            not any(name in MALFORMED_ROUTE_ACTIVITY for name in names),
+            f"{case_id}: invalid handle had route activity before rejection at index {rejection_index}",
+        )
         require(not any(name.endswith("spawn") or name == "registry.spawn" for name in names), f"{case_id}: invalid handle spawned a PTY")
         require(expected.get("state") == "failed", f"{case_id}: invalid handle must fail")
         require(expected.get("client_action") == "reject_without_open", f"{case_id}: invalid handle action changed")
@@ -243,10 +301,25 @@ def validate_case(case: dict[str, Any]) -> None:
     if case_id == "superseded-socket-fails-closed":
         valid_handle(case)
         require(kind == "superseded_socket", f"{case_id}: wrong kind")
-        require(names.count("session.attach") == 2, f"{case_id}: expected old and replacement attaches")
-        assert_order(names, "session.attach", "socket.close", case_id)
-        require(any(item.get("event") == "socket.close" and item.get("close_code") == 4409 for item in events(case)), f"{case_id}: close code must be 4409")
-        assert_order(names, "socket.close", "stale_socket.detach_ignored", case_id)
+        attach_events = event_items(case, "session.attach")
+        require(len(attach_events) == 2, f"{case_id}: expected old and replacement attaches")
+        stale_attach, replacement_attach = attach_events
+        require(stale_attach.get("socket") == "attach-a", f"{case_id}: stale socket identity changed")
+        require(replacement_attach.get("socket") == "attach-b", f"{case_id}: replacement socket identity changed")
+        close_events = event_items(case, "socket.close")
+        require(len(close_events) == 1, f"{case_id}: expected one superseded close")
+        close_event = close_events[0]
+        require(close_event.get("close_code") == 4409, f"{case_id}: close code must be 4409")
+        require(close_event.get("socket") == "attach-a", f"{case_id}: 4409 must bind to stale socket")
+        names_indexes = {
+            "stale_attach": names.index("session.attach"),
+            "replacement_attach": names.index("session.attach", names.index("session.attach") + 1),
+            "socket.close": names.index("socket.close"),
+            "stale_socket.detach_ignored": names.index("stale_socket.detach_ignored"),
+        }
+        require(names_indexes["stale_attach"] < names_indexes["replacement_attach"], f"{case_id}: replacement attach must follow stale attach")
+        require(names_indexes["replacement_attach"] < names_indexes["socket.close"], f"{case_id}: replacement must attach before stale close")
+        require(names_indexes["socket.close"] < names_indexes["stale_socket.detach_ignored"], f"{case_id}: stale cleanup must follow superseded close")
         require(expected.get("active_socket") == "attach-b", f"{case_id}: replacement must remain active")
         require(expected.get("active_session_state") == "attached", f"{case_id}: replacement must remain attached")
         require(expected.get("stale_socket_action") == "stop_without_retry", f"{case_id}: stale socket must fail closed")
@@ -292,11 +365,22 @@ def validate_case(case: dict[str, Any]) -> None:
         assert_order(names, "input.send", "session.attach", case_id)
         snapshot_events = event_items(case, "attach.snapshot_send")
         require(len(snapshot_events) == 1, f"{case_id}: exactly one reattach snapshot is required")
-        snapshot_payload_ref = snapshot_events[0].get("payload_ref")
+        snapshot = snapshot_events[0]
+        require(set(snapshot) == SNAPSHOT_EVENT_FIELDS, f"{case_id}: snapshot has extra or missing fields")
+        snapshot_payload_ref = snapshot.get("payload_ref")
         require(snapshot_payload_ref == "output-only", f"{case_id}: reattach snapshot must contain output bytes only")
         require(isinstance(snapshot_payload_ref, str), f"{case_id}: snapshot payload reference is required")
         for marker in ("input", "resize", "prompt", "tool", "action", "command"):
-            require(marker not in snapshot_payload_ref.lower(), f"{case_id}: snapshot payload contains a replayable {marker}")
+            require(marker not in snapshot_payload_ref.lower(), f"{case_id}: snapshot payload reference contains a replayable {marker}")
+        payload = snapshot.get("payload")
+        require(isinstance(payload, dict), f"{case_id}: snapshot payload metadata is required")
+        require(set(payload) == SNAPSHOT_PAYLOAD_FIELDS, f"{case_id}: snapshot payload has extra or missing fields")
+        require(payload.get("kind") == "output", f"{case_id}: snapshot payload kind must be output")
+        bytes_ref = payload.get("bytes_ref")
+        require(bytes_ref == "synthetic-output-bytes", f"{case_id}: snapshot payload must reference output bytes")
+        require(isinstance(bytes_ref, str), f"{case_id}: snapshot byte reference is required")
+        for marker in ("input", "resize", "prompt", "tool", "action", "command"):
+            require(marker not in bytes_ref.lower(), f"{case_id}: snapshot bytes contain a replayable {marker}")
         require(expected.get("input_sent_count") == 1, f"{case_id}: input count changed")
         require(expected.get("input_replayed_count") == 0, f"{case_id}: input replay is forbidden")
         require(expected.get("resize_replayed_count") == 0, f"{case_id}: resize replay is forbidden")
@@ -338,26 +422,79 @@ def fixture_case(fixtures: dict[str, Any], case_id: str) -> dict[str, Any]:
     return matches[0]
 
 
-def run_mutation_checks(fixtures: dict[str, Any]) -> int:
-    """Prove the validator rejects the two previously identified regressions."""
+def run_mutation_checks(evidence: dict[str, Any], fixtures: dict[str, Any]) -> int:
+    """Prove the validator rejects known source and fixture bypass mutations."""
+    def source_files(mutated: dict[str, Any]) -> list[dict[str, Any]]:
+        files = mutated.get("files")
+        require(isinstance(files, list), "source mutation target must have a files list")
+        require(all(isinstance(record, dict) for record in files), "source mutation records must be objects")
+        return files
+
+    def mutate_duplicate_session_file(mutated: dict[str, Any]) -> None:
+        files = source_files(mutated)
+        session = next(record for record in files if record.get("path") == "hermes_cli/pty_session.py")
+        files.append(copy.deepcopy(session))
+
+    def mutate_omit_bridge_file(mutated: dict[str, Any]) -> None:
+        files = source_files(mutated)
+        mutated["files"] = [record for record in files if record.get("path") != "hermes_cli/pty_bridge.py"]
+
+    def mutate_unbound_observation_range(mutated: dict[str, Any]) -> None:
+        observations = mutated.get("observations")
+        require(isinstance(observations, list) and observations, "source mutation target must have observations")
+        observations[0]["source_ranges"].append("hermes_cli/pty_session.py:1-2")
+
     def mutate_reused_session_identity(mutated: dict[str, Any]) -> None:
         case = fixture_case(mutated, "attach-detach-reattach")
         reuse = event_items(case, "registry.reuse")
         require(len(reuse) == 1, "mutation target must have one registry.reuse event")
         reuse[0]["session_ref"] = "synthetic-session-b"
 
-    def mutate_input_snapshot(mutated: dict[str, Any]) -> None:
+    def snapshot_event(mutated: dict[str, Any]) -> dict[str, Any]:
         case = fixture_case(mutated, "no-input-replay")
         snapshot = event_items(case, "attach.snapshot_send")
         require(len(snapshot) == 1, "mutation target must have one attach snapshot event")
-        snapshot[0]["payload_ref"] = "synthetic-input-a"
+        return snapshot[0]
 
-    def mutate_tool_action_snapshot(mutated: dict[str, Any]) -> None:
-        case = fixture_case(mutated, "no-input-replay")
-        snapshot = event_items(case, "attach.snapshot_send")
-        require(len(snapshot) == 1, "mutation target must have one attach snapshot event")
-        snapshot[0]["payload_ref"] = "synthetic-tool-action-a"
+    def mutate_input_snapshot_ref(mutated: dict[str, Any]) -> None:
+        snapshot_event(mutated)["payload_ref"] = "synthetic-input-a"
 
+    def mutate_tool_action_snapshot_ref(mutated: dict[str, Any]) -> None:
+        snapshot_event(mutated)["payload_ref"] = "synthetic-tool-action-a"
+
+    def mutate_extra_snapshot_input_field(mutated: dict[str, Any]) -> None:
+        snapshot_event(mutated)["input_ref"] = "synthetic-input-a"
+
+    def mutate_nested_snapshot_input_field(mutated: dict[str, Any]) -> None:
+        snapshot_event(mutated)["payload"]["input_ref"] = "synthetic-input-a"
+
+    def mutate_nested_snapshot_tool_action_field(mutated: dict[str, Any]) -> None:
+        snapshot_event(mutated)["payload"]["tool_action_ref"] = "synthetic-tool-action-a"
+
+    def mutate_malformed_route_activity(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "malformed-attach-fails-closed")
+        case["timeline"].insert(1, {"step": 99, "event": "socket.accept", "socket": "malformed-a"})
+
+    def mutate_superseded_close_binding(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "superseded-socket-fails-closed")
+        close = event_items(case, "socket.close")
+        require(len(close) == 1, "mutation target must have one socket.close event")
+        close[0]["socket"] = "attach-b"
+
+    def mutate_superseded_close_order(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "superseded-socket-fails-closed")
+        timeline = case["timeline"]
+        close_index = next(index for index, item in enumerate(timeline) if item.get("event") == "socket.close")
+        replacement_index = next(
+            index for index, item in enumerate(timeline)
+            if item.get("event") == "session.attach" and item.get("socket") == "attach-b"
+        )
+        close_event = timeline.pop(close_index)
+        timeline.insert(replacement_index - (1 if close_index < replacement_index else 0), close_event)
+
+    expect_source_failure(evidence, "duplicate pty_session audit record", mutate_duplicate_session_file)
+    expect_source_failure(evidence, "omitted pty_bridge audit record", mutate_omit_bridge_file)
+    expect_source_failure(evidence, "observation references an unaudited source range", mutate_unbound_observation_range)
     expect_fixture_failure(
         fixtures,
         "registry reuse points at a different PTY session",
@@ -365,15 +502,45 @@ def run_mutation_checks(fixtures: dict[str, Any]) -> int:
     )
     expect_fixture_failure(
         fixtures,
-        "reattach snapshot includes synthetic input",
-        mutate_input_snapshot,
+        "reattach snapshot includes synthetic input in payload_ref",
+        mutate_input_snapshot_ref,
     )
     expect_fixture_failure(
         fixtures,
-        "reattach snapshot includes a tool action",
-        mutate_tool_action_snapshot,
+        "reattach snapshot includes a tool action in payload_ref",
+        mutate_tool_action_snapshot_ref,
     )
-    return 3
+    expect_fixture_failure(
+        fixtures,
+        "reattach snapshot adds an extra top-level input field",
+        mutate_extra_snapshot_input_field,
+    )
+    expect_fixture_failure(
+        fixtures,
+        "reattach snapshot adds a nested input field",
+        mutate_nested_snapshot_input_field,
+    )
+    expect_fixture_failure(
+        fixtures,
+        "reattach snapshot adds a nested tool-action field",
+        mutate_nested_snapshot_tool_action_field,
+    )
+    expect_fixture_failure(
+        fixtures,
+        "malformed attach performs socket activity before rejection",
+        mutate_malformed_route_activity,
+    )
+    expect_fixture_failure(
+        fixtures,
+        "superseded close code binds to the replacement socket",
+        mutate_superseded_close_binding,
+    )
+    expect_fixture_failure(
+        fixtures,
+        "superseded close precedes replacement attach",
+        mutate_superseded_close_order,
+    )
+    return 12
 
 
 def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None) -> int:
@@ -385,26 +552,37 @@ def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None)
     require(source.get("revision") == REVISION, "source revision changed")
 
     files = evidence.get("files")
-    require(isinstance(files, list) and files, "source audit files are required")
-    for record in files:
-        require(isinstance(record, dict), "source audit file records must be objects")
-        path_value = record.get("path")
-        require(isinstance(path_value, str) and path_value.startswith("hermes_cli/"), "source audit path must be a Hermes path")
+    require(isinstance(files, list), "source audit files are required")
+    require(len(files) == len(REQUIRED_AUDIT_FILES), "source audit file set must have exactly three records")
+    require(all(isinstance(record, dict) for record in files), "source audit file records must be objects")
+    paths = [record.get("path") for record in files]
+    require(all(isinstance(path_value, str) for path_value in paths), "source audit paths must be strings")
+    require(len(paths) == len(set(paths)), "source audit file paths must be unique")
+    require(set(paths) == REQUIRED_AUDIT_FILES, f"source audit file set changed: {sorted(set(paths))}")
+
+    records_by_path = {record["path"]: record for record in files}
+    ranges_by_path: dict[str, set[tuple[int, int]]] = {}
+    for path_value, record in records_by_path.items():
+        require(path_value.startswith("hermes_cli/"), "source audit path must be a Hermes path")
         hex_string(record.get("git_blob_sha"), 40, f"{path_value}.git_blob_sha")
         hex_string(record.get("sha256"), 64, f"{path_value}.sha256")
         size = record.get("size_bytes")
         require(isinstance(size, int) and size > 0, f"{path_value}.size_bytes must be positive")
         ranges = record.get("ranges")
         require(isinstance(ranges, list) and ranges, f"{path_value}.ranges are required")
+        range_keys: set[tuple[int, int]] = set()
         for line_range in ranges:
             require(isinstance(line_range, dict), f"{path_value}: line range must be an object")
             start = line_range.get("start")
             end = line_range.get("end")
             require(isinstance(start, int) and isinstance(end, int) and 1 <= start <= end, f"{path_value}: invalid line range")
+            require((start, end) not in range_keys, f"{path_value}:{start}-{end}: duplicate source range")
+            range_keys.add((start, end))
             hex_string(line_range.get("sha256"), 64, f"{path_value}:{start}-{end}.sha256")
             markers = line_range.get("markers")
             require(isinstance(markers, list) and markers and all(isinstance(marker, str) and marker for marker in markers), f"{path_value}:{start}-{end}.markers are required")
 
+        ranges_by_path[path_value] = range_keys
         if source_root is None:
             continue
         local_path = source_root / path_value
@@ -425,10 +603,22 @@ def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None)
             text = chunk.decode("utf-8")
             for marker in line_range["markers"]:
                 require(marker in text, f"{path_value}:{start}-{end}: missing marker {marker!r}")
+
     observations = evidence.get("observations")
     require(isinstance(observations, list), "source audit observations are required")
-    observation_ids = {item.get("id") for item in observations if isinstance(item, dict)}
-    require({"legacy-disconnect-terminates", "attach-detach-reattach", "malformed-expired-fail-closed", "superseded-socket-fail-closed", "retained-output-race", "no-input-replay"}.issubset(observation_ids), "source audit observations are incomplete")
+    require(len(observations) == len(REQUIRED_OBSERVATIONS), "source audit observations must be complete and unique")
+    observation_ids = [item.get("id") for item in observations if isinstance(item, dict)]
+    require(len(observation_ids) == len(observations), "source audit observation records must be objects")
+    require(len(observation_ids) == len(set(observation_ids)), "source audit observation ids must be unique")
+    require(set(observation_ids) == REQUIRED_OBSERVATIONS, "source audit observations are incomplete or unexpected")
+    for observation in observations:
+        observation_id = observation["id"]
+        source_ranges = observation.get("source_ranges")
+        require(isinstance(source_ranges, list) and source_ranges, f"{observation_id}: source ranges are required")
+        for index, raw_range in enumerate(source_ranges):
+            path_value, start, end = parse_source_range(raw_range, f"{observation_id}.source_ranges[{index}]")
+            require(path_value in records_by_path, f"{observation_id}: source range references an unaudited file")
+            require((start, end) in ranges_by_path[path_value], f"{observation_id}: source range is not an audited range")
     return len(files)
 
 
@@ -478,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         fixtures = load_json(root / "pty-attach-fixtures.json")
         file_count = validate_source_evidence(evidence, args.source_root)
         case_count = validate_fixtures(fixtures)
-        mutation_count = run_mutation_checks(fixtures)
+        mutation_count = run_mutation_checks(evidence, fixtures)
         duration_ns = time.perf_counter_ns() - started
         bytes_count = artifact_size(root)
         if args.baseline_output is not None:

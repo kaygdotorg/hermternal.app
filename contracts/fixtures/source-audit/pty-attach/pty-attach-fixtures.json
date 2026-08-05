@@ -378,7 +378,11 @@
         {
           "step": 4,
           "event": "attach.snapshot_send",
-          "payload_ref": "output-only"
+          "payload_ref": "output-only",
+          "payload": {
+            "kind": "output",
+            "bytes_ref": "synthetic-output-bytes"
+          }
         }
       ],
       "expected": {
