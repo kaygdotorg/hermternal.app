@@ -4,8 +4,10 @@
 This standard-library-only validator checks contract data, source citation
 bindings, public-path semantics, conditional drain authentication, provider
 stacking, and mutation regressions. It never imports Hermes or sends a request.
-Pass ``--source-root`` when the pinned Hermes checkout is available to verify
-all recorded SHA-256 source-file digests as well as the checked-in metadata.
+Pass ``--source-root`` to verify recorded SHA-256 source-file digests and
+citation markers. Git metadata makes the root a checkout and requires
+``HEAD == REVISION``; without Git metadata it is explicitly a content-only
+snapshot and is never reported as checkout-verified.
 """
 
 from __future__ import annotations
@@ -15,13 +17,14 @@ import copy
 import hashlib
 import json
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parent
-REVISION = "f5be9236e00ddf2f2a412697f267078fc4ee068e6"
+REVISION = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 
 EXPECTED_NATIVE_ROUTES = {
     ("GET", "/api/auth/me"),
@@ -162,6 +165,7 @@ REQUIRED_CASES = {
     "positive-drain-plugin-registered-service-token",
     "negative-drain-plugin-registered-invalid-token-cookie-no-fallback",
     "negative-drain-plugin-registered-provider-outage",
+    "negative-drain-plugin-registered-provider-stack-all-invalid-no-fallback",
     "negative-drain-plugin-registered-missing-cookie-no-fallback",
     "positive-drain-plugin-unregistered-cookie-gated",
     "negative-drain-plugin-unregistered-native-bearer-unreviewed",
@@ -219,13 +223,31 @@ def route_matches(template: str, path: str) -> bool:
 
 
 def validate_source_provenance(audit: dict[str, Any]) -> None:
+    require(re.fullmatch(r"[0-9a-f]{40}", REVISION) is not None, "validator revision must be an exact 40-character SHA")
     require(audit.get("hermes_revision") == REVISION, "audit revision is not pinned")
+    require(isinstance(audit.get("hermes_revision"), str) and re.fullmatch(r"[0-9a-f]{40}", audit["hermes_revision"]) is not None, "audit revision must be an exact 40-character SHA")
     provenance = audit.get("source_provenance")
     require(isinstance(provenance, dict), "source_provenance is required")
     require(provenance.get("pinned_revision") == REVISION, "source provenance revision is not pinned")
     require(
-        provenance.get("verification") == "sha256_file_digests_are_verifiable_against_the_pinned_checkout",
+        isinstance(provenance.get("pinned_revision"), str)
+        and re.fullmatch(r"[0-9a-f]{40}", provenance["pinned_revision"]) is not None,
+        "source provenance revision must be an exact 40-character SHA",
+    )
+    require(
+        provenance.get("verification") == "sha256_digests_and_git_head_when_git_metadata_present",
         "source provenance verification rule changed",
+    )
+    require(
+        provenance.get("source_root_modes") == {
+            "git_checkout": "git_head_must_equal_pinned_revision",
+            "content_only_snapshot": "sha256_only_never_checkout_verified",
+        },
+        "source root mode policy changed",
+    )
+    require(
+        provenance.get("citation_marker_policy") == "marker_must_bind_to_expected_route_or_prefix_and_occur_in_cited_source_range_when_source_root_is_supplied",
+        "citation marker policy changed",
     )
     files = provenance.get("files")
     require(isinstance(files, list), "source provenance files must be a list")
@@ -262,11 +284,19 @@ def evidence_map(audit: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
-def validate_citation(citation: Any, evidence: dict[str, dict[str, Any]], label: str) -> None:
+def validate_citation(
+    citation: Any,
+    evidence: dict[str, dict[str, Any]],
+    label: str,
+    expected_marker: str,
+) -> None:
     require(isinstance(citation, dict), f"{label} source citation is required")
     evidence_id = citation.get("evidence_id")
     require(isinstance(evidence_id, str) and evidence_id, f"{label} citation evidence id is required")
     require(evidence_id in evidence, f"{label} cites unknown source evidence: {evidence_id}")
+    marker = citation.get("marker")
+    require(isinstance(marker, str) and marker.strip(), f"{label} citation marker is required")
+    require(marker == expected_marker, f"{label} citation marker is not bound to {expected_marker!r}")
     citation_start, citation_end = parse_lines(citation.get("lines"), f"{label} citation")
     evidence_start, evidence_end = parse_lines(evidence[evidence_id].get("lines"), f"source evidence {evidence_id}")
     require(
@@ -285,7 +315,7 @@ def route_pairs(routes: Any, set_name: str, evidence: dict[str, dict[str, Any]])
         path = route.get("path")
         require(isinstance(method, str) and method.isupper(), f"{label} has invalid method")
         require(isinstance(path, str) and path.startswith("/"), f"{label} has invalid path")
-        validate_citation(route.get("source_citation"), evidence, label)
+        validate_citation(route.get("source_citation"), evidence, label, path)
         pair = (method, path)
         require(pair not in pairs, f"duplicate route in {set_name}: {pair}")
         pairs.add(pair)
@@ -300,10 +330,45 @@ def inventory_paths(items: Any, name: str, evidence: dict[str, dict[str, Any]]) 
         require(isinstance(item, dict), f"{label} must be an object")
         path = item.get("path")
         require(isinstance(path, str) and path.startswith("/"), f"{label} has invalid path")
-        validate_citation(item.get("source_citation"), evidence, label)
+        validate_citation(item.get("source_citation"), evidence, label, path)
         require(path not in paths, f"duplicate path in {name}: {path}")
         paths.add(path)
     return paths
+
+
+def citation_entries(audit: dict[str, Any]):
+    bypass = audit["public_bypass_inventory"]
+    for set_name in ("public_api_exact_paths", "gate_public_prefixes"):
+        for index, item in enumerate(bypass[set_name]):
+            yield f"{set_name}[{index}]", item["source_citation"], item["path"]
+    route_sets = audit["route_sets"]
+    for set_name in ("native_bearer_supported", "public_auth_routes"):
+        for index, item in enumerate(route_sets[set_name]):
+            yield f"{set_name}[{index}]", item["source_citation"], item["path"]
+    drain = route_sets["conditional_service_token"][0]
+    yield "conditional_service_token[0]", drain["source_citation"], "/api/gateway/drain"
+    yield (
+        "conditional_service_token[0].registration",
+        drain["registration_citation"],
+        "register_token_route(DRAIN_ROUTE_PATH)",
+    )
+
+
+def validate_source_markers(audit: dict[str, Any], source_root: Path) -> None:
+    evidence = evidence_map(audit)
+    source_lines: dict[str, list[str]] = {}
+    for label, citation, expected_marker in citation_entries(audit):
+        evidence_record = evidence[citation["evidence_id"]]
+        source_path = source_root / evidence_record["file"]
+        if evidence_record["file"] not in source_lines:
+            require(source_path.is_file(), f"source marker file is missing: {evidence_record['file']}")
+            source_lines[evidence_record["file"]] = source_path.read_text(encoding="utf-8").splitlines()
+        start, end = parse_lines(citation["lines"], f"{label} citation")
+        cited_text = "\n".join(source_lines[evidence_record["file"]][start - 1:end])
+        require(
+            expected_marker in cited_text,
+            f"{label} marker {expected_marker!r} is absent from cited source text",
+        )
 
 
 def validate_audit(audit: dict[str, Any]) -> None:
@@ -343,9 +408,18 @@ def validate_audit(audit: dict[str, Any]) -> None:
     require(isinstance(drain, dict), "drain route record must be an object")
     require((drain.get("method"), drain.get("path")) == EXPECTED_DRAIN_ROUTE, "drain route changed")
     require(drain.get("registration_mode") == "plugin_conditional", "drain route must be conditional")
-    validate_citation(drain.get("source_citation"), evidence, "conditional_service_token[0]")
-    validate_citation(drain.get("registration_citation"), evidence, "conditional_service_token[0].registration")
+    validate_citation(drain.get("source_citation"), evidence, "conditional_service_token[0]", "/api/gateway/drain")
+    validate_citation(
+        drain.get("registration_citation"),
+        evidence,
+        "conditional_service_token[0].registration",
+        "register_token_route(DRAIN_ROUTE_PATH)",
+    )
     require("native_bearer" not in drain, "drain must not claim unconditional native/service auth")
+    require(
+        audit["decision_rules"].get("service_token_registered_all_reachable_invalid") == "401_service_token_only",
+        "registered drain invalid-provider rule changed",
+    )
 
 
 def public_path_class(audit: dict[str, Any], path: str) -> str | None:
@@ -402,10 +476,15 @@ def drain_decision(request: dict[str, Any]) -> str:
     if registered:
         if bearer_state == "service_valid":
             return "service_token_pass_through"
-        if bearer_state in {"provider_unavailable", "provider_stack"}:
-            if bearer_state == "provider_stack":
-                return "503_service_token_provider_unreachable" if "unreachable" in request.get("provider_outcomes", []) and "accept" not in request.get("provider_outcomes", []) else "service_token_pass_through"
+        if bearer_state == "provider_unavailable":
             return "503_service_token_provider_unreachable"
+        if bearer_state == "provider_stack":
+            provider_decision = provider_stack_decision(request.get("provider_outcomes"))
+            if provider_decision == "pass_through":
+                return "service_token_pass_through"
+            if provider_decision == "503_auth_provider_unreachable":
+                return "503_service_token_provider_unreachable"
+            return "401_service_token_only"
         return "401_service_token_only"
 
     if request.get("bind_mode", "gated") == "loopback":
@@ -498,6 +577,12 @@ def validate_cases(audit: dict[str, Any], cases_doc: dict[str, Any]) -> int:
             require(expected.get("http_status") == 503, f"503 decision missing status: {case_id}")
         if bearer_state in {"invalid", "expired"} and session_cookie == "valid":
             require(expected.get("cookie_fallback") is False, f"present invalid bearer fell back to cookie: {case_id}")
+        if (
+            route_class == "conditional_service_token"
+            and request.get("auth_mode") == "plugin_registered"
+            and decision == "401_service_token_only"
+        ):
+            require(expected.get("cookie_fallback") is False, f"registered service-token route fell back to cookie: {case_id}")
         if route_class == "conditional_service_token" and request.get("auth_mode") == "plugin_unregistered":
             require(expected.get("conditional_result") in {"cookie_gate_owns_route", "gated_auth_attempts_native_bearer", "legacy_session_token_gate", "token_seam_passes_through"}, f"unregistered drain mode is not modeled: {case_id}")
             if request.get("bind_mode", "gated") == "gated" and bearer_state == "valid":
@@ -532,6 +617,11 @@ def validate_mutation_regressions(audit: dict[str, Any], cases: dict[str, Any]) 
     citation_unknown = copy.deepcopy(audit)
     citation_unknown["route_sets"]["native_bearer_supported"][0]["source_citation"]["evidence_id"] = "unknown"
     expect_rejected("citation to unknown evidence", lambda: validate_audit(citation_unknown))
+    mutations += 1
+
+    citation_marker = copy.deepcopy(audit)
+    citation_marker["route_sets"]["native_bearer_supported"][0]["source_citation"]["marker"] = "/api/auth/me/changed"
+    expect_rejected("citation marker rebinding", lambda: validate_audit(citation_marker))
     mutations += 1
 
     digest_mutation = copy.deepcopy(audit)
@@ -577,8 +667,25 @@ def validate_mutation_regressions(audit: dict[str, Any], cases: dict[str, Any]) 
     return mutations
 
 
-def verify_source_root(audit: dict[str, Any], source_root: Path) -> int:
+def verify_source_root(audit: dict[str, Any], source_root: Path) -> tuple[int, str]:
     files = audit["source_provenance"]["files"]
+    git_metadata = source_root / ".git"
+    if git_metadata.exists():
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ValidationError("source root has Git metadata but HEAD cannot be verified") from exc
+        head = result.stdout.strip()
+        require(head == REVISION, f"source Git HEAD {head!r} does not equal pinned revision {REVISION}")
+        provenance = "git_checkout_verified"
+    else:
+        provenance = "content_only_snapshot"
+
     verified = 0
     for item in files:
         path = source_root / item["path"]
@@ -586,7 +693,8 @@ def verify_source_root(audit: dict[str, Any], source_root: Path) -> int:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         require(digest == item["sha256"], f"pinned source digest mismatch: {item['path']}")
         verified += 1
-    return verified
+    validate_source_markers(audit, source_root)
+    return verified, provenance
 
 
 def artifact_size() -> int:
@@ -606,8 +714,8 @@ def main(argv: list[str] | None = None) -> None:
     provenance = "metadata_only"
     verified_files = 0
     if args.source_root is not None:
-        verified_files = verify_source_root(audit, args.source_root)
-        provenance = f"source_files_verified={verified_files}"
+        verified_files, root_mode = verify_source_root(audit, args.source_root)
+        provenance = f"{root_mode},source_files_verified={verified_files}"
     duration_ms = (time.perf_counter() - started) * 1000
     print(
         "native bearer audit valid: "

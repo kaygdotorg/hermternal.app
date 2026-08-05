@@ -1,7 +1,7 @@
 {
   "schema": "hermternal.source-audit.native-bearer.cases.v2",
   "contract_version": "dashboard-v0.0.1",
-  "hermes_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e6",
+  "hermes_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
   "fixture_policy": "synthetic_markers_only",
   "cases": [
     {
@@ -309,6 +309,12 @@
       "kind": "negative",
       "request": {"method": "POST", "path": "/api/gateway/drain", "auth_mode": "plugin_registered", "bearer_state": "provider_unavailable", "session_cookie": "absent"},
       "expected": {"route_class": "conditional_service_token", "native_bearer_decision": "503_service_token_provider_unreachable", "http_status": 503, "conditional_result": "registered_service_token_seam"}
+    },
+    {
+      "id": "negative-drain-plugin-registered-provider-stack-all-invalid-no-fallback",
+      "kind": "negative",
+      "request": {"method": "POST", "path": "/api/gateway/drain", "auth_mode": "plugin_registered", "bearer_state": "provider_stack", "provider_outcomes": ["invalid", "invalid"], "session_cookie": "valid"},
+      "expected": {"route_class": "conditional_service_token", "native_bearer_decision": "401_service_token_only", "http_status": 401, "cookie_fallback": false, "conditional_result": "registered_service_token_seam"}
     },
     {
       "id": "negative-drain-plugin-registered-missing-cookie-no-fallback",

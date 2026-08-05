@@ -2,7 +2,7 @@
 
 **Status:** deterministic planning/proof fixture
 **Contract:** `dashboard-v0.0.1`
-**Pinned Hermes revision:** `f5be9236e00ddf2f2a412697f267078fc4ee068e6`
+**Pinned Hermes revision:** `f5be9236e00ddf2f2a412697f267078fc4ee068e`
 **Surface:** web-only mock/proof
 
 This fixture set records a conservative Hermternal client allowlist from the
@@ -88,25 +88,29 @@ The conditional behavior is sourced from `web_server.py:4000-4011`,
 
 ## Source provenance and validator
 
-`source_audit.json` pins the Hermes revision, the exact source evidence IDs and
-line ranges, and SHA-256 digests for every audited source file. Every native
-route citation is required to reference a source-evidence record and a line
-range inside that record. When the pinned checkout is available, verify the
-file digests with:
+`source_audit.json` pins the exact 40-character Hermes revision, source evidence
+IDs and line ranges, and SHA-256 digests for every audited source file. Every
+citation carries a non-empty source marker. The metadata-only validator binds
+that marker to the cited route or prefix; an exact source-root validation also
+requires the marker text to occur in the cited source range.
+
+A source root with Git metadata is a **Git checkout** and must have `HEAD`
+equal to the pinned revision. The validator labels that result
+`git_checkout_verified`. A supporting directory without Git metadata is a
+**content-only snapshot**: it verifies the seven file digests and labels the
+result `content_only_snapshot`; it never claims checkout verification.
 
 ```text
-python3 test_native_bearer.py --source-root <pinned-Hermes-checkout>
-```
-
-The standard-library-only validator checks the pinned revision, source digest
-metadata, citation bindings, complete public inventories, exact route policy,
-parameterized path shape, provider stacking, conditional drain modes,
-fail-closed unverified cases, and mutation regressions. It reports validation
-duration and fixture artifact size for repeatable review evidence.
-
-```text
+python3 test_native_bearer.py --source-root <pinned-Hermes-source-root>
 python3 test_native_bearer.py
 ```
+
+The standard-library-only validator checks the exact pinned revision, source
+root mode, source digest metadata, citation bindings and marker text, complete
+public inventories, exact route policy, parameterized path shape, provider
+stacking, conditional drain modes, fail-closed unverified cases, and mutation
+regressions. It reports validation duration and fixture artifact size for
+repeatable review evidence.
 
 This is a web-only mock/proof artifact. It adds no live Hermes integration,
 production authentication, deployment configuration, or Apple implementation.

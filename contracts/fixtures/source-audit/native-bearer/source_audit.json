@@ -1,11 +1,11 @@
 {
   "schema": "hermternal.source-audit.native-bearer.v2",
   "contract_version": "dashboard-v0.0.1",
-  "hermes_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e6",
+  "hermes_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
   "scope": {
     "platform": "web",
     "auth_family": "native_bearer_session",
-    "source_checkout": "local Hermes source snapshot pinned to hermes_revision",
+    "source_checkout": "git_checkout_or_content_only_snapshot",
     "integration_mode": "mock_and_proof_only",
     "unverified_route_policy": "blocked_unverified",
     "source_middleware_behavior": "gated_auth_attempts_bearer_on_every_non_public_path",
@@ -13,9 +13,14 @@
     "supported_route_inventory_complete": false
   },
   "source_provenance": {
-    "pinned_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e6",
-    "verification": "sha256_file_digests_are_verifiable_against_the_pinned_checkout",
+    "pinned_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "verification": "sha256_digests_and_git_head_when_git_metadata_present",
+    "source_root_modes": {
+      "git_checkout": "git_head_must_equal_pinned_revision",
+      "content_only_snapshot": "sha256_only_never_checkout_verified"
+    },
     "verification_command": "python3 test_native_bearer.py --source-root <pinned-Hermes-checkout>",
+    "citation_marker_policy": "marker_must_bind_to_expected_route_or_prefix_and_occur_in_cited_source_range_when_source_root_is_supplied",
     "files": [
       {
         "path": "hermes_cli/dashboard_auth/middleware.py",
@@ -181,56 +186,64 @@
         "path": "/api/health",
         "source_citation": {
           "evidence_id": "public-api-inventory",
-          "lines": "38"
+          "lines": "38",
+          "marker": "/api/health"
         }
       },
       {
         "path": "/api/status",
         "source_citation": {
           "evidence_id": "public-api-inventory",
-          "lines": "44"
+          "lines": "44",
+          "marker": "/api/status"
         }
       },
       {
         "path": "/api/config/defaults",
         "source_citation": {
           "evidence_id": "public-api-inventory",
-          "lines": "46"
+          "lines": "46",
+          "marker": "/api/config/defaults"
         }
       },
       {
         "path": "/api/config/schema",
         "source_citation": {
           "evidence_id": "public-api-inventory",
-          "lines": "47"
+          "lines": "47",
+          "marker": "/api/config/schema"
         }
       },
       {
         "path": "/api/model/info",
         "source_citation": {
           "evidence_id": "public-api-inventory",
-          "lines": "49"
+          "lines": "50",
+          "marker": "/api/model/info"
         }
       },
       {
         "path": "/api/dashboard/themes",
         "source_citation": {
           "evidence_id": "public-api-inventory",
-          "lines": "52"
+          "lines": "52",
+          "marker": "/api/dashboard/themes"
         }
       },
       {
         "path": "/api/dashboard/plugins",
         "source_citation": {
           "evidence_id": "public-api-inventory",
-          "lines": "53"
+          "lines": "53",
+          "marker": "/api/dashboard/plugins"
         }
       },
       {
         "path": "/api/cron/fire",
         "source_citation": {
           "evidence_id": "public-api-inventory",
-          "lines": "59"
+          "lines": "59",
+          "marker": "/api/cron/fire"
         }
       }
     ],
@@ -239,105 +252,120 @@
         "path": "/auth/login",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "50"
+          "lines": "50",
+          "marker": "/auth/login"
         }
       },
       {
         "path": "/auth/callback",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "51"
+          "lines": "51",
+          "marker": "/auth/callback"
         }
       },
       {
         "path": "/auth/native/authorize",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "52"
+          "lines": "52",
+          "marker": "/auth/native/authorize"
         }
       },
       {
         "path": "/auth/native/token",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "53"
+          "lines": "53",
+          "marker": "/auth/native/token"
         }
       },
       {
         "path": "/auth/native/refresh",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "54"
+          "lines": "54",
+          "marker": "/auth/native/refresh"
         }
       },
       {
         "path": "/auth/password-login",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "55"
+          "lines": "55",
+          "marker": "/auth/password-login"
         }
       },
       {
         "path": "/auth/logout",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "56"
+          "lines": "56",
+          "marker": "/auth/logout"
         }
       },
       {
         "path": "/login",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "57"
+          "lines": "57",
+          "marker": "/login"
         }
       },
       {
         "path": "/api/auth/providers",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "58"
+          "lines": "58",
+          "marker": "/api/auth/providers"
         }
       },
       {
         "path": "/api/mcp/oauth/callback/",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "59"
+          "lines": "59",
+          "marker": "/api/mcp/oauth/callback/"
         }
       },
       {
         "path": "/assets/",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "60"
+          "lines": "60",
+          "marker": "/assets/"
         }
       },
       {
         "path": "/favicon.ico",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "61"
+          "lines": "61",
+          "marker": "/favicon.ico"
         }
       },
       {
         "path": "/ds-assets/",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "62"
+          "lines": "62",
+          "marker": "/ds-assets/"
         }
       },
       {
         "path": "/fonts/",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "63"
+          "lines": "63",
+          "marker": "/fonts/"
         }
       },
       {
         "path": "/fonts-terminal/",
         "source_citation": {
           "evidence_id": "middleware-public-gate",
-          "lines": "64"
+          "lines": "64",
+          "marker": "/fonts-terminal/"
         }
       }
     ],
@@ -350,7 +378,8 @@
         "path": "/api/auth/me",
         "source_citation": {
           "evidence_id": "routes-auth-rest",
-          "lines": "778"
+          "lines": "778",
+          "marker": "/api/auth/me"
         }
       },
       {
@@ -358,7 +387,8 @@
         "path": "/api/auth/ws-ticket",
         "source_citation": {
           "evidence_id": "routes-auth-rest",
-          "lines": "799"
+          "lines": "799",
+          "marker": "/api/auth/ws-ticket"
         }
       },
       {
@@ -366,7 +396,8 @@
         "path": "/api/sessions",
         "source_citation": {
           "evidence_id": "sessions-list",
-          "lines": "50"
+          "lines": "50",
+          "marker": "/api/sessions"
         }
       },
       {
@@ -374,7 +405,8 @@
         "path": "/api/sessions/search",
         "source_citation": {
           "evidence_id": "sessions-search",
-          "lines": "166"
+          "lines": "166",
+          "marker": "/api/sessions/search"
         }
       },
       {
@@ -382,7 +414,8 @@
         "path": "/api/sessions/{session_id}",
         "source_citation": {
           "evidence_id": "sessions-detail",
-          "lines": "552"
+          "lines": "552",
+          "marker": "/api/sessions/{session_id}"
         }
       },
       {
@@ -390,7 +423,8 @@
         "path": "/api/sessions/{session_id}/messages",
         "source_citation": {
           "evidence_id": "sessions-messages",
-          "lines": "598"
+          "lines": "598",
+          "marker": "/api/sessions/{session_id}/messages"
         }
       },
       {
@@ -398,7 +432,8 @@
         "path": "/api/sessions/{session_id}",
         "source_citation": {
           "evidence_id": "sessions-patch",
-          "lines": "661"
+          "lines": "661",
+          "marker": "/api/sessions/{session_id}"
         }
       },
       {
@@ -406,7 +441,8 @@
         "path": "/api/chat/image-upload",
         "source_citation": {
           "evidence_id": "image-upload",
-          "lines": "2306"
+          "lines": "2306",
+          "marker": "/api/chat/image-upload"
         }
       }
     ],
@@ -416,7 +452,8 @@
         "path": "/login",
         "source_citation": {
           "evidence_id": "routes-auth-public",
-          "lines": "132"
+          "lines": "132",
+          "marker": "/login"
         }
       },
       {
@@ -424,7 +461,8 @@
         "path": "/api/auth/providers",
         "source_citation": {
           "evidence_id": "routes-auth-public",
-          "lines": "152"
+          "lines": "152",
+          "marker": "/api/auth/providers"
         }
       },
       {
@@ -432,7 +470,8 @@
         "path": "/auth/login",
         "source_citation": {
           "evidence_id": "routes-auth-public",
-          "lines": "182"
+          "lines": "182",
+          "marker": "/auth/login"
         }
       },
       {
@@ -440,7 +479,8 @@
         "path": "/auth/native/authorize",
         "source_citation": {
           "evidence_id": "routes-native-authorize",
-          "lines": "289"
+          "lines": "289",
+          "marker": "/auth/native/authorize"
         }
       },
       {
@@ -448,7 +488,8 @@
         "path": "/auth/callback",
         "source_citation": {
           "evidence_id": "routes-auth-callback",
-          "lines": "379"
+          "lines": "379",
+          "marker": "/auth/callback"
         }
       },
       {
@@ -456,7 +497,8 @@
         "path": "/auth/password-login",
         "source_citation": {
           "evidence_id": "routes-password-login",
-          "lines": "650"
+          "lines": "650",
+          "marker": "/auth/password-login"
         }
       },
       {
@@ -464,7 +506,8 @@
         "path": "/auth/logout",
         "source_citation": {
           "evidence_id": "routes-logout",
-          "lines": "742"
+          "lines": "742",
+          "marker": "/auth/logout"
         }
       },
       {
@@ -472,7 +515,8 @@
         "path": "/auth/native/token",
         "source_citation": {
           "evidence_id": "routes-native-token-refresh",
-          "lines": "841"
+          "lines": "841",
+          "marker": "/auth/native/token"
         }
       },
       {
@@ -480,7 +524,8 @@
         "path": "/auth/native/refresh",
         "source_citation": {
           "evidence_id": "routes-native-token-refresh",
-          "lines": "894"
+          "lines": "894",
+          "marker": "/auth/native/refresh"
         }
       }
     ],
@@ -491,11 +536,13 @@
         "registration_mode": "plugin_conditional",
         "source_citation": {
           "evidence_id": "drain-route-conditional-doc",
-          "lines": "4000-4011"
+          "lines": "4000-4011",
+          "marker": "/api/gateway/drain"
         },
         "registration_citation": {
           "evidence_id": "drain-plugin-registration",
-          "lines": "229-280"
+          "lines": "229-280",
+          "marker": "register_token_route(DRAIN_ROUTE_PATH)"
         }
       }
     ]
@@ -515,6 +562,7 @@
     "public_exact_path": "bypass_native_bearer_gate",
     "public_prefix": "bypass_native_bearer_gate_using_source_prefix_semantics",
     "service_token_registered": "token_auth_seam_owns_exact_drain_path_only",
+    "service_token_registered_all_reachable_invalid": "401_service_token_only",
     "service_token_unregistered": "token_auth_seam_passes_through; gated_or_legacy_session_gate_remains",
     "unverified_route": "blocked_unverified",
     "bearer_fallback": "never_fallback_to_cookie_after_present_bearer_fails"
