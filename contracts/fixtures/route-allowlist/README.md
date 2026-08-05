@@ -140,10 +140,14 @@ mutation, source/provenance drift, credential-like redaction markers, and
 malformed inputs that would otherwise produce a traceback. Redaction scanning
 covers all three JSON documents and credential-shaped values in this README
 and the manifest. It can optionally verify the pinned Git commit/tree, recorded
-full-file SHA-256 digests, Git blob IDs from `HEAD:<path>`, and canonical
-citation markers against an independently fetched source root. In pinned Git
-checkout mode, a missing or mismatched blob object is a controlled validation
-failure:
+full-file SHA-256 digests, Git blob IDs resolved from the pinned
+`f5be9236e00ddf2f2a412697f267078fc4ee068e:path` objects, and canonical citation
+markers against an independently fetched source root. In pinned Git checkout
+mode, each blob is checked with `GIT_NO_REPLACE_OBJECTS=1` and
+`GIT_NO_LAZY_FETCH=1`, captured once with `git cat-file blob`, and then used for
+both digest and marker checks; mutable worktree files are not used for those
+claims. Missing, mismatched, non-blob, or unavailable objects are controlled
+validation failures:
 
 ```text
 python3 contracts/fixtures/route-allowlist/test_route_allowlist.py

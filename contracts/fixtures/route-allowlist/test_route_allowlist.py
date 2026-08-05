@@ -15,6 +15,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import platform
 import re
 import statistics
@@ -470,11 +471,16 @@ def _validate_source_citations(audit: dict[str, Any]) -> None:
     citations = audit["source_citations"]
     _require(isinstance(citations, list), "audit: source_citations must be a list")
     _require(len(citations) == len(EXPECTED_CITATION_FILES), "audit: citation count changed")
-    ids = [citation.get("id") for citation in citations]
+    ids: list[str] = []
+    for index, citation in enumerate(citations):
+        _require(type(citation) is dict, f"audit: source_citations[{index}] must be an object")
+        citation_id = citation.get("id")
+        _require(type(citation_id) is str, f"audit: source_citations[{index}].id must be a string")
+        ids.append(citation_id)
     _require(len(ids) == len(set(ids)), "audit: citation ids must be unique")
     _require(set(ids) == set(EXPECTED_CITATION_FILES), "audit: citation inventory changed")
     for citation in citations:
-        context = f"audit citation {citation.get('id')!r}"
+        context = f"audit citation {citation['id']!r}"
         _keyset(citation, {"id", "path", "lines", "markers", "sha256", "git_blob_sha", "url", "claim"}, context)
         citation_id = _string(citation["id"], f"{context}.id")
         expected_path, expected_lines, expected_sha, expected_blob = EXPECTED_CITATION_FILES[citation_id]
@@ -630,7 +636,7 @@ def _is_valid_applicability(value: Any) -> bool:
     return type(value) is str and value in VALID_APPLICABILITIES
 
 
-def route_is_allowlisted(allowlist: dict[str, Any], method: str, path: str, applicability: str) -> bool:
+def route_is_allowlisted(allowlist: dict[str, Any], method: str, path: str, applicability: str | None = None) -> bool:
     """Authorize one REST method/path only with explicit platform context."""
 
     if type(method) is not str or not _is_valid_applicability(applicability):
@@ -651,7 +657,7 @@ def operation_is_allowlisted(allowlist: dict[str, Any], operation: str) -> bool:
     return any(item["name"] == operation for item in allowlist["client_allowlist"]["json_rpc"]["operations"])
 
 
-def _rest_policy_for_request(allowlist: dict[str, Any], method: str, path: str, applicability: str) -> dict[str, Any] | None:
+def _rest_policy_for_request(allowlist: dict[str, Any], method: str, path: str, applicability: str | None = None) -> dict[str, Any] | None:
     """Resolve a REST policy only when platform applicability is explicit."""
 
     if type(method) is not str or not _is_valid_applicability(applicability):
@@ -741,6 +747,32 @@ EXPECTED_CASE_IDS = {
     "rpc-approved-prompt", "rpc-config-key-mutation-denied", "rpc-unknown-operation-denied", "rpc-sensitive-operation-denied",
     "event-unknown-additive-noninteractive", "event-unknown-interactive-not-promoted", "pty-log-redaction", "malformed-input-control",
 }
+EXPECTED_CASE_SURFACES = {
+    "rest-approved-native-bearer": "rest",
+    "rest-approved-browser-cookie": "rest",
+    "rest-invalid-bearer-no-cookie-fallback": "rest",
+    "rest-method-mutation-denied": "rest",
+    "rest-prefix-confusion-denied": "rest",
+    "rest-source-present-not-client-allowlisted": "rest",
+    "rest-management-admin-denied": "rest",
+    "ws-chat-browser-ticket": "chat_websocket",
+    "ws-chat-native-ticket": "chat_websocket",
+    "ws-chat-ticket-reused-denied": "chat_websocket",
+    "ws-chat-ticket-expired-denied": "chat_websocket",
+    "ws-gated-token-fallback-denied": "chat_websocket",
+    "ws-pty-web-only": "pty_websocket",
+    "ws-pty-native-denied": "pty_websocket",
+    "rpc-approved-prompt": "json_rpc",
+    "rpc-config-key-mutation-denied": "json_rpc",
+    "rpc-unknown-operation-denied": "json_rpc",
+    "rpc-sensitive-operation-denied": "json_rpc",
+    "event-unknown-additive-noninteractive": "json_rpc_event",
+    "event-unknown-interactive-not-promoted": "json_rpc_event",
+    "pty-log-redaction": "pty_websocket",
+    "malformed-input-control": "validator",
+}
+VALID_CASE_SURFACES = frozenset({"rest", "chat_websocket", "pty_websocket", "json_rpc", "json_rpc_event", "validator"})
+APPLICABILITY_CASE_SURFACES = frozenset({"rest", "chat_websocket", "pty_websocket", "json_rpc", "json_rpc_event"})
 
 CASE_SHAPES = {
     "rest-approved-native-bearer": ({"method", "path", "applicability", "auth_mode", "credential_state"}, {"decision", "route_class", "auth_result", "handler_result"}),
@@ -794,21 +826,32 @@ def validate_cases(cases: dict[str, Any], allowlist: dict[str, Any], audit: dict
     _require(cases["source_audit_id"] == AUDIT_ID == audit["audit_id"], "cases: source audit binding changed")
     _require(cases["fixture_policy"] == "synthetic_markers_only" and cases["synthetic_only"] is True, "cases: synthetic policy changed")
     _require(isinstance(cases["cases"], list) and len(cases["cases"]) == len(EXPECTED_CASE_IDS), "cases: case count changed")
-    _require({case.get("id") for case in cases["cases"]} == EXPECTED_CASE_IDS, "cases: case inventory changed")
+    case_items = cases["cases"]
+    case_ids: list[str] = []
+    for index, case in enumerate(case_items):
+        _require(type(case) is dict, f"cases: cases[{index}] must be an object")
+        case_id = case.get("id")
+        _require(type(case_id) is str, f"cases: cases[{index}].id must be a string")
+        case_ids.append(case_id)
+    _require(set(case_ids) == EXPECTED_CASE_IDS, "cases: case inventory changed")
     _validate_redaction(cases)
     by_id: dict[str, dict[str, Any]] = {}
-    for case in cases["cases"]:
-        _keyset(case, {"id", "kind", "surface", "request", "expected", "notes"}, f"case {case.get('id')!r}")
-        case_id = _string(case["id"], "case.id")
+    for case in case_items:
+        case_id = case["id"]
+        _keyset(case, {"id", "kind", "surface", "request", "expected", "notes"}, f"case {case_id!r}")
         _require(case_id not in by_id, f"cases: duplicate id {case_id}")
         by_id[case_id] = case
         _string(case["kind"], f"{case_id}.kind")
-        _string(case["surface"], f"{case_id}.surface")
+        surface = _string(case["surface"], f"{case_id}.surface")
+        _require(surface in VALID_CASE_SURFACES, f"{case_id}: unsupported case surface")
+        _require(surface == EXPECTED_CASE_SURFACES[case_id], f"{case_id}: case surface changed")
         _require(isinstance(case["request"], dict), f"{case_id}: request must be an object")
         _require(isinstance(case["expected"], dict), f"{case_id}: expected must be an object")
         _validate_case_leaf_types(case_id, case["request"], case["expected"])
+        if surface in APPLICABILITY_CASE_SURFACES:
+            _require(_is_valid_applicability(case["request"].get("applicability")), f"{case_id}: applicability must be browser or native")
         _string(case["notes"], f"{case_id}.notes")
-        if case["surface"] == "rest":
+        if surface == "rest":
             _validate_rest_case_auth(case_id, case["request"], case["expected"], allowlist)
 
     _require(by_id["rest-approved-native-bearer"]["request"] == {"method": "GET", "path": "/api/sessions/synthetic-session-001", "applicability": "native", "auth_mode": "native_bearer", "credential_state": "valid"}, "cases: native route fixture changed")
@@ -846,50 +889,133 @@ def validate_cases(cases: dict[str, Any], allowlist: dict[str, Any], audit: dict
     _require(malformed["decision"] == "reject_without_traceback" and malformed["exit_status"] == 2, "cases: malformed-input policy changed")
 
 
-def _git_blob_sha_for_path(source_root: Path, relative_path: str) -> str:
-    """Resolve one immutable blob object from the pinned checkout tree."""
+def _strict_git_environment() -> dict[str, str]:
+    """Keep local provenance checks on immutable Git objects and offline refs."""
 
+    environment = os.environ.copy()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["GIT_NO_LAZY_FETCH"] = "1"
+    return environment
+
+
+def _git_blob_bytes_for_path(
+    source_root: Path,
+    relative_path: str,
+    revision: str = "HEAD",
+) -> tuple[str, bytes]:
+    """Capture one validated blob from an immutable revision and its bytes."""
+
+    git_environment = _strict_git_environment()
     try:
         result = subprocess.run(
-            ["git", "-C", str(source_root), "rev-parse", "--verify", f"HEAD:{relative_path}"],
+            ["git", "-C", str(source_root), "rev-parse", "--verify", f"{revision}:{relative_path}"],
             capture_output=True,
             text=True,
             check=True,
+            env=git_environment,
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise ContractError(f"source root: Git blob is missing for {relative_path}: {exc}") from None
+    except (OSError, subprocess.CalledProcessError):
+        raise ContractError(f"source root: Git blob is missing for {relative_path}") from None
     blob_sha = result.stdout.strip()
     _require(re.fullmatch(r"[0-9a-f]{40}", blob_sha) is not None, f"source root: invalid Git blob for {relative_path}")
+    try:
+        subprocess.run(
+            ["git", "-C", str(source_root), "cat-file", "-e", blob_sha],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=git_environment,
+        )
+        object_type = subprocess.run(
+            ["git", "-C", str(source_root), "cat-file", "-t", blob_sha],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=git_environment,
+        ).stdout.strip()
+        _require(object_type == "blob", f"source root: Git object for {relative_path} is not a blob")
+        blob_bytes = subprocess.run(
+            ["git", "-C", str(source_root), "cat-file", "blob", blob_sha],
+            capture_output=True,
+            check=True,
+            env=git_environment,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        raise ContractError(f"source root: Git blob object is unavailable for {relative_path}") from None
+    return blob_sha, blob_bytes
+
+
+def _git_blob_sha_for_path(source_root: Path, relative_path: str, revision: str = "HEAD") -> str:
+    """Resolve and validate one blob ID without reading a mutable worktree path."""
+
+    blob_sha, _ = _git_blob_bytes_for_path(source_root, relative_path, revision)
     return blob_sha
 
 
-def _validate_git_blob_ids(audit: dict[str, Any], source_root: Path) -> None:
-    """Bind every recorded blob ID to the pinned checkout's HEAD tree."""
+def _validate_git_blob_ids(
+    audit: dict[str, Any],
+    source_root: Path,
+    revision: str = "HEAD",
+) -> dict[str, bytes]:
+    """Bind each recorded ID and capture each citation's immutable blob bytes."""
 
+    captured: dict[str, bytes] = {}
     for citation in audit["source_citations"]:
-        actual_blob = _git_blob_sha_for_path(source_root, citation["path"])
+        actual_blob, blob_bytes = _git_blob_bytes_for_path(source_root, citation["path"], revision)
         _require(actual_blob == citation["git_blob_sha"], f"source root: Git blob mismatch for {citation['id']}")
+        captured[citation["id"]] = blob_bytes
+    return captured
 
 
 def _validate_source_root(audit: dict[str, Any], source_root: Path) -> str:
     mode = "content_only_snapshot"
+    captured_blobs: dict[str, bytes] | None = None
     git_dir = source_root / ".git"
     if git_dir.exists():
+        git_environment = _strict_git_environment()
         try:
-            head = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-            tree = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise ContractError(f"source root: unable to verify Git HEAD/tree: {exc}") from None
+            head = subprocess.run(
+                ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=git_environment,
+            ).stdout.strip()
+            tree = subprocess.run(
+                ["git", "-C", str(source_root), "rev-parse", "HEAD^{tree}"],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=git_environment,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            raise ContractError("source root: unable to verify Git HEAD/tree") from None
         _require(head == PINNED_SHA, "source root: Git HEAD is not the pinned Hermes revision")
         _require(tree == PINNED_TREE_SHA, "source root: Git tree is not the pinned Hermes tree")
-        _validate_git_blob_ids(audit, source_root)
+        # Resolve citations from the pinned commit, not HEAD paths or worktree files.
+        captured_blobs = _validate_git_blob_ids(audit, source_root, PINNED_SHA)
         mode = "git_checkout_verified"
     for citation in audit["source_citations"]:
-        path = source_root / citation["path"]
-        _require(path.is_file(), f"source root: missing {citation['path']}")
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        _require(digest == citation["sha256"], f"source root: digest mismatch for {citation['path']}")
-        lines = path.read_text(encoding="utf-8").splitlines()
+        if captured_blobs is not None:
+            blob_bytes = captured_blobs[citation["id"]]
+            digest = hashlib.sha256(blob_bytes).hexdigest()
+            _require(digest == citation["sha256"], f"source root: digest mismatch for {citation['path']}")
+            try:
+                text = blob_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ContractError(f"source root: source is not UTF-8 for {citation['path']}") from None
+            lines = text.splitlines()
+        else:
+            path = source_root / citation["path"]
+            _require(path.is_file(), f"source root: missing {citation['path']}")
+            try:
+                blob_bytes = path.read_bytes()
+                text = blob_bytes.decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                raise ContractError(f"source root: unable to read {citation['path']}") from None
+            digest = hashlib.sha256(blob_bytes).hexdigest()
+            _require(digest == citation["sha256"], f"source root: digest mismatch for {citation['path']}")
+            lines = text.splitlines()
         start, end = citation["lines"]
         _require(1 <= start <= end <= len(lines), f"source root: invalid range for {citation['id']}")
         excerpt = "\n".join(lines[start - 1:end])
@@ -1053,8 +1179,7 @@ class RouteAllowlistTests(unittest.TestCase):
             self.assertFalse(route_is_allowlisted(self.allowlist, "GET", "/api/auth/me", invalid), invalid)
             self.assertIsNone(_rest_policy_for_request(self.allowlist, "GET", "/api/auth/me", invalid))
 
-        with self.assertRaises(TypeError):
-            route_is_allowlisted(self.allowlist, "GET", "/api/auth/me")
+        self.assertFalse(route_is_allowlisted(self.allowlist, "GET", "/api/auth/me"))
 
         forged = copy.deepcopy(self.cases)
         browser_case = next(item for item in forged["cases"] if item["id"] == "rest-approved-browser-cookie")
@@ -1063,6 +1188,25 @@ class RouteAllowlistTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 validate_cases(forged, self.allowlist, self.audit)
             browser_case["request"]["applicability"] = "browser"
+
+        relabeled = copy.deepcopy(self.cases)
+        rest_case = next(item for item in relabeled["cases"] if item["id"] == "rest-approved-browser-cookie")
+        rest_case["surface"] = "json_rpc"
+        rest_case["request"]["applicability"] = "desktop"
+        with self.assertRaises(ContractError):
+            validate_cases(relabeled, self.allowlist, self.audit)
+
+        for case_id in (
+            "ws-chat-browser-ticket",
+            "ws-pty-web-only",
+            "rpc-approved-prompt",
+            "event-unknown-additive-noninteractive",
+        ):
+            unsupported = copy.deepcopy(self.cases)
+            target = next(item for item in unsupported["cases"] if item["id"] == case_id)
+            target["request"]["applicability"] = "desktop"
+            with self.assertRaises(ContractError):
+                validate_cases(unsupported, self.allowlist, self.audit)
 
     def test_route_widening_and_prefix_confusion_fail(self) -> None:
         forged = copy.deepcopy(self.allowlist)
@@ -1203,6 +1347,19 @@ class RouteAllowlistTests(unittest.TestCase):
             audit = {"source_citations": [{"id": "fixture", "path": "fixture.txt", "git_blob_sha": blob}]}
             _validate_git_blob_ids(audit, source_root)
 
+            revision = subprocess.run(
+                ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            fixture.write_text("worktree mutation\n", encoding="utf-8")
+            captured_sha, captured_bytes = _git_blob_bytes_for_path(source_root, "fixture.txt", revision)
+            self.assertEqual(captured_sha, blob)
+            self.assertEqual(captured_bytes, b"pinned fixture\n")
+            with self.assertRaises(ContractError):
+                _git_blob_sha_for_path(source_root, ".", revision)
+
             forged = copy.deepcopy(audit)
             forged["source_citations"][0]["git_blob_sha"] = "0" * 40
             with self.assertRaises(ContractError):
@@ -1211,6 +1368,12 @@ class RouteAllowlistTests(unittest.TestCase):
             missing = {"source_citations": [{"id": "missing", "path": "missing.txt", "git_blob_sha": blob}]}
             with self.assertRaises(ContractError):
                 _validate_git_blob_ids(missing, source_root)
+
+            object_path = source_root / ".git" / "objects" / blob[:2] / blob[2:]
+            self.assertTrue(object_path.is_file(), object_path)
+            object_path.unlink()
+            with self.assertRaises(ContractError):
+                _git_blob_sha_for_path(source_root, "fixture.txt")
 
     def test_redaction_policy_rejects_credential_material(self) -> None:
         forged = copy.deepcopy(self.cases)
@@ -1338,6 +1501,28 @@ class RouteAllowlistTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, ("audit.redaction.log_policy", optimized, result.stderr))
                 self.assertNotIn("Traceback", result.stderr + result.stdout)
                 self.assertIn("validation error", result.stderr.lower())
+
+    def test_malformed_audit_and_case_list_entries_are_controlled_in_both_modes(self) -> None:
+        list_specs = (
+            ("audit citation", self.audit, "source_citations", "--audit"),
+            ("case entry", self.cases, "cases", "--cases"),
+        )
+        for label, document, field, option in list_specs:
+            for replacement in (None, True, [], "citation"):
+                forged = copy.deepcopy(document)
+                forged[field][0] = replacement
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    json.dump(forged, stream)
+                    stream.flush()
+                    for optimized in (False, True):
+                        command = [sys.executable]
+                        if optimized:
+                            command.append("-O")
+                        command.extend([str(Path(__file__)), option, stream.name])
+                        result = subprocess.run(command, capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 2, (label, replacement, optimized, result.stderr))
+                        self.assertNotIn("Traceback", result.stderr + result.stdout)
+                        self.assertIn("validation error", result.stderr.lower())
 
     def test_malformed_cli_input_has_no_traceback(self) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
