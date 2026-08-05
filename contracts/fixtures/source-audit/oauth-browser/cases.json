@@ -4,6 +4,7 @@
   "contract": "dashboard-v0.0.1",
   "provider": "synthetic-oauth",
   "provider_mode": "reviewed_oauth_browser",
+  "provider_error_observation": "token_exchange_http_400_maps_to_invalid_code_error",
   "cases": [
     {
       "id": "success",

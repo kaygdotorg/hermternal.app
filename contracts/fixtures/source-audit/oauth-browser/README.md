@@ -12,7 +12,7 @@ The audit records typed source observations for the pinned revision:
 
 - `hermes_cli/dashboard_auth/routes.py:auth_login` short-circuits a provider with `supports_password: true` before calling `start_login`. PKCE therefore applies to the reviewed OAuth or OIDC browser path, not to the pinned `BasicAuthProvider` password form.
 - `hermes_cli/dashboard_auth/routes.py:auth_callback` rejects a missing PKCE cookie, provider cancellation/error, and missing or mismatched callback state. It passes the stored verifier to `complete_login` and issues session cookies only after the provider exchange succeeds.
-- `plugins/dashboard_auth/nous/__init__.py:NousDashboardAuthProvider.start_login` builds a nested authorization parameter map containing `state`, `code_challenge`, and `code_challenge_method=S256`. Its cookie payload contains `state` and `verifier`; `complete_login` sends `code_verifier` to the token endpoint.
+- `plugins/dashboard_auth/nous/__init__.py:NousDashboardAuthProvider.start_login` builds a nested authorization parameter map containing `state`, `code_challenge`, and `code_challenge_method=S256`. Its cookie payload contains `state` and `verifier`; `complete_login` sends `code_verifier` to the token endpoint. The pinned provider maps an HTTP 400 from that auth-code exchange to `InvalidCodeError`, including code, PKCE, and redirect-URI rejection.
 - The pinned Nous browser flow does not include an OAuth/OIDC `nonce` authorization parameter. This no-nonce statement is scoped to the pinned Nous flow. A separately reviewed OIDC provider MAY require and validate nonce when its compatibility record says so.
 - `hermes_cli/dashboard_auth/cookies.py` calls the state value a CSRF nonce in a source comment. That label is not a provider `nonce` parameter and does not expand the pinned Nous browser contract.
 
@@ -56,7 +56,7 @@ The validator compares every case against an independent expected outcome matrix
 - provider unreachable during login start: return the provider-unreachable error path;
 - retry: start a fresh login attempt.
 
-Changing an outcome, source reference, marker, or marker order fails validation. The `InvalidCodeError` markers also bind the empty-code malformed callback and the code/PKCE rejection path to the pinned 400 response.
+Changing an outcome, source reference, marker, or marker order fails validation. The `InvalidCodeError` markers bind the empty-code malformed callback and the code/PKCE rejection path to the route's 400 response and to the pinned Nous provider's HTTP-400 mapping. The cases root names that provider observation explicitly.
 
 ## Recursive schema and redaction checks
 

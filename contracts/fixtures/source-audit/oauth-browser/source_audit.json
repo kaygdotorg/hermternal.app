@@ -24,7 +24,7 @@
       {
         "path": "plugins/dashboard_auth/nous/__init__.py",
         "excerpt": "source_excerpts/nous_provider.py.txt",
-        "excerpt_sha256": "7cc9ddc1f29753a15858b1072a814c7472b31b9d48b9344e0a49406c0a4fc01d",
+        "excerpt_sha256": "53f633d5e405459ad0d042470e06af545fad6d1d02b86f23a473ece283ce8c87",
         "blob_sha": "69acd18e36b545fd20df5578809de65afb0d4df4",
         "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/plugins/dashboard_auth/nous/__init__.py",
         "observations": {
@@ -32,7 +32,8 @@
           "authorization_params_include_s256_pkce": true,
           "authorization_params_exclude_nonce": true,
           "cookie_payload_contains_state_and_verifier": true,
-          "token_exchange_sends_code_verifier": true
+          "token_exchange_sends_code_verifier": true,
+          "token_exchange_http_400_maps_to_invalid_code_error": true
         }
       },
       {

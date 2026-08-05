@@ -44,3 +44,10 @@
             headers={"Accept": "application/json"},
             timeout=_TOKEN_ENDPOINT_TIMEOUT_SEC,
         )
+
+        # The dashboard auth-code grant now issues a rotating refresh token
+        # (24h session, reuse-detected) — Portal NAS PR #293. A 400 here means
+        # the code/PKCE/redirect_uri failed, surfaced as InvalidCodeError.
+        return self._token_response_to_session(
+            response, bad_request_exc=InvalidCodeError
+        )
