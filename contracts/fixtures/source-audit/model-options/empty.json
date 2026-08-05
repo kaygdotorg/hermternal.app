@@ -1,0 +1,34 @@
+{
+  "fixture_id": "model-options.empty",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "source_audit_id": "hermes-dashboard-model-options-2026-08-05",
+  "client_scope": "shared",
+  "synthetic": true,
+  "case": "empty",
+  "source_observation": "pinned-source-present",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "fixture-empty",
+    "method": "model.options",
+    "params": {
+      "explicit_only": true
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "fixture-empty",
+    "result": {
+      "providers": [],
+      "model": "",
+      "provider": ""
+    }
+  },
+  "expected": {
+    "classification": "empty",
+    "request_parameter_keys": ["explicit_only"],
+    "usable": false,
+    "fail_closed": true,
+    "reason": "no-options-available"
+  }
+}
