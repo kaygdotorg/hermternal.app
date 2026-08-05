@@ -37,6 +37,7 @@
   },
   "expected": {
     "classification": "present",
+    "request_parameter_keys": ["session_id", "explicit_only", "include_unconfigured", "refresh"],
     "usable": true,
     "fail_closed": false,
     "provider_count": 1,

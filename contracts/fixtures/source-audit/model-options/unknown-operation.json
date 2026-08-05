@@ -23,6 +23,7 @@
   },
   "expected": {
     "classification": "unknown-operation",
+    "request_parameter_keys": [],
     "usable": false,
     "fail_closed": true,
     "reason": "unknown-operation"

@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import re
 import time
 import unittest
 from typing import Any
@@ -19,6 +20,14 @@ from typing import Any
 
 PINNED_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 EXPECTED_OPERATION = "model.options"
+EXPECTED_SOURCE_BLOB_SHA = "701c11f0eaed4d09b045c7046db3aa8443332db4"
+EXPECTED_PAYLOAD_BUILDER_BLOB_SHA = "4e95665d481f881be9885edd4997925d0cec78d6"
+EXPECTED_REQUEST_PARAMETERS = (
+    "session_id",
+    "explicit_only",
+    "include_unconfigured",
+    "refresh",
+)
 EXPECTED_CASES = {
     "present",
     "absent",
@@ -26,15 +35,31 @@ EXPECTED_CASES = {
     "malformed",
     "unknown-operation",
 }
-SENSITIVE_MARKERS = (
+FORBIDDEN_KEY_MARKERS = (
+    "token",
+    "credential",
+    "auth",
     "password",
     "cookie",
     "secret",
-    "access_token",
-    "api_key",
     "ticket",
     "transcript",
     "hostname",
+    "user_data",
+    "provider_data",
+    "apikey",
+    "accesskey",
+    "authorization",
+)
+FORBIDDEN_VALUE_PATTERNS = (
+    re.compile(
+        r"\b(?:token|credential|auth(?:entication|orization)?|password|cookie|secret|ticket|transcript|hostname)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:user|provider)[ _-]+data\b", re.IGNORECASE),
+    re.compile(r"\b(?:access|api)[_-]?(?:token|key)\b", re.IGNORECASE),
+    re.compile(r"\b(?:bearer|basic)\s+", re.IGNORECASE),
+    re.compile(r"(?:sk-|ghp_|xoxb-|eyj)", re.IGNORECASE),
 )
 FIXTURE_DIR = Path(__file__).resolve().parent
 AUDIT_PATH = FIXTURE_DIR.parents[2] / "hermes-dashboard" / "model-options" / "source-audit.json"
@@ -56,8 +81,9 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def load_audit() -> dict[str, Any]:
-    audit = load_json(AUDIT_PATH)
+def validate_audit(audit: dict[str, Any]) -> None:
+    """Validate immutable source evidence and the exact request contract."""
+
     _require(audit["contract"] == "dashboard-v0.0.1", "audit: wrong contract")
     _require(audit["hermes_source_sha"] == PINNED_SHA, "audit: SHA is not pinned")
     _require(audit["operation_present"] is True, "audit: model.options is not proven")
@@ -76,15 +102,61 @@ def load_audit() -> dict[str, Any]:
     )
     _require(surface["source_lines"] == [327, 347], "audit: handler evidence moved")
     _require(surface["payload_builder_lines"] == [283, 313], "audit: builder evidence moved")
+    _require(
+        surface["request_parameters"] == list(EXPECTED_REQUEST_PARAMETERS),
+        "audit: request parameter contract changed",
+    )
+    _require(
+        surface["source_blob_sha"] == EXPECTED_SOURCE_BLOB_SHA,
+        "audit: handler source blob is not the pinned blob",
+    )
+    _require(
+        surface["payload_builder_blob_sha"] == EXPECTED_PAYLOAD_BUILDER_BLOB_SHA,
+        "audit: payload builder source blob is not the pinned blob",
+    )
 
     for link in audit["source_links"]:
         _require(PINNED_SHA in link, "audit: source link is not pinned")
-    for evidence_key in ("source_blob_sha", "payload_builder_blob_sha"):
-        _require(
-            len(surface[evidence_key]) == 40,
-            f"audit: {evidence_key} is not a full blob SHA",
-        )
+
+
+def load_audit() -> dict[str, Any]:
+    audit = load_json(AUDIT_PATH)
+    validate_audit(audit)
     return audit
+
+
+def _validate_redaction(value: Any, path: str = "fixture") -> None:
+    """Reject credential material and sensitive-key markers recursively.
+
+    The fixture rules prohibit credentials, cookies, tickets, ticket fragments,
+    live transcripts, hostnames, tokens, secrets, provider data, and user data.
+    Key-based checks catch labels even when a synthetic value looks harmless;
+    value patterns catch pasted bearer/basic material and common credential
+    prefixes without rejecting ordinary provider/model identifiers.
+    """
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            _require(isinstance(key, str), f"{path}: object keys must be strings")
+            normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+            for marker in FORBIDDEN_KEY_MARKERS:
+                normalized_marker = re.sub(r"[^a-z0-9]", "", marker.lower())
+                _require(
+                    normalized_marker not in normalized_key,
+                    f"{path}.{key}: prohibited sensitive key marker {marker!r}",
+                )
+            _validate_redaction(child, f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            _validate_redaction(child, f"{path}[{index}]")
+        return
+    if isinstance(value, str):
+        for pattern in FORBIDDEN_VALUE_PATTERNS:
+            _require(
+                pattern.search(value) is None,
+                f"{path}: prohibited credential or sensitive value marker",
+            )
 
 
 def _result_is_valid(result: Any) -> bool:
@@ -105,7 +177,7 @@ def _result_is_valid(result: Any) -> bool:
             return False
         if not all(isinstance(model, str) for model in row["models"]):
             return False
-        if "total_models" in row and not isinstance(row["total_models"], int):
+        if "total_models" in row and type(row["total_models"]) is not int:
             return False
     return True
 
@@ -131,6 +203,26 @@ def validate_fixture(fixture: dict[str, Any], audit: dict[str, Any]) -> None:
     _require(response.get("jsonrpc") == "2.0", f"{case}: response is not JSON-RPC 2.0")
     _require(request.get("id") == response.get("id"), f"{case}: response id mismatch")
     _require(expected.get("classification") == case, f"{case}: wrong classification")
+    _validate_redaction(fixture)
+
+    params = request.get("params")
+    _require(isinstance(params, dict), f"{case}: params must be an object")
+    allowed_parameters = set(audit["fixture_surface"]["request_parameters"])
+    parameter_keys = set(params)
+    _require(
+        parameter_keys <= allowed_parameters,
+        f"{case}: request contains invented model.options parameters",
+    )
+    expected_parameter_keys = expected.get("request_parameter_keys")
+    _require(
+        isinstance(expected_parameter_keys, list)
+        and all(isinstance(key, str) for key in expected_parameter_keys),
+        f"{case}: exact request parameter keys are required",
+    )
+    _require(
+        parameter_keys == set(expected_parameter_keys),
+        f"{case}: request parameter keys do not match the frozen contract",
+    )
 
     operation = audit["fixture_surface"]["operation"]
     request_method = request.get("method")
@@ -200,9 +292,6 @@ def validate_fixture(fixture: dict[str, Any], audit: dict[str, Any]) -> None:
         _require(expected.get("usable") is False, f"{case}: negative control became usable")
         _require(expected.get("fail_closed") is True, f"{case}: negative control was not fail-closed")
 
-    encoded = json.dumps(fixture, sort_keys=True).lower()
-    for marker in SENSITIVE_MARKERS:
-        _require(marker not in encoded, f"{case}: prohibited marker {marker!r} present")
 
 
 def load_fixtures() -> list[dict[str, Any]]:
@@ -252,6 +341,54 @@ class ModelOptionsFixtureTests(unittest.TestCase):
         forged_audit["operation_present"] = False
         with self.assertRaises(ContractError):
             validate_fixture(self.by_case["present"], forged_audit)
+
+    def test_request_parameter_contract_rejects_missing_parameter(self) -> None:
+        forged_fixture = copy.deepcopy(self.by_case["present"])
+        forged_fixture["request"]["params"].pop("refresh")
+        with self.assertRaises(ContractError):
+            validate_fixture(forged_fixture, self.audit)
+
+    def test_request_parameter_contract_rejects_invented_parameter(self) -> None:
+        forged_fixture = copy.deepcopy(self.by_case["present"])
+        forged_fixture["request"]["params"]["unexpected"] = False
+        with self.assertRaises(ContractError):
+            validate_fixture(forged_fixture, self.audit)
+
+    def test_boolean_total_models_is_rejected(self) -> None:
+        forged_fixture = copy.deepcopy(self.by_case["present"])
+        forged_fixture["response"]["result"]["providers"][0]["total_models"] = True
+        with self.assertRaises(ContractError):
+            validate_fixture(forged_fixture, self.audit)
+
+    def test_sensitive_keys_and_values_are_rejected(self) -> None:
+        validate_fixture(self.by_case["present"], self.audit)
+
+        for key in ("token", "credential", "auth", "api_key", "cookie", "secret"):
+            with self.subTest(key=key):
+                forged_fixture = copy.deepcopy(self.by_case["present"])
+                forged_fixture["response"]["result"][key] = "synthetic-marker"
+                with self.assertRaises(ContractError):
+                    validate_fixture(forged_fixture, self.audit)
+
+        for value in (
+            "Bearer synthetic-marker",
+            "sk-synthetic-marker",
+            "access_token",
+            "api_key",
+        ):
+            with self.subTest(value=value):
+                forged_fixture = copy.deepcopy(self.by_case["present"])
+                forged_fixture["request"]["params"]["session_id"] = value
+                with self.assertRaises(ContractError):
+                    validate_fixture(forged_fixture, self.audit)
+
+    def test_source_blob_hashes_must_match_exact_pinned_values(self) -> None:
+        for evidence_key in ("source_blob_sha", "payload_builder_blob_sha"):
+            with self.subTest(evidence_key=evidence_key):
+                forged_audit = copy.deepcopy(self.audit)
+                forged_audit["fixture_surface"][evidence_key] = "0" * 40
+                with self.assertRaises(ContractError):
+                    validate_audit(forged_audit)
 
 
 def validate_set_for_baseline(audit: dict[str, Any], fixtures: list[dict[str, Any]]) -> float:

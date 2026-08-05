@@ -26,6 +26,7 @@
   },
   "expected": {
     "classification": "empty",
+    "request_parameter_keys": ["explicit_only"],
     "usable": false,
     "fail_closed": true,
     "reason": "no-options-available"

@@ -23,6 +23,7 @@
   },
   "expected": {
     "classification": "absent",
+    "request_parameter_keys": [],
     "usable": false,
     "fail_closed": true,
     "reason": "operation-not-proven"

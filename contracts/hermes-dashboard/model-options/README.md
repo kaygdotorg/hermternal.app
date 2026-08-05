@@ -16,8 +16,10 @@ The pinned Dashboard also exposes `GET /api/model/options` as a REST equivalent.
 ## Observable contract frozen for fixtures
 
 - **Request method:** `model.options`.
-- **Request flags:** `session_id`, `explicit_only`, `include_unconfigured`, and `refresh` are the source-defined inputs used by the handler.
-- **Response shape:** the result is an object with source-defined `providers`, `model`, and `provider` fields. Provider row fields remain source-defined; the fixtures assert only the list and active-selection semantics needed here.
+- **Request flags:** `session_id`, `explicit_only`, `include_unconfigured`, and `refresh` are the source-defined inputs used by the handler. The present fixture freezes all four keys; each negative control records its exact expected key set, and invented or missing keys fail validation.
+- **Response shape:** the result is an object with source-defined `providers`, `model`, and `provider` fields. Provider row fields remain source-defined; the fixtures assert only the list and active-selection semantics needed here. `total_models` is an integer when present; JSON booleans are rejected even though Python treats them as integers.
+- **Source identity:** the validator binds the handler and shared-builder Git blob IDs to the exact pinned values in `source-audit.json`, not merely to a 40-character SHA shape.
+- **Redaction:** recursive fixture validation rejects sensitive key markers and credential material named by [`contracts/fixtures/README.md`](../../fixtures/README.md), while ordinary synthetic provider and model identifiers remain valid.
 - **Option source:** `build_model_options_payload`, which delegates to the source inventory and applies picker-specific behavior. The client must not replace it with an invented provider list or model list.
 - **Empty result:** `{ "providers": [], "model": "", "provider": "" }` is valid evidence that no options are available. It is fail-closed, not permission to guess a provider or fallback model.
 - **Malformed, absent, or unknown results:** fail closed and preserve the last verified source evidence. No retry or alternate method is encoded by these fixtures.
