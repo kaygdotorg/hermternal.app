@@ -42,7 +42,7 @@ The browser MUST:
 - allow server-managed refresh material to remain inside the protected `HttpOnly` provider cookie, but never read, copy, export, or serialise it from JavaScript;
 - avoid storing a password, reusable credential, access token, refresh token, ticket, or provider state in `localStorage`, `sessionStorage`, IndexedDB, a navigable URL, URL fragment, browser history, or source control;
 - for a reviewed OAuth or OIDC provider, validate the callback state against the server-managed pending state; for the pinned Nous OAuth browser flow, require the provider exchange to validate the PKCE verifier. The username/password path for a `supports_password: true` provider does not create OAuth state or PKCE;
-- apply a provider-specific OIDC `nonce` requirement only when the compatibility record covers it. The pinned Nous browser flow does not expose a separate `nonce`, so Hermternal MUST NOT invent a `nonce` requirement for that provider;
+- apply a provider-specific OIDC `nonce` requirement only when the compatibility record covers it. The pinned Nous browser flow does not expose a separate `nonce`, so Hermternal MUST NOT invent a `nonce` requirement for that provider. Hermternal MUST NOT impose an unscoped global nonce requirement; a positive nonce rule must name its reviewed provider scope and compatibility condition;
 - return only to the validated same-origin application target;
 - clear pending navigation state after success, cancellation, failure, or logout.
 
@@ -60,6 +60,10 @@ At this revision, for the pinned Nous browser OAuth flow:
 - `hermes_cli/dashboard_auth/routes.py:auth_callback` fails closed for a missing PKCE cookie, provider cancellation/error, a missing or mismatched callback state, or a provider `InvalidCodeError`. It passes the stored `code_verifier` to `complete_login`; a rejected code or verifier does not issue a session cookie.
 - `plugins/dashboard_auth/nous/__init__.py:NousDashboardAuthProvider.start_login` builds the outbound authorization parameter map with `state`, `code_challenge`, and `code_challenge_method=S256`. Its cookie payload contains `state` and `verifier`; its `complete_login` sends `code_verifier` to the token endpoint.
 - No separate OAuth/OIDC `nonce` is exposed or required by this pinned Nous flow. This does not override reviewed OIDC nonce semantics for another provider. Hermternal MUST NOT add nonce validation or claim nonce support for a provider that does not expose it.
+
+The machine-readable audit uses an exact provider-scoped nonce policy: the pinned Nous scope has no required or exposed nonce, the global requirement is false, and a reviewed OIDC provider may require a nonce only when its compatibility record says so. No unscoped global positive nonce requirement is allowed.
+
+The pinned failure semantics are exact: a missing PKCE cookie rejects the callback; cancellation or provider error rejects without a session; missing or mismatched state rejects before exchange; code or PKCE rejection and `InvalidCodeError` reject without a session; a malformed callback fails closed without a session; and provider-unreachable during login start returns the pinned provider-unreachable error. Retry starts a fresh login attempt. These claims are checked against ordered markers in the commit-pinned route excerpt.
 
 A successful OAuth callback issues the provider-managed session cookie and clears the PKCE cookie. Cancellation and other callback failures do not create a session; a fresh login attempt is required. The provider's short-lived PKCE cookie remains server-managed and must never be copied into browser-readable storage.
 

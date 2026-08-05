@@ -39,6 +39,202 @@ REQUIRED_CASES = {
     "cancellation",
     "malformed-callback",
 }
+CASES_ROOT_KEYS = frozenset(
+    {"fixture_id", "source_sha", "contract", "provider", "provider_mode", "cases", "synthetic_only"}
+)
+AUDIT_ROOT_KEYS = frozenset(
+    {
+        "fixture_id",
+        "contract",
+        "flow",
+        "source",
+        "requirements",
+        "failure_semantics",
+        "redaction",
+        "synthetic_only",
+        "network_access",
+        "apple_behavior",
+        "superdesign_output",
+    }
+)
+REQUIREMENTS_KEYS = frozenset({"scope", "state", "pkce", "nonce", "password_provider"})
+STATE_REQUIREMENT_KEYS = frozenset({"required", "comparison"})
+PKCE_REQUIREMENT_KEYS = frozenset({"required", "applies_to", "method", "comparison"})
+NONCE_REQUIREMENT_KEYS = frozenset(
+    {"policy", "global_requirement", "positive_requirements_require_compatibility_scope", "provider_scopes"}
+)
+NONCE_GLOBAL_KEYS = frozenset({"required", "scope"})
+NONCE_PROVIDER_SCOPE_KEYS = frozenset({"provider", "scope", "required", "condition", "exposed"})
+PASSWORD_REQUIREMENT_KEYS = frozenset(
+    {"supports_password", "oauth_state_required", "pkce_required", "reason"}
+)
+FAILURE_SEMANTICS_KEYS = frozenset(
+    {
+        "missing_pkce_cookie",
+        "missing_or_mismatched_state",
+        "provider_cancellation",
+        "provider_error",
+        "pkce_or_code_rejection",
+        "malformed_callback",
+        "invalid_code_error",
+        "provider_unreachable",
+        "retry",
+    }
+)
+FAILURE_ENTRY_KEYS = frozenset({"outcome", "source_ref", "markers"})
+REDACTION_KEYS = frozenset(
+    {
+        "synthetic_cookie_shaped_values",
+        "public_source_urls",
+        "live_secrets",
+        "live_cookie_contents",
+        "live_host_data",
+        "transcripts",
+        "user_data",
+    }
+)
+
+# The expected matrix is independent of each fixture's self-reported outcome.
+# This prevents a case from changing its status, reason, exchange, or cleanup
+# result without changing the regression contract as well.
+EXPECTED_OUTCOME_MATRIX = {
+    "success": {
+        "expected": {
+            "status": 302,
+            "reason": "login_success",
+            "session_cookie_issued": True,
+            "pkce_cookie": "cleared",
+            "separate_nonce_required": False,
+        },
+        "provider_exchange": {"called": True, "code_verifier": "cookie", "verifier_result": "accepted"},
+    },
+    "state-mismatch": {
+        "expected": {
+            "status": 400,
+            "reason": "state_mismatch",
+            "session_cookie_issued": False,
+            "pkce_cookie": "retained_until_ttl",
+            "separate_nonce_required": False,
+        },
+        "provider_exchange": {"called": False, "code_verifier": None, "verifier_result": "not_attempted"},
+    },
+    "missing-state": {
+        "expected": {
+            "status": 400,
+            "reason": "state_mismatch",
+            "session_cookie_issued": False,
+            "pkce_cookie": "retained_until_ttl",
+            "separate_nonce_required": False,
+        },
+        "provider_exchange": {"called": False, "code_verifier": None, "verifier_result": "not_attempted"},
+    },
+    "pkce-failure": {
+        "expected": {
+            "status": 400,
+            "reason": "invalid_code_or_pkce",
+            "session_cookie_issued": False,
+            "pkce_cookie": "retained_until_ttl",
+            "separate_nonce_required": False,
+        },
+        "provider_exchange": {"called": True, "code_verifier": "cookie", "verifier_result": "rejected"},
+    },
+    "cancellation": {
+        "expected": {
+            "status": 400,
+            "reason": "idp_error",
+            "session_cookie_issued": False,
+            "pkce_cookie": "retained_until_ttl",
+            "separate_nonce_required": False,
+        },
+        "provider_exchange": {"called": False, "code_verifier": None, "verifier_result": "not_attempted"},
+    },
+    "malformed-callback": {
+        "expected": {
+            "status": 400,
+            "reason": "invalid_code_or_pkce",
+            "session_cookie_issued": False,
+            "pkce_cookie": "retained_until_ttl",
+            "separate_nonce_required": False,
+        },
+        "provider_exchange": {
+            "called": True,
+            "code_verifier": "cookie",
+            "verifier_result": "rejected_empty_code",
+        },
+    },
+}
+
+# Failure claims are independently pinned to source markers. The JSON copy is
+# validated against this manifest, so changing a prose outcome or marker alone
+# cannot make an unsupported failure path appear source-backed.
+EXPECTED_FAILURE_SEMANTICS = {
+    "missing_pkce_cookie": {
+        "outcome": "reject callback",
+        "source_ref": "hermes_cli/dashboard_auth/routes.py",
+        "markers": ("if not pkce_raw:", 'detail="Missing PKCE state cookie"'),
+    },
+    "missing_or_mismatched_state": {
+        "outcome": "reject callback before provider exchange",
+        "source_ref": "hermes_cli/dashboard_auth/routes.py",
+        "markers": (
+            "if not state or state != expected_state:",
+            'detail="OAuth state mismatch (CSRF check failed)"',
+            "p.complete_login(",
+        ),
+    },
+    "provider_cancellation": {
+        "outcome": "reject callback without a session cookie",
+        "source_ref": "hermes_cli/dashboard_auth/routes.py",
+        "markers": ("if error:", 'detail=f"OAuth error from provider: {error} ({error_description})"'),
+    },
+    "provider_error": {
+        "outcome": "reject callback without a session cookie",
+        "source_ref": "hermes_cli/dashboard_auth/routes.py",
+        "markers": (
+            "if error:",
+            "raise HTTPException(",
+            'detail=f"OAuth error from provider: {error} ({error_description})"',
+        ),
+    },
+    "pkce_or_code_rejection": {
+        "outcome": "reject callback without a session cookie",
+        "source_ref": "hermes_cli/dashboard_auth/routes.py",
+        "markers": (
+            "code_verifier=verifier,",
+            "except InvalidCodeError as e:",
+            'detail=f"Invalid code: {e}"',
+        ),
+    },
+    "malformed_callback": {
+        "outcome": "fail closed without a session cookie",
+        "source_ref": "hermes_cli/dashboard_auth/routes.py",
+        "markers": ('code: str = ""', "session = p.complete_login(", "except InvalidCodeError as e:"),
+    },
+    "invalid_code_error": {
+        "outcome": "reject callback without a session cookie",
+        "source_ref": "hermes_cli/dashboard_auth/routes.py",
+        "markers": (
+            "except InvalidCodeError as e:",
+            "status_code=400",
+            'detail=f"Invalid code: {e}"',
+        ),
+    },
+    "provider_unreachable": {
+        "outcome": "fail login start with provider-unreachable error",
+        "source_ref": "hermes_cli/dashboard_auth/routes.py",
+        "markers": (
+            "except ProviderError as e:",
+            'reason="provider_unreachable"',
+            "status_code=503",
+            'detail=f"Provider unreachable: {e}"',
+        ),
+    },
+    "retry": {
+        "outcome": "start a fresh login attempt",
+        "source_ref": None,
+        "markers": (),
+    },
+}
 
 # These values are a separately reviewed provenance manifest, not values read
 # from source_audit.json. The blob IDs are immutable Git objects from the
@@ -165,20 +361,47 @@ SYNTHETIC_CLIENT_ID = re.compile(r"^fixture-client(?:-[a-z0-9]+)*$")
 SYNTHETIC_REDIRECT_URI = re.compile(r"^fixture-redirect-uri(?:-[a-z0-9]+)*$")
 SYNTHETIC_SCOPE = re.compile(r"^fixture-scope(?:-[a-z0-9]+)*$")
 CODE_CHALLENGE = re.compile(r"^[A-Za-z0-9_-]{43}$")
-NONCE_MODAL_POSITIVE = re.compile(r"\b(?:MUST|SHOULD)\b(?!\s+NOT\b)", re.IGNORECASE)
-NONCE_ACTION = re.compile(
-    r"\b(?:apply|accept|check|enforce|include|require|use|validate|verify)\w*\b"
-    r"[^.!?;\n]{0,100}\bnonce\b",
+NONCE_POSITIVE = re.compile(
+    r"(?:\b(?:must|should|apply|accept|check|require(?:s|d)?|enforce(?:s|d)?|include(?:s|d)?|"
+    r"use(?:s|d)?|validate(?:s|d)?|verify(?:s|ied)?|need(?:s|ed)?|"
+    r"mandatory|required|compulsory|requirement)\b[^.!?;\n]{0,120}\bnonce\b|"
+    r"\bnonce\b[^.!?;\n]{0,120}\b(?:must|should|require(?:s|d)?|"
+    r"enforce(?:s|d)?|include(?:s|d)?|use(?:s|d)?|validate(?:s|d)?|"
+    r"verify(?:s|ied)?|need(?:s|ed)?|mandatory|required|compulsory|"
+    r"requirement)\b)",
     re.IGNORECASE,
 )
 NONCE_NEGATION = re.compile(
-    r"\b(?:no|not|never|without|does\s+not|do\s+not|isn't|aren't)\b",
+    r"\b(?:no|not|never|without|does\s+not|do\s+not|isn't|aren't|unsupported|"
+    r"reject(?:s|ed|ion)?|failure|absent)\b",
     re.IGNORECASE,
 )
 NONCE_SCOPE = re.compile(
     r"\b(?:provider-specific|reviewed(?:[- ]provider)?|compatibility\s+record|"
     r"pinned\s+Nous|only\s+when)\b",
     re.IGNORECASE,
+)
+NONCE_GLOBAL = re.compile(
+    r"\b(?:global(?:ly)?|regardless|unconditionally|always|universally)\b|"
+    r"\b(?:all|every|each|any)\b[^.!?;\n]{0,80}\b(?:provider|callback|flow|client|request|authorization|login)\b|"
+    r"\b(?:all|every|each|any)\s+providers?\b",
+    re.IGNORECASE,
+)
+SENSITIVE_FIELD = re.compile(
+    r"^(?:access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|"
+    r"cookie[_ -]?value|api[_ -]?key|authorization|bearer|password)$",
+    re.IGNORECASE,
+)
+SECRET_VALUE_PATTERNS = (
+    re.compile(r"(?:ghp_live_|github_pat_|sk_live_|xox[baprs]-)[A-Za-z0-9_=-]+", re.IGNORECASE),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE),
+    re.compile(r"-----BEGIN\s+(?:RSA|EC|OPENSSH|PRIVATE)\s+KEY-----", re.IGNORECASE),
+    re.compile(
+        r"\b(?:access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|cookie[_ -]?value)"
+        r"\s*[:=]\s*[^\s,}]+",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -194,6 +417,47 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"fixture root must be an object: {path}")
     return value
+
+
+def require_exact_keys(value: Any, expected: frozenset[str], label: str) -> dict[str, Any]:
+    require(isinstance(value, dict), f"{label} must be an object")
+    require(set(value) == expected, f"{label} keys changed")
+    return value
+
+
+def validate_no_live_secrets(
+    value: Any,
+    path: str = "$",
+    *,
+    scan_keys: bool = True,
+    scan_assignments: bool = True,
+) -> None:
+    """Walk every nested fixture value, including lists and mapping keys."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_path = f"{path}.{key}"
+            if scan_keys:
+                require(not SENSITIVE_FIELD.fullmatch(str(key)), f"sensitive fixture field: {key_path}")
+            validate_no_live_secrets(
+                child,
+                key_path,
+                scan_keys=scan_keys,
+                scan_assignments=scan_assignments,
+            )
+        return
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            validate_no_live_secrets(
+                child,
+                f"{path}[{index}]",
+                scan_keys=scan_keys,
+                scan_assignments=scan_assignments,
+            )
+        return
+    if isinstance(value, str):
+        patterns = SECRET_VALUE_PATTERNS if scan_assignments else SECRET_VALUE_PATTERNS[:-1]
+        for pattern in patterns:
+            require(pattern.search(value) is None, f"live secret-shaped fixture value at {path}")
 
 
 def pkce_challenge(verifier: str) -> str:
@@ -302,6 +566,127 @@ def validate_source_observations(
                 assert_markers_in_order(excerpts[excerpt_key], markers, excerpt_key)
 
 
+def validate_nonce_policy(requirements: dict[str, Any]) -> None:
+    """Require a structured provider-scoped policy, never an implicit global one."""
+    nonce = require_exact_keys(requirements.get("nonce"), NONCE_REQUIREMENT_KEYS, "requirements.nonce")
+    require(nonce["policy"] == "provider_scoped", "nonce policy must remain provider-scoped")
+    require(nonce["positive_requirements_require_compatibility_scope"] is True, "nonce scope guard disabled")
+
+    global_requirement = require_exact_keys(
+        nonce["global_requirement"], NONCE_GLOBAL_KEYS, "requirements.nonce.global_requirement"
+    )
+    require(global_requirement["required"] is False, "unscoped global nonce requirement is forbidden")
+    require(global_requirement["scope"] is None, "global nonce scope must be null")
+
+    scopes = nonce["provider_scopes"]
+    require(isinstance(scopes, list), "nonce provider scopes must be a list")
+    require(len(scopes) == 2, "nonce provider scope count changed")
+    for index, scope in enumerate(scopes):
+        require_exact_keys(scope, NONCE_PROVIDER_SCOPE_KEYS, f"requirements.nonce.provider_scopes[{index}]")
+        require(isinstance(scope["provider"], str), "nonce provider name must be a string")
+        require(isinstance(scope["scope"], str) and scope["scope"], "nonce provider scope must be named")
+        require(isinstance(scope["required"], bool), "nonce provider requirement must be boolean")
+        require(scope["condition"] is None or isinstance(scope["condition"], str), "nonce condition must be nullable text")
+        require(isinstance(scope["exposed"], bool), "nonce exposure flag must be boolean")
+
+    by_provider = {scope["provider"]: scope for scope in scopes}
+    require(set(by_provider) == {"pinned Nous", "reviewed OIDC provider"}, "nonce provider scopes changed")
+    nous = by_provider["pinned Nous"]
+    require(nous == {
+        "provider": "pinned Nous",
+        "scope": "pinned Nous browser OAuth flow only",
+        "required": False,
+        "condition": None,
+        "exposed": False,
+    }, "pinned Nous nonce policy changed")
+    oidc = by_provider["reviewed OIDC provider"]
+    require(oidc == {
+        "provider": "reviewed OIDC provider",
+        "scope": "reviewed OIDC compatibility record",
+        "required": True,
+        "condition": "only when compatibility record says so",
+        "exposed": True,
+    }, "reviewed OIDC nonce policy changed")
+
+
+def validate_failure_semantics(audit: dict[str, Any], excerpts: dict[str, str]) -> None:
+    semantics = require_exact_keys(audit.get("failure_semantics"), FAILURE_SEMANTICS_KEYS, "failure_semantics")
+    for key, expected in EXPECTED_FAILURE_SEMANTICS.items():
+        entry = require_exact_keys(semantics[key], FAILURE_ENTRY_KEYS, f"failure_semantics.{key}")
+        require(entry["outcome"] == expected["outcome"], f"failure outcome changed: {key}")
+        require(entry["source_ref"] == expected["source_ref"], f"failure source changed: {key}")
+        require(isinstance(entry["markers"], list), f"failure markers must be a list: {key}")
+        require(tuple(entry["markers"]) == expected["markers"], f"failure markers changed: {key}")
+        if expected["source_ref"] is None:
+            require(not entry["markers"], f"unbound failure markers: {key}")
+        else:
+            require(expected["source_ref"] == "hermes_cli/dashboard_auth/routes.py", f"unexpected failure source: {key}")
+            assert_markers_in_order(excerpts["routes"], expected["markers"], f"failure_semantics.{key}")
+
+
+def validate_audit_root(audit: dict[str, Any], excerpts: dict[str, str]) -> None:
+    validate_no_live_secrets(audit)
+    require_exact_keys(audit, AUDIT_ROOT_KEYS, "source_audit root")
+    require(audit["fixture_id"] == "oauth-browser-source-audit-199", "audit fixture ID changed")
+    require(audit["contract"] == "dashboard-v0.0.1", "audit contract changed")
+    require(audit["flow"] == "browser-oauth", "audit flow changed")
+    require(audit["synthetic_only"] is True, "audit must remain synthetic")
+    require(audit["network_access"] is False, "audit network access must remain disabled")
+    require(audit["apple_behavior"] is False, "audit Apple behavior must remain disabled")
+    require(audit["superdesign_output"] is False, "audit must not include superdesign output")
+
+    requirements = require_exact_keys(audit["requirements"], REQUIREMENTS_KEYS, "requirements")
+    require(requirements["scope"] == "pinned Nous browser OAuth flow only", "requirements scope changed")
+    state = require_exact_keys(requirements["state"], STATE_REQUIREMENT_KEYS, "requirements.state")
+    require(state["required"] is True, "state requirement disabled")
+    require(
+        state["comparison"] == "callback state must equal the state stored in the server-managed PKCE cookie",
+        "state comparison changed",
+    )
+    pkce = require_exact_keys(requirements["pkce"], PKCE_REQUIREMENT_KEYS, "requirements.pkce")
+    require(pkce["required"] is True, "PKCE requirement disabled")
+    require(pkce["applies_to"] == "reviewed OAuth or OIDC browser providers only", "PKCE scope changed")
+    require(pkce["method"] == "S256", "PKCE method changed")
+    require(
+        pkce["comparison"] == "the provider exchange receives the verifier paired with the authorization request challenge",
+        "PKCE comparison changed",
+    )
+    validate_nonce_policy(requirements)
+    password = require_exact_keys(requirements["password_provider"], PASSWORD_REQUIREMENT_KEYS, "requirements.password_provider")
+    require(password["supports_password"] is True, "password capability changed")
+    require(password["oauth_state_required"] is False, "password provider inherited OAuth state")
+    require(password["pkce_required"] is False, "password provider inherited PKCE")
+    require(password["reason"] == "auth_login returns before provider.start_login for a password provider", "password branch reason changed")
+
+    validate_source_observations(audit, excerpts)
+    validate_failure_semantics(audit, excerpts)
+    redaction = require_exact_keys(audit["redaction"], REDACTION_KEYS, "redaction")
+    require(all(isinstance(value, bool) for value in redaction.values()), "redaction flags must be boolean")
+    require(redaction["synthetic_cookie_shaped_values"] is True, "synthetic cookie evidence disabled")
+    require(redaction["public_source_urls"] is True, "public source evidence disabled")
+    for key in ("live_secrets", "live_cookie_contents", "live_host_data", "transcripts", "user_data"):
+        require(redaction[key] is False, f"redaction boundary changed: {key}")
+
+
+def validate_cases_root(cases: dict[str, Any]) -> None:
+    validate_no_live_secrets(cases)
+    require_exact_keys(cases, CASES_ROOT_KEYS, "cases root")
+    require(cases["fixture_id"] == "oauth-browser-source-audit-199", "case fixture ID changed")
+    require(cases["source_sha"] == PINNED_SHA, "case source commit changed")
+    require(cases["contract"] == "dashboard-v0.0.1", "case contract changed")
+    require(cases["provider"] == "synthetic-oauth", "case provider changed")
+    require(cases["provider_mode"] == "reviewed_oauth_browser", "case provider mode changed")
+    require(cases["synthetic_only"] is True, "cases must remain synthetic")
+    require(isinstance(cases["cases"], list), "cases must be a list")
+    ids = [case.get("id") if isinstance(case, dict) else None for case in cases["cases"]]
+    require(set(ids) == REQUIRED_CASES, "case ID set changed")
+    require(len(ids) == len(set(ids)), "duplicate case ID")
+    for case in cases["cases"]:
+        require(isinstance(case, dict), "fixture case must be an object")
+        validate_synthetic_case_values(case)
+        validate_oauth_case(case)
+
+
 def require_synthetic(value: Any, pattern: re.Pattern[str], label: str) -> None:
     require(isinstance(value, str), f"{label} must be a string")
     require(pattern.fullmatch(value) is not None, f"{label} is not synthetic: {value!r}")
@@ -345,18 +730,20 @@ def validate_synthetic_case_values(case: dict[str, Any]) -> None:
     require_synthetic(params["code_challenge"], CODE_CHALLENGE, "authorization.params.code_challenge")
     require(params["code_challenge_method"] == "S256", "code_challenge_method changed")
 
-    callback = request["callback"]
-    require(set(callback).issubset({"code", "state", "error", "error_description"}), "callback fields changed")
-    require(set(callback).issuperset({"code", "state"}), "callback must include code and state")
+    callback = case["request"]["callback"]
+    expected_callback_keys = {"code", "state"}
+    if case["id"] == "cancellation":
+        expected_callback_keys |= {"error", "error_description"}
+    require(set(callback) == expected_callback_keys, f"callback fields changed: {case['id']}")
     require(callback["code"] == "" or SYNTHETIC_CODE.fullmatch(callback["code"]) is not None, "callback.code is not synthetic")
     require(callback["state"] == "" or SYNTHETIC_STATE.fullmatch(callback["state"]) is not None, "callback.state is not synthetic")
     if "error" in callback:
-        require(callback["error"] in {"", "access_denied"}, "callback.error is not an allowed protocol value")
+        require(callback["error"] == "access_denied", "callback.error is not an allowed protocol value")
+        require("error_description" in callback, "provider error description is required")
     if "error_description" in callback:
         require_synthetic(callback["error_description"], SYNTHETIC_DESCRIPTION, "callback.error_description")
 
-    exchange = case["provider_exchange"]
-    require(set(exchange) == {"called", "code_verifier", "verifier_result"}, "provider exchange shape changed")
+    exchange = require_exact_keys(case["provider_exchange"], {"called", "code_verifier", "verifier_result"}, "provider_exchange")
     require(isinstance(exchange["called"], bool), "provider_exchange.called must be boolean")
     require(
         exchange["code_verifier"] is None
@@ -368,16 +755,24 @@ def validate_synthetic_case_values(case: dict[str, Any]) -> None:
         "provider_exchange.verifier_result changed",
     )
 
-    expected = case["expected"]
-    require(
-        set(expected) == {"status", "reason", "session_cookie_issued", "pkce_cookie", "separate_nonce_required"},
-        "expected case shape changed",
+    expected = require_exact_keys(
+        case["expected"],
+        {"status", "reason", "session_cookie_issued", "pkce_cookie", "separate_nonce_required"},
+        "expected",
     )
     require(expected["status"] in {302, 400}, "expected status changed")
     require(expected["reason"] in {"login_success", "state_mismatch", "invalid_code_or_pkce", "idp_error"}, "expected reason changed")
     require(isinstance(expected["session_cookie_issued"], bool), "expected session flag must be boolean")
     require(expected["pkce_cookie"] in {"cleared", "retained_until_ttl"}, "expected PKCE cookie state changed")
     require(isinstance(expected["separate_nonce_required"], bool), "expected nonce flag must be boolean")
+
+    matrix = EXPECTED_OUTCOME_MATRIX.get(case["id"])
+    require(matrix is not None, f"case is not in expected outcome matrix: {case['id']}")
+    require(expected == matrix["expected"], f"expected outcome changed: {case['id']}")
+    expected_exchange = dict(matrix["provider_exchange"])
+    if expected_exchange["code_verifier"] == "cookie":
+        expected_exchange["code_verifier"] = case["request"]["pkce_cookie"]["verifier"]
+    require(exchange == expected_exchange, f"expected provider exchange changed: {case['id']}")
 
 
 def validate_oauth_case(case: dict[str, Any]) -> None:
@@ -403,19 +798,16 @@ def validate_oauth_case(case: dict[str, Any]) -> None:
 
 
 def assert_nonce_policy_is_scoped(documentation: str) -> None:
-    """Reject positive nonce requirements unless their provider scope is explicit."""
+    """Reject every positive global nonce rule while allowing reviewed scopes."""
     clauses = re.split(r"[.!?;\n]+", documentation)
     for clause in clauses:
         if not re.search(r"\bnonce\b", clause, re.IGNORECASE):
             continue
-        positive_modal = NONCE_MODAL_POSITIVE.search(clause) is not None
-        positive_action = NONCE_ACTION.search(clause) is not None
-        if not (positive_modal or positive_action):
+        if NONCE_POSITIVE.search(clause) is None:
             continue
-        if positive_modal and re.search(r"\b(?:MUST|SHOULD)\b\s+NOT\b", clause, re.IGNORECASE):
+        if NONCE_NEGATION.search(clause):
             continue
-        if not positive_modal and NONCE_NEGATION.search(clause):
-            continue
+        require(NONCE_GLOBAL.search(clause) is None, f"global nonce requirement: {clause.strip()!r}")
         require(
             NONCE_SCOPE.search(clause) is not None,
             f"unscoped positive nonce requirement: {clause.strip()!r}",
@@ -431,18 +823,32 @@ class BrowserOAuthContractTests(unittest.TestCase):
         cls.excerpts = load_source_excerpts()
 
     def test_source_pin_and_audit_shape(self) -> None:
-        self.assertEqual(self.audit["contract"], "dashboard-v0.0.1")
-        self.assertEqual(self.audit["source"]["repository"], "NousResearch/hermes-agent")
-        self.assertEqual(self.audit["source"]["sha"], PINNED_SHA)
-        self.assertEqual(self.audit["source"]["tree_sha"], PINNED_TREE_SHA)
-        self.assertEqual(self.cases["source_sha"], PINNED_SHA)
-        self.assertTrue(self.audit["synthetic_only"])
-        self.assertFalse(self.audit["network_access"])
-        self.assertFalse(self.audit["apple_behavior"])
-        self.assertFalse(self.audit["superdesign_output"])
+        validate_audit_root(self.audit, self.excerpts)
+        validate_cases_root(self.cases)
+        validate_no_live_secrets(self.audit)
+        validate_no_live_secrets(self.cases)
+        validate_no_live_secrets(self.excerpts, scan_assignments=False)
 
-        paths = {ref["path"] for ref in self.audit["source"]["refs"]}
-        self.assertEqual(paths, {ref["path"] for ref in EXPECTED_SOURCE_REFS})
+    def test_root_and_nested_schema_mutations_are_rejected(self) -> None:
+        extra_case_root = copy.deepcopy(self.cases)
+        extra_case_root["unexpected"] = {"nested": True}
+        with self.assertRaises(AssertionError):
+            validate_cases_root(extra_case_root)
+
+        extra_audit_root = copy.deepcopy(self.audit)
+        extra_audit_root["unexpected"] = []
+        with self.assertRaises(AssertionError):
+            validate_audit_root(extra_audit_root, self.excerpts)
+
+        extra_nonce_scope = copy.deepcopy(self.audit)
+        extra_nonce_scope["requirements"]["nonce"]["provider_scopes"][0]["unexpected"] = False
+        with self.assertRaises(AssertionError):
+            validate_audit_root(extra_nonce_scope, self.excerpts)
+
+        extra_failure_field = copy.deepcopy(self.audit)
+        extra_failure_field["failure_semantics"]["provider_unreachable"]["unexpected"] = "x"
+        with self.assertRaises(AssertionError):
+            validate_audit_root(extra_failure_field, self.excerpts)
 
     def test_source_refs_are_exact_unique_and_pinned(self) -> None:
         validate_source_refs(self.audit)
@@ -519,13 +925,45 @@ class BrowserOAuthContractTests(unittest.TestCase):
         self.assertTrue(requirements["pkce"]["required"])
         self.assertEqual(requirements["pkce"]["method"], "S256")
         self.assertEqual(requirements["pkce"]["applies_to"], "reviewed OAuth or OIDC browser providers only")
-        self.assertEqual(requirements["nonce"]["policy"], "provider_scoped")
-        self.assertFalse(requirements["nonce"]["global_positive_requirement"])
-        self.assertTrue(requirements["nonce"]["positive_requirements_require_compatibility_scope"])
-        self.assertFalse(requirements["nonce"]["required"])
-        self.assertFalse(requirements["nonce"]["exposed_by_pinned_browser_flow"])
-        self.assertEqual(requirements["nonce"]["scope"], "pinned Nous browser OAuth flow only")
-        self.assertIn("may require nonce", requirements["nonce"]["reviewed_oidc_providers"])
+        validate_nonce_policy(requirements)
+        scopes = {scope["provider"]: scope for scope in requirements["nonce"]["provider_scopes"]}
+        self.assertFalse(scopes["pinned Nous"]["required"])
+        self.assertFalse(scopes["pinned Nous"]["exposed"])
+        self.assertTrue(scopes["reviewed OIDC provider"]["required"])
+        self.assertTrue(scopes["reviewed OIDC provider"]["exposed"])
+        self.assertEqual(scopes["reviewed OIDC provider"]["condition"], "only when compatibility record says so")
+
+    def test_nonce_policy_rejects_unscoped_global_mutations_and_allows_reviewed_scope(self) -> None:
+        unscoped = copy.deepcopy(self.audit)
+        unscoped["requirements"]["nonce"]["global_requirement"]["required"] = True
+        with self.assertRaises(AssertionError):
+            validate_nonce_policy(unscoped["requirements"])
+
+        unscoped_scope = copy.deepcopy(self.audit)
+        unscoped_scope["requirements"]["nonce"]["global_requirement"]["scope"] = "all providers"
+        with self.assertRaises(AssertionError):
+            validate_nonce_policy(unscoped_scope["requirements"])
+
+        reviewed = copy.deepcopy(self.audit)
+        validate_nonce_policy(reviewed["requirements"])
+
+        # The structured record is exact, but the prose guard still allows a
+        # provider-scoped OIDC requirement when its compatibility record names it.
+        assert_nonce_policy_is_scoped(
+            "A reviewed OIDC provider MUST require and validate a nonce only when its compatibility record says so."
+        )
+
+    def test_failure_semantics_are_exactly_pinned_to_route_markers(self) -> None:
+        validate_failure_semantics(self.audit, self.excerpts)
+        for key in EXPECTED_FAILURE_SEMANTICS:
+            mutated = copy.deepcopy(self.audit)
+            markers = mutated["failure_semantics"][key]["markers"]
+            if markers:
+                markers[0] = markers[0] + " mutated"
+            else:
+                mutated["failure_semantics"][key]["outcome"] += " mutated"
+            with self.assertRaises(AssertionError, msg=key):
+                validate_failure_semantics(mutated, self.excerpts)
 
     def test_password_provider_does_not_inherit_oauth_pkce(self) -> None:
         password = self.audit["requirements"]["password_provider"]
@@ -541,8 +979,19 @@ class BrowserOAuthContractTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_source_compatible_cases_validate_from_nested_inputs(self) -> None:
-        for case in self.cases["cases"]:
-            validate_oauth_case(case)
+        validate_cases_root(self.cases)
+
+    def test_expected_outcome_matrix_rejects_case_mutations(self) -> None:
+        for case_id in REQUIRED_CASES:
+            mutated = copy.deepcopy(self._case(case_id))
+            mutated["expected"]["status"] = 999
+            with self.assertRaises(AssertionError, msg=case_id):
+                validate_oauth_case(mutated)
+
+        exchange_mutation = copy.deepcopy(self._case("cancellation"))
+        exchange_mutation["provider_exchange"]["called"] = True
+        with self.assertRaises(AssertionError):
+            validate_oauth_case(exchange_mutation)
 
     def test_synthetic_value_schema_rejects_live_credential_shapes(self) -> None:
         mutations = (
@@ -659,19 +1108,47 @@ class BrowserOAuthContractTests(unittest.TestCase):
         for sentence in (
             "The client MUST enforce a nonce for every provider.",
             "The client MUST require a nonce for every provider.",
+            "Nonce is required for all providers.",
+            "Every OAuth provider MUST include a nonce.",
+            "A nonce MUST be present for each callback.",
+            "All browser flows require a nonce.",
+            "Nonce is required globally.",
+            "The nonce requirement applies universally.",
         ):
             mutated = self.documentation + "\n" + sentence + "\n"
             with self.assertRaises(AssertionError):
                 assert_nonce_policy_is_scoped(mutated)
 
+    def test_reviewed_provider_nonce_mutation_is_allowed(self) -> None:
+        for sentence in (
+            "A reviewed OIDC provider MUST validate a nonce when its compatibility record requires it.",
+            "A provider-specific OIDC flow SHOULD include a nonce only when compatibility record evidence requires it.",
+        ):
+            assert_nonce_policy_is_scoped(self.documentation + "\n" + sentence + "\n")
+
     def test_fixture_values_are_synthetic_and_redaction_is_explicit(self) -> None:
+        validate_no_live_secrets(self.audit)
+        validate_no_live_secrets(self.cases)
+        validate_no_live_secrets(self.excerpts, scan_assignments=False)
         serialized_cases = json.dumps(self.cases, sort_keys=True).lower()
         self.assertNotIn("http://", serialized_cases)
         self.assertNotIn("https://", serialized_cases)
         self.assertNotIn("@", serialized_cases)
-        self.assertNotIn("access_token", serialized_cases)
-        self.assertNotIn("refresh_token", serialized_cases)
-        self.assertNotIn("cookie_value", serialized_cases)
+
+        nested_audit_secret = copy.deepcopy(self.audit)
+        nested_audit_secret["requirements"]["nonce"]["provider_scopes"][1]["condition"] = "ghp_live_nested_fixture_secret"
+        with self.assertRaises(AssertionError):
+            validate_no_live_secrets(nested_audit_secret)
+
+        nested_case_secret = copy.deepcopy(self.cases)
+        nested_case_secret["cases"][0]["request"]["authorization_request"]["params"]["scope"] = "Bearer fixture_live_secret_value"
+        with self.assertRaises(AssertionError):
+            validate_no_live_secrets(nested_case_secret)
+
+        nested_excerpt_secret = copy.deepcopy(self.excerpts)
+        nested_excerpt_secret["routes"] += "\nAuthorization: Bearer fixture_live_secret_value\n"
+        with self.assertRaises(AssertionError):
+            validate_no_live_secrets(nested_excerpt_secret, scan_assignments=False)
 
         redaction = self.audit["redaction"]
         self.assertTrue(redaction["synthetic_cookie_shaped_values"])

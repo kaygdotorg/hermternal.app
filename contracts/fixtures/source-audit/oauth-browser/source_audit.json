@@ -63,12 +63,27 @@
     },
     "nonce": {
       "policy": "provider_scoped",
-      "global_positive_requirement": false,
+      "global_requirement": {
+        "required": false,
+        "scope": null
+      },
       "positive_requirements_require_compatibility_scope": true,
-      "required": false,
-      "exposed_by_pinned_browser_flow": false,
-      "scope": "pinned Nous browser OAuth flow only",
-      "reviewed_oidc_providers": "may require nonce only when their compatibility record says so"
+      "provider_scopes": [
+        {
+          "provider": "pinned Nous",
+          "scope": "pinned Nous browser OAuth flow only",
+          "required": false,
+          "condition": null,
+          "exposed": false
+        },
+        {
+          "provider": "reviewed OIDC provider",
+          "scope": "reviewed OIDC compatibility record",
+          "required": true,
+          "condition": "only when compatibility record says so",
+          "exposed": true
+        }
+      ]
     },
     "password_provider": {
       "supports_password": true,
@@ -78,12 +93,82 @@
     }
   },
   "failure_semantics": {
-    "missing_pkce_cookie": "reject callback",
-    "missing_or_mismatched_state": "reject callback before provider exchange",
-    "provider_cancellation": "reject callback without a session cookie",
-    "pkce_or_code_rejection": "reject callback without a session cookie",
-    "malformed_callback": "fail closed without a session cookie",
-    "retry": "start a fresh login attempt"
+    "missing_pkce_cookie": {
+      "outcome": "reject callback",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "if not pkce_raw:",
+        "detail=\"Missing PKCE state cookie\""
+      ]
+    },
+    "missing_or_mismatched_state": {
+      "outcome": "reject callback before provider exchange",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "if not state or state != expected_state:",
+        "detail=\"OAuth state mismatch (CSRF check failed)\"",
+        "p.complete_login("
+      ]
+    },
+    "provider_cancellation": {
+      "outcome": "reject callback without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "if error:",
+        "detail=f\"OAuth error from provider: {error} ({error_description})\""
+      ]
+    },
+    "provider_error": {
+      "outcome": "reject callback without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "if error:",
+        "raise HTTPException(",
+        "detail=f\"OAuth error from provider: {error} ({error_description})\""
+      ]
+    },
+    "pkce_or_code_rejection": {
+      "outcome": "reject callback without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "code_verifier=verifier,",
+        "except InvalidCodeError as e:",
+        "detail=f\"Invalid code: {e}\""
+      ]
+    },
+    "malformed_callback": {
+      "outcome": "fail closed without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "code: str = \"\"",
+        "session = p.complete_login(",
+        "except InvalidCodeError as e:"
+      ]
+    },
+    "invalid_code_error": {
+      "outcome": "reject callback without a session cookie",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "except InvalidCodeError as e:",
+        "status_code=400",
+        "detail=f\"Invalid code: {e}\""
+      ]
+    },
+    "provider_unreachable": {
+      "outcome": "fail login start with provider-unreachable error",
+      "source_ref": "hermes_cli/dashboard_auth/routes.py",
+      "markers": [
+        "except ProviderError as e:",
+        "reason=\"provider_unreachable\"",
+        "status_code=503",
+        "detail=f\"Provider unreachable: {e}\""
+      ]
+    },
+    "retry": {
+      "outcome": "start a fresh login attempt",
+      "source_ref": null,
+      "markers": []
+    }
   },
   "redaction": {
     "synthetic_cookie_shaped_values": true,

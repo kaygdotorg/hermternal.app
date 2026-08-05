@@ -18,20 +18,49 @@ The audit records typed source observations for the pinned revision:
 
 The source observations are checked against the supplied immutable excerpts in [`source_excerpts/`](source_excerpts/), their commit-pinned SHA-256 values, and the pinned Hermes Git tree/blob IDs. `source_audit.json` must contain exactly one reference for each expected path, with an exact path-to-excerpt and path-to-URL mapping. URLs are parsed and must use the public `github.com` host, the pinned commit, the expected path, and no userinfo, query, fragment, or path parameters. The validator does not treat `source_audit.json` metadata alone as source evidence.
 
-## Fixture cases
+## Structured nonce policy
+
+`source_audit.json` uses an exact recursive schema for nonce policy:
+
+- `global_requirement.required` is `false` and `global_requirement.scope` is `null`; a global positive nonce requirement is never valid.
+- `pinned Nous` has `required: false` and `exposed: false` for its pinned browser scope.
+- A `reviewed OIDC provider` may have `required: true` and `exposed: true` only under the named `reviewed OIDC compatibility record` condition.
+
+The documentation guard rejects positive nonce language with no provider scope and rejects global quantifiers such as “every provider”, “all providers”, or “each callback”. It allows a reviewed provider-scoped OIDC requirement. This prose check supplements, but does not replace, the exact structured policy validation.
+
+## Fixture cases and exact outcome matrix
 
 [`cases.json`](cases.json) covers exactly these callback outcomes for a reviewed OAuth browser provider:
 
-- success with matching callback state, matching outbound authorization state, and valid PKCE;
-- state mismatch;
-- missing callback state;
-- provider rejection of the code or PKCE verifier;
-- provider cancellation; and
-- a malformed callback with an empty code.
+| Case | Status | Reason | Provider exchange | Session cookie | PKCE cookie | Separate nonce |
+| --- | ---: | --- | --- | --- | --- | --- |
+| `success` | 302 | `login_success` | called; accepted verifier | issued | cleared | false |
+| `state-mismatch` | 400 | `state_mismatch` | not called | not issued | retained until TTL | false |
+| `missing-state` | 400 | `state_mismatch` | not called | not issued | retained until TTL | false |
+| `pkce-failure` | 400 | `invalid_code_or_pkce` | called; verifier rejected | not issued | retained until TTL | false |
+| `cancellation` | 400 | `idp_error` | not called | not issued | retained until TTL | false |
+| `malformed-callback` | 400 | `invalid_code_or_pkce` | called; empty code rejected | not issued | retained until TTL | false |
 
-The authorization parameters are nested under `authorization_request.params` to mirror the provider's outbound query map. The provider exchange records the exact `code_verifier` passed by the callback route. Every cookie, authorization parameter, callback value, and exchange value follows an explicit synthetic or protocol-literal schema; live-looking values such as `ghp_live_*` are rejected. Mutation regressions reject duplicate or misbound source refs, wrong URL paths, wrong nested state, wrong exchange verifier, live credential-shaped values, a nested nonce, or a false source observation.
+The validator compares every case against an independent expected outcome matrix. It rejects status, reason, exchange, or cleanup mutations even when the mutated values remain individually well-typed. The nested authorization parameters and provider exchange verifier are cross-checked against the cookie state and verifier.
 
-Failure cases fail closed: no session cookie is issued and the provider exchange is not treated as successful. The source clears the short-lived PKCE cookie on success; rejected callbacks do not create a session and require a fresh login attempt.
+## Failure semantics and source markers
+
+`failure_semantics` is an exact map. Every callback failure claim below is bound to ordered markers in the pinned `routes.py` excerpt; the retry instruction is explicitly unbound because it is client guidance rather than a source observation:
+
+- missing PKCE cookie: reject callback;
+- missing or mismatched state: reject before provider exchange;
+- cancellation and provider error parameters: reject without a session cookie;
+- code or PKCE rejection: reject without a session cookie;
+- malformed callback: fail closed without a session cookie;
+- `InvalidCodeError`: reject without a session cookie;
+- provider unreachable during login start: return the provider-unreachable error path;
+- retry: start a fresh login attempt.
+
+Changing an outcome, source reference, marker, or marker order fails validation. The `InvalidCodeError` markers also bind the empty-code malformed callback and the code/PKCE rejection path to the pinned 400 response.
+
+## Recursive schema and redaction checks
+
+Both JSON roots and every nested object used by the fixtures have exact key sets and type/value checks. The validator recursively walks all nested dictionaries, lists, keys, and string values in `cases.json` and `source_audit.json`. It rejects live credential-shaped values such as `ghp_live_*`, `github_pat_*`, `sk_live_*`, bearer values, cloud access-key shapes, private-key headers, token assignments, and sensitive field names. Public commit-pinned source URLs are allowed evidence; live secrets and live cookie contents are not.
 
 ## Validation
 
@@ -39,10 +68,11 @@ Run the standard-library test directly from the repository root:
 
 ```text
 python3 contracts/fixtures/source-audit/oauth-browser/test_oauth_browser.py
+python3 -O contracts/fixtures/source-audit/oauth-browser/test_oauth_browser.py
+python3 -m unittest discover -s contracts/fixtures/source-audit/oauth-browser -p 'test_oauth_browser.py'
+python3 -m py_compile contracts/fixtures/source-audit/oauth-browser/test_oauth_browser.py
 ```
 
 The test prints the measured fixture-validation duration and JSON artifact size as baseline evidence. These values are observations only; this issue does not define a performance threshold. The test is offline and deterministic apart from the reported wall-clock duration.
-
-The normative nonce policy is structured as provider-scoped data: there is no global positive nonce requirement, and a positive requirement must name the reviewed compatibility scope. The documentation guard rejects unscoped positive language such as `MUST enforce a nonce for every provider`.
 
 This fixture set is source-audit evidence, not production authentication code. Do not add live integration, Apple-specific behavior, `.superdesign/` output, or real provider material here.
