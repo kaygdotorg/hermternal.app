@@ -135,18 +135,20 @@ PTY logging redaction, and malformed input.
 [`test_route_allowlist.py`](test_route_allowlist.py) uses only Python's standard
 library. It rejects duplicate JSON object keys, `NaN`/`Infinity`/`-Infinity`,
 unknown schema keys, wrong leaf types, JSON booleans where integers are
-required, incoherent or stale baseline evidence, route widening, method
-mutation, source/provenance drift, credential-like redaction markers, and
-malformed inputs that would otherwise produce a traceback. Redaction scanning
-covers all three JSON documents and credential-shaped values in this README
-and the manifest. It can optionally verify the pinned Git commit/tree, recorded
-full-file SHA-256 digests, Git blob IDs resolved from the pinned
-`f5be9236e00ddf2f2a412697f267078fc4ee068e:path` objects, and canonical citation
-markers against an independently fetched source root. In pinned Git checkout
-mode, each blob is checked with `GIT_NO_REPLACE_OBJECTS=1` and
-`GIT_NO_LAZY_FETCH=1`, captured once with `git cat-file blob`, and then used for
-both digest and marker checks; mutable worktree files are not used for those
-claims. Missing, mismatched, non-blob, or unavailable objects are controlled
+required, excessive JSON nesting, incoherent or stale baseline evidence, route
+widening, method mutation, source/provenance drift, credential-like redaction
+markers, and malformed inputs that would otherwise produce a traceback.
+Redaction scanning covers all three JSON documents and credential-shaped values
+in this README and the manifest. It can optionally verify the pinned Git
+commit/tree, recorded full-file SHA-256 digests, Git blob IDs resolved from the
+pinned `f5be9236e00ddf2f2a412697f267078fc4ee068e:path` objects, and canonical
+citation markers against an independently fetched source root. In pinned Git
+checkout mode, inherited Git repository, worktree, namespace, and object
+redirect variables are removed; each blob is fetched through one
+`git cat-file --batch` response with `GIT_NO_REPLACE_OBJECTS=1` and
+`GIT_NO_LAZY_FETCH=1`, and the parsed exact bytes are used for both digest and
+marker checks. Mutable worktree files are not used for those claims. Missing,
+mismatched, non-blob, truncated, or unavailable objects are controlled
 validation failures:
 
 ```text
@@ -156,6 +158,11 @@ python3 -m unittest discover -s contracts/fixtures/route-allowlist -p 'test_*.py
 python3 -m py_compile contracts/fixtures/route-allowlist/test_route_allowlist.py
 python3 contracts/fixtures/route-allowlist/test_route_allowlist.py --source-root /path/to/hermes-agent
 ```
+
+The validator currently runs 27 regression tests. Discovery is intentionally
+scoped to this fixture directory with `-s contracts/fixtures/route-allowlist`
+and `-p 'test_*.py'`; a bare repository-root discovery is not evidence for this
+contract.
 
 The checked-in `source_audit.json` baseline records the raw command, standard-
 library validator environment, seven repetitions, min/median/p95/max/mean

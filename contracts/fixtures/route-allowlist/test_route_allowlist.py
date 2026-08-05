@@ -11,8 +11,10 @@ checkout or content-only snapshot.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import hashlib
+import io
 import json
 import math
 import os
@@ -24,6 +26,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -39,6 +42,16 @@ REPOSITORY = "NousResearch/hermes-agent"
 REPOSITORY_URL = "https://github.com/NousResearch/hermes-agent"
 AUDIT_ID = "route-allowlist-c01-f5be9236"
 BASELINE_REPETITIONS = 7
+MAX_JSON_DEPTH = 128
+GIT_REDIRECT_ENV_VARS = (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+)
 README_PATH = ROOT / "README.md"
 MANIFEST_PATH = ROOT.parent.parent / "hermes-dashboard" / "manifest.md"
 SESSION_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._~-]{0,126}[A-Za-z0-9])?\Z")
@@ -72,6 +85,7 @@ EXPECTED_ACCESSIBILITY = {
     "preservation": "The allowlist does not remove or redefine the existing web and native accessibility obligations in the Hermternal product contracts.",
 }
 EXPECTED_FUTURE_PROXY_NOTE = "A reverse proxy or external gateway must receive a separate reviewed allowlist; this client contract is not proxy authorization and does not grant broader upstream access."
+EXPECTED_BLOCKED_EXAMPLES_REASON = "Source presence is not client authorization. These examples remain default-deny even when the pinned source registers or publicly serves them."
 VALID_APPLICABILITIES = frozenset({"browser", "native"})
 
 
@@ -121,23 +135,24 @@ def load_json(path: Path) -> dict[str, Any]:
                 object_pairs_hook=_reject_duplicate_keys,
                 parse_constant=_reject_nonfinite_json_constant,
             )
-    except (ContractError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (ContractError, OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ContractError(f"{path}: invalid JSON input: {exc}") from None
     _require(isinstance(value, dict), f"{path}: top level must be an object")
     return value
 
 
-def _validate_json_tree(value: Any, context: str = "document") -> None:
-    """Reject non-JSON objects and non-finite floats before schema checks."""
+def _validate_json_tree(value: Any, context: str = "document", depth: int = 0) -> None:
+    """Reject malformed values before schema checks, including deep recursion."""
 
+    _require(depth <= MAX_JSON_DEPTH, f"{context}: maximum JSON nesting depth exceeded")
     if type(value) is dict:
         for key, child in value.items():
             _require(type(key) is str, f"{context}: object key must be string")
-            _validate_json_tree(child, f"{context}.{key}")
+            _validate_json_tree(child, f"{context}.{key}", depth + 1)
         return
     if type(value) is list:
         for index, child in enumerate(value):
-            _validate_json_tree(child, f"{context}[{index}]")
+            _validate_json_tree(child, f"{context}[{index}]", depth + 1)
         return
     if type(value) is float:
         _require(math.isfinite(value), f"{context}: non-finite number is not allowed")
@@ -514,6 +529,10 @@ def validate_audit(audit: dict[str, Any]) -> None:
     _keyset(audit["blocked_examples"], {"rest_management", "json_rpc_sensitive", "reason"}, "blocked examples")
     _require(_strict_equal(audit["blocked_examples"]["rest_management"], ["GET /api/config/defaults", "GET /api/config/schema", "GET /api/dashboard/plugins", "POST /api/gateway/restart", "GET /api/files", "GET /api/ssh/ownership"]), "audit: blocked REST examples changed")
     _require(_strict_equal(audit["blocked_examples"]["json_rpc_sensitive"], ["session.delete", "session.activate", "session.title", "message.react", "llm.oneshot", "model.save_key", "model.disconnect", "complete.path", "complete.slash", "sudo.respond", "secret.respond", "terminal.read.respond", "file.attach"]), "audit: blocked JSON-RPC examples changed")
+    _require(
+        _string(audit["blocked_examples"]["reason"], "blocked examples.reason") == EXPECTED_BLOCKED_EXAMPLES_REASON,
+        "audit: blocked examples reason changed",
+    )
     _keyset(audit["redaction"], set(EXPECTED_REDACTION), "redaction")
     _require(_strict_equal(audit["redaction"], EXPECTED_REDACTION), "redaction: semantics changed")
     _keyset(audit["accessibility"], set(EXPECTED_ACCESSIBILITY), "accessibility")
@@ -636,6 +655,30 @@ def _is_valid_applicability(value: Any) -> bool:
     return type(value) is str and value in VALID_APPLICABILITIES
 
 
+def _validated_client_rest_routes(allowlist: Any) -> list[dict[str, Any]] | None:
+    """Return REST entries only when the authorization container is well formed."""
+
+    if type(allowlist) is not dict:
+        return None
+    client = allowlist.get("client_allowlist")
+    if type(client) is not dict:
+        return None
+    routes = client.get("rest")
+    if type(routes) is not list:
+        return None
+    for route in routes:
+        if type(route) is not dict or not {"method", "path", "applicability"} <= set(route):
+            return None
+        if type(route["method"]) is not str or type(route["path"]) is not str:
+            return None
+        applicability = route["applicability"]
+        if type(applicability) is not list or not applicability or any(
+            not _is_valid_applicability(item) for item in applicability
+        ):
+            return None
+    return routes
+
+
 def route_is_allowlisted(allowlist: dict[str, Any], method: str, path: str, applicability: str | None = None) -> bool:
     """Authorize one REST method/path only with explicit platform context."""
 
@@ -644,12 +687,12 @@ def route_is_allowlisted(allowlist: dict[str, Any], method: str, path: str, appl
     template = _route_template_for_path(path)
     if template is None:
         return False
-    for route in allowlist["client_allowlist"]["rest"]:
-        if route["method"] != method or template != route["path"]:
-            continue
-        if applicability not in route["applicability"]:
-            continue
-        return True
+    routes = _validated_client_rest_routes(allowlist)
+    if routes is None:
+        return False
+    for route in routes:
+        if route["method"] == method and template == route["path"] and applicability in route["applicability"]:
+            return True
     return False
 
 
@@ -665,7 +708,10 @@ def _rest_policy_for_request(allowlist: dict[str, Any], method: str, path: str, 
     template = _route_template_for_path(path)
     if template is None:
         return None
-    for route in allowlist["client_allowlist"]["rest"]:
+    routes = _validated_client_rest_routes(allowlist)
+    if routes is None:
+        return None
+    for route in routes:
         if route["method"] == method and route["path"] == template and applicability in route["applicability"]:
             return route
     return None
@@ -710,18 +756,19 @@ CREDENTIAL_VALUE_PATTERNS = (
 )
 
 
-def _validate_redaction(value: Any, path: str = "fixture") -> None:
-    """Scan all fixture values while allowing public protocol terminology."""
+def _validate_redaction(value: Any, path: str = "fixture", depth: int = 0) -> None:
+    """Scan fixture values with a bounded recursion depth."""
 
+    _require(depth <= MAX_JSON_DEPTH, f"{path}: maximum JSON nesting depth exceeded")
     if type(value) is dict:
         for key, child in value.items():
             _require(type(key) is str, f"{path}: object key must be string")
             normalized = key.casefold()
             _require(normalized in ALLOWED_SENSITIVE_METADATA_KEYS or normalized not in FORBIDDEN_SENSITIVE_KEYS, f"{path}.{key}: sensitive key is not allowed")
-            _validate_redaction(child, f"{path}.{key}")
+            _validate_redaction(child, f"{path}.{key}", depth + 1)
     elif type(value) is list:
         for index, child in enumerate(value):
-            _validate_redaction(child, f"{path}[{index}]")
+            _validate_redaction(child, f"{path}[{index}]", depth + 1)
     elif type(value) is str:
         for pattern in CREDENTIAL_VALUE_PATTERNS:
             _require(pattern.search(value) is None, f"{path}: credential-like value is not allowed")
@@ -799,6 +846,119 @@ CASE_SHAPES = {
     "malformed-input-control": ({"encoding", "input_state"}, {"decision", "exit_status", "stderr_policy", "fallback"}),
 }
 
+EXPECTED_CASE_SEMANTICS = {
+    "rest-approved-native-bearer": {
+        "kind": "positive",
+        "request": {"method": "GET", "path": "/api/sessions/synthetic-session-001", "applicability": "native", "auth_mode": "native_bearer", "credential_state": "valid"},
+        "expected": {"decision": "allow_reviewed_route", "route_class": "client_allowlist", "auth_result": "pass_to_handler", "handler_result": "not_asserted"},
+    },
+    "rest-approved-browser-cookie": {
+        "kind": "positive",
+        "request": {"method": "GET", "path": "/api/auth/me", "applicability": "browser", "auth_mode": "browser_cookie", "credential_state": "valid"},
+        "expected": {"decision": "allow_reviewed_route", "route_class": "client_allowlist", "auth_result": "pass_to_handler", "handler_result": "not_asserted"},
+    },
+    "rest-invalid-bearer-no-cookie-fallback": {
+        "kind": "negative",
+        "request": {"method": "GET", "path": "/api/sessions", "applicability": "native", "auth_mode": "native_bearer", "credential_state": "invalid", "cookie_state": "valid"},
+        "expected": {"decision": "allow_reviewed_route", "route_class": "client_allowlist", "auth_result": "401_invalid_or_expired_without_cookie_fallback", "http_status": 401},
+    },
+    "rest-method-mutation-denied": {
+        "kind": "negative",
+        "request": {"method": "POST", "path": "/api/auth/me", "applicability": "native", "auth_mode": "native_bearer", "credential_state": "valid"},
+        "expected": {"decision": "deny_default", "route_class": "unknown_method_path_pair", "auth_result": "not_attempted", "http_status": 403},
+    },
+    "rest-prefix-confusion-denied": {
+        "kind": "negative",
+        "request": {"method": "GET", "path": "/api/sessions/synthetic-session-001/messages/extra", "applicability": "native", "auth_mode": "native_bearer", "credential_state": "valid"},
+        "expected": {"decision": "deny_default", "route_class": "path_shape_mismatch", "auth_result": "not_attempted", "http_status": 403},
+    },
+    "rest-source-present-not-client-allowlisted": {
+        "kind": "negative",
+        "request": {"method": "GET", "path": "/api/model/options", "applicability": "browser", "auth_mode": "browser_cookie", "credential_state": "valid"},
+        "expected": {"decision": "deny_default", "route_class": "source_present_not_client_allowlisted", "auth_result": "not_attempted", "http_status": 403},
+    },
+    "rest-management-admin-denied": {
+        "kind": "negative",
+        "request": {"method": "POST", "path": "/api/gateway/restart", "applicability": "browser", "auth_mode": "browser_cookie", "credential_state": "valid"},
+        "expected": {"decision": "deny_default", "route_class": "source_present_management_blocked", "auth_result": "not_attempted", "http_status": 403},
+    },
+    "ws-chat-browser-ticket": {
+        "kind": "positive",
+        "request": {"path": "/api/ws", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "fresh_single_use", "framing": "one_text_json_rpc_object_per_websocket_message"},
+        "expected": {"decision": "allow_reviewed_upgrade", "upgrade_auth": "ticket_consumed_once", "route_class": "client_allowlist", "source_result": "handler_result_not_asserted"},
+    },
+    "ws-chat-native-ticket": {
+        "kind": "positive",
+        "request": {"path": "/api/ws", "applicability": "native", "auth_mode": "gated_ticket_from_native_bearer", "credential_state": "fresh_single_use", "framing": "one_text_json_rpc_object_per_websocket_message"},
+        "expected": {"decision": "allow_reviewed_upgrade", "upgrade_auth": "ticket_consumed_once", "route_class": "client_allowlist", "source_result": "handler_result_not_asserted"},
+    },
+    "ws-chat-ticket-reused-denied": {
+        "kind": "negative",
+        "request": {"path": "/api/ws", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "already_consumed"},
+        "expected": {"decision": "deny_upgrade", "upgrade_auth": "ticket_invalid", "close_code": 4401, "retry": "mint_fresh_ticket"},
+    },
+    "ws-chat-ticket-expired-denied": {
+        "kind": "negative",
+        "request": {"path": "/api/ws", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "expired"},
+        "expected": {"decision": "deny_upgrade", "upgrade_auth": "ticket_invalid", "close_code": 4401, "retry": "mint_fresh_ticket"},
+    },
+    "ws-gated-token-fallback-denied": {
+        "kind": "negative",
+        "request": {"path": "/api/ws", "applicability": "browser", "auth_mode": "gated_legacy_query_token", "credential_state": "present"},
+        "expected": {"decision": "deny_upgrade", "upgrade_auth": "gated_query_token_rejected", "close_code": 4401, "retry": "mint_fresh_ticket"},
+    },
+    "ws-pty-web-only": {
+        "kind": "positive",
+        "request": {"path": "/api/pty", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "fresh_single_use", "host_class": "attested_posix_or_wsl", "attach_state": "opaque_source_handle"},
+        "expected": {"decision": "allow_reviewed_upgrade", "route_class": "client_allowlist_web_only", "native_policy": "not_applicable_and_blocked", "pty_input_policy": "forward_bytes_no_replay", "pty_logging_policy": "no_raw_bytes_or_handle"},
+    },
+    "ws-pty-native-denied": {
+        "kind": "negative",
+        "request": {"path": "/api/pty", "applicability": "native", "auth_mode": "gated_ticket_from_native_bearer", "credential_state": "fresh_single_use", "host_class": "attested_posix_or_wsl"},
+        "expected": {"decision": "deny_default", "route_class": "web_only_not_native", "upgrade_auth": "not_attempted", "retry": "none"},
+    },
+    "rpc-approved-prompt": {
+        "kind": "positive",
+        "request": {"path": "/api/ws", "applicability": "native", "auth_mode": "gated_ticket", "credential_state": "fresh_single_use", "operation": "prompt.submit"},
+        "expected": {"decision": "allow_reviewed_operation", "operation_class": "client_allowlist", "fallback": "none"},
+    },
+    "rpc-config-key-mutation-denied": {
+        "kind": "negative",
+        "request": {"path": "/api/ws", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "fresh_single_use", "operation": "config.set", "config_key": "logging.level"},
+        "expected": {"decision": "deny_operation", "operation_class": "approved_name_but_unapproved_key", "fallback": "none", "error": "unsupported_configuration_key"},
+    },
+    "rpc-unknown-operation-denied": {
+        "kind": "negative",
+        "request": {"path": "/api/ws", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "fresh_single_use", "operation": "session.export"},
+        "expected": {"decision": "deny_operation", "operation_class": "unknown_not_allowlisted", "fallback": "none", "error": "method_not_found_or_unsupported"},
+    },
+    "rpc-sensitive-operation-denied": {
+        "kind": "negative",
+        "request": {"path": "/api/ws", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "fresh_single_use", "operation": "sudo.respond"},
+        "expected": {"decision": "deny_operation", "operation_class": "source_present_sensitive_blocked", "fallback": "none", "error": "unsupported_sensitive_operation"},
+    },
+    "event-unknown-additive-noninteractive": {
+        "kind": "compatibility",
+        "request": {"path": "/api/ws", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "fresh_single_use", "event_name": "tool.progress"},
+        "expected": {"decision": "ignore_additive_noninteractive", "event_class": "unknown_noninteractive", "fallback": "none"},
+    },
+    "event-unknown-interactive-not-promoted": {
+        "kind": "negative",
+        "request": {"path": "/api/ws", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "fresh_single_use", "event_name": "secret.request"},
+        "expected": {"decision": "deny_unsupported_interactive_event", "event_class": "unknown_interactive", "fallback": "none", "ui_action": "never_treat_as_approval_or_clarification"},
+    },
+    "pty-log-redaction": {
+        "kind": "security",
+        "request": {"path": "/api/pty", "applicability": "browser", "auth_mode": "gated_ticket", "credential_state": "invalid", "host_class": "attested_posix_or_wsl", "attach_state": "opaque_source_handle"},
+        "expected": {"decision": "deny_upgrade", "close_code": 4401, "logging": {"credential_class": "ticket", "path_observed": True, "bounded_reason_observed": True, "sensitive_values_recorded": False, "pty_bytes_recorded": False}},
+    },
+    "malformed-input-control": {
+        "kind": "malformed_input",
+        "request": {"encoding": "duplicate_object_key_or_wrong_top_level_type", "input_state": "malformed"},
+        "expected": {"decision": "reject_without_traceback", "exit_status": 2, "stderr_policy": "one_validation_error_no_traceback", "fallback": "none"},
+    },
+}
+
 
 def _validate_case_leaf_types(case_id: str, request: dict[str, Any], expected: dict[str, Any]) -> None:
     request_keys, expected_keys = CASE_SHAPES[case_id]
@@ -826,6 +986,7 @@ def validate_cases(cases: dict[str, Any], allowlist: dict[str, Any], audit: dict
     _require(cases["source_audit_id"] == AUDIT_ID == audit["audit_id"], "cases: source audit binding changed")
     _require(cases["fixture_policy"] == "synthetic_markers_only" and cases["synthetic_only"] is True, "cases: synthetic policy changed")
     _require(isinstance(cases["cases"], list) and len(cases["cases"]) == len(EXPECTED_CASE_IDS), "cases: case count changed")
+    _require(set(EXPECTED_CASE_SEMANTICS) == EXPECTED_CASE_IDS, "cases: semantic inventory is incomplete")
     case_items = cases["cases"]
     case_ids: list[str] = []
     for index, case in enumerate(case_items):
@@ -845,9 +1006,13 @@ def validate_cases(cases: dict[str, Any], allowlist: dict[str, Any], audit: dict
         surface = _string(case["surface"], f"{case_id}.surface")
         _require(surface in VALID_CASE_SURFACES, f"{case_id}: unsupported case surface")
         _require(surface == EXPECTED_CASE_SURFACES[case_id], f"{case_id}: case surface changed")
+        semantics = EXPECTED_CASE_SEMANTICS[case_id]
+        _require(_strict_equal(case["kind"], semantics["kind"]), f"{case_id}: case kind changed")
         _require(isinstance(case["request"], dict), f"{case_id}: request must be an object")
         _require(isinstance(case["expected"], dict), f"{case_id}: expected must be an object")
         _validate_case_leaf_types(case_id, case["request"], case["expected"])
+        _require(_strict_equal(case["request"], semantics["request"]), f"{case_id}: request semantics changed")
+        _require(_strict_equal(case["expected"], semantics["expected"]), f"{case_id}: expected semantics changed")
         if surface in APPLICABILITY_CASE_SURFACES:
             _require(_is_valid_applicability(case["request"].get("applicability")), f"{case_id}: applicability must be browser or native")
         _string(case["notes"], f"{case_id}.notes")
@@ -890,9 +1055,13 @@ def validate_cases(cases: dict[str, Any], allowlist: dict[str, Any], audit: dict
 
 
 def _strict_git_environment() -> dict[str, str]:
-    """Keep local provenance checks on immutable Git objects and offline refs."""
+    """Keep provenance checks on this checkout's immutable Git objects."""
 
     environment = os.environ.copy()
+    # Git accepts these variables as repository, worktree, namespace, or object
+    # database redirects. Inherited values must not override `git -C source_root`.
+    for variable in GIT_REDIRECT_ENV_VARS:
+        environment.pop(variable, None)
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     environment["GIT_NO_LAZY_FETCH"] = "1"
     return environment
@@ -901,7 +1070,7 @@ def _strict_git_environment() -> dict[str, str]:
 def _git_blob_bytes_for_path(
     source_root: Path,
     relative_path: str,
-    revision: str = "HEAD",
+    revision: str = PINNED_SHA,
 ) -> tuple[str, bytes]:
     """Capture one validated blob from an immutable revision and its bytes."""
 
@@ -918,34 +1087,40 @@ def _git_blob_bytes_for_path(
         raise ContractError(f"source root: Git blob is missing for {relative_path}") from None
     blob_sha = result.stdout.strip()
     _require(re.fullmatch(r"[0-9a-f]{40}", blob_sha) is not None, f"source root: invalid Git blob for {relative_path}")
+
     try:
-        subprocess.run(
-            ["git", "-C", str(source_root), "cat-file", "-e", blob_sha],
+        batch_result = subprocess.run(
+            ["git", "-C", str(source_root), "cat-file", "--batch"],
+            input=f"{blob_sha}\n".encode("ascii"),
             capture_output=True,
-            text=True,
             check=True,
             env=git_environment,
         )
-        object_type = subprocess.run(
-            ["git", "-C", str(source_root), "cat-file", "-t", blob_sha],
-            capture_output=True,
-            text=True,
-            check=True,
-            env=git_environment,
-        ).stdout.strip()
-        _require(object_type == "blob", f"source root: Git object for {relative_path} is not a blob")
-        blob_bytes = subprocess.run(
-            ["git", "-C", str(source_root), "cat-file", "blob", blob_sha],
-            capture_output=True,
-            check=True,
-            env=git_environment,
-        ).stdout
     except (OSError, subprocess.CalledProcessError):
         raise ContractError(f"source root: Git blob object is unavailable for {relative_path}") from None
-    return blob_sha, blob_bytes
+
+    header, separator, payload = batch_result.stdout.partition(b"\n")
+    _require(separator == b"\n", f"source root: malformed Git batch response for {relative_path}")
+    fields = header.split(b" ")
+    _require(fields and fields[0] == blob_sha.encode("ascii"), f"source root: Git batch object mismatch for {relative_path}")
+    if len(fields) == 2 and fields[1] == b"missing":
+        raise ContractError(f"source root: Git blob object is unavailable for {relative_path}")
+    _require(len(fields) == 3, f"source root: malformed Git batch header for {relative_path}")
+    object_type = fields[1]
+    try:
+        object_size = int(fields[2], 10)
+    except (TypeError, ValueError):
+        raise ContractError(f"source root: malformed Git batch size for {relative_path}") from None
+    _require(object_size >= 0, f"source root: invalid Git batch size for {relative_path}")
+    _require(object_type == b"blob", f"source root: Git object for {relative_path} is not a blob")
+    _require(
+        len(payload) == object_size + 1 and payload[-1:] == b"\n",
+        f"source root: truncated Git batch object for {relative_path}",
+    )
+    return blob_sha, payload[:object_size]
 
 
-def _git_blob_sha_for_path(source_root: Path, relative_path: str, revision: str = "HEAD") -> str:
+def _git_blob_sha_for_path(source_root: Path, relative_path: str, revision: str = PINNED_SHA) -> str:
     """Resolve and validate one blob ID without reading a mutable worktree path."""
 
     blob_sha, _ = _git_blob_bytes_for_path(source_root, relative_path, revision)
@@ -955,7 +1130,7 @@ def _git_blob_sha_for_path(source_root: Path, relative_path: str, revision: str 
 def _validate_git_blob_ids(
     audit: dict[str, Any],
     source_root: Path,
-    revision: str = "HEAD",
+    revision: str = PINNED_SHA,
 ) -> dict[str, bytes]:
     """Bind each recorded ID and capture each citation's immutable blob bytes."""
 
@@ -1091,6 +1266,13 @@ class RouteAllowlistTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_allowlist(forged_allowlist, self.audit)
 
+    def test_blocked_examples_reason_is_exact_and_typed(self) -> None:
+        for replacement in ("", "changed", False, True, 0, 1.0, {}, [], None):
+            forged = copy.deepcopy(self.audit)
+            forged["blocked_examples"]["reason"] = replacement
+            with self.assertRaises(ContractError):
+                validate_audit(forged)
+
     def test_nonfinite_json_and_baseline_metrics_fail_closed(self) -> None:
         for literal in ("NaN", "Infinity", "-Infinity"):
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
@@ -1208,6 +1390,33 @@ class RouteAllowlistTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 validate_cases(unsupported, self.allowlist, self.audit)
 
+    def test_malformed_allowlist_routes_deny_without_lookup_errors(self) -> None:
+        for replacement in (None, True, 1, [], "route"):
+            forged = copy.deepcopy(self.allowlist)
+            forged["client_allowlist"]["rest"][0] = replacement
+            self.assertFalse(route_is_allowlisted(forged, "GET", "/api/auth/me", "browser"), replacement)
+            self.assertIsNone(_rest_policy_for_request(forged, "GET", "/api/auth/me", "browser"))
+
+        for missing_key in ("method", "path", "applicability"):
+            forged = copy.deepcopy(self.allowlist)
+            matching = next(
+                route for route in forged["client_allowlist"]["rest"]
+                if route["method"] == "GET" and route["path"] == "/api/auth/me"
+            )
+            matching.pop(missing_key)
+            self.assertFalse(route_is_allowlisted(forged, "GET", "/api/auth/me", "browser"), missing_key)
+            self.assertIsNone(_rest_policy_for_request(forged, "GET", "/api/auth/me", "browser"))
+
+        for malformed_applicability in ("browser", {"browser": True}, None, ["browser", True], ["desktop"]):
+            forged = copy.deepcopy(self.allowlist)
+            matching = next(
+                route for route in forged["client_allowlist"]["rest"]
+                if route["method"] == "GET" and route["path"] == "/api/auth/me"
+            )
+            matching["applicability"] = malformed_applicability
+            self.assertFalse(route_is_allowlisted(forged, "GET", "/api/auth/me", "browser"), malformed_applicability)
+            self.assertIsNone(_rest_policy_for_request(forged, "GET", "/api/auth/me", "browser"))
+
     def test_route_widening_and_prefix_confusion_fail(self) -> None:
         forged = copy.deepcopy(self.allowlist)
         forged["client_allowlist"]["rest"][13]["path"] = "/api/sessions/{session_id}/"
@@ -1310,6 +1519,36 @@ class RouteAllowlistTests(unittest.TestCase):
 
         self.assertEqual(next(item for item in self.cases["cases"] if item["id"] == "event-unknown-interactive-not-promoted")["expected"]["ui_action"], "never_treat_as_approval_or_clarification")
 
+    def test_case_semantics_are_bound_in_normal_and_optimized_cli(self) -> None:
+        # Keep the approved IDs while mutating only one frozen semantic value;
+        # this prevents a relabelled or otherwise widened fixture from passing.
+        mutations = (
+            ("ws-chat-browser-ticket", "request", "path", "/api/evil"),
+            ("ws-chat-browser-ticket", "request", "auth_mode", "raw_ticket"),
+            ("rpc-approved-prompt", "request", "operation", "session.delete"),
+            ("event-unknown-additive-noninteractive", "request", "path", "/api/evil"),
+            ("rest-invalid-bearer-no-cookie-fallback", "expected", "http_status", 0),
+        )
+        for case_id, section, key, replacement in mutations:
+            forged = copy.deepcopy(self.cases)
+            target = next(item for item in forged["cases"] if item["id"] == case_id)
+            target[section][key] = replacement
+            with self.assertRaises(ContractError):
+                validate_cases(forged, self.allowlist, self.audit)
+
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                json.dump(forged, stream)
+                stream.flush()
+                for optimized in (False, True):
+                    command = [sys.executable]
+                    if optimized:
+                        command.append("-O")
+                    command.extend([str(Path(__file__)), "--cases", stream.name])
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2, (case_id, section, key, optimized, result.stderr))
+                    self.assertNotIn("Traceback", result.stderr + result.stdout)
+                    self.assertIn("validation error", result.stderr.lower())
+
     def test_provenance_and_source_scope_are_immutable(self) -> None:
         forged = copy.deepcopy(self.audit)
         forged["hermes_source_sha"] = "0" * 40
@@ -1343,16 +1582,47 @@ class RouteAllowlistTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            blob = _git_blob_sha_for_path(source_root, "fixture.txt")
-            audit = {"source_citations": [{"id": "fixture", "path": "fixture.txt", "git_blob_sha": blob}]}
-            _validate_git_blob_ids(audit, source_root)
-
             revision = subprocess.run(
                 ["git", "-C", str(source_root), "rev-parse", "HEAD"],
                 check=True,
                 capture_output=True,
                 text=True,
             ).stdout.strip()
+            blob = _git_blob_sha_for_path(source_root, "fixture.txt", revision)
+            audit = {"source_citations": [{"id": "fixture", "path": "fixture.txt", "git_blob_sha": blob}]}
+            _validate_git_blob_ids(audit, source_root, revision)
+
+            decoy_root = source_root / "decoy"
+            decoy_root.mkdir()
+            subprocess.run(["git", "-C", str(decoy_root), "init", "-q"], check=True, capture_output=True, text=True)
+            (decoy_root / "fixture.txt").write_text("decoy fixture\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(decoy_root), "add", "fixture.txt"], check=True, capture_output=True, text=True)
+            subprocess.run(
+                [
+                    "git", "-C", str(decoy_root),
+                    "-c", "user.name=Hermternal Decoy", "-c", "user.email=decoy@example.invalid",
+                    "commit", "-qm", "decoy",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            redirected_environment = {
+                "GIT_DIR": str(decoy_root / ".git"),
+                "GIT_COMMON_DIR": str(decoy_root / ".git"),
+                "GIT_OBJECT_DIRECTORY": str(decoy_root / ".git" / "objects"),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(decoy_root / ".git" / "objects"),
+                "GIT_NAMESPACE": "decoy",
+                "GIT_WORK_TREE": str(decoy_root),
+                "GIT_INDEX_FILE": str(decoy_root / ".git" / "index"),
+            }
+            with mock.patch.dict(os.environ, redirected_environment, clear=False):
+                strict_environment = _strict_git_environment()
+                self.assertTrue(all(variable not in strict_environment for variable in GIT_REDIRECT_ENV_VARS))
+                redirected_sha, redirected_bytes = _git_blob_bytes_for_path(source_root, "fixture.txt", revision)
+            self.assertEqual(redirected_sha, blob)
+            self.assertEqual(redirected_bytes, b"pinned fixture\n")
+
             fixture.write_text("worktree mutation\n", encoding="utf-8")
             captured_sha, captured_bytes = _git_blob_bytes_for_path(source_root, "fixture.txt", revision)
             self.assertEqual(captured_sha, blob)
@@ -1363,17 +1633,17 @@ class RouteAllowlistTests(unittest.TestCase):
             forged = copy.deepcopy(audit)
             forged["source_citations"][0]["git_blob_sha"] = "0" * 40
             with self.assertRaises(ContractError):
-                _validate_git_blob_ids(forged, source_root)
+                _validate_git_blob_ids(forged, source_root, revision)
 
             missing = {"source_citations": [{"id": "missing", "path": "missing.txt", "git_blob_sha": blob}]}
             with self.assertRaises(ContractError):
-                _validate_git_blob_ids(missing, source_root)
+                _validate_git_blob_ids(missing, source_root, revision)
 
             object_path = source_root / ".git" / "objects" / blob[:2] / blob[2:]
             self.assertTrue(object_path.is_file(), object_path)
             object_path.unlink()
             with self.assertRaises(ContractError):
-                _git_blob_sha_for_path(source_root, "fixture.txt")
+                _git_blob_sha_for_path(source_root, "fixture.txt", revision)
 
     def test_redaction_policy_rejects_credential_material(self) -> None:
         forged = copy.deepcopy(self.cases)
@@ -1524,6 +1794,59 @@ class RouteAllowlistTests(unittest.TestCase):
                         self.assertNotIn("Traceback", result.stderr + result.stdout)
                         self.assertIn("validation error", result.stderr.lower())
 
+    def test_deeply_nested_json_is_controlled_in_both_modes(self) -> None:
+        forged: dict[str, Any] = {}
+        cursor: dict[str, Any] = forged
+        for _ in range(MAX_JSON_DEPTH + 16):
+            child: dict[str, Any] = {}
+            cursor["nested"] = child
+            cursor = child
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+            json.dump(forged, stream)
+            stream.flush()
+            for optimized in (False, True):
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.extend([str(Path(__file__)), "--cases", stream.name])
+                result = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, (optimized, result.stderr))
+                self.assertNotIn("Traceback", result.stderr + result.stdout)
+                self.assertIn("validation error", result.stderr.lower())
+                self.assertIn("maximum JSON nesting depth", result.stderr)
+
+    def test_source_root_stale_baseline_is_controlled(self) -> None:
+        stale = copy.deepcopy(self.audit)
+        stale["baseline"]["artifact_size_bytes"] += 1
+        module = sys.modules[__name__]
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+            json.dump(stale, stream)
+            stream.flush()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    module,
+                    "validate_all",
+                    side_effect=["git_checkout_verified", ContractError("baseline: artifact size is stale")],
+                ),
+                mock.patch.object(unittest.defaultTestLoader, "loadTestsFromTestCase", return_value=unittest.TestSuite()),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                status = main(
+                    [
+                        "--audit",
+                        stream.name,
+                        "--source-root",
+                        str(Path(stream.name).parent / "source-root"),
+                    ]
+                )
+        self.assertEqual(status, 2)
+        self.assertNotIn("Traceback", stdout.getvalue() + stderr.getvalue())
+        self.assertIn("validation error", stderr.getvalue().lower())
+        self.assertIn("artifact size is stale", stderr.getvalue())
+
     def test_malformed_cli_input_has_no_traceback(self) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
             stream.write('{"cases": [}')
@@ -1571,7 +1894,7 @@ def main(argv: list[str] | None = None) -> int:
         audit = load_json(args.audit)
         cases = load_json(args.cases)
         source_mode = validate_all(allowlist, audit, cases, args.source_root)
-    except (ContractError, KeyError, TypeError, ValueError, OSError, UnicodeError) as exc:
+    except (ContractError, KeyError, TypeError, ValueError, OSError, UnicodeError, RecursionError) as exc:
         print(f"validation error: {exc}", file=sys.stderr)
         return 2
 
@@ -1579,7 +1902,11 @@ def main(argv: list[str] | None = None) -> int:
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():
         return 1
-    samples = _measure_baseline(allowlist, audit, cases)
+    try:
+        samples = _measure_baseline(allowlist, audit, cases)
+    except (ContractError, KeyError, TypeError, ValueError, OSError, UnicodeError, RecursionError) as exc:
+        print(f"validation error: {exc}", file=sys.stderr)
+        return 2
     print(f"baseline.fixture_validation_ms={statistics.median(samples):.3f}")
     print(f"baseline.fixture_validation_distribution_ms={json.dumps(_baseline_payload(samples), sort_keys=True)}")
     print(f"baseline.fixture_artifact_bytes={artifact_size_bytes()}")
