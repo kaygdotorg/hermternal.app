@@ -43,9 +43,9 @@ The pinned source selects the PTY lifetime from the **presence** of the `attach`
 | Missing or empty | Legacy `_legacy_pump` path | The socket handler closes the PTY bridge in `finally`; the child is terminated and the client enters `exited`. | Prohibited. Open a new terminal instead. |
 | Non-empty, previously accepted opaque handle | `PtySessionRegistry` keep-alive path | The handler detaches only the socket. The drain task keeps reading and buffering while the PTY remains eligible for reattach. | Reuse the same handle during the retention window. Never replace it with a fresh handle or silently fall back to legacy mode. |
 
-The source does not define a client-visible attach-token grammar or an issuance route. Hermternal therefore treats only an exact opaque handle obtained from the reviewed attach flow as usable. A malformed, expired, or stale/superseded handle fails closed at the client and fixture boundary: do not open `/api/pty`, spawn a replacement PTY, fall back to the legacy path, or retry the rejected value. This guard is required because the pinned registry accepts any non-empty key and can create a new PTY after an old detached entry has been reaped; that source behavior must not turn an invalid handle into an accidental fresh session.
+The source does not define a client-visible attach-token grammar or an issuance route. Hermternal therefore treats only an exact opaque handle obtained from the reviewed attach flow as usable. A malformed or expired handle fails closed during preflight, before opening `/api/pty` or performing socket accept/upgrade, route dispatch, registry lookup/attach/spawn, session attach, or PTY spawn: do not create a replacement PTY, fall back to the legacy path, or retry the rejected value. This guard is required because the pinned registry accepts any non-empty key and can create a new PTY after an old detached entry has been reaped; that source behavior must not turn an invalid handle into an accidental fresh session.
 
-A superseded socket is a separate failure from an expired handle. The active replacement remains attached; the old socket receives `4409`, stops reading, and must not retry or call detach against the replacement. The pinned `detach` identity check preserves the replacement attachment.
+A superseded socket is a separate failure from a malformed or expired handle. It is already open when a replacement attach arrives. The replacement must attach first; only then does the old socket receive `4409`, stop reading, and fail to retry or call detach against the replacement. The pinned `detach` identity check preserves the replacement attachment.
 
 The source audit and deterministic regression fixtures for this distinction live in [`fixtures/source-audit/pty-attach`](../fixtures/source-audit/pty-attach/README.md).
 
@@ -78,7 +78,8 @@ The source audit and deterministic regression fixtures for this distinction live
 | `4410` | `exited` | Stop reconnecting to the dead PTY. |
 | `1011` | `failed` | Report backend failure and offer an explicit retry. |
 | Legacy socket disconnect without `attach` | `exited` | The source closes the bridge. Do not offer reattach for that PTY. |
-| Malformed or expired attach handle, or superseded socket | `failed` or `detached` | Fail closed. Do not open a replacement PTY, fall back to legacy mode, or replay input. |
+| Malformed or expired attach handle | `failed` | Reject during preflight before opening `/api/pty`; do not spawn a replacement PTY, fall back to legacy mode, or replay input. |
+| Already-open superseded socket | `detached` | The replacement attaches first; then the stale socket receives `4409`, stops reading, and cannot detach or retry. |
 | Hermternal **Close** | `closed` | Detach the socket and do not reconnect automatically. Do not claim that the PTY process was killed. |
 | Network loss | `detached` | Reattach with the same token while the 30-minute window remains. |
 

@@ -54,7 +54,8 @@
         {
           "step": 2,
           "event": "pty.spawn",
-          "process_ref": "synthetic-legacy-pty"
+          "process_ref": "synthetic-legacy-pty",
+          "socket": "legacy-a"
         },
         {
           "step": 3,
@@ -73,6 +74,10 @@
         "reattach": "prohibited",
         "spawn_count": 1,
         "input_replay_count": 0
+      },
+      "identity": {
+        "process_ref": "synthetic-legacy-pty",
+        "socket_ref": "legacy-a"
       }
     },
     {
@@ -87,42 +92,64 @@
         {
           "step": 1,
           "event": "socket.accept",
-          "socket": "attach-a"
+          "socket": "attach-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 2,
           "event": "registry.spawn",
-          "session_ref": "synthetic-session-a"
+          "session_ref": "synthetic-session-a",
+          "handle_ref": "synthetic-handle-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 3,
           "event": "session.attach",
-          "socket": "attach-a"
+          "socket": "attach-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 4,
           "event": "socket.disconnect",
-          "socket": "attach-a"
+          "socket": "attach-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 5,
           "event": "registry.detach",
-          "socket": "attach-a"
+          "socket": "attach-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 6,
           "event": "socket.accept",
-          "socket": "attach-b"
+          "socket": "attach-b",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 7,
           "event": "registry.reuse",
-          "session_ref": "synthetic-session-a"
+          "session_ref": "synthetic-session-a",
+          "handle_ref": "synthetic-handle-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 8,
           "event": "session.attach",
-          "socket": "attach-b"
+          "socket": "attach-b",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         }
       ],
       "expected": {
@@ -136,6 +163,11 @@
         "spawn_count": 1,
         "reattach": "same_exact_handle",
         "input_replay_count": 0
+      },
+      "identity": {
+        "handle_ref": "synthetic-handle-a",
+        "session_ref": "synthetic-session-a",
+        "process_ref": "synthetic-attach-pty"
       }
     },
     {
@@ -176,26 +208,15 @@
       "timeline": [
         {
           "step": 1,
-          "event": "socket.disconnect",
-          "socket": "attach-a"
-        },
-        {
-          "step": 2,
-          "event": "registry.detach",
-          "socket": "attach-a",
-          "elapsed_seconds": 0
-        },
-        {
-          "step": 3,
           "event": "reaper.reap",
           "elapsed_seconds": 1801
         },
         {
-          "step": 4,
+          "step": 2,
           "event": "client.observe_expired_handle"
         },
         {
-          "step": 5,
+          "step": 3,
           "event": "client.reject_without_upgrade",
           "reason": "expired_attach_handle"
         }
@@ -222,28 +243,43 @@
         {
           "step": 1,
           "event": "session.attach",
-          "socket": "attach-a"
+          "socket": "attach-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 2,
           "event": "session.attach",
-          "socket": "attach-b"
+          "socket": "attach-b",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 3,
           "event": "socket.close",
           "socket": "attach-a",
-          "close_code": 4409
+          "close_code": 4409,
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 4,
           "event": "stale_socket.finally",
-          "socket": "attach-a"
+          "socket": "attach-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 5,
           "event": "stale_socket.detach_ignored",
-          "socket": "attach-a"
+          "socket": "attach-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         }
       ],
       "expected": {
@@ -253,6 +289,11 @@
         "stale_socket_action": "stop_without_retry",
         "close_code": 4409,
         "active_detach_count": 0
+      },
+      "identity": {
+        "handle_ref": "synthetic-handle-a",
+        "session_ref": "synthetic-session-a",
+        "process_ref": "synthetic-attach-pty"
       }
     },
     {
@@ -286,17 +327,26 @@
       "timeline": [
         {
           "step": 1,
-          "event": "session.attach"
+          "event": "session.attach",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 2,
           "event": "attach.snapshot_send",
-          "payload_ref": "retained"
+          "payload_ref": "retained",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 3,
           "event": "drain.live_send",
-          "payload_ref": "live"
+          "payload_ref": "live",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         }
       ],
       "expected": {
@@ -314,6 +364,11 @@
         "render_policy": "receive_order",
         "complete_replay_claim": false,
         "retained_bytes_are_transcript": false
+      },
+      "identity": {
+        "handle_ref": "synthetic-handle-a",
+        "session_ref": "synthetic-session-a",
+        "process_ref": "synthetic-attach-pty"
       }
     },
     {
@@ -332,15 +387,24 @@
       "timeline": [
         {
           "step": 1,
-          "event": "drain.append_output"
+          "event": "drain.append_output",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 2,
-          "event": "ring_buffer.truncate_oldest"
+          "event": "ring_buffer.truncate_oldest",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 3,
-          "event": "session.attach"
+          "event": "session.attach",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         }
       ],
       "expected": {
@@ -348,6 +412,11 @@
         "oldest_output_may_be_missing": true,
         "complete_replay_claim": false,
         "client_blocks_on_replay": false
+      },
+      "identity": {
+        "handle_ref": "synthetic-handle-a",
+        "session_ref": "synthetic-session-a",
+        "process_ref": "synthetic-attach-pty"
       }
     },
     {
@@ -363,26 +432,66 @@
           "step": 1,
           "event": "input.send",
           "socket": "attach-a",
-          "input_ref": "synthetic-input-a"
+          "input_ref": "synthetic-input-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 2,
-          "event": "socket.disconnect",
-          "socket": "attach-a"
+          "event": "resize.send",
+          "socket": "attach-a",
+          "resize_ref": "synthetic-resize-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 3,
-          "event": "session.attach",
-          "socket": "attach-b"
+          "event": "prompt.submit",
+          "socket": "attach-a",
+          "prompt_ref": "synthetic-prompt-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
         },
         {
           "step": 4,
+          "event": "tool.action.send",
+          "socket": "attach-a",
+          "tool_action_ref": "synthetic-tool-action-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
+        },
+        {
+          "step": 5,
+          "event": "socket.disconnect",
+          "socket": "attach-a",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
+        },
+        {
+          "step": 6,
+          "event": "session.attach",
+          "socket": "attach-b",
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty"
+        },
+        {
+          "step": 7,
           "event": "attach.snapshot_send",
           "payload_ref": "output-only",
           "payload": {
             "kind": "output",
             "bytes_ref": "synthetic-output-bytes"
-          }
+          },
+          "handle_ref": "synthetic-handle-a",
+          "session_ref": "synthetic-session-a",
+          "process_ref": "synthetic-attach-pty",
+          "socket": "attach-b"
         }
       ],
       "expected": {
@@ -392,7 +501,15 @@
         "prompt_replayed_count": 0,
         "tool_action_replayed_count": 0,
         "output_snapshot_may_be_sent": true,
-        "new_user_action_required": true
+        "new_user_action_required": true,
+        "resize_sent_count": 1,
+        "prompt_sent_count": 1,
+        "tool_action_sent_count": 1
+      },
+      "identity": {
+        "handle_ref": "synthetic-handle-a",
+        "session_ref": "synthetic-session-a",
+        "process_ref": "synthetic-attach-pty"
       }
     }
   ]
