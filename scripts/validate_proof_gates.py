@@ -700,6 +700,46 @@ def _visible(scanned: Sequence[MarkdownLine]) -> List[MarkdownLine]:
     return [line for line in scanned if not line.hidden and line.fence_role is None]
 
 
+def _fold_field_lines(scanned: Sequence[MarkdownLine]) -> List[MarkdownLine]:
+    """Fold indented Markdown continuations into their preceding field value.
+
+    Markdown permits a list item's value to continue on an indented physical
+    line.  The validator keeps physical source locations for diagnostics, but
+    semantic and field checks must see one logical value; otherwise a folded
+    number or claim can evade the line-local scanners.
+    """
+
+    folded: List[MarkdownLine] = []
+    pending: Optional[MarkdownLine] = None
+    for line in scanned:
+        if line.hidden or line.fence_role is not None:
+            if pending is not None:
+                folded.append(pending)
+                pending = None
+            continue
+        if pending is not None:
+            is_continuation = bool(
+                re.match(r"^\s{2,}\S", line.text)
+                and not re.match(r"^\s{2,}(?:[-*+] |\||#{1,6}\s)", line.text)
+            )
+            if line.text and is_continuation:
+                pending = MarkdownLine(
+                    source=pending.source,
+                    text=f"{pending.text} {line.text.strip()}",
+                    hidden=False,
+                )
+                continue
+            folded.append(pending)
+            pending = None
+        if line.text.startswith("- ") and _BULLET_FIELD_RE.fullmatch(line.text):
+            pending = line
+        else:
+            folded.append(line)
+    if pending is not None:
+        folded.append(pending)
+    return folded
+
+
 def _validate_line_endings(
     lines: Sequence[SourceLine], endings: set[str], final_newline: bool
 ) -> List[ValidationError]:
@@ -1116,7 +1156,7 @@ def _collect_bullet_fields(body: Sequence[MarkdownLine], expected: Sequence[str]
     records: List[Tuple[str, SourceLine, str]] = []
     errors: List[ValidationError] = []
     expected_set = set(expected)
-    for line in _visible(body):
+    for line in _fold_field_lines(body):
         match = _BULLET_FIELD_RE.fullmatch(line.text)
         if not match:
             if line.text.startswith("- ") and ":" in line.text:
@@ -1182,27 +1222,37 @@ def _validate_section_fields(h2: Sequence[Heading], scanned: Sequence[MarkdownLi
                         re.I,
                     )
                 )
-                has_reason_connector = bool(
-                    re.search(
-                        r"\b(?:because|since|so that|by|without)\b",
-                        preservation,
-                        re.I,
-                    )
+                reason_match = re.search(
+                    r"\b(?:because|since|so that|by|without)\b(?P<reason>.+)",
+                    preservation,
+                    re.I | re.S,
                 )
+                reason_text = reason_match.group("reason") if reason_match else ""
+                reason_clause = re.split(r"[;.!?]", reason_text, maxsplit=1)[0]
+                has_reason_connector = reason_match is not None
                 has_mechanism = bool(
                     re.search(
-                        r"\b(?:read(?:s)? bytes|emit(?:s)? diagnostics|only read(?:s)?|"
+                        r"\b(?:read(?:s|ing)? bytes|emit(?:s|ting)? diagnostics|only read(?:s|ing)?|"
                         r"does not (?:rewrite|remove|alter|drop)|never (?:rewrite|remove|alter|drop)|"
-                        r"non[- ]UI|no direct UI|downstream (?:design|paper) source|tooling artifact)\b",
-                        preservation,
+                        r"downstream (?:design|paper) source)\b",
+                        reason_clause,
                         re.I,
                     )
                 )
+                circular_reason = bool(
+                    re.search(
+                        r"\b(?:preserv\w*|retain\w*|keep\w*|remain\w*|stay\w*|"
+                        r"behavior|requirement|evidence)\b",
+                        reason_clause,
+                        re.I,
+                    )
+                )
+                has_non_circular_reason = has_mechanism and not circular_reason
                 if not (
                     has_preservation_semantics
                     and has_accessibility_surface
                     and has_reason_connector
-                    and has_mechanism
+                    and has_non_circular_reason
                 ):
                     errors.append(
                         _error(
@@ -1433,12 +1483,12 @@ def _validate_semantic_rules(scanned: Sequence[MarkdownLine]) -> List[Validation
         re.compile(
             r"\b"
             + performance_terms
-            + r"\b[^|\n]{0,24}(?:<|<=|>|>=|=)\s*"
+            + r"\b[^|\n]{0,24}(?:<|<=|>|>=|≤|≥|=)\s*"
             + numeric_value,
             re.I,
         ),
     )
-    for line in _visible(scanned):
+    for line in _fold_field_lines(scanned):
         text = line.text
         if re.search(
             r"\b(?:gate|status|checklist item)\b[^\n]{0,40}\b(?:waiv(?:e|ed|er)|skip(?:ping)?|optional)\b"

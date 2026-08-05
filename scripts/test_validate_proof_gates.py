@@ -300,6 +300,7 @@ class ProofGateValidationTests(unittest.TestCase):
             "startup limit 2 s.",
             "response time should be within 500 ms.",
             "latency must be under 50 ms.",
+            "p95 ≤ 50 ms.",
         )
         for variant in variants:
             with self.subTest(variant=variant):
@@ -312,7 +313,7 @@ class ProofGateValidationTests(unittest.TestCase):
                 self.assertCode(self.result(mutated), "threshold-statement")
 
     def test_measured_evidence_rejects_embedded_target_but_accepts_observation(self) -> None:
-        original = "- **Validator-duration evidence:** Same checkout; ten samples `62.864, 64.096, 63.412, 63.918, 62.889, 63.695, 62.094, 62.994, 63.942, 63.373` ms; min `62.094` ms, mean `63.328` ms, median `63.393` ms, p95 `64.027` ms, and max `64.096` ms; p99 is not meaningful for ten samples and no threshold is inferred."
+        original = "- **Validator-duration evidence:** Same checkout; ten samples `63.502, 66.142, 65.529, 64.241, 66.980, 64.344, 63.436, 67.437, 63.555, 63.324` ms; min `63.324` ms, mean `64.849` ms, median `64.292` ms, p95 `67.231` ms, and max `67.437` ms; p99 is not meaningful for ten samples and no threshold is inferred."
         observation = self.checklist_text.replace(
             original,
             "- **Validator-duration evidence:** Same checkout; ten samples; min 56 ms, mean 57 ms, median 57 ms, p95 was 58.664 ms, and max 58.807 ms; no threshold is inferred.",
@@ -326,6 +327,37 @@ class ProofGateValidationTests(unittest.TestCase):
         )
         self.assertCode(self.result(target), "invented-performance-threshold")
         self.assertCode(self.result(target), "threshold-statement")
+
+    def test_multiline_field_continuations_fail_closed(self) -> None:
+        duration = "- **Validator-duration evidence:** Same checkout; ten samples `63.502, 66.142, 65.529, 64.241, 66.980, 64.344, 63.436, 67.437, 63.555, 63.324` ms; min `63.324` ms, mean `64.849` ms, median `64.292` ms, p95 `67.231` ms, and max `67.437` ms; p99 is not meaningful for ten samples and no threshold is inferred."
+        folded_duration = self.replace_once(
+            self.checklist_text,
+            duration,
+            duration.replace("p95 `67.231` ms", "p95 target is\n  50 ms", 1),
+        )
+        self.assertCode(self.result(folded_duration), "invented-performance-threshold")
+        self.assertCode(self.result(folded_duration), "threshold-statement")
+
+        review = "- **Review result:** Review records the exact command, exit status, output artifact, and remaining limitation; a failed or unrun command is not reported as passed."
+        folded_review = self.replace_once(
+            self.checklist_text,
+            review,
+            "- **Review result:** Live integration remains blocked, but production deployment\n  is complete.",
+        )
+        self.assertCode(self.result(folded_review), "live-production-claim")
+
+        preservation = "- **Preservation evidence:** The checklist and validator preserve keyboard/focus, semantic-name, screen-reader/VoiceOver, Switch Control, zoom/Dynamic Type, contrast, reduced-motion/transparency, and touch-target behavior requirements because they only read bytes and emit diagnostics; missing evidence stays blocked."
+        for value in (
+            "Keyboard behavior remains preserved because keyboard behavior remains preserved by tooling artifact.",
+            "Keyboard behavior remains preserved because keyboard behavior remains\n  preserved by tooling artifact.",
+        ):
+            circular = self.replace_once(
+                self.checklist_text,
+                preservation,
+                f"- **Preservation evidence:** {value}",
+            )
+            with self.subTest(value=value):
+                self.assertCode(self.result(circular), "preservation-evidence")
 
     def test_live_or_production_success_claim_fails_by_clause(self) -> None:
         review_line = "- **Review result:** Review records the exact command, exit status, output artifact, and remaining limitation; a failed or unrun command is not reported as passed."
@@ -366,6 +398,7 @@ class ProofGateValidationTests(unittest.TestCase):
             "accessibility requirement remains preserved because the requirement remains required.",
             "preserves keyboard behavior because behavior remains required.",
             "preserves keyboard behavior because evidence is required.",
+            "Keyboard is preserved because non-UI.",
         ):
             weak = self.checklist_text.replace(
                 original,

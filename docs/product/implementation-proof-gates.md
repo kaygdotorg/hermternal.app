@@ -105,8 +105,8 @@ budget. No threshold is claimed.
 - **Repetitions and distribution:** 10 fresh subprocess runs; all returned valid checklist JSON; record all ten samples plus min, mean, median, p95, and max in milliseconds; p99 is not meaningful for ten samples.
 - **Trace artifact:** Local command output only; no upload or service trace.
 - **Raw command:** `python3 -c 'import json,platform,statistics,subprocess,sys,time; p=["scripts/validate_proof_gates.py","docs/product/implementation-proof-gates.md"]; samples=[]; [samples.append((lambda t: (subprocess.run([sys.executable,*p],check=True,capture_output=True), (time.perf_counter()-t)*1000)[1])(time.perf_counter())) for _ in range(10)]; print(json.dumps({"environment":platform.platform(),"python":sys.version.split()[0],"repetitions":10,"distribution_ms":{"min":min(samples),"mean":statistics.mean(samples),"median":statistics.median(samples),"p95":statistics.quantiles(samples,n=20,method="inclusive")[18],"max":max(samples),"samples":samples}}))'`
-- **Artifact-size evidence:** Same checkout; `scripts/validate_proof_gates.py` `74,387` bytes, `scripts/test_validate_proof_gates.py` `24,596` bytes, and `docs/product/implementation-proof-gates.md` `28,835` bytes.
-- **Validator-duration evidence:** Same checkout; ten samples `62.864, 64.096, 63.412, 63.918, 62.889, 63.695, 62.094, 62.994, 63.942, 63.373` ms; min `62.094` ms, mean `63.328` ms, median `63.393` ms, p95 `64.027` ms, and max `64.096` ms; p99 is not meaningful for ten samples and no threshold is inferred.
+- **Artifact-size evidence:** Same checkout; `scripts/validate_proof_gates.py` `76,492` bytes, `scripts/test_validate_proof_gates.py` `26,828` bytes, and `docs/product/implementation-proof-gates.md` `28,835` bytes.
+- **Validator-duration evidence:** Same checkout; ten samples `63.502, 66.142, 65.529, 64.241, 66.980, 64.344, 63.436, 67.437, 63.555, 63.324` ms; min `63.324` ms, mean `64.849` ms, median `64.292` ms, p95 `67.231` ms, and max `67.437` ms; p99 is not meaningful for ten samples and no threshold is inferred.
 - **Threshold statement:** No threshold is claimed.
 
 The benchmark record must include environment, repetitions, distribution, build

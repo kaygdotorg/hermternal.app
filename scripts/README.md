@@ -59,9 +59,12 @@ shapes, and parity with the atomic issue-template contract. Measured evidence ma
 report observations, but target, budget, SLO, limit, and bound prose still fails
 when embedded in the same value. Live claims are checked per punctuation and
 conjunction clause, and preservation evidence must name a concrete accessibility
-surface plus a non-circular mechanism or reason. A single stateful Markdown scan
-hides multiline HTML comments and arbitrary-length backtick or tilde fences, so
-hidden or fenced decoys cannot satisfy a gate.
+surface plus a non-circular mechanism or reason. Indented Markdown field
+continuations are folded before field and semantic checks, including Unicode
+numeric comparators; circular or generic reasons such as `because non-UI`
+remain blocked. A single stateful Markdown scan hides multiline HTML comments
+and arbitrary-length backtick or tilde fences, so hidden or fenced decoys
+cannot satisfy a gate.
 
 Success and every failure emit exactly one JSON object. Unknown CLI arguments,
 invalid UTF-8, read errors, malformed input, checked or waived gates, and type
