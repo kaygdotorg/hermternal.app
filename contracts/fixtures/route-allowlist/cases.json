@@ -1,0 +1,430 @@
+{
+  "schema": "hermternal.fixture.route-allowlist.cases.v1",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "source_audit_id": "route-allowlist-c01-f5be9236",
+  "fixture_policy": "synthetic_markers_only",
+  "synthetic_only": true,
+  "cases": [
+    {
+      "id": "rest-approved-native-bearer",
+      "kind": "positive",
+      "surface": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions/synthetic-session-001",
+        "applicability": "native",
+        "auth_mode": "native_bearer",
+        "credential_state": "valid"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "client_allowlist",
+        "auth_result": "pass_to_handler",
+        "handler_result": "not_asserted"
+      },
+      "notes": "The route shape is reviewed; the fixture does not claim a response body or live compatibility."
+    },
+    {
+      "id": "rest-approved-browser-cookie",
+      "kind": "positive",
+      "surface": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "applicability": "browser",
+        "auth_mode": "browser_cookie",
+        "credential_state": "valid"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "client_allowlist",
+        "auth_result": "pass_to_handler",
+        "handler_result": "not_asserted"
+      },
+      "notes": "Browser sessions use the protected Dashboard cookie; the fixture carries no cookie value."
+    },
+    {
+      "id": "rest-invalid-bearer-no-cookie-fallback",
+      "kind": "negative",
+      "surface": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions",
+        "applicability": "native",
+        "auth_mode": "native_bearer",
+        "credential_state": "invalid",
+        "cookie_state": "valid"
+      },
+      "expected": {
+        "decision": "allow_reviewed_route",
+        "route_class": "client_allowlist",
+        "auth_result": "401_invalid_or_expired_without_cookie_fallback",
+        "http_status": 401
+      },
+      "notes": "A presented invalid bearer is not silently converted to cookie authentication."
+    },
+    {
+      "id": "rest-method-mutation-denied",
+      "kind": "negative",
+      "surface": "rest",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/me",
+        "applicability": "native",
+        "auth_mode": "native_bearer",
+        "credential_state": "valid"
+      },
+      "expected": {
+        "decision": "deny_default",
+        "route_class": "unknown_method_path_pair",
+        "auth_result": "not_attempted",
+        "http_status": 403
+      },
+      "notes": "Changing only the method must not widen the reviewed GET pair."
+    },
+    {
+      "id": "rest-prefix-confusion-denied",
+      "kind": "negative",
+      "surface": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions/synthetic-session-001/messages/extra",
+        "applicability": "native",
+        "auth_mode": "native_bearer",
+        "credential_state": "valid"
+      },
+      "expected": {
+        "decision": "deny_default",
+        "route_class": "path_shape_mismatch",
+        "auth_result": "not_attempted",
+        "http_status": 403
+      },
+      "notes": "A parameterized session id is one non-empty path segment; suffixes and prefix lookalikes are not matches."
+    },
+    {
+      "id": "rest-source-present-not-client-allowlisted",
+      "kind": "negative",
+      "surface": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/api/model/options",
+        "applicability": "browser",
+        "auth_mode": "browser_cookie",
+        "credential_state": "valid"
+      },
+      "expected": {
+        "decision": "deny_default",
+        "route_class": "source_present_not_client_allowlisted",
+        "auth_result": "not_attempted",
+        "http_status": 403
+      },
+      "notes": "The pinned source has a REST equivalent, but this audit freezes model.options over JSON-RPC and does not grant the REST transport."
+    },
+    {
+      "id": "rest-management-admin-denied",
+      "kind": "negative",
+      "surface": "rest",
+      "request": {
+        "method": "POST",
+        "path": "/api/gateway/restart",
+        "applicability": "browser",
+        "auth_mode": "browser_cookie",
+        "credential_state": "valid"
+      },
+      "expected": {
+        "decision": "deny_default",
+        "route_class": "source_present_management_blocked",
+        "auth_result": "not_attempted",
+        "http_status": 403
+      },
+      "notes": "Management, configuration, filesystem, SSH, and broad admin routes are not client features."
+    },
+    {
+      "id": "ws-chat-browser-ticket",
+      "kind": "positive",
+      "surface": "chat_websocket",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "framing": "one_text_json_rpc_object_per_websocket_message"
+      },
+      "expected": {
+        "decision": "allow_reviewed_upgrade",
+        "upgrade_auth": "ticket_consumed_once",
+        "route_class": "client_allowlist",
+        "source_result": "handler_result_not_asserted"
+      },
+      "notes": "The browser creates a fresh ticket from an authenticated gated session; no credential value is recorded."
+    },
+    {
+      "id": "ws-chat-native-ticket",
+      "kind": "positive",
+      "surface": "chat_websocket",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "native",
+        "auth_mode": "gated_ticket_from_native_bearer",
+        "credential_state": "fresh_single_use",
+        "framing": "one_text_json_rpc_object_per_websocket_message"
+      },
+      "expected": {
+        "decision": "allow_reviewed_upgrade",
+        "upgrade_auth": "ticket_consumed_once",
+        "route_class": "client_allowlist",
+        "source_result": "handler_result_not_asserted"
+      },
+      "notes": "Native bearer authentication creates the ticket; the bearer is not sent directly on the gated upgrade."
+    },
+    {
+      "id": "ws-chat-ticket-reused-denied",
+      "kind": "negative",
+      "surface": "chat_websocket",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "already_consumed"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "upgrade_auth": "ticket_invalid",
+        "close_code": 4401,
+        "retry": "mint_fresh_ticket"
+      },
+      "notes": "Ticket reuse is rejected; no retry reuses the prior credential."
+    },
+    {
+      "id": "ws-chat-ticket-expired-denied",
+      "kind": "negative",
+      "surface": "chat_websocket",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "expired"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "upgrade_auth": "ticket_invalid",
+        "close_code": 4401,
+        "retry": "mint_fresh_ticket"
+      },
+      "notes": "The pinned ticket TTL is 30 seconds; an expired fixture is a fail-closed classification, not live timing evidence."
+    },
+    {
+      "id": "ws-gated-token-fallback-denied",
+      "kind": "negative",
+      "surface": "chat_websocket",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_legacy_query_token",
+        "credential_state": "present"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "upgrade_auth": "gated_query_token_rejected",
+        "close_code": 4401,
+        "retry": "mint_fresh_ticket"
+      },
+      "notes": "The non-gated local query-token path is not a fallback once the OAuth gate is engaged."
+    },
+    {
+      "id": "ws-pty-web-only",
+      "kind": "positive",
+      "surface": "pty_websocket",
+      "request": {
+        "path": "/api/pty",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "host_class": "attested_posix_or_wsl",
+        "attach_state": "opaque_source_handle"
+      },
+      "expected": {
+        "decision": "allow_reviewed_upgrade",
+        "route_class": "client_allowlist_web_only",
+        "native_policy": "not_applicable_and_blocked",
+        "pty_input_policy": "forward_bytes_no_replay",
+        "pty_logging_policy": "no_raw_bytes_or_handle"
+      },
+      "notes": "PTY is the full web Terminal surface. Apple/native clients do not invoke it in dashboard-v0.0.1."
+    },
+    {
+      "id": "ws-pty-native-denied",
+      "kind": "negative",
+      "surface": "pty_websocket",
+      "request": {
+        "path": "/api/pty",
+        "applicability": "native",
+        "auth_mode": "gated_ticket_from_native_bearer",
+        "credential_state": "fresh_single_use",
+        "host_class": "attested_posix_or_wsl"
+      },
+      "expected": {
+        "decision": "deny_default",
+        "route_class": "web_only_not_native",
+        "upgrade_auth": "not_attempted",
+        "retry": "none"
+      },
+      "notes": "Native applicability is explicitly preserved as N/A rather than treated as an unsupported fallback."
+    },
+    {
+      "id": "rpc-approved-prompt",
+      "kind": "positive",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "native",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": "prompt.submit"
+      },
+      "expected": {
+        "decision": "allow_reviewed_operation",
+        "operation_class": "client_allowlist",
+        "fallback": "none"
+      },
+      "notes": "The operation name is frozen; request and response bodies remain source-defined unless separately audited."
+    },
+    {
+      "id": "rpc-config-key-mutation-denied",
+      "kind": "negative",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": "config.set",
+        "config_key": "logging.level"
+      },
+      "expected": {
+        "decision": "deny_operation",
+        "operation_class": "approved_name_but_unapproved_key",
+        "fallback": "none",
+        "error": "unsupported_configuration_key"
+      },
+      "notes": "config.set is selected only for the source-defined model key; it is not a general configuration channel."
+    },
+    {
+      "id": "rpc-unknown-operation-denied",
+      "kind": "negative",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": "session.export"
+      },
+      "expected": {
+        "decision": "deny_operation",
+        "operation_class": "unknown_not_allowlisted",
+        "fallback": "none",
+        "error": "method_not_found_or_unsupported"
+      },
+      "notes": "Unknown operations never fall back to a source-present route, REST equivalent, or adjacent gateway method."
+    },
+    {
+      "id": "rpc-sensitive-operation-denied",
+      "kind": "negative",
+      "surface": "json_rpc",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "operation": "sudo.respond"
+      },
+      "expected": {
+        "decision": "deny_operation",
+        "operation_class": "source_present_sensitive_blocked",
+        "fallback": "none",
+        "error": "unsupported_sensitive_operation"
+      },
+      "notes": "Sudo, secret, terminal-read, filesystem, and management operations are not converted into approval or clarification flows."
+    },
+    {
+      "id": "event-unknown-additive-noninteractive",
+      "kind": "compatibility",
+      "surface": "json_rpc_event",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "event_name": "tool.progress"
+      },
+      "expected": {
+        "decision": "ignore_additive_noninteractive",
+        "event_class": "unknown_noninteractive",
+        "fallback": "none"
+      },
+      "notes": "The client must not require tool.progress; additive noninteractive events may be ignored."
+    },
+    {
+      "id": "event-unknown-interactive-not-promoted",
+      "kind": "negative",
+      "surface": "json_rpc_event",
+      "request": {
+        "path": "/api/ws",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "fresh_single_use",
+        "event_name": "secret.request"
+      },
+      "expected": {
+        "decision": "deny_unsupported_interactive_event",
+        "event_class": "unknown_interactive",
+        "fallback": "none",
+        "ui_action": "never_treat_as_approval_or_clarification"
+      },
+      "notes": "Unknown sensitive interactive events are not silently rendered as a safe approval."
+    },
+    {
+      "id": "pty-log-redaction",
+      "kind": "security",
+      "surface": "pty_websocket",
+      "request": {
+        "path": "/api/pty",
+        "applicability": "browser",
+        "auth_mode": "gated_ticket",
+        "credential_state": "invalid",
+        "host_class": "attested_posix_or_wsl",
+        "attach_state": "opaque_source_handle"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "close_code": 4401,
+        "logging": {
+          "credential_class": "ticket",
+          "path_observed": true,
+          "bounded_reason_observed": true,
+          "sensitive_values_recorded": false,
+          "pty_bytes_recorded": false
+        }
+      },
+      "notes": "Synthetic evidence preserves the pinned bounded-ticket logging rule and adds a client guard against raw PTY bytes or handles."
+    },
+    {
+      "id": "malformed-input-control",
+      "kind": "malformed_input",
+      "surface": "validator",
+      "request": {
+        "encoding": "duplicate_object_key_or_wrong_top_level_type",
+        "input_state": "malformed"
+      },
+      "expected": {
+        "decision": "reject_without_traceback",
+        "exit_status": 2,
+        "stderr_policy": "one_validation_error_no_traceback",
+        "fallback": "none"
+      },
+      "notes": "The validator rejects duplicate keys, wrong JSON types, and malformed JSON without importing Hermes or attempting a network call."
+    }
+  ]
+}

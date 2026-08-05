@@ -12,6 +12,18 @@ Hermternal is a client of the Dashboard surface. It is not a client of the separ
 
 The source revision is evidence for this contract. It is not a dependency in this repository. A later Hermes revision needs a new compatibility review.
 
+## C-01 route and method freeze
+
+The normative machine-readable freeze is [`route_allowlist.json`](../fixtures/route-allowlist/route_allowlist.json), with its source citations and synthetic regression suite in [`route-allowlist/`](../fixtures/route-allowlist/). The validator is standard-library-only and source-audit-only; it does not import Hermes, contact a Dashboard, or claim live compatibility.
+
+The freeze keeps three inventories separate:
+
+1. **`source_present`** contains selected observations from the pinned Hermes tree, including the exact public bypass inventory and source-present routes or operations that remain blocked. It is not a complete upstream inventory and source presence is never client authorization.
+2. **`client_allowlist`** is the conservative Hermternal v0.0.1 contract: the exact reviewed REST method/path pairs, `WS /api/ws`, web-only `WS /api/pty`, the approved JSON-RPC operation names and events, and the authentication/applicability rules below. Unknown REST pairs, source-present-but-unapproved routes, and unknown JSON-RPC operations are default-deny.
+3. **`future_external_proxy_allowlist`** is a separate review item. It is empty and `not_frozen_future_review_required`; this client contract does not authorize a reverse proxy, gateway, or broader upstream exposure.
+
+Unknown additive non-interactive events may be ignored. Unknown interactive events must be surfaced as unsupported and must never be promoted to approval or clarification. Any change to this separation, the pinned source, or the exact allowlisted surface requires a focused contract review.
+
 ## Deployment base
 
 A deployment may serve Hermternal at `/` and proxy Hermes Dashboard at `/hermes/`. The route names below are relative to the Dashboard base. The proxy must preserve HTTPS, cookies, WebSocket upgrades, host checks, and the forwarded path prefix.
