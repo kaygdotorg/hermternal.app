@@ -9,8 +9,9 @@ objects locally so clean CI always exercises the adversarial Git boundary.
 from __future__ import annotations
 
 import copy
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -70,7 +71,7 @@ class AttachmentPolicyTests(unittest.TestCase):
                 self.assertEqual(completed.stderr, "")
                 lines = [line for line in completed.stdout.splitlines() if line.strip()]
                 self.assertEqual(len(lines), 1)
-                self.assertLess(len(lines[0]), 512)
+                self.assertLessEqual(len(lines[0]), validate.MAX_ERROR_OUTPUT_LENGTH)
                 payload = json.loads(lines[0])
                 self.assertIn(payload["error"]["code"], {"contract", "runtime"})
                 self.assertIsInstance(payload["error"]["message"], str)
@@ -237,6 +238,25 @@ class AttachmentPolicyTests(unittest.TestCase):
         iend = b"\x00\x00\x00\x00IEND" + b"\x00" * 4
         self.assertIsNone(validate._format_from_bytes(b"\x89PNG\r\n\x1a\n" + iend + b"%PDF-1.7"))
 
+    def test_gif_and_jpeg_metadata_terminators_are_opaque(self) -> None:
+        gif_comment = (
+            b"GIF89a" + b"\x00" * 7 + b"\x21\xfe" + bytes([7]) + b";<html>" + b"\x00\x3b"
+        )
+        self.assertEqual(validate._format_from_bytes(gif_comment), ("gif89a", ".gif"))
+        self.assertIsNone(validate._format_from_bytes(gif_comment + b"<html>"))
+
+        jpeg_metadata = b"\xff\xd8\xff\xe1" + (10).to_bytes(2, "big") + b"\xff\xd9<html>" + b"\xff\xd9"
+        self.assertEqual(validate._format_from_bytes(jpeg_metadata), ("jpeg", ".jpg"))
+        self.assertIsNone(validate._format_from_bytes(jpeg_metadata + b"<html>"))
+
+    def test_oversized_data_url_is_rejected_before_base64_decode(self) -> None:
+        encoded = "A" * (validate.MAX_BASE64_CHARS + 1)
+        with patch.object(validate.base64, "b64decode", wraps=validate.base64.b64decode) as decoder:
+            data, reason = validate._parse_data_url("data:image/png;base64," + encoded)
+        self.assertIsNone(data)
+        self.assertEqual(reason, "too_large")
+        decoder.assert_not_called()
+
     def test_size_boundary_is_inclusive_and_oversize_is_rejected(self) -> None:
         boundary = copy.deepcopy(self.cases["valid-png"])
         boundary["fixture"]["decoded_size_override"] = validate.MAX_IMAGE_BYTES
@@ -291,6 +311,10 @@ class AttachmentPolicyTests(unittest.TestCase):
         forbidden_values = (
             "data:image/png;base64,iVBORw0KGgo=",
             "iVBORw0KGgo=",
+            "iVBORw0KGgo",
+            "SGVsbG8",
+            "YWJjZGVm",
+            "/any/absolute/posix/path",
             "/Users/example/clipboard.png",
             "file:///tmp/clipboard.png",
             r"C:\\Users\\example\\clipboard.png",
@@ -325,15 +349,40 @@ class AttachmentPolicyTests(unittest.TestCase):
         for case_id in ("pending-upload", "interrupted-upload", "incompatible-contract"):
             self.assertEqual(self.cases[case_id]["expected"]["draft"], "preserved")
 
+        mutations = (
+            ("pending-upload", "phase", "other-phase"),
+            ("interrupted-upload", "phase", "uploading"),
+            ("incompatible-contract", "contract", validate.CONTRACT),
+        )
+        for case_id, key, value in mutations:
+            mutated = copy.deepcopy(self.document)
+            mutated_case = next(case for case in mutated["cases"] if case["id"] == case_id)
+            mutated_case["request"][key] = value
+            with self.subTest(case=case_id):
+                with self.assertRaises(validate.ContractError):
+                    validate.validate_document(mutated)
+                with self.assertRaises(validate.ContractError):
+                    validate.evaluate_case(mutated_case)
+
     def test_duplicate_keys_nonfinite_and_parser_limits_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
+            array_values = b"[" + b",".join(b"0" for _ in range(validate.MAX_JSON_ARRAY_ITEMS + 1)) + b"]"
+            object_values = b"{" + b",".join(
+                f'"key-{index}":0'.encode("ascii") for index in range(validate.MAX_JSON_OBJECT_KEYS + 1)
+            ) + b"}"
+            node_values = b"[" + b",".join(b"0" for _ in range(validate.MAX_JSON_SCAN_NODES + 1)) + b"]"
             fixtures = {
                 "duplicate.json": b'{"schema": "one", "schema": "two"}',
                 "nan.json": b'{"schema": NaN}',
                 "exponent-overflow.json": b'{"schema": 1e309}',
                 "huge-integer.json": b'{"schema": ' + (b"9" * 5000) + b"}",
                 "deep.json": (b"[" * (validate.MAX_JSON_SCAN_DEPTH + 1)) + b"0" + (b"]" * (validate.MAX_JSON_SCAN_DEPTH + 1)),
+                "oversized-bytes.json": b"x" * (validate.MAX_JSON_BYTES + 1),
+                "oversized-string.json": b'{"value":"' + (b"x" * (validate.MAX_JSON_STRING_CHARS + 1)) + b'"}',
+                "oversized-array.json": array_values,
+                "oversized-object.json": object_values,
+                "oversized-nodes.json": node_values,
                 "syntax.json": b'{"schema":',
                 "invalid-utf8.json": b"{\xff",
             }
@@ -374,6 +423,24 @@ class AttachmentPolicyTests(unittest.TestCase):
                 with self.assertRaises(validate.ContractError):
                     validate.validate_document(mutated)
 
+    def test_structured_errors_cap_serialized_bytes_and_redact_unknown_fields(self) -> None:
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            validate._print_structured_error("contract", "x" * 10_000)
+        line = stream.getvalue().strip()
+        self.assertLessEqual(len(line), validate.MAX_ERROR_OUTPUT_LENGTH)
+        self.assertEqual(json.loads(line)["error"]["code"], "contract")
+
+        mutated = copy.deepcopy(self.document)
+        mutated["/etc/passwd"] = "secret-shaped-value"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unknown-key.json"
+            path.write_text(json.dumps(mutated), encoding="utf-8")
+            self._assert_structured_cli_failure(
+                path,
+                forbidden=("/etc/passwd", "secret-shaped-value"),
+            )
+
     def test_source_attestation_exact_root_and_pinned_objects_are_offline(self) -> None:
         root, document, metadata = self._make_source_repo()
         with self._source_constants(metadata):
@@ -383,8 +450,15 @@ class AttachmentPolicyTests(unittest.TestCase):
             with self.assertRaises(validate.ContractError):
                 validate.validate_source(root / ".git", document)
 
+            alternates = root / ".git" / "objects" / "info" / "alternates"
+            alternates.write_text("/untrusted/object-store\n", encoding="utf-8")
+            with self.assertRaises(validate.ContractError):
+                validate.validate_source(root, document)
+            alternates.unlink()
+
             bare = root.parent / "bare"
             self._git(root.parent, "clone", "--bare", "-q", str(root), str(bare))
+            self.assertEqual(self._git(bare, "rev-parse", "--is-bare-repository"), "true")
             with self.assertRaises(validate.ContractError):
                 validate.validate_source(bare, document)
 
@@ -473,7 +547,7 @@ class AttachmentPolicyTests(unittest.TestCase):
                     self.assertEqual(completed.stderr, "")
                     self.assertNotIn(str(path), completed.stdout)
                     self.assertNotIn("host-secret", completed.stdout)
-                    self.assertLess(len(completed.stdout), 512)
+                    self.assertLessEqual(len(completed.stdout), validate.MAX_ERROR_OUTPUT_LENGTH)
                     self.assertNotIn("Traceback", completed.stdout)
 
     def test_normal_and_optimized_cli_outputs_match(self) -> None:

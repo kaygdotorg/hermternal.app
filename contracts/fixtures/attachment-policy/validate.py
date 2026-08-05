@@ -31,10 +31,20 @@ SOURCE_PATH = "hermes_cli/web_server.py"
 SOURCE_GIT_BLOB = "1fb3e6131629e7399ef12de78148ac6e7ec58d34"
 SOURCE_FILE_SHA256 = "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a"
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_BASE64_CHARS = 4 * ((MAX_IMAGE_BYTES + 2) // 3)
+MAX_DATA_URL_CHARS = MAX_BASE64_CHARS + 128
+MAX_JSON_BYTES = 1 * 1024 * 1024
+MAX_JSON_STRING_CHARS = 512 * 1024
+MAX_JSON_ARRAY_ITEMS = 512
+MAX_JSON_OBJECT_KEYS = 128
+MAX_JSON_INTEGER_DIGITS = 1_024
 MAX_JSON_SCAN_DEPTH = 64
 MAX_JSON_SCAN_NODES = 10_000
 MAX_RETAINED_TEXT_LENGTH = 4_096
-MAX_ERROR_MESSAGE_LENGTH = 240
+MAX_ERROR_OUTPUT_LENGTH = 240
+PENDING_PHASE = "uploading"
+INTERRUPTED_PHASE = "transport_interrupted"
+INCOMPATIBLE_CONTRACT = "dashboard-v0.0.2"
 RESPONSE_FIELDS = ["ok", "path", "name", "bytes", "mime_type"]
 STORAGE_ROOT = "HERMES_HOME/images/"
 SUPPORTED_IMAGE_MIME_FORMATS = {
@@ -185,6 +195,7 @@ _FORMATS: tuple[tuple[str, bytes | None, int | None, bytes | None, str], ...] = 
     ("bmp", b"BM", None, None, ".bmp"),
 )
 _DATA_URL_PAYLOAD_RE = re.compile(r"\A[A-Za-z0-9+/]*={0,2}\Z")
+_RETAINED_BASE64_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{3,}(?![A-Za-z0-9+/])")
 _FOREIGN_SIGNATURES = (
     b"%PDF-",
     b"PK\x03\x04",
@@ -233,24 +244,20 @@ def _strict_equal(actual: Any, expected: Any) -> bool:
 
 
 def _check_keys(value: Any, expected: set[str], context: str) -> None:
-    """Require an exact object shape and report both missing and extra keys."""
+    """Require an exact object shape without echoing untrusted field names."""
 
     _require(type(value) is dict, f"{context}: expected object")
-    actual = set(value)
-    _require(
-        actual == expected,
-        f"{context}: keys differ; missing={sorted(expected - actual)} extra={sorted(actual - expected)}",
-    )
+    _require(set(value) == expected, f"{context}: object fields do not match contract")
 
 
 def _check_optional_keys(value: Any, required: set[str], optional: set[str], context: str) -> None:
-    """Require all required keys while allowing only declared optional keys."""
+    """Require declared fields without echoing unknown keys in diagnostics."""
 
     _require(type(value) is dict, f"{context}: expected object")
     actual = set(value)
     allowed = required | optional
-    _require(required <= actual, f"{context}: missing required keys")
-    _require(actual <= allowed, f"{context}: unknown keys")
+    _require(required <= actual, f"{context}: required fields are missing")
+    _require(actual <= allowed, f"{context}: object fields do not match contract")
 
 
 def _strict_int(value: Any, context: str) -> None:
@@ -262,18 +269,109 @@ def _strict_string(value: Any, context: str) -> None:
 
 
 def _reject_constant(value: str) -> None:
-    raise ContractError(f"non-finite JSON value is not allowed: {value}")
+    raise ContractError("non-finite JSON value is not allowed")
+
+
+def _parse_int(value: str) -> int:
+    """Bound integer conversion before Python allocates a large integer."""
+
+    _require(len(value.lstrip("-")) <= MAX_JSON_INTEGER_DIGITS, "JSON integer exceeds bounded digits")
+    return int(value)
+
+
+def _parse_float(value: str) -> float:
+    """Bound float token size before conversion and finite-value scanning."""
+
+    _require(len(value) <= MAX_JSON_INTEGER_DIGITS, "JSON number exceeds bounded length")
+    return float(value)
 
 
 def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Reject duplicate JSON keys instead of silently keeping the last value."""
+    """Reject duplicate or oversized JSON objects before building the result."""
 
+    _require(len(pairs) <= MAX_JSON_OBJECT_KEYS, "JSON object exceeds bounded key count")
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
             raise ContractError("duplicate JSON key")
         result[key] = value
     return result
+
+
+def _preflight_json(text: str) -> None:
+    """Bound lexical JSON work before ``json.loads`` creates the value graph."""
+
+    stack: list[tuple[str, int]] = []
+    nodes = 0
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character.isspace():
+            index += 1
+            continue
+        if character == '"':
+            nodes += 1
+            _require(nodes <= MAX_JSON_SCAN_NODES, "JSON value graph exceeds bounded scan")
+            index += 1
+            string_length = 0
+            closed = False
+            while index < len(text):
+                character = text[index]
+                if character == '"':
+                    index += 1
+                    closed = True
+                    break
+                if character == "\\":
+                    index += 1
+                    if index < len(text):
+                        string_length += 1
+                        if text[index] == "u":
+                            index += 4
+                            string_length += 4
+                        index += 1
+                        _require(string_length <= MAX_JSON_STRING_CHARS, "JSON string exceeds bounded length")
+                        continue
+                string_length += 1
+                _require(string_length <= MAX_JSON_STRING_CHARS, "JSON string exceeds bounded length")
+                index += 1
+            _require(closed, "invalid JSON syntax")
+            continue
+        if character in "[{":
+            nodes += 1
+            _require(nodes <= MAX_JSON_SCAN_NODES, "JSON value graph exceeds bounded scan")
+            _require(len(stack) < MAX_JSON_SCAN_DEPTH, "JSON nesting exceeds bounded scan")
+            stack.append((character, 0))
+            index += 1
+            continue
+        if character in "]}":
+            if stack:
+                stack.pop()
+            index += 1
+            continue
+        if character == ",":
+            if stack:
+                kind, separators = stack[-1]
+                limit = MAX_JSON_ARRAY_ITEMS if kind == "[" else MAX_JSON_OBJECT_KEYS
+                _require(separators < limit, "JSON container exceeds bounded item count")
+                stack[-1] = (kind, separators + 1)
+            index += 1
+            continue
+        if character in "-0123456789":
+            nodes += 1
+            _require(nodes <= MAX_JSON_SCAN_NODES, "JSON value graph exceeds bounded scan")
+            digits = 0
+            while index < len(text) and text[index] in "0123456789eE+-.":
+                if text[index].isdigit():
+                    digits += 1
+                    _require(digits <= MAX_JSON_INTEGER_DIGITS, "JSON number exceeds bounded digits")
+                index += 1
+            continue
+        if text.startswith(("true", "false", "null"), index):
+            nodes += 1
+            _require(nodes <= MAX_JSON_SCAN_NODES, "JSON value graph exceeds bounded scan")
+            index += 4 if text.startswith("true", index) else 5 if text.startswith("false", index) else 4
+            continue
+        index += 1
 
 
 def _scan_finite_json(value: Any) -> None:
@@ -289,26 +387,34 @@ def _scan_finite_json(value: Any) -> None:
         if type(current) is float:
             _require(math.isfinite(current), "non-finite JSON value is not allowed")
         elif type(current) is dict:
+            _require(len(current) <= MAX_JSON_OBJECT_KEYS, "JSON object exceeds bounded key count")
             for child in current.values():
                 stack.append((child, depth + 1))
         elif type(current) is list:
+            _require(len(current) <= MAX_JSON_ARRAY_ITEMS, "JSON array exceeds bounded item count")
             for child in current:
                 stack.append((child, depth + 1))
 
 
 def load_document(path: Path = DEFAULT_CASES_PATH) -> dict[str, Any]:
-    """Load JSON with duplicate-key, parser-error, and finite-value rejection."""
+    """Load bounded JSON with parser-error and finite-value rejection."""
 
     try:
-        text = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise ContractError("invalid UTF-8") from exc
+        raw = path.read_bytes()
     except OSError as exc:
         raise ContractError("could not read fixture") from exc
+    _require(len(raw) <= MAX_JSON_BYTES, "JSON document exceeds bounded bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ContractError("invalid UTF-8") from exc
+    _preflight_json(text)
     try:
         document = json.loads(
             text,
             object_pairs_hook=_object_pairs,
+            parse_int=_parse_int,
+            parse_float=_parse_float,
             parse_constant=_reject_constant,
         )
     except ContractError:
@@ -344,8 +450,130 @@ def _foreign_prefix(value: bytes) -> bool:
     return any(lowered.startswith(marker.lower()) for marker in _FOREIGN_SIGNATURES)
 
 
+def _skip_gif_subblocks(data: bytes, cursor: int) -> int | None:
+    """Skip a GIF extension/image sub-block stream without scanning its bytes."""
+
+    while cursor < len(data):
+        size = data[cursor]
+        cursor += 1
+        if size == 0:
+            return cursor
+        cursor += size
+        if cursor > len(data):
+            return None
+    return None
+
+
+def _validated_gif_end(data: bytes) -> int | None:
+    """Find the GIF trailer while treating extension payloads as opaque bytes."""
+
+    if len(data) < 13:
+        return None
+    cursor = 6
+    packed = data[10]
+    cursor += 7
+    if packed & 0x80:
+        cursor += 3 * (1 << ((packed & 0x07) + 1))
+        if cursor > len(data):
+            return None
+    while cursor < len(data):
+        block = data[cursor]
+        cursor += 1
+        if block == 0x3B:
+            return cursor
+        if block == 0x21:
+            if cursor >= len(data):
+                return None
+            cursor += 1
+            cursor = _skip_gif_subblocks(data, cursor)
+            if cursor is None:
+                return None
+            continue
+        if block == 0x2C:
+            if cursor + 9 > len(data):
+                return None
+            packed = data[cursor + 8]
+            cursor += 9
+            if packed & 0x80:
+                cursor += 3 * (1 << ((packed & 0x07) + 1))
+                if cursor > len(data):
+                    return None
+            if cursor >= len(data):
+                return None
+            cursor += 1
+            cursor = _skip_gif_subblocks(data, cursor)
+            if cursor is None:
+                return None
+            continue
+        return None
+    return None
+
+
+def _read_jpeg_segment_end(data: bytes, cursor: int) -> int | None:
+    """Read one JPEG marker segment, including its bounded length field."""
+
+    if cursor + 2 > len(data):
+        return None
+    length = int.from_bytes(data[cursor : cursor + 2], "big")
+    if length < 2 or cursor + length > len(data):
+        return None
+    return cursor + length
+
+
+def _validated_jpeg_end(data: bytes) -> int | None:
+    """Find JPEG EOI while treating metadata and stuffed scan bytes as opaque."""
+
+    if len(data) < 2 or data[:2] != b"\xff\xd8":
+        return None
+    cursor = 2
+    while cursor < len(data):
+        if data[cursor] != 0xFF:
+            return None
+        while cursor < len(data) and data[cursor] == 0xFF:
+            cursor += 1
+        if cursor >= len(data):
+            return None
+        marker = data[cursor]
+        cursor += 1
+        if marker == 0xD9:
+            return cursor
+        if marker == 0xDA:
+            segment_end = _read_jpeg_segment_end(data, cursor)
+            if segment_end is None:
+                return None
+            cursor = segment_end
+            while cursor < len(data):
+                if data[cursor] != 0xFF:
+                    cursor += 1
+                    continue
+                marker_start = cursor
+                while cursor < len(data) and data[cursor] == 0xFF:
+                    cursor += 1
+                if cursor >= len(data):
+                    return None
+                scan_marker = data[cursor]
+                if scan_marker == 0x00:
+                    cursor += 1
+                    continue
+                if scan_marker == 0xD9:
+                    return cursor + 1
+                if 0xD0 <= scan_marker <= 0xD7:
+                    cursor += 1
+                    continue
+                cursor = marker_start
+                break
+            continue
+        if marker == 0xD8 or marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            continue
+        segment_end = _read_jpeg_segment_end(data, cursor)
+        if segment_end is None:
+            return None
+        cursor = segment_end
+    return None
+
+
 def _validated_format_end(data: bytes, format_id: str) -> int | None:
-    """Return a trusted image terminator, not an arbitrary trailing-byte offset."""
+    """Return a trusted image terminator, not a marker inside metadata."""
 
     if format_id == "png":
         cursor = 8
@@ -359,11 +587,9 @@ def _validated_format_end(data: bytes, format_id: str) -> int | None:
             cursor = end
         return None
     if format_id == "jpeg":
-        end = data.find(b"\xff\xd9", 3)
-        return end + 2 if end >= 0 else None
+        return _validated_jpeg_end(data)
     if format_id in {"gif87a", "gif89a"}:
-        end = data.find(b"\x3b", 6)
-        return end + 1 if end >= 0 else None
+        return _validated_gif_end(data)
     if format_id == "webp" and len(data) >= 12:
         riff_size = int.from_bytes(data[4:8], "little")
         end = 8 + riff_size
@@ -422,11 +648,15 @@ def _parse_data_url(data_url: Any) -> tuple[bytes, str] | tuple[None, str]:
     if type(data_url) is not str:
         return None, "malformed_request"
     text = data_url
+    if len(text) > MAX_DATA_URL_CHARS:
+        return None, "too_large"
     if not text.startswith("data:") or "," not in text:
         return None, "invalid_data_url"
     header, encoded = text.split(",", 1)
     if not header.startswith("data:"):
         return None, "invalid_data_url"
+    if len(encoded) > MAX_BASE64_CHARS:
+        return None, "too_large"
     media = header[5:]
     mime_type = media.split(";", 1)[0]
     if not mime_type.startswith("image/"):
@@ -497,6 +727,10 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             "attachment[empty]",
         )
     if state == "pending":
+        _require(
+            type(case.get("request")) is dict and case["request"].get("phase") == PENDING_PHASE,
+            "pending request phase is not canonical",
+        )
         return _state_outcome(
             "pending",
             "upload_pending",
@@ -505,6 +739,10 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             "attachment[pending]",
         )
     if state == "interrupted":
+        _require(
+            type(case.get("request")) is dict and case["request"].get("phase") == INTERRUPTED_PHASE,
+            "interrupted request phase is not canonical",
+        )
         return _state_outcome(
             "interrupted",
             "upload_interrupted",
@@ -513,6 +751,10 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             "attachment[interrupted]",
         )
     if state == "incompatible":
+        _require(
+            type(case.get("request")) is dict and case["request"].get("contract") == INCOMPATIBLE_CONTRACT,
+            "incompatible request contract is not canonical",
+        )
         return _state_outcome(
             "blocked",
             "incompatible_contract",
@@ -584,11 +826,30 @@ _RETAINED_BASE64_RE = re.compile(
     r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{8,}={1,2}(?![A-Za-z0-9+/])"
 )
 _RETAINED_PATH_RE = re.compile(
-    r"(?i)(?:file://|(?:^|[\s(\"'])/(?:users|private|tmp|var|home|etc|opt|root)(?:/|$)|(?:^|[\s(\"'])[a-z]:[\\/]|(?:^|[\s(\"'])\\\\)"
+    r"(?i)(?:file://|(?:^|[\s(\"'])/(?!/)[^\s\"']*|(?:^|[\s(\"'])[a-z]:[\\/]|(?:^|[\s(\"'])\\\\)"
 )
 _RETAINED_FILENAME_RE = re.compile(
     r"(?i)(?<![\w.-])(?:\.\.?[\\/][^\r\n]*|[a-z0-9_.-]+[\\/][^\r\n]*|[a-z0-9_.-]+)\.(?:png|jpg|jpeg|gif|webp|bmp|tiff|pdf)(?![\w.-])"
 )
+
+
+def _contains_unpadded_base64(value: str) -> bool:
+    """Reject canonical unpadded payload-like base64 without rejecting prose."""
+
+    for match in _RETAINED_BASE64_TOKEN_RE.finditer(value):
+        token = match.group(0)
+        if (len(token) < 8 and not any(character.isdigit() or character in "+/" for character in token)) or len(token) % 4 == 1:
+            continue
+        if sum(character.isupper() for character in token) < 2:
+            continue
+        padded = token + "=" * (-len(token) % 4)
+        try:
+            decoded = base64.b64decode(padded, validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if base64.b64encode(decoded).decode("ascii").rstrip("=") == token:
+            return True
+    return False
 
 
 def _validate_retained_text(value: Any, context: str) -> None:
@@ -598,6 +859,7 @@ def _validate_retained_text(value: Any, context: str) -> None:
     _require(len(value) <= MAX_RETAINED_TEXT_LENGTH, f"{context}: retained text is too long")
     _require(_RETAINED_DATA_URL_RE.search(value) is None, f"{context}: raw data URL is not retained")
     _require(_RETAINED_BASE64_RE.search(value) is None, f"{context}: raw base64 is not retained")
+    _require(not _contains_unpadded_base64(value), f"{context}: raw base64 is not retained")
     _require(_RETAINED_PATH_RE.search(value) is None, f"{context}: raw path is not retained")
     _require(_RETAINED_FILENAME_RE.search(value) is None, f"{context}: user filename is not retained")
 
@@ -710,9 +972,12 @@ def validate_document(document: dict[str, Any]) -> None:
         elif case["state"] == "pending" or case["state"] == "interrupted":
             _check_keys(case["request"], {"phase"}, f"{context}.request")
             _strict_string(case["request"]["phase"], f"{context}.request.phase")
+            expected_phase = PENDING_PHASE if case["state"] == "pending" else INTERRUPTED_PHASE
+            _require(case["request"]["phase"] == expected_phase, f"{context}.request.phase: not canonical")
         else:
             _check_keys(case["request"], {"contract"}, f"{context}.request")
             _strict_string(case["request"]["contract"], f"{context}.request.contract")
+            _require(case["request"]["contract"] == INCOMPATIBLE_CONTRACT, f"{context}.request.contract: not canonical")
 
         _check_keys(case["expected"], EXPECTED_KEYS, f"{context}.expected")
         _require(_strict_equal(evaluate_case(case), case["expected"]), f"{context}: expected outcome does not match policy")
@@ -761,11 +1026,35 @@ def _run_git(root: Path, args: list[str], raw: bool = False) -> bytes | str:
     return result.stdout if raw else result.stdout.decode("utf-8").strip()
 
 
+def _reject_repository_local_alternates(root: Path) -> None:
+    """Reject object-store redirection declared inside the supplied repository."""
+
+    marker = root / ".git"
+    git_dirs: list[Path] = []
+    if marker.is_dir():
+        git_dirs.append(marker)
+    elif marker.is_file():
+        try:
+            line = marker.read_text(encoding="utf-8").splitlines()[0]
+        except (OSError, UnicodeDecodeError, IndexError) as exc:
+            raise ContractError("invalid Git metadata") from exc
+        if not line.startswith("gitdir:"):
+            raise ContractError("invalid Git metadata")
+        git_dirs.append((root / line[7:].strip()).resolve())
+    for git_dir in git_dirs:
+        alternates = git_dir / "objects" / "info" / "alternates"
+        if alternates.exists() or alternates.is_symlink():
+            raise ContractError("repository-local object alternates are not allowed")
+
+
 def validate_source(source_root: Path, document: dict[str, Any]) -> None:
     """Verify provenance and markers from immutable pinned Git blob bytes."""
 
     root = source_root.resolve()
     _require(root.is_dir(), "source root is not a directory")
+    _reject_repository_local_alternates(root)
+    _require(_run_git(root, ["rev-parse", "--is-bare-repository"]) == "false", "bare repositories are not allowed")
+    _require(_run_git(root, ["rev-parse", "--is-inside-work-tree"]) == "true", "source root is not a worktree")
     checkout_root = Path(_run_git(root, ["rev-parse", "--show-toplevel"])).resolve()
     _require(checkout_root == root, "source root is not the exact checkout root")
     commit = _run_git(root, ["rev-parse", "--verify", f"{PINNED_SHA}^{{commit}}"])
@@ -886,10 +1175,25 @@ def _parse_cli(argv: list[str]) -> tuple[Path, Path | None]:
 
 
 def _print_structured_error(code: str, message: str) -> None:
-    """Emit one bounded semantic error without raw paths or input material."""
+    """Emit one compact semantic error whose serialized line is capped."""
 
-    safe_message = " ".join(message.split())[:MAX_ERROR_MESSAGE_LENGTH]
-    print(json.dumps({"error": {"code": code, "message": safe_message}}, sort_keys=True))
+    safe_code = code if code in {"contract", "runtime"} else "runtime"
+    safe_message = " ".join(message.split())
+    payload = {"error": {"code": safe_code, "message": safe_message}}
+    serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    if len(serialized) > MAX_ERROR_OUTPUT_LENGTH:
+        empty = json.dumps(
+            {"error": {"code": safe_code, "message": ""}},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        budget = max(0, MAX_ERROR_OUTPUT_LENGTH - len(empty))
+        payload["error"]["message"] = safe_message[:budget]
+        serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        while len(serialized) > MAX_ERROR_OUTPUT_LENGTH and payload["error"]["message"]:
+            payload["error"]["message"] = payload["error"]["message"][:-1]
+            serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    print(serialized)
 
 
 def main(argv: list[str] | None = None) -> int:

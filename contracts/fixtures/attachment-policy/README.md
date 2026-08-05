@@ -91,8 +91,10 @@ Reject the upload when any required boundary is absent or mismatched:
 - decoded bytes larger than 25 MiB;
 - an empty or unrecognised byte signature; or
 - an obvious PDF, ZIP, or HTML polyglot at the image suffix/terminator boundary.
-  Foreign-looking bytes inside a valid format-internal chunk are not rejected
-  merely because the marker text exists;
+  GIF extension/image sub-blocks and JPEG metadata/scan segments are parsed as
+  opaque structure, so terminator-like bytes inside them do not create false
+  polyglot matches. Foreign-looking bytes inside a valid format-internal chunk
+  are not rejected merely because the marker text exists;
 - a content type other than the selected JSON envelope; or
 - a missing or incompatible `dashboard-v0.0.1` / pinned-source proof.
 
@@ -142,17 +144,24 @@ and exact markers for the route, limit, format detector, decoder, and response.
 With `--source-root`, the validator requires the supplied path to be the exact
 non-bare checkout top level, then reads only immutable bytes from
 `f5be9236e00ddf2f2a412697f267078fc4ee068e:path` with lazy fetch, replacement
-objects, alternate object stores, inherited Git config, grafts, shallow-file
-redirects, and implicit-work-tree overrides disabled. It does not trust a
-mutable worktree copy for those claims. Structured failures use bounded semantic
-messages and never echo the source path.
+objects, repository-local `.git/objects/info/alternates`, alternate object
+stores, inherited Git config, grafts, shallow-file redirects, and
+implicit-work-tree overrides disabled. It independently rejects bare or
+non-worktree repositories, and does not trust a mutable worktree copy for those
+claims. Structured failures use one compact semantic JSON line capped at 240
+serialized characters and never echo source paths, unknown keys, or input data.
 
-The loader rejects duplicate keys, parser overflow such as 5000-digit integers,
-exponent overflow such as `1e309`, malformed UTF-8/syntax, excessive nesting,
-and non-finite values. Retained case notes are bounded and reject raw data URLs,
-base64 payloads, `file://` URLs, absolute POSIX/Windows paths, and filename/path
-shapes; request fixtures themselves contain only the synthetic values needed to
-exercise the boundary.
+The loader bounds raw JSON bytes, string lengths, array items, object keys,
+integer digits, nesting, and value-graph nodes before costly parsing. It rejects
+duplicate keys, parser overflow such as 5000-digit integers, exponent overflow
+such as `1e309`, malformed UTF-8/syntax, excessive nesting, and non-finite values.
+The data URL parser rejects an encoded payload above the 25 MiB base64 envelope
+before allocating decoded bytes. Retained case notes and source claims are
+bounded and reject raw data URLs, padded or valid unpadded base64 payloads,
+`file://` URLs, all absolute POSIX/Windows paths, and filename/path shapes;
+request fixtures themselves contain only the synthetic values needed to exercise
+the boundary. Pending, interrupted, and incompatible requests must carry their
+canonical phase or contract evidence rather than only a matching state label.
 
 ## Accessibility and Paper evidence
 
@@ -208,10 +217,10 @@ Environment:
 ```text
 interpreter: /opt/homebrew/opt/python@3.14/bin/python3.14 (Python 3.14.6)
 platform: Darwin 25.5.0 arm64
-artifact bytes: 101342
+artifact bytes: 118077
 repetitions per mode: 30
-normal distribution (ms): min 42.992, median 44.644, max 45.732
-optimized distribution (ms): min 43.244, median 45.565, max 47.432
+normal distribution (ms): min 48.645, median 50.966, max 54.106
+optimized distribution (ms): min 49.038, median 50.678, max 58.712
 ```
 
 Artifact bytes are the sum of the committed `README.md`, `cases.json`,
