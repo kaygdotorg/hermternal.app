@@ -62,6 +62,8 @@ Changing an outcome, source reference, marker, or marker order fails validation.
 
 Both JSON roots and every nested object used by the fixtures have exact key sets and type/value checks. The validator recursively walks all nested dictionaries, lists, keys, and string values in `cases.json` and `source_audit.json`. It rejects live credential-shaped values such as `ghp_live_*`, `github_pat_*`, `sk_live_*`, bearer values, cloud access-key shapes, private-key headers, token assignments, and sensitive field names. Public commit-pinned source URLs are allowed evidence; live secrets and live cookie contents are not.
 
+Every JSON fixture or source-evidence read uses the same strict standard-library loader. It rejects duplicate object keys before redaction (including nested duplicates), `NaN`, `Infinity`, `-Infinity`, exponent overflow such as `1e9999`, unsupported leaf types, and nesting beyond the fixed depth bound. The loader performs a structural depth pre-scan before parsing so hostile input fails with a controlled validation error rather than a parser traceback. The CLI accepts `--audit` and `--cases` overrides for offline temporary-fixture regressions; malformed input exits with status `2`, a `validation error` line, and no traceback.
+
 ## Validation
 
 Run the standard-library test directly from the repository root:

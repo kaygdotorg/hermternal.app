@@ -10,12 +10,16 @@ contact a provider.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import copy
 import hashlib
 import json
+import math
 import re
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -31,6 +35,7 @@ CASES_PATH = FIXTURE_DIR / "cases.json"
 SOURCE_EXCERPT_DIR = FIXTURE_DIR / "source_excerpts"
 PINNED_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 PINNED_TREE_SHA = "886db5eb1150f819344d67fedc81aef0caab09ff"
+MAX_JSON_DEPTH = 128
 REQUIRED_CASES = {
     "success",
     "state-mismatch",
@@ -455,16 +460,111 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+class FixtureJSONError(ValueError):
+    """Raised for malformed or unsafe JSON before schema/redaction checks run."""
+
+
+def reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate keys so a hidden value cannot be overwritten."""
+
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise FixtureJSONError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def reject_nonfinite_json_constant(value: str) -> Any:
+    """Reject JSON extensions that can smuggle non-finite numbers."""
+
+    raise FixtureJSONError(f"non-finite JSON number is not allowed: {value}")
+
+
+def reject_overflowing_json_float(value: str) -> float:
+    """Reject exponent overflow such as ``1e9999`` at parse time."""
+
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise FixtureJSONError(f"non-finite JSON number is not allowed: {value}")
+    return parsed
+
+
+def scan_json_nesting(text: str) -> None:
+    """Bound structural nesting before ``json`` can recurse on hostile input."""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for offset, character in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise FixtureJSONError(
+                    f"maximum JSON nesting depth exceeded at byte {offset}"
+                )
+        elif character in "]}":
+            depth -= 1
+            if depth < 0:
+                raise FixtureJSONError(f"malformed JSON nesting at byte {offset}")
+
+
+def validate_json_tree(value: Any, label: str = "fixture", depth: int = 0) -> None:
+    """Reject unsupported leaves, non-finite values, and post-parse deep trees."""
+
+    if depth > MAX_JSON_DEPTH:
+        raise FixtureJSONError(f"{label}: maximum JSON nesting depth exceeded")
+    if type(value) is dict:
+        for key, child in value.items():
+            if type(key) is not str:
+                raise FixtureJSONError(f"{label}: object key must be a string")
+            validate_json_tree(child, f"{label}.{key}", depth + 1)
+        return
+    if type(value) is list:
+        for index, child in enumerate(value):
+            validate_json_tree(child, f"{label}[{index}]", depth + 1)
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise FixtureJSONError(f"{label}: non-finite JSON number is not allowed")
+        return
+    if value is None or type(value) in (bool, int, str):
+        return
+    raise FixtureJSONError(f"{label}: unsupported JSON value type")
+
+
 def load_json(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as stream:
-        value = json.load(stream)
-    if not isinstance(value, dict):
-        raise TypeError(f"fixture root must be an object: {path}")
-    return value
+    """Load every owned JSON artifact through one strict, fail-closed path."""
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        scan_json_nesting(text)
+        value = json.loads(
+            text,
+            object_pairs_hook=reject_duplicate_json_keys,
+            parse_constant=reject_nonfinite_json_constant,
+            parse_float=reject_overflowing_json_float,
+        )
+        if type(value) is not dict:
+            raise FixtureJSONError(f"fixture root must be an object: {path}")
+        validate_json_tree(value, str(path))
+        return value
+    except (FixtureJSONError, OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise FixtureJSONError(f"{path}: invalid JSON input: {exc}") from None
 
 
 def require_exact_keys(value: Any, expected: frozenset[str], label: str) -> dict[str, Any]:
-    require(isinstance(value, dict), f"{label} must be an object")
+    require(type(value) is dict, f"{label} must be an object")
     require(set(value) == expected, f"{label} keys changed")
     return value
 
@@ -477,7 +577,7 @@ def validate_no_live_secrets(
     scan_assignments: bool = True,
 ) -> None:
     """Walk every nested fixture value, including lists and mapping keys."""
-    if isinstance(value, dict):
+    if type(value) is dict:
         for key, child in value.items():
             key_path = f"{path}.{key}"
             if scan_keys:
@@ -489,7 +589,7 @@ def validate_no_live_secrets(
                 scan_assignments=scan_assignments,
             )
         return
-    if isinstance(value, list):
+    if type(value) is list:
         for index, child in enumerate(value):
             validate_no_live_secrets(
                 child,
@@ -498,7 +598,7 @@ def validate_no_live_secrets(
                 scan_assignments=scan_assignments,
             )
         return
-    if isinstance(value, str):
+    if type(value) is str:
         for pattern in SECRET_VALUE_PATTERNS:
             require(pattern.search(value) is None, f"live secret-shaped fixture value at {path}")
         for match in SENSITIVE_ASSIGNMENT.finditer(value):
@@ -904,12 +1004,50 @@ def assert_nonce_policy_is_scoped(documentation: str) -> None:
 
 
 class BrowserOAuthContractTests(unittest.TestCase):
+    audit_path = SOURCE_AUDIT_PATH
+    cases_path = CASES_PATH
+
     @classmethod
     def setUpClass(cls) -> None:
-        cls.audit = load_json(SOURCE_AUDIT_PATH)
-        cls.cases = load_json(CASES_PATH)
+        cls.audit = load_json(cls.audit_path)
+        cls.cases = load_json(cls.cases_path)
         cls.documentation = DOC_PATH.read_text(encoding="utf-8")
         cls.excerpts = load_source_excerpts()
+
+    def _run_cli(
+        self,
+        fixture_path: Path,
+        *,
+        optimized: bool,
+        option: str = "--cases",
+    ) -> subprocess.CompletedProcess[str]:
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend([str(Path(__file__)), option, str(fixture_path)])
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+
+    def _assert_cli_parser_failure(
+        self,
+        payload: str,
+        expected_message: str,
+        *,
+        option: str = "--cases",
+    ) -> None:
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized, message=expected_message):
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    result = self._run_cli(
+                        Path(stream.name),
+                        optimized=optimized,
+                        option=option,
+                    )
+                self.assertEqual(result.returncode, 2, (optimized, result.stdout, result.stderr))
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+                self.assertIn("validation error", result.stderr.lower())
+                self.assertIn(expected_message, result.stderr)
 
     def test_source_pin_and_audit_shape(self) -> None:
         validate_audit_root(self.audit, self.excerpts)
@@ -917,6 +1055,70 @@ class BrowserOAuthContractTests(unittest.TestCase):
         validate_no_live_secrets(self.audit)
         validate_no_live_secrets(self.cases)
         validate_no_live_secrets(self.excerpts, scan_assignments=False)
+
+    def test_strict_loader_rejects_duplicate_nonfinite_deep_and_malformed_json(self) -> None:
+        deep_document: dict[str, Any] = {}
+        cursor = deep_document
+        for _ in range(MAX_JSON_DEPTH + 1):
+            child: dict[str, Any] = {}
+            cursor["nested"] = child
+            cursor = child
+        payloads = (
+            ('{"scope":"ghp_live_hidden_secret","scope":"safe_fixture_scope"}', "duplicate JSON object key"),
+            ('{"outer":{"scope":"ghp_live_nested_secret","scope":"safe_fixture_scope"}}', "duplicate JSON object key"),
+            ('{"value":NaN}', "non-finite JSON number"),
+            ('{"value":Infinity}', "non-finite JSON number"),
+            ('{"value":-Infinity}', "non-finite JSON number"),
+            ('{"value":1e9999}', "non-finite JSON number"),
+            (json.dumps(deep_document), "maximum JSON nesting depth"),
+            ('{"cases":[}', "invalid JSON input"),
+        )
+        for payload, expected_message in payloads:
+            with self.subTest(expected_message=expected_message):
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    with self.assertRaises(FixtureJSONError) as raised:
+                        load_json(Path(stream.name))
+                self.assertIn(expected_message, str(raised.exception))
+
+    def test_exact_type_confusion_is_rejected_by_closed_schema(self) -> None:
+        forged = copy.deepcopy(self.cases)
+        forged["cases"][0]["expected"]["status"] = True
+        with self.assertRaises(AssertionError):
+            validate_cases_root(forged)
+
+    def test_temp_fixture_failures_are_controlled_in_normal_and_optimized_cli(self) -> None:
+        cases_text = CASES_PATH.read_text(encoding="utf-8")
+        duplicate_secret = cases_text.replace(
+            '"scope": "fixture-scope",',
+            '"scope": "ghp_live_hidden_secret",\n            "scope": "fixture-scope",',
+            1,
+        )
+        self.assertNotEqual(duplicate_secret, cases_text)
+        self._assert_cli_parser_failure(duplicate_secret, "duplicate JSON object key")
+        self._assert_cli_parser_failure(
+            '{"scope":"ghp_live_audit_secret","scope":"safe_fixture_scope"}',
+            "duplicate JSON object key",
+            option="--audit",
+        )
+        self._assert_cli_parser_failure(
+            '{"outer":{"scope":"ghp_live_nested_secret","scope":"safe_fixture_scope"}}',
+            "duplicate JSON object key",
+        )
+        self._assert_cli_parser_failure('{"value":NaN}', "non-finite JSON number")
+        self._assert_cli_parser_failure('{"value":Infinity}', "non-finite JSON number")
+        self._assert_cli_parser_failure('{"value":-Infinity}', "non-finite JSON number")
+        self._assert_cli_parser_failure('{"value":1e9999}', "non-finite JSON number")
+
+        deep_document: dict[str, Any] = {}
+        cursor = deep_document
+        for _ in range(MAX_JSON_DEPTH + 1):
+            child: dict[str, Any] = {}
+            cursor["nested"] = child
+            cursor = child
+        self._assert_cli_parser_failure(json.dumps(deep_document), "maximum JSON nesting depth")
+        self._assert_cli_parser_failure('{"cases":[}', "invalid JSON input")
 
     def test_root_and_nested_schema_mutations_are_rejected(self) -> None:
         extra_case_root = copy.deepcopy(self.cases)
@@ -1289,7 +1491,24 @@ class BrowserOAuthContractTests(unittest.TestCase):
         self.fail(f"missing case: {case_id}")
 
 
-def run() -> int:
+def run(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--audit", type=Path, default=SOURCE_AUDIT_PATH)
+    parser.add_argument("--cases", type=Path, default=CASES_PATH)
+    args = parser.parse_args(argv)
+    BrowserOAuthContractTests.audit_path = args.audit
+    BrowserOAuthContractTests.cases_path = args.cases
+    try:
+        # Preflight through the same loader used by setUpClass so malformed
+        # temporary fixtures fail as one controlled CLI error, never a unittest
+        # traceback. The second read is intentional: tests exercise the exact
+        # selected paths through their normal setup lifecycle.
+        load_json(args.audit)
+        load_json(args.cases)
+    except (FixtureJSONError, OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        print(f"validation error: {exc}", file=sys.stderr)
+        return 2
+
     started = time.perf_counter()
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
