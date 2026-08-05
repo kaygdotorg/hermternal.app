@@ -1,0 +1,69 @@
+{
+  "schema_version": "pty-contract-baseline-v1",
+  "fixture": "pty-contract-fixtures.json",
+  "metric": "validator_wall_clock_ms",
+  "environment": {
+    "os": "Darwin",
+    "arch": "arm64",
+    "python": "3.14.6",
+    "runtime": "CPython"
+  },
+  "runs": [
+    {
+      "mode": "normal",
+      "command": "python3 validate.py",
+      "samples_ms": [
+        56.087,
+        53.928,
+        54.29,
+        55.925,
+        55.348,
+        55.763,
+        54.266,
+        53.831,
+        56.222,
+        54.993
+      ],
+      "distribution": {
+        "min_ms": 53.831,
+        "median_ms": 55.171,
+        "p95_ms": 56.222,
+        "max_ms": 56.222
+      }
+    },
+    {
+      "mode": "optimized",
+      "command": "python3 -O validate.py",
+      "samples_ms": [
+        55.513,
+        56.886,
+        58.49,
+        58.196,
+        57.205,
+        58.863,
+        57.461,
+        57.992,
+        59.081,
+        56.678
+      ],
+      "distribution": {
+        "min_ms": 55.513,
+        "median_ms": 57.727,
+        "p95_ms": 59.081,
+        "max_ms": 59.081
+      }
+    }
+  ],
+  "artifact_size_bytes": {
+    "scope": "owned fixture files excluding this mutable baseline record",
+    "files": {
+      "README.md": 4257,
+      "pty-contract-fixtures.json": 12002,
+      "validate.py": 46073,
+      "test_validate.py": 4408
+    },
+    "total": 66740
+  },
+  "approved_budget": null,
+  "notes": "Observation only; no approved performance threshold exists. This is fixture-validator timing, not PTY runtime latency."
+}
