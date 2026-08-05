@@ -1,0 +1,363 @@
+{
+  "schema": "hermternal.fixture.provider-discovery.v1",
+  "contract": "dashboard-v0.0.1",
+  "audit_id": "provider-discovery-c02-f5be9236",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "client_scope": "shared",
+  "synthetic": true,
+  "route": {
+    "method": "GET",
+    "path": "/api/auth/providers",
+    "clients": ["browser", "native"]
+  },
+  "provider_policy": {
+    "response_keys": ["name", "display_name", "supports_password"],
+    "registry_filter": "supports_session_truthy",
+    "supports_session_default": true,
+    "supports_password_default": false,
+    "order": "registration",
+    "provider_name_policy": "source-data-lowercase-stable-identifier",
+    "provider_choice_policy": "provider-neutral"
+  },
+  "state_policy": {
+    "pending": "discovering",
+    "success": "signed_out",
+    "empty": "provider_unavailable",
+    "malformed": "provider_unavailable",
+    "cancelled": "signed_out",
+    "retry": "discovering_then_re_read"
+  },
+  "recovery": {
+    "discovery_is_idempotent": true,
+    "retry_requires_explicit_user_action": true,
+    "unknown_result": "re_read_source_state_before_retry",
+    "duplicate_prompt_policy": "not_applicable_no_prompt_before_authenticated",
+    "credential_policy": "no_credentials_in_fixture_or_retry",
+    "retry_transition": ["provider_unavailable", "discovering", "signed_out"],
+    "failure_transition": ["provider_unavailable", "discovering"]
+  },
+  "cases": [
+    {
+      "id": "pending",
+      "synthetic": true,
+      "kind": "pending",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "browser"
+      },
+      "registered_providers": [],
+      "response": null,
+      "expected": {
+        "state": "discovering",
+        "fail_closed": false,
+        "usable": false,
+        "retryable": false,
+        "reason": "discovery-pending",
+        "provider_names": []
+      }
+    },
+    {
+      "id": "success-password-provider",
+      "synthetic": true,
+      "kind": "success",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "native"
+      },
+      "registered_providers": [
+        {
+          "name": "synthetic-basic",
+          "display_name": "Synthetic Password",
+          "supports_session": true,
+          "supports_password": true
+        }
+      ],
+      "response": {
+        "status": 200,
+        "body": {
+          "providers": [
+            {
+              "name": "synthetic-basic",
+              "display_name": "Synthetic Password",
+              "supports_password": true
+            }
+          ]
+        }
+      },
+      "expected": {
+        "state": "signed_out",
+        "fail_closed": false,
+        "usable": true,
+        "retryable": false,
+        "reason": "providers-available",
+        "provider_names": ["synthetic-basic"]
+      }
+    },
+    {
+      "id": "success-provider-neutral-order",
+      "synthetic": true,
+      "kind": "success",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "browser"
+      },
+      "registered_providers": [
+        {
+          "name": "synthetic-oauth",
+          "display_name": "Synthetic OAuth",
+          "supports_session": true,
+          "supports_password": false
+        },
+        {
+          "name": "synthetic-oidc",
+          "display_name": "Synthetic OIDC",
+          "supports_session": true,
+          "supports_password": false
+        }
+      ],
+      "response": {
+        "status": 200,
+        "body": {
+          "providers": [
+            {
+              "name": "synthetic-oauth",
+              "display_name": "Synthetic OAuth",
+              "supports_password": false
+            },
+            {
+              "name": "synthetic-oidc",
+              "display_name": "Synthetic OIDC",
+              "supports_password": false
+            }
+          ]
+        }
+      },
+      "expected": {
+        "state": "signed_out",
+        "fail_closed": false,
+        "usable": true,
+        "retryable": false,
+        "reason": "providers-available",
+        "provider_names": ["synthetic-oauth", "synthetic-oidc"]
+      }
+    },
+    {
+      "id": "success-default-password-capability",
+      "synthetic": true,
+      "kind": "success",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "native"
+      },
+      "registered_providers": [
+        {
+          "name": "synthetic-default",
+          "display_name": "Synthetic Default"
+        }
+      ],
+      "response": {
+        "status": 200,
+        "body": {
+          "providers": [
+            {
+              "name": "synthetic-default",
+              "display_name": "Synthetic Default",
+              "supports_password": false
+            }
+          ]
+        }
+      },
+      "expected": {
+        "state": "signed_out",
+        "fail_closed": false,
+        "usable": true,
+        "retryable": false,
+        "reason": "providers-available",
+        "provider_names": ["synthetic-default"]
+      }
+    },
+    {
+      "id": "success-unicode-localized-provider",
+      "synthetic": true,
+      "kind": "success",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "browser"
+      },
+      "registered_providers": [
+        {
+          "name": "é",
+          "display_name": "Identité Synthétique",
+          "supports_session": true,
+          "supports_password": false
+        }
+      ],
+      "response": {
+        "status": 200,
+        "body": {
+          "providers": [
+            {
+              "name": "é",
+              "display_name": "Identité Synthétique",
+              "supports_password": false
+            }
+          ]
+        }
+      },
+      "expected": {
+        "state": "signed_out",
+        "fail_closed": false,
+        "usable": true,
+        "retryable": false,
+        "reason": "providers-available",
+        "provider_names": ["é"]
+      }
+    },
+    {
+      "id": "empty-registry",
+      "synthetic": true,
+      "kind": "empty",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "browser"
+      },
+      "registered_providers": [],
+      "response": {
+        "status": 503,
+        "body": {
+          "detail": "no auth providers registered"
+        }
+      },
+      "expected": {
+        "state": "provider_unavailable",
+        "fail_closed": true,
+        "usable": false,
+        "retryable": true,
+        "reason": "no-auth-providers",
+        "provider_names": []
+      }
+    },
+    {
+      "id": "session-filtered-registry",
+      "synthetic": true,
+      "kind": "empty",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "native"
+      },
+      "registered_providers": [
+        {
+          "name": "synthetic-token-only",
+          "display_name": "Synthetic Token Only",
+          "supports_session": false,
+          "supports_password": true
+        }
+      ],
+      "response": {
+        "status": 503,
+        "body": {
+          "detail": "no auth providers registered"
+        }
+      },
+      "expected": {
+        "state": "provider_unavailable",
+        "fail_closed": true,
+        "usable": false,
+        "retryable": true,
+        "reason": "no-session-providers",
+        "provider_names": []
+      }
+    },
+    {
+      "id": "malformed-provider-entry",
+      "synthetic": true,
+      "kind": "malformed-provider",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "browser"
+      },
+      "registered_providers": [
+        {
+          "display_name": "Synthetic Missing Name",
+          "supports_session": true,
+          "supports_password": false
+        }
+      ],
+      "response": null,
+      "expected": {
+        "state": "provider_unavailable",
+        "fail_closed": true,
+        "usable": false,
+        "retryable": true,
+        "reason": "source-handler-failure",
+        "provider_names": []
+      }
+    },
+    {
+      "id": "malformed-response-entry",
+      "synthetic": true,
+      "kind": "malformed-response",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "native"
+      },
+      "registered_providers": [
+        {
+          "name": "synthetic-malformed",
+          "display_name": "Synthetic Malformed",
+          "supports_session": true,
+          "supports_password": true
+        }
+      ],
+      "response": {
+        "status": 200,
+        "body": {
+          "providers": [
+            {
+              "name": "synthetic-malformed",
+              "display_name": "Synthetic Malformed",
+              "supports_password": "true"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "state": "provider_unavailable",
+        "fail_closed": true,
+        "usable": false,
+        "retryable": true,
+        "reason": "invalid-response-shape",
+        "provider_names": []
+      }
+    },
+    {
+      "id": "cancelled-discovery",
+      "synthetic": true,
+      "kind": "cancelled",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "browser"
+      },
+      "registered_providers": [],
+      "response": null,
+      "expected": {
+        "state": "signed_out",
+        "fail_closed": false,
+        "usable": false,
+        "retryable": true,
+        "reason": "cancelled-by-user",
+        "provider_names": []
+      }
+    }
+  ]
+}
