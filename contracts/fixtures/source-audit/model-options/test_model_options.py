@@ -69,6 +69,12 @@ EXPECTED_REGISTRY_EVIDENCE = {
     "source_blob_sha": "9d5fd00ce7d0becfd4581a5a3867c516a6d3b20a",
     "operation_is_routed_off_reader_thread": True,
 }
+EXPECTED_NEGATIVE_CONTROLS = {
+    "absent": "synthetic replacement-gateway control only; it does not describe the pinned source",
+    "empty": "valid source operation with no available provider rows",
+    "malformed": "synthetic invalid result shape",
+    "unknown_operation": "synthetic method-not-found control",
+}
 EXPECTED_SOURCE_LINKS = (
     f"{EXPECTED_REPOSITORY_URL}/blob/{PINNED_SHA}/tui_gateway/methods_complete.py",
     f"{EXPECTED_REPOSITORY_URL}/blob/{PINNED_SHA}/hermes_cli/inventory.py",
@@ -183,6 +189,23 @@ def _require(condition: bool, message: str) -> None:
         raise ContractError(message)
 
 
+def _strict_equal(actual: Any, expected: Any) -> bool:
+    """Compare JSON-shaped values without Python bool/int coercion."""
+
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(actual, dict):
+        if set(actual) != set(expected):
+            return False
+        return all(_strict_equal(actual[key], expected[key]) for key in expected)
+    if isinstance(actual, list):
+        return len(actual) == len(expected) and all(
+            _strict_equal(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected)
+        )
+    return actual == expected
+
+
 def load_json(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as stream:
         value = json.load(stream)
@@ -206,21 +229,28 @@ def validate_audit(audit: dict[str, Any]) -> None:
     surface = audit.get("fixture_surface")
     _require(isinstance(surface, dict), "audit: fixture surface must be an object")
     _require(
-        surface == EXPECTED_FIXTURE_SURFACE,
+        _strict_equal(surface, EXPECTED_FIXTURE_SURFACE),
         "audit: complete fixture surface provenance changed",
     )
 
     _require(
-        audit["rest_equivalent"] == EXPECTED_REST_EQUIVALENT,
+        _strict_equal(audit["rest_equivalent"], EXPECTED_REST_EQUIVALENT),
         "audit: REST provenance changed",
     )
     _require(
-        audit["registry_evidence"] == EXPECTED_REGISTRY_EVIDENCE,
+        _strict_equal(audit["registry_evidence"], EXPECTED_REGISTRY_EVIDENCE),
         "audit: registry provenance changed",
+    )
+    _require(
+        _strict_equal(audit["negative_controls"], EXPECTED_NEGATIVE_CONTROLS),
+        "audit: negative controls changed",
     )
 
     source_links = audit.get("source_links")
-    _require(source_links == list(EXPECTED_SOURCE_LINKS), "audit: source links changed")
+    _require(
+        _strict_equal(source_links, list(EXPECTED_SOURCE_LINKS)),
+        "audit: source links changed",
+    )
     _require(len(source_links) == len(set(source_links)), "audit: source links are not unique")
     for link in source_links:
         parsed = urlsplit(link)
@@ -620,6 +650,31 @@ class ModelOptionsFixtureTests(unittest.TestCase):
             with self.subTest(field=field):
                 forged_audit = copy.deepcopy(self.audit)
                 forged_audit[field]["source_blob_sha"] = "0" * 40
+                with self.assertRaises(ContractError):
+                    validate_audit(forged_audit)
+
+        for field, forged_value in (
+            ("uses_same_builder", 1),
+            ("included_in_fixture_surface", 0),
+        ):
+            with self.subTest(field=field):
+                forged_audit = copy.deepcopy(self.audit)
+                forged_audit["rest_equivalent"][field] = forged_value
+                with self.assertRaises(ContractError):
+                    validate_audit(forged_audit)
+
+        forged_audit = copy.deepcopy(self.audit)
+        forged_audit["registry_evidence"]["operation_is_routed_off_reader_thread"] = 1
+        with self.assertRaises(ContractError):
+            validate_audit(forged_audit)
+
+        for forged_negative_controls in (
+            None,
+            {**EXPECTED_NEGATIVE_CONTROLS, "absent": "credential-bearing"},
+        ):
+            with self.subTest(negative_controls=forged_negative_controls):
+                forged_audit = copy.deepcopy(self.audit)
+                forged_audit["negative_controls"] = forged_negative_controls
                 with self.assertRaises(ContractError):
                     validate_audit(forged_audit)
 
