@@ -13,28 +13,35 @@ fixtures.
 ## Files
 
 - [`planning_review.json`](planning_review.json) records the reviewed source
-  paths, SHA-256 digests, source anchors, planning-document coverage, and
-  deferred ownership boundaries.
+  paths, SHA-256 digests, claim-level anchors and digests, planning-document
+  coverage, and deferred ownership boundaries.
 - [`validate.py`](validate.py) verifies the pinned source checkout, file
-  digests, anchors, document coverage, and required links. It fails closed when
-  the source root or any required evidence is missing.
+  digests, anchors, document coverage, and actual Markdown link targets. It
+  fails closed when the source root or any required evidence is missing.
 - [`test_validate.py`](test_validate.py) tests successful validation and the
   missing, changed, and malformed evidence cases with temporary synthetic
   source trees.
 
 The validator freezes the required-link set, ordered planning-document and
 source-file coverage, required anchors and absent fields, claim IDs, statuses,
-source references, document references, summaries, and deferred ownership.
-It rejects absolute paths, `..` traversal, and resolved symlinks that escape the
-approved repository or pinned source root. These checks run in both full and
+claim-level anchors and digests, source references, document references,
+summaries, exceptions, and deferred ownership. It rejects absolute paths,
+`..` traversal, and resolved symlinks that escape the approved repository or
+pinned source root. Required references must be real local Markdown link targets,
+not matching prose or decoy paths. These checks run in both full and
 document-only modes when a source root is supplied, so a matching digest or
 anchor cannot make an out-of-root path valid.
 
 Full validation also requires a clean source checkout at the exact pinned Git
-HEAD. It reads every reviewed file with `git cat-file blob HEAD:path`, not from
-the mutable worktree, and fails if tracked, untracked, or ignored worktree
-changes are present. A changed worktree file cannot become accepted by changing
-its recorded digest.
+HEAD. It reads every reviewed file with `git cat-file blob HEAD:path` and
+`GIT_NO_LAZY_FETCH=1`, not from the mutable worktree, and fails on missing
+promisor blobs, tracked, untracked, or ignored worktree changes, and
+`assume-unchanged` or `skip-worktree` index flags. A changed worktree file cannot
+become accepted by changing its recorded digest.
+
+The selected Dashboard surface has no source-SHA or stable protocol-version
+field. The separate `/api/ssh/ownership` `protocolVersion: 1` response is
+explicitly recorded as blocked and outside this contract.
 
 ## Reproduce the review
 

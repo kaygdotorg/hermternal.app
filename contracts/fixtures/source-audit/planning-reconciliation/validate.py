@@ -12,11 +12,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+from urllib.parse import urlsplit
 
 
 EXPECTED_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
@@ -60,23 +63,23 @@ EXPECTED_PLANNING_DOCS = [
 EXPECTED_REQUIRED_LINKS = [
     {
         "path": "contracts/fixtures/README.md",
-        "literal": "source-audit/planning-reconciliation/planning_review.json",
+        "target": "source-audit/planning-reconciliation/planning_review.json",
     },
     {
         "path": "contracts/hermes-dashboard/README.md",
-        "literal": "source-audit/planning-reconciliation/planning_review.json",
+        "target": "../fixtures/source-audit/planning-reconciliation/planning_review.json",
     },
     {
         "path": "contracts/hermes-dashboard/manifest.md",
-        "literal": "source-audit/planning-reconciliation/planning_review.json",
+        "target": "../fixtures/source-audit/planning-reconciliation/planning_review.json",
     },
     {
         "path": "docs/product/v0.0.1.md",
-        "literal": "source-audit/planning-reconciliation/planning_review.json",
+        "target": "../../contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
     },
     {
         "path": "docs/protocol/compatibility.md",
-        "literal": "source-audit/planning-reconciliation/planning_review.json",
+        "target": "../../contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
     },
 ]
 EXPECTED_SOURCE_FILES = [
@@ -129,7 +132,18 @@ EXPECTED_SOURCE_FILES = [
             {"id": "chat-websocket-route", "literal": "@app.websocket(\"/api/ws\")", "line": 15811},
             {"id": "pty-detach", "literal": "PTY_REGISTRY.detach(attach_token, ws)", "line": 15797},
         ],
-        "absent": ["hermes_source_sha", "dashboard_protocol_version"],
+        "absent": ["hermes_source_sha"],
+        "exceptions": [
+            {
+                "route": "/api/ssh/ownership",
+                "field": "protocolVersion",
+                "status": "blocked",
+                "reason": (
+                    "The route exposes a separate SSH ownership protocol and is "
+                    "outside the selected Dashboard surface."
+                ),
+            }
+        ],
     },
     {
         "path": "hermes_cli/pty_bridge.py",
@@ -216,6 +230,24 @@ EXPECTED_CLAIMS = [
         "id": "auth-bootstrap",
         "status": "verified",
         "source_files": ["hermes_cli/dashboard_auth/routes.py"],
+        "evidence": [
+            {
+                "source_file": "hermes_cli/dashboard_auth/routes.py",
+                "sha256": "d42be557b9b1ba798c038c91246cba0bf046e89ebe34a27db0c7803c517e9c20",
+                "anchors": [
+                    "login-page",
+                    "provider-discovery",
+                    "browser-login",
+                    "native-authorize",
+                    "oauth-callback",
+                    "logout",
+                    "identity-probe",
+                    "ws-ticket",
+                    "native-token",
+                    "native-refresh",
+                ],
+            }
+        ],
         "docs": [
             "contracts/hermes-dashboard/manifest.md",
             "docs/product/v0.0.1.md",
@@ -230,6 +262,23 @@ EXPECTED_CLAIMS = [
             "hermes_cli/dashboard_auth/ws_tickets.py",
             "hermes_cli/dashboard_auth/routes.py",
         ],
+        "evidence": [
+            {
+                "source_file": "hermes_cli/dashboard_auth/ws_tickets.py",
+                "sha256": "b66e29a067002ad8a345b49281d30c75d6ec2bb177d58214611db66925bb4429",
+                "anchors": [
+                    "ticket-ttl",
+                    "ticket-consumer",
+                    "single-use-pop",
+                    "bounded-ticket-log",
+                ],
+            },
+            {
+                "source_file": "hermes_cli/dashboard_auth/routes.py",
+                "sha256": "d42be557b9b1ba798c038c91246cba0bf046e89ebe34a27db0c7803c517e9c20",
+                "anchors": ["ws-ticket"],
+            },
+        ],
         "docs": [
             "contracts/hermes-dashboard/manifest.md",
             "docs/protocol/compatibility.md",
@@ -241,6 +290,19 @@ EXPECTED_CLAIMS = [
         "id": "session-rest-surface",
         "status": "verified",
         "source_files": ["hermes_cli/web_routers/sessions.py"],
+        "evidence": [
+            {
+                "source_file": "hermes_cli/web_routers/sessions.py",
+                "sha256": "f8debdab79430829245352ebdb7f50603c3a42c11d4609eb3287c35b9a2bf0ba",
+                "anchors": [
+                    "session-list",
+                    "session-search",
+                    "session-read",
+                    "session-messages",
+                    "session-patch",
+                ],
+            }
+        ],
         "docs": [
             "contracts/hermes-dashboard/manifest.md",
             "docs/product/v0.0.1.md",
@@ -257,6 +319,59 @@ EXPECTED_CLAIMS = [
             "tui_gateway/methods_complete.py",
             "tui_gateway/server.py",
         ],
+        "evidence": [
+            {
+                "source_file": "tui_gateway/ws.py",
+                "sha256": "2b1c772cb37c77a756325e4c298f6a5ee8947d6566cd7638f06f7a0421b8b5fd",
+                "anchors": [
+                    "gateway-route-contract",
+                    "message-delta",
+                    "reasoning-delta",
+                    "thinking-delta",
+                    "gateway-ready",
+                    "parse-error",
+                    "dispatch-error",
+                ],
+            },
+            {
+                "source_file": "tui_gateway/methods_prompt.py",
+                "sha256": "96363dbf53a484f6445750c99a40e0624a9e43966be8fb29d8e47883a3ec5f51",
+                "anchors": ["prompt-submit", "clarify-response", "approval-response"],
+            },
+            {
+                "source_file": "tui_gateway/methods_session.py",
+                "sha256": "1e70561f7c5ca08556e26216f9f6a553bbf25e4c8de3368ac9cb9634e57ea34e",
+                "anchors": [
+                    "session-create",
+                    "session-list-rpc",
+                    "session-most-recent",
+                    "session-resume",
+                    "session-active-list",
+                    "session-status",
+                    "session-history",
+                    "session-close",
+                    "session-interrupt",
+                ],
+            },
+            {
+                "source_file": "tui_gateway/methods_complete.py",
+                "sha256": "87ef05379c694cf7b6995095eb7acd5a4111eb275eb4c77b6e040da41033a8cf",
+                "anchors": ["model-options"],
+            },
+            {
+                "source_file": "tui_gateway/server.py",
+                "sha256": "e4bd9009827ffd224cc85c8b17ad7baba0f560d643d688e265be5a06fe8ba29c",
+                "anchors": [
+                    "tool-start",
+                    "tool-complete",
+                    "message-complete",
+                    "approval-request",
+                    "clarify-request",
+                    "session-info",
+                    "error-event",
+                ],
+            },
+        ],
         "docs": [
             "contracts/hermes-dashboard/manifest.md",
             "docs/protocol/compatibility.md",
@@ -268,6 +383,23 @@ EXPECTED_CLAIMS = [
         "id": "model-switch",
         "status": "verified",
         "source_files": ["tui_gateway/methods_complete.py", "tui_gateway/server.py"],
+        "evidence": [
+            {
+                "source_file": "tui_gateway/methods_complete.py",
+                "sha256": "87ef05379c694cf7b6995095eb7acd5a4111eb275eb4c77b6e040da41033a8cf",
+                "anchors": ["model-options"],
+            },
+            {
+                "source_file": "tui_gateway/server.py",
+                "sha256": "e4bd9009827ffd224cc85c8b17ad7baba0f560d643d688e265be5a06fe8ba29c",
+                "anchors": [
+                    "config-set",
+                    "model-key",
+                    "pending-switch-pop",
+                    "pending-confirmation-drop",
+                ],
+            },
+        ],
         "docs": [
             "contracts/hermes-dashboard/manifest.md",
             "docs/product/v0.0.1.md",
@@ -283,6 +415,33 @@ EXPECTED_CLAIMS = [
             "hermes_cli/pty_bridge.py",
             "hermes_cli/pty_session.py",
         ],
+        "evidence": [
+            {
+                "source_file": "hermes_cli/web_server.py",
+                "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+                "anchors": [
+                    "pty-resize-format",
+                    "pty-ttl",
+                    "pty-replay-cap",
+                    "pty-route",
+                    "pty-detach",
+                ],
+            },
+            {
+                "source_file": "hermes_cli/pty_bridge.py",
+                "sha256": "e24515762a8ee3c9089369b7ecba20307af62c7cfb6d02abf04261ecacaa6095",
+                "anchors": ["pty-min-dimension", "pty-max-cols", "pty-max-rows"],
+            },
+            {
+                "source_file": "hermes_cli/pty_session.py",
+                "sha256": "617448d953ec978f1b3287b02ac0dd2ad61c255d3366e0ca45efdf829146d8c5",
+                "anchors": [
+                    "pty-process-exited-code",
+                    "pty-superseded-code",
+                    "pty-detached-reap",
+                ],
+            },
+        ],
         "docs": [
             "contracts/hermes-dashboard/manifest.md",
             "docs/product/v0.0.1.md",
@@ -295,6 +454,13 @@ EXPECTED_CLAIMS = [
         "id": "image-attachment-boundary",
         "status": "verified",
         "source_files": ["hermes_cli/web_server.py"],
+        "evidence": [
+            {
+                "source_file": "hermes_cli/web_server.py",
+                "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+                "anchors": ["image-upload"],
+            }
+        ],
         "docs": [
             "contracts/hermes-dashboard/manifest.md",
             "docs/product/v0.0.1.md",
@@ -305,11 +471,26 @@ EXPECTED_CLAIMS = [
         "id": "source-identity",
         "status": "verified",
         "source_files": ["hermes_cli/web_server.py"],
+        "evidence": [
+            {
+                "source_file": "hermes_cli/web_server.py",
+                "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+                "anchors": ["image-upload", "pty-route", "chat-websocket-route"],
+            }
+        ],
+        "exceptions": [
+            {
+                "source_file": "hermes_cli/web_server.py",
+                "route": "/api/ssh/ownership",
+                "field": "protocolVersion",
+                "status": "blocked",
+            }
+        ],
         "docs": [
             "contracts/hermes-dashboard/manifest.md",
             "docs/protocol/compatibility.md",
         ],
-        "summary": "The reviewed Dashboard source contains no server-observable Hermes source-SHA or dashboard protocol-version field, so deployment attestation remains out of band.",
+        "summary": "The selected Dashboard surface exposes no server-observable Hermes source SHA or stable protocol-version field. The separate /api/ssh/ownership protocolVersion response is explicitly blocked and remains outside this contract, so deployment attestation remains out of band.",
     },
 ]
 EXPECTED_DEFERRED = [
@@ -345,7 +526,7 @@ def load_review(path: Path) -> dict[str, Any]:
     """Load and structurally validate the review record before using it."""
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read review record {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ValueError("review record must be a JSON object")
@@ -393,18 +574,44 @@ def _git_status(source_root: Path) -> str | None:
 
 
 def _git_blob(source_root: Path, head: str, relative: str) -> bytes | None:
-    """Read a source file from the immutable HEAD tree, never the worktree."""
+    """Read a source file from immutable Git storage without lazy fetching."""
+    env = os.environ.copy()
+    env["GIT_NO_LAZY_FETCH"] = "1"
     try:
         result = subprocess.run(
             ["git", "-C", str(source_root), "cat-file", "blob", f"{head}:{relative}"],
             check=False,
             capture_output=True,
+            env=env,
         )
     except OSError:
         return None
-    if result.returncode != 0:
+    if result.returncode != 0 or not isinstance(result.stdout, bytes):
         return None
     return result.stdout
+
+
+def _git_index_flags(source_root: Path) -> list[str] | None:
+    """Return tracked paths marked assume-unchanged or skip-worktree."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), "ls-files", "-v"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0 or not isinstance(result.stdout, str):
+        return None
+    flagged: list[str] = []
+    for line in result.stdout.splitlines():
+        if line[:1] in {"h", "s", "S"}:
+            flagged.append(line[2:] if len(line) > 2 else "<unknown>")
+    return flagged
+
+
+_MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]\n]+\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 
 
 def _line_numbers(text: str, literal: str) -> list[int]:
@@ -413,6 +620,11 @@ def _line_numbers(text: str, literal: str) -> list[int]:
         for number, line in enumerate(text.splitlines(), start=1)
         if literal in line
     ]
+
+
+def _markdown_link_targets(text: str) -> list[str]:
+    """Extract actual Markdown link destinations, excluding image syntax."""
+    return _MARKDOWN_LINK_RE.findall(text)
 
 
 def _is_unsafe_relative_path(value: str) -> bool:
@@ -463,14 +675,22 @@ def _validate_claims(review: dict[str, Any], errors: list[str]) -> None:
     allowed_ids = frozenset(expected_by_id)
     allowed_statuses = frozenset(claim["status"] for claim in EXPECTED_CLAIMS)
     expected_id_order = tuple(claim["id"] for claim in EXPECTED_CLAIMS)
-    included_source_files = {
-        entry["path"]
-        for entry in review.get("source_files", [])
-        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
-    }
-    included_planning_docs = {
-        item for item in review.get("planning_docs", []) if isinstance(item, str)
-    }
+    source_records = review.get("source_files")
+    included_source_records = (
+        {
+            entry["path"]: entry
+            for entry in source_records
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        }
+        if isinstance(source_records, list)
+        else {}
+    )
+    planning_docs = review.get("planning_docs")
+    included_planning_docs = (
+        {item for item in planning_docs if isinstance(item, str)}
+        if isinstance(planning_docs, list)
+        else set()
+    )
 
     claim_ids: list[str] = []
     for claim in claims:
@@ -491,16 +711,91 @@ def _validate_claims(review: dict[str, Any], errors: list[str]) -> None:
                 f"claim {claim_id!r} status does not match the pinned review: "
                 f"expected {expected['status']!r}, found {status!r}"
             )
+
         source_refs = claim.get("source_files")
-        if not isinstance(source_refs, list) or not all(
-            isinstance(item, str) and item in included_source_files for item in source_refs
+        if not isinstance(source_refs, list) or not source_refs or not all(
+            isinstance(item, str) and item in included_source_records for item in source_refs
         ):
             errors.append(f"claim {claim_id!r} references an excluded source record")
         doc_refs = claim.get("docs")
-        if not isinstance(doc_refs, list) or not all(
+        if not isinstance(doc_refs, list) or not doc_refs or not all(
             isinstance(item, str) and item in included_planning_docs for item in doc_refs
         ):
             errors.append(f"claim {claim_id!r} references an excluded planning document")
+
+        evidence = claim.get("evidence")
+        evidence_sources: set[str] = set()
+        if not isinstance(evidence, list) or not evidence:
+            errors.append(f"claim {claim_id!r} evidence must be a non-empty list")
+        else:
+            for item in evidence:
+                if not isinstance(item, dict):
+                    errors.append(f"claim {claim_id!r} evidence contains a non-object")
+                    continue
+                source_file = item.get("source_file")
+                if isinstance(source_file, str):
+                    evidence_sources.add(source_file)
+                source_record = (
+                    included_source_records.get(source_file)
+                    if isinstance(source_file, str)
+                    else None
+                )
+                if source_record is None:
+                    errors.append(
+                        f"claim {claim_id!r} evidence references an excluded source record"
+                    )
+                    continue
+                if item.get("sha256") != source_record.get("sha256"):
+                    errors.append(
+                        f"claim {claim_id!r} evidence digest does not match {source_file}"
+                    )
+                anchors = item.get("anchors")
+                source_anchors = source_record.get("anchors", [])
+                expected_anchor_ids = {
+                    anchor.get("id")
+                    for anchor in source_anchors
+                    if isinstance(anchor, dict) and isinstance(anchor.get("id"), str)
+                } if isinstance(source_anchors, list) else set()
+                if not isinstance(anchors, list) or not anchors or not all(
+                    isinstance(anchor_id, str) and anchor_id in expected_anchor_ids
+                    for anchor_id in anchors
+                ):
+                    errors.append(
+                        f"claim {claim_id!r} evidence anchors do not match {source_file}"
+                    )
+        if isinstance(source_refs, list) and evidence_sources != set(source_refs):
+            errors.append(f"claim {claim_id!r} evidence/source coverage does not match")
+        exceptions = claim.get("exceptions", [])
+        if not isinstance(exceptions, list) or not all(
+            isinstance(item, dict) for item in exceptions
+        ):
+            errors.append(f"claim {claim_id!r} exceptions must be a list of objects")
+        else:
+            for exception in exceptions:
+                source_file = exception.get("source_file")
+                source_record = (
+                    included_source_records.get(source_file)
+                    if isinstance(source_file, str)
+                    else None
+                )
+                if source_record is None:
+                    errors.append(
+                        f"claim {claim_id!r} exception references an excluded source record"
+                    )
+                    continue
+                source_exceptions = source_record.get("exceptions", [])
+                if not isinstance(source_exceptions, list) or not any(
+                    isinstance(recorded, dict)
+                    and all(
+                        exception.get(field) == recorded.get(field)
+                        for field in ("route", "field", "status")
+                    )
+                    for recorded in source_exceptions
+                ):
+                    errors.append(
+                        f"claim {claim_id!r} exception is not recorded in source metadata"
+                    )
+
         if claim != expected:
             errors.append(f"claim {claim_id!r} content does not match the pinned review")
 
@@ -577,9 +872,15 @@ def _validate_shape(review: dict[str, Any], errors: list[str]) -> None:
             anchors = entry.get("anchors", [])
             if not isinstance(anchors, list):
                 errors.append(f"review.source_files[{path!r}].anchors must be a list")
+                anchors = []
             for anchor in anchors:
-                if not isinstance(anchor, dict) or not isinstance(
-                    anchor.get("literal"), str
+                if not isinstance(anchor, dict) or not all(
+                    isinstance(anchor.get(field), expected_type)
+                    for field, expected_type in (
+                        ("id", str),
+                        ("literal", str),
+                        ("line", int),
+                    )
                 ):
                     errors.append(f"review.source_files[{path!r}] has an invalid anchor")
             absent = entry.get("absent", [])
@@ -587,6 +888,18 @@ def _validate_shape(review: dict[str, Any], errors: list[str]) -> None:
                 isinstance(item, str) and item for item in absent
             ):
                 errors.append(f"review.source_files[{path!r}].absent must be a list")
+            exceptions = entry.get("exceptions", [])
+            if not isinstance(exceptions, list):
+                errors.append(f"review.source_files[{path!r}].exceptions must be a list")
+                exceptions = []
+            for exception in exceptions:
+                if not isinstance(exception, dict) or not all(
+                    isinstance(exception.get(field), str) and exception.get(field)
+                    for field in ("route", "field", "status", "reason")
+                ):
+                    errors.append(
+                        f"review.source_files[{path!r}] has an invalid exception"
+                    )
         if source_files != EXPECTED_SOURCE_FILES:
             errors.append("review.source_files metadata does not match the exact pinned coverage")
 
@@ -594,14 +907,16 @@ def _validate_shape(review: dict[str, Any], errors: list[str]) -> None:
 
 
 def _validate_docs(repo_root: Path, review: dict[str, Any], errors: list[str]) -> None:
-    for relative in review.get("planning_docs", []):
-        if not isinstance(relative, str):
-            continue
-        path = _resolve_under_root(repo_root, relative, "planning document path", errors)
-        if path is None:
-            continue
-        if not path.is_file():
-            errors.append(f"missing planning document: {relative}")
+    planning_docs = review.get("planning_docs", [])
+    if isinstance(planning_docs, list):
+        for relative in planning_docs:
+            if not isinstance(relative, str):
+                continue
+            path = _resolve_under_root(repo_root, relative, "planning document path", errors)
+            if path is None:
+                continue
+            if not path.is_file():
+                errors.append(f"missing planning document: {relative}")
 
     links = review.get("required_links", [])
     if not isinstance(links, list):
@@ -610,8 +925,9 @@ def _validate_docs(repo_root: Path, review: dict[str, Any], errors: list[str]) -
         if not isinstance(link, dict):
             continue
         relative = link.get("path")
-        literal = link.get("literal")
-        if not isinstance(relative, str) or not isinstance(literal, str):
+        target = link.get("target")
+        if not isinstance(relative, str) or not isinstance(target, str):
+            errors.append("required link must contain string path and target")
             continue
         path = _resolve_under_root(repo_root, relative, "required-link path", errors)
         if path is None:
@@ -621,11 +937,24 @@ def _validate_docs(repo_root: Path, review: dict[str, Any], errors: list[str]) -
             continue
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             errors.append(f"cannot read required-link document {relative}: {exc}")
             continue
-        if literal not in text:
-            errors.append(f"{relative} does not link the planning review record")
+        if target not in _markdown_link_targets(text):
+            errors.append(f"{relative} does not contain Markdown link target {target!r}")
+            continue
+        parsed = urlsplit(target)
+        if parsed.scheme or parsed.netloc or target.startswith("//") or not parsed.path:
+            errors.append(f"required link target is not a local path: {target!r}")
+            continue
+        try:
+            target_path = (path.parent / parsed.path).resolve()
+            target_path.relative_to(repo_root.resolve())
+        except (OSError, RuntimeError, ValueError):
+            errors.append(f"required link target escapes the repository: {target!r}")
+            continue
+        if not target_path.is_file():
+            errors.append(f"required link target is missing: {target!r}")
 
 
 def _validate_source_paths(
@@ -635,7 +964,10 @@ def _validate_source_paths(
     if not source_root.is_dir():
         errors.append(f"source root is missing: {source_root}")
         return
-    for entry in review.get("source_files", []):
+    source_files = review.get("source_files", [])
+    if not isinstance(source_files, list):
+        return
+    for entry in source_files:
         if not isinstance(entry, dict):
             continue
         relative = entry.get("path")
@@ -664,10 +996,28 @@ def _validate_source(
     elif status:
         errors.append("source checkout is dirty; immutable HEAD blobs cannot be trusted")
 
-    if head != EXPECTED_SOURCE_SHA or status is None or status:
+    index_flags = _git_index_flags(source_root)
+    if index_flags is None:
+        errors.append("source index flags are unavailable")
+    elif index_flags:
+        errors.append(
+            "source checkout uses assume-unchanged or skip-worktree flags: "
+            + ", ".join(index_flags)
+        )
+
+    if (
+        head != EXPECTED_SOURCE_SHA
+        or status is None
+        or status
+        or index_flags is None
+        or index_flags
+    ):
         return head
 
-    for entry in review.get("source_files", []):
+    source_files = review.get("source_files", [])
+    if not isinstance(source_files, list):
+        return head
+    for entry in source_files:
         if not isinstance(entry, dict):
             continue
         relative = entry.get("path")
@@ -692,25 +1042,29 @@ def _validate_source(
         except UnicodeDecodeError as exc:
             errors.append(f"cannot decode pinned source blob {relative}: {exc}")
             continue
-        for anchor in entry.get("anchors", []):
-            if not isinstance(anchor, dict):
-                continue
-            literal = anchor.get("literal")
-            if not isinstance(literal, str):
-                continue
-            locations = _line_numbers(text, literal)
-            if not locations:
-                errors.append(
-                    f"missing source anchor {anchor.get('id', literal)!r} in {relative}"
-                )
-            elif isinstance(anchor.get("line"), int) and anchor["line"] not in locations:
-                errors.append(
-                    f"source anchor {anchor.get('id', literal)!r} moved in {relative}: "
-                    f"expected line {anchor['line']}, found {locations}"
-                )
-        for literal in entry.get("absent", []):
-            if literal in text:
-                errors.append(f"forbidden source field {literal!r} found in {relative}")
+        anchors = entry.get("anchors", [])
+        if isinstance(anchors, list):
+            for anchor in anchors:
+                if not isinstance(anchor, dict):
+                    continue
+                literal = anchor.get("literal")
+                if not isinstance(literal, str):
+                    continue
+                locations = _line_numbers(text, literal)
+                if not locations:
+                    errors.append(
+                        f"missing source anchor {anchor.get('id', literal)!r} in {relative}"
+                    )
+                elif isinstance(anchor.get("line"), int) and anchor["line"] not in locations:
+                    errors.append(
+                        f"source anchor {anchor.get('id', literal)!r} moved in {relative}: "
+                        f"expected line {anchor['line']}, found {locations}"
+                    )
+        absent = entry.get("absent", [])
+        if isinstance(absent, list):
+            for literal in absent:
+                if isinstance(literal, str) and literal in text:
+                    errors.append(f"forbidden source field {literal!r} found in {relative}")
     return head
 
 
@@ -729,16 +1083,21 @@ def validate_review(
     except ValueError as exc:
         return [str(exc)], None, (time.perf_counter() - started) * 1000
 
-    _validate_shape(review, errors)
-    _validate_docs(repo_root, review, errors)
     head = None
-    if source_root is None:
-        if require_source:
-            errors.append("source root is required for full validation")
-    elif require_source:
-        head = _validate_source(source_root, review, errors)
-    else:
-        _validate_source_paths(source_root, review, errors)
+    try:
+        _validate_shape(review, errors)
+        _validate_docs(repo_root, review, errors)
+        if source_root is None:
+            if require_source:
+                errors.append("source root is required for full validation")
+        elif require_source:
+            head = _validate_source(source_root, review, errors)
+        else:
+            _validate_source_paths(source_root, review, errors)
+    except Exception as exc:  # pragma: no cover - regression exercised through CLI
+        errors.append(
+            f"unexpected validation error: {type(exc).__name__}: {exc}"
+        )
     return errors, head, (time.perf_counter() - started) * 1000
 
 
@@ -780,12 +1139,18 @@ def main(argv: list[str] | None = None) -> int:
         else Path(__file__).resolve().with_name(REVIEW_NAME)
     )
     source_root = args.source_root.resolve() if args.source_root is not None else None
-    errors, head, duration_ms = validate_review(
-        repo_root,
-        review_path,
-        source_root,
-        require_source=not args.check_docs_only,
-    )
+    started = time.perf_counter()
+    try:
+        errors, head, duration_ms = validate_review(
+            repo_root,
+            review_path,
+            source_root,
+            require_source=not args.check_docs_only,
+        )
+    except Exception as exc:  # Keep the command-line contract structured.
+        errors = [f"unexpected validation error: {type(exc).__name__}: {exc}"]
+        head = None
+        duration_ms = (time.perf_counter() - started) * 1000
     result = {
         "ok": not errors,
         "review": str(review_path),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -23,9 +24,7 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         self.repo_root.mkdir()
         self.source_root.mkdir()
         self.synthetic_planning_docs = ["README.md"]
-        self.synthetic_required_links = [
-            {"path": "README.md", "literal": "synthetic planning document"}
-        ]
+        self.synthetic_required_links = [{"path": "README.md", "target": "README.md"}]
         self.synthetic_source_files = [
             {
                 "path": "src/module.py",
@@ -39,6 +38,13 @@ class PlanningReviewValidatorTests(unittest.TestCase):
                 "id": "synthetic-claim",
                 "status": "verified",
                 "source_files": ["src/module.py"],
+                "evidence": [
+                    {
+                        "source_file": "src/module.py",
+                        "sha256": hashlib.sha256(b"ANCHOR\n").hexdigest(),
+                        "anchors": ["anchor"],
+                    }
+                ],
                 "docs": ["README.md"],
                 "summary": "Synthetic source evidence.",
             }
@@ -61,12 +67,8 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         for patcher in self._metadata_patches:
             patcher.start()
         (self.repo_root / "README.md").write_text(
-            "synthetic planning document\n", encoding="utf-8"
+            "[synthetic planning document](README.md)\n", encoding="utf-8"
         )
-        for link in validate.EXPECTED_REQUIRED_LINKS:
-            path = self.repo_root / link["path"]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(path.read_text(encoding="utf-8") + link["literal"] + "\n", encoding="utf-8")
         (self.source_root / "src").mkdir()
         self.source_file = self.source_root / "src" / "module.py"
         self.source_file.write_text("ANCHOR\n", encoding="utf-8")
@@ -152,6 +154,41 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         (self.source_root / "untracked.py").write_text("ANCHOR\n", encoding="utf-8")
         errors = self._validate()
         self.assertTrue(any("source checkout is dirty" in error for error in errors))
+
+    def test_assume_unchanged_flag_fails_closed(self) -> None:
+        self._git("update-index", "--assume-unchanged", "src/module.py")
+        try:
+            errors = self._validate()
+        finally:
+            self._git("update-index", "--no-assume-unchanged", "src/module.py")
+        self.assertTrue(any("assume-unchanged" in error for error in errors))
+
+    def test_skip_worktree_flag_fails_closed(self) -> None:
+        self._git("update-index", "--skip-worktree", "src/module.py")
+        try:
+            errors = self._validate()
+        finally:
+            self._git("update-index", "--no-skip-worktree", "src/module.py")
+        self.assertTrue(any("skip-worktree" in error for error in errors))
+
+    def test_git_blob_disables_lazy_fetch(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["git"], returncode=0, stdout=b"ANCHOR\n", stderr=b""
+        )
+        with mock.patch.object(validate.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(validate._git_blob(self.source_root, self.source_sha, "src/module.py"), b"ANCHOR\n")
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
+
+    def test_missing_git_blob_is_reported_without_fetch(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["git"], returncode=1, stdout=b"", stderr=b"promisor remote unavailable"
+        )
+        with mock.patch.object(validate.subprocess, "run", return_value=completed) as run:
+            self.assertIsNone(validate._git_blob(self.source_root, self.source_sha, "src/module.py"))
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
+        with mock.patch.object(validate, "_git_blob", return_value=None):
+            errors = self._validate()
+        self.assertTrue(any("missing pinned source blob" in error for error in errors))
 
     def test_parent_traversal_source_path_fails_in_both_modes(self) -> None:
         outside = self.root / "outside.py"
@@ -240,10 +277,26 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         for errors in (full_errors, docs_errors):
             self.assertTrue(any("source_files" in error for error in errors))
 
+    def test_markdown_substring_decoy_fails_closed(self) -> None:
+        (self.repo_root / "README.md").write_text(
+            "source-audit/planning-reconciliation/planning_review.json\n",
+            encoding="utf-8",
+        )
+        full_errors, docs_errors = self._validate_both_modes()
+        for errors in (full_errors, docs_errors):
+            self.assertTrue(any("Markdown link target" in error for error in errors))
+
     def test_missing_anchor_fails_closed(self) -> None:
         with mock.patch.object(validate, "_git_blob", return_value=b"OTHER\n"):
             errors = self._validate()
         self.assertTrue(any("missing source anchor" in error for error in errors))
+
+    def test_missing_promisor_blob_is_structured(self) -> None:
+        with mock.patch.object(validate, "_git_blob", return_value=None):
+            errors = self._validate()
+        self.assertTrue(errors)
+        self.assertTrue(all(isinstance(error, str) for error in errors))
+        self.assertTrue(any("missing pinned source blob" in error for error in errors))
 
     def test_forbidden_source_field_fails_closed(self) -> None:
         with mock.patch.object(
@@ -266,6 +319,46 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         self.assertIsNone(head)
         self.assertTrue(any("cannot read review record" in error for error in errors))
 
+    def test_invalid_utf8_review_fails_closed(self) -> None:
+        self.review_path.write_bytes(b"\xff\xfe")
+        errors, head, _duration = validate.validate_review(
+            self.repo_root, self.review_path, self.source_root
+        )
+        self.assertIsNone(head)
+        self.assertTrue(any("cannot read review record" in error for error in errors))
+
+    def test_invalid_utf8_markdown_fails_closed(self) -> None:
+        (self.repo_root / "README.md").write_bytes(b"\xff\xfe")
+        full_errors, docs_errors = self._validate_both_modes()
+        for errors in (full_errors, docs_errors):
+            self.assertTrue(any("cannot read required-link document" in error for error in errors))
+
+    def test_null_and_wrong_type_collections_fail_without_traceback(self) -> None:
+        for field, value in (
+            ("planning_docs", None),
+            ("required_links", {"path": "README.md"}),
+            ("source_files", None),
+            ("claims", {"id": "synthetic-claim"}),
+        ):
+            review = self._load_review()
+            review[field] = value
+            self._write_review(review)
+            full_errors, docs_errors = self._validate_both_modes()
+            self.assertTrue(full_errors, field)
+            self.assertTrue(docs_errors, field)
+            self.assertTrue(all(isinstance(error, str) for error in full_errors), field)
+            self.assertTrue(all(isinstance(error, str) for error in docs_errors), field)
+
+    def test_unexpected_cli_error_is_structured(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(validate, "validate_review", side_effect=RuntimeError("boom")):
+            with mock.patch("sys.stdout", output):
+                code = validate.main(["--check-docs-only"])
+        self.assertEqual(code, 1)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("unexpected validation error" in error for error in result["errors"]))
+
     def test_required_links_are_required_and_frozen(self) -> None:
         review = self._load_review()
         review.pop("required_links")
@@ -279,6 +372,18 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         full_errors, docs_errors = self._validate_both_modes()
         for errors in (full_errors, docs_errors):
             self.assertTrue(any("exact expected links" in error for error in errors))
+
+        review["required_links"] = validate.EXPECTED_REQUIRED_LINKS
+        self._write_review(review)
+        (self.repo_root / "README.md").write_text(
+            "[decoy](README.txt)\n", encoding="utf-8"
+        )
+        full_errors, docs_errors = self._validate_both_modes()
+        for errors in (full_errors, docs_errors):
+            self.assertTrue(any("Markdown link target" in error for error in errors))
+        (self.repo_root / "README.md").write_text(
+            "[synthetic planning document](README.md)\n", encoding="utf-8"
+        )
 
     def test_claims_are_required_and_content_is_frozen(self) -> None:
         review = self._load_review()
@@ -311,6 +416,22 @@ class PlanningReviewValidatorTests(unittest.TestCase):
             self.assertTrue(any("excluded source record" in error for error in errors))
             self.assertTrue(any("excluded planning document" in error for error in errors))
 
+        review["claims"] = json.loads(json.dumps(validate.EXPECTED_CLAIMS))
+        review["claims"][0]["evidence"] = []
+        self._write_review(review)
+        full_errors, docs_errors = self._validate_both_modes()
+        for errors in (full_errors, docs_errors):
+            self.assertTrue(any("evidence must be a non-empty list" in error for error in errors))
+
+        review["claims"] = json.loads(json.dumps(validate.EXPECTED_CLAIMS))
+        review["claims"][0]["evidence"][0]["sha256"] = "0" * 64
+        review["claims"][0]["evidence"][0]["anchors"] = ["missing-anchor"]
+        self._write_review(review)
+        full_errors, docs_errors = self._validate_both_modes()
+        for errors in (full_errors, docs_errors):
+            self.assertTrue(any("evidence digest" in error for error in errors))
+            self.assertTrue(any("evidence anchors" in error for error in errors))
+
     def test_document_only_mode_does_not_require_source_checkout(self) -> None:
         errors, head, _duration = validate.validate_review(
             self.repo_root,
@@ -335,6 +456,12 @@ class CheckedInReviewMetadataTests(unittest.TestCase):
         )
         self.assertEqual(review["required_links"], validate.EXPECTED_REQUIRED_LINKS)
         self.assertEqual(review["claims"], validate.EXPECTED_CLAIMS)
+        web_server = next(
+            entry for entry in review["source_files"] if entry["path"] == "hermes_cli/web_server.py"
+        )
+        self.assertEqual(web_server["absent"], ["hermes_source_sha"])
+        self.assertEqual(web_server["exceptions"][0]["status"], "blocked")
+        self.assertEqual(web_server["exceptions"][0]["route"], "/api/ssh/ownership")
 
 
 if __name__ == "__main__":

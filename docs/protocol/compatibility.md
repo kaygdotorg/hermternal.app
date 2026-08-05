@@ -19,7 +19,7 @@ Every release candidate MUST carry a compatibility record with these values:
 - `behavioral_probe`: the redacted live-deployment probe and its expected results for the supported REST, authentication, WebSocket, edge, and Terminal behavior.
 - `proof_run`: the date, tool versions, proxy variants, host class, and pass or fail result for the disposable proof.
 
-At this source pin, Hermes has no server-observable source SHA field and no server-observable protocol-version field. The compatibility record MUST NOT require a version endpoint, response header, or guessed `dashboard_protocol_version`. The full SHA and deployment identity come from the out-of-band attestation. The behavioral probe is additional evidence; it does not replace the attestation.
+For the selected v0.0.1 Dashboard surface at this source pin, Hermes has no server-observable source SHA field or stable protocol-version field. The separate `/api/ssh/ownership` route returns `protocolVersion: 1`, but that SSH ownership protocol is explicitly blocked and outside this compatibility contract. The compatibility record MUST NOT require a version endpoint, response header, or guessed `dashboard_protocol_version` for the selected surface. The full SHA and deployment identity come from the out-of-band attestation. The behavioral probe is additional evidence; it does not replace the attestation.
 
 The deployment or release gate MUST fail closed when the attestation is absent, malformed, unverifiable, or different from the pinned SHA, route-manifest revision, or reviewed proxy proof. It MUST also fail closed when the behavioral probe is missing or fails. A placeholder, missing value, or `unknown` source SHA means **not compatible** and MUST block the release.
 
@@ -61,7 +61,7 @@ The check MUST fail closed if the deployment attestation is absent or mismatched
 
 The client MUST show a safe, actionable incompatibility state when the check fails. The state MAY expose a deployment identifier, expected SHA, attestation status, or safe probe name, but MUST NOT expose cookies, passwords, refresh material, tickets, provider state, prompt text, transcript text, malformed payloads, or raw headers.
 
-There is no server-observed protocol version to compare at this source pin. Missing server version metadata is expected and MUST NOT be converted into a guessed version. Missing or invalid attestation and failed behavioral evidence mean blocked. There is no best-effort mode in v0.0.1.
+There is no server-observed protocol version to compare for the selected Dashboard surface at this source pin. The blocked `/api/ssh/ownership` `protocolVersion: 1` response is not evidence for this contract and MUST NOT be used as a negotiated version. Missing selected-surface version metadata is expected and MUST NOT be converted into a guessed version. Missing or invalid attestation and failed behavioral evidence mean blocked. There is no best-effort mode in v0.0.1.
 
 ## Evidence rules
 

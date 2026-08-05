@@ -132,7 +132,7 @@ Model selection changes the active session, not every session on the server.
 - `dashboard-v0.0.1` is tested against exactly `f5be9236e00ddf2f2a412697f267078fc4ee068e`.
 - A patch-level Hermes change may use this contract only when all selected route names, auth behavior, WebSocket framing, method names, events, model-switch rules, PTY rules, and state fixtures remain unchanged.
 - A route rename, auth change, WebSocket framing change, method removal, required-field change, model-switch change, approval or clarification change, PTY close/replay change, or profile-scope change requires a new contract review and contract version.
-- The pinned Dashboard does not expose its source SHA or a stable protocol-version field. A deployment must provide reviewed out-of-band attestation for the installed Hermes SHA, and the client or proof harness must also run a non-destructive behavioral probe before enabling chat. Missing or mismatched attestation blocks the connection.
+- The selected v0.0.1 Dashboard surface does not expose its source SHA or a stable protocol-version field. The separate `/api/ssh/ownership` route returns `protocolVersion: 1`, but that SSH ownership protocol is explicitly blocked and outside this contract. A deployment must provide reviewed out-of-band attestation for the installed Hermes SHA, and the client or proof harness must also run a non-destructive behavioral probe before enabling chat. Missing or mismatched attestation blocks the connection.
 - Compatibility is not negotiated by an invented Hermes header or query parameter. The deployment attestation, manifest, behavioral probe, and fixture revision form the compatibility record until Hermes publishes a stable wire version.
 
 ## Explicitly blocked surface
