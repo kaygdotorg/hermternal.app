@@ -155,6 +155,7 @@ class RevisionAttestationValidationTests(unittest.TestCase):
             "password: synthetic",
             "token=synthetic",
             "Authorization: synthetic",
+            "Basic x",
             "Bearer synthetic-marker",
             "Cookie: session=synthetic",
             "set_cookie=synthetic",
@@ -191,6 +192,8 @@ class RevisionAttestationValidationTests(unittest.TestCase):
     def test_redaction_normalizes_sensitive_key_aliases(self) -> None:
         aliases = (
             "API-KEY",
+            "X-API-Key",
+            "x_api_key",
             "AWS-SECRET-ACCESS-KEY",
             "set_cookie",
             "Set-Cookie",
@@ -223,6 +226,24 @@ class RevisionAttestationValidationTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate._validate_redaction(nested)
 
+    def test_json_input_is_read_in_bounded_chunks(self) -> None:
+        class TrackingStream(io.BytesIO):
+            def __init__(self, data: bytes) -> None:
+                super().__init__(data)
+                self.read_sizes: list[int] = []
+
+            def read(self, size: int = -1) -> bytes:
+                self.read_sizes.append(size)
+                return super().read(size)
+
+        stream = TrackingStream(b"x" * (validate.MAX_JSON_BYTES + 1))
+        with mock.patch.object(Path, "open", return_value=stream):
+            with self.assertRaises(validate.ValidationError):
+                validate.load_json(Path("synthetic-over-limit.json"))
+        self.assertTrue(stream.read_sizes)
+        self.assertTrue(all(0 < size <= validate.JSON_READ_CHUNK_BYTES for size in stream.read_sizes))
+        self.assertLessEqual(sum(stream.read_sizes), validate.MAX_JSON_BYTES + 1)
+
     def test_json_input_byte_limit_is_rejected_without_retaining_payload(self) -> None:
         marker = "oversized-secret-marker"
         with tempfile.TemporaryDirectory() as directory:
@@ -242,8 +263,34 @@ class RevisionAttestationValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "duplicate.json"
             path.write_text('{"schema": 1, "schema": 2}', encoding="utf-8")
-            with self.assertRaises(validate.DuplicateKeyError):
+            with self.assertRaises(validate.DuplicateKeyError) as context:
                 validate.load_json(path)
+            self.assertNotIn("schema", str(context.exception))
+
+    def test_large_duplicate_key_is_not_echoed_and_cli_output_is_capped(self) -> None:
+        key = "k" * validate.MAX_STRING_LENGTH
+        duplicate = json.dumps({key: 1})[:-1] + "," + json.dumps({key: 2})[1:]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "duplicate-large-key.json"
+            path.write_text(duplicate, encoding="utf-8")
+            with self.assertRaises(validate.DuplicateKeyError) as context:
+                validate.load_json(path)
+            self.assertNotIn(key, str(context.exception))
+            original = validate.ATTESTATION_PATH
+            validate.ATTESTATION_PATH = path
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    result = validate.main(["--repo-root", str(REPO_ROOT), "--worktree"])
+            finally:
+                validate.ATTESTATION_PATH = original
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(result, 1)
+            self.assertLess(len(stdout.getvalue().encode("utf-8")), 2048)
+            self.assertNotIn(key, stdout.getvalue())
+            self.assertNotIn(key, stderr.getvalue())
+            self.assertEqual(payload["errors"], ["duplicate JSON object key is not allowed"])
 
     def test_non_finite_json_numbers_are_rejected(self) -> None:
         for literal in ("NaN", "Infinity", "-Infinity", "1e9999"):

@@ -67,8 +67,9 @@ The valid case with a matching probe is labelled `separate_probe_gate`, not
 
 - duplicate JSON object keys, `NaN`, `Infinity`, `-Infinity`, and exponent
   overflow such as `1e9999`;
-- bounded JSON input bytes, strings, arrays, object widths, total nodes, and
-  redaction traversal, with control characters rejected;
+- bounded streaming JSON input bytes, strings, arrays, object widths, total
+  nodes, and redaction traversal, with control characters rejected; duplicate
+  key errors never echo the rejected key and controlled CLI errors are capped;
 - unknown keys, reordered keys, changed fixture IDs, wrong leaf types, and
   booleans where integers are required;
 - missing, abbreviated, unknown, or mismatched Hermes revisions;
@@ -77,9 +78,10 @@ The valid case with a matching probe is labelled `separate_probe_gate`, not
   measured baseline artifacts;
 - server-shaped source-revision or protocol-version fields; and
 - URLs, email addresses, host forms, password/token/authorization and
-  secret/key assignments, bearer/basic values, cookie/ticket markers, raw
-  operational material, or user data. Sensitive field aliases are normalized
-  across case, hyphen, underscore, and separator variants.
+  secret/key assignments, bearer/basic values including short Basic values,
+  cookie/ticket markers, raw operational material, or user data. Sensitive
+  field aliases including `x_api_key` are normalized across case, hyphen,
+  underscore, and separator variants.
 
 The JSON and redaction limits are validator safety limits only; they are not
 product protocol limits.

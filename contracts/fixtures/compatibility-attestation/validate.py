@@ -301,6 +301,8 @@ MAX_ARRAY_LENGTH = 256
 MAX_OBJECT_KEYS = 64
 MAX_JSON_NODES = 4096
 MAX_INTEGER_BITS = 4096
+MAX_ERROR_MESSAGE_LENGTH = 512
+JSON_READ_CHUNK_BYTES = 64 * 1024
 CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
@@ -317,7 +319,7 @@ SECRET_PATTERNS = (
     re.compile(r"\b(?:api[_-]?key|x[_-]?api[_-]?key|aws[_-]?secret[_-]?access[_-]?key|set[_-]?cookie|raw[_-]?ticket|session[_-]?token|access[_-]?token|password|passphrase|token|authorization)\s*[:=]\s*\S+", re.IGNORECASE),
     re.compile(r"\b(?:AWS_ACCESS_KEY_ID|SECRET_KEY)\s*[:=]\s*\S+", re.IGNORECASE),
     re.compile(r"\bBearer\s+\S+", re.IGNORECASE),
-    re.compile(r"\bBasic\s+[A-Za-z0-9+/=_-]{12,}", re.IGNORECASE),
+    re.compile(r"\bBasic\s+\S+", re.IGNORECASE),
     re.compile(r"\b(?:cookie|set-cookie|ticket|raw-ticket)\s*[:=]\s*\S+", re.IGNORECASE),
 )
 FORBIDDEN_KEYS = frozenset(
@@ -325,6 +327,7 @@ FORBIDDEN_KEYS = frozenset(
         "access_token",
         "api_key",
         "authorization",
+        "x_api_key",
         "aws_secret_access_key",
         "bearer",
         "cookie",
@@ -404,7 +407,9 @@ def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, An
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise DuplicateKeyError(f"duplicate JSON object key: {key}")
+            # Do not echo the duplicate key: it may contain attacker-controlled
+            # material and would otherwise bypass the CLI error-size bound.
+            raise DuplicateKeyError("duplicate JSON object key is not allowed")
         result[key] = value
     return result
 
@@ -472,12 +477,31 @@ def _parse_json_bytes(data: bytes, label: str) -> Any:
     return _parse_json_text(text, label)
 
 
+def _read_bounded_stream(stream: Any, label: str) -> bytes:
+    """Read at most the JSON limit plus one byte from an untrusted stream."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= MAX_JSON_BYTES:
+        chunk = stream.read(min(JSON_READ_CHUNK_BYTES, MAX_JSON_BYTES + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        require(type(chunk) is bytes, f"strict JSON {label} stream returned non-bytes")
+        total += len(chunk)
+        if total > MAX_JSON_BYTES:
+            raise ValidationError(f"strict JSON {label} exceeds the input byte limit")
+        chunks.append(chunk)
+    raise ValidationError(f"strict JSON {label} exceeds the input byte limit")
+
+
 def load_json(path: Path) -> Any:
-    """Load bounded strict JSON without retaining oversized input values."""
+    """Load bounded strict JSON without reading an unbounded file into memory."""
     try:
-        data = path.read_bytes()
+        with path.open("rb") as stream:
+            data = _read_bounded_stream(stream, str(path))
+    except ValidationError:
+        raise
     except OSError as exc:
-        raise ValidationError(f"cannot read strict JSON {path}: {exc}") from exc
+        raise ValidationError(f"cannot read strict JSON {path}") from exc
     return _parse_json_bytes(data, str(path))
 
 
@@ -639,6 +663,26 @@ def validate_executing_validator(repo_root: Path, execution_commit: str) -> None
     require(runtime_bytes == committed_bytes, "executing validator differs from its immutable Git blob")
 
 
+def _git_blob_size(repo_root: Path, commit: str, relative: str) -> int | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "cat-file", "-s", f"{commit}:{relative}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=_git_env(),
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        size = int(result.stdout.strip())
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
 def _git_blob(repo_root: Path, commit: str, relative: str) -> bytes | None:
     try:
         result = subprocess.run(
@@ -656,6 +700,9 @@ def _git_blob(repo_root: Path, commit: str, relative: str) -> bytes | None:
 
 
 def _load_json_blob(repo_root: Path, snapshot: GitSnapshot, relative: str) -> Any:
+    size = _git_blob_size(repo_root, snapshot.commit, relative)
+    require(size is not None, f"missing immutable JSON fixture: {relative}")
+    require(size <= MAX_JSON_BYTES, f"strict JSON {snapshot.commit}:{relative} exceeds the input byte limit")
     blob = _git_blob(repo_root, snapshot.commit, relative)
     require(blob is not None, f"missing immutable JSON fixture: {relative}")
     return _parse_json_bytes(blob, f"{snapshot.commit}:{relative}")
@@ -1022,6 +1069,17 @@ def default_repo_root() -> Path:
     return ROOT.parents[2]
 
 
+def _bounded_error_message(exc: BaseException) -> str:
+    """Keep controlled CLI output bounded even for malformed external input."""
+    try:
+        message = str(exc)
+    except Exception:
+        return "validation failed"
+    if len(message) <= MAX_ERROR_MESSAGE_LENGTH:
+        return message
+    return message[: MAX_ERROR_MESSAGE_LENGTH - 3] + "..."
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1056,7 +1114,7 @@ def main(argv: list[str] | None = None) -> int:
             execution_commit=execution_commit,
         )
     except (ValidationError, DuplicateKeyError, OSError, UnicodeError, TypeError, ValueError, OverflowError, RecursionError) as exc:
-        errors.append(str(exc))
+        errors.append(_bounded_error_message(exc))
     duration_ms = (time.perf_counter() - started) * 1000
     result = {
         "ok": not errors,
