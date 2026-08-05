@@ -38,6 +38,22 @@ EXPECTED_REQUEST_KEYS_BY_CASE = {
     "malformed": (),
     "unknown-operation": (),
 }
+EXPECTED_FIXTURE_SURFACE = {
+    "transport": "json-rpc",
+    "operation": "model.options",
+    "source_path": "tui_gateway/methods_complete.py",
+    "source_lines": [327, 347],
+    "source_blob_sha": EXPECTED_SOURCE_BLOB_SHA,
+    "handler_calls": "hermes_cli.inventory.build_model_options_payload",
+    "request_parameters": list(EXPECTED_REQUEST_PARAMETERS),
+    "response_shape_source_path": "hermes_cli/inventory.py",
+    "response_shape_source_lines": [276, 280],
+    "payload_builder_path": "hermes_cli/inventory.py",
+    "payload_builder_lines": [283, 313],
+    "payload_builder_blob_sha": EXPECTED_PAYLOAD_BUILDER_BLOB_SHA,
+    "required_result_keys": ["providers", "model", "provider"],
+    "provider_rows": "source-defined; fixture rows are synthetic only",
+}
 EXPECTED_REST_EQUIVALENT = {
     "method": "GET",
     "path": "/api/model/options",
@@ -91,6 +107,7 @@ FORBIDDEN_SENSITIVE_KEYS = {
     "userdata",
 }
 FORBIDDEN_SENSITIVE_KEY_COMPONENTS = {
+    "authorization",
     "credential",
     "credentials",
     "cookie",
@@ -107,25 +124,44 @@ FORBIDDEN_SENSITIVE_KEY_COMPONENTS = {
     "transcript",
     "transcripts",
 }
-FORBIDDEN_VALUE_MARKERS = {
-    "accesskey",
-    "accesstoken",
+FORBIDDEN_SENSITIVE_KEY_COMPOUNDS = (
+    ("access", "key"),
+    ("api", "key"),
+    ("auth", "credential"),
+    ("auth", "key"),
+    ("auth", "token"),
+)
+FORBIDDEN_VALUE_COMPONENTS = {
+    "access",
     "apikey",
+    "authorization",
     "auth",
     "authentication",
-    "authorization",
     "cookie",
+    "cookies",
     "credential",
     "credentials",
     "hostname",
     "password",
     "providerdata",
     "secret",
+    "secrets",
     "ticket",
+    "tickets",
     "token",
+    "tokens",
     "transcript",
+    "transcripts",
     "userdata",
 }
+FORBIDDEN_VALUE_COMPOUNDS = (
+    ("access", "key"),
+    ("access", "token"),
+    ("api", "key"),
+    ("auth", "credential"),
+    ("auth", "key"),
+    ("auth", "token"),
+)
 FORBIDDEN_VALUE_PATTERNS = (
     re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.IGNORECASE),
@@ -167,30 +203,11 @@ def validate_audit(audit: dict[str, Any]) -> None:
     _require(audit["operation_present"] is True, "audit: model.options is not proven")
     _require(audit["conclusion"] == "present", "audit: conclusion is not present")
 
-    surface = audit["fixture_surface"]
-    _require(surface["transport"] == "json-rpc", "audit: fixtures must use JSON-RPC")
-    _require(surface["operation"] == EXPECTED_OPERATION, "audit: wrong operation")
+    surface = audit.get("fixture_surface")
+    _require(isinstance(surface, dict), "audit: fixture surface must be an object")
     _require(
-        surface["handler_calls"] == "hermes_cli.inventory.build_model_options_payload",
-        "audit: fixture source is not the shared payload builder",
-    )
-    _require(
-        surface["required_result_keys"] == ["providers", "model", "provider"],
-        "audit: observable result shape changed",
-    )
-    _require(surface["source_lines"] == [327, 347], "audit: handler evidence moved")
-    _require(surface["payload_builder_lines"] == [283, 313], "audit: builder evidence moved")
-    _require(
-        surface["request_parameters"] == list(EXPECTED_REQUEST_PARAMETERS),
-        "audit: request parameter contract changed",
-    )
-    _require(
-        surface["source_blob_sha"] == EXPECTED_SOURCE_BLOB_SHA,
-        "audit: handler source blob is not the pinned blob",
-    )
-    _require(
-        surface["payload_builder_blob_sha"] == EXPECTED_PAYLOAD_BUILDER_BLOB_SHA,
-        "audit: payload builder source blob is not the pinned blob",
+        surface == EXPECTED_FIXTURE_SURFACE,
+        "audit: complete fixture surface provenance changed",
     )
 
     _require(
@@ -226,11 +243,18 @@ def _normalize_marker(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.casefold())
 
 
-def _key_tokens(key: str) -> set[str]:
-    return {
+def _key_tokens(value: str) -> tuple[str, ...]:
+    return tuple(
         token.casefold()
-        for token in re.findall(r"[A-Z]+(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+|\d+", key)
-    }
+        for token in re.findall(r"[A-Z]+(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+|\d+", value)
+    )
+
+
+def _contains_compound(tokens: tuple[str, ...], compounds: tuple[tuple[str, ...], ...]) -> bool:
+    return any(
+        any(tokens[index : index + len(compound)] == compound for index in range(len(tokens)))
+        for compound in compounds
+    )
 
 
 def _is_forbidden_sensitive_key(key: str) -> bool:
@@ -239,7 +263,19 @@ def _is_forbidden_sensitive_key(key: str) -> bool:
     normalized_key = _normalize_marker(key)
     if normalized_key in FORBIDDEN_SENSITIVE_KEYS:
         return True
-    return bool(_key_tokens(key) & FORBIDDEN_SENSITIVE_KEY_COMPONENTS)
+    tokens = _key_tokens(key)
+    return bool(set(tokens) & FORBIDDEN_SENSITIVE_KEY_COMPONENTS) or _contains_compound(
+        tokens,
+        FORBIDDEN_SENSITIVE_KEY_COMPOUNDS,
+    )
+
+
+def _is_forbidden_sensitive_value(value: str) -> bool:
+    tokens = _key_tokens(value)
+    return bool(set(tokens) & FORBIDDEN_VALUE_COMPONENTS) or _contains_compound(
+        tokens,
+        FORBIDDEN_VALUE_COMPOUNDS,
+    )
 
 
 def _validate_redaction(value: Any, path: str = "fixture") -> None:
@@ -266,7 +302,7 @@ def _validate_redaction(value: Any, path: str = "fixture") -> None:
         return
     if isinstance(value, str):
         _require(
-            _normalize_marker(value) not in FORBIDDEN_VALUE_MARKERS,
+            not _is_forbidden_sensitive_value(value),
             f"{path}: prohibited sensitive value marker",
         )
         for pattern in FORBIDDEN_VALUE_PATTERNS:
@@ -302,6 +338,10 @@ def _result_is_valid(result: Any) -> bool:
 def validate_fixture(fixture: dict[str, Any], audit: dict[str, Any]) -> None:
     """Validate one fixture against the source audit without network access."""
 
+    # Callers cannot smuggle an unverified SHA, repository, operation, or source
+    # record through this helper; every direct audit argument must pass the same
+    # immutable checks used when loading the committed audit file.
+    validate_audit(audit)
     _require(fixture.get("contract") == "dashboard-v0.0.1", "fixture: wrong contract")
     _require(fixture.get("hermes_source_sha") == PINNED_SHA, "fixture: wrong SHA")
     _require(fixture.get("source_audit_id") == audit["audit_id"], "fixture: wrong audit id")
@@ -493,7 +533,17 @@ class ModelOptionsFixtureTests(unittest.TestCase):
     def test_sensitive_keys_and_values_are_rejected(self) -> None:
         validate_fixture(self.by_case["present"], self.audit)
 
-        for key in ("token", "credential", "auth", "api_key", "cookie", "secret"):
+        for key in (
+            "token",
+            "credential",
+            "auth",
+            "api_key",
+            "provider_api_key",
+            "x_authorization_value",
+            "api_key_value",
+            "cookie",
+            "secret",
+        ):
             with self.subTest(key=key):
                 forged_fixture = copy.deepcopy(self.by_case["present"])
                 forged_fixture["response"]["result"][key] = "synthetic-marker"
@@ -507,6 +557,8 @@ class ModelOptionsFixtureTests(unittest.TestCase):
             "Bearer synthetic-credential",
             "Basic c3ludGhldGlj",
             "sk-synthetic-marker",
+            "synthetic-api-key",
+            "my-secret-value",
         ):
             with self.subTest(value=value):
                 forged_fixture = copy.deepcopy(self.by_case["present"])
@@ -521,6 +573,37 @@ class ModelOptionsFixtureTests(unittest.TestCase):
                 forged_audit["fixture_surface"][evidence_key] = "0" * 40
                 with self.assertRaises(ContractError):
                     validate_audit(forged_audit)
+
+    def test_complete_fixture_surface_is_exactly_bound(self) -> None:
+        for field, expected_value in EXPECTED_FIXTURE_SURFACE.items():
+            with self.subTest(field=field):
+                forged_audit = copy.deepcopy(self.audit)
+                if isinstance(expected_value, list):
+                    forged_audit["fixture_surface"][field] = [*expected_value, "forged"]
+                elif isinstance(expected_value, str):
+                    forged_audit["fixture_surface"][field] = f"{expected_value}-forged"
+                else:
+                    forged_audit["fixture_surface"][field] = None
+                with self.assertRaises(ContractError):
+                    validate_audit(forged_audit)
+
+    def test_validate_fixture_rejects_unvalidated_audit_arguments(self) -> None:
+        mutations = (
+            ("source SHA", {"hermes_source_sha": "0" * 40}),
+            ("repository", {"hermes_repository": "evil/example"}),
+            ("source blob", {"fixture_surface": {"source_blob_sha": "0" * 40}}),
+            ("operation", {"fixture_surface": {"operation": "model.options.forged"}}),
+        )
+        for description, mutation in mutations:
+            with self.subTest(description=description):
+                forged_audit = copy.deepcopy(self.audit)
+                for field, value in mutation.items():
+                    if field == "fixture_surface":
+                        forged_audit[field].update(value)
+                    else:
+                        forged_audit[field] = value
+                with self.assertRaises(ContractError):
+                    validate_fixture(self.by_case["present"], forged_audit)
 
     def test_all_machine_readable_provenance_is_exactly_bound(self) -> None:
         forged_audit = copy.deepcopy(self.audit)
