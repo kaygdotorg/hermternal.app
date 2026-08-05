@@ -22,13 +22,51 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         self.source_root = self.root / "source"
         self.repo_root.mkdir()
         self.source_root.mkdir()
+        self.synthetic_planning_docs = ["README.md"]
+        self.synthetic_required_links = [
+            {"path": "README.md", "literal": "synthetic planning document"}
+        ]
+        self.synthetic_source_files = [
+            {
+                "path": "src/module.py",
+                "sha256": hashlib.sha256(b"ANCHOR\n").hexdigest(),
+                "anchors": [{"id": "anchor", "literal": "ANCHOR", "line": 1}],
+                "absent": ["FORBIDDEN_FIELD"],
+            }
+        ]
+        self.synthetic_claims = [
+            {
+                "id": "synthetic-claim",
+                "status": "verified",
+                "source_files": ["src/module.py"],
+                "docs": ["README.md"],
+                "summary": "Synthetic source evidence.",
+            }
+        ]
+        self.synthetic_deferred = [
+            {
+                "owner": "synthetic owner",
+                "scope": "synthetic scope",
+                "reason": "synthetic boundary",
+            }
+        ]
+        self._metadata_patches = [
+            mock.patch.object(validate, "EXPECTED_PLANNING_DOCS", self.synthetic_planning_docs),
+            mock.patch.object(validate, "EXPECTED_REQUIRED_LINKS", self.synthetic_required_links),
+            mock.patch.object(validate, "EXPECTED_SOURCE_FILES", self.synthetic_source_files),
+            mock.patch.object(validate, "EXPECTED_CLAIMS", self.synthetic_claims),
+            mock.patch.object(validate, "EXPECTED_PURPOSE", "Synthetic planning review."),
+            mock.patch.object(validate, "EXPECTED_DEFERRED", self.synthetic_deferred),
+        ]
+        for patcher in self._metadata_patches:
+            patcher.start()
         (self.repo_root / "README.md").write_text(
             "synthetic planning document\n", encoding="utf-8"
         )
         for link in validate.EXPECTED_REQUIRED_LINKS:
             path = self.repo_root / link["path"]
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(link["literal"] + "\n", encoding="utf-8")
+            path.write_text(path.read_text(encoding="utf-8") + link["literal"] + "\n", encoding="utf-8")
         (self.source_root / "src").mkdir()
         self.source_file = self.source_root / "src" / "module.py"
         self.source_file.write_text("ANCHOR\n", encoding="utf-8")
@@ -47,17 +85,12 @@ class PlanningReviewValidatorTests(unittest.TestCase):
                 "repository": "NousResearch/hermes-agent",
                 "sha": self.source_sha,
             },
-            "planning_docs": ["README.md"],
+            "purpose": validate.EXPECTED_PURPOSE,
+            "planning_docs": validate.EXPECTED_PLANNING_DOCS,
             "required_links": validate.EXPECTED_REQUIRED_LINKS,
-            "source_files": [
-                {
-                    "path": "src/module.py",
-                    "sha256": hashlib.sha256(b"ANCHOR\n").hexdigest(),
-                    "anchors": [{"id": "anchor", "literal": "ANCHOR", "line": 1}],
-                    "absent": ["FORBIDDEN_FIELD"],
-                }
-            ],
+            "source_files": validate.EXPECTED_SOURCE_FILES,
             "claims": validate.EXPECTED_CLAIMS,
+            "deferred": validate.EXPECTED_DEFERRED,
         }
         self.review_path.write_text(json.dumps(review), encoding="utf-8")
         self._source_pin = mock.patch.object(validate, "EXPECTED_SOURCE_SHA", self.source_sha)
@@ -65,6 +98,8 @@ class PlanningReviewValidatorTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._source_pin.stop()
+        for patcher in self._metadata_patches:
+            patcher.stop()
         self.tempdir.cleanup()
 
     def _git(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -95,7 +130,7 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         docs_errors, _head, _duration = validate.validate_review(
             self.repo_root,
             self.review_path,
-            None,
+            self.source_root,
             require_source=False,
         )
         return full_errors, docs_errors
@@ -103,10 +138,20 @@ class PlanningReviewValidatorTests(unittest.TestCase):
     def test_valid_synthetic_source_passes(self) -> None:
         self.assertEqual(self._validate(), [])
 
-    def test_changed_source_fails_digest_check(self) -> None:
+    def test_dirty_source_fails_even_if_worktree_digest_is_updated(self) -> None:
         self.source_file.write_text("CHANGED\n", encoding="utf-8")
+        review = self._load_review()
+        review["source_files"][0]["sha256"] = hashlib.sha256(
+            b"CHANGED\n"
+        ).hexdigest()
+        self._write_review(review)
         errors = self._validate()
-        self.assertTrue(any("digest mismatch" in error for error in errors))
+        self.assertTrue(any("source checkout is dirty" in error for error in errors))
+
+    def test_untracked_source_file_fails_closed(self) -> None:
+        (self.source_root / "untracked.py").write_text("ANCHOR\n", encoding="utf-8")
+        errors = self._validate()
+        self.assertTrue(any("source checkout is dirty" in error for error in errors))
 
     def test_parent_traversal_source_path_fails_in_both_modes(self) -> None:
         outside = self.root / "outside.py"
@@ -147,8 +192,9 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         source_entry["sha256"] = hashlib.sha256(b"ANCHOR\n").hexdigest()
         self._write_review(review)
 
-        errors = self._validate()
-        self.assertTrue(any("resolves outside" in error for error in errors))
+        full_errors, docs_errors = self._validate_both_modes()
+        for errors in (full_errors, docs_errors):
+            self.assertTrue(any("resolves outside" in error for error in errors))
 
     def test_planning_document_paths_stay_under_repo_root(self) -> None:
         outside = self.root / "outside.md"
@@ -168,14 +214,42 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         for errors in (full_errors, docs_errors):
             self.assertTrue(any("resolves outside" in error for error in errors))
 
+    def test_exact_coverage_and_required_metadata_are_frozen(self) -> None:
+        review = self._load_review()
+        mutations = {
+            "format_version": (2, "format_version"),
+            "operation": ("P0-99", "operation"),
+            "purpose": ("mutated purpose", "purpose"),
+            "deferred": ([], "deferred"),
+            "planning_docs": ([], "planning_docs"),
+            "source_files": ([], "source_files"),
+        }
+        for field, (value, fragment) in mutations.items():
+            mutated = self._load_review()
+            mutated[field] = value
+            self._write_review(mutated)
+            full_errors, docs_errors = self._validate_both_modes()
+            for errors in (full_errors, docs_errors):
+                self.assertTrue(any(fragment in error for error in errors), field)
+        self._write_review(review)
+
+        mutated = self._load_review()
+        mutated["source_files"] = [{"path": ".git/HEAD"}]
+        self._write_review(mutated)
+        full_errors, docs_errors = self._validate_both_modes()
+        for errors in (full_errors, docs_errors):
+            self.assertTrue(any("source_files" in error for error in errors))
+
     def test_missing_anchor_fails_closed(self) -> None:
-        self.source_file.write_text("OTHER\n", encoding="utf-8")
-        errors = self._validate()
+        with mock.patch.object(validate, "_git_blob", return_value=b"OTHER\n"):
+            errors = self._validate()
         self.assertTrue(any("missing source anchor" in error for error in errors))
 
     def test_forbidden_source_field_fails_closed(self) -> None:
-        self.source_file.write_text("ANCHOR\nFORBIDDEN_FIELD\n", encoding="utf-8")
-        errors = self._validate()
+        with mock.patch.object(
+            validate, "_git_blob", return_value=b"ANCHOR\nFORBIDDEN_FIELD\n"
+        ):
+            errors = self._validate()
         self.assertTrue(any("forbidden source field" in error for error in errors))
 
     def test_missing_source_root_fails_closed(self) -> None:
@@ -227,6 +301,15 @@ class PlanningReviewValidatorTests(unittest.TestCase):
         for errors in (full_errors, docs_errors):
             self.assertTrue(any("disallowed status" in error for error in errors))
             self.assertTrue(any("content does not match" in error for error in errors))
+
+        review["claims"] = json.loads(json.dumps(validate.EXPECTED_CLAIMS))
+        review["claims"][0]["source_files"] = ["missing.py"]
+        review["claims"][0]["docs"] = ["missing.md"]
+        self._write_review(review)
+        full_errors, docs_errors = self._validate_both_modes()
+        for errors in (full_errors, docs_errors):
+            self.assertTrue(any("excluded source record" in error for error in errors))
+            self.assertTrue(any("excluded planning document" in error for error in errors))
 
     def test_document_only_mode_does_not_require_source_checkout(self) -> None:
         errors, head, _duration = validate.validate_review(

@@ -21,7 +21,42 @@ from typing import Any
 
 EXPECTED_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 EXPECTED_CONTRACT = "dashboard-v0.0.1"
+EXPECTED_FORMAT_VERSION = 1
+EXPECTED_OPERATION = "P0-01"
+EXPECTED_PURPOSE = (
+    "Reconcile source-derived v0.0.1 planning claims with the pinned Hermes "
+    "checkout without contacting a live service."
+)
 REVIEW_NAME = "planning_review.json"
+EXPECTED_PLANNING_DOCS = [
+    "README.md",
+    "apps/apple/README.md",
+    "apps/web/README.md",
+    "contracts/README.md",
+    "contracts/design-tokens/README.md",
+    "contracts/fixtures/README.md",
+    "contracts/hermes-dashboard/README.md",
+    "contracts/hermes-dashboard/manifest.md",
+    "contracts/state-models/README.md",
+    "contracts/state-models/authentication.md",
+    "contracts/state-models/chat.md",
+    "contracts/state-models/connection.md",
+    "contracts/state-models/terminal.md",
+    "contracts/fixtures/source-audit/planning-reconciliation/README.md",
+    "docs/architecture/README.md",
+    "docs/architecture/deep-links.md",
+    "docs/deployment/README.md",
+    "docs/deployment/proof-matrix.md",
+    "docs/product/README.md",
+    "docs/product/roadmap.md",
+    "docs/product/v0.0.1.md",
+    "docs/protocol/README.md",
+    "docs/protocol/compatibility.md",
+    "docs/security/authentication.md",
+    "docs/security/README.md",
+    "prototypes/README.md",
+    "scripts/README.md",
+]
 EXPECTED_REQUIRED_LINKS = [
     {
         "path": "contracts/fixtures/README.md",
@@ -42,6 +77,138 @@ EXPECTED_REQUIRED_LINKS = [
     {
         "path": "docs/protocol/compatibility.md",
         "literal": "source-audit/planning-reconciliation/planning_review.json",
+    },
+]
+EXPECTED_SOURCE_FILES = [
+    {
+        "path": "hermes_cli/dashboard_auth/routes.py",
+        "sha256": "d42be557b9b1ba798c038c91246cba0bf046e89ebe34a27db0c7803c517e9c20",
+        "anchors": [
+            {"id": "login-page", "literal": "@router.get(\"/login\", name=\"login_page\")", "line": 132},
+            {"id": "provider-discovery", "literal": "@router.get(\"/api/auth/providers\", name=\"auth_providers\")", "line": 152},
+            {"id": "browser-login", "literal": "@router.get(\"/auth/login\", name=\"auth_login\")", "line": 182},
+            {"id": "native-authorize", "literal": "@router.get(\"/auth/native/authorize\", name=\"auth_native_authorize\")", "line": 289},
+            {"id": "oauth-callback", "literal": "@router.get(\"/auth/callback\", name=\"auth_callback\")", "line": 379},
+            {"id": "logout", "literal": "@router.post(\"/auth/logout\", name=\"auth_logout\")", "line": 742},
+            {"id": "identity-probe", "literal": "@router.get(\"/api/auth/me\", name=\"auth_me\")", "line": 778},
+            {"id": "ws-ticket", "literal": "@router.post(\"/api/auth/ws-ticket\", name=\"auth_ws_ticket\")", "line": 799},
+            {"id": "native-token", "literal": "@router.post(\"/auth/native/token\", name=\"auth_native_token\")", "line": 841},
+            {"id": "native-refresh", "literal": "@router.post(\"/auth/native/refresh\", name=\"auth_native_refresh\")", "line": 894},
+        ],
+    },
+    {
+        "path": "hermes_cli/dashboard_auth/ws_tickets.py",
+        "sha256": "b66e29a067002ad8a345b49281d30c75d6ec2bb177d58214611db66925bb4429",
+        "anchors": [
+            {"id": "ticket-ttl", "literal": "TTL_SECONDS = 30", "line": 42},
+            {"id": "ticket-consumer", "literal": "def consume_ticket(ticket: str)", "line": 81},
+            {"id": "single-use-pop", "literal": "entry = _tickets.pop(ticket, None)", "line": 90},
+            {"id": "bounded-ticket-log", "literal": "truncated = (ticket[:8] + \"…\") if ticket else \"<empty>\"", "line": 94},
+        ],
+    },
+    {
+        "path": "hermes_cli/web_routers/sessions.py",
+        "sha256": "f8debdab79430829245352ebdb7f50603c3a42c11d4609eb3287c35b9a2bf0ba",
+        "anchors": [
+            {"id": "session-list", "literal": "@list_router.get(\"/api/sessions\")", "line": 50},
+            {"id": "session-search", "literal": "@search_router.get(\"/api/sessions/search\")", "line": 166},
+            {"id": "session-read", "literal": "@manage_router.get(\"/api/sessions/{session_id}\")", "line": 552},
+            {"id": "session-messages", "literal": "@manage_router.get(\"/api/sessions/{session_id}/messages\")", "line": 598},
+            {"id": "session-patch", "literal": "@manage_router.patch(\"/api/sessions/{session_id}\")", "line": 661},
+        ],
+    },
+    {
+        "path": "hermes_cli/web_server.py",
+        "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+        "anchors": [
+            {"id": "image-upload", "literal": "@app.post(\"/api/chat/image-upload\")", "line": 2306},
+            {"id": "pty-resize-format", "literal": "_RESIZE_RE = re.compile(rb\"\\x1b\\[RESIZE:(\\d+);(\\d+)\\]\")", "line": 14401},
+            {"id": "pty-ttl", "literal": "ttl=30 * 60", "line": 14409},
+            {"id": "pty-replay-cap", "literal": "buffer_cap=1 * 1024 * 1024", "line": 14411},
+            {"id": "pty-route", "literal": "@app.websocket(\"/api/pty\")", "line": 15624},
+            {"id": "chat-websocket-route", "literal": "@app.websocket(\"/api/ws\")", "line": 15811},
+            {"id": "pty-detach", "literal": "PTY_REGISTRY.detach(attach_token, ws)", "line": 15797},
+        ],
+        "absent": ["hermes_source_sha", "dashboard_protocol_version"],
+    },
+    {
+        "path": "hermes_cli/pty_bridge.py",
+        "sha256": "e24515762a8ee3c9089369b7ecba20307af62c7cfb6d02abf04261ecacaa6095",
+        "anchors": [
+            {"id": "pty-min-dimension", "literal": "_MIN_DIMENSION = 1", "line": 58},
+            {"id": "pty-max-cols", "literal": "_MAX_COLS = 2000", "line": 59},
+            {"id": "pty-max-rows", "literal": "_MAX_ROWS = 1000", "line": 60},
+        ],
+    },
+    {
+        "path": "hermes_cli/pty_session.py",
+        "sha256": "617448d953ec978f1b3287b02ac0dd2ad61c255d3366e0ca45efdf829146d8c5",
+        "anchors": [
+            {"id": "pty-process-exited-code", "literal": "WS_CLOSE_PROCESS_EXITED = 4410", "line": 15},
+            {"id": "pty-superseded-code", "literal": "WS_CLOSE_SUPERSEDED = 4409", "line": 16},
+            {"id": "pty-detached-reap", "literal": "and (now - s.last_detached_at) > self._ttl", "line": 179},
+        ],
+    },
+    {
+        "path": "tui_gateway/ws.py",
+        "sha256": "2b1c772cb37c77a756325e4c298f6a5ee8947d6566cd7638f06f7a0421b8b5fd",
+        "anchors": [
+            {"id": "gateway-route-contract", "literal": "@app.websocket(\"/api/ws\")", "line": 19},
+            {"id": "message-delta", "literal": "\"message.delta\"", "line": 54},
+            {"id": "reasoning-delta", "literal": "\"reasoning.delta\"", "line": 55},
+            {"id": "thinking-delta", "literal": "\"thinking.delta\"", "line": 56},
+            {"id": "gateway-ready", "literal": "\"gateway.ready\"", "line": 319},
+            {"id": "parse-error", "literal": "\"error\": {\"code\": -32700, \"message\": \"parse error\"}", "line": 373},
+            {"id": "dispatch-error", "literal": "\"error\": {\"code\": -32603, \"message\": \"internal error\"}", "line": 404},
+        ],
+    },
+    {
+        "path": "tui_gateway/methods_prompt.py",
+        "sha256": "96363dbf53a484f6445750c99a40e0624a9e43966be8fb29d8e47883a3ec5f51",
+        "anchors": [
+            {"id": "prompt-submit", "literal": "@method(\"prompt.submit\")", "line": 67},
+            {"id": "clarify-response", "literal": "@method(\"clarify.respond\")", "line": 879},
+            {"id": "approval-response", "literal": "@method(\"approval.respond\")", "line": 907},
+        ],
+    },
+    {
+        "path": "tui_gateway/methods_session.py",
+        "sha256": "1e70561f7c5ca08556e26216f9f6a553bbf25e4c8de3368ac9cb9634e57ea34e",
+        "anchors": [
+            {"id": "session-create", "literal": "@method(\"session.create\")", "line": 14},
+            {"id": "session-list-rpc", "literal": "@method(\"session.list\")", "line": 162},
+            {"id": "session-most-recent", "literal": "@method(\"session.most_recent\")", "line": 214},
+            {"id": "session-resume", "literal": "@method(\"session.resume\")", "line": 306},
+            {"id": "session-active-list", "literal": "@method(\"session.active_list\")", "line": 750},
+            {"id": "session-status", "literal": "@method(\"session.status\")", "line": 2207},
+            {"id": "session-history", "literal": "@method(\"session.history\")", "line": 2283},
+            {"id": "session-close", "literal": "@method(\"session.close\")", "line": 2586},
+            {"id": "session-interrupt", "literal": "@method(\"session.interrupt\")", "line": 2750},
+        ],
+    },
+    {
+        "path": "tui_gateway/methods_complete.py",
+        "sha256": "87ef05379c694cf7b6995095eb7acd5a4111eb275eb4c77b6e040da41033a8cf",
+        "anchors": [
+            {"id": "model-options", "literal": "@method(\"model.options\")", "line": 327},
+        ],
+    },
+    {
+        "path": "tui_gateway/server.py",
+        "sha256": "e4bd9009827ffd224cc85c8b17ad7baba0f560d643d688e265be5a06fe8ba29c",
+        "anchors": [
+            {"id": "config-set", "literal": "@method(\"config.set\")", "line": 10468},
+            {"id": "model-key", "literal": "if key == \"model\":", "line": 10473},
+            {"id": "pending-switch-pop", "literal": "pending = session.pop(\"pending_model_switch\", None)", "line": 4583},
+            {"id": "pending-confirmation-drop", "literal": "surface the warning and drop the", "line": 4594},
+            {"id": "tool-start", "literal": "_emit(\"tool.start\", sid, payload)", "line": 5316},
+            {"id": "tool-complete", "literal": "_emit(\"tool.complete\", sid, payload)", "line": 5363},
+            {"id": "message-complete", "literal": "_emit(\"message.complete\", csid, {\"text\": summary})", "line": 5604},
+            {"id": "approval-request", "literal": "_emit(\"approval.request\", sid, payload)", "line": 1808},
+            {"id": "clarify-request", "literal": "\"clarify.request\"", "line": 3136},
+            {"id": "session-info", "literal": "_emit(\"session.info\", sid, info)", "line": 1726},
+            {"id": "error-event", "literal": "_emit(\"error\", sid, {\"message\": f\"agent init failed: {e}\"})", "line": 2239},
+        ],
     },
 ]
 EXPECTED_CLAIMS = [
@@ -145,10 +312,33 @@ EXPECTED_CLAIMS = [
         "summary": "The reviewed Dashboard source contains no server-observable Hermes source-SHA or dashboard protocol-version field, so deployment attestation remains out of band.",
     },
 ]
-EXPECTED_CLAIMS_BY_ID = {claim["id"]: claim for claim in EXPECTED_CLAIMS}
-ALLOWED_CLAIM_IDS = frozenset(EXPECTED_CLAIMS_BY_ID)
-ALLOWED_CLAIM_STATUSES = frozenset(claim["status"] for claim in EXPECTED_CLAIMS)
-EXPECTED_CLAIM_ID_ORDER = tuple(claim["id"] for claim in EXPECTED_CLAIMS)
+EXPECTED_DEFERRED = [
+    {
+        "owner": "#200 / PR #220",
+        "scope": "native bearer route allowlist and its source-audit fixtures",
+        "reason": "This operation does not duplicate the focused bearer-auth route audit.",
+    },
+    {
+        "owner": "PR #216",
+        "scope": "PTY attach fixture set and terminal-state changes",
+        "reason": "This operation records only the source anchors needed to reconcile existing planning claims and does not edit reserved terminal files.",
+    },
+    {
+        "owner": "PR #218",
+        "scope": "browser OAuth state and PKCE fixture set",
+        "reason": "This operation does not duplicate the focused browser OAuth audit or edit its reserved authentication document.",
+    },
+    {
+        "owner": "PR #219",
+        "scope": "model-options fixture set",
+        "reason": "This operation records the existing model-switch contract anchors but does not edit the reserved model-options paths.",
+    },
+    {
+        "owner": "P0-02 and deployment-proof issues",
+        "scope": "live deployment attestation, Caddy or Traefik behavior, and behavioral probes",
+        "reason": "Source inspection is necessary evidence, but it is not a live integration or deployment proof.",
+    },
+]
 
 
 def load_review(path: Path) -> dict[str, Any]:
@@ -160,14 +350,6 @@ def load_review(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("review record must be a JSON object")
     return value
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _git_head(source_root: Path) -> str | None:
@@ -184,6 +366,45 @@ def _git_head(source_root: Path) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip()
+
+
+def _git_status(source_root: Path) -> str | None:
+    """Return all tracked, untracked, and ignored worktree changes."""
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source_root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _git_blob(source_root: Path, head: str, relative: str) -> bytes | None:
+    """Read a source file from the immutable HEAD tree, never the worktree."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), "cat-file", "blob", f"{head}:{relative}"],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def _line_numbers(text: str, literal: str) -> list[int]:
@@ -238,33 +459,65 @@ def _validate_claims(review: dict[str, Any], errors: list[str]) -> None:
         errors.append("review.claims must be a non-empty list")
         return
 
+    expected_by_id = {claim["id"]: claim for claim in EXPECTED_CLAIMS}
+    allowed_ids = frozenset(expected_by_id)
+    allowed_statuses = frozenset(claim["status"] for claim in EXPECTED_CLAIMS)
+    expected_id_order = tuple(claim["id"] for claim in EXPECTED_CLAIMS)
+    included_source_files = {
+        entry["path"]
+        for entry in review.get("source_files", [])
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+    included_planning_docs = {
+        item for item in review.get("planning_docs", []) if isinstance(item, str)
+    }
+
     claim_ids: list[str] = []
     for claim in claims:
         if not isinstance(claim, dict):
             errors.append("review.claims contains a non-object")
             continue
         claim_id = claim.get("id")
-        if claim_id not in ALLOWED_CLAIM_IDS:
+        if claim_id not in allowed_ids:
             errors.append(f"review.claims contains an unknown id: {claim_id!r}")
             continue
         claim_ids.append(claim_id)
         status = claim.get("status")
-        if status not in ALLOWED_CLAIM_STATUSES:
+        if status not in allowed_statuses:
             errors.append(f"claim {claim_id!r} has a disallowed status: {status!r}")
-        expected = EXPECTED_CLAIMS_BY_ID[claim_id]
+        expected = expected_by_id[claim_id]
         if status != expected["status"]:
             errors.append(
                 f"claim {claim_id!r} status does not match the pinned review: "
                 f"expected {expected['status']!r}, found {status!r}"
             )
+        source_refs = claim.get("source_files")
+        if not isinstance(source_refs, list) or not all(
+            isinstance(item, str) and item in included_source_files for item in source_refs
+        ):
+            errors.append(f"claim {claim_id!r} references an excluded source record")
+        doc_refs = claim.get("docs")
+        if not isinstance(doc_refs, list) or not all(
+            isinstance(item, str) and item in included_planning_docs for item in doc_refs
+        ):
+            errors.append(f"claim {claim_id!r} references an excluded planning document")
         if claim != expected:
             errors.append(f"claim {claim_id!r} content does not match the pinned review")
 
-    if tuple(claim_ids) != EXPECTED_CLAIM_ID_ORDER:
+    if tuple(claim_ids) != expected_id_order:
         errors.append("review.claims ids/order do not match the pinned review")
 
 
 def _validate_shape(review: dict[str, Any], errors: list[str]) -> None:
+    if review.get("format_version") != EXPECTED_FORMAT_VERSION:
+        errors.append("review.format_version does not match the pinned schema")
+    if review.get("operation") != EXPECTED_OPERATION:
+        errors.append("review.operation does not match P0-01")
+    if review.get("purpose") != EXPECTED_PURPOSE:
+        errors.append("review.purpose does not match the pinned review")
+    if review.get("deferred") != EXPECTED_DEFERRED:
+        errors.append("review.deferred does not match the pinned ownership boundaries")
+
     source = review.get("source")
     if not isinstance(source, dict):
         errors.append("review.source must be an object")
@@ -284,6 +537,8 @@ def _validate_shape(review: dict[str, Any], errors: list[str]) -> None:
     else:
         if len(set(planning_docs)) != len(planning_docs):
             errors.append("review.planning_docs contains duplicate paths")
+        if planning_docs != EXPECTED_PLANNING_DOCS:
+            errors.append("review.planning_docs does not match the exact ordered coverage")
         for relative in planning_docs:
             if _is_unsafe_relative_path(relative):
                 errors.append(
@@ -332,6 +587,8 @@ def _validate_shape(review: dict[str, Any], errors: list[str]) -> None:
                 isinstance(item, str) and item for item in absent
             ):
                 errors.append(f"review.source_files[{path!r}].absent must be a list")
+        if source_files != EXPECTED_SOURCE_FILES:
+            errors.append("review.source_files metadata does not match the exact pinned coverage")
 
     _validate_claims(review, errors)
 
@@ -371,11 +628,26 @@ def _validate_docs(repo_root: Path, review: dict[str, Any], errors: list[str]) -
             errors.append(f"{relative} does not link the planning review record")
 
 
+def _validate_source_paths(
+    source_root: Path, review: dict[str, Any], errors: list[str]
+) -> None:
+    """Validate source path containment without reading source content."""
+    if not source_root.is_dir():
+        errors.append(f"source root is missing: {source_root}")
+        return
+    for entry in review.get("source_files", []):
+        if not isinstance(entry, dict):
+            continue
+        relative = entry.get("path")
+        if isinstance(relative, str):
+            _resolve_under_root(source_root, relative, "source entry path", errors)
+
+
 def _validate_source(
     source_root: Path, review: dict[str, Any], errors: list[str]
 ) -> str | None:
+    _validate_source_paths(source_root, review, errors)
     if not source_root.is_dir():
-        errors.append(f"source root is missing: {source_root}")
         return None
 
     head = _git_head(source_root)
@@ -386,6 +658,15 @@ def _validate_source(
             f"{EXPECTED_SOURCE_SHA} (found {found})"
         )
 
+    status = _git_status(source_root)
+    if status is None:
+        errors.append("source checkout status is unavailable")
+    elif status:
+        errors.append("source checkout is dirty; immutable HEAD blobs cannot be trusted")
+
+    if head != EXPECTED_SOURCE_SHA or status is None or status:
+        return head
+
     for entry in review.get("source_files", []):
         if not isinstance(entry, dict):
             continue
@@ -395,10 +676,11 @@ def _validate_source(
         path = _resolve_under_root(source_root, relative, "source entry path", errors)
         if path is None:
             continue
-        if not path.is_file():
-            errors.append(f"missing pinned source file: {relative}")
+        blob = _git_blob(source_root, head, relative)
+        if blob is None:
+            errors.append(f"missing pinned source blob at HEAD: {relative}")
             continue
-        actual_digest = _sha256(path)
+        actual_digest = hashlib.sha256(blob).hexdigest()
         expected_digest = entry.get("sha256")
         if actual_digest != expected_digest:
             errors.append(
@@ -406,9 +688,9 @@ def _validate_source(
                 f"expected {expected_digest}, found {actual_digest}"
             )
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            errors.append(f"cannot read pinned source file {relative}: {exc}")
+            text = blob.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            errors.append(f"cannot decode pinned source blob {relative}: {exc}")
             continue
         for anchor in entry.get("anchors", []):
             if not isinstance(anchor, dict):
@@ -450,11 +732,13 @@ def validate_review(
     _validate_shape(review, errors)
     _validate_docs(repo_root, review, errors)
     head = None
-    if require_source:
-        if source_root is None:
+    if source_root is None:
+        if require_source:
             errors.append("source root is required for full validation")
-        else:
-            head = _validate_source(source_root, review, errors)
+    elif require_source:
+        head = _validate_source(source_root, review, errors)
+    else:
+        _validate_source_paths(source_root, review, errors)
     return errors, head, (time.perf_counter() - started) * 1000
 
 
@@ -495,9 +779,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.review is not None
         else Path(__file__).resolve().with_name(REVIEW_NAME)
     )
-    source_root = None if args.check_docs_only else (
-        args.source_root.resolve() if args.source_root is not None else None
-    )
+    source_root = args.source_root.resolve() if args.source_root is not None else None
     errors, head, duration_ms = validate_review(
         repo_root,
         review_path,

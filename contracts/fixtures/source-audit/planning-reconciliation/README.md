@@ -22,11 +22,19 @@ fixtures.
   missing, changed, and malformed evidence cases with temporary synthetic
   source trees.
 
-The validator freezes the required-link set and claim IDs, statuses, source
-references, document references, and summaries. It also rejects absolute paths,
-`..` traversal, and resolved symlinks that escape the approved repository or
-pinned source root. These checks run in both full and document-only modes, so a
-matching digest or anchor cannot make an out-of-root path valid.
+The validator freezes the required-link set, ordered planning-document and
+source-file coverage, required anchors and absent fields, claim IDs, statuses,
+source references, document references, summaries, and deferred ownership.
+It rejects absolute paths, `..` traversal, and resolved symlinks that escape the
+approved repository or pinned source root. These checks run in both full and
+document-only modes when a source root is supplied, so a matching digest or
+anchor cannot make an out-of-root path valid.
+
+Full validation also requires a clean source checkout at the exact pinned Git
+HEAD. It reads every reviewed file with `git cat-file blob HEAD:path`, not from
+the mutable worktree, and fails if tracked, untracked, or ignored worktree
+changes are present. A changed worktree file cannot become accepted by changing
+its recorded digest.
 
 ## Reproduce the review
 
@@ -44,6 +52,8 @@ git -C "$SOURCE_ROOT" checkout --detach \
 
 python3 contracts/fixtures/source-audit/planning-reconciliation/validate.py \
   --source-root "$SOURCE_ROOT"
+python3 contracts/fixtures/source-audit/planning-reconciliation/validate.py \
+  --check-docs-only --source-root "$SOURCE_ROOT"
 python3 -m unittest discover \
   -s contracts/fixtures/source-audit/planning-reconciliation \
   -p 'test_*.py'
