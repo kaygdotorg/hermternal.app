@@ -53,7 +53,7 @@ credential, hostname, or live deployment value is fabricated here.
 - a matching attestation with no behavioral probe;
 - a matching attestation with a separate probe result;
 - missing, empty, and malformed attestation;
-- unknown and mismatched revisions;
+- abbreviated, unknown, and mismatched revisions;
 - mismatched route-manifest, source-review, and proxy-proof evidence;
 - unexpected server revision or wire-version metadata; and
 - a failed behavioral probe that cannot be overridden by attestation.
@@ -65,14 +65,18 @@ The valid case with a matching probe is labelled `separate_probe_gate`, not
 
 [`validate.py`](validate.py) uses only the Python standard library. It rejects:
 
-- duplicate JSON object keys, `NaN`, `Infinity`, and `-Infinity`;
+- duplicate JSON object keys, `NaN`, `Infinity`, `-Infinity`, and exponent
+  overflow such as `1e9999`;
+- bounded JSON and redaction traversal, with control characters rejected;
 - unknown keys, reordered keys, changed fixture IDs, wrong leaf types, and
   booleans where integers are required;
 - missing, abbreviated, unknown, or mismatched Hermes revisions;
 - absolute, Windows, traversal, or symlink-escaping evidence paths;
-- changed SHA-256 digests or byte counts for the immutable policy evidence;
+- changed SHA-256 digests or byte counts for the immutable policy evidence and
+  measured baseline artifacts;
 - server-shaped source-revision or protocol-version fields; and
-- credential-shaped values, raw operational material, or user data.
+- URLs, email addresses, secret/key assignments, bearer/basic values,
+  cookie/ticket markers, raw operational material, or user data.
 
 Run the default validator after the fixture is committed so the referenced
 files are read from `HEAD` Git blobs:
@@ -88,10 +92,14 @@ developing:
 python3 contracts/fixtures/compatibility-attestation/validate.py --worktree
 ```
 
-The default validator's successful result proves only the synthetic contract,
-case matrix, and immutable policy-file bindings. It does not prove a Hermes
-process, a proxy, a deployment identity, a behavioral probe, or live
-compatibility.
+The default validator captures one immutable `HEAD` commit and tree, reads
+all three fixture JSON documents and measured artifacts from that commit, and
+reports the verified commit/tree provenance. Its successful result proves only
+the synthetic contract, executable case matrix, immutable policy bindings, and
+recorded baseline evidence. It does not prove a Hermes process, a proxy, a
+deployment identity, a behavioral probe, or live compatibility. `--worktree`
+is a development-only mutable check: it reports `fixture_valid` but never
+claims `attestation_verified`.
 
 ## Tests
 

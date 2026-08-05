@@ -107,6 +107,23 @@
       }
     },
     {
+      "id": "abbreviated_revision",
+      "description": "A shortened revision is not an immutable source pin.",
+      "input": {
+        "attestation": "present",
+        "revision": "abbreviated",
+        "route_manifest": "match",
+        "source_review": "match",
+        "proxy_proof": "match",
+        "behavioral_probe": "not_run",
+        "dashboard_metadata": "absent"
+      },
+      "expected": {
+        "attestation_result": "blocked",
+        "runtime_gate": "blocked_incompatible"
+      }
+    },
+    {
       "id": "mismatched_revision",
       "description": "A full revision that differs from the pinned source is not compatible.",
       "input": {
