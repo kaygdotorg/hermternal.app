@@ -7,9 +7,12 @@ import copy
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 from pathlib import Path
 
 import validate
@@ -19,6 +22,37 @@ FIXTURE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = FIXTURE_DIR.parents[3]
 README_PATH = FIXTURE_DIR / "README.md"
 RECORD_PATH = FIXTURE_DIR / "compatibility_record.json"
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _temporary_git_fixture(directory: str) -> tuple[Path, str]:
+    root = Path(directory) / "source"
+    root.mkdir()
+    _git(root, "init", "-q")
+    (root / "fixture.txt").write_text("pinned fixture\n", encoding="utf-8")
+    (root / "tree").mkdir()
+    (root / "tree" / "child.txt").write_text("tree object\n", encoding="utf-8")
+    _git(root, "add", "fixture.txt", "tree/child.txt")
+    _git(
+        root,
+        "-c",
+        "user.name=Hermternal Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "fixture",
+    )
+    revision = _git(root, "rev-parse", "HEAD").stdout.strip()
+    return root, revision
 
 
 class CompatibilityGateValidatorTests(unittest.TestCase):
@@ -37,12 +71,52 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
             self.record["artifacts"]["set_sha256"],
         )
 
+    def test_current_dev_integration_is_separate_from_historical_review(self) -> None:
+        self.assertEqual(
+            self.record["merged_dev"]["head"],
+            validate.HISTORICAL_DEV_HEAD,
+        )
+        self.assertNotEqual(
+            self.record["integration_dev"]["head"],
+            self.record["merged_dev"]["head"],
+        )
+        stale = copy.deepcopy(self.record)
+        stale["integration_dev"]["head"] = stale["merged_dev"]["head"]
+        self.assert_rejected(stale, verify_git=True)
+
+    def test_missing_or_malformed_current_commit_fails_closed(self) -> None:
+        malformed = copy.deepcopy(self.record)
+        malformed["integration_dev"]["head"] = "not-a-commit"
+        self.assert_rejected(malformed)
+
+        missing = copy.deepcopy(self.record)
+        missing["integration_dev"]["head"] = "0" * 40
+        self.assert_rejected(missing, verify_git=True)
+
+    def test_boolean_integer_confusion_is_rejected_at_every_numeric_field(self) -> None:
+        for path in (
+            ("merged_dev", "merged_prs", 0, "number"),
+            ("artifacts", "files", 0, "size_bytes"),
+            ("observations", "repetitions"),
+        ):
+            mutated = copy.deepcopy(self.record)
+            cursor: object = mutated
+            for part in path[:-1]:
+                cursor = cursor[part] if not isinstance(part, int) else cursor[part]
+            cursor[path[-1]] = True
+            with self.subTest(path=path):
+                self.assert_rejected(mutated)
+
     def test_duplicate_json_key_is_rejected_before_schema_validation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "duplicate.json"
-            path.write_text('{"schema":"one","schema":"two"}', encoding="utf-8")
-            with self.assertRaises(validate.DuplicateKeyError):
-                validate.load_record(path)
+        for text in (
+            '{"schema":"one","schema":"two"}',
+            '{"outer":{"key":1,"key":2}}',
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "duplicate.json"
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(validate.DuplicateKeyError):
+                    validate.load_record(path)
 
     def test_malformed_json_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -50,6 +124,50 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
             path.write_text("{not-json", encoding="utf-8")
             with self.assertRaises(validate.ValidationError):
                 validate.load_record(path)
+
+    def test_nonfinite_and_exponent_overflow_json_is_rejected(self) -> None:
+        for text in (
+            '{"value": NaN}',
+            '{"value": Infinity}',
+            '{"value": -Infinity}',
+            '{"value": 1e9999}',
+            '{"value": -1e9999}',
+        ):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "nonfinite.json"
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(validate.ValidationError):
+                    validate.load_record(path)
+
+    def test_deep_json_is_rejected_without_tracebacks(self) -> None:
+        value: dict[str, object] = {}
+        cursor = value
+        for _ in range(validate.MAX_JSON_DEPTH + 16):
+            child: dict[str, object] = {}
+            cursor["nested"] = child
+            cursor = child
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deep.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaises(validate.ValidationError):
+                validate.load_record(path)
+            for optimized in (False, True):
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.extend(
+                    [
+                        str(validate.__file__),
+                        "--repo-root",
+                        str(REPO_ROOT),
+                        "--record",
+                        str(path),
+                    ]
+                )
+                result = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, (optimized, result.stderr))
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+                self.assertIn("maximum JSON nesting depth", result.stdout)
 
     def test_parent_traversal_and_absolute_paths_are_rejected(self) -> None:
         traversal = copy.deepcopy(self.record)
@@ -74,6 +192,73 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
             os.symlink(outside, link)
             with self.assertRaises(validate.ValidationError):
                 validate.resolve_under_root(root, "link/file.json")
+
+    def test_git_batch_binding_rejects_redirects_replace_lazy_fetch_wrong_missing_and_truncated_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root, revision = _temporary_git_fixture(directory)
+            expected = b"pinned fixture\n"
+            self.assertEqual(validate._git_blob(root, revision, "fixture.txt"), expected)
+            self.assertIsNone(validate._git_blob(root, revision, "tree"))
+            self.assertIsNone(validate._git_blob(root, revision, "missing.txt"))
+            self.assertIsNone(validate._git_commit_oid(root, "0" * 40))
+
+            (root / "fixture.txt").write_text("replacement fixture\n", encoding="utf-8")
+            _git(root, "add", "fixture.txt")
+            _git(
+                root,
+                "-c",
+                "user.name=Hermternal Replacement",
+                "-c",
+                "user.email=replacement@example.invalid",
+                "commit",
+                "-qm",
+                "replacement",
+            )
+            replacement = _git(root, "rev-parse", "HEAD").stdout.strip()
+            _git(root, "replace", revision, replacement)
+            self.assertEqual(validate._git_blob(root, revision, "fixture.txt"), expected)
+
+            decoy = Path(directory) / "decoy"
+            decoy.mkdir()
+            _git(decoy, "init", "-q")
+            redirect_environment = {
+                "GIT_DIR": str(decoy / ".git"),
+                "GIT_COMMON_DIR": str(decoy / ".git"),
+                "GIT_OBJECT_DIRECTORY": str(decoy / ".git" / "objects"),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(decoy / ".git" / "objects"),
+                "GIT_NAMESPACE": "decoy",
+                "GIT_WORK_TREE": str(decoy),
+                "GIT_INDEX_FILE": str(decoy / ".git" / "index"),
+                "GIT_CEILING_DIRECTORIES": str(directory),
+                "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+            }
+            captured_environment: dict[str, str] = {}
+            real_run = validate.subprocess.run
+
+            def capture_batch_environment(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
+                command = args[0] if args else kwargs.get("args")
+                if isinstance(command, list) and "cat-file" in command:
+                    captured_environment.update(kwargs["env"])
+                return real_run(*args, **kwargs)
+
+            with (
+                mock.patch.dict(os.environ, redirect_environment, clear=False),
+                mock.patch.object(validate.subprocess, "run", side_effect=capture_batch_environment),
+            ):
+                self.assertEqual(validate._git_blob(root, revision, "fixture.txt"), expected)
+            self.assertEqual(captured_environment["GIT_NO_REPLACE_OBJECTS"], "1")
+            self.assertEqual(captured_environment["GIT_NO_LAZY_FETCH"], "1")
+            for variable in redirect_environment:
+                self.assertNotIn(variable, captured_environment)
+
+            truncated = subprocess.CompletedProcess(
+                args=["git", "cat-file", "--batch"],
+                returncode=0,
+                stdout=b"a" * 40 + b" blob 9\nshort\n",
+                stderr=b"",
+            )
+            with mock.patch.object(validate.subprocess, "run", return_value=truncated):
+                self.assertIsNone(validate._git_blob(root, revision, "fixture.txt"))
 
     def test_sensitive_keys_and_credential_shapes_are_rejected(self) -> None:
         for value in (
@@ -121,6 +306,17 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         live_proof["status"]["live_proof"] = "not_run"
         self.assert_rejected(live_proof)
 
+    def test_observation_values_are_finite_and_unthresholded(self) -> None:
+        for forged_value in (float("nan"), float("inf"), float("-inf"), True, -1.0):
+            mutated = copy.deepcopy(self.record)
+            mutated["observations"]["validator_duration_ms"]["p95"] = forged_value
+            with self.subTest(forged_value=forged_value):
+                self.assert_rejected(mutated)
+
+        mutated = copy.deepcopy(self.record)
+        mutated["observations"]["artifact_size_bytes"] += 1
+        self.assert_rejected(mutated)
+
     def test_artifact_digest_mutations_are_rejected(self) -> None:
         digest = copy.deepcopy(self.record)
         digest["artifacts"]["files"][0]["sha256"] = "0" * 64
@@ -155,6 +351,9 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
     def test_readme_preserves_accessibility_and_benchmark_requirements(self) -> None:
         readme = " ".join(README_PATH.read_text(encoding="utf-8").split())
         for marker in (
+            "`merged_dev`, the immutable historical review",
+            "`integration_dev`, the explicit current `dev` snapshot",
+            "one `git cat-file --batch` response",
             "## Accessibility",
             "Accessibility verification is N/A for this operation because it produces no UI",
             "preserves rather than removes those future accessibility requirements",
@@ -202,6 +401,30 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         self.assertFalse(result["compatible"])
         self.assertFalse(result["live_run"])
         self.assertEqual(result["artifact_count"], len(validate.ARTIFACT_PATHS))
+        self.assertEqual(result["historical_reviewed_commit"], self.record["merged_dev"]["head"])
+        self.assertEqual(result["verified_commit"], self.record["integration_dev"]["head"])
+        self.assertEqual(result["verified_commit_kind"], "current_dev_integration")
+        self.assertEqual(result["evidence_scope"], "historical_review_and_current_dev_integration")
+
+        for optimized in (False, True):
+            command = [sys.executable]
+            if optimized:
+                command.append("-O")
+            command.extend(
+                [
+                    str(validate.__file__),
+                    "--repo-root",
+                    str(REPO_ROOT),
+                    "--record",
+                    str(RECORD_PATH),
+                ]
+            )
+            completed = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, (optimized, completed.stderr))
+            self.assertNotIn("Traceback", completed.stdout + completed.stderr)
+            cli_result = json.loads(completed.stdout)
+            self.assertEqual(cli_result["verified_commit"], self.record["integration_dev"]["head"])
+            self.assertEqual(cli_result["verified_commit_kind"], "current_dev_integration")
 
 
 if __name__ == "__main__":
