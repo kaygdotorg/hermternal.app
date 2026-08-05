@@ -85,6 +85,8 @@ Create one GitHub milestone for each milestone in this file. Use the stable key 
 
 ## M2 — Paper and design proof
 
+Web-only `W` suffix operations publish the canonical web tokens and artboard manifest without requiring iPad or macOS design work in this session. The unsuffixed shared operations consume the web artifacts later and remain blocked on the Apple Paper boards. This preserves one Paper source of truth without making Apple work a prerequisite for the web mock.
+
 | Key | GitHub # | One operation | Dependencies |
 | --- | --- | --- | --- |
 | `D-01` | [#72](https://github.com/kaygdotorg/hermternal/issues/72) | Add authentication and provider-selection boards. | `C-02`, `C-02A`, `C-03` |
@@ -101,10 +103,14 @@ Create one GitHub milestone for each milestone in this file. Use the stable key 
 | `D-11` | [#83](https://github.com/kaygdotorg/hermternal/issues/83) | Add 200% zoom, localization-growth, and visible-focus boards. | `D-01`, `D-02` |
 | `D-12` | [#84](https://github.com/kaygdotorg/hermternal/issues/84) | Add Dynamic Type, VoiceOver, Switch Control, and hardware-keyboard boards. | `D-09`, `D-10` |
 | `D-13` | [#85](https://github.com/kaygdotorg/hermternal/issues/85) | Add increased-contrast, reduced-transparency, and reduced-motion boards. | `D-02` |
-| `D-14` | [#86](https://github.com/kaygdotorg/hermternal/issues/86) | Publish semantic state, breakpoint, typography, and motion tokens. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-09`, `D-10`, `D-11`, `D-12`, `D-13` |
-| `D-15` | [#87](https://github.com/kaygdotorg/hermternal/issues/87) | Publish the Paper artboard-to-implementation manifest. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-09`, `D-10`, `D-11`, `D-12`, `D-13`, `D-14` |
+| `D-14W` | [#205](https://github.com/kaygdotorg/hermternal/issues/205) | Publish web semantic state, breakpoint, typography, and motion tokens. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-11`, `D-13` |
+| `D-15W` | [#206](https://github.com/kaygdotorg/hermternal/issues/206) | Publish the web Paper artboard-to-implementation manifest. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-11`, `D-13`, `D-14W` |
+| `D-14` | [#86](https://github.com/kaygdotorg/hermternal/issues/86) | Publish shared semantic state, breakpoint, typography, and motion tokens after Apple design proof. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-09`, `D-10`, `D-11`, `D-12`, `D-13`, `D-14W` |
+| `D-15` | [#87](https://github.com/kaygdotorg/hermternal/issues/87) | Publish the shared Paper artboard-to-implementation manifest after Apple design proof. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-09`, `D-10`, `D-11`, `D-12`, `D-13`, `D-14`, `D-15W` |
 
 ## M3 — deployment and security proof
+
+`M` suffix operations prove the same browser, ticket, and PTY security invariants with deterministic local adapters and no network egress. They unblock mock client behavior only. The unsuffixed deployment operations retain Caddy, Traefik, private-network, and disposable live-adjacent proof responsibilities for later gates.
 
 | Key | GitHub # | One operation | Dependencies |
 | --- | --- | --- | --- |
@@ -113,11 +119,14 @@ Create one GitHub milestone for each milestone in this file. Use the stable key 
 | `DEP-03` | [#90](https://github.com/kaygdotorg/hermternal/issues/90) | Prove the source-compatible upstream Host and Origin mapping. | `DEP-01`, `DEP-02`, `C-04`, `C-04A` |
 | `DEP-04` | [#91](https://github.com/kaygdotorg/hermternal/issues/91) | Prove the Caddy HTTPS and prefix-routing cases. | `DEP-03` |
 | `DEP-05` | [#92](https://github.com/kaygdotorg/hermternal/issues/92) | Prove the Traefik HTTPS and prefix-routing cases. | `DEP-03` |
-| `DEP-06` | [#93](https://github.com/kaygdotorg/hermternal/issues/93) | Prove browser provider discovery, cookies, logout, and CSRF boundaries. | `C-02`, `C-02A`, `DEP-04`, `DEP-05` |
-| `DEP-07` | [#94](https://github.com/kaygdotorg/hermternal/issues/94) | Prove chat WebSocket ticket creation, query use, rejection, and redaction. | `C-02`, `C-02A`, `DEP-04`, `DEP-05` |
+| `DEP-06M` | [#207](https://github.com/kaygdotorg/hermternal/issues/207) | Prove mocked browser authentication boundaries with synthetic local adapters. | `C-02`, `C-02A` |
+| `DEP-06` | [#93](https://github.com/kaygdotorg/hermternal/issues/93) | Prove live-adjacent browser provider discovery, cookies, logout, and CSRF boundaries. | `C-02`, `C-02A`, `DEP-04`, `DEP-05`, `DEP-06M` |
+| `DEP-07M` | [#208](https://github.com/kaygdotorg/hermternal/issues/208) | Prove mocked chat WebSocket ticket boundaries with synthetic local adapters. | `C-02`, `C-02A` |
+| `DEP-07` | [#94](https://github.com/kaygdotorg/hermternal/issues/94) | Prove live-adjacent chat WebSocket ticket creation, query use, rejection, and redaction. | `C-02`, `C-02A`, `DEP-04`, `DEP-05`, `DEP-07M` |
 | `DEP-08` | [#95](https://github.com/kaygdotorg/hermternal/issues/95) | Prove native password-provider cookie isolation and ticket creation. | `C-03`, `DEP-04`, `DEP-05` |
 | `DEP-09` | [#96](https://github.com/kaygdotorg/hermternal/issues/96) | Prove a source-accepted native OAuth/OIDC callback on a supported platform, and block unsupported or unproven transports. | `C-02`, `C-03` |
-| `DEP-10` | [#97](https://github.com/kaygdotorg/hermternal/issues/97) | Prove PTY upgrade, byte transport, detach, reattach, and expiry. | `C-17`, `C-18`, `DEP-04`, `DEP-05` |
+| `DEP-10M` | [#209](https://github.com/kaygdotorg/hermternal/issues/209) | Prove mocked PTY transport boundaries with a synthetic local byte adapter. | `C-17`, `C-18` |
+| `DEP-10` | [#97](https://github.com/kaygdotorg/hermternal/issues/97) | Prove live-adjacent PTY upgrade, byte transport, detach, reattach, and expiry. | `C-17`, `C-18`, `DEP-04`, `DEP-05`, `DEP-10M` |
 | `DEP-11` | [#98](https://github.com/kaygdotorg/hermternal/issues/98) | Prove direct-port denial. | `DEP-01` |
 | `DEP-11A` | [#99](https://github.com/kaygdotorg/hermternal/issues/99) | Prove blocked-route no-upstream behavior. | `DEP-02`, `DEP-04`, `DEP-05` |
 | `DEP-12` | [#100](https://github.com/kaygdotorg/hermternal/issues/100) | Prove access, error, and malformed-message log redaction. | `DEP-06`, `DEP-07`, `DEP-10` |
@@ -125,33 +134,41 @@ Create one GitHub milestone for each milestone in this file. Use the stable key 
 
 ## M4 — performance foundation
 
-The order is deliberate. Define fixtures and evidence first. Add harnesses second. Measure baselines third. Freeze budgets only after reviewed baseline distributions exist. No issue before `B-08A` invents a final threshold.
+The order is deliberate. Define fixtures and evidence first. Add harnesses second. Measure baselines third. Freeze budgets only after reviewed baseline distributions exist. No issue before the applicable budget operation invents a final threshold.
+
+Web-only `W` suffix operations remove Swift and Apple benchmark prerequisites from the web mock path. The unsuffixed shared workload, review, and budget operations consume the web evidence later and remain responsible for cross-platform parity.
 
 | Key | GitHub # | One operation | Dependencies |
 | --- | --- | --- | --- |
 | `B-01` | [#102](https://github.com/kaygdotorg/hermternal/issues/102) | Define the benchmark evidence format and statistical method. | `C-19` |
-| `B-02` | [#103](https://github.com/kaygdotorg/hermternal/issues/103) | Add deterministic transcript workload. | `C-20`, `C-21`, `B-01` |
-| `B-02A` | [#104](https://github.com/kaygdotorg/hermternal/issues/104) | Add deterministic stream workload. | `C-20`, `C-21`, `B-01` |
-| `B-02B` | [#105](https://github.com/kaygdotorg/hermternal/issues/105) | Add deterministic reconnect workload. | `C-20`, `C-21`, `B-01` |
+| `B-02W` | [#210](https://github.com/kaygdotorg/hermternal/issues/210) | Add the deterministic web transcript workload. | `C-20`, `B-01` |
+| `B-02AW` | [#211](https://github.com/kaygdotorg/hermternal/issues/211) | Add the deterministic web stream workload. | `C-20`, `B-01` |
+| `B-02BW` | [#212](https://github.com/kaygdotorg/hermternal/issues/212) | Add the deterministic web reconnect workload. | `C-20`, `B-01` |
+| `B-02` | [#103](https://github.com/kaygdotorg/hermternal/issues/103) | Add the shared deterministic transcript workload after Swift parity. | `C-20`, `C-21`, `B-01`, `B-02W` |
+| `B-02A` | [#104](https://github.com/kaygdotorg/hermternal/issues/104) | Add the shared deterministic stream workload after Swift parity. | `C-20`, `C-21`, `B-01`, `B-02AW` |
+| `B-02B` | [#105](https://github.com/kaygdotorg/hermternal/issues/105) | Add the shared deterministic reconnect workload after Swift parity. | `C-20`, `C-21`, `B-01`, `B-02BW` |
 | `B-02C` | [#106](https://github.com/kaygdotorg/hermternal/issues/106) | Add deterministic PTY workload. | `C-20`, `B-01` |
 | `B-03` | [#107](https://github.com/kaygdotorg/hermternal/issues/107) | Scaffold the web production-build benchmark harness. | `B-01` |
 | `B-04` | [#108](https://github.com/kaygdotorg/hermternal/issues/108) | Scaffold the Apple release-build benchmark harness. | `B-01` |
-| `B-05` | [#109](https://github.com/kaygdotorg/hermternal/issues/109) | Measure the web startup, input, stream, scroll, memory, and bundle baseline. | `B-02`, `B-02A`, `B-03` |
+| `B-05` | [#109](https://github.com/kaygdotorg/hermternal/issues/109) | Measure the web startup, input, stream, scroll, memory, and bundle baseline. | `B-02W`, `B-02AW`, `B-03` |
+| `B-05A` | [#213](https://github.com/kaygdotorg/hermternal/issues/213) | Measure the web reconnect and restoration baseline. | `B-02BW`, `B-03` |
 | `B-06` | [#110](https://github.com/kaygdotorg/hermternal/issues/110) | Measure the PTY first-byte, render, echo, resize, retained-output, and memory baseline. | `B-02C`, `B-03` |
 | `B-07` | [#111](https://github.com/kaygdotorg/hermternal/issues/111) | Measure Apple launch, resume, stream, scroll, scene, and memory baselines. | `B-02`, `B-02A`, `B-02B`, `B-04` |
-| `B-08` | [#112](https://github.com/kaygdotorg/hermternal/issues/112) | Review baseline distributions. | `B-05`, `B-06`, `B-07` |
-| `B-08A` | [#113](https://github.com/kaygdotorg/hermternal/issues/113) | Freeze regression budgets. | `B-08` |
+| `B-08W` | [#214](https://github.com/kaygdotorg/hermternal/issues/214) | Review web, reconnect, and PTY mock baseline distributions. | `B-05`, `B-05A`, `B-06` |
+| `B-08AW` | [#215](https://github.com/kaygdotorg/hermternal/issues/215) | Freeze web and PTY mock regression budgets. | `B-08W` |
+| `B-08` | [#112](https://github.com/kaygdotorg/hermternal/issues/112) | Review shared baseline distributions after Apple evidence. | `B-05`, `B-05A`, `B-06`, `B-07`, `B-08W` |
+| `B-08A` | [#113](https://github.com/kaygdotorg/hermternal/issues/113) | Freeze shared regression budgets after Apple evidence. | `B-08`, `B-08AW` |
 
 ## M5 — web client
 
 | Key | GitHub # | One operation | Dependencies |
 | --- | --- | --- | --- |
-| `W-01` | [#114](https://github.com/kaygdotorg/hermternal/issues/114) | Scaffold the static SvelteKit and Bun application with mock-only network boundaries. | `C-20`, `D-14`, `B-03` |
+| `W-01` | [#114](https://github.com/kaygdotorg/hermternal/issues/114) | Scaffold the static SvelteKit and Bun application with mock-only network boundaries. | `C-20`, `D-14W`, `B-03` |
 | `W-02` | [#115](https://github.com/kaygdotorg/hermternal/issues/115) | Implement the compatibility attestation gate. | `C-04`, `W-01` |
 | `W-02A` | [#116](https://github.com/kaygdotorg/hermternal/issues/116) | Implement the behavioral-probe gate. | `C-04A`, `W-01` |
 | `W-03` | [#117](https://github.com/kaygdotorg/hermternal/issues/117) | Implement provider discovery. | `C-02`, `W-01`, `D-01` |
-| `W-04` | [#118](https://github.com/kaygdotorg/hermternal/issues/118) | Implement browser authentication and logout. | `C-02`, `C-02A`, `DEP-06`, `W-03` |
-| `W-05` | [#119](https://github.com/kaygdotorg/hermternal/issues/119) | Implement chat WebSocket ticket acquisition. | `DEP-07`, `W-04` |
+| `W-04` | [#118](https://github.com/kaygdotorg/hermternal/issues/118) | Implement fixture-driven browser authentication and logout. | `C-02`, `C-02A`, `DEP-06M`, `W-03` |
+| `W-05` | [#119](https://github.com/kaygdotorg/hermternal/issues/119) | Implement fixture-driven chat WebSocket ticket acquisition. | `DEP-07M`, `W-04` |
 | `W-06` | [#120](https://github.com/kaygdotorg/hermternal/issues/120) | Implement typed REST transport. | `C-01`, `W-01` |
 | `W-07` | [#121](https://github.com/kaygdotorg/hermternal/issues/121) | Implement typed JSON-RPC transport and handshake. | `C-05`, `W-05` |
 | `W-08` | [#122](https://github.com/kaygdotorg/hermternal/issues/122) | Implement reconnect and uncertain-delivery recovery. | `C-06`, `W-07` |
@@ -170,18 +187,18 @@ The order is deliberate. Define fixtures and evidence first. Add harnesses secon
 | `W-18` | [#135](https://github.com/kaygdotorg/hermternal/issues/135) | Implement image upload progress, cancellation, retry, and failure handling. | `C-14`, `W-17` |
 | `W-18A` | [#136](https://github.com/kaygdotorg/hermternal/issues/136) | Attach uploaded images to prompts. | `C-14`, `W-12`, `W-17`, `W-18` |
 | `W-19` | [#137](https://github.com/kaygdotorg/hermternal/issues/137) | Implement active-session model selection. | `C-12`, `W-12` |
-| `W-20` | [#138](https://github.com/kaygdotorg/hermternal/issues/138) | Implement the Paper-backed responsive workspace. | `D-15`, `W-09`, `W-09A`, `W-12`, `W-12A` |
+| `W-20` | [#138](https://github.com/kaygdotorg/hermternal/issues/138) | Implement the Paper-backed responsive workspace. | `D-15W`, `W-09`, `W-09A`, `W-12`, `W-12A` |
 | `W-21` | [#139](https://github.com/kaygdotorg/hermternal/issues/139) | Implement keyboard and focus behavior. | `D-11`, `W-20` |
 | `W-21A` | [#140](https://github.com/kaygdotorg/hermternal/issues/140) | Implement browser zoom behavior. | `D-11`, `W-20` |
 | `W-21B` | [#141](https://github.com/kaygdotorg/hermternal/issues/141) | Implement screen-reader behavior. | `D-11`, `W-20` |
 | `W-21C` | [#142](https://github.com/kaygdotorg/hermternal/issues/142) | Implement reduced-motion behavior. | `D-13`, `W-20` |
 | `W-22` | [#143](https://github.com/kaygdotorg/hermternal/issues/143) | Implement lazy-loaded xterm.js rendering. | `C-17`, `D-07`, `W-01` |
 | `W-22A` | [#144](https://github.com/kaygdotorg/hermternal/issues/144) | Implement raw-byte resize transport. | `C-17`, `D-07`, `W-01` |
-| `W-23` | [#145](https://github.com/kaygdotorg/hermternal/issues/145) | Implement PTY attach, detach, reattach, retained-output warning, and expiry. | `C-18`, `DEP-10`, `W-22`, `W-22A` |
-| `W-24` | [#146](https://github.com/kaygdotorg/hermternal/issues/146) | Add Paper visual-regression coverage for shipped web states. | `D-15`, `W-20`, `W-23` |
-| `W-25` | [#147](https://github.com/kaygdotorg/hermternal/issues/147) | Enforce web regression budgets. | `B-08`, `B-08A`, `W-20`, `W-21`, `W-21A`, `W-21B`, `W-21C` |
-| `W-25A` | [#148](https://github.com/kaygdotorg/hermternal/issues/148) | Enforce PTY regression budgets. | `B-08`, `B-08A`, `W-22`, `W-22A`, `W-23` |
-| `W-26` | [#203](https://github.com/kaygdotorg/hermternal/issues/203) | Prove the fixture-driven web mock exit gate with no live network egress. | `C-20`, `D-15`, `W-02`, `W-02A`, `W-10`, `W-10A`, `W-11`, `W-13`, `W-14`, `W-15`, `W-16`, `W-17`, `W-18`, `W-18A`, `W-19`, `W-24`, `W-25`, `W-25A` |
+| `W-23` | [#145](https://github.com/kaygdotorg/hermternal/issues/145) | Implement PTY attach, detach, reattach, retained-output warning, and expiry. | `C-18`, `DEP-10M`, `W-22`, `W-22A` |
+| `W-24` | [#146](https://github.com/kaygdotorg/hermternal/issues/146) | Add Paper visual-regression coverage for shipped web states. | `D-15W`, `W-20`, `W-23` |
+| `W-25` | [#147](https://github.com/kaygdotorg/hermternal/issues/147) | Enforce web regression budgets. | `B-08W`, `B-08AW`, `W-20`, `W-21`, `W-21A`, `W-21B`, `W-21C` |
+| `W-25A` | [#148](https://github.com/kaygdotorg/hermternal/issues/148) | Enforce PTY regression budgets. | `B-08W`, `B-08AW`, `W-22`, `W-22A`, `W-23` |
+| `W-26` | [#203](https://github.com/kaygdotorg/hermternal/issues/203) | Prove the fixture-driven web mock exit gate with no live network egress. | `C-20`, `D-15W`, `W-02`, `W-02A`, `W-10`, `W-10A`, `W-11`, `W-13`, `W-14`, `W-15`, `W-16`, `W-17`, `W-18`, `W-18A`, `W-19`, `W-24`, `W-25`, `W-25A` |
 
 ## M6 — Apple clients
 
