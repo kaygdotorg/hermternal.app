@@ -4,9 +4,10 @@
   "exit_status": 0,
   "source_verified": true,
   "case_count": 9,
-  "fixture_artifact_bytes": 44913,
-  "validation_duration_ns": 2406125,
-  "validation_duration_ms": 2.406,
+  "mutation_check_count": 3,
+  "fixture_artifact_bytes": 49539,
+  "validation_duration_ns": 3408958,
+  "validation_duration_ms": 3.409,
   "environment": {
     "python": "3.14.6",
     "implementation": "CPython",

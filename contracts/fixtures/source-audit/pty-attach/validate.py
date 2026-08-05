@@ -10,12 +10,14 @@ recorded full-file and line-range hashes before the fixture assertions run.
 The assertions below are deliberately narrow and encode the source-correct
 lifecycle split: missing attach is legacy and terminates on disconnect; a
 previously accepted opaque handle keeps the PTY alive; retained output can
-race live output; and no input is replayed. Invalid handles are rejected
+race live output; prompt/tool output bytes may be retained; and no user input
+or action is replayed. Invalid handles are rejected
 before the source registry can interpret them as a new key.
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import platform
@@ -138,6 +140,20 @@ def assert_order(names: list[str], before: str, after: str, case_id: str) -> Non
     require(names.index(before) < names.index(after), f"{case_id}: {before} must precede {after}")
 
 
+def event_items(case: dict[str, Any], event: str) -> list[dict[str, Any]]:
+    return [item for item in events(case) if item.get("event") == event]
+
+
+def expect_fixture_failure(fixtures: dict[str, Any], mutation: str, mutate: Any) -> None:
+    mutated = copy.deepcopy(fixtures)
+    mutate(mutated)
+    try:
+        validate_fixtures(mutated)
+    except AssertionError:
+        return
+    fail(f"mutation check accepted unsafe fixture: {mutation}")
+
+
 def valid_handle(case: dict[str, Any]) -> None:
     handle = case.get("attach_handle")
     require(isinstance(handle, dict), f"{case.get('id')}: attach_handle is required")
@@ -191,6 +207,13 @@ def validate_case(case: dict[str, Any]) -> None:
         assert_order(names, "socket.disconnect", "registry.detach", case_id)
         assert_order(names, "registry.detach", "registry.reuse", case_id)
         require(names.index("registry.reuse") < attach_positions[1], f"{case_id}: registry reuse must precede reattach")
+        spawn_events = event_items(case, "registry.spawn")
+        reuse_events = event_items(case, "registry.reuse")
+        require(len(spawn_events) == 1 and len(reuse_events) == 1, f"{case_id}: expected one spawn and one reuse")
+        spawn_ref = spawn_events[0].get("session_ref")
+        reuse_ref = reuse_events[0].get("session_ref")
+        require(isinstance(spawn_ref, str) and isinstance(reuse_ref, str), f"{case_id}: session references are required")
+        require(spawn_ref == reuse_ref, f"{case_id}: registry reuse changed the PTY session identity")
         require("bridge.close" not in names, f"{case_id}: detach must not close the bridge")
         require(expected.get("state_sequence") == ["attached", "detached", "attached"], f"{case_id}: state sequence changed")
         require(expected.get("process_lifetime_during_detach") == "alive", f"{case_id}: PTY must survive detach")
@@ -267,10 +290,18 @@ def validate_case(case: dict[str, Any]) -> None:
         require(names.count("input.send") == 1, f"{case_id}: expected one user input")
         require(not any(name.startswith("input.replay") for name in names), f"{case_id}: input replay event is forbidden")
         assert_order(names, "input.send", "session.attach", case_id)
+        snapshot_events = event_items(case, "attach.snapshot_send")
+        require(len(snapshot_events) == 1, f"{case_id}: exactly one reattach snapshot is required")
+        snapshot_payload_ref = snapshot_events[0].get("payload_ref")
+        require(snapshot_payload_ref == "output-only", f"{case_id}: reattach snapshot must contain output bytes only")
+        require(isinstance(snapshot_payload_ref, str), f"{case_id}: snapshot payload reference is required")
+        for marker in ("input", "resize", "prompt", "tool", "action", "command"):
+            require(marker not in snapshot_payload_ref.lower(), f"{case_id}: snapshot payload contains a replayable {marker}")
         require(expected.get("input_sent_count") == 1, f"{case_id}: input count changed")
         require(expected.get("input_replayed_count") == 0, f"{case_id}: input replay is forbidden")
         require(expected.get("resize_replayed_count") == 0, f"{case_id}: resize replay is forbidden")
         require(expected.get("prompt_replayed_count") == 0, f"{case_id}: prompt replay is forbidden")
+        require(expected.get("tool_action_replayed_count") == 0, f"{case_id}: tool-action replay is forbidden")
         require(expected.get("output_snapshot_may_be_sent") is True, f"{case_id}: output snapshot behavior changed")
         require(expected.get("new_user_action_required") is True, f"{case_id}: retry must be explicit")
         return
@@ -297,6 +328,52 @@ def validate_fixtures(fixtures: dict[str, Any]) -> int:
         require(isinstance(case, dict), "fixture cases must be objects")
         validate_case(case)
     return len(cases)
+
+
+def fixture_case(fixtures: dict[str, Any], case_id: str) -> dict[str, Any]:
+    cases = fixtures.get("cases")
+    require(isinstance(cases, list), "fixtures.cases must be a list")
+    matches = [case for case in cases if isinstance(case, dict) and case.get("id") == case_id]
+    require(len(matches) == 1, f"mutation target {case_id!r} must exist exactly once")
+    return matches[0]
+
+
+def run_mutation_checks(fixtures: dict[str, Any]) -> int:
+    """Prove the validator rejects the two previously identified regressions."""
+    def mutate_reused_session_identity(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "attach-detach-reattach")
+        reuse = event_items(case, "registry.reuse")
+        require(len(reuse) == 1, "mutation target must have one registry.reuse event")
+        reuse[0]["session_ref"] = "synthetic-session-b"
+
+    def mutate_input_snapshot(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "no-input-replay")
+        snapshot = event_items(case, "attach.snapshot_send")
+        require(len(snapshot) == 1, "mutation target must have one attach snapshot event")
+        snapshot[0]["payload_ref"] = "synthetic-input-a"
+
+    def mutate_tool_action_snapshot(mutated: dict[str, Any]) -> None:
+        case = fixture_case(mutated, "no-input-replay")
+        snapshot = event_items(case, "attach.snapshot_send")
+        require(len(snapshot) == 1, "mutation target must have one attach snapshot event")
+        snapshot[0]["payload_ref"] = "synthetic-tool-action-a"
+
+    expect_fixture_failure(
+        fixtures,
+        "registry reuse points at a different PTY session",
+        mutate_reused_session_identity,
+    )
+    expect_fixture_failure(
+        fixtures,
+        "reattach snapshot includes synthetic input",
+        mutate_input_snapshot,
+    )
+    expect_fixture_failure(
+        fixtures,
+        "reattach snapshot includes a tool action",
+        mutate_tool_action_snapshot,
+    )
+    return 3
 
 
 def validate_source_evidence(evidence: dict[str, Any], source_root: Path | None) -> int:
@@ -364,7 +441,7 @@ def artifact_size(root: Path) -> int:
     return total
 
 
-def write_baseline(path: Path, root: Path, duration_ns: int, case_count: int, source_verified: bool) -> None:
+def write_baseline(path: Path, root: Path, duration_ns: int, case_count: int, mutation_count: int, source_verified: bool) -> None:
     baseline = {
         "schema": "hermternal.fixture-validation-baseline.v1",
         "command": (
@@ -374,6 +451,7 @@ def write_baseline(path: Path, root: Path, duration_ns: int, case_count: int, so
         "exit_status": 0,
         "source_verified": source_verified,
         "case_count": case_count,
+        "mutation_check_count": mutation_count,
         "fixture_artifact_bytes": artifact_size(root),
         "validation_duration_ns": duration_ns,
         "validation_duration_ms": round(duration_ns / 1_000_000, 3),
@@ -400,10 +478,18 @@ def main(argv: list[str] | None = None) -> int:
         fixtures = load_json(root / "pty-attach-fixtures.json")
         file_count = validate_source_evidence(evidence, args.source_root)
         case_count = validate_fixtures(fixtures)
+        mutation_count = run_mutation_checks(fixtures)
         duration_ns = time.perf_counter_ns() - started
         bytes_count = artifact_size(root)
         if args.baseline_output is not None:
-            write_baseline(args.baseline_output, root, duration_ns, case_count, args.source_root is not None)
+            write_baseline(
+                args.baseline_output,
+                root,
+                duration_ns,
+                case_count,
+                mutation_count,
+                args.source_root is not None,
+            )
     except AssertionError as exc:
         print(f"validation failed: {exc}", file=sys.stderr)
         return 1
@@ -413,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"validated source_files={file_count} cases={case_count} "
+        f"mutation_checks={mutation_count} "
         f"fixture_artifact_bytes={bytes_count} "
         f"duration_ms={duration_ns / 1_000_000:.3f} "
         f"source_checkout_verified={args.source_root is not None}"

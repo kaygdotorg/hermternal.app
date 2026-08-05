@@ -386,6 +386,7 @@
         "input_replayed_count": 0,
         "resize_replayed_count": 0,
         "prompt_replayed_count": 0,
+        "tool_action_replayed_count": 0,
         "output_snapshot_may_be_sent": true,
         "new_user_action_required": true
       }

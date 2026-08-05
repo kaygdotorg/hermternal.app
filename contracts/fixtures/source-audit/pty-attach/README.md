@@ -11,7 +11,7 @@ This fixture set freezes the source-correct lifecycle split that clients must no
 - a missing or empty `attach` value selects the legacy one-socket/one-PTY path; a socket disconnect closes the bridge and terminates the child;
 - a previously accepted, exact opaque attach handle selects the keep-alive registry; socket loss detaches only the socket, and the same handle may reattach while the session is retained;
 - retained output is a bounded byte buffer, not a transcript and not an ordered replay snapshot; retained and live frames may race;
-- input, resize controls, prompts, and tool actions are not retained and must never be replayed;
+- user input, resize controls, prompt submissions, and tool actions are not retained as replayable actions and must never be replayed; prompt and tool output bytes are PTY output and may appear in the retained buffer;
 - malformed or expired handles fail closed before opening `/api/pty`; they must not fall back to legacy mode or silently create a replacement PTY;
 - a superseded socket receives `4409`, stops reading, and cannot detach or retry the replacement socket.
 
@@ -43,7 +43,7 @@ The recorded observations explain the contract guard where the pinned implementa
 | `superseded-socket-fails-closed` | `4409` stops the stale socket without detaching the replacement. |
 | `retained-output-race` | Both retained/live receive orders are allowed; the client renders receive order without a replay boundary. |
 | `retained-output-truncation` | The newest 1 MiB is bounded and older output may be absent. |
-| `no-input-replay` | Reattach may send output only; no prior input or action is replayed. |
+| `no-input-replay` | Reattach may send retained PTY output, including prompt/tool output bytes; no prior user input, resize control, prompt submission, or tool action is replayed. |
 
 ## Narrow validation
 
@@ -67,7 +67,7 @@ python3 contracts/fixtures/source-audit/pty-attach/validate.py \
   --baseline-output contracts/fixtures/source-audit/pty-attach/validation-baseline.json
 ```
 
-The baseline measures the checked-in audit/fixture artifacts listed by `validate.py`; its duration is environment evidence, not a pass threshold. The command exits non-zero on schema drift, missing required cases, changed source fingerprints, unsafe replay expectations, or redaction violations.
+The validator also runs three in-process mutation checks: changing the reused session reference, placing `synthetic-input-a` in the reattach snapshot, and placing a synthetic tool action in that snapshot must each fail validation. The baseline measures the checked-in audit/fixture artifacts listed by `validate.py`; its duration is environment evidence, not a pass threshold. The command exits non-zero on schema drift, missing required cases, changed source fingerprints, unsafe replay expectations, or redaction violations.
 
 ## Scope notes
 

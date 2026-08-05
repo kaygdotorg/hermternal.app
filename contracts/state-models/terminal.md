@@ -63,7 +63,7 @@ The source audit and deterministic regression fixtures for this distinction live
 - On reattach, the pinned source may deliver retained and live bytes without a client-visible boundary. It does not guarantee that all retained bytes arrive before live bytes.
 - Render byte frames in receive order. Do not insert a separator or decode and re-encode them.
 - Output older than the retained 1 MiB may be missing. The client must not claim that reattached output is a complete transcript or a strictly ordered replay snapshot.
-- Input bytes are not retained by the attach session. Never replay input, resize controls, prompts, or tool actions after detach or reattach; a retry requires a new, explicit user action.
+- User input bytes and resize controls are not retained as replayable actions. Never replay input, resize controls, prompt submissions, or tool actions after detach or reattach; a retry requires a new, explicit user action. Prompt and tool output bytes are PTY output and may appear in retained output without implying that the underlying action was replayed.
 - The client may show a non-blocking "reconnected" or "output may be truncated" notice. It must not save retained output as a durable transcript.
 
 ## Close and failure rules
@@ -94,5 +94,5 @@ Unknown close codes are compatibility failures. Do not treat them as permission 
 - Missing or empty `attach` is legacy mode and terminates the PTY on socket disconnect; it never implies keep-alive.
 - A malformed or expired attach handle fails closed before opening a replacement PTY, and a superseded socket cannot detach or retry the active replacement.
 - No v0.0.1 client action requests PTY process termination at the pinned revision. View disposal and **Close** detach.
-- PTY bytes, retained output, prompts, and tool output are not stored as a local transcript mirror.
+- PTY bytes, including retained prompt and tool output, are not stored as a local transcript mirror; retained bytes remain ephemeral output, not replayable actions or a durable transcript.
 - Input, resize, attach, reattach, and close transitions remain interruptible. Retained output must not block the close control.
