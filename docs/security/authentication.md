@@ -39,13 +39,27 @@ The browser MUST:
 - keep the cookie in the browser's protected cookie mechanism;
 - allow server-managed refresh material to remain inside the protected `HttpOnly` provider cookie, but never read, copy, export, or serialise it from JavaScript;
 - avoid storing a password, reusable credential, access token, refresh token, ticket, or provider state in `localStorage`, `sessionStorage`, IndexedDB, a navigable URL, URL fragment, browser history, or source control;
-- validate the authentication state and nonce returned by the reviewed flow;
+- validate the callback state against the server-managed PKCE state and require the reviewed provider exchange to validate the PKCE verifier;
+- do not require a separate nonce: the pinned browser flow does not expose one, and Hermternal MUST NOT invent a provider requirement;
 - return only to the validated same-origin application target;
 - clear pending navigation state after success, cancellation, failure, or logout.
 
 A WebSocket ticket is an exception only for the in-memory, ephemeral upgrade URL. It MAY appear as `?ticket=` on the `/api/ws` or `/api/pty` upgrade request. It MUST NOT become a page URL, bookmark, navigation entry, application state value, or user-visible error. The browser MUST NOT treat an access token or a ticket in a URL as a session. It MUST NOT accept an arbitrary `return_to`, redirect, or provider origin from a user-supplied link.
 
 REST requests use the protected provider cookie. They MUST NOT use a WebSocket query ticket.
+
+### Pinned browser OAuth source audit
+
+The browser contract is frozen to [`NousResearch/hermes-agent@f5be9236e00ddf2f2a412697f267078fc4ee068e`](https://github.com/NousResearch/hermes-agent/tree/f5be9236e00ddf2f2a412697f267078fc4ee068e). The synthetic audit in [`contracts/fixtures/source-audit/oauth-browser/`](../../contracts/fixtures/source-audit/oauth-browser/) records the observable behavior without contacting a provider.
+
+At this revision:
+
+- `hermes_cli/dashboard_auth/routes.py:auth_login` stores the provider, callback state, and PKCE verifier in the short-lived `hermes_session_pkce` cookie after `start_login` returns. The route marks that cookie `HttpOnly`, `SameSite=Lax`, and secure when the request is HTTPS.
+- `hermes_cli/dashboard_auth/routes.py:auth_callback` fails closed for a missing PKCE cookie, provider cancellation/error, a missing or mismatched callback state, or a provider `InvalidCodeError`. It passes the stored `code_verifier` to `complete_login`; a rejected code or verifier does not issue a session cookie.
+- `plugins/dashboard_auth/nous/__init__.py:NousDashboardAuthProvider.start_login` sends `state`, `code_challenge`, and `code_challenge_method=S256`. Its cookie payload contains `state` and `verifier`; its `complete_login` sends `code_verifier` to the token endpoint.
+- No separate browser `nonce` is exposed or required by the pinned flow. Hermternal MUST NOT add nonce validation or claim nonce support for a provider that does not expose it.
+
+A successful callback issues the provider-managed session cookie and clears the PKCE cookie. Cancellation and other callback failures do not create a session; a fresh login attempt is required. The provider's short-lived PKCE cookie remains server-managed and must never be copied into browser-readable storage.
 
 ## Native password-provider cookie path
 
@@ -87,7 +101,7 @@ The web and Apple test suites MUST cover:
 
 - provider discovery with the pinned provider name `basic`, `supports_password: true`, OAuth or OIDC providers, multiple providers, unknown providers, malformed providers, and no providers;
 - same-origin and wrong-origin discovery and callbacks;
-- browser OAuth or OIDC state, nonce, cancellation, callback failure, and safe return behavior;
+- browser OAuth or OIDC state and PKCE validation, cancellation, callback failure, safe return behavior, and rejection of an unsupported separate nonce requirement;
 - native password-provider success, wrong password, expired cookie, logout, session renewal, isolated cookie storage, protected-cookie refresh material, and Keychain clearing, using the pinned `basic` provider fixture where applicable;
 - native OAuth or OIDC success for a source-accepted, platform-proven callback transport, plus rejection for unsupported transport and for absent or failed target-platform proof;
 - cookie prefix, `Secure`, `HttpOnly`, `SameSite`, Domain, and Path checks;

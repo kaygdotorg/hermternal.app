@@ -1,0 +1,185 @@
+{
+  "fixture_id": "oauth-browser-source-audit-199",
+  "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "contract": "dashboard-v0.0.1",
+  "provider": "synthetic-oauth",
+  "cases": [
+    {
+      "id": "success",
+      "request": {
+        "pkce_cookie": {
+          "provider": "synthetic-oauth",
+          "state": "fixture-state-success",
+          "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
+        },
+        "authorization_request": {
+          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+          "code_challenge_method": "S256"
+        },
+        "callback": {
+          "code": "fixture-code-success",
+          "state": "fixture-state-success"
+        }
+      },
+      "provider_exchange": {
+        "called": true,
+        "verifier_result": "accepted"
+      },
+      "expected": {
+        "status": 302,
+        "reason": "login_success",
+        "session_cookie_issued": true,
+        "pkce_cookie": "cleared",
+        "separate_nonce_required": false
+      }
+    },
+    {
+      "id": "state-mismatch",
+      "request": {
+        "pkce_cookie": {
+          "provider": "synthetic-oauth",
+          "state": "fixture-state-expected",
+          "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
+        },
+        "authorization_request": {
+          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+          "code_challenge_method": "S256"
+        },
+        "callback": {
+          "code": "fixture-code-state-mismatch",
+          "state": "fixture-state-unexpected"
+        }
+      },
+      "provider_exchange": {
+        "called": false,
+        "verifier_result": "not_attempted"
+      },
+      "expected": {
+        "status": 400,
+        "reason": "state_mismatch",
+        "session_cookie_issued": false,
+        "pkce_cookie": "retained_until_ttl",
+        "separate_nonce_required": false
+      }
+    },
+    {
+      "id": "missing-state",
+      "request": {
+        "pkce_cookie": {
+          "provider": "synthetic-oauth",
+          "state": "fixture-state-required",
+          "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
+        },
+        "authorization_request": {
+          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+          "code_challenge_method": "S256"
+        },
+        "callback": {
+          "code": "fixture-code-missing-state",
+          "state": ""
+        }
+      },
+      "provider_exchange": {
+        "called": false,
+        "verifier_result": "not_attempted"
+      },
+      "expected": {
+        "status": 400,
+        "reason": "state_mismatch",
+        "session_cookie_issued": false,
+        "pkce_cookie": "retained_until_ttl",
+        "separate_nonce_required": false
+      }
+    },
+    {
+      "id": "pkce-failure",
+      "request": {
+        "pkce_cookie": {
+          "provider": "synthetic-oauth",
+          "state": "fixture-state-pkce-failure",
+          "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
+        },
+        "authorization_request": {
+          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+          "code_challenge_method": "S256"
+        },
+        "callback": {
+          "code": "fixture-code-pkce-failure",
+          "state": "fixture-state-pkce-failure"
+        }
+      },
+      "provider_exchange": {
+        "called": true,
+        "verifier_result": "rejected"
+      },
+      "expected": {
+        "status": 400,
+        "reason": "invalid_code_or_pkce",
+        "session_cookie_issued": false,
+        "pkce_cookie": "retained_until_ttl",
+        "separate_nonce_required": false
+      }
+    },
+    {
+      "id": "cancellation",
+      "request": {
+        "pkce_cookie": {
+          "provider": "synthetic-oauth",
+          "state": "fixture-state-cancelled",
+          "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
+        },
+        "authorization_request": {
+          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+          "code_challenge_method": "S256"
+        },
+        "callback": {
+          "code": "",
+          "state": "fixture-state-cancelled",
+          "error": "access_denied",
+          "error_description": "fixture-user-cancelled"
+        }
+      },
+      "provider_exchange": {
+        "called": false,
+        "verifier_result": "not_attempted"
+      },
+      "expected": {
+        "status": 400,
+        "reason": "idp_error",
+        "session_cookie_issued": false,
+        "pkce_cookie": "retained_until_ttl",
+        "separate_nonce_required": false
+      }
+    },
+    {
+      "id": "malformed-callback",
+      "request": {
+        "pkce_cookie": {
+          "provider": "synthetic-oauth",
+          "state": "fixture-state-malformed",
+          "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
+        },
+        "authorization_request": {
+          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+          "code_challenge_method": "S256"
+        },
+        "callback": {
+          "code": "",
+          "state": "fixture-state-malformed"
+        }
+      },
+      "provider_exchange": {
+        "called": true,
+        "verifier_result": "rejected_empty_code"
+      },
+      "expected": {
+        "status": 400,
+        "reason": "invalid_code_or_pkce",
+        "session_cookie_issued": false,
+        "pkce_cookie": "retained_until_ttl",
+        "separate_nonce_required": false
+      }
+    }
+  ],
+  "synthetic_only": true
+}

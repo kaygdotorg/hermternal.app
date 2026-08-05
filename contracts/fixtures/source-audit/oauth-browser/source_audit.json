@@ -1,0 +1,74 @@
+{
+  "fixture_id": "oauth-browser-source-audit-199",
+  "contract": "dashboard-v0.0.1",
+  "flow": "browser-oauth",
+  "source": {
+    "repository": "NousResearch/hermes-agent",
+    "sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "refs": [
+      {
+        "path": "hermes_cli/dashboard_auth/routes.py",
+        "symbols": ["auth_login", "auth_callback"],
+        "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/routes.py",
+        "observations": [
+          "auth_login calls provider.start_login and stores provider, state, and verifier in hermes_session_pkce",
+          "auth_callback rejects a missing PKCE cookie, provider error, missing state, and mismatched state",
+          "auth_callback passes the stored verifier as code_verifier to provider.complete_login",
+          "auth_callback sets session cookies and clears the PKCE cookie only after a successful provider exchange"
+        ]
+      },
+      {
+        "path": "plugins/dashboard_auth/nous/__init__.py",
+        "symbols": [
+          "NousDashboardAuthProvider.start_login",
+          "NousDashboardAuthProvider.complete_login"
+        ],
+        "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/plugins/dashboard_auth/nous/__init__.py",
+        "observations": [
+          "start_login creates state and a PKCE verifier/challenge pair",
+          "start_login sends state, code_challenge, and code_challenge_method=S256",
+          "start_login returns state and verifier in the PKCE cookie payload",
+          "complete_login sends code_verifier to the authorization-code token exchange",
+          "the browser provider flow does not expose a separate nonce"
+        ]
+      },
+      {
+        "path": "hermes_cli/dashboard_auth/cookies.py",
+        "symbols": ["set_pkce_cookie", "read_pkce_cookie", "clear_pkce_cookie"],
+        "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/cookies.py",
+        "observations": [
+          "the PKCE cookie is short-lived with a ten-minute maximum age",
+          "the PKCE cookie is HttpOnly and SameSite=Lax and is Secure for HTTPS requests"
+        ]
+      }
+    ]
+  },
+  "requirements": {
+    "state": {
+      "required": true,
+      "comparison": "callback state must equal the state stored in the server-managed PKCE cookie"
+    },
+    "pkce": {
+      "required": true,
+      "method": "S256",
+      "comparison": "the provider exchange receives the verifier paired with the authorization request challenge"
+    },
+    "nonce": {
+      "required": false,
+      "exposed_by_pinned_browser_flow": false,
+      "reason": "the pinned browser flow exposes state and PKCE, but no separate nonce"
+    }
+  },
+  "failure_semantics": {
+    "missing_pkce_cookie": "reject callback",
+    "missing_or_mismatched_state": "reject callback before provider exchange",
+    "provider_cancellation": "reject callback without a session cookie",
+    "pkce_or_code_rejection": "reject callback without a session cookie",
+    "malformed_callback": "fail closed without a session cookie",
+    "retry": "start a fresh login attempt"
+  },
+  "synthetic_only": true,
+  "network_access": false,
+  "apple_behavior": false,
+  "superdesign_output": false
+}
