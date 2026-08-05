@@ -33,6 +33,11 @@
       }
     ]
   },
+  "integration_dev": {
+    "ref": "dev",
+    "head": "3a279cf209a41d47e3bcef471ccf977c08c3cb7a",
+    "tree": "39fff048fcd35cf54799c9207ff2d7063daeb000"
+  },
   "artifacts": {
     "algorithm": "sha256",
     "files": [
@@ -178,6 +183,17 @@
       }
     ],
     "set_sha256": "be8cc598bfef973560a26d04d00e9d44aa17d4b9f37240f2d90d7c93ea34c3cd"
+  },
+  "observations": {
+    "artifact_size_bytes": 462874,
+    "validator_duration_ms": {
+      "min": 769.818,
+      "p50": 823.983,
+      "p95": 935.495,
+      "max": 938.086,
+      "mean": 835.766
+    },
+    "repetitions": 30
   },
   "status": {
     "compatible": false,
