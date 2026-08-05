@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import io
 import json
 import math
 import os
@@ -21,9 +22,12 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
+import unicodedata
 import unittest
 from typing import Any
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 
@@ -41,6 +45,7 @@ EXPECTED_CASE_IDS = (
     "success-password-provider",
     "success-provider-neutral-order",
     "success-default-password-capability",
+    "success-unicode-localized-provider",
     "empty-registry",
     "session-filtered-registry",
     "malformed-provider-entry",
@@ -54,6 +59,81 @@ EXPECTED_CASE_KINDS = {
     "malformed-provider",
     "malformed-response",
     "cancelled",
+}
+EXPECTED_CASE_KIND_BY_ID = {
+    "pending": "pending",
+    "success-password-provider": "success",
+    "success-provider-neutral-order": "success",
+    "success-default-password-capability": "success",
+    "success-unicode-localized-provider": "success",
+    "empty-registry": "empty",
+    "session-filtered-registry": "empty",
+    "malformed-provider-entry": "malformed-provider",
+    "malformed-response-entry": "malformed-response",
+    "cancelled-discovery": "cancelled",
+}
+EXPECTED_MALFORMED_PROVIDER = {
+    "display_name": "Synthetic Missing Name",
+    "supports_session": True,
+    "supports_password": False,
+}
+EXPECTED_CASE_REGISTRIES = {
+    "pending": [],
+    "success-password-provider": [
+        {
+            "name": "synthetic-basic",
+            "display_name": "Synthetic Password",
+            "supports_session": True,
+            "supports_password": True,
+        }
+    ],
+    "success-provider-neutral-order": [
+        {
+            "name": "synthetic-oauth",
+            "display_name": "Synthetic OAuth",
+            "supports_session": True,
+            "supports_password": False,
+        },
+        {
+            "name": "synthetic-oidc",
+            "display_name": "Synthetic OIDC",
+            "supports_session": True,
+            "supports_password": False,
+        },
+    ],
+    "success-default-password-capability": [
+        {
+            "name": "synthetic-default",
+            "display_name": "Synthetic Default",
+        }
+    ],
+    "success-unicode-localized-provider": [
+        {
+            "name": "é",
+            "display_name": "Identité Synthétique",
+            "supports_session": True,
+            "supports_password": False,
+        }
+    ],
+    "empty-registry": [],
+    "session-filtered-registry": [
+        {
+            "name": "synthetic-token-only",
+            "display_name": "Synthetic Token Only",
+            "supports_session": False,
+            "supports_password": True,
+        }
+    ],
+    "malformed-provider-entry": [EXPECTED_MALFORMED_PROVIDER],
+    "malformed-response-entry": [
+        {
+            "name": "synthetic-malformed",
+            "display_name": "Synthetic Malformed",
+            "supports_session": True,
+            "supports_password": True,
+        }
+    ],
+    "cancelled-discovery": [],
 }
 EXPECTED_CASE_KEYS = {
     "id",
@@ -290,6 +370,14 @@ GIT_REDIRECT_ENV_VARS = (
 class ContractError(ValueError):
     """Raised when a fixture claims more than the pinned contract proves."""
 
+    MAX_MESSAGE_LENGTH = 192
+
+    def __init__(self, message: str) -> None:
+        bounded = str(message)
+        if len(bounded) > self.MAX_MESSAGE_LENGTH:
+            bounded = f"{bounded[: self.MAX_MESSAGE_LENGTH - 3]}..."
+        super().__init__(bounded)
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
@@ -313,14 +401,15 @@ def _strict_equal(actual: Any, expected: Any) -> bool:
 
 
 def _reject_constant(value: str) -> None:
-    raise ContractError(f"non-finite JSON constant is forbidden: {value}")
+    del value
+    raise ContractError("non-finite JSON constant is forbidden")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ContractError(f"duplicate JSON object key: {key}")
+            raise ContractError("duplicate JSON object key")
         result[key] = value
     return result
 
@@ -329,10 +418,24 @@ def _validate_depth(value: Any, depth: int = 0, path: str = "fixture") -> None:
     _require(depth <= MAX_JSON_DEPTH, f"{path}: JSON nesting is too deep")
     if isinstance(value, dict):
         for key, child in value.items():
-            _validate_depth(child, depth + 1, f"{path}.{key}")
+            _validate_depth(child, depth + 1, f"{path}.<key>")
     elif isinstance(value, list):
         for index, child in enumerate(value):
             _validate_depth(child, depth + 1, f"{path}[{index}]")
+
+
+def _validate_finite_numbers(value: Any, depth: int = 0, path: str = "fixture") -> None:
+    """Reject exponent-overflow floats after JSON parsing, within the depth bound."""
+
+    _require(depth <= MAX_JSON_DEPTH, f"{path}: JSON nesting is too deep")
+    if isinstance(value, float):
+        _require(math.isfinite(value), f"{path}: non-finite JSON number")
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            _validate_finite_numbers(child, depth + 1, f"{path}.<key>")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _validate_finite_numbers(child, depth + 1, f"{path}[{index}]")
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -343,10 +446,11 @@ def load_json(path: Path) -> dict[str, Any]:
                 object_pairs_hook=_reject_duplicate_keys,
                 parse_constant=_reject_constant,
             )
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ContractError(f"{path.name}: invalid JSON: {exc}") from exc
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        raise ContractError(f"{path.name}: invalid JSON") from exc
     _require(isinstance(value, dict), f"{path.name}: top level must be an object")
     _validate_depth(value)
+    _validate_finite_numbers(value)
     return value
 
 
@@ -388,9 +492,9 @@ def _validate_redaction(value: Any, path: str = "fixture") -> None:
             _require(isinstance(key, str), f"{path}: object keys must be strings")
             _require(
                 not _is_forbidden_sensitive_key(key),
-                f"{path}.{key}: prohibited sensitive key marker",
+                f"{path}: prohibited sensitive key marker",
             )
-            _validate_redaction(child, f"{path}.{key}")
+            _validate_redaction(child, f"{path}.<key>")
         return
     if isinstance(value, list):
         for index, child in enumerate(value):
@@ -421,22 +525,73 @@ def _validate_source_link(link: str, expected_path: str) -> None:
     )
 
 
-def _validate_distribution(value: Any, label: str) -> None:
-    _require(isinstance(value, dict), f"baseline: {label} must be an object")
-    _require(set(value) == {"min", "median", "p95", "max", "mean"}, f"baseline: {label} keys changed")
-    numbers: dict[str, float] = {}
-    for key, number in value.items():
-        _require(type(number) in (int, float), f"baseline: {label}.{key} must be numeric")
-        number = float(number)
-        _require(math.isfinite(number) and number > 0, f"baseline: {label}.{key} must be finite and positive")
-        numbers[key] = number
-    _require(numbers["min"] <= numbers["median"] <= numbers["p95"] <= numbers["max"], f"baseline: {label} order changed")
-    _require(numbers["min"] <= numbers["mean"] <= numbers["max"], f"baseline: {label} mean is outside distribution")
+def _require_exact_int(value: Any, path: str) -> None:
+    _require(type(value) is int, f"{path}: expected exact integer")
+
+
+def _finite_number(value: Any, path: str) -> float:
+    """Convert bounded evidence only after rejecting bools and overflow."""
+
+    _require(type(value) in (int, float), f"{path}: expected numeric evidence")
+    try:
+        converted = float(value)
+    except (OverflowError, ValueError):
+        raise ContractError(f"{path}: numeric evidence is out of range") from None
+    _require(math.isfinite(converted), f"{path}: numeric evidence is not finite")
+    return converted
+
+
+TRACE_SUMMARY_KEYS = {"min", "p50", "p95", "p99", "max", "mean"}
+TRACE_MODES = {"normal", "optimized"}
+TRACE_SAMPLE_COUNT = 30
+
+
+def _percentile(samples: list[float], percentile: float) -> float:
+    ordered = sorted(samples)
+    position = (len(ordered) - 1) * percentile / 100
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def _validate_trace(value: Any, label: str, expected_mode: str, expected_command: str, repetitions: int) -> None:
+    _require_exact_keys(value, {"mode", "command", "samples_ms", "summary_ms"}, f"baseline.{label}")
+    _require(value["mode"] == expected_mode, f"baseline.{label}: mode changed")
+    _require(value["command"] == expected_command, f"baseline.{label}: command changed")
+    samples_value = value["samples_ms"]
+    _require(isinstance(samples_value, list), f"baseline.{label}.samples_ms: expected list")
+    _require(len(samples_value) == repetitions == TRACE_SAMPLE_COUNT, f"baseline.{label}.samples_ms: expected {TRACE_SAMPLE_COUNT} samples")
+    samples = [_finite_number(sample, f"baseline.{label}.samples_ms[{index}]") for index, sample in enumerate(samples_value)]
+    _require(all(sample > 0 for sample in samples), f"baseline.{label}.samples_ms: values must be positive")
+    summary_value = value["summary_ms"]
+    _require_exact_keys(summary_value, TRACE_SUMMARY_KEYS, f"baseline.{label}.summary_ms")
+    summary = {
+        key: _finite_number(number, f"baseline.{label}.summary_ms.{key}")
+        for key, number in summary_value.items()
+    }
+    _require(all(number > 0 for number in summary.values()), f"baseline.{label}.summary_ms: values must be positive")
+    recomputed = {
+        "min": min(samples),
+        "p50": _percentile(samples, 50),
+        "p95": _percentile(samples, 95),
+        "p99": _percentile(samples, 99),
+        "max": max(samples),
+        "mean": statistics.fmean(samples),
+    }
+    for key, expected in recomputed.items():
+        _require(math.isclose(summary[key], expected, rel_tol=1e-12, abs_tol=1e-9), f"baseline.{label}.summary_ms.{key}: does not match raw samples")
+    _require(summary["min"] <= summary["p50"] <= summary["p95"] <= summary["p99"] <= summary["max"], f"baseline.{label}.summary_ms: order changed")
+    _require(summary["min"] <= summary["mean"] <= summary["max"], f"baseline.{label}.summary_ms: mean is outside samples")
 
 
 def validate_audit(audit: dict[str, Any]) -> None:
     """Validate exact source provenance, policy, and reproducibility metadata."""
 
+    _validate_depth(audit, path="audit")
+    _validate_finite_numbers(audit, path="audit")
     expected_keys = {
         "schema",
         "contract",
@@ -472,7 +627,8 @@ def validate_audit(audit: dict[str, Any]) -> None:
         _validate_source_link(citation["url"], citation["path"])
         _require(len(citation["sha256"]) == 64 and re.fullmatch(r"[0-9a-f]{64}", citation["sha256"]), "audit: invalid source SHA-256")
         _require(len(citation["git_blob_sha"]) == 40 and re.fullmatch(r"[0-9a-f]{40}", citation["git_blob_sha"]), "audit: invalid source blob ID")
-        _require(type(citation["lines"][0]) is int and type(citation["lines"][1]) is int, "audit: source lines must be integers")
+        _require_exact_int(citation["lines"][0], "audit.source_citations.lines.start")
+        _require_exact_int(citation["lines"][1], "audit.source_citations.lines.end")
         _require(citation["lines"][0] <= citation["lines"][1], "audit: source lines are reversed")
         _require(citation["markers"], "audit: source citation has no markers")
     _require(_strict_equal(audit["contract_surface"], EXPECTED_CONTRACT_SURFACE), "audit: contract surface changed")
@@ -488,9 +644,11 @@ def validate_audit(audit: dict[str, Any]) -> None:
             "build_mode",
             "source_verified",
             "repetitions",
-            "normal_distribution_ms",
-            "optimized_distribution_ms",
+            "normal_trace",
+            "optimized_trace",
             "artifact_size_bytes",
+            "artifact_sha256",
+            "measured_commit",
             "environment",
             "threshold",
         },
@@ -500,18 +658,49 @@ def validate_audit(audit: dict[str, Any]) -> None:
     _require(baseline["validator"] == "Python standard library only", "baseline: validator changed")
     _require(baseline["build_mode"] == "N/A: fixture validator has no build artifact", "baseline: build mode changed")
     _require(baseline["source_verified"] is False, "baseline: source verification claim changed")
-    _require(baseline["repetitions"] == 7, "baseline: repetitions must be seven")
-    _validate_distribution(baseline["normal_distribution_ms"], "normal_distribution_ms")
-    _validate_distribution(baseline["optimized_distribution_ms"], "optimized_distribution_ms")
-    _require(type(baseline["artifact_size_bytes"]) is int and baseline["artifact_size_bytes"] > 0, "baseline: artifact size is invalid")
+    _require_exact_int(baseline["repetitions"], "baseline.repetitions")
+    _require(baseline["repetitions"] == TRACE_SAMPLE_COUNT, f"baseline: repetitions must be {TRACE_SAMPLE_COUNT}")
+    _validate_trace(baseline["normal_trace"], "normal_trace", "normal", EXPECTED_BASELINE_COMMANDS["normal"], baseline["repetitions"])
+    _validate_trace(baseline["optimized_trace"], "optimized_trace", "optimized", EXPECTED_BASELINE_COMMANDS["optimized"], baseline["repetitions"])
+    _require_exact_int(baseline["artifact_size_bytes"], "baseline.artifact_size_bytes")
+    _require(baseline["artifact_size_bytes"] > 0, "baseline: artifact size is invalid")
+    _require_exact_string(baseline["artifact_sha256"], "baseline.artifact_sha256")
+    _require(re.fullmatch(r"[0-9a-f]{64}", baseline["artifact_sha256"]) is not None, "baseline: artifact SHA-256 is invalid")
+    _require_exact_string(baseline["measured_commit"], "baseline.measured_commit")
+    _require(re.fullmatch(r"[0-9a-f]{40}", baseline["measured_commit"]) is not None, "baseline: measured commit is invalid")
     _require_exact_keys(baseline["environment"], {"python", "implementation", "platform", "machine"}, "baseline.environment")
-    _require(all(isinstance(value, str) and value for value in baseline["environment"].values()), "baseline: environment is incomplete")
+    _require(all(type(value) is str and value for value in baseline["environment"].values()), "baseline: environment is incomplete")
     _require(baseline["threshold"] is None, "baseline: an unapproved threshold was invented")
 
 
+def _require_exact_string(value: Any, path: str) -> None:
+    _require(type(value) is str, f"{path}: expected string")
+
+
 def _validate_provider_name(value: Any, path: str) -> None:
-    _require(isinstance(value, str) and value, f"{path}: provider name must be non-empty")
-    _require(value.isascii() and value == value.casefold(), f"{path}: provider name must be lowercase ASCII data")
+    """Match the pinned source's lowercase identifier boundary without ASCII narrowing."""
+
+    _require_exact_string(value, path)
+    _require(bool(value), f"{path}: provider name must be non-empty")
+    _require(value == value.casefold(), f"{path}: provider name must be lowercase Unicode data")
+    _require(
+        not any(
+            character.isspace()
+            or character in "/\\"
+            or unicodedata.category(character).startswith("C")
+            for character in value
+        ),
+        f"{path}: provider name contains whitespace, a path delimiter, or a control character",
+    )
+
+
+def _validate_display_name(value: Any, path: str) -> None:
+    _require_exact_string(value, path)
+    _require(bool(value), f"{path}: display name must be non-empty")
+    _require(
+        not any(unicodedata.category(character).startswith("C") for character in value),
+        f"{path}: display name contains a control character",
+    )
 
 
 def _validate_registered_provider(provider: Any, path: str, malformed: bool = False) -> None:
@@ -519,12 +708,21 @@ def _validate_registered_provider(provider: Any, path: str, malformed: bool = Fa
     keys = set(provider)
     if malformed:
         _require(keys == {"display_name", "supports_session", "supports_password"}, f"{path}: malformed control changed")
-        _require(isinstance(provider["display_name"], str) and provider["display_name"], f"{path}: malformed display label")
+        _validate_display_name(provider["display_name"], f"{path}.display_name")
     else:
-        _require(keys in ({"name", "display_name", "supports_session"}, {"name", "display_name", "supports_session", "supports_password"}), f"{path}: provider declaration keys changed")
+        _require(
+            keys in (
+                {"name", "display_name"},
+                {"name", "display_name", "supports_session"},
+                {"name", "display_name", "supports_password"},
+                {"name", "display_name", "supports_session", "supports_password"},
+            ),
+            f"{path}: provider declaration keys changed",
+        )
         _validate_provider_name(provider["name"], f"{path}.name")
-        _require(isinstance(provider["display_name"], str) and provider["display_name"], f"{path}.display_name: label must be non-empty")
-    _require(type(provider["supports_session"]) is bool, f"{path}.supports_session: expected boolean")
+        _validate_display_name(provider["display_name"], f"{path}.display_name")
+    if "supports_session" in provider:
+        _require(type(provider["supports_session"]) is bool, f"{path}.supports_session: expected boolean")
     if "supports_password" in provider:
         _require(type(provider["supports_password"]) is bool, f"{path}.supports_password: expected boolean")
 
@@ -533,27 +731,84 @@ def _validate_response_provider(provider: Any, path: str, malformed: bool = Fals
     _require(isinstance(provider, dict), f"{path}: response provider must be an object")
     _require(set(provider) == {"name", "display_name", "supports_password"}, f"{path}: response provider keys changed")
     _validate_provider_name(provider["name"], f"{path}.name")
-    _require(isinstance(provider["display_name"], str) and provider["display_name"], f"{path}.display_name: label must be non-empty")
+    _validate_display_name(provider["display_name"], f"{path}.display_name")
     if malformed:
+        _require(type(provider["supports_password"]) is str, f"{path}.supports_password: malformed control changed")
         _require(provider["supports_password"] == "true", f"{path}.supports_password: malformed control changed")
     else:
         _require(type(provider["supports_password"]) is bool, f"{path}.supports_password: expected boolean")
 
 
+def _require_unique_provider_names(names: list[str], path: str) -> None:
+    seen: set[str] = set()
+    for name in names:
+        _require(name not in seen, f"{path}: duplicate provider name")
+        seen.add(name)
+
+
 def _validate_case_expected(expected: Any, path: str) -> None:
     _require_exact_keys(expected, {"state", "fail_closed", "usable", "retryable", "reason", "provider_names"}, path)
+    _require_exact_string(expected["state"], f"{path}.state")
     _require(expected["state"] in {"discovering", "signed_out", "provider_unavailable"}, f"{path}.state: unknown state")
     for key in ("fail_closed", "usable", "retryable"):
         _require(type(expected[key]) is bool, f"{path}.{key}: expected boolean")
-    _require(isinstance(expected["reason"], str) and expected["reason"], f"{path}.reason: expected reason")
+    _require_exact_string(expected["reason"], f"{path}.reason")
+    _require(bool(expected["reason"]), f"{path}.reason: expected reason")
     _require(isinstance(expected["provider_names"], list), f"{path}.provider_names: expected list")
     for index, name in enumerate(expected["provider_names"]):
         _validate_provider_name(name, f"{path}.provider_names[{index}]")
+    _require_unique_provider_names(expected["provider_names"], f"{path}.provider_names")
+
+
+def _source_response_from_registry(registry: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Evaluate the pinned registry filter and route serialization on one case."""
+
+    active = [provider for provider in registry if provider.get("supports_session", True)]
+    if not active:
+        return {"status": 503, "body": {"detail": "no auth providers registered"}}
+    serialized: list[dict[str, Any]] = []
+    for provider in active:
+        if "name" not in provider or "display_name" not in provider:
+            return None
+        serialized.append(
+            {
+                "name": provider["name"],
+                "display_name": provider["display_name"],
+                "supports_password": bool(provider.get("supports_password", False)),
+            }
+        )
+    return {"status": 200, "body": {"providers": serialized}}
+
+
+def _validate_success_response(response: Any, path: str) -> None:
+    _require(isinstance(response, dict), f"{path}: response must be an object")
+    _require_exact_keys(response, {"status", "body"}, path)
+    _require(type(response["status"]) is int, f"{path}.status: expected exact integer")
+    _require(response["status"] == 200, f"{path}.status: expected 200")
+    _require(isinstance(response["body"], dict), f"{path}.body: expected an object")
+    _require_exact_keys(response["body"], {"providers"}, f"{path}.body")
+    providers = response["body"]["providers"]
+    _require(isinstance(providers, list) and providers, f"{path}.body.providers: expected non-empty list")
+    names: list[str] = []
+    for index, provider in enumerate(providers):
+        _validate_response_provider(provider, f"{path}.body.providers[{index}]")
+        names.append(provider["name"])
+    _require_unique_provider_names(names, f"{path}.body.providers")
+
+
+def _validate_empty_response(response: Any, path: str) -> None:
+    _require(isinstance(response, dict), f"{path}: response must be an object")
+    _require_exact_keys(response, {"status", "body"}, path)
+    _require(type(response["status"]) is int, f"{path}.status: expected exact integer")
+    _require(response["status"] == 503, f"{path}.status: expected 503")
+    _require(_strict_equal(response["body"], {"detail": "no auth providers registered"}), f"{path}.body: exact empty response changed")
 
 
 def validate_cases(cases: dict[str, Any], audit: dict[str, Any]) -> None:
-    """Validate every synthetic case against the pinned route semantics."""
+    """Validate each row against canonical identity and evaluated source behavior."""
 
+    _validate_depth(cases, path="cases")
+    _validate_finite_numbers(cases, path="cases")
     _require_exact_keys(
         cases,
         {
@@ -585,70 +840,92 @@ def validate_cases(cases: dict[str, Any], audit: dict[str, Any]) -> None:
 
     fixture_cases = cases["cases"]
     _require(isinstance(fixture_cases, list), "cases: case inventory must be a list")
-    _require(tuple(case.get("id") for case in fixture_cases) == EXPECTED_CASE_IDS, "cases: ordered case inventory changed")
-    _require(len({case.get("id") for case in fixture_cases}) == len(EXPECTED_CASE_IDS), "cases: duplicate case IDs")
+    for index, case in enumerate(fixture_cases):
+        _require(isinstance(case, dict), f"cases[{index}]: case row must be an object")
+    case_ids: list[str] = []
+    for index, case in enumerate(fixture_cases):
+        _require_exact_string(case.get("id"), f"cases[{index}].id")
+        case_ids.append(case["id"])
+    _require(tuple(case_ids) == EXPECTED_CASE_IDS, "cases: ordered case inventory changed")
+    _require(len(set(case_ids)) == len(EXPECTED_CASE_IDS), "cases: duplicate case IDs")
 
     for case in fixture_cases:
         case_id = case["id"]
         _require_exact_keys(case, EXPECTED_CASE_KEYS, f"case {case_id}")
         _require(case["synthetic"] is True, f"case {case_id}: not synthetic")
+        _require_exact_string(case["kind"], f"case {case_id}.kind")
         _require(case["kind"] in EXPECTED_CASE_KINDS, f"case {case_id}: unknown kind")
+        kind = case["kind"]
+        _require(kind == EXPECTED_CASE_KIND_BY_ID[case_id], f"case {case_id}: kind does not match canonical semantics")
         _require_exact_keys(case["request"], {"method", "path", "client"}, f"case {case_id}.request")
+        for field in ("method", "path", "client"):
+            _require_exact_string(case["request"][field], f"case {case_id}.request.{field}")
         _require(_strict_equal({"method": case["request"]["method"], "path": case["request"]["path"]}, EXPECTED_REQUEST), f"case {case_id}: route mutation")
         _require(case["request"]["client"] in {"browser", "native"}, f"case {case_id}: unknown client")
-        _require(isinstance(case["registered_providers"], list), f"case {case_id}: registry must be a list")
-        for index, provider in enumerate(case["registered_providers"]):
-            _validate_registered_provider(provider, f"case {case_id}.registered_providers[{index}]", case["kind"] == "malformed-provider")
-        _validate_case_expected(case["expected"], f"case {case_id}.expected")
 
-        response = case["response"]
-        kind = case["kind"]
-        if kind in {"pending", "cancelled", "malformed-provider"}:
-            _require(response is None, f"case {case_id}: response must be absent for {kind}")
+        registry = case["registered_providers"]
+        _require(isinstance(registry, list), f"case {case_id}: registry must be a list")
+        malformed_provider = kind == "malformed-provider"
+        for index, provider in enumerate(registry):
+            _validate_registered_provider(provider, f"case {case_id}.registered_providers[{index}]", malformed_provider)
+        expected_registry = EXPECTED_CASE_REGISTRIES[case_id]
+        _require(_strict_equal(registry, expected_registry), f"case {case_id}: registered provider identity changed")
+        if malformed_provider:
+            _require(len(registry) == 1, f"case {case_id}: malformed provider cardinality changed")
         else:
-            _require(isinstance(response, dict), f"case {case_id}: response must be an object")
-            _require_exact_keys(response, {"status", "body"}, f"case {case_id}.response")
-            _require(type(response["status"]) is int, f"case {case_id}: status must be an integer")
-            _require(isinstance(response["body"], dict), f"case {case_id}: response body must be an object")
+            names = [provider["name"] for provider in registry]
+            _require_unique_provider_names(names, f"case {case_id}.registered_providers")
 
         expected = case["expected"]
+        _validate_case_expected(expected, f"case {case_id}.expected")
+        response = case["response"]
+
         if kind == "pending":
+            _require(response is None, f"case {case_id}: pending response must be absent")
             _require(_strict_equal(expected, {"state": "discovering", "fail_closed": False, "usable": False, "retryable": False, "reason": "discovery-pending", "provider_names": []}), f"case {case_id}: pending outcome changed")
-        elif kind == "cancelled":
+            continue
+        if kind == "cancelled":
+            _require(response is None, f"case {case_id}: cancelled response must be absent")
             _require(_strict_equal(expected, {"state": "signed_out", "fail_closed": False, "usable": False, "retryable": True, "reason": "cancelled-by-user", "provider_names": []}), f"case {case_id}: cancellation outcome changed")
-        elif kind == "malformed-provider":
+            continue
+        if kind == "malformed-provider":
+            _require(response is None, f"case {case_id}: malformed provider response must be absent")
+            source_response = _source_response_from_registry(registry)
+            _require(source_response is None, f"case {case_id}: malformed provider unexpectedly serialized")
             _require(_strict_equal(expected, {"state": "provider_unavailable", "fail_closed": True, "usable": False, "retryable": True, "reason": "source-handler-failure", "provider_names": []}), f"case {case_id}: malformed provider outcome changed")
-        elif kind == "malformed-response":
-            _require(response["status"] == 200, f"case {case_id}: malformed response status changed")
-            _require(set(response["body"]) == {"providers"}, f"case {case_id}: malformed response body keys changed")
+            continue
+
+        source_response = _source_response_from_registry(registry)
+        _require(source_response is not None, f"case {case_id}: source response unexpectedly failed")
+        _require(isinstance(response, dict), f"case {case_id}: response must be an object")
+        if kind == "malformed-response":
+            _validate_success_response(source_response, f"case {case_id}.source_response")
+            _require_exact_keys(response, {"status", "body"}, f"case {case_id}.response")
+            _require(type(response["status"]) is int and response["status"] == 200, f"case {case_id}: malformed response status changed")
+            _require(isinstance(response["body"], dict), f"case {case_id}: malformed response body must be an object")
+            _require_exact_keys(response["body"], {"providers"}, f"case {case_id}.response.body")
             providers = response["body"]["providers"]
-            _require(isinstance(providers, list) and len(providers) == 1, f"case {case_id}: malformed response provider count changed")
-            _validate_response_provider(providers[0], f"case {case_id}.response.body.providers[0]", malformed=True)
+            _require(isinstance(providers, list) and len(providers) == 1, f"case {case_id}: malformed response provider cardinality changed")
+            actual_provider = providers[0]
+            _validate_response_provider(actual_provider, f"case {case_id}.response.body.providers[0]", malformed=True)
+            _require_unique_provider_names([actual_provider["name"]], f"case {case_id}.response.body.providers")
+            source_provider = source_response["body"]["providers"][0]
+            _require(actual_provider["name"] == source_provider["name"], f"case {case_id}: malformed response provider name changed")
+            _require(actual_provider["display_name"] == source_provider["display_name"], f"case {case_id}: malformed response display name changed")
             _require(_strict_equal(expected, {"state": "provider_unavailable", "fail_closed": True, "usable": False, "retryable": True, "reason": "invalid-response-shape", "provider_names": []}), f"case {case_id}: malformed response outcome changed")
+            continue
+
+        active = [provider for provider in registry if provider.get("supports_session", True)]
+        if source_response["status"] == 503:
+            _validate_empty_response(response, f"case {case_id}.response")
+            _require(_strict_equal(response, source_response), f"case {case_id}: source empty response changed")
+            expected_reason = "no-auth-providers" if case_id == "empty-registry" else "no-session-providers"
+            expected_outcome = {"state": "provider_unavailable", "fail_closed": True, "usable": False, "retryable": True, "reason": expected_reason, "provider_names": []}
         else:
-            active = [provider for provider in case["registered_providers"] if provider.get("supports_session", True)]
-            if not active:
-                _require(response["status"] == 503, f"case {case_id}: empty registry must return 503")
-                _require(_strict_equal(response["body"], {"detail": "no auth providers registered"}), f"case {case_id}: empty response changed")
-                expected_reason = "no-auth-providers" if case_id == "empty-registry" else "no-session-providers"
-                _require(_strict_equal(expected, {"state": "provider_unavailable", "fail_closed": True, "usable": False, "retryable": True, "reason": expected_reason, "provider_names": []}), f"case {case_id}: empty outcome changed")
-            else:
-                _require(response["status"] == 200, f"case {case_id}: successful discovery must return 200")
-                _require(set(response["body"]) == {"providers"}, f"case {case_id}: success body keys changed")
-                result_providers = response["body"]["providers"]
-                _require(isinstance(result_providers, list) and result_providers, f"case {case_id}: success provider list must be non-empty")
-                for index, provider in enumerate(result_providers):
-                    _validate_response_provider(provider, f"case {case_id}.response.body.providers[{index}]")
-                expected_providers = [
-                    {
-                        "name": provider["name"],
-                        "display_name": provider["display_name"],
-                        "supports_password": bool(provider.get("supports_password", False)),
-                    }
-                    for provider in active
-                ]
-                _require(_strict_equal(result_providers, expected_providers), f"case {case_id}: source order or capability default changed")
-                _require(_strict_equal(expected, {"state": "signed_out", "fail_closed": False, "usable": True, "retryable": False, "reason": "providers-available", "provider_names": [provider["name"] for provider in active]}), f"case {case_id}: success outcome changed")
+            _validate_success_response(response, f"case {case_id}.response")
+            _require(_strict_equal(response, source_response), f"case {case_id}: source order or capability default changed")
+            expected_outcome = {"state": "signed_out", "fail_closed": False, "usable": True, "retryable": False, "reason": "providers-available", "provider_names": [provider["name"] for provider in active]}
+        _require(_strict_equal(expected, expected_outcome), f"case {case_id}: discovery outcome changed")
 
 
 def _git_environment() -> dict[str, str]:
@@ -673,8 +950,7 @@ def _run_git(root: Path, *arguments: str) -> bytes:
         env=_git_environment(),
     )
     if result.returncode:
-        detail = result.stderr.decode("utf-8", "replace").strip()
-        raise ContractError(f"source verification git command failed: {detail}")
+        raise ContractError("source verification git command failed")
     return result.stdout
 
 
@@ -706,12 +982,29 @@ def verify_source_root(source_root: Path, audit: dict[str, Any]) -> str:
     return "git_checkout_verified" if git_checkout else "content_only_snapshot"
 
 
+def _artifact_paths() -> tuple[Path, ...]:
+    return (ROOT / "README.md", CASES_PATH, ROOT / "test_provider_discovery.py")
+
+
 def artifact_size_bytes() -> int:
-    return sum(path.stat().st_size for path in (ROOT / "README.md", CASES_PATH, ROOT / "test_provider_discovery.py"))
+    return sum(path.stat().st_size for path in _artifact_paths())
+
+
+def artifact_sha256() -> str:
+    digest = hashlib.sha256()
+    for path in _artifact_paths():
+        relative_name = path.name.encode("utf-8")
+        data = path.read_bytes()
+        digest.update(len(relative_name).to_bytes(4, "big"))
+        digest.update(relative_name)
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
 
 
 def validate_baseline_artifact_size(audit: dict[str, Any]) -> None:
     _require(audit["baseline"]["artifact_size_bytes"] == artifact_size_bytes(), "baseline: artifact size is stale")
+    _require(audit["baseline"]["artifact_sha256"] == artifact_sha256(), "baseline: artifact SHA-256 is stale")
 
 
 def validate_set_for_baseline(cases: dict[str, Any], audit: dict[str, Any]) -> float:
@@ -748,7 +1041,14 @@ class ProviderDiscoveryFixtureTests(unittest.TestCase):
         filtered = self.by_id["session-filtered-registry"]
         self.assertEqual(filtered["response"]["status"], 503)
         defaulted = self.by_id["success-default-password-capability"]
+        self.assertNotIn("supports_session", defaulted["registered_providers"][0])
         self.assertIs(defaulted["response"]["body"]["providers"][0]["supports_password"], False)
+
+    def test_lowercase_unicode_provider_and_localized_label_are_source_valid(self) -> None:
+        localized = self.by_id["success-unicode-localized-provider"]
+        self.assertEqual(localized["registered_providers"][0]["name"], "é")
+        self.assertEqual(localized["response"]["body"]["providers"][0]["display_name"], "Identité Synthétique")
+        validate_cases(self.cases, self.audit)
 
     def test_empty_registry_is_precise_503(self) -> None:
         for case_id in ("empty-registry", "session-filtered-registry"):
@@ -780,6 +1080,57 @@ class ProviderDiscoveryFixtureTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_cases(forged, self.audit)
 
+    def test_case_kind_binding_rejects_relabelled_semantics(self) -> None:
+        for case_index, forged_kind in ((5, "success"), (1, "empty"), (7, "empty"), (8, "success")):
+            with self.subTest(case_index=case_index, forged_kind=forged_kind):
+                forged = copy.deepcopy(self.cases)
+                forged["cases"][case_index]["kind"] = forged_kind
+                with self.assertRaises(ContractError):
+                    validate_cases(forged, self.audit)
+
+    def test_malformed_provider_cardinality_and_identity_are_exact(self) -> None:
+        for mutation in ("empty", "duplicate", "identity"):
+            with self.subTest(mutation=mutation):
+                forged = copy.deepcopy(self.cases)
+                registry = forged["cases"][7]["registered_providers"]
+                if mutation == "empty":
+                    registry.clear()
+                elif mutation == "duplicate":
+                    registry.append(copy.deepcopy(registry[0]))
+                else:
+                    registry[0]["display_name"] = "Synthetic Other Malformation"
+                with self.assertRaises(ContractError):
+                    validate_cases(forged, self.audit)
+
+    def test_provider_name_uniqueness_is_enforced_at_each_boundary(self) -> None:
+        forged = copy.deepcopy(self.cases)
+        registry = forged["cases"][2]["registered_providers"]
+        registry[1]["name"] = registry[0]["name"]
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.audit)
+
+        forged = copy.deepcopy(self.cases)
+        response_providers = forged["cases"][2]["response"]["body"]["providers"]
+        response_providers[1]["name"] = response_providers[0]["name"]
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.audit)
+
+        forged = copy.deepcopy(self.cases)
+        forged["cases"][2]["expected"]["provider_names"][1] = forged["cases"][2]["expected"]["provider_names"][0]
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.audit)
+
+    def test_rows_are_evaluated_from_registry_to_response(self) -> None:
+        forged = copy.deepcopy(self.cases)
+        forged["cases"][1]["response"]["body"]["providers"][0]["supports_password"] = False
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.audit)
+
+        forged = copy.deepcopy(self.cases)
+        forged["cases"][1]["expected"]["provider_names"] = []
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.audit)
+
     def test_unknown_case_and_extra_case_keys_are_rejected(self) -> None:
         forged = copy.deepcopy(self.cases)
         forged["cases"][0]["id"] = "new-case"
@@ -798,7 +1149,7 @@ class ProviderDiscoveryFixtureTests(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation):
                 forged = copy.deepcopy(self.cases)
-                forged["cases"][4]["response"] = mutation
+                forged["cases"][5]["response"] = mutation
                 with self.assertRaises(ContractError):
                     validate_cases(forged, self.audit)
 
@@ -843,10 +1194,30 @@ class ProviderDiscoveryFixtureTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_cases(forged, self.audit)
 
-    def test_baseline_artifact_size_is_current(self) -> None:
+    def test_baseline_artifact_trace_is_current_and_bound(self) -> None:
         validate_baseline_artifact_size(self.audit)
-        self.assertEqual(self.audit["baseline"]["repetitions"], 7)
-        self.assertIsNone(self.audit["baseline"]["threshold"])
+        baseline = self.audit["baseline"]
+        self.assertEqual(baseline["repetitions"], TRACE_SAMPLE_COUNT)
+        self.assertEqual(set(baseline["normal_trace"]["summary_ms"]), TRACE_SUMMARY_KEYS)
+        self.assertEqual(set(baseline["optimized_trace"]["summary_ms"]), TRACE_SUMMARY_KEYS)
+        self.assertRegex(baseline["measured_commit"], r"^[0-9a-f]{40}$")
+        self.assertIsNone(baseline["threshold"])
+
+    def test_baseline_numeric_evidence_types_and_trace_math_are_strict(self) -> None:
+        for invalid in (7.0, True, "30"):
+            with self.subTest(invalid=invalid):
+                forged = copy.deepcopy(self.audit)
+                forged["baseline"]["repetitions"] = invalid
+                with self.assertRaises(ContractError):
+                    validate_audit(forged)
+        forged = copy.deepcopy(self.audit)
+        forged["baseline"]["normal_trace"]["samples_ms"][0] = "7.0"
+        with self.assertRaises(ContractError):
+            validate_audit(forged)
+        forged = copy.deepcopy(self.audit)
+        forged["baseline"]["normal_trace"]["summary_ms"]["p99"] += 1
+        with self.assertRaises(ContractError):
+            validate_audit(forged)
 
     def test_duplicate_and_nonfinite_json_controls(self) -> None:
         with self.assertRaises(ContractError):
@@ -855,6 +1226,40 @@ class ProviderDiscoveryFixtureTests(unittest.TestCase):
             _reject_constant("NaN")
         with self.assertRaises(ContractError):
             _validate_depth([], MAX_JSON_DEPTH + 1)
+        with tempfile.TemporaryDirectory() as directory:
+            overflow_path = Path(directory) / "overflow.json"
+            overflow_path.write_text('{"value": 1e9999}', encoding="utf-8")
+            with self.assertRaises(ContractError):
+                load_json(overflow_path)
+            oversized_integer_path = Path(directory) / "oversized-integer.json"
+            oversized_integer_path.write_text('{"value": 1' + ("0" * 5000) + '}', encoding="utf-8")
+            with self.assertRaises(ContractError):
+                load_json(oversized_integer_path)
+
+    def test_direct_validation_depth_is_bounded(self) -> None:
+        forged = copy.deepcopy(self.cases)
+        nested: Any = []
+        for _ in range(MAX_JSON_DEPTH + 2):
+            nested = [nested]
+        forged["cases"][0]["response"] = nested
+        with self.assertRaises(ContractError):
+            validate_cases(forged, self.audit)
+
+    def test_main_reports_scalar_case_rows_without_traceback(self) -> None:
+        forged = copy.deepcopy(self.cases)
+        forged["cases"][0] = "not-an-object"
+        real_load_json = load_json
+
+        def load_with_scalar(path: Path) -> dict[str, Any]:
+            if path == CASES_PATH:
+                return forged
+            return real_load_json(path)
+
+        stderr = io.StringIO()
+        with patch(__name__ + ".load_json", side_effect=load_with_scalar), patch("sys.stderr", stderr), patch("sys.argv", [str(Path(__file__))]):
+            self.assertEqual(main(), 1)
+        self.assertIn("contract validation failed:", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 def main() -> int:
@@ -862,29 +1267,33 @@ def main() -> int:
     parser.add_argument("--source-root", type=Path, help="optional already-pinned Hermes source root")
     args = parser.parse_args()
 
-    audit = load_json(AUDIT_PATH)
-    cases = load_json(CASES_PATH)
-    validate_audit(audit)
-    validate_cases(cases, audit)
-    validate_baseline_artifact_size(audit)
-    source_mode = "metadata_only"
-    if args.source_root is not None:
-        source_mode = verify_source_root(args.source_root, audit)
+    try:
+        audit = load_json(AUDIT_PATH)
+        cases = load_json(CASES_PATH)
+        validate_audit(audit)
+        validate_cases(cases, audit)
+        validate_baseline_artifact_size(audit)
+        source_mode = "metadata_only"
+        if args.source_root is not None:
+            source_mode = verify_source_root(args.source_root, audit)
 
-    duration_ms = validate_set_for_baseline(cases, audit)
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(ProviderDiscoveryFixtureTests)
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if result.wasSuccessful():
-        print(f"baseline.fixture_validation_ms={duration_ms:.3f}")
-        print(f"baseline.fixture_artifact_bytes={artifact_size_bytes()}")
-        print(f"baseline.fixture_count={len(cases['cases'])}")
-        print(f"baseline.source_mode={source_mode}")
-        print(f"baseline.python={platform.python_version()}")
-        print(f"baseline.implementation={platform.python_implementation()}")
-        print(f"baseline.platform={platform.platform()}")
-        print(f"baseline.machine={platform.machine()}")
-        return 0
-    return 1
+        duration_ms = validate_set_for_baseline(cases, audit)
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(ProviderDiscoveryFixtureTests)
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        if result.wasSuccessful():
+            print(f"baseline.fixture_validation_ms={duration_ms:.3f}")
+            print(f"baseline.fixture_artifact_bytes={artifact_size_bytes()}")
+            print(f"baseline.fixture_count={len(cases['cases'])}")
+            print(f"baseline.source_mode={source_mode}")
+            print(f"baseline.python={platform.python_version()}")
+            print(f"baseline.implementation={platform.python_implementation()}")
+            print(f"baseline.platform={platform.platform()}")
+            print(f"baseline.machine={platform.machine()}")
+            return 0
+        return 1
+    except ContractError as exc:
+        print(f"contract validation failed: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

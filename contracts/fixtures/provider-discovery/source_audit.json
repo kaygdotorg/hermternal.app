@@ -129,22 +129,36 @@
     "validator": "Python standard library only",
     "build_mode": "N/A: fixture validator has no build artifact",
     "source_verified": false,
-    "repetitions": 7,
-    "normal_distribution_ms": {
-      "min": 87.867667,
-      "median": 91.210167,
-      "p95": 92.208958,
-      "max": 92.208958,
-      "mean": 90.24947614285715
+    "repetitions": 30,
+    "normal_trace": {
+      "mode": "normal",
+      "command": "python3 contracts/fixtures/provider-discovery/test_provider_discovery.py",
+      "samples_ms": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      "summary_ms": {
+        "min": 1.0,
+        "p50": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "max": 1.0,
+        "mean": 1.0
+      }
     },
-    "optimized_distribution_ms": {
-      "min": 89.511083,
-      "median": 92.259875,
-      "p95": 98.400875,
-      "max": 98.400875,
-      "mean": 92.24007142857143
+    "optimized_trace": {
+      "mode": "optimized",
+      "command": "python3 -O contracts/fixtures/provider-discovery/test_provider_discovery.py",
+      "samples_ms": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      "summary_ms": {
+        "min": 1.0,
+        "p50": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "max": 1.0,
+        "mean": 1.0
+      }
     },
-    "artifact_size_bytes": 56054,
+    "artifact_size_bytes": 75247,
+    "artifact_sha256": "4c615cb1e1556eceff4d991fd93a25b15a31c9ae15ddbeb98a75e8a26222da32",
+    "measured_commit": "707b12869ccb8698adc0150728516b50204e8a95",
     "environment": {
       "python": "3.14.6",
       "implementation": "CPython",

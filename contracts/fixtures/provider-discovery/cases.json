@@ -156,8 +156,7 @@
       "registered_providers": [
         {
           "name": "synthetic-default",
-          "display_name": "Synthetic Default",
-          "supports_session": true
+          "display_name": "Synthetic Default"
         }
       ],
       "response": {
@@ -179,6 +178,44 @@
         "retryable": false,
         "reason": "providers-available",
         "provider_names": ["synthetic-default"]
+      }
+    },
+    {
+      "id": "success-unicode-localized-provider",
+      "synthetic": true,
+      "kind": "success",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "client": "browser"
+      },
+      "registered_providers": [
+        {
+          "name": "é",
+          "display_name": "Identité Synthétique",
+          "supports_session": true,
+          "supports_password": false
+        }
+      ],
+      "response": {
+        "status": 200,
+        "body": {
+          "providers": [
+            {
+              "name": "é",
+              "display_name": "Identité Synthétique",
+              "supports_password": false
+            }
+          ]
+        }
+      },
+      "expected": {
+        "state": "signed_out",
+        "fail_closed": false,
+        "usable": true,
+        "retryable": false,
+        "reason": "providers-available",
+        "provider_names": ["é"]
       }
     },
     {

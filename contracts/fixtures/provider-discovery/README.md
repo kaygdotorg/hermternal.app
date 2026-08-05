@@ -66,7 +66,8 @@ available pinned checkout or content-only snapshot.
 - pending discovery, which remains `discovering` without claiming success;
 - a native password-capable provider;
 - multiple provider-neutral entries with registration-order preservation;
-- a provider with the source default `supports_password: false`;
+- a lowercase Unicode provider identifier and localized display label;
+- a provider with the source defaults `supports_session: true` and `supports_password: false`;
 - an empty registry and a registry containing only non-session providers, both
   with the exact 503 response;
 - a malformed source provider entry, which has no invented response status;
@@ -82,13 +83,17 @@ appear in the retry record.
 ## Strict validation
 
 `test_provider_discovery.py` uses Python's standard library only. It rejects
-duplicate JSON object keys, non-finite numbers, unknown schema keys, boolean
-values where integers are required, malformed provider rows, wrong status or
-error details, route mutations, provider-order changes, source-audit drift,
-credential-shaped redaction markers, and response shapes that could silently
-widen provider policy. It uses explicit exceptions rather than executable
-`assert` statements, so normal and optimized (`-O`) runs exercise the same
-fail-closed checks.
+duplicate JSON object keys, parser and post-parse non-finite numbers, oversized
+integers, unknown schema keys, boolean or non-integer evidence, scalar rows,
+over-deep direct inputs, malformed provider rows, duplicate provider names,
+wrong status or error details, route mutations, case-kind relabeling,
+source-order or capability drift, source-audit drift, credential-shaped
+redaction markers, and response shapes that could silently widen provider
+policy. Provider names preserve the pinned lowercase Unicode boundary without
+an unsupported ASCII restriction. It uses explicit exceptions rather than
+executable `assert` statements, and `main()` reports controlled validation
+failures without tracebacks, so normal and optimized (`-O`) runs exercise the
+same fail-closed checks.
 
 Run the focused proof from the repository root:
 
@@ -121,15 +126,14 @@ not claim checkout verification.
 ## Baseline and accessibility
 
 `source_audit.json` records the raw normal, optimized, discovery, and compile
-commands, seven-repetition normal and optimized validator distributions, the
-measured fixture artifact size, the local Python environment, `build_mode: N/A`,
-and `threshold: null`. The corrected-head baseline is 7 fresh subprocess runs
-per mode: normal `min 87.867667 / median 91.210167 / p95 92.208958 / max
-92.208958 / mean 90.249476 ms`, optimized `min 89.511083 / median 92.259875 /
-p95 98.400875 / max 98.400875 / mean 92.240071 ms`, with a 56,054-byte fixture
-artifact. These are reproducibility observations, not a product latency
-budget. Re-run the raw commands after changing the fixture and replace the
-recorded observations with the new measured values.
+commands, 30 raw normal and optimized validator samples, recomputed
+`min`/`p50`/`p95`/`p99`/`max`/`mean` summaries, the measured fixture artifact
+size and SHA-256, the measured source commit, the local Python environment,
+`build_mode: N/A`, and `threshold: null`. The samples are fresh subprocess
+observations of the exact recorded command and mode. They are reproducibility
+observations, not a product latency budget or performance gate. Re-run the raw
+commands after changing the fixture, bind the new trace to the code commit
+that was measured, and replace the recorded observations and artifact digest.
 
 Accessibility and Paper evidence are **N/A** because this change is a
 non-UI protocol fixture and validator. It changes no focus order, semantic
