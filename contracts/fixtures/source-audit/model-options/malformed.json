@@ -1,0 +1,38 @@
+{
+  "fixture_id": "model-options.malformed",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "source_audit_id": "hermes-dashboard-model-options-2026-08-05",
+  "client_scope": "shared",
+  "synthetic": true,
+  "case": "malformed",
+  "source_observation": "synthetic-malformed-control",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "fixture-malformed",
+    "method": "model.options",
+    "params": {}
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "fixture-malformed",
+    "result": {
+      "providers": [
+        {
+          "name": "Fixture Provider",
+          "slug": "fixture-provider",
+          "models": "not-a-list",
+          "total_models": "not-a-number"
+        }
+      ],
+      "model": ["not-a-string"],
+      "provider": null
+    }
+  },
+  "expected": {
+    "classification": "malformed",
+    "usable": false,
+    "fail_closed": true,
+    "reason": "invalid-result-shape"
+  }
+}

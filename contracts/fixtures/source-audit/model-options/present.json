@@ -1,0 +1,46 @@
+{
+  "fixture_id": "model-options.present",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "source_audit_id": "hermes-dashboard-model-options-2026-08-05",
+  "client_scope": "shared",
+  "synthetic": true,
+  "case": "present",
+  "source_observation": "pinned-source-present",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "fixture-present",
+    "method": "model.options",
+    "params": {
+      "session_id": "synthetic-session-01",
+      "explicit_only": true,
+      "include_unconfigured": false,
+      "refresh": false
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "fixture-present",
+    "result": {
+      "providers": [
+        {
+          "name": "Fixture Provider",
+          "slug": "fixture-provider",
+          "models": ["fixture-model"],
+          "total_models": 1,
+          "is_current": true
+        }
+      ],
+      "model": "fixture-model",
+      "provider": "fixture-provider"
+    }
+  },
+  "expected": {
+    "classification": "present",
+    "usable": true,
+    "fail_closed": false,
+    "provider_count": 1,
+    "active_model": "fixture-model",
+    "active_provider": "fixture-provider"
+  }
+}

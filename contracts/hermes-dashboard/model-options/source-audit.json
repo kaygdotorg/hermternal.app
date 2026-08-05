@@ -1,0 +1,56 @@
+{
+  "audit_id": "hermes-dashboard-model-options-2026-08-05",
+  "contract": "dashboard-v0.0.1",
+  "hermes_repository": "NousResearch/hermes-agent",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "operation_present": true,
+  "conclusion": "present",
+  "fixture_surface": {
+    "transport": "json-rpc",
+    "operation": "model.options",
+    "source_path": "tui_gateway/methods_complete.py",
+    "source_lines": [327, 347],
+    "source_blob_sha": "701c11f0eaed4d09b045c7046db3aa8443332db4",
+    "handler_calls": "hermes_cli.inventory.build_model_options_payload",
+    "request_parameters": [
+      "session_id",
+      "explicit_only",
+      "include_unconfigured",
+      "refresh"
+    ],
+    "response_shape_source_path": "hermes_cli/inventory.py",
+    "response_shape_source_lines": [276, 280],
+    "payload_builder_path": "hermes_cli/inventory.py",
+    "payload_builder_lines": [283, 313],
+    "payload_builder_blob_sha": "4e95665d481f881be9885edd4997925d0cec78d6",
+    "required_result_keys": ["providers", "model", "provider"],
+    "provider_rows": "source-defined; fixture rows are synthetic only"
+  },
+  "rest_equivalent": {
+    "method": "GET",
+    "path": "/api/model/options",
+    "source_path": "hermes_cli/web_server.py",
+    "source_lines": [6238, 6280],
+    "source_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+    "uses_same_builder": true,
+    "included_in_fixture_surface": false
+  },
+  "registry_evidence": {
+    "source_path": "tui_gateway/server.py",
+    "source_lines": [223, 228],
+    "source_blob_sha": "9d5fd00ce7d0becfd4581a5a3867c516a6d3b20a",
+    "operation_is_routed_off_reader_thread": true
+  },
+  "source_links": [
+    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/methods_complete.py#L327-L347",
+    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/inventory.py#L276-L313",
+    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py#L6238-L6280",
+    "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/server.py#L223-L228"
+  ],
+  "negative_controls": {
+    "absent": "synthetic replacement-gateway control only; it does not describe the pinned source",
+    "empty": "valid source operation with no available provider rows",
+    "malformed": "synthetic invalid result shape",
+    "unknown_operation": "synthetic method-not-found control"
+  }
+}
