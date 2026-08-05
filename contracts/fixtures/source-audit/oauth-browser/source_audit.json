@@ -5,11 +5,13 @@
   "source": {
     "repository": "NousResearch/hermes-agent",
     "sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "tree_sha": "886db5eb1150f819344d67fedc81aef0caab09ff",
     "refs": [
       {
         "path": "hermes_cli/dashboard_auth/routes.py",
         "excerpt": "source_excerpts/routes_auth.py.txt",
         "excerpt_sha256": "7a748fc29acee3d055049f0b1a12bba9e7d8aa13bc4852827888a0ebaaa507b4",
+        "blob_sha": "0c142963bcc83f38fddbdcec29c35608f14f7bc1",
         "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/routes.py",
         "observations": {
           "password_provider_short_circuits_oauth_start": true,
@@ -23,6 +25,7 @@
         "path": "plugins/dashboard_auth/nous/__init__.py",
         "excerpt": "source_excerpts/nous_provider.py.txt",
         "excerpt_sha256": "7cc9ddc1f29753a15858b1072a814c7472b31b9d48b9344e0a49406c0a4fc01d",
+        "blob_sha": "69acd18e36b545fd20df5578809de65afb0d4df4",
         "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/plugins/dashboard_auth/nous/__init__.py",
         "observations": {
           "authorization_params_include_state": true,
@@ -36,6 +39,7 @@
         "path": "hermes_cli/dashboard_auth/cookies.py",
         "excerpt": "source_excerpts/cookies.py.txt",
         "excerpt_sha256": "4061f5e075fee015151a14ab75c7b77661400bb2ec0fa402559c0d49cae36f3e",
+        "blob_sha": "8bcd9db78eb6a8e9209e1b3087ab4e85b8997f1e",
         "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/cookies.py",
         "observations": {
           "pkce_cookie_is_short_lived": true,
@@ -58,6 +62,9 @@
       "comparison": "the provider exchange receives the verifier paired with the authorization request challenge"
     },
     "nonce": {
+      "policy": "provider_scoped",
+      "global_positive_requirement": false,
+      "positive_requirements_require_compatibility_scope": true,
       "required": false,
       "exposed_by_pinned_browser_flow": false,
       "scope": "pinned Nous browser OAuth flow only",

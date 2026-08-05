@@ -16,7 +16,7 @@ The audit records typed source observations for the pinned revision:
 - The pinned Nous browser flow does not include an OAuth/OIDC `nonce` authorization parameter. This no-nonce statement is scoped to the pinned Nous flow. A separately reviewed OIDC provider MAY require and validate nonce when its compatibility record says so.
 - `hermes_cli/dashboard_auth/cookies.py` calls the state value a CSRF nonce in a source comment. That label is not a provider `nonce` parameter and does not expand the pinned Nous browser contract.
 
-The source observations are checked against the supplied immutable excerpts in [`source_excerpts/`](source_excerpts/) and their commit-pinned SHA-256 values. The validator does not treat `source_audit.json` metadata alone as source evidence.
+The source observations are checked against the supplied immutable excerpts in [`source_excerpts/`](source_excerpts/), their commit-pinned SHA-256 values, and the pinned Hermes Git tree/blob IDs. `source_audit.json` must contain exactly one reference for each expected path, with an exact path-to-excerpt and path-to-URL mapping. URLs are parsed and must use the public `github.com` host, the pinned commit, the expected path, and no userinfo, query, fragment, or path parameters. The validator does not treat `source_audit.json` metadata alone as source evidence.
 
 ## Fixture cases
 
@@ -29,7 +29,7 @@ The source observations are checked against the supplied immutable excerpts in [
 - provider cancellation; and
 - a malformed callback with an empty code.
 
-The authorization parameters are nested under `authorization_request.params` to mirror the provider's outbound query map. The provider exchange records the exact `code_verifier` passed by the callback route. Mutation regressions reject a wrong nested state, a wrong exchange verifier, a nested nonce, or a false source observation.
+The authorization parameters are nested under `authorization_request.params` to mirror the provider's outbound query map. The provider exchange records the exact `code_verifier` passed by the callback route. Every cookie, authorization parameter, callback value, and exchange value follows an explicit synthetic or protocol-literal schema; live-looking values such as `ghp_live_*` are rejected. Mutation regressions reject duplicate or misbound source refs, wrong URL paths, wrong nested state, wrong exchange verifier, live credential-shaped values, a nested nonce, or a false source observation.
 
 Failure cases fail closed: no session cookie is issued and the provider exchange is not treated as successful. The source clears the short-lived PKCE cookie on success; rejected callbacks do not create a session and require a fresh login attempt.
 
@@ -42,5 +42,7 @@ python3 contracts/fixtures/source-audit/oauth-browser/test_oauth_browser.py
 ```
 
 The test prints the measured fixture-validation duration and JSON artifact size as baseline evidence. These values are observations only; this issue does not define a performance threshold. The test is offline and deterministic apart from the reported wall-clock duration.
+
+The normative nonce policy is structured as provider-scoped data: there is no global positive nonce requirement, and a positive requirement must name the reviewed compatibility scope. The documentation guard rejects unscoped positive language such as `MUST enforce a nonce for every provider`.
 
 This fixture set is source-audit evidence, not production authentication code. Do not add live integration, Apple-specific behavior, `.superdesign/` output, or real provider material here.
