@@ -128,6 +128,8 @@ _H2_RE = re.compile(r"^## (.+)$")
 _H3_RE = re.compile(r"^### (.+)$")
 _CHECKBOX_RE = re.compile(r"^- \[([ xX])\] (.*)$")
 _FIELD_BULLET_RE = re.compile(r"^\s*-\s+(.+)$")
+_FENCE_CANDIDATE_RE = re.compile(r"^( {0,3})([`~]{3,})(.*)$")
+_FENCE_CLOSE_RE = re.compile(r"^( {0,3})([`~]{3,})[ \t]*$")
 
 
 @dataclass(frozen=True)
@@ -150,10 +152,34 @@ class SourceLine:
 
 
 @dataclass(frozen=True)
+class MarkdownLine:
+    """One source line after the stateful comment and fence scan."""
+
+    source: SourceLine
+    text: str
+    hidden: bool
+    fence_role: Optional[str] = None
+    fence_char: Optional[str] = None
+    fence_length: Optional[int] = None
+    fence_info: str = ""
+
+
+@dataclass(frozen=True)
 class Heading:
     title: Optional[str]
     line: SourceLine
     kind: str
+
+
+@dataclass(frozen=True)
+class Fence:
+    char: str
+    length: int
+    info: str
+
+
+class _CliArgumentError(ValueError):
+    """Raised without argparse printing usage before structured JSON output."""
 
 
 def _error(code: str, line: Optional[int], message: str) -> ValidationError:
@@ -185,22 +211,104 @@ def _split_lines(text: str) -> Tuple[List[SourceLine], set[str], bool]:
     return result, endings, final_newline
 
 
-def _is_fence_line(text: str) -> bool:
-    return text.startswith("```")
+def _strip_html_comments(text: str, in_comment: bool) -> Tuple[str, bool]:
+    """Remove HTML comments while preserving visible text before and after them."""
+
+    visible: List[str] = []
+    position = 0
+    while position < len(text):
+        if in_comment:
+            close = text.find("-->", position)
+            if close < 0:
+                return "".join(visible), True
+            position = close + 3
+            in_comment = False
+            continue
+
+        opening = text.find("<!--", position)
+        if opening < 0:
+            visible.append(text[position:])
+            break
+        visible.append(text[position:opening])
+        position = opening + 4
+        in_comment = True
+    return "".join(visible), in_comment
 
 
-def _fenced_line_numbers(lines: Sequence[SourceLine]) -> set[int]:
-    """Mark code-fence contents so decoy headings and fields do not validate."""
+def _parse_fence_open(text: str) -> Optional[Fence]:
+    match = _FENCE_CANDIDATE_RE.fullmatch(text)
+    if not match:
+        return None
+    run, info = match.group(2), match.group(3)
+    if len(set(run)) != 1:
+        return None
+    return Fence(char=run[0], length=len(run), info=info)
 
-    fenced: set[int] = set()
-    in_fence = False
+
+def _parse_fence_close(text: str, fence: Fence) -> bool:
+    match = _FENCE_CLOSE_RE.fullmatch(text)
+    if not match:
+        return False
+    run = match.group(2)
+    return len(set(run)) == 1 and run[0] == fence.char and len(run) >= fence.length
+
+
+def _scan_markdown(lines: Sequence[SourceLine]) -> List[MarkdownLine]:
+    """Scan comments and arbitrary backtick/tilde fences in one stateful pass.
+
+    A full-document scan is required: slicing a section and rescanning it would
+    lose whether that slice starts inside a multiline HTML comment or fence.
+    Visible fence delimiters are retained for the section-8 command contract;
+    all fence contents and comment contents are hidden from structural checks.
+    """
+
+    scanned: List[MarkdownLine] = []
+    in_comment = False
+    active_fence: Optional[Fence] = None
+
     for source_line in lines:
-        if _is_fence_line(source_line.text):
-            fenced.add(source_line.number)
-            in_fence = not in_fence
-        elif in_fence:
-            fenced.add(source_line.number)
-    return fenced
+        if active_fence is not None:
+            if _parse_fence_close(source_line.text, active_fence):
+                scanned.append(
+                    MarkdownLine(
+                        source=source_line,
+                        text=source_line.text,
+                        hidden=False,
+                        fence_role="close",
+                        fence_char=active_fence.char,
+                        fence_length=len(
+                            _FENCE_CLOSE_RE.fullmatch(source_line.text).group(2)  # type: ignore[union-attr]
+                        ),
+                    )
+                )
+                active_fence = None
+            else:
+                scanned.append(MarkdownLine(source=source_line, text="", hidden=True))
+            continue
+
+        visible_text, in_comment = _strip_html_comments(source_line.text, in_comment)
+        opening = _parse_fence_open(visible_text)
+        if opening is not None:
+            scanned.append(
+                MarkdownLine(
+                    source=source_line,
+                    text=visible_text,
+                    hidden=False,
+                    fence_role="open",
+                    fence_char=opening.char,
+                    fence_length=opening.length,
+                    fence_info=opening.info,
+                )
+            )
+            active_fence = opening
+            continue
+
+        comment_only = bool(source_line.text.strip()) and not visible_text.strip()
+        scanned.append(
+            MarkdownLine(source=source_line, text=visible_text, hidden=comment_only)
+        )
+
+    return scanned
 
 
 def _front_matter_end(lines: Sequence[SourceLine]) -> Optional[int]:
@@ -345,9 +453,6 @@ def _validate_front_matter(lines: Sequence[SourceLine]) -> List[ValidationError]
             )
         )
 
-    # A second delimiter block is never valid in this fixed scaffold. This
-    # catches a duplicated whole front matter block without treating its fields
-    # as unrelated document prose.
     for source_line in lines[end + 1 :]:
         if source_line.text == "---":
             errors.append(
@@ -362,17 +467,17 @@ def _validate_front_matter(lines: Sequence[SourceLine]) -> List[ValidationError]
 
 
 def _collect_headings(
-    lines: Sequence[SourceLine],
+    scanned: Sequence[MarkdownLine],
 ) -> Tuple[List[Heading], List[Heading], List[ValidationError]]:
     h2: List[Heading] = []
     h3: List[Heading] = []
     errors: List[ValidationError] = []
-    fenced = _fenced_line_numbers(lines)
 
-    for source_line in lines:
-        if source_line.number in fenced:
+    for scanned_line in scanned:
+        if scanned_line.hidden or scanned_line.fence_role is not None:
             continue
-        text = source_line.text
+        source_line = scanned_line.source
+        text = scanned_line.text
         if text.startswith("# "):
             title = text[2:]
             if title in SECTIONS:
@@ -415,7 +520,7 @@ def _collect_headings(
                             "A section heading must use level two, not level three.",
                         )
                     )
-                h3.append(Heading(title=match.group(1), line=source_line, kind="h3"))
+                h3.append(Heading(match.group(1), source_line, "h3"))
             else:
                 h3.append(Heading(title=None, line=source_line, kind="h3"))
                 errors.append(
@@ -482,11 +587,10 @@ def _validate_h2_sections(h2: Sequence[Heading]) -> List[ValidationError]:
             for index, (actual, expected_title) in enumerate(zip(observed, expected))
             if actual != expected_title
         )
-        heading = h2[first_difference]
         errors.append(
             _error(
                 "section-reordered",
-                heading.line.number,
+                h2[first_difference].line.number,
                 "The ten level-two sections must remain in the canonical order.",
             )
         )
@@ -494,41 +598,52 @@ def _validate_h2_sections(h2: Sequence[Heading]) -> List[ValidationError]:
 
 
 def _section_ranges(
-    h2: Sequence[Heading], lines: Sequence[SourceLine]
-) -> Iterable[Tuple[Heading, Sequence[SourceLine]]]:
+    h2: Sequence[Heading], scanned: Sequence[MarkdownLine]
+) -> Iterable[Tuple[Heading, Sequence[MarkdownLine]]]:
     for index, heading in enumerate(h2):
-        end = h2[index + 1].line.number - 1 if index + 1 < len(h2) else len(lines)
-        yield heading, lines[heading.line.number : end]
+        end = h2[index + 1].line.number - 1 if index + 1 < len(h2) else len(scanned)
+        yield heading, scanned[heading.line.number : end]
 
 
 def _validate_subsections_and_fields(
-    h2: Sequence[Heading], lines: Sequence[SourceLine]
+    h2: Sequence[Heading], scanned: Sequence[MarkdownLine]
 ) -> List[ValidationError]:
     errors: List[ValidationError] = []
-    for heading, body in _section_ranges(h2, lines):
+    for heading, body in _section_ranges(h2, scanned):
         title = heading.title
         if title is None or title not in SECTIONS:
             continue
         expected_subsections = list(SUBSECTIONS.get(title, ()))
         expected_fields = list(FIELDS.get(title, ()))
-        fenced = _fenced_line_numbers(body)
+        visible_body = [
+            line
+            for line in body
+            if not line.hidden and line.fence_role is None
+        ]
 
         observed_subsections: List[Heading] = []
-        for source_line in body:
-            if source_line.number in fenced or not source_line.text.startswith("###"):
+        subsection_errors: List[ValidationError] = []
+        for scanned_line in visible_body:
+            text = scanned_line.text
+            if not text.startswith("###"):
                 continue
-            match = _H3_RE.fullmatch(source_line.text)
-            if match and not source_line.text.startswith("####"):
-                observed_subsections.append(Heading(match.group(1), source_line, "h3"))
+            match = _H3_RE.fullmatch(text)
+            if match and not text.startswith("####") and match.group(1) == match.group(1).rstrip():
+                observed_subsections.append(Heading(match.group(1), scanned_line.source, "h3"))
             else:
-                observed_subsections.append(Heading(None, source_line, "h3"))
+                observed_subsections.append(Heading(None, scanned_line.source, "h3"))
+                subsection_errors.append(
+                    _error(
+                        "subsection-malformed",
+                        scanned_line.source.number,
+                        "Level-three headings must use exactly `### ` followed by the subsection title.",
+                    )
+                )
 
         if expected_subsections:
             for subsection in observed_subsections:
-                if subsection.title is None:
-                    continue
-                if subsection.title not in expected_subsections:
-                    errors.append(
+                if subsection.title is not None and subsection.title not in expected_subsections:
+                    subsection_errors.append(
                         _error(
                             "subsection-unknown",
                             subsection.line.number,
@@ -542,7 +657,7 @@ def _validate_subsections_and_fields(
             for name in expected_subsections:
                 matches = locations[name]
                 if not matches:
-                    errors.append(
+                    subsection_errors.append(
                         _error(
                             "subsection-missing",
                             heading.line.number,
@@ -551,7 +666,7 @@ def _validate_subsections_and_fields(
                     )
                 elif len(matches) > 1:
                     for duplicate in matches[1:]:
-                        errors.append(
+                        subsection_errors.append(
                             _error(
                                 "subsection-duplicate",
                                 duplicate.line.number,
@@ -559,20 +674,13 @@ def _validate_subsections_and_fields(
                             )
                         )
             observed_names = [item.title for item in observed_subsections if item.title is not None]
-            section_structure_error = any(
-                error.code
-                in {"subsection-missing", "subsection-duplicate", "subsection-unknown"}
-                and error.line is not None
-                and error.line >= heading.line.number
-                for error in errors
-            )
-            if not section_structure_error and observed_names != expected_subsections:
+            if not subsection_errors and observed_names != expected_subsections:
                 first_difference = next(
                     index
                     for index, (actual, expected_name) in enumerate(zip(observed_names, expected_subsections))
                     if actual != expected_name
                 )
-                errors.append(
+                subsection_errors.append(
                     _error(
                         "subsection-reordered",
                         observed_subsections[first_difference].line.number,
@@ -581,30 +689,30 @@ def _validate_subsections_and_fields(
                 )
         elif observed_subsections:
             for subsection in observed_subsections:
-                errors.append(
+                subsection_errors.append(
                     _error(
                         "subsection-unknown",
                         subsection.line.number,
                         f"Section `{title}` does not allow subsections.",
                     )
                 )
+        errors.extend(subsection_errors)
 
         field_records: List[Tuple[str, SourceLine]] = []
-        for source_line in body:
-            if source_line.number in fenced:
-                continue
-            match = _FIELD_BULLET_RE.fullmatch(source_line.text)
+        field_errors: List[ValidationError] = []
+        for scanned_line in visible_body:
+            match = _FIELD_BULLET_RE.fullmatch(scanned_line.text)
             if not match:
                 continue
             bullet = match.group(1)
             if ":" in bullet:
                 label = bullet.split(":", 1)[0].strip()
-                field_records.append((label, source_line))
+                field_records.append((label, scanned_line.source))
                 if label not in expected_fields:
-                    errors.append(
+                    field_errors.append(
                         _error(
                             "field-unknown",
-                            source_line.number,
+                            scanned_line.source.number,
                             f"Unknown field `{label}` in `{title}`.",
                         )
                     )
@@ -612,103 +720,97 @@ def _validate_subsections_and_fields(
                 bullet == expected or bullet.startswith(expected + " ")
                 for expected in expected_fields
             ):
-                errors.append(
+                field_errors.append(
                     _error(
                         "field-malformed",
-                        source_line.number,
+                        scanned_line.source.number,
                         "Required fields must use `- Label: value` syntax.",
                     )
                 )
 
-        if not expected_fields:
-            continue
+        if expected_fields:
+            locations = {name: [] for name in expected_fields}
+            for label, source_line in field_records:
+                if label in locations:
+                    locations[label].append(source_line)
+            for name in expected_fields:
+                matches = locations[name]
+                if not matches:
+                    field_errors.append(
+                        _error(
+                            "field-missing",
+                            heading.line.number,
+                            f"Required field `{name}` is missing from `{title}`.",
+                        )
+                    )
+                elif len(matches) > 1:
+                    for duplicate in matches[1:]:
+                        field_errors.append(
+                            _error(
+                                "field-duplicate",
+                                duplicate.number,
+                                f"Field `{name}` appears more than once in `{title}`.",
+                            )
+                        )
 
-        locations: Dict[str, List[SourceLine]] = {name: [] for name in expected_fields}
-        for label, source_line in field_records:
-            if label in locations:
-                locations[label].append(source_line)
-        for name in expected_fields:
-            matches = locations[name]
-            if not matches:
-                errors.append(
+            observed_fields = [label for label, _ in field_records if label in expected_fields]
+            if not field_errors and observed_fields != expected_fields:
+                first_difference = next(
+                    index
+                    for index, (actual, expected_name) in enumerate(zip(observed_fields, expected_fields))
+                    if actual != expected_name
+                )
+                field_errors.append(
                     _error(
-                        "field-missing",
-                        heading.line.number,
-                        f"Required field `{name}` is missing from `{title}`.",
+                        "field-reordered",
+                        locations[observed_fields[first_difference]][0].number,
+                        f"Fields in `{title}` must remain in the canonical order.",
                     )
                 )
-            elif len(matches) > 1:
-                for duplicate in matches[1:]:
-                    errors.append(
-                        _error(
-                            "field-duplicate",
-                            duplicate.number,
-                            f"Field `{name}` appears more than once in `{title}`.",
-                        )
-                    )
 
-        observed_fields = [label for label, _ in field_records if label in expected_fields]
-        field_structure_error = any(
-            error.code in {"field-missing", "field-duplicate", "field-unknown", "field-malformed"}
-            and error.line is not None
-            and error.line >= heading.line.number
-            for error in errors
-        )
-        if not field_structure_error and observed_fields != expected_fields:
-            first_difference = next(
-                index
-                for index, (actual, expected_name) in enumerate(zip(observed_fields, expected_fields))
-                if actual != expected_name
-            )
-            errors.append(
-                _error(
-                    "field-reordered",
-                    locations[observed_fields[first_difference]][0].number,
-                    f"Fields in `{title}` must remain in the canonical order.",
-                )
-            )
-
-        if title == "4. Paper evidence":
-            for paper_line in locations.get("Paper file", []):
-                value = paper_line.text.split(":", 1)[1].strip()
-                if value != PAPER_URL:
-                    errors.append(
-                        _error(
-                            "paper-url",
-                            paper_line.number,
-                            f"`Paper file` must use the canonical URL `{PAPER_URL}`.",
+            if title == "4. Paper evidence":
+                for paper_line in locations.get("Paper file", []):
+                    value = paper_line.text.split(":", 1)[1].strip()
+                    if value != PAPER_URL:
+                        field_errors.append(
+                            _error(
+                                "paper-url",
+                                paper_line.number,
+                                f"`Paper file` must use the canonical URL `{PAPER_URL}`.",
+                            )
                         )
-                    )
+        errors.extend(field_errors)
     return errors
 
 
 def _validate_command_fence(
-    h2: Sequence[Heading], lines: Sequence[SourceLine]
+    h2: Sequence[Heading], scanned: Sequence[MarkdownLine]
 ) -> List[ValidationError]:
     errors: List[ValidationError] = []
     target = next((heading for heading in h2 if heading.title == "8. Verification commands"), None)
     if target is None:
         return errors
-    body = next((body for heading, body in _section_ranges(h2, lines) if heading is target), ())
-    fence_lines = [line for line in body if line.text.startswith("```")]
-    openings = [line for line in fence_lines if line.text == "```text"]
-    closings = [line for line in fence_lines if line.text == "```"]
-    malformed = [line for line in fence_lines if line.text not in {"```text", "```"}]
-
-    for line in malformed:
-        errors.append(
-            _error(
-                "command-fence-malformed",
-                line.number,
-                "The verification block must open with exactly ```text and close with exactly ```.",
+    body = next((body for heading, body in _section_ranges(h2, scanned) if heading is target), ())
+    visible_openings = [
+        line for line in body if not line.hidden and line.fence_role == "open"
+    ]
+    openings = [line for line in visible_openings if line.text == "```text"]
+    for line in visible_openings:
+        if line.text != "```text":
+            errors.append(
+                _error(
+                    "command-fence-malformed",
+                    line.source.number,
+                    "The verification block must open with exactly ```text and close with exactly ```.",
+                )
             )
-        )
+
     if not openings:
         errors.append(
             _error(
                 "command-fence-missing",
                 target.line.number,
-                "Section 8 must contain one fenced block with the `text` language.",
+                "Section 8 must contain one visible fenced block with the `text` language.",
             )
         )
         return errors
@@ -717,62 +819,67 @@ def _validate_command_fence(
             errors.append(
                 _error(
                     "command-fence-duplicate",
-                    duplicate.number,
-                    "Section 8 may contain only one command fence.",
+                    duplicate.source.number,
+                    "Section 8 may contain only one visible command fence.",
                 )
             )
+
     opening = openings[0]
-    following_closings = [line for line in closings if line.number > opening.number]
-    if not following_closings:
+    closing = next(
+        (
+            line
+            for line in body
+            if line.source.number > opening.source.number and line.fence_role == "close"
+        ),
+        None,
+    )
+    if closing is None:
         errors.append(
             _error(
                 "command-fence-unclosed",
-                opening.number,
-                "The section 8 command fence is not closed.",
+                opening.source.number,
+                "The visible section 8 command fence is not closed.",
             )
         )
         return errors
-    closing = following_closings[0]
-    if len(following_closings) > 1:
-        for duplicate in following_closings[1:]:
-            errors.append(
-                _error(
-                    "command-fence-duplicate",
-                    duplicate.number,
-                    "Section 8 may contain only one command fence.",
-                )
-            )
-    body_lines = [line.text for line in body if opening.number < line.number < closing.number]
+
+    body_lines = [
+        line.source.text
+        for line in body
+        if opening.source.number < line.source.number < closing.source.number
+    ]
     if body_lines != [COMMAND_FENCE_BODY]:
         errors.append(
             _error(
                 "command-fence-content",
-                body[0].number if body else target.line.number,
-                "The text command fence must contain the canonical placeholder comment.",
+                opening.source.number,
+                "The visible text command fence must contain the canonical placeholder comment.",
             )
         )
     return errors
 
 
 def _validate_definition_of_done(
-    h2: Sequence[Heading], lines: Sequence[SourceLine]
+    h2: Sequence[Heading], scanned: Sequence[MarkdownLine]
 ) -> List[ValidationError]:
     errors: List[ValidationError] = []
     target = next((heading for heading in h2 if heading.title == "10. Definition of done"), None)
     if target is None:
         return errors
-    body = next((body for heading, body in _section_ranges(h2, lines) if heading is target), ())
+    body = next((body for heading, body in _section_ranges(h2, scanned) if heading is target), ())
     observed: List[Tuple[str, SourceLine, str]] = []
     malformed_lines: List[SourceLine] = []
-    for source_line in body:
-        text = source_line.text
-        if text.startswith("- [") or text.startswith("-"):
+    for scanned_line in body:
+        if scanned_line.hidden or scanned_line.fence_role is not None:
+            continue
+        text = scanned_line.text
+        if text.startswith("-"):
             match = _CHECKBOX_RE.fullmatch(text)
             if match:
                 state, item = match.groups()
-                observed.append((item, source_line, state))
+                observed.append((item, scanned_line.source, state))
             elif text.strip():
-                malformed_lines.append(source_line)
+                malformed_lines.append(scanned_line.source)
     for source_line in malformed_lines:
         errors.append(
             _error(
@@ -854,7 +961,9 @@ def _invalid_utf8_error(data: bytes, exc: UnicodeDecodeError) -> ValidationError
     )
 
 
-def _result(path: Union[str, Path], errors: Iterable[ValidationError]) -> Dict[str, object]:
+def _result(
+    path: Optional[Union[str, Path]], errors: Iterable[ValidationError]
+) -> Dict[str, object]:
     ordered = sorted(
         errors,
         key=lambda item: (
@@ -866,7 +975,7 @@ def _result(path: Union[str, Path], errors: Iterable[ValidationError]) -> Dict[s
     )
     return {
         "ok": not ordered,
-        "path": str(path),
+        "path": str(path) if path is not None else None,
         "errors": [item.as_dict() for item in ordered],
     }
 
@@ -883,12 +992,13 @@ def validate_bytes(data: bytes, path: Union[str, Path] = DEFAULT_TEMPLATE_PATH) 
     errors: List[ValidationError] = []
     errors.extend(_validate_line_endings(lines, endings, final_newline))
     errors.extend(_validate_front_matter(lines))
-    h2, _h3, heading_errors = _collect_headings(lines)
+    scanned = _scan_markdown(lines)
+    h2, _h3, heading_errors = _collect_headings(scanned)
     errors.extend(heading_errors)
     errors.extend(_validate_h2_sections(h2))
-    errors.extend(_validate_subsections_and_fields(h2, lines))
-    errors.extend(_validate_command_fence(h2, lines))
-    errors.extend(_validate_definition_of_done(h2, lines))
+    errors.extend(_validate_subsections_and_fields(h2, scanned))
+    errors.extend(_validate_command_fence(h2, scanned))
+    errors.extend(_validate_definition_of_done(h2, scanned))
     return _result(path, errors)
 
 
@@ -924,8 +1034,15 @@ def validate(path: Union[str, Path] = DEFAULT_TEMPLATE_PATH) -> Dict[str, object
     return validate_file(path)
 
 
+class _JsonArgumentParser(argparse.ArgumentParser):
+    """Keep parse failures on the validator's one-object JSON output path."""
+
+    def error(self, message: str) -> None:
+        raise _CliArgumentError(message)
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _JsonArgumentParser(description=__doc__)
     parser.add_argument(
         "path",
         nargs="?",
@@ -935,12 +1052,39 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = _parser().parse_args(argv)
-    result = validate_file(args.path)
+def _write_result(result: Dict[str, object]) -> None:
     json.dump(result, sys.stdout, ensure_ascii=False, sort_keys=True)
     sys.stdout.write("\n")
-    return 0 if bool(result["ok"]) else 1
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    try:
+        args = _parser().parse_args(argv)
+        result = validate_file(args.path)
+        _write_result(result)
+        return 0 if bool(result["ok"]) else 1
+    except _CliArgumentError as exc:
+        _write_result(
+            _result(
+                None,
+                [_error("cli-arguments", None, f"Invalid command-line arguments: {exc}")],
+            )
+        )
+        return 2
+    except Exception as exc:  # pragma: no cover - defensive CLI boundary.
+        _write_result(
+            _result(
+                None,
+                [
+                    _error(
+                        "cli-failure",
+                        None,
+                        f"Validator failed without a traceback: {type(exc).__name__}: {exc}",
+                    )
+                ],
+            )
+        )
+        return 1
 
 
 if __name__ == "__main__":

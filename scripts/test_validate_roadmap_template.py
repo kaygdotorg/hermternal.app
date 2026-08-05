@@ -289,6 +289,99 @@ class RoadmapTemplateValidationTests(unittest.TestCase):
         self.assertCode(result, "invalid-utf8")
         self.assertEqual(result["errors"][0]["line"], 4)
 
+    def test_multiline_html_comments_hide_all_structural_content(self) -> None:
+        hidden = (
+            "<!--\n"
+            "## 0. Hidden section\n"
+            "### Hidden subsection\n"
+            "- Hidden: field\n"
+            "```text\n"
+            "# Add exact commands and expected artifacts.\n"
+            "```\n"
+            "-->\n"
+        )
+        mutated = self.replace_once(
+            self.template_text,
+            "## 1. One operation\n",
+            hidden + "## 1. One operation\n",
+        )
+        result = self.result(mutated)
+        self.assertTrue(result["ok"], result)
+
+    def test_backtick_and_tilde_fences_hide_structural_content(self) -> None:
+        backtick = (
+            "```\n"
+            "## 0. Hidden section\n"
+            "### Hidden subsection\n"
+            "- Hidden: field\n"
+            "- [ ] hidden DoD\n"
+            "```\n"
+        )
+        tilde = (
+            "~~~~markdown\n"
+            "## 0. Hidden tilde section\n"
+            "### Hidden tilde subsection\n"
+            "- Hidden: tilde field\n"
+            "- [ ] hidden tilde DoD\n"
+            "~~~~\n"
+        )
+        mutated = self.replace_once(
+            self.template_text,
+            "## 1. One operation\n",
+            backtick + tilde + "## 1. One operation\n",
+        )
+        result = self.result(mutated)
+        self.assertTrue(result["ok"], result)
+
+    def test_hidden_dod_checkboxes_do_not_count(self) -> None:
+        hidden = "<!--\n- [ ] The one operation is complete.\n- [ ] Hidden DoD.\n-->\n"
+        mutated = self.replace_once(
+            self.template_text,
+            "## 10. Definition of done\n",
+            "## 10. Definition of done\n" + hidden,
+        )
+        result = self.result(mutated)
+        self.assertTrue(result["ok"], result)
+
+    def test_hidden_command_fence_is_ignored_but_visible_fence_is_required(self) -> None:
+        hidden = (
+            "<!--\n"
+            "```text\n"
+            "# Add exact commands and expected artifacts.\n"
+            "```\n"
+            "-->\n"
+        )
+        with_visible = self.replace_once(
+            self.template_text,
+            "## 8. Verification commands\n",
+            "## 8. Verification commands\n" + hidden,
+        )
+        result = self.result(with_visible)
+        self.assertTrue(result["ok"], result)
+
+        without_visible = self.replace_once(
+            with_visible,
+            hidden + "\n```text\n# Add exact commands and expected artifacts.\n```\n",
+            hidden + "\n",
+        )
+        self.assertCode(self.result(without_visible), "command-fence-missing")
+
+    def test_unknown_cli_args_emit_one_json_object_without_traceback(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "--unknown-flag"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stderr, "")
+        self.assertNotIn("Traceback", completed.stdout + completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["path"], None)
+        self.assertEqual(payload["errors"][0]["code"], "cli-arguments")
+
 
 if __name__ == "__main__":
     unittest.main()
