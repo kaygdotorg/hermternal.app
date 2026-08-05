@@ -8,55 +8,66 @@
     "refs": [
       {
         "path": "hermes_cli/dashboard_auth/routes.py",
-        "symbols": ["auth_login", "auth_callback"],
+        "excerpt": "source_excerpts/routes_auth.py.txt",
+        "excerpt_sha256": "7a748fc29acee3d055049f0b1a12bba9e7d8aa13bc4852827888a0ebaaa507b4",
         "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/routes.py",
-        "observations": [
-          "auth_login calls provider.start_login and stores provider, state, and verifier in hermes_session_pkce",
-          "auth_callback rejects a missing PKCE cookie, provider error, missing state, and mismatched state",
-          "auth_callback passes the stored verifier as code_verifier to provider.complete_login",
-          "auth_callback sets session cookies and clears the PKCE cookie only after a successful provider exchange"
-        ]
+        "observations": {
+          "password_provider_short_circuits_oauth_start": true,
+          "oauth_start_returns_state_and_verifier_cookie_payload": true,
+          "callback_rejects_missing_or_mismatched_state_before_exchange": true,
+          "callback_passes_cookie_verifier_to_complete_login": true,
+          "callback_issues_and_clears_session_only_after_exchange": true
+        }
       },
       {
         "path": "plugins/dashboard_auth/nous/__init__.py",
-        "symbols": [
-          "NousDashboardAuthProvider.start_login",
-          "NousDashboardAuthProvider.complete_login"
-        ],
+        "excerpt": "source_excerpts/nous_provider.py.txt",
+        "excerpt_sha256": "7cc9ddc1f29753a15858b1072a814c7472b31b9d48b9344e0a49406c0a4fc01d",
         "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/plugins/dashboard_auth/nous/__init__.py",
-        "observations": [
-          "start_login creates state and a PKCE verifier/challenge pair",
-          "start_login sends state, code_challenge, and code_challenge_method=S256",
-          "start_login returns state and verifier in the PKCE cookie payload",
-          "complete_login sends code_verifier to the authorization-code token exchange",
-          "the browser provider flow does not expose a separate nonce"
-        ]
+        "observations": {
+          "authorization_params_include_state": true,
+          "authorization_params_include_s256_pkce": true,
+          "authorization_params_exclude_nonce": true,
+          "cookie_payload_contains_state_and_verifier": true,
+          "token_exchange_sends_code_verifier": true
+        }
       },
       {
         "path": "hermes_cli/dashboard_auth/cookies.py",
-        "symbols": ["set_pkce_cookie", "read_pkce_cookie", "clear_pkce_cookie"],
+        "excerpt": "source_excerpts/cookies.py.txt",
+        "excerpt_sha256": "4061f5e075fee015151a14ab75c7b77661400bb2ec0fa402559c0d49cae36f3e",
         "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/cookies.py",
-        "observations": [
-          "the PKCE cookie is short-lived with a ten-minute maximum age",
-          "the PKCE cookie is HttpOnly and SameSite=Lax and is Secure for HTTPS requests"
-        ]
+        "observations": {
+          "pkce_cookie_is_short_lived": true,
+          "pkce_cookie_is_http_only_lax_and_secure_for_https": true,
+          "csrf_nonce_label_is_state_not_provider_nonce": true
+        }
       }
     ]
   },
   "requirements": {
+    "scope": "pinned Nous browser OAuth flow only",
     "state": {
       "required": true,
       "comparison": "callback state must equal the state stored in the server-managed PKCE cookie"
     },
     "pkce": {
       "required": true,
+      "applies_to": "reviewed OAuth or OIDC browser providers only",
       "method": "S256",
       "comparison": "the provider exchange receives the verifier paired with the authorization request challenge"
     },
     "nonce": {
       "required": false,
       "exposed_by_pinned_browser_flow": false,
-      "reason": "the pinned browser flow exposes state and PKCE, but no separate nonce"
+      "scope": "pinned Nous browser OAuth flow only",
+      "reviewed_oidc_providers": "may require nonce only when their compatibility record says so"
+    },
+    "password_provider": {
+      "supports_password": true,
+      "oauth_state_required": false,
+      "pkce_required": false,
+      "reason": "auth_login returns before provider.start_login for a password provider"
     }
   },
   "failure_semantics": {
@@ -66,6 +77,15 @@
     "pkce_or_code_rejection": "reject callback without a session cookie",
     "malformed_callback": "fail closed without a session cookie",
     "retry": "start a fresh login attempt"
+  },
+  "redaction": {
+    "synthetic_cookie_shaped_values": true,
+    "public_source_urls": true,
+    "live_secrets": false,
+    "live_cookie_contents": false,
+    "live_host_data": false,
+    "transcripts": false,
+    "user_data": false
   },
   "synthetic_only": true,
   "network_access": false,

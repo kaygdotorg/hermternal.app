@@ -3,6 +3,7 @@
   "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
   "contract": "dashboard-v0.0.1",
   "provider": "synthetic-oauth",
+  "provider_mode": "reviewed_oauth_browser",
   "cases": [
     {
       "id": "success",
@@ -13,8 +14,15 @@
           "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
         },
         "authorization_request": {
-          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
-          "code_challenge_method": "S256"
+          "params": {
+            "response_type": "code",
+            "client_id": "fixture-client",
+            "redirect_uri": "fixture-redirect-uri",
+            "scope": "fixture-scope",
+            "state": "fixture-state-success",
+            "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+            "code_challenge_method": "S256"
+          }
         },
         "callback": {
           "code": "fixture-code-success",
@@ -23,6 +31,7 @@
       },
       "provider_exchange": {
         "called": true,
+        "code_verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz",
         "verifier_result": "accepted"
       },
       "expected": {
@@ -42,8 +51,15 @@
           "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
         },
         "authorization_request": {
-          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
-          "code_challenge_method": "S256"
+          "params": {
+            "response_type": "code",
+            "client_id": "fixture-client",
+            "redirect_uri": "fixture-redirect-uri",
+            "scope": "fixture-scope",
+            "state": "fixture-state-expected",
+            "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+            "code_challenge_method": "S256"
+          }
         },
         "callback": {
           "code": "fixture-code-state-mismatch",
@@ -52,6 +68,7 @@
       },
       "provider_exchange": {
         "called": false,
+        "code_verifier": null,
         "verifier_result": "not_attempted"
       },
       "expected": {
@@ -71,8 +88,15 @@
           "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
         },
         "authorization_request": {
-          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
-          "code_challenge_method": "S256"
+          "params": {
+            "response_type": "code",
+            "client_id": "fixture-client",
+            "redirect_uri": "fixture-redirect-uri",
+            "scope": "fixture-scope",
+            "state": "fixture-state-required",
+            "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+            "code_challenge_method": "S256"
+          }
         },
         "callback": {
           "code": "fixture-code-missing-state",
@@ -81,6 +105,7 @@
       },
       "provider_exchange": {
         "called": false,
+        "code_verifier": null,
         "verifier_result": "not_attempted"
       },
       "expected": {
@@ -100,8 +125,15 @@
           "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
         },
         "authorization_request": {
-          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
-          "code_challenge_method": "S256"
+          "params": {
+            "response_type": "code",
+            "client_id": "fixture-client",
+            "redirect_uri": "fixture-redirect-uri",
+            "scope": "fixture-scope",
+            "state": "fixture-state-pkce-failure",
+            "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+            "code_challenge_method": "S256"
+          }
         },
         "callback": {
           "code": "fixture-code-pkce-failure",
@@ -110,6 +142,7 @@
       },
       "provider_exchange": {
         "called": true,
+        "code_verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz",
         "verifier_result": "rejected"
       },
       "expected": {
@@ -129,8 +162,15 @@
           "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
         },
         "authorization_request": {
-          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
-          "code_challenge_method": "S256"
+          "params": {
+            "response_type": "code",
+            "client_id": "fixture-client",
+            "redirect_uri": "fixture-redirect-uri",
+            "scope": "fixture-scope",
+            "state": "fixture-state-cancelled",
+            "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+            "code_challenge_method": "S256"
+          }
         },
         "callback": {
           "code": "",
@@ -141,6 +181,7 @@
       },
       "provider_exchange": {
         "called": false,
+        "code_verifier": null,
         "verifier_result": "not_attempted"
       },
       "expected": {
@@ -160,8 +201,15 @@
           "verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
         },
         "authorization_request": {
-          "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
-          "code_challenge_method": "S256"
+          "params": {
+            "response_type": "code",
+            "client_id": "fixture-client",
+            "redirect_uri": "fixture-redirect-uri",
+            "scope": "fixture-scope",
+            "state": "fixture-state-malformed",
+            "code_challenge": "TP0rVOmoJf4JplDeSf9S7nomIEzsle1JbDYhGfOTT0Y",
+            "code_challenge_method": "S256"
+          }
         },
         "callback": {
           "code": "",
@@ -170,6 +218,7 @@
       },
       "provider_exchange": {
         "called": true,
+        "code_verifier": "synthetic-verifier-0123456789abcdefghijklmnopqrstuvwxyz",
         "verifier_result": "rejected_empty_code"
       },
       "expected": {

@@ -1,0 +1,17 @@
+# hermes_session_pkce: short-lived PKCE state + CSRF nonce + provider
+# hint (HttpOnly, lifetime = 10 minutes)
+
+PKCE_COOKIE = "hermes_session_pkce"
+
+_PKCE_MAX_AGE = 10 * 60
+
+
+def _common_attrs(*, use_https: bool, prefix: str) -> dict:
+    attrs: dict = {
+        "httponly": True,
+        "samesite": "lax",
+        "path": _cookie_path(prefix),
+    }
+    if use_https:
+        attrs["secure"] = True
+    return attrs
