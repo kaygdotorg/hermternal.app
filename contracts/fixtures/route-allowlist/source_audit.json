@@ -1,0 +1,418 @@
+{
+  "schema": "hermternal.source-audit.route-allowlist.v1",
+  "contract": "dashboard-v0.0.1",
+  "audit_id": "route-allowlist-c01-f5be9236",
+  "hermes_repository": "NousResearch/hermes-agent",
+  "hermes_repository_url": "https://github.com/NousResearch/hermes-agent",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "hermes_tree_sha": "886db5eb1150f819344d67fedc81aef0caab09ff",
+  "audit_scope": {
+    "purpose": "Freeze the reviewed Hermternal client Dashboard route, upgrade, JSON-RPC operation, and event allowlist from pinned source evidence.",
+    "source_inventory_complete": false,
+    "client_allowlist_complete": true,
+    "future_external_proxy_allowlist": "not_frozen",
+    "live_compatibility": false,
+    "integration_mode": "mock_and_proof_only",
+    "source_root_verification": "optional_git_checkout_or_content_only_snapshot",
+    "unknown_policy": "default_deny"
+  },
+  "source_citations": [
+    {
+      "id": "rest-auth-routes",
+      "path": "hermes_cli/dashboard_auth/routes.py",
+      "lines": [132, 894],
+      "markers": [
+        "@router.get(\"/login\"",
+        "@router.get(\"/api/auth/providers\"",
+        "@router.get(\"/auth/login\"",
+        "@router.get(\"/auth/native/authorize\"",
+        "@router.get(\"/auth/callback\"",
+        "@router.post(\"/auth/password-login\"",
+        "@router.post(\"/auth/logout\"",
+        "@router.get(\"/api/auth/me\"",
+        "@router.post(\"/api/auth/ws-ticket\"",
+        "@router.post(\"/auth/native/token\"",
+        "@router.post(\"/auth/native/refresh\"",
+        "/api/console"
+      ],
+      "sha256": "d42be557b9b1ba798c038c91246cba0bf046e89ebe34a27db0c7803c517e9c20",
+      "git_blob_sha": "0c142963bcc83f38fddbdcec29c35608f14f7bc1",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/routes.py",
+      "claim": "The selected authentication and identity REST route decorators are present; the ticket doc names additional source-sidecar upgrade paths that are not client allowlisted."
+    },
+    {
+      "id": "rest-session-routes",
+      "path": "hermes_cli/web_routers/sessions.py",
+      "lines": [50, 662],
+      "markers": [
+        "@list_router.get(\"/api/sessions\")",
+        "@search_router.get(\"/api/sessions/search\")",
+        "@manage_router.get(\"/api/sessions/{session_id}\")",
+        "@manage_router.get(\"/api/sessions/{session_id}/messages\")",
+        "@manage_router.patch(\"/api/sessions/{session_id}\")"
+      ],
+      "sha256": "f8debdab79430829245352ebdb7f50603c3a42c11d4609eb3287c35b9a2bf0ba",
+      "git_blob_sha": "c692d7b21e1ace3d5a9828c67caf2ee4aa561c4d",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_routers/sessions.py",
+      "claim": "The five selected session REST method/path pairs are present; neighboring source routes such as delete and latest-descendant remain outside the client allowlist."
+    },
+    {
+      "id": "rest-image-upload",
+      "path": "hermes_cli/web_server.py",
+      "lines": [2306, 2306],
+      "markers": ["@app.post(\"/api/chat/image-upload\")"],
+      "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+      "git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py",
+      "claim": "The selected image-only upload route is present. Arbitrary file, filesystem, and media routes are not granted by this evidence."
+    },
+    {
+      "id": "rest-model-options",
+      "path": "hermes_cli/web_server.py",
+      "lines": [6238, 6280],
+      "markers": ["@app.get(\"/api/model/options\")", "REST equivalent of the ``model.options`` JSON-RPC"],
+      "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+      "git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py",
+      "claim": "A source-present REST equivalent exists, but the focused client fixture freezes the JSON-RPC operation and does not add this REST transport to the Hermternal allowlist."
+    },
+    {
+      "id": "source-public-paths",
+      "path": "hermes_cli/dashboard_auth/public_paths.py",
+      "lines": [33, 60],
+      "markers": [
+        "PUBLIC_API_PATHS",
+        "\"/api/health\"",
+        "\"/api/status\"",
+        "\"/api/config/defaults\"",
+        "\"/api/config/schema\"",
+        "\"/api/model/info\"",
+        "\"/api/dashboard/themes\"",
+        "\"/api/dashboard/plugins\"",
+        "\"/api/cron/fire\""
+      ],
+      "sha256": "18dad29df79d0ee6111926249d859704b2afc61ffa974ae4589d3667c7fa02ce",
+      "git_blob_sha": "befedb1070a2bb193ffa292b8a87340aa8686f9b",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/public_paths.py",
+      "claim": "The pinned source's exact public API bypass inventory is recorded as source evidence; public does not mean client-approved."
+    },
+    {
+      "id": "source-public-prefixes",
+      "path": "hermes_cli/dashboard_auth/middleware.py",
+      "lines": [49, 85],
+      "markers": [
+        "_GATE_PUBLIC_PREFIXES",
+        "\"/api/mcp/oauth/callback/\"",
+        "\"/assets/\"",
+        "path == prefix or path.startswith(prefix)"
+      ],
+      "sha256": "a7ed66ee8334458a53029ee2ca8ad59682ac830b1e65c881cde486752d212d4e",
+      "git_blob_sha": "5b11e98cf2b161a6b98f3d27fa68e83e89883295",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/middleware.py",
+      "claim": "Source public-prefix matching uses exact equality or source prefix semantics; client route matching remains exact and default-deny."
+    },
+    {
+      "id": "native-bearer",
+      "path": "hermes_cli/dashboard_auth/middleware.py",
+      "lines": [346, 373],
+      "markers": [
+        "Authorization: Bearer <access_token>",
+        "if bearer:",
+        "return _unauth_response(request, reason=\"invalid_or_expired_session\")"
+      ],
+      "sha256": "a7ed66ee8334458a53029ee2ca8ad59682ac830b1e65c881cde486752d212d4e",
+      "git_blob_sha": "5b11e98cf2b161a6b98f3d27fa68e83e89883295",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/middleware.py",
+      "claim": "Reviewed native bearer requests use the provider stack; a presented invalid bearer is rejected without cookie fallback."
+    },
+    {
+      "id": "ticket-lifecycle",
+      "path": "hermes_cli/dashboard_auth/ws_tickets.py",
+      "lines": [42, 99],
+      "markers": [
+        "TTL_SECONDS = 30",
+        "entry = _tickets.pop(ticket, None)",
+        "truncated = (ticket[:8] + \"…\") if ticket else \"<empty>\"",
+        "raise TicketInvalid(\"expired\")"
+      ],
+      "sha256": "b66e29a067002ad8a345b49281d30c75d6ec2bb177d58214611db66925bb4429",
+      "git_blob_sha": "118a988e142adf3a904d2a553698b38da22f34fc",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/ws_tickets.py",
+      "claim": "Gated WebSocket tickets are 30-second, single-use values and invalid-ticket diagnostics retain only a bounded fragment."
+    },
+    {
+      "id": "websocket-auth",
+      "path": "hermes_cli/web_server.py",
+      "lines": [14634, 14725],
+      "markers": [
+        "def _ws_auth_mode()",
+        "?ticket=<single-use>",
+        "?internal=<process-credential>",
+        "The legacy ``?token=`` path is unconditionally rejected in gated mode",
+        "audit_log(",
+        "path=ws.url.path"
+      ],
+      "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+      "git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py",
+      "claim": "Gated upgrades accept a fresh ticket or server-internal credential; the legacy query token is only for non-gated local mode, and audit logging identifies credential type without recording the raw ticket."
+    },
+    {
+      "id": "chat-websocket",
+      "path": "hermes_cli/web_server.py",
+      "lines": [15811, 15827],
+      "markers": ["@app.websocket(\"/api/ws\")", "await handle_ws(ws)"],
+      "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+      "git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py",
+      "claim": "The selected structured chat upgrade is the Dashboard /api/ws WebSocket."
+    },
+    {
+      "id": "pty-websocket",
+      "path": "hermes_cli/web_server.py",
+      "lines": [14401, 15797],
+      "markers": [
+        "_RESIZE_RE = re.compile(rb\"\\x1b\\[RESIZE:(\\d+);(\\d+)\\]\")",
+        "ttl=30 * 60",
+        "buffer_cap=1 * 1024 * 1024",
+        "@app.websocket(\"/api/pty\")",
+        "attach_token = ws.query_params.get(\"attach\") or None",
+        "PTY_REGISTRY.detach(attach_token, ws)"
+      ],
+      "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+      "git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py",
+      "claim": "The full PTY upgrade is web-only, source-defined as an attachable POSIX/WSL surface with bounded replay and detach behavior; native clients do not use it in v0.0.1."
+    },
+    {
+      "id": "source-sidecar-surfaces",
+      "path": "hermes_cli/web_server.py",
+      "lines": [15831, 15900],
+      "markers": [
+        "/api/pub",
+        "/api/events",
+        "@app.websocket(\"/api/pub\")",
+        "@app.websocket(\"/api/events\")"
+      ],
+      "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+      "git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py",
+      "claim": "Source-sidecar pub/events channels exist for the embedded TUI but are outside the direct Hermternal client route allowlist."
+    },
+    {
+      "id": "blocked-management-routes",
+      "path": "hermes_cli/web_server.py",
+      "lines": [2029, 4000],
+      "markers": [
+        "@app.get(\"/api/media\")",
+        "@app.get(\"/api/files\")",
+        "@app.get(\"/api/ssh/ownership\")",
+        "@app.post(\"/api/gateway/restart\")",
+        "@app.post(\"/api/gateway/drain\")"
+      ],
+      "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+      "git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_server.py",
+      "claim": "Source-present filesystem, SSH, media, and gateway-management routes are blocked from the Hermternal client allowlist; conditional drain behavior remains covered by the native-bearer audit instead."
+    },
+    {
+      "id": "pty-resize",
+      "path": "hermes_cli/pty_bridge.py",
+      "lines": [58, 60],
+      "markers": ["_MIN_DIMENSION = 1", "_MAX_COLS = 2000", "_MAX_ROWS = 1000"],
+      "sha256": "e24515762a8ee3c9089369b7ecba20307af62c7cfb6d02abf04261ecacaa6095",
+      "git_blob_sha": "cf4a4e60a75eab4490fa718db8651c079c5ff828",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/pty_bridge.py",
+      "claim": "The source bounds PTY dimensions to 1-2000 columns and 1-1000 rows."
+    },
+    {
+      "id": "pty-lifecycle",
+      "path": "hermes_cli/pty_session.py",
+      "lines": [15, 179],
+      "markers": [
+        "WS_CLOSE_PROCESS_EXITED = 4410",
+        "WS_CLOSE_SUPERSEDED = 4409",
+        "await ws.send_bytes(snap)",
+        "if self._ws is not ws:",
+        "(now - s.last_detached_at) > self._ttl"
+      ],
+      "sha256": "617448d953ec978f1b3287b02ac0dd2ad61c255d3366e0ca45efdf829146d8c5",
+      "git_blob_sha": "43910be9deb4655c6eb2dbad62b0b4aa1d81c0fa",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/pty_session.py",
+      "claim": "The source retains bounded output, supersedes stale sockets with 4409, preserves a valid attach session, and reaps detached sessions after the TTL."
+    },
+    {
+      "id": "chat-transport",
+      "path": "tui_gateway/ws.py",
+      "lines": [10, 404],
+      "markers": [
+        "newline-delimited JSON-RPC",
+        "@app.websocket(\"/api/ws\")",
+        "\"message.delta\"",
+        "\"reasoning.delta\"",
+        "\"thinking.delta\"",
+        "gateway.ready",
+        "\"parse error\"",
+        "\"internal error\""
+      ],
+      "sha256": "2b1c772cb37c77a756325e4c298f6a5ee8947d6566cd7638f06f7a0421b8b5fd",
+      "git_blob_sha": "073c4ac1497c7a266209169176ebfff673ecbbcb",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/ws.py",
+      "claim": "The selected chat transport uses JSON-RPC over /api/ws and exposes the ready, streaming, and parse/dispatch error observations frozen by the client contract."
+    },
+    {
+      "id": "rpc-session-methods",
+      "path": "tui_gateway/methods_session.py",
+      "lines": [14, 2750],
+      "markers": [
+        "@method(\"session.create\")",
+        "@method(\"session.list\")",
+        "@method(\"session.most_recent\")",
+        "@method(\"session.resume\")",
+        "@method(\"session.active_list\")",
+        "@method(\"session.status\")",
+        "@method(\"session.history\")",
+        "@method(\"session.close\")",
+        "@method(\"session.interrupt\")"
+      ],
+      "sha256": "1e70561f7c5ca08556e26216f9f6a553bbf25e4c8de3368ac9cb9634e57ea34e",
+      "git_blob_sha": "1a3e09f16e49c5c75a42ca94e4fbfd8f36c290f0",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/methods_session.py",
+      "claim": "The selected session and interrupt JSON-RPC decorators are present; adjacent session-management methods are not client-approved."
+    },
+    {
+      "id": "rpc-prompt-methods",
+      "path": "tui_gateway/methods_prompt.py",
+      "lines": [67, 907],
+      "markers": [
+        "@method(\"prompt.submit\")",
+        "@method(\"clarify.respond\")",
+        "@method(\"approval.respond\")",
+        "@method(\"sudo.respond\")",
+        "@method(\"secret.respond\")"
+      ],
+      "sha256": "96363dbf53a484f6445750c99a40e0624a9e43966be8fb29d8e47883a3ec5f51",
+      "git_blob_sha": "7e3157544e0d4dce2c94193c38a0951af30a12c9",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/methods_prompt.py",
+      "claim": "Prompt submission and approval/clarification responses are selected; terminal-read, sudo, secret, and other adjacent operations are not approved."
+    },
+    {
+      "id": "rpc-model-options",
+      "path": "tui_gateway/methods_complete.py",
+      "lines": [327, 327],
+      "markers": ["@method(\"model.options\")"],
+      "sha256": "87ef05379c694cf7b6995095eb7acd5a4111eb275eb4c77b6e040da41033a8cf",
+      "git_blob_sha": "701c11f0eaed4d09b045c7046db3aa8443332db4",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/methods_complete.py",
+      "claim": "The pinned gateway registers model.options; the fixture uses this JSON-RPC operation rather than inventing a REST dependency."
+    },
+    {
+      "id": "rpc-config-set",
+      "path": "tui_gateway/server.py",
+      "lines": [10468, 10473],
+      "markers": ["@method(\"config.set\")", "if key == \"model\":"],
+      "sha256": "e4bd9009827ffd224cc85c8b17ad7baba0f560d643d688e265be5a06fe8ba29c",
+      "git_blob_sha": "9d5fd00ce7d0becfd4581a5a3867c516a6d3b20a",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/server.py",
+      "claim": "config.set is selected only with the source-defined model key; other configuration keys are blocked."
+    },
+    {
+      "id": "model-options-builder",
+      "path": "hermes_cli/inventory.py",
+      "lines": [276, 313],
+      "markers": [
+        "\"providers\": rows",
+        "\"model\": ctx.current_model",
+        "\"provider\": ctx.current_provider",
+        "def build_model_options_payload("
+      ],
+      "sha256": "5c48dfb6ae1973c00eb5b50c6f92381e49b3f2fc66983dd958cda913f81800e0",
+      "git_blob_sha": "4e95665d481f881be9885edd4997925d0cec78d6",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/inventory.py",
+      "claim": "The shared model-options builder supplies the source-defined providers/model/provider result shape."
+    },
+    {
+      "id": "chat-events",
+      "path": "tui_gateway/server.py",
+      "lines": [1726, 5604],
+      "markers": [
+        "\"session.info\"",
+        "\"approval.request\"",
+        "\"clarify.request\"",
+        "\"error\"",
+        "\"tool.start\"",
+        "\"tool.complete\"",
+        "\"message.complete\""
+      ],
+      "sha256": "e4bd9009827ffd224cc85c8b17ad7baba0f560d643d688e265be5a06fe8ba29c",
+      "git_blob_sha": "9d5fd00ce7d0becfd4581a5a3867c516a6d3b20a",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/tui_gateway/server.py",
+      "claim": "The selected session, tool, approval, clarification, completion, and error event emissions are present."
+    }
+  ],
+  "blocked_examples": {
+    "rest_management": [
+      "GET /api/config/defaults",
+      "GET /api/config/schema",
+      "GET /api/dashboard/plugins",
+      "POST /api/gateway/restart",
+      "GET /api/files",
+      "GET /api/ssh/ownership"
+    ],
+    "json_rpc_sensitive": [
+      "session.delete",
+      "session.activate",
+      "session.title",
+      "message.react",
+      "llm.oneshot",
+      "model.save_key",
+      "model.disconnect",
+      "complete.path",
+      "complete.slash",
+      "sudo.respond",
+      "secret.respond",
+      "terminal.read.respond",
+      "file.attach"
+    ],
+    "reason": "Source presence is not client authorization. These examples remain default-deny even when the pinned source registers or publicly serves them."
+  },
+  "redaction": {
+    "synthetic_only": true,
+    "raw_credentials": false,
+    "raw_cookies": false,
+    "raw_bearer_values": false,
+    "raw_websocket_tickets": false,
+    "raw_pty_handles": false,
+    "transcripts": false,
+    "hostnames": false,
+    "user_data": false,
+    "log_policy": "record credential class and bounded rejection reason only; never raw ticket, bearer, PTY input, PTY output, or transcript"
+  },
+  "accessibility": {
+    "status": "N/A",
+    "reason": "C-01 freezes protocol and source-audit artifacts only; it adds no UI, interaction, focus order, semantics, Dynamic Type, VoiceOver, Switch Control, browser zoom, contrast, motion, transparency, or touch-target surface.",
+    "preservation": "The allowlist does not remove or redefine the existing web and native accessibility obligations in the Hermternal product contracts."
+  },
+  "baseline": {
+    "raw_command": "python3 contracts/fixtures/route-allowlist/test_route_allowlist.py",
+    "validator": "Python standard library only",
+    "build_mode": "N/A: fixture validator has no build artifact",
+    "source_verified": false,
+    "repetitions": 7,
+    "distribution_ms": {
+      "min": 6.6205,
+      "median": 6.710709,
+      "p95": 6.866375,
+      "max": 6.866375,
+      "mean": 6.749178714285714
+    },
+    "artifact_size_bytes": 159046,
+    "environment": {
+      "python": "3.14.6",
+      "implementation": "CPython",
+      "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+      "machine": "arm64"
+    },
+    "threshold": null
+  }
+}

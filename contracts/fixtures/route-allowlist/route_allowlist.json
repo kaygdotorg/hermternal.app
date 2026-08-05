@@ -1,0 +1,465 @@
+{
+  "schema": "hermternal.dashboard.route-allowlist.v1",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "source_audit_id": "route-allowlist-c01-f5be9236",
+  "policy": {
+    "default_route_decision": "deny",
+    "default_operation_decision": "deny",
+    "unknown_event_policy": "ignore_additive_noninteractive_only",
+    "source_inventory_complete": false,
+    "client_allowlist_is_conservative": true,
+    "future_proxy_allowlist_separate": true,
+    "live_compatibility_claim": false
+  },
+  "source_present": {
+    "inventory_status": "selected_review_evidence_not_complete_upstream_inventory",
+    "public_bypass_inventory_complete": true,
+    "public_api_exact_paths": [
+      "/api/health",
+      "/api/status",
+      "/api/config/defaults",
+      "/api/config/schema",
+      "/api/model/info",
+      "/api/dashboard/themes",
+      "/api/dashboard/plugins",
+      "/api/cron/fire"
+    ],
+    "gate_public_prefixes": [
+      "/auth/login",
+      "/auth/callback",
+      "/auth/native/authorize",
+      "/auth/native/token",
+      "/auth/native/refresh",
+      "/auth/password-login",
+      "/auth/logout",
+      "/login",
+      "/api/auth/providers",
+      "/api/mcp/oauth/callback/",
+      "/assets/",
+      "/favicon.ico",
+      "/ds-assets/",
+      "/fonts/",
+      "/fonts-terminal/"
+    ],
+    "selected_rest_routes": [
+      {
+        "method": "GET",
+        "path": "/login",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/auth/login",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/auth/callback",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/password-login",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/logout",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/auth/native/authorize",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/native/token",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/native/refresh",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/search",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/{session_id}",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/{session_id}/messages",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/sessions/{session_id}",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/api/chat/image-upload",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "rest-image-upload"
+      },
+      {
+        "method": "GET",
+        "path": "/api/model/options",
+        "status": "source_present_not_client_allowlisted",
+        "source_citation_id": "rest-model-options"
+      },
+      {
+        "method": "GET",
+        "path": "/api/config/defaults",
+        "status": "source_present_public_but_client_blocked",
+        "source_citation_id": "source-public-paths"
+      },
+      {
+        "method": "GET",
+        "path": "/api/config/schema",
+        "status": "source_present_public_but_client_blocked",
+        "source_citation_id": "source-public-paths"
+      },
+      {
+        "method": "GET",
+        "path": "/api/dashboard/plugins",
+        "status": "source_present_public_but_client_blocked",
+        "source_citation_id": "source-public-paths"
+      },
+      {
+        "method": "POST",
+        "path": "/api/gateway/restart",
+        "status": "source_present_management_blocked",
+        "source_citation_id": "blocked-management-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/files",
+        "status": "source_present_filesystem_blocked",
+        "source_citation_id": "blocked-management-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ssh/ownership",
+        "status": "source_present_ssh_blocked",
+        "source_citation_id": "blocked-management-routes"
+      }
+    ],
+    "selected_upgrade_surfaces": [
+      {
+        "path": "/api/ws",
+        "transport": "websocket",
+        "status": "source_present_reviewed_client_allowlisted",
+        "source_citation_id": "chat-websocket"
+      },
+      {
+        "path": "/api/pty",
+        "transport": "websocket",
+        "status": "source_present_reviewed_web_only",
+        "source_citation_id": "pty-websocket"
+      },
+      {
+        "path": "/api/pub",
+        "transport": "websocket",
+        "status": "source_present_not_client_allowlisted",
+        "source_citation_id": "source-sidecar-surfaces"
+      },
+      {
+        "path": "/api/events",
+        "transport": "websocket",
+        "status": "source_present_not_client_allowlisted",
+        "source_citation_id": "source-sidecar-surfaces"
+      },
+      {
+        "path": "/api/console",
+        "transport": "websocket",
+        "status": "source_present_not_client_allowlisted",
+        "source_citation_id": "rest-auth-routes"
+      }
+    ],
+    "selected_json_rpc_operations": [
+      "session.create",
+      "session.resume",
+      "session.list",
+      "session.active_list",
+      "session.most_recent",
+      "session.history",
+      "session.status",
+      "session.close",
+      "session.interrupt",
+      "prompt.submit",
+      "approval.respond",
+      "clarify.respond",
+      "model.options",
+      "config.set",
+      "session.delete",
+      "session.activate",
+      "session.title",
+      "message.react",
+      "llm.oneshot",
+      "model.save_key",
+      "model.disconnect",
+      "complete.path",
+      "complete.slash",
+      "sudo.respond",
+      "secret.respond",
+      "terminal.read.respond",
+      "file.attach"
+    ],
+    "selected_json_rpc_events": [
+      "gateway.ready",
+      "session.info",
+      "message.delta",
+      "reasoning.delta",
+      "thinking.delta",
+      "message.complete",
+      "tool.start",
+      "tool.complete",
+      "approval.request",
+      "clarify.request",
+      "error"
+    ]
+  },
+  "client_allowlist": {
+    "rest": [
+      {
+        "method": "GET",
+        "path": "/login",
+        "auth_mode": "public",
+        "applicability": ["browser"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/auth/providers",
+        "auth_mode": "public",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/auth/login",
+        "auth_mode": "public",
+        "applicability": ["browser"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/auth/callback",
+        "auth_mode": "public",
+        "applicability": ["browser"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/password-login",
+        "auth_mode": "public",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/logout",
+        "auth_mode": "browser_cookie_or_native_cookie",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "auth_mode": "browser_cookie_or_native_bearer",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "auth_mode": "browser_cookie_or_native_bearer",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/auth/native/authorize",
+        "auth_mode": "public_native_authorize",
+        "applicability": ["native"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/native/token",
+        "auth_mode": "public_native_loopback_code_pkce",
+        "applicability": ["native"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/auth/native/refresh",
+        "auth_mode": "public_native_refresh_material",
+        "applicability": ["native"],
+        "source_citation_id": "rest-auth-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions",
+        "auth_mode": "browser_cookie_or_native_bearer",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/search",
+        "auth_mode": "browser_cookie_or_native_bearer",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/{session_id}",
+        "auth_mode": "browser_cookie_or_native_bearer",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions/{session_id}/messages",
+        "auth_mode": "browser_cookie_or_native_bearer",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/sessions/{session_id}",
+        "auth_mode": "browser_cookie_or_native_bearer",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-session-routes"
+      },
+      {
+        "method": "POST",
+        "path": "/api/chat/image-upload",
+        "auth_mode": "browser_cookie_or_native_bearer",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "rest-image-upload"
+      }
+    ],
+    "websocket_upgrades": [
+      {
+        "path": "/api/ws",
+        "surface": "structured_chat",
+        "auth_mode": "gated_ticket_or_non_gated_local_query_token",
+        "gated_auth": "fresh_single_use_ticket",
+        "non_gated_local_auth": "source_defined_query_token",
+        "applicability": ["browser", "native"],
+        "source_citation_id": "chat-websocket"
+      },
+      {
+        "path": "/api/pty",
+        "surface": "full_hermes_tui",
+        "auth_mode": "gated_ticket_or_non_gated_local_query_token",
+        "gated_auth": "fresh_single_use_ticket",
+        "non_gated_local_auth": "source_defined_query_token",
+        "applicability": ["browser"],
+        "host_requirement": "attested_posix_or_wsl",
+        "native_policy": "not_applicable_and_blocked",
+        "source_citation_id": "pty-websocket"
+      }
+    ],
+    "json_rpc": {
+      "transport_path": "/api/ws",
+      "framing": "one_text_json_rpc_object_per_websocket_message",
+      "operations": [
+        {"name": "session.create", "group": "session", "source_citation_id": "rpc-session-methods"},
+        {"name": "session.resume", "group": "session", "source_citation_id": "rpc-session-methods"},
+        {"name": "session.list", "group": "session", "source_citation_id": "rpc-session-methods"},
+        {"name": "session.active_list", "group": "session", "source_citation_id": "rpc-session-methods"},
+        {"name": "session.most_recent", "group": "session", "source_citation_id": "rpc-session-methods"},
+        {"name": "session.history", "group": "session", "source_citation_id": "rpc-session-methods"},
+        {"name": "session.status", "group": "session", "source_citation_id": "rpc-session-methods"},
+        {"name": "session.close", "group": "session", "source_citation_id": "rpc-session-methods"},
+        {"name": "session.interrupt", "group": "control", "source_citation_id": "rpc-session-methods"},
+        {"name": "prompt.submit", "group": "prompt", "source_citation_id": "rpc-prompt-methods"},
+        {"name": "approval.respond", "group": "human_input", "source_citation_id": "rpc-prompt-methods"},
+        {"name": "clarify.respond", "group": "human_input", "source_citation_id": "rpc-prompt-methods"},
+        {"name": "model.options", "group": "model", "source_citation_id": "rpc-model-options"},
+        {"name": "config.set", "group": "model", "key_policy": "model_only", "source_citation_id": "rpc-config-set"}
+      ],
+      "events": [
+        {"name": "gateway.ready", "class": "connection", "source_citation_id": "chat-events"},
+        {"name": "session.info", "class": "session", "source_citation_id": "chat-events"},
+        {"name": "message.delta", "class": "streaming_noninteractive", "source_citation_id": "chat-events"},
+        {"name": "reasoning.delta", "class": "streaming_noninteractive", "source_citation_id": "chat-events"},
+        {"name": "thinking.delta", "class": "streaming_noninteractive", "source_citation_id": "chat-events"},
+        {"name": "message.complete", "class": "message", "source_citation_id": "chat-events"},
+        {"name": "tool.start", "class": "tool_noninteractive", "source_citation_id": "chat-events"},
+        {"name": "tool.complete", "class": "tool_noninteractive", "source_citation_id": "chat-events"},
+        {"name": "approval.request", "class": "interactive_approval", "source_citation_id": "chat-events"},
+        {"name": "clarify.request", "class": "interactive_clarification", "source_citation_id": "chat-events"},
+        {"name": "error", "class": "terminal_error", "source_citation_id": "chat-events"}
+      ],
+      "error_codes": {
+        "parse_error": -32700,
+        "dispatch_error": -32603
+      },
+      "unknown_operation": "deny_without_fallback",
+      "unknown_interactive_event": "never_promote_to_approval_or_clarification"
+    },
+    "default_deny": {
+      "unknown_rest_method_or_path": "deny",
+      "source_present_not_client_allowlisted": "deny",
+      "unknown_json_rpc_operation": "deny_without_fallback",
+      "unknown_interactive_event": "surface_as_unsupported_and_do_not_act",
+      "unknown_noninteractive_event": "ignore_only_when_additive_and_noninteractive"
+    }
+  },
+  "future_external_proxy_allowlist": {
+    "status": "not_frozen_future_review_required",
+    "rest": [],
+    "websocket_upgrades": [],
+    "json_rpc_operations": [],
+    "json_rpc_events": [],
+    "note": "A reverse proxy or external gateway must receive a separate reviewed allowlist; this client contract is not proxy authorization and does not grant broader upstream access."
+  }
+}
