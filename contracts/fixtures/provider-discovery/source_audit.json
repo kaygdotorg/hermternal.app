@@ -1,0 +1,156 @@
+{
+  "schema": "hermternal.source-audit.provider-discovery.v1",
+  "contract": "dashboard-v0.0.1",
+  "audit_id": "provider-discovery-c02-f5be9236",
+  "hermes_repository": "NousResearch/hermes-agent",
+  "hermes_repository_url": "https://github.com/NousResearch/hermes-agent",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "hermes_tree_sha": "886db5eb1150f819344d67fedc81aef0caab09ff",
+  "audit_scope": {
+    "purpose": "Freeze the provider-neutral Dashboard discovery response and safe client state boundary from pinned source evidence.",
+    "source_inventory_complete": false,
+    "client_contract_complete": true,
+    "live_compatibility": false,
+    "integration_mode": "offline_synthetic_contract_only",
+    "source_root_verification": "optional_pinned_checkout_or_content_snapshot",
+    "unknown_policy": "fail_closed"
+  },
+  "fixture_paths": [
+    "cases.json",
+    "test_provider_discovery.py",
+    "README.md"
+  ],
+  "source_citations": [
+    {
+      "id": "provider-discovery-route",
+      "path": "hermes_cli/dashboard_auth/routes.py",
+      "lines": [152, 174],
+      "markers": [
+        "@router.get(\"/api/auth/providers\", name=\"auth_providers\")",
+        "providers = list_session_providers()",
+        "\"detail\": \"no auth providers registered\"",
+        "\"name\": p.name",
+        "\"display_name\": p.display_name",
+        "\"supports_password\": bool(",
+        "getattr(p, \"supports_password\", False)"
+      ],
+      "sha256": "d42be557b9b1ba798c038c91246cba0bf046e89ebe34a27db0c7803c517e9c20",
+      "git_blob_sha": "0c142963bcc83f38fddbdcec29c35608f14f7bc1",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/routes.py",
+      "claim": "The pinned route returns only the three provider discovery fields and returns a precise 503 response when no interactive providers are registered."
+    },
+    {
+      "id": "provider-discovery-registry",
+      "path": "hermes_cli/dashboard_auth/registry.py",
+      "lines": [69, 75],
+      "markers": [
+        "def list_session_providers()",
+        "if getattr(p, \"supports_session\", True)",
+        "return [p for p in _providers.values() if getattr(p, \"supports_session\", True)]"
+      ],
+      "sha256": "b5083a1ec4e7d99bfdca57d3d6383a289b1e4ebc6740d878f0d5a8c8f1b79290",
+      "git_blob_sha": "3f58090abf16d7239ec0ce24736a120a77f31fce",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/registry.py",
+      "claim": "Discovery includes interactive session providers only, defaults missing supports_session to true, and preserves registration order."
+    },
+    {
+      "id": "provider-capabilities",
+      "path": "hermes_cli/dashboard_auth/base.py",
+      "lines": [139, 185],
+      "markers": [
+        "Subclasses MUST set ``name`` (lowercase identifier, stable forever)",
+        "name: str = \"\"",
+        "display_name: str = \"\"",
+        "supports_password: bool = False",
+        "supports_session: bool = True"
+      ],
+      "sha256": "2307a97d6ac5f08cb3fd31ade22daa4be616a05f9faf53a40bd19ef0d7a58cb8",
+      "git_blob_sha": "e8b8a7730b1d9c66c03b014751bbdc3a9c9cf802",
+      "url": "https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/base.py",
+      "claim": "Provider names and display labels are source-defined data; password and session capabilities have explicit boolean defaults."
+    }
+  ],
+  "contract_surface": {
+    "method": "GET",
+    "path": "/api/auth/providers",
+    "clients": ["browser", "native"],
+    "success": {
+      "status": 200,
+      "body_keys": ["providers"],
+      "provider_keys": ["name", "display_name", "supports_password"],
+      "supports_password_rule": "bool(getattr(provider, 'supports_password', False))"
+    },
+    "empty": {
+      "status": 503,
+      "body": {"detail": "no auth providers registered"}
+    },
+    "registry": {
+      "filter": "supports_session_truthy",
+      "supports_session_default": true,
+      "order": "registration"
+    },
+    "malformed": {
+      "source_outcome": "handler-fails-before-response",
+      "client_state": "provider_unavailable",
+      "fail_closed": true,
+      "invented_status": false
+    },
+    "provider_policy": {
+      "name_is_data": true,
+      "display_name_is_data": true,
+      "provider_specific_fallback": false,
+      "arbitrary_origin_from_response": false
+    }
+  },
+  "redaction": {
+    "synthetic_only": true,
+    "raw_credentials": false,
+    "raw_cookies": false,
+    "raw_bearer_values": false,
+    "raw_websocket_tickets": false,
+    "transcripts": false,
+    "hostnames": false,
+    "user_data": false,
+    "provider_data": false,
+    "log_policy": "fixture contains classification and source citations only; never credential material"
+  },
+  "accessibility": {
+    "status": "N/A",
+    "reason": "C-02 freezes a protocol fixture and validator only; it adds no controls, focus order, semantic labels, Dynamic Type, VoiceOver, Switch Control, contrast, motion, transparency, or touch-target surface.",
+    "preservation": "Later web and Apple clients must keep their existing accessibility contracts while rendering discovered provider labels."
+  },
+  "baseline": {
+    "raw_commands": {
+      "normal": "python3 contracts/fixtures/provider-discovery/test_provider_discovery.py",
+      "optimized": "python3 -O contracts/fixtures/provider-discovery/test_provider_discovery.py",
+      "discovery": "python3 -m unittest discover -s contracts/fixtures/provider-discovery -p 'test_*.py'",
+      "compile": "python3 -m py_compile contracts/fixtures/provider-discovery/test_provider_discovery.py"
+    },
+    "validator": "Python standard library only",
+    "build_mode": "N/A: fixture validator has no build artifact",
+    "source_verified": false,
+    "repetitions": 7,
+    "normal_distribution_ms": {
+      "min": 87.867667,
+      "median": 91.210167,
+      "p95": 92.208958,
+      "max": 92.208958,
+      "mean": 90.24947614285715
+    },
+    "optimized_distribution_ms": {
+      "min": 89.511083,
+      "median": 92.259875,
+      "p95": 98.400875,
+      "max": 98.400875,
+      "mean": 92.24007142857143
+    },
+    "artifact_size_bytes": 56054,
+    "environment": {
+      "python": "3.14.6",
+      "implementation": "CPython",
+      "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+      "machine": "arm64"
+    },
+    "threshold": null
+  }
+}
