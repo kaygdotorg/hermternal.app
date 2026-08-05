@@ -1,0 +1,16 @@
+{
+  "schema": "hermternal.fixture-validation-baseline.v1",
+  "command": "python3 validate.py --source-root <pinned-checkout>",
+  "exit_status": 0,
+  "source_verified": true,
+  "case_count": 9,
+  "fixture_artifact_bytes": 44913,
+  "validation_duration_ns": 2406125,
+  "validation_duration_ms": 2.406,
+  "environment": {
+    "python": "3.14.6",
+    "implementation": "CPython",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O"
+  },
+  "threshold": null
+}
