@@ -1,0 +1,442 @@
+{
+  "schema": "hermternal.deep-link-grammar/v1",
+  "contract": "dashboard-v0.0.1",
+  "synthetic": true,
+  "configured_origin": "https://synthetic.hermternal.test",
+  "id_policy": {
+    "alphabet": "unreserved-ascii",
+    "minimum_length": 16,
+    "opaque": true
+  },
+  "reason_order": [
+    "type",
+    "control",
+    "non_ascii",
+    "percent_escape",
+    "backslash",
+    "query",
+    "fragment",
+    "trailing_slash",
+    "scheme",
+    "authority",
+    "origin",
+    "version",
+    "path",
+    "traversal",
+    "normalization",
+    "segment",
+    "id_character",
+    "full_id"
+  ],
+  "redaction": {
+    "mode": "semantic-only",
+    "raw_link": false,
+    "origin": false,
+    "ids": "omitted"
+  },
+  "cases": [
+    {
+      "id": "valid-web-session",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": true,
+        "kind": "web",
+        "session_id": "synthetic-session-0001",
+        "message_id": null,
+        "reasons": [],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "valid-web-message",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001/m/synthetic-message-0001",
+      "expected": {
+        "valid": true,
+        "kind": "web",
+        "session_id": "synthetic-session-0001",
+        "message_id": "synthetic-message-0001",
+        "reasons": [],
+        "diagnostic": "deep-link[web;session=present;message=present]"
+      }
+    },
+    {
+      "id": "valid-native-session",
+      "synthetic": true,
+      "link": "hermternal://open/v1/c/synthetic-session-0002",
+      "expected": {
+        "valid": true,
+        "kind": "native",
+        "session_id": "synthetic-session-0002",
+        "message_id": null,
+        "reasons": [],
+        "diagnostic": "deep-link[native;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "valid-native-message",
+      "synthetic": true,
+      "link": "hermternal://open/v1/c/synthetic-session-0002/m/synthetic-message-0002",
+      "expected": {
+        "valid": true,
+        "kind": "native",
+        "session_id": "synthetic-session-0002",
+        "message_id": "synthetic-message-0002",
+        "reasons": [],
+        "diagnostic": "deep-link[native;session=present;message=present]"
+      }
+    },
+    {
+      "id": "wrong-origin",
+      "synthetic": true,
+      "link": "https://other.hermternal.test/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": "synthetic-session-0001",
+        "message_id": null,
+        "reasons": ["origin"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "empty-userinfo",
+      "synthetic": true,
+      "link": "https://@synthetic.hermternal.test/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": "synthetic-session-0001",
+        "message_id": null,
+        "reasons": ["authority", "origin"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "empty-password-userinfo",
+      "synthetic": true,
+      "link": "https://:@synthetic.hermternal.test/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": "synthetic-session-0001",
+        "message_id": null,
+        "reasons": ["authority", "origin"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "native-authority",
+      "synthetic": true,
+      "link": "hermternal://not-open/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "native",
+        "session_id": "synthetic-session-0001",
+        "message_id": null,
+        "reasons": ["authority"],
+        "diagnostic": "deep-link[native;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "wrong-scheme",
+      "synthetic": true,
+      "link": "http://synthetic.hermternal.test/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": null,
+        "session_id": "synthetic-session-0001",
+        "message_id": null,
+        "reasons": ["scheme"],
+        "diagnostic": "deep-link[unknown;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "uppercase-scheme",
+      "synthetic": true,
+      "link": "HTTPS://synthetic.hermternal.test/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": "synthetic-session-0001",
+        "message_id": null,
+        "reasons": ["scheme"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "unknown-version",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v2/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["version"],
+        "diagnostic": "deep-link[web;session=absent;message=absent]"
+      }
+    },
+    {
+      "id": "wrong-collection",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/x/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["path"],
+        "diagnostic": "deep-link[web;session=absent;message=absent]"
+      }
+    },
+    {
+      "id": "extra-segment",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001/m/synthetic-message-0001/extra",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["path"],
+        "diagnostic": "deep-link[web;session=present;message=present]"
+      }
+    },
+    {
+      "id": "short-session-id",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/short",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["full_id"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "ellipsis-session-id",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-...",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["full_id"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "id-character",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001+plus",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["id_character"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "percent-escape",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001%2F",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["percent_escape"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "backslash",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001\\bad",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["backslash"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "control",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001\u0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["control"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "non-ascii",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-séssion-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["non_ascii"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "query",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001?mode=synthetic",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["query"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "fragment",
+      "synthetic": true,
+      "link": "hermternal://open/v1/c/synthetic-session-0002#synthetic",
+      "expected": {
+        "valid": false,
+        "kind": "native",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["fragment"],
+        "diagnostic": "deep-link[native;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "query-and-fragment",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001?mode=synthetic#anchor",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["query", "fragment"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "web-trailing-slash",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001/",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["trailing_slash"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "native-trailing-slash",
+      "synthetic": true,
+      "link": "hermternal://open/v1/c/synthetic-session-0002/",
+      "expected": {
+        "valid": false,
+        "kind": "native",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["trailing_slash"],
+        "diagnostic": "deep-link[native;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "traversal",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/../m/synthetic-message-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["traversal", "normalization"],
+        "diagnostic": "deep-link[web;session=present;message=present]"
+      }
+    },
+    {
+      "id": "normalization",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1//c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["path", "normalization"],
+        "diagnostic": "deep-link[web;session=absent;message=absent]"
+      }
+    },
+    {
+      "id": "empty-session",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c//m/synthetic-message-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["normalization", "segment"],
+        "diagnostic": "deep-link[web;session=present;message=present]"
+      }
+    },
+    {
+      "id": "missing-message-id",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001/m/",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["trailing_slash"],
+        "diagnostic": "deep-link[web;session=present;message=present]"
+      }
+    },
+    {
+      "id": "missing-anchor",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/v1/c/synthetic-session-0001/m",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["path"],
+        "diagnostic": "deep-link[web;session=present;message=absent]"
+      }
+    },
+    {
+      "id": "origin-path",
+      "synthetic": true,
+      "link": "https://synthetic.hermternal.test/base/v1/c/synthetic-session-0001",
+      "expected": {
+        "valid": false,
+        "kind": "web",
+        "session_id": null,
+        "message_id": null,
+        "reasons": ["path"],
+        "diagnostic": "deep-link[web;session=absent;message=absent]"
+      }
+    }
+  ]
+}

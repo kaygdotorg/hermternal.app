@@ -1,98 +1,184 @@
-# Deep-link specification
+# Private deep-link grammar
 
-Status: normative planning specification.
+Status: normative planning contract for Hermternal v1 deep links.
 
-Deep links identify Hermternal content. They do not identify a Hermes HTTP route. The link grammar is versioned separately from the product release and the Hermes Dashboard protocol. These rules apply to web, iOS, iPadOS, and macOS.
+Deep links identify Hermternal content. They do not identify a Hermes HTTP
+route, carry authentication material, or create a session. The grammar is
+versioned separately from the product release and the Hermes Dashboard
+protocol. This document freezes the parse boundary only; resolution, access
+results, lineage, and message-result boards belong to dependent contract work.
 
-These documents and their disposable proofs are not production credentials, production configuration, or a live link service.
+The companion synthetic proof is
+[`contracts/fixtures/deep-link-grammar/README.md`](../../contracts/fixtures/deep-link-grammar/README.md).
+It does not make live calls, install Apple link associations, or implement a
+client.
 
 ## Canonical grammar
 
-The canonical web content form is:
+The canonical web form is:
 
 ```text
-https://<configured-origin>/v1/c/<full-session-id>[/m/<message-id>]
+https://<configured-origin>/v1/c/<full-session-id>
+https://<configured-origin>/v1/c/<full-session-id>/m/<full-message-id>
 ```
 
 The native fallback form is:
 
 ```text
-hermternal://open/v1/c/<full-session-id>[/m/<message-id>]
+hermternal://open/v1/c/<full-session-id>
+hermternal://open/v1/c/<full-session-id>/m/<full-message-id>
 ```
 
-The following ABNF describes the stable shape. `origin` is the configured public HTTPS origin without a path, query, fragment, user information, or trailing slash.
+The ABNF below describes the exact stable shape. `configured-origin` is one
+preconfigured public HTTPS origin, written without a path, query, fragment,
+user information, or trailing slash. The spelling is compared exactly; a
+parser must not supply a default port or otherwise normalise it.
 
 ```abnf
-web-link     = "https://" origin "/v1/c/" session-id [ "/m/" message-id ]
-native-link  = "hermternal://open/v1/c/" session-id [ "/m/" message-id ]
-origin       = configured-origin
-session-id   = id-segment
-message-id   = id-segment
-id-segment   = 1*unreserved
+web-link       = "https://" configured-origin "/v1/c/" session-id [ "/m/" message-id ]
+native-link    = "hermternal://open/v1/c/" session-id [ "/m/" message-id ]
+configured-origin = origin-host [ ":" port ]
+origin-host    = 1*( ALPHA / DIGIT / "." / "-" )
+port           = 1*5DIGIT
+session-id     = id-segment
+message-id     = id-segment
+id-segment     = 16*unreserved
+unreserved     = ALPHA / DIGIT / "-" / "." / "_" / "~"
 ```
 
-The resolver MUST apply these rules:
+The 16-character floor prevents a display prefix or short local label from
+being treated as a full ID. It does not claim a UUID shape or prove server
+lineage. IDs remain opaque and must be preserved byte-for-byte for the later
+authenticated Dashboard lookup.
 
-- `v1` is the deep-link grammar version. It is not a Hermes protocol version and is not inferred from the Dashboard.
-- `session-id` and `message-id` are full, stable IDs. A short ID, display name, prefix, local array index, or compression-lineage suffix is invalid.
-- Each ID occupies one path segment and uses only URI `unreserved` characters. Encoded or unencoded slashes, encoded or unencoded backslashes, encoded dot segments, control characters, malformed percent escapes, empty segments, queries, and fragments are invalid.
-- The canonical form has no trailing slash. A resolver MAY accept a clearly equivalent trailing slash only to show an invalid-link result; it MUST NOT silently create a different target.
-- The resolver MUST preserve the ID value used for the authenticated lookup. It MUST not case-fold, truncate, or normalise an opaque ID.
-- The web form MUST use the configured HTTPS origin. An arbitrary origin is not a valid Hermternal content link.
-- The native form MUST use the exact `hermternal` scheme and `open` authority. Other custom schemes or authorities are invalid.
+The parser MUST:
 
-The exact Dashboard route used to resolve a session or message is owned by [`contracts/hermes-dashboard/manifest.md`](../../contracts/hermes-dashboard/manifest.md). This document does not invent a route name for that lookup.
+- accept only the exact lowercase `https://` web spelling and the exact
+  configured origin;
+- accept only the exact lowercase `hermternal://open` native spelling;
+- accept only `/v1/c/<session-id>` with the optional exact `/m/<message-id>`
+  suffix;
+- accept only ASCII URI `unreserved` ID characters and the full-ID floor;
+- preserve the original ID values without decoding, case folding, truncating,
+  or normalising them; and
+- return a stable, ordered failure reason before any fetch or lookup.
 
-## Link resolution
+The parser MUST reject all percent escapes, including malformed escapes and
+encoded slashes, backslashes, or dot segments. It MUST also reject unencoded
+backslashes, C0/C1/DEL controls, all other non-ASCII characters, queries,
+fragments, empty segments, a trailing slash, dot traversal, path
+normalisation, changed origins, user information, wrong authorities, unknown
+versions, wrong path shapes, non-unreserved ID characters, and short or
+visibly abbreviated IDs. No invalid link may be accepted as an equivalent
+normalised link.
 
-A resolver MUST process a link in this order:
+## Stable preflight reasons
+
+A parser reports every applicable reason in this fixed order. The first reason
+is the primary diagnostic. A valid link reports no reasons and has an `ok`
+primary result.
+
+```text
+type
+control
+non_ascii
+percent_escape
+backslash
+query
+fragment
+trailing_slash
+scheme
+authority
+origin
+version
+path
+traversal
+normalization
+segment
+id_character
+full_id
+```
+
+This order is part of the contract. It must not depend on set iteration,
+exception text, URL-library normalisation, or platform differences. Lexical
+violations are terminal: a resolver must not partially decode or inspect a
+candidate after one of those hard rejections.
+
+## Non-reversible diagnostics
+
+Raw links MUST NOT appear in proxy logs, analytics, crash reports,
+notifications, clipboard history, OAuth/OIDC return URLs, or user-facing
+errors. The proof harness uses semantic-only diagnostics such as:
+
+```text
+deep-link[web;session=present;message=present]
+deep-link[native;session=present;message=absent]
+deep-link[unknown;session=absent;message=absent]
+```
+
+These diagnostics omit the configured origin, every ID, query, fragment, and
+invalid suffix. They are not hashes, shortened IDs, or reconstructible links.
+A diagnostic must never permit a lookup or reveal whether a session exists.
+
+## Resolution boundary
+
+A later resolver MUST process a candidate in this order:
 
 1. Parse the URI without following redirects.
-2. Check the scheme, authority, configured origin, path grammar, and ID segments.
-3. Check the deep-link grammar version. An unknown version is blocked. The resolver does not guess a newer or older grammar.
-4. Require an authenticated client session. If authentication is needed, keep only the validated link in process memory while the approved authentication flow runs. Do not put the raw link into an OAuth or OIDC return URL.
-5. Resolve the full session ID through the authenticated Dashboard contract. Hermes remains the source of truth.
-6. Open the session. If `message-id` is present and exists, focus or scroll to that message. If it does not exist, open the session and show a clear **message not found** state.
-7. If the session does not exist or the user is not allowed to access it, show a clear **session not found** or **not available** state. Do not reveal whether another user owns the ID.
-8. Remove the pending link from memory after success, failure, cancellation, or logout.
+2. Apply the scheme, authority, exact-origin, path, ID, version, and lexical
+   rejection rules above.
+3. Require an authenticated client session. If authentication is needed, keep
+   only the validated target in process memory; never place the raw link in an
+   OAuth/OIDC return URL.
+4. Resolve the exact full session ID through the authenticated Dashboard
+   contract. Hermes remains the source of truth.
+5. Open that session. If a valid message ID exists, focus or scroll to it. If
+   it does not exist, open the session and show a clear **message not found**
+   state.
+6. Use the same safe **session not found** or **not available** result for an
+   unknown or unauthorised target. Do not reveal another user's IDs.
+7. Remove the pending target from memory after success, failure, cancellation,
+   expiry, or logout.
 
-A link MUST NOT cause a session to be created. A link MUST NOT select a different server profile. A link MUST NOT read the filesystem or a local `~/.hermes` directory.
+A deep link MUST NOT create a session, select another server profile, read a
+filesystem or local `~/.hermes` directory, act as a bearer credential, or
+follow an external redirect. Opening the same valid link twice is idempotent:
+it targets the same full IDs and does not duplicate a session, prompt, or
+message.
 
-The resolver MUST be idempotent. Opening the same link twice targets the same full IDs and does not duplicate a session, prompt, or message.
+## Platform boundary
 
-## Platform behavior
+A same-origin HTTPS link may open the web client. An approved universal-link
+association may open the native client first on iOS or iPadOS. The
+`hermternal://` form is a native fallback; the web client must not treat it as
+an authenticated web redirect. Native scene or window restoration and cold or
+suspended launch handling must retain the same opaque IDs. These are platform
+requirements for later implementation, not entitlements or registration in
+this contract.
 
-- A same-origin HTTPS link MAY open the web client. On iOS and iPadOS, an approved universal-link association MAY open the native client first.
-- The `hermternal://` form is a native fallback. The web client MUST NOT treat it as an authenticated web redirect.
-- iOS, iPadOS, and macOS MUST use the system link association and native scene or window restoration. They MUST retain the same full IDs.
-- If native association is unavailable, the HTTPS form remains the portable form. It MUST still pass origin, grammar, authentication, and access checks.
-- Deep-link handling MUST remain available after a cold launch and after a suspended scene resumes.
+User-facing sharing is deferred to v0.0.2. Internal restoration, Spotlight
+navigation, and window or scene restoration use this grammar without storing
+raw links in shared persistence.
 
-## Privacy and security rules
+## Proof coverage and limits
 
-Deep links can reveal access patterns even when the IDs are opaque. The clients and proof harness MUST apply these rules:
+The synthetic fixture proof covers valid web/native session links, optional
+message anchors, exact origin and authority checks, wrong schemes and
+versions, wrong paths, traversal and normalisation, trailing forms, empty and
+short IDs, all lexical rejection classes, stable reason order, strict
+recursive JSON shape, mutation regressions, and non-reversible diagnostics.
 
-- Never put passwords, username/password provider credentials, access tokens, refresh tokens, cookies, WebSocket tickets, provider state, provider nonce values, or transcript text in a link.
-- Never put a raw deep link in proxy logs, analytics, crash reports, notification text, clipboard history, or an error URL. Redact IDs when a diagnostic record needs to identify a case.
-- Do not accept an arbitrary `return_to`, redirect, or origin from a link. Authentication returns to the validated in-process target only.
-- Do not fetch a link before validating the origin and grammar. Do not follow an external redirect as part of resolution.
-- Do not expose the existence of a session or message to an unauthorised caller. Use the same safe not-available result for unknown and unauthorised targets.
-- Do not use a link as a bearer credential. Access remains controlled by the current Dashboard session.
-- Keep a pending link in process memory where possible. If the app terminates, discard the pending link rather than writing a secret-bearing or access-sensitive link to shared storage.
-- User-facing sharing is deferred to v0.0.2. Internal restoration, Spotlight navigation, and window or scene restoration still use this grammar.
+It does not resolve a session, test authentication, prove ownership, inspect
+Hermes, call a network, create universal-link entitlements, implement iOS,
+iPadOS, or macOS routing, or define unknown-session/message result boards.
+Those behaviors require the approved downstream fixtures and platform work.
 
-## Required proof cases
+## Non-UI accessibility evidence
 
-The web, iOS, iPadOS, and macOS test suites MUST cover the same cases:
-
-- valid session link with and without a message ID;
-- cold launch, warm launch, suspended scene, and duplicate open;
-- invalid scheme, authority, origin, version, segment, percent escape, query, fragment, and trailing form;
-- unknown deep-link version, unknown session, missing message, and unauthorised target;
-- authentication interruption, cancellation, expiry, and logout while a link is pending;
-- no duplicate session or prompt creation;
-- no secret, transcript, or full-link value in captured logs;
-- web HTTPS resolution and native custom-scheme fallback;
-- the same full IDs and safe error states on web and Apple platforms.
-
-This file is a specification and a disposable-proof contract. It does not create a universal-link entitlement, a production association file, a custom-scheme registration, or a live credential.
+Accessibility verification is **N/A** for this grammar contract because it
+renders no UI and changes no focus order, semantic names, touch targets,
+VoiceOver, Dynamic Type, contrast, reduced-motion, reduced-transparency, or
+Switch Control behavior. This is an explicit boundary, not a waiver. Later
+web and Apple implementations must preserve their platform accessibility
+contracts while retaining the exact opaque IDs, fail-closed parsing, and
+non-reversible diagnostics specified here.
