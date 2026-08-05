@@ -291,6 +291,11 @@ class PlanningReviewValidatorTests(unittest.TestCase):
             errors = self._validate()
         self.assertTrue(any("missing source anchor" in error for error in errors))
 
+    def test_invalid_utf8_source_blob_fails_closed(self) -> None:
+        with mock.patch.object(validate, "_git_blob", return_value=b"\xff\xfe"):
+            errors = self._validate()
+        self.assertTrue(any("cannot decode pinned source blob" in error for error in errors))
+
     def test_missing_promisor_blob_is_structured(self) -> None:
         with mock.patch.object(validate, "_git_blob", return_value=None):
             errors = self._validate()
