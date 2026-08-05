@@ -12,6 +12,12 @@ Hermternal is a client of the Dashboard surface. It is not a client of the separ
 
 The source revision is evidence for this contract. It is not a dependency in this repository. A later Hermes revision needs a new compatibility review.
 
+Every REST authorization decision requires explicit platform applicability:
+`browser` or `native`. Missing, empty, unknown, or non-string applicability is
+not a route decision and must fail closed. Shared routes are checked once per
+platform; native-only and browser-only routes cannot pass under the other
+platform.
+
 ## C-01 route and method freeze
 
 The normative machine-readable freeze is [`route_allowlist.json`](../fixtures/route-allowlist/route_allowlist.json), with its source citations and synthetic regression suite in [`route-allowlist/`](../fixtures/route-allowlist/). The validator is standard-library-only and source-audit-only; it does not import Hermes, contact a Dashboard, or claim live compatibility.

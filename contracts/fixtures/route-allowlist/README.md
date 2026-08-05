@@ -36,6 +36,12 @@ interactive event must never be promoted to an approval or clarification.
 
 The exact client-approved pairs are:
 
+Every REST authorization decision requires explicit `applicability`: exactly
+`browser` or `native`. Missing, empty, unknown, or non-string applicability
+fails closed. A shared route such as `/api/auth/me` must be checked separately
+for each platform; native-only and browser-only routes cannot pass under the
+other platform or without platform context.
+
 | Method | Path | Browser/native applicability | Authentication mode |
 | --- | --- | --- | --- |
 | `GET` | `/login` | browser | public |
@@ -134,8 +140,10 @@ mutation, source/provenance drift, credential-like redaction markers, and
 malformed inputs that would otherwise produce a traceback. Redaction scanning
 covers all three JSON documents and credential-shaped values in this README
 and the manifest. It can optionally verify the pinned Git commit/tree, recorded
-full-file SHA-256 digests, and canonical citation markers against an
-independently fetched source root:
+full-file SHA-256 digests, Git blob IDs from `HEAD:<path>`, and canonical
+citation markers against an independently fetched source root. In pinned Git
+checkout mode, a missing or mismatched blob object is a controlled validation
+failure:
 
 ```text
 python3 contracts/fixtures/route-allowlist/test_route_allowlist.py

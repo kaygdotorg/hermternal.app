@@ -3,8 +3,9 @@
 
 This validator is intentionally offline and standard-library-only. It reads
 synthetic JSON, never imports Hermes, never opens a socket, and never calls a
-provider. Source-root mode verifies recorded SHA-256 files and citation
-markers against an independently obtained checkout or content-only snapshot.
+provider. Source-root mode verifies the pinned Git commit/tree, recorded blob
+IDs and SHA-256 files, and citation markers against an independently obtained
+checkout or content-only snapshot.
 """
 
 from __future__ import annotations
@@ -70,6 +71,7 @@ EXPECTED_ACCESSIBILITY = {
     "preservation": "The allowlist does not remove or redefine the existing web and native accessibility obligations in the Hermternal product contracts.",
 }
 EXPECTED_FUTURE_PROXY_NOTE = "A reverse proxy or external gateway must receive a separate reviewed allowlist; this client contract is not proxy authorization and does not grant broader upstream access."
+VALID_APPLICABILITIES = frozenset({"browser", "native"})
 
 
 class ContractError(ValueError):
@@ -622,8 +624,16 @@ def _route_template_for_path(path: Any) -> str | None:
     return path
 
 
-def route_is_allowlisted(allowlist: dict[str, Any], method: str, path: str, applicability: str | None = None) -> bool:
-    if type(method) is not str:
+def _is_valid_applicability(value: Any) -> bool:
+    """Require explicit browser/native context for every REST decision."""
+
+    return type(value) is str and value in VALID_APPLICABILITIES
+
+
+def route_is_allowlisted(allowlist: dict[str, Any], method: str, path: str, applicability: str) -> bool:
+    """Authorize one REST method/path only with explicit platform context."""
+
+    if type(method) is not str or not _is_valid_applicability(applicability):
         return False
     template = _route_template_for_path(path)
     if template is None:
@@ -631,7 +641,7 @@ def route_is_allowlisted(allowlist: dict[str, Any], method: str, path: str, appl
     for route in allowlist["client_allowlist"]["rest"]:
         if route["method"] != method or template != route["path"]:
             continue
-        if applicability is not None and applicability not in route["applicability"]:
+        if applicability not in route["applicability"]:
             continue
         return True
     return False
@@ -642,6 +652,10 @@ def operation_is_allowlisted(allowlist: dict[str, Any], operation: str) -> bool:
 
 
 def _rest_policy_for_request(allowlist: dict[str, Any], method: str, path: str, applicability: str) -> dict[str, Any] | None:
+    """Resolve a REST policy only when platform applicability is explicit."""
+
+    if type(method) is not str or not _is_valid_applicability(applicability):
+        return None
     template = _route_template_for_path(path)
     if template is None:
         return None
@@ -652,6 +666,7 @@ def _rest_policy_for_request(allowlist: dict[str, Any], method: str, path: str, 
 
 
 def _validate_rest_case_auth(case_id: str, request: dict[str, Any], expected: dict[str, Any], allowlist: dict[str, Any]) -> None:
+    _require(_is_valid_applicability(request.get("applicability")), f"{case_id}: REST applicability must be browser or native")
     mode = request["auth_mode"]
     _require(mode in {"browser_cookie", "native_bearer", "native_cookie", "public"}, f"{case_id}: REST auth mode is not a client REST mode")
     policy = _rest_policy_for_request(allowlist, request["method"], request["path"], request["applicability"])
@@ -831,6 +846,31 @@ def validate_cases(cases: dict[str, Any], allowlist: dict[str, Any], audit: dict
     _require(malformed["decision"] == "reject_without_traceback" and malformed["exit_status"] == 2, "cases: malformed-input policy changed")
 
 
+def _git_blob_sha_for_path(source_root: Path, relative_path: str) -> str:
+    """Resolve one immutable blob object from the pinned checkout tree."""
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "--verify", f"HEAD:{relative_path}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ContractError(f"source root: Git blob is missing for {relative_path}: {exc}") from None
+    blob_sha = result.stdout.strip()
+    _require(re.fullmatch(r"[0-9a-f]{40}", blob_sha) is not None, f"source root: invalid Git blob for {relative_path}")
+    return blob_sha
+
+
+def _validate_git_blob_ids(audit: dict[str, Any], source_root: Path) -> None:
+    """Bind every recorded blob ID to the pinned checkout's HEAD tree."""
+
+    for citation in audit["source_citations"]:
+        actual_blob = _git_blob_sha_for_path(source_root, citation["path"])
+        _require(actual_blob == citation["git_blob_sha"], f"source root: Git blob mismatch for {citation['id']}")
+
+
 def _validate_source_root(audit: dict[str, Any], source_root: Path) -> str:
     mode = "content_only_snapshot"
     git_dir = source_root / ".git"
@@ -842,6 +882,7 @@ def _validate_source_root(audit: dict[str, Any], source_root: Path) -> str:
             raise ContractError(f"source root: unable to verify Git HEAD/tree: {exc}") from None
         _require(head == PINNED_SHA, "source root: Git HEAD is not the pinned Hermes revision")
         _require(tree == PINNED_TREE_SHA, "source root: Git tree is not the pinned Hermes tree")
+        _validate_git_blob_ids(audit, source_root)
         mode = "git_checkout_verified"
     for citation in audit["source_citations"]:
         path = source_root / citation["path"]
@@ -998,6 +1039,31 @@ class RouteAllowlistTests(unittest.TestCase):
         for path in invalid_paths:
             self.assertFalse(route_is_allowlisted(self.allowlist, "GET", path, "native"), path)
 
+    def test_route_applicability_is_mandatory_and_platform_bound(self) -> None:
+        # Native-only, shared, and browser-only routes each require their
+        # matching platform context; omitted or malformed context denies.
+        self.assertTrue(route_is_allowlisted(self.allowlist, "GET", "/auth/native/authorize", "native"))
+        self.assertFalse(route_is_allowlisted(self.allowlist, "GET", "/auth/native/authorize", "browser"))
+        self.assertTrue(route_is_allowlisted(self.allowlist, "GET", "/api/auth/me", "native"))
+        self.assertTrue(route_is_allowlisted(self.allowlist, "GET", "/api/auth/me", "browser"))
+        self.assertTrue(route_is_allowlisted(self.allowlist, "GET", "/login", "browser"))
+        self.assertFalse(route_is_allowlisted(self.allowlist, "GET", "/login", "native"))
+
+        for invalid in (None, "", "desktop", True, 1, {}, []):
+            self.assertFalse(route_is_allowlisted(self.allowlist, "GET", "/api/auth/me", invalid), invalid)
+            self.assertIsNone(_rest_policy_for_request(self.allowlist, "GET", "/api/auth/me", invalid))
+
+        with self.assertRaises(TypeError):
+            route_is_allowlisted(self.allowlist, "GET", "/api/auth/me")
+
+        forged = copy.deepcopy(self.cases)
+        browser_case = next(item for item in forged["cases"] if item["id"] == "rest-approved-browser-cookie")
+        for invalid in ("", {}, [], None):
+            browser_case["request"]["applicability"] = invalid
+            with self.assertRaises(ContractError):
+                validate_cases(forged, self.allowlist, self.audit)
+            browser_case["request"]["applicability"] = "browser"
+
     def test_route_widening_and_prefix_confusion_fail(self) -> None:
         forged = copy.deepcopy(self.allowlist)
         forged["client_allowlist"]["rest"][13]["path"] = "/api/sessions/{session_id}/"
@@ -1115,6 +1181,36 @@ class RouteAllowlistTests(unittest.TestCase):
         forged["source_present"]["inventory_status"] = "complete_upstream_inventory"
         with self.assertRaises(ContractError):
             validate_allowlist(forged, self.audit)
+
+    def test_git_checkout_blob_ids_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_root = Path(directory)
+            subprocess.run(["git", "-C", str(source_root), "init", "-q"], check=True, capture_output=True, text=True)
+            fixture = source_root / "fixture.txt"
+            fixture.write_text("pinned fixture\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source_root), "add", "fixture.txt"], check=True, capture_output=True, text=True)
+            subprocess.run(
+                [
+                    "git", "-C", str(source_root),
+                    "-c", "user.name=Hermternal Test", "-c", "user.email=test@example.invalid",
+                    "commit", "-qm", "fixture",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            blob = _git_blob_sha_for_path(source_root, "fixture.txt")
+            audit = {"source_citations": [{"id": "fixture", "path": "fixture.txt", "git_blob_sha": blob}]}
+            _validate_git_blob_ids(audit, source_root)
+
+            forged = copy.deepcopy(audit)
+            forged["source_citations"][0]["git_blob_sha"] = "0" * 40
+            with self.assertRaises(ContractError):
+                _validate_git_blob_ids(forged, source_root)
+
+            missing = {"source_citations": [{"id": "missing", "path": "missing.txt", "git_blob_sha": blob}]}
+            with self.assertRaises(ContractError):
+                _validate_git_blob_ids(missing, source_root)
 
     def test_redaction_policy_rejects_credential_material(self) -> None:
         forged = copy.deepcopy(self.cases)
