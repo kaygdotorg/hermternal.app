@@ -34,6 +34,48 @@ fixtures synthetic and local. Do not add live Hermes calls, credentials,
 cookies, WebSocket tickets, transcripts, provider data, secrets, hostnames,
 user data, or deployment configuration to a script or test.
 
+## Implementation proof-gate validator
+
+Run the fail-closed implementation checklist validator from the repository root:
+
+```text
+python3 scripts/validate_proof_gates.py
+```
+
+The four-file proof-gate contract is owned by
+`docs/product/implementation-proof-gates.md`, `scripts/validate_proof_gates.py`,
+`scripts/test_validate_proof_gates.py`, and this README. The checklist maps the
+M0 planning, source-audit, issue-template, route, fixture, Paper,
+deployment/security, benchmark, accessibility, no-network, review, evidence,
+and dev-integration requirements to their roadmap issues. Runtime, deployment,
+live-adjacent, and release proofs remain later ordered gates; they are not M0
+prerequisites.
+
+The validator is standard-library-only and offline. It checks exact section and
+subsection order, canonical roadmap keys and links, gate and evidence rows,
+dependency direction, required fields, inline N/A rationales, the explicit
+no-threshold statement, no live/production success claims, no-network command
+shapes, and parity with the atomic issue-template contract. Measured evidence may
+report observations, but target, budget, SLO, limit, and bound prose still fails
+when embedded in the same value. Live claims are checked per punctuation and
+conjunction clause, and preservation evidence must name a concrete accessibility
+surface plus a non-circular mechanism or reason. Indented Markdown field
+continuations are folded before field and semantic checks, including Unicode
+numeric comparators; circular or generic reasons such as `because non-UI`
+remain blocked. A single stateful Markdown scan hides multiline HTML comments
+and arbitrary-length backtick or tilde fences, so hidden or fenced decoys
+cannot satisfy a gate.
+
+Success and every failure emit exactly one JSON object. Unknown CLI arguments,
+invalid UTF-8, read errors, malformed input, checked or waived gates, and type
+confusion fail closed without argparse usage or a traceback. The focused test
+suite covers hidden/fenced content, duplicates, reorder, missing/unknown gates
+and evidence, wrong issue links, stale blockers, waived status, N/A and
+threshold mutations, line endings, invalid UTF-8, CLI failures, and input
+boolean/type confusion. Keep all proof fixtures synthetic, redacted, local, and
+free of credentials, cookies, tickets, transcripts, provider data, hostnames,
+tokens, secrets, or user data.
+
 ## Accessibility evidence
 
 - Accessibility is **N/A** for this non-UI command-line artifact: it has no
@@ -57,9 +99,9 @@ No threshold is claimed.
 - Repetitions and distribution: 10 fresh subprocess runs; report min, median,
   and max validator duration in milliseconds.
 - Artifact-size evidence from the same checkout: validator `38,208` bytes,
-  tests `16,715` bytes, and this README `3,929` bytes.
-- Validator-duration evidence from the same checkout: min `44.754` ms, median
-  `45.573` ms, max `46.983` ms; every run returned the valid-template JSON result.
+  tests `16,715` bytes, and this README `5,807` bytes.
+- Validator-duration evidence from the same checkout: min `41.527` ms, median
+  `42.870` ms, max `45.918` ms; every run returned the valid-template JSON result.
 - Raw command:
 
 ```sh
