@@ -1175,14 +1175,25 @@ def _validate_section_fields(h2: Sequence[Heading], scanned: Sequence[MarkdownLi
                 )
                 has_accessibility_surface = bool(
                     re.search(
-                        r"\b(?:accessibility|keyboard|focus|semantic(?:[- ]name|s)?|screen[- ]reader|voiceover|switch control|dynamic type|browser zoom|zoom|contrast|reduced[- ]motion|reduced[- ]transparency|touch[- ]target|behavior|requirement)\b",
+                        r"\b(?:keyboard|focus|semantic[- ]names?|screen[- ]reader|voiceover|switch control|"
+                        r"(?:200%[ -])?(?:browser[ -])?zoom|dynamic type|contrast|"
+                        r"reduced[- ]motion|reduced[- ]transparency|touch[- ]targets?)\b",
                         preservation,
                         re.I,
                     )
                 )
-                has_reason = bool(
+                has_reason_connector = bool(
                     re.search(
-                        r"\b(?:because|so that|since|only|remains?|stays?|blocked|downstream|evidence|reason)\b",
+                        r"\b(?:because|since|so that|by|without)\b",
+                        preservation,
+                        re.I,
+                    )
+                )
+                has_mechanism = bool(
+                    re.search(
+                        r"\b(?:read(?:s)? bytes|emit(?:s)? diagnostics|only read(?:s)?|"
+                        r"does not (?:rewrite|remove|alter|drop)|never (?:rewrite|remove|alter|drop)|"
+                        r"non[- ]UI|no direct UI|downstream (?:design|paper) source|tooling artifact)\b",
                         preservation,
                         re.I,
                     )
@@ -1190,7 +1201,8 @@ def _validate_section_fields(h2: Sequence[Heading], scanned: Sequence[MarkdownLi
                 if not (
                     has_preservation_semantics
                     and has_accessibility_surface
-                    and has_reason
+                    and has_reason_connector
+                    and has_mechanism
                 ):
                     errors.append(
                         _error(
@@ -1435,10 +1447,19 @@ def _validate_semantic_rules(scanned: Sequence[MarkdownLine]) -> List[Validation
             re.I,
         ):
             errors.append(_error("gate-waived", line.source.number, "A proof gate cannot be waived, skipped, or made optional."))
-        # Evaluate each punctuation-delimited clause independently.  A
-        # negated boundary clause must not suppress a later positive live claim
-        # on the same Markdown line.
-        clauses = [clause.strip() for clause in re.split(r"[;.!?]+", text) if clause.strip()]
+        # Evaluate punctuation and conjunction-delimited clauses
+        # independently. A negated boundary clause must not suppress a later
+        # positive live claim on the same Markdown line.
+        clauses = [
+            part.strip()
+            for sentence in re.split(r"[;.!?]+", text)
+            for part in re.split(
+                r",?\s+\b(?:but|however|yet|and)\b",
+                sentence,
+                flags=re.I,
+            )
+            if part.strip()
+        ]
         for clause in clauses:
             negative_context = bool(
                 re.search(
@@ -1460,41 +1481,29 @@ def _validate_semantic_rules(scanned: Sequence[MarkdownLine]) -> List[Validation
                     )
                     break
 
-        field_match = _BULLET_FIELD_RE.fullmatch(text)
-        measured_evidence_field = bool(
-            field_match
-            and field_match.group(1)
-            in {
-                "Repetitions and distribution",
-                "Raw command",
-                "Artifact-size evidence",
-                "Validator-duration evidence",
-            }
-        )
-        # Numeric observations are allowed only in explicitly measured
-        # evidence fields.  Prose targets, budgets, SLOs, limits, and bounds
-        # remain forbidden even when a separate no-threshold line is present.
-        if not measured_evidence_field:
-            for pattern in threshold_patterns:
-                if pattern.search(text):
-                    errors.append(
-                        _error(
-                            "invented-performance-threshold",
-                            line.source.number,
-                            "Do not invent a numeric performance threshold or budget in the planning checklist.",
-                        )
+        # Measured evidence fields may report numeric observations, but they
+        # do not exempt target, budget, SLO, limit, or bound prose in the same
+        # value. The patterns distinguish observations such as `p95 58 ms`
+        # from claims such as `p95 target is 50 ms`.
+        for pattern in threshold_patterns:
+            if pattern.search(text):
+                errors.append(
+                    _error(
+                        "invented-performance-threshold",
+                        line.source.number,
+                        "Do not invent a numeric performance threshold or budget in the planning checklist.",
                     )
-                    # A numeric budget also contradicts the explicit
-                    # no-threshold record, even when the mutation leaves that
-                    # field untouched.
-                    errors.append(
-                        _error(
-                            "threshold-statement",
-                            line.source.number,
-                            "The benchmark section must state exactly `No threshold is claimed.` and contain no numeric budget.",
-                        )
+                )
+                # A numeric budget also contradicts the explicit no-threshold
+                # record, even when the mutation leaves that field untouched.
+                errors.append(
+                    _error(
+                        "threshold-statement",
+                        line.source.number,
+                        "The benchmark section must state exactly `No threshold is claimed.` and contain no numeric budget.",
                     )
-                    break
+                )
+                break
 
         # Match executable command/import/call shapes, not prose literals.  The
         # module names are assembled from fragments so this validator remains a

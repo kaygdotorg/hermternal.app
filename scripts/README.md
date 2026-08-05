@@ -55,9 +55,13 @@ The validator is standard-library-only and offline. It checks exact section and
 subsection order, canonical roadmap keys and links, gate and evidence rows,
 dependency direction, required fields, inline N/A rationales, the explicit
 no-threshold statement, no live/production success claims, no-network command
-shapes, and parity with the atomic issue-template contract. A single stateful
-Markdown scan hides multiline HTML comments and arbitrary-length backtick or
-tilde fences, so hidden or fenced decoys cannot satisfy a gate.
+shapes, and parity with the atomic issue-template contract. Measured evidence may
+report observations, but target, budget, SLO, limit, and bound prose still fails
+when embedded in the same value. Live claims are checked per punctuation and
+conjunction clause, and preservation evidence must name a concrete accessibility
+surface plus a non-circular mechanism or reason. A single stateful Markdown scan
+hides multiline HTML comments and arbitrary-length backtick or tilde fences, so
+hidden or fenced decoys cannot satisfy a gate.
 
 Success and every failure emit exactly one JSON object. Unknown CLI arguments,
 invalid UTF-8, read errors, malformed input, checked or waived gates, and type

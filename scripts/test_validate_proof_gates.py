@@ -311,13 +311,21 @@ class ProofGateValidationTests(unittest.TestCase):
                 self.assertCode(self.result(mutated), "invented-performance-threshold")
                 self.assertCode(self.result(mutated), "threshold-statement")
 
-    def test_measured_evidence_may_report_observations_without_claiming_a_budget(self) -> None:
-        mutated = self.checklist_text.replace(
-            "- **Validator-duration evidence:** Same checkout; ten samples `56.827, 58.489, 57.996, 58.807, 56.066, 56.437, 56.874, 56.946, 57.372, 57.641` ms; min `56.066` ms, mean `57.345` ms, median `57.159` ms, p95 `58.664` ms, and max `58.807` ms; p99 is not meaningful for ten samples and no threshold is inferred.",
-            "- **Validator-duration evidence:** Same checkout; ten samples; min 56 ms, mean 57 ms, median 57 ms, p95 target observation was 58.664 ms, and max 58.807 ms; no threshold is inferred.",
+    def test_measured_evidence_rejects_embedded_target_but_accepts_observation(self) -> None:
+        original = "- **Validator-duration evidence:** Same checkout; ten samples `62.864, 64.096, 63.412, 63.918, 62.889, 63.695, 62.094, 62.994, 63.942, 63.373` ms; min `62.094` ms, mean `63.328` ms, median `63.393` ms, p95 `64.027` ms, and max `64.096` ms; p99 is not meaningful for ten samples and no threshold is inferred."
+        observation = self.checklist_text.replace(
+            original,
+            "- **Validator-duration evidence:** Same checkout; ten samples; min 56 ms, mean 57 ms, median 57 ms, p95 was 58.664 ms, and max 58.807 ms; no threshold is inferred.",
             1,
         )
-        self.assertTrue(self.result(mutated)["ok"], self.result(mutated))
+        self.assertTrue(self.result(observation)["ok"], self.result(observation))
+        target = self.checklist_text.replace(
+            original,
+            "- **Validator-duration evidence:** Same checkout; ten samples; min 56 ms, mean 57 ms, median 57 ms, p95 target is 50 ms, and max 58.807 ms; no threshold is inferred.",
+            1,
+        )
+        self.assertCode(self.result(target), "invented-performance-threshold")
+        self.assertCode(self.result(target), "threshold-statement")
 
     def test_live_or_production_success_claim_fails_by_clause(self) -> None:
         review_line = "- **Review result:** Review records the exact command, exit status, output artifact, and remaining limitation; a failed or unrun command is not reported as passed."
@@ -325,6 +333,10 @@ class ProofGateValidationTests(unittest.TestCase):
             "No live claim is allowed; production deployment passed.",
             "Production release shipped.",
             "Live integration works.",
+            "Live integration remains blocked, but production deployment is complete.",
+            "Live integration remains blocked, however production deployment is complete.",
+            "Live integration remains blocked yet production deployment is complete.",
+            "Live integration remains blocked and production deployment is complete.",
         ):
             with self.subTest(claim=claim):
                 mutated = self.checklist_text.replace(
@@ -333,20 +345,35 @@ class ProofGateValidationTests(unittest.TestCase):
                     1,
                 )
                 self.assertCode(self.result(mutated), "live-production-claim")
-        negative = self.checklist_text.replace(
-            review_line,
-            "- **Review result:** No live or production success is asserted; the mock boundary remains blocked.",
-            1,
-        )
-        self.assertNotIn("live-production-claim", self.codes(self.result(negative)))
+        for boundary in (
+            "No live or production success is asserted; the mock boundary remains blocked.",
+            "Live integration remains blocked, but production deployment is not complete.",
+            "No live service is contacted and production deployment is not complete.",
+        ):
+            negative = self.checklist_text.replace(
+                review_line,
+                f"- **Review result:** {boundary}",
+                1,
+            )
+            with self.subTest(boundary=boundary):
+                self.assertNotIn("live-production-claim", self.codes(self.result(negative)))
 
-    def test_preservation_evidence_requires_accessibility_semantics_and_reason(self) -> None:
-        weak = self.checklist_text.replace(
-            "- **Preservation evidence:** The checklist and validator preserve keyboard/focus, semantic-name, screen-reader/VoiceOver, Switch Control, zoom/Dynamic Type, contrast, reduced-motion/transparency, and touch-target behavior requirements because they only read bytes and emit diagnostics; missing evidence stays blocked.",
-            "- **Preservation evidence:** no.",
-            1,
-        )
-        self.assertCode(self.result(weak), "preservation-evidence")
+    def test_preservation_evidence_requires_concrete_surface_and_reason(self) -> None:
+        original = "- **Preservation evidence:** The checklist and validator preserve keyboard/focus, semantic-name, screen-reader/VoiceOver, Switch Control, zoom/Dynamic Type, contrast, reduced-motion/transparency, and touch-target behavior requirements because they only read bytes and emit diagnostics; missing evidence stays blocked."
+        for weak_value in (
+            "no.",
+            "behavior remains preserved because evidence is required.",
+            "accessibility requirement remains preserved because the requirement remains required.",
+            "preserves keyboard behavior because behavior remains required.",
+            "preserves keyboard behavior because evidence is required.",
+        ):
+            weak = self.checklist_text.replace(
+                original,
+                f"- **Preservation evidence:** {weak_value}",
+                1,
+            )
+            with self.subTest(weak_value=weak_value):
+                self.assertCode(self.result(weak), "preservation-evidence")
 
     def test_template_definition_of_done_is_exact_and_each_phrase_is_guarded(self) -> None:
         visible_template = self.visible_template_dod()
