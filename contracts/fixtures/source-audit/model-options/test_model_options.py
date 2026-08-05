@@ -388,7 +388,10 @@ def validate_fixture(fixture: dict[str, Any], audit: dict[str, Any]) -> None:
     _require(isinstance(expected, dict), f"{case}: expected must be an object")
     _require(request.get("jsonrpc") == "2.0", f"{case}: request is not JSON-RPC 2.0")
     _require(response.get("jsonrpc") == "2.0", f"{case}: response is not JSON-RPC 2.0")
-    _require(request.get("id") == response.get("id"), f"{case}: response id mismatch")
+    _require(
+        _strict_equal(request.get("id"), response.get("id")),
+        f"{case}: response id mismatch",
+    )
     _require(expected.get("classification") == case, f"{case}: wrong classification")
     _validate_redaction(fixture)
 
@@ -462,7 +465,10 @@ def validate_fixture(fixture: dict[str, Any], audit: dict[str, Any]) -> None:
         _require(bool(result["model"]) and bool(result["provider"]), "present: active choice is empty")
         _require(expected.get("usable") is True, "present: fixture is not usable")
         _require(expected.get("fail_closed") is False, "present: unexpected fail-closed result")
-        _require(expected.get("provider_count") == len(result["providers"]), "present: provider count mismatch")
+        _require(
+            _strict_equal(expected.get("provider_count"), len(result["providers"])),
+            "present: provider count mismatch",
+        )
         _require(expected.get("active_model") == result["model"], "present: model mismatch")
         _require(expected.get("active_provider") == result["provider"], "present: provider mismatch")
     elif case == "empty":
@@ -550,6 +556,19 @@ class ModelOptionsFixtureTests(unittest.TestCase):
     def test_boolean_total_models_is_rejected(self) -> None:
         forged_fixture = copy.deepcopy(self.by_case["present"])
         forged_fixture["response"]["result"]["providers"][0]["total_models"] = True
+        with self.assertRaises(ContractError):
+            validate_fixture(forged_fixture, self.audit)
+
+    def test_boolean_provider_count_is_rejected(self) -> None:
+        forged_fixture = copy.deepcopy(self.by_case["present"])
+        forged_fixture["expected"]["provider_count"] = True
+        with self.assertRaises(ContractError):
+            validate_fixture(forged_fixture, self.audit)
+
+    def test_json_rpc_ids_are_type_aware(self) -> None:
+        forged_fixture = copy.deepcopy(self.by_case["present"])
+        forged_fixture["request"]["id"] = True
+        forged_fixture["response"]["id"] = 1
         with self.assertRaises(ContractError):
             validate_fixture(forged_fixture, self.audit)
 
