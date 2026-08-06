@@ -1,0 +1,140 @@
+{
+  "schema": "hermternal.deployment-security.ws-ticket-baseline.v1",
+  "fixture": "ticket-fixtures.json",
+  "threshold": null,
+  "workload": {
+    "id": "ws-ticket-validator",
+    "metric": "validation_duration_ms",
+    "synthetic_only": true,
+    "repetitions": 30
+  },
+  "observations": {
+    "normal": {
+      "samples_ms": [
+        94.948,
+        95.435,
+        98.617,
+        98.492,
+        98.786,
+        96.72,
+        94.659,
+        94.378,
+        94.227,
+        95.487,
+        94.813,
+        96.407,
+        97.056,
+        97.289,
+        96.24,
+        94.879,
+        96.7,
+        95.847,
+        95.286,
+        96.157,
+        96.175,
+        94.613,
+        95.217,
+        97.52,
+        95.741,
+        96.051,
+        95.078,
+        95.62,
+        94.876,
+        95.412
+      ],
+      "summary": {
+        "min": 94.227,
+        "p50": 95.62,
+        "p95": 98.617,
+        "max": 98.786,
+        "mean": 95.958
+      }
+    },
+    "optimized": {
+      "samples_ms": [
+        94.36,
+        96.115,
+        96.994,
+        96.813,
+        97.134,
+        95.043,
+        95.369,
+        95.876,
+        95.442,
+        93.812,
+        96.629,
+        95.252,
+        94.237,
+        95.62,
+        98.006,
+        95.98,
+        94.856,
+        95.492,
+        95.393,
+        95.068,
+        94.921,
+        97.14,
+        95.788,
+        94.788,
+        96.2,
+        97.442,
+        99.196,
+        101.503,
+        100.192,
+        98.244
+      ],
+      "summary": {
+        "min": 93.812,
+        "p50": 95.788,
+        "p95": 100.192,
+        "max": 101.503,
+        "mean": 96.297
+      }
+    }
+  },
+  "environment": {
+    "python": "3.14.6",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "build_mode": "N/A",
+    "live_run": false
+  },
+  "integrity": {
+    "fixture_canonical_sha256": "2b8cb396aa999a9d3a41a8371f38cbfcb719a7147fb52918ef29731b9ea9d7b8",
+    "baseline_canonical_sha256": "dc6699968787f36221c1575ea6ac297b0b1132f30d4e268ad1050980b9445d8c",
+    "artifact_manifest_sha256": "e55b58610dc9d6cb8d2ab4964987ae94af8117c9b50cbf5b679a198ddce59dd2",
+    "artifact_manifest": [
+      {
+        "path": "README.md",
+        "sha256": "c8f2335eb4a2ccb490eafacd43184a093a45953fe3ebc13c71cd1f1129ca89d9",
+        "size_bytes": 6927
+      },
+      {
+        "path": "probe-baseline.json",
+        "sha256": "dc6699968787f36221c1575ea6ac297b0b1132f30d4e268ad1050980b9445d8c",
+        "size_bytes": 3158
+      },
+      {
+        "path": "ticket-fixtures.json",
+        "sha256": "90a29f60aa84b662cb647cb11672394d13e97f61f7875ff5b176745996b2558b",
+        "size_bytes": 37600
+      },
+      {
+        "path": "test_validate.py",
+        "sha256": "a9d701c3201f3b46204f0c9dadadc0ae675a11a5a37443b7a3684e8a35f04cdb",
+        "size_bytes": 23654
+      },
+      {
+        "path": "validate.py",
+        "sha256": "0e0d074ae7b9939482acd3e85e3fb52e12c56230a1a9db824318e24bf4367b8d",
+        "size_bytes": 55327
+      }
+    ],
+    "baseline_file_size_bytes": 3158
+  },
+  "redaction": {
+    "synthetic_only": true,
+    "contains_sensitive_values": false,
+    "contains_raw_input": false
+  }
+}
