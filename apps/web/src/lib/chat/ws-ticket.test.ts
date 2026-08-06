@@ -44,7 +44,7 @@ describe("createWsTicketRequestBoundary", () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const fetcher: WsTicketFetch = async (input, init) => {
       calls.push({ input, init });
-      return jsonResponse({ ticket: opaqueTicket() });
+      return jsonResponse({ ticket: opaqueTicket(), ttl_seconds: 30 });
     };
     const boundary = createWsTicketRequestBoundary(fetcher);
     const signal = new AbortController().signal;
@@ -101,10 +101,48 @@ describe("createWsTicketRequestBoundary", () => {
     const first = opaqueTicket();
     const second = opaqueTicket();
     const fetcher: WsTicketFetch = async () =>
-      new Response(`{"ticket":"${first}","ticket":"${second}"}`, {
-        headers: { "Content-Type": "application/json" },
-      });
+      new Response(
+        `{"ticket":"${first}","ticket":"${second}","ttl_seconds":30}`,
+        { headers: { "Content-Type": "application/json" } },
+      );
     const boundary = createWsTicketRequestBoundary(fetcher);
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "response-invalid" });
+  });
+
+  it("accepts the official fields in either JSON key order", async () => {
+    const ticket = opaqueTicket();
+    const boundary = createWsTicketRequestBoundary(
+      async () =>
+        new Response(`{"ttl_seconds":30,"ticket":"${ticket}"}`, {
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({ ticket });
+  });
+
+  it.each([
+    { ticket: opaqueTicket() },
+    { ticket: opaqueTicket(), ttl_seconds: 29 },
+    { ticket: opaqueTicket(), ttl_seconds: "30" },
+    { ticket: opaqueTicket(), ttl_seconds: 30, unexpected: true },
+  ])("rejects a ticket response outside the official 30-second shape", async (body) => {
+    const boundary = createWsTicketRequestBoundary(async () => jsonResponse(body));
 
     await expect(
       boundary({
