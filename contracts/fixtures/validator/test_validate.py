@@ -282,6 +282,23 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["live_claim"])
             self.assertEqual(payload["evidence_status"], "blocked")
 
+    def _append_artifact_and_block(self, relative_path: str, addition: str) -> None:
+        repo_root = self._copy_fixture_repo()
+        artifact = repo_root / "contracts/fixtures" / relative_path
+        artifact.write_text(artifact.read_text(encoding="utf-8") + addition, encoding="utf-8")
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    @staticmethod
+    def _add_json_expected_value(document: dict[str, object], key: str, value: object) -> None:
+        cases = document["cases"]
+        if not isinstance(cases, list) or not cases or not isinstance(cases[0], dict):
+            raise TypeError("fixture test case shape changed")
+        expected = cases[0].setdefault("expected", {})
+        if not isinstance(expected, dict):
+            raise TypeError("fixture expected shape changed")
+        expected[key] = value
+
     @staticmethod
     def _distribution(samples: list[float]) -> dict[str, float]:
         ordered = sorted(samples)
@@ -359,6 +376,110 @@ class CliTests(unittest.TestCase):
             + '\nFORGED_BASIC = "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="\n',
             encoding="utf-8",
         )
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_raw_rfc7617_token_is_rejected_in_indexed_python_and_text(self) -> None:
+        token = validate.TEST_NEGATIVE_BASIC_AUTH_CANDIDATE
+        for relative_path, assignment in (
+            ("connection-restoration/validate.py", f'FORGED_RAW_TOKEN = "{token}"\n'),
+            ("connection-restoration/README.md", f"\n{token}\n"),
+        ):
+            with self.subTest(relative_path=relative_path):
+                self._append_artifact_and_block(relative_path, assignment)
+
+    def test_nested_json_raw_rfc7617_key_and_value_are_rejected_in_both_modes(self) -> None:
+        token = validate.TEST_NEGATIVE_BASIC_AUTH_CANDIDATE
+        for key, value in ((token, "redacted"), ("raw_token", token)):
+            with self.subTest(key=key):
+                repo_root = self._copy_fixture_repo()
+                json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
+                document = json.loads(json_path.read_text(encoding="utf-8"))
+                self._add_json_expected_value(document, key, value)
+                json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+                self._rebind_copy(repo_root, refresh_anchor=True)
+                self._assert_blocked_in_both_modes(repo_root)
+
+    def test_regex_calls_and_static_string_construction_are_rejected_in_both_modes(self) -> None:
+        snippets = (
+            're.compile("Authorization: Basic AAAAAAAAAAAAAAAA")\n',
+            'regex.compile("Authorization: Basic AAAAAAAAAAAAAAAA")\n',
+            'FORGED_PLUS = "Authorization: " + "Basic AAAAAAAAAAAAAAAA"\n',
+            'FORGED_RUNTIME_PLUS = "Authorization: Basic " + runtime_secret\n',
+            'FORGED_FSTRING = f"Authorization: Basic {\'AAAAAAAAAAAAAAAA\'}"\n',
+            'FORGED_RUNTIME_FSTRING = f"Authorization: Basic {runtime_secret}"\n',
+            'FORGED_FORMAT = "Authorization: Basic {}".format("AAAAAAAAAAAAAAAA")\n',
+            'FORGED_RUNTIME_FORMAT = "Authorization: Basic {}".format(runtime_secret)\n',
+            'FORGED_JOIN = "".join(["Authorization: ", "Basic ", "AAAAAAAAAAAAAAAA"])\n',
+        )
+        for snippet in snippets:
+            with self.subTest(snippet=snippet):
+                self._append_artifact_and_block("connection-restoration/validate.py", "\n" + snippet)
+
+    def test_exact_allowlisted_basic_match_cannot_hide_a_later_match(self) -> None:
+        token = validate.TEST_NEGATIVE_BASIC_AUTH_CANDIDATE
+        addition = (
+            '\nFORGED_BASIC_CHAIN = '
+            f'"Authorization: Basic {token}\nAuthorization: Basic AAAAAAAAAAAAAAAA"\n'
+        )
+        self._append_artifact_and_block(
+            "deployment-security/external-allowlist/test_validate.py",
+            addition,
+        )
+
+    def test_nul_split_bearer_value_is_rejected_in_both_modes(self) -> None:
+        self._append_artifact_and_block(
+            "connection-restoration/validate.py",
+            '\nFORGED_NUL = "Bearer unredacted-\\x00secret-value-123456"\n',
+        )
+
+    def test_markdown_assignment_value_is_rejected_in_both_modes(self) -> None:
+        self._append_artifact_and_block(
+            "connection-restoration/README.md",
+            "\ntoken=unredacted-secret-value-123456\n",
+        )
+
+    def test_sensitive_key_aliases_are_rejected_in_both_modes(self) -> None:
+        aliases = ("apiKey", "access-key", "clientSecret", "aws-secret-access-key", "x-api-key")
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                repo_root = self._copy_fixture_repo()
+                json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
+                document = json.loads(json_path.read_text(encoding="utf-8"))
+                self._add_json_expected_value(document, alias, "Basic AAAAAAAAAAAAAAAA")
+                json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+                self._rebind_copy(repo_root, refresh_anchor=True)
+                self._assert_blocked_in_both_modes(repo_root)
+
+    def test_central_validator_sources_must_remain_in_baseline_binding(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        baseline_path = repo_root / "contracts/fixtures/validator/validation-baseline.json"
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        baseline["artifact_manifest"] = [
+            record
+            for record in baseline["artifact_manifest"]
+            if record["path"] != "contracts/fixtures/validator/test_validate.py"
+        ]
+        baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
+        baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_registered_unknown_extension_is_rejected_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        fixtures_root = repo_root / "contracts/fixtures"
+        artifact = fixtures_root / "connection-restoration/unscanned.bin"
+        artifact.write_bytes(b"Authorization: Basic AAAAAAAAAAAAAAAA\n")
+        index_path = fixtures_root / "index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        fixture = next(item for item in index["fixture_roots"] if item["id"] == "connection-restoration")
+        fixture["files"].append({
+            "path": "connection-restoration/unscanned.bin",
+            "sha256": "0" * 64,
+            "size_bytes": 0,
+        })
+        fixture["files"].sort(key=lambda record: record["path"])
+        index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
         self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
 
