@@ -1,0 +1,1848 @@
+{
+  "schema": "hermternal.connection-restoration.v1",
+  "operation": "C-05",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "surface": "shared-web-apple",
+  "states": [
+    {
+      "id": "offline",
+      "meaning": "No transport is open.",
+      "allowed_actions": [
+        "start_auth",
+        "connect",
+        "wait_network"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "auth_required",
+      "meaning": "A verified identity or fresh ticket is required.",
+      "allowed_actions": [
+        "authenticate",
+        "sign_out"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "connecting",
+      "meaning": "The Dashboard transport is opening.",
+      "allowed_actions": [
+        "cancel",
+        "wait"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "handshaking",
+      "meaning": "The transport is open and waiting for gateway.ready plus compatibility evidence.",
+      "allowed_actions": [
+        "wait",
+        "cancel"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "ready",
+      "meaning": "The transport and selected surface are usable.",
+      "allowed_actions": [
+        "restore",
+        "send",
+        "retry_idempotent",
+        "sign_out"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "restoring",
+      "meaning": "Server-owned session history and status are being resolved.",
+      "allowed_actions": [
+        "wait",
+        "cancel"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "reconnecting",
+      "meaning": "The old transport ended and recovery is in progress.",
+      "allowed_actions": [
+        "fresh_ticket",
+        "cancel",
+        "authenticate"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "delivery_uncertain",
+      "meaning": "A prompt may have reached the server, but its result is unknown.",
+      "allowed_actions": [
+        "restore",
+        "cancel",
+        "sign_out"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "incompatible",
+      "meaning": "Required compatibility evidence or behavior is absent or mismatched.",
+      "allowed_actions": [
+        "stop",
+        "sign_out"
+      ],
+      "terminal": true
+    },
+    {
+      "id": "failed",
+      "meaning": "A known connection or restoration attempt failed.",
+      "allowed_actions": [
+        "explicit_retry",
+        "sign_out"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "closing",
+      "meaning": "The transport is closing and cleanup is in progress.",
+      "allowed_actions": [
+        "finish_cleanup"
+      ],
+      "terminal": true
+    }
+  ],
+  "invariants": {
+    "gateway_ready_required": {
+      "event": "gateway.ready",
+      "application_send_before": "blocked",
+      "missing_result": "failed"
+    },
+    "compatibility_gate": {
+      "requires": [
+        "gateway.ready",
+        "attestation.pass",
+        "probe.pass"
+      ],
+      "success_state": "ready",
+      "missing_or_failed_state": "incompatible"
+    },
+    "restore_barrier": {
+      "before_prompt_retry": "required_after_reconnect",
+      "server_owned": true,
+      "uncertain_prompt_next": "restore_session",
+      "resend_decision_owner": "C-06"
+    },
+    "retryable_methods": [
+      "session.resume",
+      "session.history",
+      "session.status",
+      "model.options"
+    ],
+    "prompt_policy": {
+      "auto_resubmit": false,
+      "uncertain_state": "delivery_uncertain",
+      "preserve_draft": true
+    },
+    "session_policy": {
+      "selected_session_source": "server",
+      "new_transport_is_new_session": false,
+      "preserve_selected_session_on_reconnect": true,
+      "preserve_draft_on_reconnect": true
+    },
+    "cancellation_policy": {
+      "cancel_state": "closing",
+      "sign_out_state": "closing",
+      "reconnect_after_close": false,
+      "sign_out_clears_session_reference": true,
+      "sign_out_preserves_draft": true
+    },
+    "known_close_codes": {
+      "4401": "auth_required",
+      "4403": "incompatible",
+      "4404": "incompatible",
+      "4408": "failed",
+      "4409": "failed",
+      "4410": "failed",
+      "1011": "failed"
+    },
+    "unknown_policy": {
+      "unknown_event": "incompatible",
+      "unknown_close": "incompatible",
+      "fallback": "none"
+    }
+  },
+  "cases": [
+    {
+      "id": "state-offline",
+      "initial_state": "offline",
+      "initial_context": {
+        "authenticated": false,
+        "selected_session": null,
+        "draft": "empty",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 0,
+        "prompt_delivery": "none"
+      },
+      "events": [],
+      "expected": {
+        "decision": "offline",
+        "final_state": "offline",
+        "trace": [
+          "offline"
+        ],
+        "effects": [],
+        "selected_session": null,
+        "draft": "empty",
+        "ticket_generations": [],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Offline is safe and has no transport side effect."
+    },
+    {
+      "id": "state-auth-required",
+      "initial_state": "auth_required",
+      "initial_context": {
+        "authenticated": false,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 0,
+        "prompt_delivery": "none"
+      },
+      "events": [],
+      "expected": {
+        "decision": "auth_required",
+        "final_state": "auth_required",
+        "trace": [
+          "auth_required"
+        ],
+        "effects": [],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Authentication is required before a connection can open."
+    },
+    {
+      "id": "initial-connect-ready",
+      "initial_state": "connecting",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "transport.open",
+        "gateway.ready",
+        "attestation.pass",
+        "probe.pass",
+        "session.resume.start",
+        "session.resume.ok"
+      ],
+      "expected": {
+        "decision": "restored",
+        "final_state": "ready",
+        "trace": [
+          "connecting",
+          "handshaking",
+          "ready",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "transport_open",
+          "gateway_ready_received",
+          "attestation_verified",
+          "behavioral_probe_passed",
+          "compatibility_gate_passed",
+          "restore_started",
+          "server_session_restored"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Gateway readiness and both compatibility gates precede selected-session restoration."
+    },
+    {
+      "id": "gateway-ready-barrier",
+      "initial_state": "handshaking",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "gateway.ready",
+        "retry.session.status"
+      ],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "handshaking",
+          "incompatible"
+        ],
+        "effects": [
+          "gateway_ready_received",
+          "retry_before_restore_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Application methods cannot cross the gateway.ready barrier."
+    },
+    {
+      "id": "gates-before-gateway",
+      "initial_state": "handshaking",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "attestation.pass",
+        "probe.pass"
+      ],
+      "expected": {
+        "decision": "handshaking",
+        "final_state": "handshaking",
+        "trace": [
+          "handshaking"
+        ],
+        "effects": [
+          "attestation_verified",
+          "behavioral_probe_passed"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Passing evidence without gateway.ready does not enable the connection."
+    },
+    {
+      "id": "attestation-mismatch-blocks",
+      "initial_state": "handshaking",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "gateway.ready",
+        "attestation.fail"
+      ],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "handshaking",
+          "incompatible"
+        ],
+        "effects": [
+          "gateway_ready_received",
+          "compatibility_attestation_failed"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A missing or mismatched attestation blocks the surface."
+    },
+    {
+      "id": "probe-failure-blocks",
+      "initial_state": "handshaking",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "gateway.ready",
+        "attestation.pass",
+        "probe.fail"
+      ],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "handshaking",
+          "incompatible"
+        ],
+        "effects": [
+          "gateway_ready_received",
+          "attestation_verified",
+          "behavioral_probe_failed"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A failed behavioral probe blocks the surface."
+    },
+    {
+      "id": "state-ready",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [],
+      "expected": {
+        "decision": "ready",
+        "final_state": "ready",
+        "trace": [
+          "ready"
+        ],
+        "effects": [],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Ready is observable only after the compatibility gate has passed."
+    },
+    {
+      "id": "restore-selected-session",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "session.resume.start",
+        "session.resume.ok"
+      ],
+      "expected": {
+        "decision": "restored",
+        "final_state": "ready",
+        "trace": [
+          "ready",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "restore_started",
+          "server_session_restored"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Restoration resolves the selected server-owned session."
+    },
+    {
+      "id": "restore-empty-session",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": null,
+        "draft": "empty",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "session.resume.start",
+        "session.empty"
+      ],
+      "expected": {
+        "decision": "restored_empty",
+        "final_state": "ready",
+        "trace": [
+          "ready",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "restore_started",
+          "server_session_empty"
+        ],
+        "selected_session": null,
+        "draft": "empty",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "An empty restore result returns to ready without inventing a session."
+    },
+    {
+      "id": "state-restoring",
+      "initial_state": "restoring",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [],
+      "expected": {
+        "decision": "restoring",
+        "final_state": "restoring",
+        "trace": [
+          "restoring"
+        ],
+        "effects": [],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Restoring is a barrier and does not permit prompt retry."
+    },
+    {
+      "id": "state-reconnecting",
+      "initial_state": "reconnecting",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [],
+      "expected": {
+        "decision": "reconnecting",
+        "final_state": "reconnecting",
+        "trace": [
+          "reconnecting"
+        ],
+        "effects": [],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Reconnecting keeps local safe state while a new transport is pending."
+    },
+    {
+      "id": "state-failed",
+      "initial_state": "failed",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [],
+      "expected": {
+        "decision": "failed",
+        "final_state": "failed",
+        "trace": [
+          "failed"
+        ],
+        "effects": [],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A known failure remains recoverable only through explicit user action."
+    },
+    {
+      "id": "state-incompatible",
+      "initial_state": "incompatible",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "incompatible"
+        ],
+        "effects": [],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Incompatibility is terminal for this surface and has no fallback."
+    },
+    {
+      "id": "reconnect-fresh-ticket-and-restore",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "transport.loss",
+        "ticket.fresh",
+        "transport.open",
+        "gateway.ready",
+        "attestation.pass",
+        "probe.pass",
+        "session.resume.start",
+        "session.resume.ok"
+      ],
+      "expected": {
+        "decision": "restored",
+        "final_state": "ready",
+        "trace": [
+          "ready",
+          "reconnecting",
+          "handshaking",
+          "ready",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "transport_lost",
+          "reconnect_started",
+          "fresh_ticket_minted",
+          "transport_open",
+          "gateway_ready_received",
+          "attestation_verified",
+          "behavioral_probe_passed",
+          "compatibility_gate_passed",
+          "restore_started",
+          "server_session_restored"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1,
+          2
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Reconnect uses a new ticket and restores before recovery actions."
+    },
+    {
+      "id": "reconnect-without-fresh-ticket",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "transport.loss",
+        "transport.open"
+      ],
+      "expected": {
+        "decision": "auth_required",
+        "final_state": "auth_required",
+        "trace": [
+          "ready",
+          "reconnecting",
+          "auth_required"
+        ],
+        "effects": [
+          "transport_lost",
+          "reconnect_started",
+          "fresh_ticket_required"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A reconnect cannot reuse the old upgrade credential."
+    },
+    {
+      "id": "reconnect-ticket-reuse-blocked",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "transport.loss",
+        "ticket.reuse"
+      ],
+      "expected": {
+        "decision": "auth_required",
+        "final_state": "auth_required",
+        "trace": [
+          "ready",
+          "reconnecting",
+          "auth_required"
+        ],
+        "effects": [
+          "transport_lost",
+          "reconnect_started",
+          "reused_ticket_rejected"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A reused or consumed ticket enters authentication recovery."
+    },
+    {
+      "id": "restore-before-idempotent-retry",
+      "initial_state": "restoring",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "retry.session.history"
+      ],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "restoring",
+          "incompatible"
+        ],
+        "effects": [
+          "retry_before_restore_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "History retry is blocked until restore completes."
+    },
+    {
+      "id": "idempotent-retry-after-restore",
+      "initial_state": "restoring",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "session.resume.ok",
+        "retry.session.history"
+      ],
+      "expected": {
+        "decision": "idempotent_retry",
+        "final_state": "ready",
+        "trace": [
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "server_session_restored",
+          "retry_idempotent_session_history"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "History is the only kind of retry represented after restore."
+    },
+    {
+      "id": "non-idempotent-retry-blocked",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "retry.prompt.submit"
+      ],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "non_idempotent_retry_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Prompt submission is not an idempotent retry."
+    },
+    {
+      "id": "prompt-transport-loss-uncertain",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "prompt.sent",
+        "transport.loss"
+      ],
+      "expected": {
+        "decision": "delivery_uncertain",
+        "final_state": "delivery_uncertain",
+        "trace": [
+          "ready",
+          "delivery_uncertain"
+        ],
+        "effects": [
+          "prompt_forwarded",
+          "transport_lost",
+          "prompt_delivery_uncertain"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "deferred_to_C-06",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A lost result enters delivery_uncertain and preserves the draft."
+    },
+    {
+      "id": "uncertain-restore-barrier",
+      "initial_state": "delivery_uncertain",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "uncertain"
+      },
+      "events": [
+        "session.resume.start",
+        "session.resume.ok"
+      ],
+      "expected": {
+        "decision": "restored",
+        "final_state": "ready",
+        "trace": [
+          "delivery_uncertain",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "restore_started",
+          "server_session_restored"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "deferred_to_C-06",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "C-05 stops after restore and defers resend choice to C-06."
+    },
+    {
+      "id": "prompt-auto-resubmit-blocked",
+      "initial_state": "delivery_uncertain",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "uncertain"
+      },
+      "events": [
+        "prompt.auto_retry"
+      ],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "delivery_uncertain",
+          "incompatible"
+        ],
+        "effects": [
+          "prompt_auto_resubmit_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "deferred_to_C-06",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "The connection contract never auto-resubmits an uncertain prompt."
+    },
+    {
+      "id": "cancel-connecting",
+      "initial_state": "connecting",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "user.cancel",
+        "close.complete"
+      ],
+      "expected": {
+        "decision": "closed",
+        "final_state": "offline",
+        "trace": [
+          "connecting",
+          "closing",
+          "offline"
+        ],
+        "effects": [
+          "cancelled",
+          "reconnect_suppressed",
+          "cleanup_complete"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Cancellation closes cleanup and suppresses reconnect."
+    },
+    {
+      "id": "cancel-restoring",
+      "initial_state": "restoring",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "user.cancel",
+        "close.complete"
+      ],
+      "expected": {
+        "decision": "closed",
+        "final_state": "offline",
+        "trace": [
+          "restoring",
+          "closing",
+          "offline"
+        ],
+        "effects": [
+          "cancelled",
+          "reconnect_suppressed",
+          "cleanup_complete"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Restore cancellation preserves safe local state."
+    },
+    {
+      "id": "cancel-reconnecting",
+      "initial_state": "reconnecting",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "user.cancel",
+        "close.complete"
+      ],
+      "expected": {
+        "decision": "closed",
+        "final_state": "offline",
+        "trace": [
+          "reconnecting",
+          "closing",
+          "offline"
+        ],
+        "effects": [
+          "cancelled",
+          "reconnect_suppressed",
+          "cleanup_complete"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Reconnect cancellation never schedules another reconnect."
+    },
+    {
+      "id": "sign-out-clears-session-preserves-draft",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "user.sign_out",
+        "close.complete"
+      ],
+      "expected": {
+        "decision": "closed",
+        "final_state": "offline",
+        "trace": [
+          "ready",
+          "closing",
+          "offline"
+        ],
+        "effects": [
+          "signed_out",
+          "session_reference_cleared",
+          "draft_preserved",
+          "cleanup_complete"
+        ],
+        "selected_session": null,
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Sign-out clears the selected server session but preserves the draft."
+    },
+    {
+      "id": "state-closing",
+      "initial_state": "closing",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "close.complete"
+      ],
+      "expected": {
+        "decision": "closed",
+        "final_state": "offline",
+        "trace": [
+          "closing",
+          "offline"
+        ],
+        "effects": [
+          "cleanup_complete"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Closing completes cleanup and does not reconnect."
+    },
+    {
+      "id": "known-auth-close",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "close.4401"
+      ],
+      "expected": {
+        "decision": "auth_required",
+        "final_state": "auth_required",
+        "trace": [
+          "ready",
+          "auth_required"
+        ],
+        "effects": [
+          "ticket_invalidated"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Authentication rejection invalidates the connection path."
+    },
+    {
+      "id": "known-host-close-incompatible",
+      "initial_state": "handshaking",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "close.4403"
+      ],
+      "expected": {
+        "decision": "incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "handshaking",
+          "incompatible"
+        ],
+        "effects": [
+          "compatibility_close_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Known host or origin rejection is incompatible for this surface."
+    },
+    {
+      "id": "known-chat-disabled-close",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "close.4404"
+      ],
+      "expected": {
+        "decision": "incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "compatibility_close_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A disabled embedded chat surface is incompatible."
+    },
+    {
+      "id": "known-peer-rejected-close",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "close.4408"
+      ],
+      "expected": {
+        "decision": "failed",
+        "final_state": "failed",
+        "trace": [
+          "ready",
+          "failed"
+        ],
+        "effects": [
+          "known_backend_failure"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A known peer rejection is a failed connection outcome."
+    },
+    {
+      "id": "known-attachment-close",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "close.4409"
+      ],
+      "expected": {
+        "decision": "failed",
+        "final_state": "failed",
+        "trace": [
+          "ready",
+          "failed"
+        ],
+        "effects": [
+          "known_backend_failure"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A superseded attachment is a failed operation, not an unknown close."
+    },
+    {
+      "id": "known-pty-exited-close",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "close.4410"
+      ],
+      "expected": {
+        "decision": "failed",
+        "final_state": "failed",
+        "trace": [
+          "ready",
+          "failed"
+        ],
+        "effects": [
+          "known_backend_failure"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A PTY exit is a known failed outcome; this fixture does not reconnect Terminal."
+    },
+    {
+      "id": "known-backend-failure",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "close.1011"
+      ],
+      "expected": {
+        "decision": "failed",
+        "final_state": "failed",
+        "trace": [
+          "ready",
+          "failed"
+        ],
+        "effects": [
+          "known_backend_failure"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A known backend failure is recoverable only by explicit retry."
+    },
+    {
+      "id": "unknown-event-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "event.unknown"
+      ],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "unknown_event_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Unknown events cannot become interactive behavior."
+    },
+    {
+      "id": "unknown-close-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "close.4999"
+      ],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "unknown_close_code_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Unknown close codes cannot trigger an unsafe fallback."
+    },
+    {
+      "id": "auth-success-starts-connect",
+      "initial_state": "auth_required",
+      "initial_context": {
+        "authenticated": false,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 0,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "auth.success",
+        "ticket.fresh",
+        "transport.open",
+        "gateway.ready",
+        "attestation.pass",
+        "probe.pass"
+      ],
+      "expected": {
+        "decision": "ready",
+        "final_state": "ready",
+        "trace": [
+          "auth_required",
+          "connecting",
+          "handshaking",
+          "ready"
+        ],
+        "effects": [
+          "authenticated",
+          "fresh_ticket_minted",
+          "transport_open",
+          "gateway_ready_received",
+          "attestation_verified",
+          "behavioral_probe_passed",
+          "compatibility_gate_passed"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Authentication recovery mints a fresh ticket before opening the transport."
+    },
+    {
+      "id": "offline-network-loss",
+      "initial_state": "connecting",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "network.offline"
+      ],
+      "expected": {
+        "decision": "offline",
+        "final_state": "offline",
+        "trace": [
+          "connecting",
+          "offline"
+        ],
+        "effects": [
+          "transport_unavailable"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A network loss returns to offline without claiming rejection."
+    },
+    {
+      "id": "send-before-gateway-ready",
+      "initial_state": "handshaking",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "prompt.sent"
+      ],
+      "expected": {
+        "decision": "blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "handshaking",
+          "incompatible"
+        ],
+        "effects": [
+          "prompt_send_before_ready_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Prompt send before handshake readiness is blocked."
+    },
+    {
+      "id": "session-and-draft-preserved-on-reconnect-cancel",
+      "initial_state": "reconnecting",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "user.cancel",
+        "close.complete"
+      ],
+      "expected": {
+        "decision": "closed",
+        "final_state": "offline",
+        "trace": [
+          "reconnecting",
+          "closing",
+          "offline"
+        ],
+        "effects": [
+          "cancelled",
+          "reconnect_suppressed",
+          "cleanup_complete"
+        ],
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "pending",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Selected session and draft remain local during explicit reconnect cancellation."
+    },
+    {
+      "id": "sign-out-during-uncertain-delivery",
+      "initial_state": "delivery_uncertain",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "uncertain"
+      },
+      "events": [
+        "user.sign_out",
+        "close.complete"
+      ],
+      "expected": {
+        "decision": "closed",
+        "final_state": "offline",
+        "trace": [
+          "delivery_uncertain",
+          "closing",
+          "offline"
+        ],
+        "effects": [
+          "signed_out",
+          "session_reference_cleared",
+          "draft_preserved",
+          "cleanup_complete"
+        ],
+        "selected_session": null,
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "deferred_to_C-06",
+        "compatibility_gate": "passed",
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Sign-out is safe even while prompt delivery remains uncertain."
+    }
+  ],
+  "redaction": {
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_cookies": false,
+    "contains_tickets": false,
+    "contains_prompts": false,
+    "contains_transcripts": false,
+    "contains_hosts": false,
+    "contains_user_data": false,
+    "diagnostic_policy": "semantic_markers_only"
+  }
+}
