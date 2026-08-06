@@ -1,0 +1,649 @@
+{
+  "schema": "hermternal.deployment-security.browser-auth.v1",
+  "operation": "DEP-06M",
+  "contract": "dashboard-v0.0.1",
+  "pinned_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "network_access": false,
+  "redaction": {
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_raw_cookies": false,
+    "contains_tokens": false,
+    "contains_live_data": false,
+    "contains_public_hosts": false
+  },
+  "cases": [
+    {
+      "id": "provider-discovery",
+      "kind": "discover",
+      "input": {
+        "action": "discover",
+        "origin": "https://synthetic.hermternal.test",
+        "registry": [
+          {
+            "id": "synthetic-browser",
+            "label": "Synthetic Browser",
+            "supports_password": false,
+            "supports_session": true
+          }
+        ],
+        "storage": "available"
+      },
+      "expected": {
+        "status": 200,
+        "state": "provider_available",
+        "reason": "provider_discovered",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_applicable",
+        "providers": ["synthetic-browser"],
+        "diagnostic": "provider discovery complete"
+      }
+    },
+    {
+      "id": "provider-discovery-empty",
+      "kind": "discover",
+      "input": {
+        "action": "discover",
+        "origin": "https://synthetic.hermternal.test",
+        "registry": [],
+        "storage": "available"
+      },
+      "expected": {
+        "status": 503,
+        "state": "signed_out",
+        "reason": "provider_unavailable",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_applicable",
+        "providers": [],
+        "diagnostic": "provider unavailable"
+      }
+    },
+    {
+      "id": "provider-discovery-filters-non-session",
+      "kind": "discover",
+      "input": {
+        "action": "discover",
+        "origin": "https://synthetic.hermternal.test",
+        "registry": [
+          {
+            "id": "synthetic-disabled",
+            "label": "Synthetic Disabled",
+            "supports_password": false,
+            "supports_session": false
+          },
+          {
+            "id": "synthetic-browser",
+            "label": "Synthetic Browser",
+            "supports_password": false,
+            "supports_session": true
+          }
+        ],
+        "storage": "available"
+      },
+      "expected": {
+        "status": 200,
+        "state": "provider_available",
+        "reason": "provider_discovered",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_applicable",
+        "providers": ["synthetic-browser"],
+        "diagnostic": "provider discovery complete"
+      }
+    },
+    {
+      "id": "login-start",
+      "kind": "login_start",
+      "input": {
+        "action": "login_start",
+        "origin": "https://synthetic.hermternal.test",
+        "registry": [
+          {
+            "id": "synthetic-browser",
+            "label": "Synthetic Browser",
+            "supports_password": false,
+            "supports_session": true
+          }
+        ],
+        "return_target": "/app/chat",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 302,
+        "state": "login_pending",
+        "reason": "login_started",
+        "redirect": "/auth/provider",
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": ["synthetic-browser"],
+        "diagnostic": "login start ready"
+      }
+    },
+    {
+      "id": "login-success",
+      "kind": "callback",
+      "input": {
+        "action": "callback",
+        "callback": {
+          "code": "present",
+          "state": "match",
+          "csrf": "match",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "absent",
+          "csrf": "present",
+          "pkce": "present"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "provider": "synthetic-browser",
+        "return_target": "/app/chat",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 302,
+        "state": "authenticated",
+        "reason": "login_success",
+        "redirect": "/app/chat",
+        "session_cookie": "present",
+        "cookie_cleanup": "clear_ephemeral",
+        "provider_exchange": "called",
+        "providers": [],
+        "diagnostic": "callback accepted"
+      }
+    },
+    {
+      "id": "callback-missing-state",
+      "kind": "callback",
+      "input": {
+        "action": "callback",
+        "callback": {
+          "code": "present",
+          "state": "missing",
+          "csrf": "match",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "absent",
+          "csrf": "present",
+          "pkce": "present"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "provider": "synthetic-browser",
+        "return_target": "/app/chat",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 400,
+        "state": "blocked",
+        "reason": "csrf_state_mismatch",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "callback rejected"
+      }
+    },
+    {
+      "id": "callback-csrf-mismatch",
+      "kind": "callback",
+      "input": {
+        "action": "callback",
+        "callback": {
+          "code": "present",
+          "state": "match",
+          "csrf": "mismatch",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "absent",
+          "csrf": "present",
+          "pkce": "present"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "provider": "synthetic-browser",
+        "return_target": "/app/chat",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 403,
+        "state": "blocked",
+        "reason": "csrf_mismatch",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "callback rejected"
+      }
+    },
+    {
+      "id": "callback-provider-error",
+      "kind": "callback",
+      "input": {
+        "action": "callback",
+        "callback": {
+          "code": "missing",
+          "state": "match",
+          "csrf": "match",
+          "error": "provider"
+        },
+        "cookies": {
+          "session": "absent",
+          "csrf": "present",
+          "pkce": "present"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "provider": "synthetic-browser",
+        "return_target": "/app/chat",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 400,
+        "state": "blocked",
+        "reason": "provider_error",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "callback rejected"
+      }
+    },
+    {
+      "id": "callback-malformed-code",
+      "kind": "callback",
+      "input": {
+        "action": "callback",
+        "callback": {
+          "code": "malformed",
+          "state": "match",
+          "csrf": "match",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "absent",
+          "csrf": "present",
+          "pkce": "present"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "provider": "synthetic-browser",
+        "return_target": "/app/chat",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 400,
+        "state": "blocked",
+        "reason": "malformed_callback",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "callback rejected"
+      }
+    },
+    {
+      "id": "callback-pkce-expired",
+      "kind": "callback",
+      "input": {
+        "action": "callback",
+        "callback": {
+          "code": "present",
+          "state": "match",
+          "csrf": "match",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "absent",
+          "csrf": "present",
+          "pkce": "expired"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "provider": "synthetic-browser",
+        "return_target": "/app/chat",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 400,
+        "state": "blocked",
+        "reason": "pkce_cookie_expired",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "callback rejected"
+      }
+    },
+    {
+      "id": "logout-success",
+      "kind": "logout",
+      "input": {
+        "action": "logout",
+        "callback": {
+          "code": "missing",
+          "state": "missing",
+          "csrf": "match",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "present",
+          "csrf": "present",
+          "pkce": "absent"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 204,
+        "state": "signed_out",
+        "reason": "logout",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "clear_session",
+        "provider_exchange": "not_applicable",
+        "providers": [],
+        "diagnostic": "session invalidated"
+      }
+    },
+    {
+      "id": "logout-missing-csrf",
+      "kind": "logout",
+      "input": {
+        "action": "logout",
+        "callback": {
+          "code": "missing",
+          "state": "missing",
+          "csrf": "match",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "present",
+          "csrf": "absent",
+          "pkce": "absent"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 403,
+        "state": "blocked",
+        "reason": "csrf_cookie_missing",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "logout rejected"
+      }
+    },
+    {
+      "id": "restore-expired-session",
+      "kind": "restore",
+      "input": {
+        "action": "restore",
+        "cookies": {
+          "session": "expired",
+          "csrf": "absent",
+          "pkce": "absent"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 401,
+        "state": "signed_out",
+        "reason": "session_expired",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "clear_session",
+        "provider_exchange": "not_applicable",
+        "providers": [],
+        "diagnostic": "session unavailable"
+      }
+    },
+    {
+      "id": "restore-invalid-session",
+      "kind": "restore",
+      "input": {
+        "action": "restore",
+        "cookies": {
+          "session": "invalid",
+          "csrf": "absent",
+          "pkce": "absent"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 401,
+        "state": "blocked",
+        "reason": "invalid_session",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "clear_session",
+        "provider_exchange": "not_applicable",
+        "providers": [],
+        "diagnostic": "session unavailable"
+      }
+    },
+    {
+      "id": "wrong-origin",
+      "kind": "callback",
+      "input": {
+        "action": "callback",
+        "callback": {
+          "code": "present",
+          "state": "match",
+          "csrf": "match",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "absent",
+          "csrf": "present",
+          "pkce": "present"
+        },
+        "origin": "https://other.hermternal.test",
+        "provider": "synthetic-browser",
+        "return_target": "/app/chat",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 403,
+        "state": "blocked",
+        "reason": "wrong_origin",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "origin rejected"
+      }
+    },
+    {
+      "id": "external-return-target",
+      "kind": "callback",
+      "input": {
+        "action": "callback",
+        "callback": {
+          "code": "present",
+          "state": "match",
+          "csrf": "match",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "absent",
+          "csrf": "present",
+          "pkce": "present"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "provider": "synthetic-browser",
+        "return_target": "https://other.hermternal.test/redirect",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 400,
+        "state": "blocked",
+        "reason": "external_return_target",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "return target rejected"
+      }
+    },
+    {
+      "id": "traversal-return-target",
+      "kind": "callback",
+      "input": {
+        "action": "callback",
+        "callback": {
+          "code": "present",
+          "state": "match",
+          "csrf": "match",
+          "error": "absent"
+        },
+        "cookies": {
+          "session": "absent",
+          "csrf": "present",
+          "pkce": "present"
+        },
+        "origin": "https://synthetic.hermternal.test",
+        "provider": "synthetic-browser",
+        "return_target": "/app/../admin",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 400,
+        "state": "blocked",
+        "reason": "return_target_traversal",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "return target rejected"
+      }
+    },
+    {
+      "id": "storage-denied",
+      "kind": "login_start",
+      "input": {
+        "action": "login_start",
+        "origin": "https://synthetic.hermternal.test",
+        "registry": [
+          {
+            "id": "synthetic-browser",
+            "label": "Synthetic Browser",
+            "supports_password": false,
+            "supports_session": true
+          }
+        ],
+        "return_target": "/app/chat",
+        "storage": "denied"
+      },
+      "expected": {
+        "status": 503,
+        "state": "blocked",
+        "reason": "storage_denied",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "browser storage unavailable"
+      }
+    },
+    {
+      "id": "interruption-cancelled",
+      "kind": "interrupt",
+      "input": {
+        "action": "interrupt",
+        "origin": "https://synthetic.hermternal.test",
+        "operation": "callback",
+        "last_verified_artifact": "authenticated_session",
+        "last_verified_state": "authenticated",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 200,
+        "state": "authenticated",
+        "reason": "cancelled",
+        "redirect": null,
+        "session_cookie": "present",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "cancellation preserved last verified state; no new side effects"
+      }
+    },
+    {
+      "id": "retry-source-reread",
+      "kind": "retry",
+      "input": {
+        "action": "retry",
+        "attempt": 2,
+        "last_verified_artifact": "authenticated_session",
+        "last_verified_state": "authenticated",
+        "operation": "restore",
+        "origin": "https://synthetic.hermternal.test",
+        "prior_outward_change": "redirected",
+        "prior_provider_exchange": "called",
+        "prior_session_creation": "created",
+        "source_after_reread": "verified",
+        "source_before": "stale",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 200,
+        "state": "authenticated",
+        "reason": "retry_source_reread",
+        "redirect": null,
+        "session_cookie": "present",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "retry reread source; no duplicate provider, session, or outward side effects"
+      }
+    },
+    {
+      "id": "retry-non-idempotent",
+      "kind": "retry",
+      "input": {
+        "action": "retry",
+        "attempt": 2,
+        "last_verified_artifact": "authenticated_session",
+        "last_verified_state": "authenticated",
+        "operation": "callback",
+        "origin": "https://synthetic.hermternal.test",
+        "prior_outward_change": "redirected",
+        "prior_provider_exchange": "called",
+        "prior_session_creation": "created",
+        "source_after_reread": "verified",
+        "source_before": "stale",
+        "storage": "available"
+      },
+      "expected": {
+        "status": 409,
+        "state": "blocked",
+        "reason": "retry_not_idempotent",
+        "redirect": null,
+        "session_cookie": "absent",
+        "cookie_cleanup": "none",
+        "provider_exchange": "not_called",
+        "providers": [],
+        "diagnostic": "retry rejected: operation is not idempotent"
+      }
+    }
+  ]
+}
