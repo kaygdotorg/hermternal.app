@@ -37,8 +37,8 @@ PREFIX = "/hermes"
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py")
 # Evidence is pinned after the fixture is reviewed; a copied baseline cannot
 # self-rebind its digest to a mutated README, manifest, or validator.
-EXPECTED_ARTIFACT_BYTES = 120224
-EXPECTED_ARTIFACT_SHA256 = "2823677ebb8db8a0fee4c10b3c89246ba6cd8436852dd7ed04ada11e3e1432ea"
+EXPECTED_ARTIFACT_BYTES = 120384
+EXPECTED_ARTIFACT_SHA256 = "6f5b328dcf52acf9bbafd5fafd1d79a501c97823f44bafa86248d0e25a1ebdf4"
 
 MAX_JSON_BYTES = 512 * 1024
 MAX_JSON_DEPTH = 64

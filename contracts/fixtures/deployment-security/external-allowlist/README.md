@@ -149,7 +149,9 @@ The retained-output scanner rejects data URLs, plausible padded and unpadded
 standard or URL-safe Base64 runs, absolute POSIX and Windows paths (including
 `/tmp`), relative paths, filenames, hostnames (including `localhost:3000`),
 email or IPv4 host-shaped values, and Basic, Cookie, Bearer, and
-sensitive-assignment payloads. Base64 candidates are bounded, decoded with
+sensitive-assignment payloads. The path/host promise is intentionally bounded:
+isolated `/`, `../`, and IPv6 literals are outside this synthetic contract and
+are not claimed by this scanner. Base64 candidates are bounded, decoded with
 strict standard-library validation, and re-encoded before acceptance; terminal
 padding must be canonical and nonzero unused pad bits are rejected. The
 scanner uses payload-shaped punctuation, digits, and mixed-case signals so
