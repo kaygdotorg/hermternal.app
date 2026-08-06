@@ -170,7 +170,7 @@ export HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit>
 # Execute normal.command and optimized.command from validation-baseline.json.
 python3 -I -B -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
 python3 -I -B -O -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
-PYTHONPYCACHEPREFIX=/tmp/hermternal-c06-pycache python3 -I -B -m py_compile contracts/fixtures/uncertain-delivery/preflight.py contracts/fixtures/uncertain-delivery/validate.py contracts/fixtures/uncertain-delivery/test_validate.py
+python3 -X pycache_prefix=/tmp/hermternal-c06-pycache -I -B -m py_compile contracts/fixtures/uncertain-delivery/preflight.py contracts/fixtures/uncertain-delivery/validate.py contracts/fixtures/uncertain-delivery/test_validate.py
 ```
 
 The focused tests execute the real validator CLI in both normal and optimized

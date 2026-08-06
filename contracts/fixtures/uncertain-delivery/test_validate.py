@@ -1253,11 +1253,11 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
     def test_compile_in_both_modes_without_worktree_cache(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             for optimized in (False, True):
-                command = [sys.executable, "-I", "-B"]
+                command = [sys.executable, "-X", f"pycache_prefix={directory}", "-I", "-B"]
                 if optimized:
                     command.append("-O")
                 command.extend(["-m", "py_compile", str(ROOT / "validate.py"), str(ROOT / "test_validate.py")])
-                result = subprocess.run(command, capture_output=True, text=True, check=False, env={**__import__("os").environ, "PYTHONPYCACHEPREFIX": directory})
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
                 with self.subTest(optimized=optimized):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stderr, "")

@@ -50,14 +50,14 @@ CANONICAL_FIXTURE_NAMES = frozenset(("README.md", "cases.json", "preflight.py", 
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_BOUND_SHA256 = {
-    "README.md": "a75d4382b8f7b1c35df58e9261a2f536534309def344ef7c2841dac0697387cd",
+    "README.md": "1ef9daff8bd9d6b260489966cba522088d76c6d08f0e263514e83f5d362a726d",
     "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
     "preflight.py": "03ae31cced667f4dea1f1e4b3358e2be20cd1e4484c47c649ef60882af886c3c",
     "validate.py": "5475771bd612a0426dc03bf8739ddf9e8a088dc405a83d701184c2fd70b58804",
-    "test_validate.py": "7f41eeb68b373868904d5363cf7b06170b1ecc607f9f0a9cc4853ef3d6e05ce2",
+    "test_validate.py": "eeb25a3848b0582ec392a69dfc2b2398be23604468a0d9c3b8b60c9ea0f75299",
     "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
 }
-EXPECTED_BASELINE_SHA256 = "db027c96f0b9b5e14ead95c3880786a1355844193daa5f023077179dd4e8cbed"
+EXPECTED_BASELINE_SHA256 = "aa79a838710a9d7d123724aa98532de468bee3340ecb9e5675b6bf1efb518cf8"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
