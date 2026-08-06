@@ -37,8 +37,8 @@ PREFIX = "/hermes"
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py")
 # Evidence is pinned after the fixture is reviewed; a copied baseline cannot
 # self-rebind its digest to a mutated README, manifest, or validator.
-EXPECTED_ARTIFACT_BYTES = 120384
-EXPECTED_ARTIFACT_SHA256 = "6f5b328dcf52acf9bbafd5fafd1d79a501c97823f44bafa86248d0e25a1ebdf4"
+EXPECTED_ARTIFACT_BYTES = 126891
+EXPECTED_ARTIFACT_SHA256 = "ea7df5493dc36471d43c63dbbad72fd3b7cb04327e019dd1ec47904d19b5536e"
 
 MAX_JSON_BYTES = 512 * 1024
 MAX_JSON_DEPTH = 64
@@ -117,7 +117,6 @@ REDACTION_STRUCTURAL_FIELDS = frozenset(
         "validator",
         "fixture",
         "command",
-        "path",
         "prefix",
         "platform",
         "files",
@@ -137,8 +136,8 @@ REDACTION_STRUCTURAL_EXEMPT_PATTERNS = frozenset(
     }
 )
 _BASE64_CANDIDATE_RE = re.compile(
-    r"(?<![A-Za-z0-9+/_%-])"
-    r"[A-Za-z0-9+/_-]{2,}={0,}"
+    r"(?<![A-Za-z0-9+/_%=-])"
+    r"[A-Za-z0-9+/_=-]{2,}"
     r"(?![A-Za-z0-9+/_=-])"
 )
 RETAINED_VALUE_PATTERNS = (
@@ -260,7 +259,14 @@ def _base64_candidate_state(token: str) -> str | None:
         return "noncanonical"
     core = token.rstrip("=")
     padding = token[len(core) :]
-    if len(core) < 2 or "=" in core or len(core) % 4 == 1:
+    if len(core) < 2:
+        return None
+    if "=" in core:
+        # An equals sign followed by more Base64 alphabet is malformed
+        # internal/nonterminal padding.  Keep the complete run in scope so a
+        # valid-looking suffix cannot be approved independently.
+        return "noncanonical"
+    if len(core) % 4 == 1:
         return None
     url_safe = "-" in core or "_" in core
     if url_safe and any(character in "+/" for character in core):
@@ -288,12 +294,52 @@ def _base64_candidate_state(token: str) -> str | None:
     return "canonical" if token == expected else "noncanonical"
 
 
+def _malformed_base64_padding_is_plausible(
+    value: str,
+    match: re.Match[str],
+    token: str,
+    *,
+    candidate_start: int | None = None,
+) -> bool:
+    """Recognize one complete run with internal or nonterminal padding."""
+
+    core = token.rstrip("=")
+    equals_index = core.find("=")
+    if equals_index < 2:
+        return False
+    prefix = core[:equals_index]
+    suffix = core[equals_index:].replace("=", "")
+    if not suffix or len(prefix) % 4 == 1:
+        return False
+    url_safe = "-" in prefix or "_" in prefix or "-" in suffix or "_" in suffix
+    if url_safe and any(character in "+/" for character in prefix + suffix):
+        return False
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" if url_safe else "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    if any(character not in alphabet for character in prefix + suffix):
+        return False
+    if _base64_candidate_state(prefix) is None:
+        return False
+
+    start = match.start() if candidate_start is None else candidate_start
+    preceding = value[start - 1] if start else ""
+    assignment_context = bool(preceding) and preceding in "=:+,;"
+    whole_token = token == value.strip()
+    combined = prefix + suffix
+    upper_count = sum(character.isupper() for character in combined)
+    lower_count = sum(character.islower() for character in combined)
+    payload_signal = any(character.isdigit() or character in "+/" for character in combined)
+    return payload_signal or upper_count >= 2 or (
+        (assignment_context or whole_token) and upper_count >= 1 and lower_count >= 1
+    )
+
+
 def _base64_candidate_is_plausible(
     value: str,
     match: re.Match[str],
     token: str,
     state: str,
     *,
+    candidate_start: int | None = None,
     is_key: bool = False,
 ) -> bool:
     """Keep canonical detection bounded without classifying contract prose.
@@ -308,10 +354,18 @@ def _base64_candidate_is_plausible(
     if state not in {"canonical", "noncanonical"}:
         return False
     core = token.rstrip("=")
+    if "=" in core:
+        return _malformed_base64_padding_is_plausible(
+            value,
+            match,
+            token,
+            candidate_start=candidate_start,
+        )
     padding = token[len(core) :]
     if len(core) < 2:
         return False
-    preceding = value[match.start() - 1] if match.start() else ""
+    start = match.start() if candidate_start is None else candidate_start
+    preceding = value[start - 1] if start else ""
     assignment_context = bool(preceding) and preceding in "=:+,;"
     whole_token = token == value.strip()
     if padding:
@@ -352,6 +406,18 @@ def _base64_candidate_is_plausible(
     )
 
 
+def _base64_prefix_has_payload_signal(prefix: str) -> bool:
+    """Distinguish an assignment label from a Base64 payload prefix."""
+
+    upper_count = sum(character.isupper() for character in prefix)
+    lower_count = sum(character.islower() for character in prefix)
+    return (
+        any(character.isdigit() or character in "+/_-" for character in prefix)
+        or upper_count >= 2
+        or (upper_count >= 1 and lower_count >= 1 and len(prefix) < 6)
+    )
+
+
 def _base64_candidate_spans(
     value: str,
     *,
@@ -360,20 +426,28 @@ def _base64_candidate_spans(
 ) -> list[tuple[int, int]]:
     """Find plausible canonical or noncanonical Base64 runs in bounded text."""
 
-    if _pattern_is_exempt("base64", field_name):
+    if _pattern_is_exempt("base64", field_name, value):
         return []
     spans: list[tuple[int, int]] = []
     for match in _BASE64_CANDIDATE_RE.finditer(value):
+        candidate_start = match.start()
         token = match.group(0)
+        if "=" in token:
+            separator = token.find("=")
+            prefix = token[:separator]
+            if not _base64_prefix_has_payload_signal(prefix):
+                candidate_start = match.start() + separator + 1
+                token = value[candidate_start : match.end()]
         state = _base64_candidate_state(token)
         if state is not None and _base64_candidate_is_plausible(
             value,
             match,
             token,
             state,
+            candidate_start=candidate_start,
             is_key=is_key,
         ):
-            spans.append(match.span())
+            spans.append((candidate_start, match.end()))
     return spans
 
 
@@ -546,7 +620,28 @@ def _normalize_sensitive_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", key.casefold())
 
 
-def _pattern_is_exempt(pattern_name: str, field_name: str | None) -> bool:
+def _is_independently_validated_path(value: str) -> bool:
+    """Allow only route paths frozen by the route matrix or its session template."""
+
+    if value in FROZEN_ROUTE_PATH_VALUES or value in FROZEN_CASE_PATH_VALUES:
+        return True
+    return any(
+        "{session_id}" in route["path"] and _path_template_matches(route["path"], value)
+        for route in EXPECTED_EXTERNAL_ROUTES
+    )
+
+
+def _pattern_is_exempt(
+    pattern_name: str,
+    field_name: str | None,
+    value: str | None = None,
+) -> bool:
+    if field_name == "path":
+        return (
+            value is not None
+            and _is_independently_validated_path(value)
+            and pattern_name in REDACTION_STRUCTURAL_EXEMPT_PATTERNS
+        )
     return (
         field_name in REDACTION_STRUCTURAL_FIELDS
         and pattern_name in REDACTION_STRUCTURAL_EXEMPT_PATTERNS
@@ -563,7 +658,7 @@ def _check_retained_text(
     for pattern_name, pattern in RETAINED_VALUE_PATTERNS:
         if pattern_name == "base64":
             continue
-        if _pattern_is_exempt(pattern_name, field_name):
+        if _pattern_is_exempt(pattern_name, field_name, value):
             continue
         require(pattern.search(value) is None, f"retained sensitive value at {path}")
     require(
@@ -757,6 +852,7 @@ EXPECTED_EXTERNAL_ROUTES = (
 )
 ALL_ROUTES = EXPECTED_STATIC_ROUTES + EXPECTED_EXTERNAL_ROUTES
 ROUTE_BY_ID = {route["id"]: route for route in ALL_ROUTES}
+FROZEN_ROUTE_PATH_VALUES = frozenset(route["path"] for route in ALL_ROUTES)
 EXPECTED_CASE_IDS = (
     "static-root-get",
     "static-root-head",
@@ -829,6 +925,73 @@ EXPECTED_CASE_IDS = (
     "deny-method-override-query-x-http-method-underscore",
     "deny-method-override-query-x-http-method-encoded",
     "deny-method-override-query-x-http-method-double-encoded",
+)
+
+# These request-path literals are the reviewed fixture probes.  Redaction may
+# exempt only this frozen value set (or a route template validated below); a
+# temporary manifest path such as /tmp is never structural by field name alone.
+FROZEN_CASE_PATH_VALUES = frozenset(
+    {
+        "/",
+        "/app",
+        "/app/chat",
+        "/app/",
+        "/app/other",
+        "/settings",
+        "/signed-out",
+        "/dashboard",
+        "/app?route=chat",
+        "/hermes/login",
+        "/hermes/api/auth/providers",
+        "/hermes/auth/login",
+        "/hermes/auth/callback",
+        "/hermes/auth/password-login",
+        "/hermes/auth/logout",
+        "/hermes/api/auth/me",
+        "/hermes/api/auth/ws-ticket",
+        "/hermes/auth/native/authorize",
+        "/hermes/auth/native/token",
+        "/hermes/auth/native/refresh",
+        "/hermes/api/sessions",
+        "/hermes/api/sessions/search",
+        "/hermes/api/sessions/a7.session~2",
+        "/hermes/api/sessions/a7.session~2/messages",
+        "/hermes/api/sessions/s7",
+        "/hermes/api/sessions/",
+        "/hermes/api/sessions/.",
+        "/hermes/api/sessions/..",
+        "/hermes/api/sessions/a/b",
+        "/hermes/api/sessions/_a",
+        "/hermes/api/sessions/a_",
+        "/hermes/api/chat/image-upload",
+        "/hermes/api/ws",
+        "/hermes/api/pty",
+        "/api/ws",
+        "/api/sessions",
+        "/hermes/*",
+        "/hermes/api/unknown",
+        "/hermes/api/ws/",
+        "/hermes/hermes/api/ws",
+        "/hermes/api/sessions/a%2Fb",
+        "/hermes/api/sessions/%2e%2e/auth/me",
+        "/%68ermes/api/ws",
+        "/hermes/api/sessions/../auth/me",
+        "/hermes/api/config/defaults",
+        "/hermes/api/dashboard/plugins",
+        "/hermes/api/gateway/restart",
+        "/hermes/api/files",
+        "/hermes/api/ssh/ownership",
+        "/hermes/api/model/options",
+        "/hermes/api/pub",
+        "/hermes/api/events",
+        "/hermes/api/console",
+        "/hermes/api/cron/fire",
+        "/hermes/api/health",
+        "/hermes/api/*",
+        "/hermes/api/sessions/a7/extra",
+        "/hermes/api/sessions/a$b",
+        "/hermes/api/sessions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }
 )
 
 UNPREFIXED_PATHS = frozenset(

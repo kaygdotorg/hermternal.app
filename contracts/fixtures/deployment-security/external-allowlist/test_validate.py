@@ -44,6 +44,12 @@ BASE64_REDACTION_CASES = (
     ("standard-excessive-padding", "aGVsbG8==="),
     ("urlsafe-noncanonical-padded", "AQIDBAUG-_=="),
 )
+MALFORMED_BASE64_REDACTION_CASES = (
+    ("internal-padding", "c2VjcmV0=X"),
+    ("nonterminal-padding-one", "aA=Z"),
+    ("nonterminal-padding-two", "aA==Z"),
+    ("internal-padding-with-terminal-padding", "aGV=sbG8="),
+)
 
 
 class ExternalAllowlistTests(unittest.TestCase):
@@ -399,6 +405,48 @@ class ExternalAllowlistTests(unittest.TestCase):
             with self.subTest(safe_text=safe_text):
                 for optimized in (False, True):
                     self.assertEqual(self._run_compact_error(safe_text, optimized=optimized).stdout.strip(), json.dumps(safe_text))
+
+    def test_redaction_rejects_complete_malformed_base64_runs(self) -> None:
+        for label, value in MALFORMED_BASE64_REDACTION_CASES:
+            with self.subTest(label=label, value=value):
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_redaction({"message": value})
+
+    def test_error_compaction_redacts_complete_malformed_base64_runs_in_both_modes(self) -> None:
+        for label, value in MALFORMED_BASE64_REDACTION_CASES:
+            with self.subTest(label=label, value=value):
+                outputs: list[str] = []
+                for optimized in (False, True):
+                    completed = self._run_compact_error(f"retained={value}", optimized=optimized)
+                    with self.subTest(optimized=optimized):
+                        self.assertEqual(completed.returncode, 0)
+                        self.assertEqual(completed.stderr, "")
+                        compacted = json.loads(completed.stdout)
+                        self.assertEqual(compacted, "retained=[REDACTED]")
+                        self.assertNotIn(value, compacted)
+                        outputs.append(compacted)
+                self.assertEqual(outputs[0], outputs[1])
+
+    def test_real_cli_rejects_complete_malformed_base64_runs_in_both_modes(self) -> None:
+        for label, value in MALFORMED_BASE64_REDACTION_CASES:
+            for location in ("description", "header", "hostile-key"):
+                with self.subTest(label=label, value=value, location=location):
+                    mutated = copy.deepcopy(self.document)
+                    if location == "description":
+                        mutated["cases"][0]["description"] = f"malformed {value}"
+                    elif location == "header":
+                        mutated["cases"][0]["request"]["headers"]["X-Note"] = value
+                    else:
+                        mutated["cases"][0]["request"][value] = "synthetic"
+                    self._assert_cli_redaction_failure(mutated, (value,))
+
+    def test_real_cli_rejects_unvalidated_request_path_mutations_in_both_modes(self) -> None:
+        for value in ("/tmp", "/Users/alice/private/report.txt"):
+            with self.subTest(value=value):
+                mutated = copy.deepcopy(self.document)
+                deny_case = next(case for case in mutated["cases"] if case["id"] == "deny-unknown-hermes-route")
+                deny_case["request"]["path"] = value
+                self._assert_cli_redaction_failure(mutated, (value,))
 
     def test_real_cli_rejects_canonical_base64_classes_in_both_modes(self) -> None:
         for label, value in BASE64_REDACTION_CASES:

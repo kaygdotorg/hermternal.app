@@ -153,21 +153,28 @@ sensitive-assignment payloads. The path/host promise is intentionally bounded:
 isolated `/`, `../`, and IPv6 literals are outside this synthetic contract and
 are not claimed by this scanner. Base64 candidates are bounded, decoded with
 strict standard-library validation, and re-encoded before acceptance; terminal
-padding must be canonical and nonzero unused pad bits are rejected. The
-scanner uses payload-shaped punctuation, digits, and mixed-case signals so
-ordinary contract prose and hyphenated route identifiers are not treated as
-encoded payloads. Structural route, platform, and evidence fields are exempt
-only where their frozen syntax is independently validated. It scans both values
-and object keys. Diagnostic locations use fixed semantic labels such as
-`$.<field>` and `$[]`; attacker-controlled keys never become error paths.
+padding must be canonical and nonzero unused pad bits are rejected. Internal
+or nonterminal padding is retained as one complete malformed run, so a
+valid-looking suffix cannot escape redaction. The scanner uses payload-shaped
+punctuation, digits, and mixed-case signals so ordinary contract prose and
+hyphenated route identifiers are not treated as encoded payloads. Structural
+route, platform, and evidence fields are exempt only where their frozen syntax
+is independently validated. Request `path` exemptions are limited to exact
+frozen route/case values and independently matched session templates; a
+temporary-manifest mutation such as `/tmp` or an absolute filesystem path is
+still rejected. It scans both values and object keys. Diagnostic locations use
+fixed semantic labels such as `$.<field>` and `$[]`; attacker-controlled keys
+never become error paths.
 
 The manifest's frozen route paths, source-contract path, artifact filenames and
 hashes, and validator command strings are structural syntax. Those fields are
 independently checked against the closed contract and are exempt only from the
 heuristics that would classify their syntax as a retained user path, filename,
 host, or encoded payload. Credential and URL checks still apply. The helper
-and real-CLI regressions exercise every retained-data class in both normal and
-optimized modes and require the same bounded semantic failure in both modes.
+and real-CLI regressions exercise every retained-data class, including complete
+malformed Base64 runs and unvalidated request-path mutations, in both normal
+and optimized modes and require the same bounded semantic failure in both
+modes.
 
 Run from the repository root:
 
