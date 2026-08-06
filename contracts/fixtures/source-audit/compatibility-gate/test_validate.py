@@ -69,7 +69,7 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.validate_record(record, REPO_ROOT, verify_git=verify_git, snapshot=snapshot)
 
-    def test_checked_in_record_passes_against_merged_dev(self) -> None:
+    def test_checked_in_record_passes_against_pinned_integration_snapshot(self) -> None:
         artifact_count = validate.validate_record(self.record, REPO_ROOT)
         self.assertEqual(artifact_count, len(validate.ARTIFACT_PATHS))
         self.assertEqual(
@@ -77,7 +77,7 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
             self.record["artifacts"]["set_sha256"],
         )
 
-    def test_current_dev_integration_is_separate_from_historical_review(self) -> None:
+    def test_pinned_integration_snapshot_is_separate_from_historical_review(self) -> None:
         self.assertEqual(
             self.record["merged_dev"]["head"],
             validate.HISTORICAL_DEV_HEAD,
@@ -133,6 +133,7 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIsNone(result["verified_commit"])
             self.assertNotIn("current_dev", output.getvalue())
+            self.assertNotIn("captured_dev", output.getvalue())
             self.assertNotIn(str(alternate), output.getvalue())
 
     def test_snapshot_commit_argument_must_be_an_exact_commit_object(self) -> None:
@@ -140,22 +141,25 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate._capture_snapshot(REPO_ROOT, tree)
 
-    def test_moved_dev_ref_fails_closed_after_snapshot_capture(self) -> None:
+    def test_moved_origin_dev_does_not_invalidate_pinned_snapshot(self) -> None:
         snapshot = validate._capture_snapshot(REPO_ROOT)
         real_commit_oid = validate._git_commit_oid
-        calls = {"dev": 0}
 
         def moved_ref(root: Path, expression: str) -> str | None:
-            if expression == snapshot.dev_ref:
-                calls["dev"] += 1
-                if calls["dev"] >= 1:
-                    return "0" * 40
+            if expression in {
+                "refs/remotes/origin/dev",
+                "refs/remotes/origin/dev^{commit}",
+                "refs/heads/dev",
+                "refs/heads/dev^{commit}",
+            }:
+                return "0" * 40
             return real_commit_oid(root, expression)
 
         with mock.patch.object(validate, "_git_commit_oid", side_effect=moved_ref):
-            self.assert_rejected(self.record, verify_git=True, snapshot=snapshot)
+            artifact_count = validate.validate_record(self.record, REPO_ROOT, verify_git=True, snapshot=snapshot)
+        self.assertEqual(artifact_count, len(validate.ARTIFACT_PATHS))
 
-    def test_missing_or_malformed_current_commit_fails_closed(self) -> None:
+    def test_malformed_missing_or_wrong_pinned_snapshot_fails_closed(self) -> None:
         malformed = copy.deepcopy(self.record)
         malformed["integration_dev"]["head"] = "not-a-commit"
         self.assert_rejected(malformed)
@@ -163,6 +167,32 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         missing = copy.deepcopy(self.record)
         missing["integration_dev"]["head"] = "0" * 40
         self.assert_rejected(missing, verify_git=True)
+
+        wrong = copy.deepcopy(self.record)
+        wrong["integration_dev"]["head"] = validate.HISTORICAL_DEV_HEAD
+        wrong["integration_dev"]["tree"] = validate.HISTORICAL_DEV_TREE
+        self.assert_rejected(wrong, verify_git=True)
+
+        pinned_commit = self.record["integration_dev"]["head"]
+        real_commit_oid = validate._git_commit_oid
+
+        def missing_pinned_commit(root: Path, expression: str) -> str | None:
+            if expression == pinned_commit:
+                return None
+            return real_commit_oid(root, expression)
+
+        with mock.patch.object(validate, "_git_commit_oid", side_effect=missing_pinned_commit):
+            self.assert_rejected(self.record, verify_git=True)
+
+        real_tree_oid = validate._git_tree_oid
+
+        def wrong_pinned_tree(root: Path, commit_oid: str) -> str | None:
+            if commit_oid == pinned_commit:
+                return "0" * 40
+            return real_tree_oid(root, commit_oid)
+
+        with mock.patch.object(validate, "_git_tree_oid", side_effect=wrong_pinned_tree):
+            self.assert_rejected(self.record, verify_git=True)
 
     def test_boolean_integer_confusion_is_rejected_at_every_numeric_field(self) -> None:
         for path in (
@@ -483,7 +513,8 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         readme = " ".join(README_PATH.read_text(encoding="utf-8").split())
         for marker in (
             "`merged_dev`, the immutable historical review",
-            "`integration_dev`, the explicit captured `origin/dev` snapshot",
+            "`integration_dev` is one explicitly recorded immutable snapshot",
+            "advancing that ref does not change or invalidate this historical snapshot",
             "one complete `git cat-file --batch` response",
             "## Accessibility",
             "Accessibility verification is N/A for this operation because it produces no UI",
@@ -534,9 +565,12 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         self.assertEqual(result["historical_reviewed_commit"], self.record["merged_dev"]["head"])
         self.assertEqual(result["verified_commit_kind"], "captured_snapshot")
         self.assertEqual(result["verified_commit"], _git(REPO_ROOT, "rev-parse", "HEAD").stdout.strip())
-        self.assertEqual(result["captured_dev_commit"], self.record["integration_dev"]["head"])
-        self.assertEqual(result["captured_dev_ref"], "refs/remotes/origin/dev")
-        self.assertEqual(result["evidence_scope"], "historical_review_and_captured_snapshot")
+        self.assertEqual(result["integration_snapshot_commit"], self.record["integration_dev"]["head"])
+        self.assertEqual(result["integration_snapshot_tree"], self.record["integration_dev"]["tree"])
+        self.assertEqual(result["evidence_scope"], "historical_review_and_immutable_snapshots")
+        self.assertNotIn("current_dev", output.getvalue())
+        self.assertNotIn("captured_dev", output.getvalue())
+        self.assertNotIn("origin/dev", output.getvalue())
         self.assertEqual(result["errors"], [])
 
         for optimized in (False, True):

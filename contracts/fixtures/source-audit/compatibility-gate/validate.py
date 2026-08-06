@@ -2,11 +2,12 @@
 """Validate the synthetic, source-only compatibility gate record.
 
 This validator is deliberately offline. It reads the checked-in JSON record and
-immutable Git blobs from one historical reviewed commit plus one explicit
-current-``dev`` integration snapshot. It never contacts Hermes, a proxy, an
-identity provider, or a deployment. A record can therefore prove only that the
-reviewed fixture artifacts are the exact bytes recorded for those revisions; it
-cannot turn missing deployment or behavioral evidence into compatibility.
+immutable Git blobs from one historical reviewed commit plus one explicitly
+recorded integration snapshot. It never contacts Hermes, a proxy, an identity
+provider, or a deployment. A record can therefore prove only that the reviewed
+fixture artifacts are the exact bytes recorded for those revisions; it cannot
+turn missing deployment or behavioral evidence into compatibility. The recorded
+integration snapshot is pinned by commit and tree, not by a mutable ref.
 """
 
 from __future__ import annotations
@@ -36,11 +37,11 @@ HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 DEV_REF = "dev"
 HISTORICAL_DEV_HEAD = "8465bd4cacc87fe62ff952c38d7f3c2b5927bfbd"
 HISTORICAL_DEV_TREE = "aede9b87932f5cc28462120ef28be52a9a4aba7f"
-# This is the immutable origin/dev snapshot used by this fixture revision. The
-# record repeats these values, but the validator pins them independently so a
-# caller cannot choose another locally available commit and recompute metadata.
-INTEGRATION_DEV_HEAD = "0671593b42235d4fbad2f7f3e04255c9f51b257d"
-INTEGRATION_DEV_TREE = "16fac2e9d6aa64dd2631b9f4b445146c115acfb0"
+# This is the immutable integration snapshot used by this fixture revision.
+# The record repeats these values, but the validator pins them independently so
+# a caller cannot choose another locally available commit and recompute metadata.
+INTEGRATION_SNAPSHOT_COMMIT = "0671593b42235d4fbad2f7f3e04255c9f51b257d"
+INTEGRATION_SNAPSHOT_TREE = "16fac2e9d6aa64dd2631b9f4b445146c115acfb0"
 CANONICAL_RECORD_SHA256 = "baddfc67cb92cfe024dc64310a4f9b6f6ea28dab26652a1965fcf7579084559f"
 CANONICAL_RECORD_SIZE_BYTES = 11030
 CANONICAL_RECORD_RELATIVE_PATH = "contracts/fixtures/source-audit/compatibility-gate/compatibility_record.json"
@@ -128,7 +129,7 @@ ROOT_KEYS = (
 )
 SOURCE_KEYS = ("repository", "sha")
 MERGED_DEV_KEYS = ("ref", "head", "tree", "merged_prs")
-INTEGRATION_DEV_KEYS = ("ref", "head", "tree")
+INTEGRATION_SNAPSHOT_KEYS = ("ref", "head", "tree")
 MERGED_PR_KEYS = ("number", "merge_commit")
 ARTIFACTS_KEYS = ("algorithm", "files", "set_sha256")
 ARTIFACT_KEYS = ("path", "sha256", "size_bytes")
@@ -250,7 +251,7 @@ class NonFiniteJSONError(ValueError):
 
 @dataclass(frozen=True)
 class CapturedSnapshot:
-    """Immutable Git objects used for one validation attempt."""
+    """Immutable HEAD Git objects used for one validation attempt."""
 
     commit: str
     tree: str
@@ -258,8 +259,6 @@ class CapturedSnapshot:
     record_bytes: bytes
     validator_blob: str
     validator_bytes: bytes
-    dev_ref: str
-    dev_commit: str
 
 
 def require(condition: bool, message: str) -> None:
@@ -584,7 +583,7 @@ def _validate_benchmark(
 ) -> None:
     item = strict_keys(benchmark, BENCHMARK_KEYS, f"record.observations.validator_duration_ms.{mode}")
     require(item["command"] == BENCHMARK_COMMANDS[mode], f"{mode} benchmark command changed")
-    require(item["commit"] == INTEGRATION_DEV_HEAD, f"{mode} benchmark commit changed")
+    require(item["commit"] == INTEGRATION_SNAPSHOT_COMMIT, f"{mode} benchmark commit changed")
     environment = strict_keys(item["environment"], ENVIRONMENT_KEYS, f"{mode} benchmark environment")
     for field in ENVIRONMENT_KEYS:
         require(type(environment[field]) is str and environment[field], f"{mode} benchmark environment is incomplete")
@@ -633,12 +632,12 @@ def _validate_shape(record: dict[str, Any]) -> None:
         require(type(item["merge_commit"]) is str and HEX40.fullmatch(item["merge_commit"]) is not None, f"merged PR {expected_number} commit is not a full SHA")
         require(item["merge_commit"] == expected_commit, f"merged PR #{expected_number} commit changed")
 
-    integration = strict_keys(record["integration_dev"], INTEGRATION_DEV_KEYS, "record.integration_dev")
-    require(integration["ref"] == DEV_REF, "record integration dev ref changed")
-    require(type(integration["head"]) is str and HEX40.fullmatch(integration["head"]) is not None, "record integration dev head is not a full SHA")
-    require(integration["head"] == INTEGRATION_DEV_HEAD, "record integration dev head changed")
-    require(type(integration["tree"]) is str and HEX40.fullmatch(integration["tree"]) is not None, "record integration dev tree is not a full SHA")
-    require(integration["tree"] == INTEGRATION_DEV_TREE, "record integration dev tree changed")
+    integration = strict_keys(record["integration_dev"], INTEGRATION_SNAPSHOT_KEYS, "record.integration_dev")
+    require(integration["ref"] == DEV_REF, "recorded integration snapshot ref changed")
+    require(type(integration["head"]) is str and HEX40.fullmatch(integration["head"]) is not None, "recorded integration snapshot commit is not a full SHA")
+    require(integration["head"] == INTEGRATION_SNAPSHOT_COMMIT, "record integration snapshot commit changed")
+    require(type(integration["tree"]) is str and HEX40.fullmatch(integration["tree"]) is not None, "record integration snapshot tree is not a full SHA")
+    require(integration["tree"] == INTEGRATION_SNAPSHOT_TREE, "record integration snapshot tree changed")
 
     artifacts = strict_keys(record["artifacts"], ARTIFACTS_KEYS, "record.artifacts")
     require(artifacts["algorithm"] == "sha256", "artifact digest algorithm changed")
@@ -698,32 +697,6 @@ def _validate_redaction(value: Any, path: str = "$") -> None:
         require("\x00" not in value, f"{path}: embedded NUL is not allowed")
 
 
-def _git_ref_exists(repo_root: Path, ref: str) -> bool:
-    try:
-        result = _git_run(repo_root, ["show-ref", "--verify", "--quiet", ref], text=False)
-    except OSError:
-        return False
-    return result.returncode == 0
-
-
-def _capture_dev_ref(repo_root: Path) -> tuple[str, str] | None:
-    """Capture one explicit remote/local dev ref and its full commit OID."""
-    # Prefer origin/dev because the focused worktree is based on that ref. The
-    # local branch remains a fallback for offline checkouts that have no remote.
-    for ref in ("refs/remotes/origin/dev", "refs/heads/dev"):
-        if _git_ref_exists(repo_root, ref):
-            commit_oid = _git_commit_oid(repo_root, ref)
-            if commit_oid is not None:
-                return ref, commit_oid
-    return None
-
-
-def _local_dev_commit_oid(repo_root: Path) -> str | None:
-    """Return the captured dev commit while preserving the focused test helper."""
-    captured = _capture_dev_ref(repo_root)
-    return captured[1] if captured is not None else None
-
-
 def _capture_snapshot(repo_root: Path, snapshot_commit: str | None = None) -> CapturedSnapshot:
     """Bind canonical record, validator, and evidence to one HEAD snapshot."""
     root = repo_root.resolve(strict=False)
@@ -756,9 +729,6 @@ def _capture_snapshot(repo_root: Path, snapshot_commit: str | None = None) -> Ca
     except (OSError, UnicodeError):
         raise ValidationError("captured snapshot files cannot be read") from None
 
-    dev_capture = _capture_dev_ref(root)
-    require(dev_capture is not None, "current dev ref is unavailable locally")
-    dev_ref, dev_commit = dev_capture
     return CapturedSnapshot(
         commit=commit_oid,
         tree=tree_oid,
@@ -766,8 +736,6 @@ def _capture_snapshot(repo_root: Path, snapshot_commit: str | None = None) -> Ca
         record_bytes=record_bytes,
         validator_blob=validator_blob,
         validator_bytes=validator_bytes,
-        dev_ref=dev_ref,
-        dev_commit=dev_commit,
     )
 
 
@@ -784,30 +752,23 @@ def _validate_merged_dev(repo_root: Path, record: dict[str, Any]) -> str:
     return historical_oid
 
 
-def _validate_integration_dev(
-    repo_root: Path,
-    record: dict[str, Any],
-    captured_ref: tuple[str, str] | None = None,
-) -> str:
-    """Validate one captured dev commit without rereading a moving ref."""
+def _validate_integration_snapshot(repo_root: Path, record: dict[str, Any]) -> str:
+    """Validate the independently pinned integration commit, never a mutable ref."""
     integration = record["integration_dev"]
-    captured = captured_ref or _capture_dev_ref(repo_root)
-    require(captured is not None, "current dev ref is unavailable locally")
-    _ref_name, current_oid = captured
-    require(current_oid == integration["head"], "current dev ref is not the recorded integration commit")
-    require(_git_commit_oid(repo_root, current_oid) == current_oid, "current integration commit is unavailable locally")
-    require(_git_tree_oid(repo_root, current_oid) == integration["tree"], "current integration tree digest changed")
+    snapshot_oid = integration["head"]
     require(
-        _is_ancestor(repo_root, record["merged_dev"]["head"], current_oid),
-        "current integration commit does not descend from the historical review",
+        _git_commit_oid(repo_root, snapshot_oid) == snapshot_oid,
+        "pinned integration snapshot commit is unavailable locally",
     )
-    return current_oid
-
-
-def _require_dev_ref_unchanged(repo_root: Path, captured_ref: tuple[str, str]) -> None:
-    """Fail closed if the intended dev ref moved during the validation."""
-    ref_name, captured_oid = captured_ref
-    require(_git_commit_oid(repo_root, ref_name) == captured_oid, "current dev ref moved during validation")
+    require(
+        _git_tree_oid(repo_root, snapshot_oid) == integration["tree"],
+        "pinned integration snapshot tree digest changed",
+    )
+    require(
+        _is_ancestor(repo_root, record["merged_dev"]["head"], snapshot_oid),
+        "pinned integration snapshot does not descend from the historical review",
+    )
+    return snapshot_oid
 
 
 def _artifact_set_digest(files: Iterable[dict[str, Any]]) -> str:
@@ -852,16 +813,15 @@ def validate_record(
     _validate_redaction(record)
     if verify_git:
         historical_oid = _validate_merged_dev(repo_root, record)
-        captured_ref = (snapshot.dev_ref, snapshot.dev_commit) if snapshot is not None else _capture_dev_ref(repo_root)
-        current_oid = _validate_integration_dev(repo_root, record, captured_ref)
+        integration_oid = _validate_integration_snapshot(repo_root, record)
         historical_count = _validate_artifacts(repo_root, record, historical_oid, "historical")
-        current_count = _validate_artifacts(repo_root, record, current_oid, "current")
-        require(current_count == historical_count, "historical and current artifact counts differ")
+        integration_count = _validate_artifacts(repo_root, record, integration_oid, "pinned integration")
+        require(integration_count == historical_count, "historical and pinned integration artifact counts differ")
         if snapshot is not None:
             captured_count = _validate_artifacts(repo_root, record, snapshot.commit, "captured")
-            require(captured_count == current_count, "captured and current artifact counts differ")
-            _require_dev_ref_unchanged(repo_root, captured_ref)
-        return captured_count if snapshot is not None else current_count
+            require(captured_count == integration_count, "pinned integration and captured artifact counts differ")
+            return captured_count
+        return integration_count
     return len(record["artifacts"]["files"])
 
 
@@ -889,7 +849,6 @@ def _redacted_error(exc: BaseException) -> str:
         ("alternate record input is not canonical", "alternate record input is not attested"),
         ("working-tree canonical record differs", "canonical record does not match committed snapshot"),
         ("executing validator differs", "executing validator does not match committed snapshot"),
-        ("current dev ref moved during validation", "current dev ref moved during validation"),
     )
     for marker, public_message in markers:
         if marker in message:
@@ -903,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
         "--repo-root",
         type=Path,
         default=default_repo_root(),
-        help="local checkout containing the recorded current dev integration ref",
+        help="local checkout containing the pinned Git snapshots",
     )
     parser.add_argument(
         "--record",
@@ -941,15 +900,15 @@ def main(argv: list[str] | None = None) -> int:
         "artifact_count": artifact_count if trusted else 0,
         "artifact_size_bytes": record["observations"]["artifact_size_bytes"] if trusted and record is not None else 0,
         "duration_ms": round(duration_ms, 3),
-        "evidence_scope": "historical_review_and_captured_snapshot" if trusted else "unverified",
+        "evidence_scope": "historical_review_and_immutable_snapshots" if trusted else "unverified",
         "historical_reviewed_commit": record["merged_dev"]["head"] if trusted and record is not None else None,
         "verified_commit": snapshot.commit if trusted and snapshot is not None else None,
         "verified_commit_kind": "captured_snapshot" if trusted else None,
         "captured_snapshot_tree": snapshot.tree if trusted and snapshot is not None else None,
         "captured_record_blob": snapshot.record_blob if trusted and snapshot is not None else None,
         "captured_validator_blob": snapshot.validator_blob if trusted and snapshot is not None else None,
-        "captured_dev_ref": snapshot.dev_ref if trusted and snapshot is not None else None,
-        "captured_dev_commit": snapshot.dev_commit if trusted and snapshot is not None else None,
+        "integration_snapshot_commit": record["integration_dev"]["head"] if trusted and record is not None else None,
+        "integration_snapshot_tree": record["integration_dev"]["tree"] if trusted and record is not None else None,
         "errors": errors[:MAX_ERROR_MESSAGES],
     }
     print(json.dumps(result, sort_keys=True, allow_nan=False))

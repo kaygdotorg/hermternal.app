@@ -12,23 +12,25 @@ run Hermes, contact a provider, contact a proxy, or claim compatibility.
 - `merged_dev`, the immutable historical review at commit
   `8465bd4cacc87fe62ff952c38d7f3c2b5927bfbd` and tree
   `aede9b87932f5cc28462120ef28be52a9a4aba7f`;
-- `integration_dev`, the explicit captured `origin/dev` snapshot at commit
+- `integration_dev`, the explicitly recorded integration snapshot at commit
   `0671593b42235d4fbad2f7f3e04255c9f51b257d` and tree
-  `16fac2e9d6aa64dd2631b9f4b445146c115acfb0`;
+  `16fac2e9d6aa64dd2631b9f4b445146c115acfb0`; the `dev` ref value is
+  provenance metadata, not a mutable ref claim;
 - the ordered, source-audit artifact inventory verified against the historical,
   integration, and executing-validator snapshots;
 - raw normal and optimized validator-duration samples with distributions and
   `threshold: null`; and
 - an explicitly blocked status with `compatible: false` and `live_run: false`.
 
-`merged_dev` is historical evidence. `integration_dev` is one explicit
-captured `origin/dev` snapshot, not a replacement review and not a live
+`merged_dev` is historical evidence. `integration_dev` is one explicitly
+recorded immutable snapshot, not a replacement review and not a live
 compatibility claim. The validator captures `HEAD` once for the executing
 snapshot, reads the canonical record and validator bytes from that commit, and
-compares both working-tree files byte-for-byte. It captures `origin/dev` once,
-reads all evidence blobs from that commit, and rechecks the ref before success;
-a moved ref fails closed. A refresh must record a new explicit commit and rerun
-the immutable checks.
+compares both working-tree files byte-for-byte. It then validates the recorded
+integration commit and tree exactly and reads every integration artifact from
+that commit. It does not consult a mutable `origin/dev` ref, so advancing that
+ref does not change or invalidate this historical snapshot. A refresh must
+record a new explicit commit and rerun the immutable checks.
 
 The merged PR list uses the fixture's canonical recorded order (`#221`,
 `#216`, `#218`, `#219`, `#220`); issue #41 does not prescribe an order. Artifact
@@ -54,9 +56,8 @@ The standard-library-only `validate.py` rejects:
   required), changed key ordering, reordered PRs, or reordered artifact paths;
 - absolute paths, Windows paths, NULs, `..` traversal, and symlink resolution
   that escapes the repository root;
-- a missing, malformed, replaced, or different historical/integration/captured
-  commit or tree, and a moving `dev` ref that does not match the recorded full
-  OID;
+- a missing, malformed, replaced, or different historical, pinned-integration,
+  or executing-snapshot commit or tree;
 - changed artifact SHA-256 values, sizes, or the canonical artifact-set digest;
 - wrong or missing Git objects, wrong object types, wrong blob OIDs, truncated
   or extra `cat-file` batch output;
@@ -68,12 +69,12 @@ The standard-library-only `validate.py` rejects:
 Git verification clears inherited Git redirects and sets both
 `GIT_NO_REPLACE_OBJECTS=1` and `GIT_NO_LAZY_FETCH=1`. It captures an explicit
 full `HEAD` snapshot for the canonical record and executing validator, then
-captures one full `origin/dev` OID for integration evidence. Each artifact's
-exact blob OID, type, size, and bytes come from one complete
-`git cat-file --batch` response. The digest and size checks use that same
-buffer and commit. The mutable worktree is used only for path containment and
-byte-for-byte snapshot checks. The artifact-set digest is SHA-256 over UTF-8
-lines in the recorded order, where each line is:
+validates the record's full integration commit and tree without resolving a
+mutable ref. Each artifact's exact blob OID, type, size, and bytes come from
+one complete `git cat-file --batch` response. The digest and size checks use
+that same buffer and commit. The mutable worktree is used only for path
+containment and byte-for-byte snapshot checks. The artifact-set digest is
+SHA-256 over UTF-8 lines in the recorded order, where each line is:
 
 ```text
 relative/path\0file_sha256\0size_bytes\n
@@ -85,7 +86,7 @@ stable check of the already-merged fixture evidence.
 
 ## Reproduce offline
 
-Run from the repository root with the local `dev` ref available:
+Run from the repository root with the recorded Git snapshots available locally:
 
 ```sh
 python3 contracts/fixtures/source-audit/compatibility-gate/validate.py
@@ -102,12 +103,14 @@ PYTHONPYCACHEPREFIX=/tmp/hermternal-pycache python3 -m py_compile \
 
 The validator is offline and uses only the Python standard library plus the
 local Git object database. A passing run proves only the canonical committed
-record and validator bytes, the historical reviewed commit, the captured
+record and validator bytes, the historical reviewed commit, the pinned
 integration snapshot, containment rules, and artifact bytes. Its JSON output
-names the `historical_reviewed_commit`, `captured_snapshot_tree`, exact record
-and validator blobs, and `verified_commit_kind: captured_snapshot`. It does not
-prove a live service or a deployment. An alternate `--record` path is rejected
-before parsing and can never claim current-dev or captured-snapshot evidence.
+names the `historical_reviewed_commit`, `integration_snapshot_commit`,
+`integration_snapshot_tree`, `captured_snapshot_tree`, exact record and
+validator blobs, and `verified_commit_kind: captured_snapshot`. It does not
+prove a live service, a deployment, or a mutable-ref state. An alternate
+`--record` path is rejected before parsing and can never claim attested
+snapshot evidence.
 
 ## Accessibility
 
