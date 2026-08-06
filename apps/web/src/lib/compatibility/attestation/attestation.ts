@@ -1,4 +1,9 @@
-import type { JsonRpcCompatibilityGate } from '../../chat/json-rpc-chat';
+import {
+  createJsonRpcChatTransport,
+  type JsonRpcChatOptions,
+  type JsonRpcChatTransport,
+  type JsonRpcCompatibilityGate
+} from '../../chat/json-rpc-chat';
 import { parseStrictJson } from '../../transport/strict-json';
 
 export const REVISION_ATTESTATION_SCHEMA = 'hermternal.revision-attestation.v1' as const;
@@ -97,7 +102,10 @@ const MAX_EVIDENCE_TOTAL_UTF8_BYTES = 128 * 1024;
 
 const behavioralProbeMarker: unique symbol = Symbol('behavioral-probe');
 const trustedContexts = new WeakSet<object>();
+const attestationCallbacks = new WeakSet<JsonRpcCompatibilityGate>();
 const behavioralProbeCallbacks = new WeakMap<object, JsonRpcCompatibilityGate>();
+const pairedAttestationGates = new WeakSet<object>();
+const pairedBehavioralProbeGates = new WeakSet<object>();
 
 type RecordValue = Record<string, unknown>;
 type SnapshotValue = null | boolean | number | string | SnapshotValue[] | RecordValue;
@@ -114,14 +122,22 @@ export interface BehavioralProbeGate {
   readonly [behavioralProbeMarker]: true;
 }
 
-export interface CompatibilityGateCallbacks {
-  readonly verifyAttestation: JsonRpcCompatibilityGate;
-  readonly runBehavioralProbe: JsonRpcCompatibilityGate;
+export type CompatibilityTransportOptions = Omit<
+  JsonRpcChatOptions,
+  'verifyAttestation' | 'runBehavioralProbe'
+> & {
+  readonly verifyAttestation?: never;
+  readonly runBehavioralProbe?: never;
+};
+
+export interface CompatibilityTransportFactory {
+  readonly kind: 'compatibility-transport-factory';
+  createTransport(options: CompatibilityTransportOptions): JsonRpcChatTransport;
 }
 
 export interface CompatibilityAttestationGate {
   readonly kind: 'compatibility-attestation';
-  pairWithBehavioralProbe(probe: BehavioralProbeGate): CompatibilityGateCallbacks;
+  pairWithBehavioralProbe(probe: BehavioralProbeGate): CompatibilityTransportFactory;
 }
 
 export type AttestationDecisionCode =
@@ -547,6 +563,9 @@ export function evaluateCompatibilityAttestation(
 export function createBehavioralProbeGate(
   runBehavioralProbe: JsonRpcCompatibilityGate
 ): BehavioralProbeGate {
+  if (typeof runBehavioralProbe !== 'function' || attestationCallbacks.has(runBehavioralProbe)) {
+    throw new TypeError('An independent behavioral-probe callback is required.');
+  }
   const gate = Object.freeze({
     kind: 'behavioral-probe' as const,
     [behavioralProbeMarker]: true as const
@@ -569,6 +588,8 @@ export function createCompatibilityAttestationGate(
     const decision = evaluateCompatibilityAttestation(input, trustContext, evidence, signal);
     return { passed: decision.passed };
   };
+  attestationCallbacks.add(verifyAttestation);
+
   const gate: CompatibilityAttestationGate = {
     kind: 'compatibility-attestation',
     pairWithBehavioralProbe(probe) {
@@ -577,7 +598,24 @@ export function createCompatibilityAttestationGate(
         // Forged structural lookalikes are not accepted as independent probes.
         throw new TypeError('A canonical behavioral-probe wrapper is required.');
       }
-      return Object.freeze({ verifyAttestation, runBehavioralProbe });
+      if (pairedAttestationGates.has(gate) || pairedBehavioralProbeGates.has(probe)) {
+        throw new TypeError('Compatibility gate wrappers can be paired only once.');
+      }
+      pairedAttestationGates.add(gate);
+      pairedBehavioralProbeGates.add(probe);
+
+      return Object.freeze({
+        kind: 'compatibility-transport-factory' as const,
+        createTransport(options: CompatibilityTransportOptions) {
+          // The role callbacks never cross the module boundary. Supplying gates
+          // last also prevents cast JavaScript options from replacing either role.
+          return createJsonRpcChatTransport({
+            ...options,
+            verifyAttestation,
+            runBehavioralProbe
+          });
+        }
+      });
     }
   };
   return Object.freeze(gate);

@@ -4,9 +4,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   JSON_RPC_EVENT_METHOD,
   JSON_RPC_GATEWAY_READY_EVENT,
-  createJsonRpcChatTransport,
   type JsonRpcChatOptions,
+  type JsonRpcChatTransport,
   type JsonRpcCompatibilityEvidence,
+  type JsonRpcCompatibilityGate,
   type JsonRpcWebSocket
 } from '../../chat/json-rpc-chat';
 import {
@@ -146,7 +147,7 @@ function makeTransport(
   behavioralProbe: JsonRpcChatOptions['runBehavioralProbe'],
   signal?: AbortSignal
 ): {
-  readonly transport: ReturnType<typeof createJsonRpcChatTransport>;
+  readonly transport: JsonRpcChatTransport;
   readonly socket: FakeWebSocket;
   readonly connection: Promise<void>;
 } {
@@ -155,14 +156,13 @@ function makeTransport(
     input,
     createCanonicalFixtureTrustContext()
   );
-  const gates = attestation.pairWithBehavioralProbe(
+  const factory = attestation.pairWithBehavioralProbe(
     createBehavioralProbeGate(behavioralProbe ?? (async () => false))
   );
-  const transport = createJsonRpcChatTransport({
+  const transport = factory.createTransport({
     ticketProvider: async () => 'synthetic-ticket',
     createWebSocket: () => socket,
     compatibilityEvidence: COMPATIBILITY_EVIDENCE,
-    ...gates,
     compatibilityGateTimeoutMs: 10_000
   });
   const connection = transport.connect(signal);
@@ -208,7 +208,7 @@ describe('fixture-driven compatibility attestation', () => {
     }
   });
 
-  it('never becomes ready without a distinct successful behavioral probe', async () => {
+  it('never exposes or reuses an attestation callback as a behavioral probe', async () => {
     const attestation = createCompatibilityAttestationGate(
       CANONICAL_ATTESTATION_TEXT,
       createCanonicalFixtureTrustContext()
@@ -221,14 +221,52 @@ describe('fixture-driven compatibility attestation', () => {
       attestation.pairWithBehavioralProbe({ kind: 'behavioral-probe' });
     }).toThrowError('A canonical behavioral-probe wrapper is required.');
 
+    const probeGate = createBehavioralProbeGate(async () => false);
+    const factory = attestation.pairWithBehavioralProbe(probeGate);
+    expect(Reflect.ownKeys(factory)).toEqual(['kind', 'createTransport']);
+    expect('verifyAttestation' in factory).toBe(false);
+    expect('runBehavioralProbe' in factory).toBe(false);
+    // @ts-expect-error The transport factory never exposes the attestation callback.
+    const extracted = factory.verifyAttestation;
+    expect(extracted).toBeUndefined();
+    expect(() => createBehavioralProbeGate(extracted)).toThrowError(
+      'An independent behavioral-probe callback is required.'
+    );
+    expect(() =>
+      attestation.pairWithBehavioralProbe(createBehavioralProbeGate(async () => true))
+    ).toThrowError('Compatibility gate wrappers can be paired only once.');
+    const secondAttestation = createCompatibilityAttestationGate(
+      CANONICAL_ATTESTATION_TEXT,
+      createCanonicalFixtureTrustContext()
+    );
+    expect(() => secondAttestation.pairWithBehavioralProbe(probeGate)).toThrowError(
+      'Compatibility gate wrappers can be paired only once.'
+    );
+
+    const roleLookalikes = [
+      factory.createTransport as unknown as JsonRpcCompatibilityGate,
+      factory.createTransport.bind(factory) as unknown as JsonRpcCompatibilityGate,
+      ((...args: Parameters<JsonRpcCompatibilityGate>) =>
+        (factory.createTransport as unknown as JsonRpcCompatibilityGate)(
+          ...args
+        )) as JsonRpcCompatibilityGate,
+      new Proxy(factory.createTransport, {}) as unknown as JsonRpcCompatibilityGate
+    ];
+    for (const callback of roleLookalikes) {
+      const harness = makeTransport(CANONICAL_ATTESTATION_TEXT, callback);
+      await flush();
+      harness.socket.emitOpen();
+      harness.socket.emitGatewayReady();
+      await expect(harness.connection).rejects.toMatchObject({ code: 'incompatible' });
+      expect(harness.transport.state.status).toBe('incompatible');
+    }
+
     for (const result of [false, { passed: false }] as const) {
       const harness = makeTransport(CANONICAL_ATTESTATION_TEXT, async () => result);
       await flush();
       harness.socket.emitOpen();
       harness.socket.emitGatewayReady();
-      await expect(harness.connection).rejects.toMatchObject({
-        code: 'incompatible'
-      });
+      await expect(harness.connection).rejects.toMatchObject({ code: 'incompatible' });
       expect(harness.transport.state.status).toBe('incompatible');
     }
   });

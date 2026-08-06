@@ -29,11 +29,14 @@ snapshot; a million-entry array is rejected without spreading it onto the stack.
 
 Cancellation also returns a blocked decision. `createCompatibilityAttestationGate`
 returns a nominal non-callable wrapper with no exposed callback. It accepts only
-a privately branded wrapper from `createBehavioralProbeGate`, then returns the
-paired transport callbacks. Neither nominal wrapper can be supplied directly as
-the other callback, and forged structural probe objects are rejected. The
-source-backed transport tests prove pending, passed, failed, and cancelled probe
-states and prove that attestation alone never reaches `ready`. This focused
+a privately branded wrapper from `createBehavioralProbeGate`, can be paired once,
+and returns a transport factory rather than either raw role callback. The factory
+installs both callbacks inside this module, so an extracted attestation callback
+cannot be registered, bound, wrapped, proxied, or reused as a probe. A private
+function-identity registry also rejects any exact cross-role registration if the
+boundary changes later. Forged probe objects and repeated pairings are rejected.
+The source-backed transport tests prove pending, passed, failed, and cancelled
+probe states and prove that attestation alone never reaches `ready`. This focused
 change does not wire a live connection or implement the independent behavioral
 probe.
 
