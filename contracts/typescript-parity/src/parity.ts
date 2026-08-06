@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, opendir, type FileHandle } from "node:fs/promises";
+import { lstat, open, opendir, realpath, type FileHandle } from "node:fs/promises";
+import { dlopen, FFIType, ptr } from "bun:ffi";
 import { resolve, normalize, isAbsolute, join } from "node:path";
 
 export const HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e";
@@ -26,9 +27,15 @@ const MAX_OUTPUT_COVERAGE_IDS = 64;
 const MAX_REGISTRY_FILES = 512;
 const MAX_TOTAL_ARTIFACT_BYTES = 8 * 1024 * 1024;
 const MAX_READ_DURATION_MS = 1_000;
+export const MAX_ERROR_CODE_LENGTH = 64;
+export const MAX_ERROR_MESSAGE_LENGTH = 240;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const READ_FLAGS =
+const DIRECTORY_READ_FLAGS =
+  fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
+const FILE_READ_FLAGS =
   fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW;
+const DUPLICATED_DESCRIPTOR_FLAGS = fsConstants.O_RDONLY | fsConstants.O_NONBLOCK;
+const AT_FDCWD = -2;
 const FIXTURE_METADATA_FILES = new Set(["README.md", "index.json", "schema.json"]);
 const FIXTURE_VALIDATOR_DIRECTORY = "validator";
 const NON_SUCCESS_COVERAGE_STATUSES = [
@@ -55,13 +62,20 @@ export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonRecord = { [key: string]: JsonValue };
 
+export function boundedErrorText(value: string, limit: number, fallback: string): string {
+  const sanitized = value.replace(/[\u0000-\u001f\u007f]/g, "?");
+  const safeValue = sanitized.length > 0 ? sanitized : fallback;
+  if (safeValue.length <= limit) return safeValue;
+  return `${safeValue.slice(0, limit - 1)}…`;
+}
+
 export class ContractInputError extends Error {
   readonly code: string;
 
   constructor(code: string, message: string) {
-    super(message);
+    super(boundedErrorText(message, MAX_ERROR_MESSAGE_LENGTH, "parity check failed"));
     this.name = "ContractInputError";
-    this.code = code;
+    this.code = boundedErrorText(code, MAX_ERROR_CODE_LENGTH, "contract_error");
   }
 }
 
@@ -646,40 +660,122 @@ function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size;
 }
 
-async function readWithDeadline(
-  handle: FileHandle,
-  bytes: Uint8Array,
-  offset: number,
-  length: number,
-  position: number,
-  timeoutMs: number,
-  label: string,
-): Promise<{ bytesRead: number }> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+interface NativeFileApi {
+  readonly openat: (directoryFd: number, path: number, flags: number, mode: number) => number;
+  readonly read: (fileDescriptor: number, buffer: number, length: number) => number;
+  readonly close: (fileDescriptor: number) => number;
+}
+
+let nativeFileApi: NativeFileApi | undefined;
+let nativeFileLibrary: unknown;
+
+function getNativeFileApi(): NativeFileApi {
+  if (nativeFileApi) return nativeFileApi;
   try {
-    return await Promise.race([
-      handle.read(bytes, offset, length, position),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new ContractInputError("artifact_read_timeout", `${label} did not finish reading`));
-        }, timeoutMs);
-      }),
-    ]);
+    const libraryName = process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6";
+    const library = dlopen(libraryName, {
+      openat: {
+        args: [FFIType.int, FFIType.cstring, FFIType.int, FFIType.int],
+        returns: FFIType.int,
+      },
+      read: {
+        args: [FFIType.int, FFIType.ptr, FFIType.int],
+        returns: FFIType.int,
+      },
+      close: {
+        args: [FFIType.int],
+        returns: FFIType.int,
+      },
+    });
+    nativeFileLibrary = library;
+    nativeFileApi = library.symbols as unknown as NativeFileApi;
+    return nativeFileApi;
+  } catch {
+    fail("artifact_read_failed", "descriptor-first reader is unavailable");
+  }
+}
+
+function nativeCString(value: string): number {
+  return ptr(new TextEncoder().encode(`${value}\0`));
+}
+
+function closeNativeFile(api: NativeFileApi, fileDescriptor: number): void {
+  if (fileDescriptor >= 0) api.close(fileDescriptor);
+}
+
+// Traverse every pathname component from an anchored directory descriptor. The
+// repository root is canonicalized once, but fixture descendants are never
+// resolved through a pathname symlink; replacing a parent directory therefore
+// cannot redirect this read to an attacker-selected tree.
+function openDescriptorNoFollow(path: string, label: string): number {
+  const api = getNativeFileApi();
+  const components = resolve(path).split("/").filter((component) => component.length > 0);
+  let directoryFd = api.openat(AT_FDCWD, nativeCString("/"), DIRECTORY_READ_FLAGS, 0);
+  if (directoryFd < 0) {
+    fail("artifact_read_failed", `${label} could not open its descriptor root`);
+  }
+  try {
+    for (const [index, component] of components.entries()) {
+      const finalComponent = index === components.length - 1;
+      const nextFd = api.openat(
+        directoryFd,
+        nativeCString(component),
+        finalComponent ? FILE_READ_FLAGS : DIRECTORY_READ_FLAGS,
+        0,
+      );
+      if (nextFd < 0) {
+        fail("unsafe_artifact", `${label} could not be opened without following a parent symlink`);
+      }
+      closeNativeFile(api, directoryFd);
+      directoryFd = nextFd;
+    }
+    const result = directoryFd;
+    directoryFd = -1;
+    return result;
   } finally {
-    if (timer) clearTimeout(timer);
+    closeNativeFile(api, directoryFd);
+  }
+}
+
+function readNativeBytes(
+  api: NativeFileApi,
+  fileDescriptor: number,
+  bytes: Uint8Array,
+  label: string,
+): void {
+  let offset = 0;
+  const deadline = Date.now() + MAX_READ_DURATION_MS;
+  while (offset < bytes.length) {
+    if (Date.now() >= deadline) {
+      fail("artifact_read_timeout", `${label} did not finish reading`);
+    }
+    const remaining = bytes.subarray(offset);
+    const bytesRead = api.read(fileDescriptor, ptr(remaining), remaining.byteLength);
+    if (bytesRead < 0) {
+      fail("artifact_read_failed", `${label} could not be read as a regular file`);
+    }
+    if (bytesRead === 0 || bytesRead > remaining.byteLength) {
+      fail("artifact_changed", `${label} ended before its declared byte size`);
+    }
+    offset += bytesRead;
   }
 }
 
 // Open the descriptor before trusting any pathname metadata. O_NONBLOCK prevents a
-// FIFO replacement from waiting for a writer, O_NOFOLLOW blocks symlink traversal,
-// and descriptor/path identity checks reject swaps before bytes become evidence.
+// FIFO replacement from waiting for a writer, component-by-component O_NOFOLLOW
+// prevents parent-directory traversal, and native synchronous reads avoid an
+// uncancelled Promise that could survive a timeout after the handle is closed.
 async function readBoundedBytes(path: string, label: string, registered?: RegistryFile): Promise<Uint8Array> {
   let handle: FileHandle | undefined;
+  let nativeFileDescriptor: number | undefined;
   try {
+    nativeFileDescriptor = openDescriptorNoFollow(path, label);
     try {
-      handle = await open(path, READ_FLAGS);
+      // /dev/fd duplicates the already-anchored descriptor; it does not resolve
+      // the untrusted fixture pathname and is used only for portable Node stats.
+      handle = await open(`/dev/fd/${nativeFileDescriptor}`, DUPLICATED_DESCRIPTOR_FLAGS);
     } catch {
-      fail("artifact_read_failed", `${label} could not be opened`);
+      fail("artifact_read_failed", `${label} could not duplicate its secure descriptor`);
     }
 
     const descriptorStatsRaw = await handle.stat();
@@ -708,27 +804,7 @@ async function readBoundedBytes(path: string, label: string, registered?: Regist
     }
 
     const bytes = new Uint8Array(descriptorStats.size);
-    let offset = 0;
-    const deadline = Date.now() + MAX_READ_DURATION_MS;
-    while (offset < bytes.length) {
-      const timeoutMs = deadline - Date.now();
-      if (timeoutMs <= 0) {
-        fail("artifact_read_timeout", `${label} did not finish reading`);
-      }
-      const result = await readWithDeadline(
-        handle,
-        bytes,
-        offset,
-        bytes.length - offset,
-        offset,
-        timeoutMs,
-        label,
-      );
-      if (result.bytesRead === 0) {
-        fail("artifact_changed", `${label} ended before its declared byte size`);
-      }
-      offset += result.bytesRead;
-    }
+    readNativeBytes(getNativeFileApi(), nativeFileDescriptor, bytes, label);
 
     const finalStats = fileIdentity(await handle.stat());
     if (!sameFileIdentity(descriptorStats, finalStats)) {
@@ -752,6 +828,9 @@ async function readBoundedBytes(path: string, label: string, registered?: Regist
     return fail("artifact_read_failed", `${label} could not be read as bounded UTF-8 JSON`);
   } finally {
     if (handle) await handle.close().catch(() => undefined);
+    if (nativeFileDescriptor !== undefined) {
+      closeNativeFile(getNativeFileApi(), nativeFileDescriptor);
+    }
   }
 }
 
@@ -849,8 +928,19 @@ function parseParity(value: JsonValue | undefined): RegistryParity {
   };
 }
 
+async function canonicalRepositoryRoot(repoRoot: string): Promise<string> {
+  try {
+    // Only the repository root itself is canonicalized. Every descendant is
+    // traversed from descriptors with O_NOFOLLOW, so a fixture parent swapped
+    // after this point cannot redirect a read through a symlink.
+    return await realpath(resolve(repoRoot));
+  } catch {
+    fail("artifact_read_failed", "repository root could not be resolved");
+  }
+}
+
 export async function loadRegistry(repoRoot: string): Promise<FixtureRegistry> {
-  const root = resolve(repoRoot);
+  const root = await canonicalRepositoryRoot(repoRoot);
   const raw = exactRecord(
     await readJson(join(root, "contracts/fixtures/index.json"), "fixture index"),
     "fixture index",
@@ -979,7 +1069,7 @@ function sameStringList(left: readonly string[], right: readonly string[]): bool
 // source for the eight representatives. Recheck every ready root, every digest, and
 // every non-metadata file before any semantic representative can claim parity.
 async function validateRegistryInventory(repoRoot: string, registry: FixtureRegistry): Promise<void> {
-  const fixturesRoot = join(resolve(repoRoot), "contracts/fixtures");
+  const fixturesRoot = join(repoRoot, "contracts/fixtures");
   const ownedFiles = new Set<string>();
   let totalBytes = 0;
 
@@ -1150,7 +1240,7 @@ export async function loadCase(repoRoot: string, registry: FixtureRegistry, root
   if (root.status !== "ready") {
     fail("coverage_pending", "pending fixture roots cannot provide parity evidence");
   }
-  const artifact = await loadArtifact(repoRoot, root);
+  const artifact = await loadArtifact(await canonicalRepositoryRoot(repoRoot), root);
   const cases = array(artifact.cases, `fixture ${rootId}.cases`);
   const matches = cases.filter((entry) => isRecord(entry) && entry.id === caseId);
   if (matches.length !== 1) {
@@ -1164,9 +1254,32 @@ export async function loadCase(repoRoot: string, registry: FixtureRegistry, root
   };
 }
 
+function blockedCompatibilityRecord(status: string): CompatibilityRecord {
+  const evidence = boundedOutputString(`blocked:${status}`, "compatibility blocked evidence");
+  return {
+    compatible: false,
+    liveRun: false,
+    deploymentAttestation: evidence,
+    behavioralProbe: evidence,
+    proxyProof: evidence,
+    parityEvidence: evidence,
+    benchmarkEvidence: evidence,
+  };
+}
+
 export async function loadCompatibilityRecord(repoRoot: string, registry: FixtureRegistry): Promise<CompatibilityRecord> {
   const root = rootById(registry, "source-audit-compatibility-gate");
-  const artifact = await loadArtifact(repoRoot, root);
+  const coverageStatuses = root.coverageIds.map((coverageId) => coverageById(registry, coverageId).status);
+  const blockedStatus = coverageStatuses.find((status) => status !== "ready")
+    ?? (root.status === "pending" ? "pending" : undefined);
+  if (blockedStatus) {
+    // A pending root has no artifact to load by design. Keep the aggregate
+    // compatibility record explicit and bounded instead of inventing evidence
+    // or reporting the empty manifest as an unregistered artifact.
+    return blockedCompatibilityRecord(blockedStatus);
+  }
+
+  const artifact = await loadArtifact(await canonicalRepositoryRoot(repoRoot), root);
   literal(artifact.schema, "hermternal.compatibility-gate.v1", "compatibility schema");
   const source = exactRecord(artifact.source, "compatibility source", COMPATIBILITY_SOURCE_KEYS);
   literal(source.sha, HERMES_SOURCE_SHA, "compatibility source revision");
@@ -1304,17 +1417,18 @@ async function runRepresentative(
 }
 
 export async function runParity(repoRoot: string): Promise<ParityReport> {
-  const registry = await loadRegistry(repoRoot);
-  await validateRegistryInventory(repoRoot, registry);
+  const canonicalRoot = await canonicalRepositoryRoot(repoRoot);
+  const registry = await loadRegistry(canonicalRoot);
+  await validateRegistryInventory(canonicalRoot, registry);
   literal(registry.parity.ptyPolicy, "web_only_apple_blocked", "parity PTY policy");
   literal(registry.parity.missingResultPolicy, "block", "parity missing-result policy");
   literal(registry.parity.resultEquivalence, "semantic_outcomes_not_platform_specific_wire_bytes", "parity equivalence policy");
 
   const cases: ParityCaseResult[] = [];
   for (const representative of REPRESENTATIVES) {
-    cases.push(...(await runRepresentative(repoRoot, registry, representative)));
+    cases.push(...(await runRepresentative(canonicalRoot, registry, representative)));
   }
-  const compatibility = await loadCompatibilityRecord(repoRoot, registry);
+  const compatibility = await loadCompatibilityRecord(canonicalRoot, registry);
   if (cases.length > MAX_OUTPUT_CASES) {
     fail("output_limit", "parity report contains too many case results");
   }

@@ -1,5 +1,11 @@
 import { resolve } from "node:path";
-import { ContractInputError, runParity } from "./parity";
+import {
+  boundedErrorText,
+  ContractInputError,
+  MAX_ERROR_CODE_LENGTH,
+  MAX_ERROR_MESSAGE_LENGTH,
+  runParity,
+} from "./parity";
 
 function repositoryRootArgument(): string | undefined {
   let repositoryRoot: string | undefined;
@@ -28,7 +34,10 @@ try {
   process.stdout.write(`${JSON.stringify(report)}\n`);
 } catch (error) {
   const failure = error instanceof ContractInputError
-    ? { code: error.code, message: error.message }
+    ? {
+        code: boundedErrorText(error.code, MAX_ERROR_CODE_LENGTH, "contract_error"),
+        message: boundedErrorText(error.message, MAX_ERROR_MESSAGE_LENGTH, "parity check failed"),
+      }
     : { code: "unexpected_failure", message: "parity check failed without a contract error" };
   process.stderr.write(`${JSON.stringify({ ok: false, error: failure })}\n`);
   process.exitCode = 1;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, symlink } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -7,6 +7,7 @@ import {
   assertRejects,
   loadCase,
   loadRegistry,
+  MAX_ERROR_MESSAGE_LENGTH,
   MAX_JSON_BYTES,
   MAX_JSON_DEPTH,
   repoRootFromModule,
@@ -115,6 +116,36 @@ async function mutateParityRegistry(
   const registry = await Bun.file(indexPath).json() as Record<string, unknown>;
   mutate(registry);
   await Bun.write(indexPath, `${JSON.stringify(registry)}\n`);
+}
+
+async function createLongRegisteredPath(temporaryRoot: string): Promise<string> {
+  const originalRelativePath = "deployment-security/browser-auth/cases.json";
+  const longRelativePath = [
+    "deployment-security/browser-auth",
+    ...Array.from({ length: 8 }, (_, index) => `long-${index}-${"x".repeat(100)}`),
+    "cases.json",
+  ].join("/");
+  const originalPath = join(temporaryRoot, "contracts/fixtures", originalRelativePath);
+  const replacementPath = join(temporaryRoot, "contracts/fixtures", longRelativePath);
+  await mkdir(dirname(replacementPath), { recursive: true });
+  await Bun.write(replacementPath, await Bun.file(originalPath).arrayBuffer());
+  await rm(originalPath);
+  await mutateParityRegistry(temporaryRoot, (registry) => {
+    const roots = registry.fixture_roots as Array<Record<string, unknown>>;
+    const root = roots.find((entry) => entry.id === "deployment-security-browser-auth");
+    if (!root) throw new Error("browser auth root is missing");
+    const files = root.files as Array<Record<string, unknown>>;
+    const file = files.find((entry) => entry.path === originalRelativePath);
+    if (!file) throw new Error("browser auth cases artifact is missing");
+    file.path = longRelativePath;
+    file.size_bytes = (file.size_bytes as number) + 1;
+    files.sort((left, right) => {
+      const leftPath = String(left.path);
+      const rightPath = String(right.path);
+      return leftPath < rightPath ? -1 : leftPath > rightPath ? 1 : 0;
+    });
+  });
+  return longRelativePath;
 }
 
 function createFifo(path: string): void {
@@ -280,6 +311,84 @@ describe("C-20 TypeScript contract parity", () => {
       const report = await runParity(temporaryRoot);
       expect(report.blockedCoverageIds).toContain("provider-discovery");
       expect(report.readyCaseCount).toBe(11);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns bounded blocked compatibility evidence for a pending aggregate root", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      await rm(join(temporaryRoot, "contracts/fixtures/source-audit/compatibility-gate"), { recursive: true, force: true });
+      await mutateParityRegistry(temporaryRoot, (registry) => {
+        const roots = registry.fixture_roots as Array<Record<string, unknown>>;
+        const root = roots.find((entry) => entry.id === "source-audit-compatibility-gate");
+        if (!root) throw new Error("aggregate compatibility root is missing");
+        root.status = "pending";
+        root.validator = null;
+        root.files = [];
+        const coverage = registry.coverage as Array<Record<string, unknown>>;
+        const row = coverage.find((entry) => entry.id === "compatibility-gate");
+        if (!row) throw new Error("aggregate compatibility coverage row is missing");
+        row.status = "pending";
+      });
+
+      const result = runCli("--repo-root", temporaryRoot);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      const report = JSON.parse(result.stdout) as {
+        blockedCoverageIds: string[];
+        compatibility: Record<string, unknown>;
+      };
+      expect(report.blockedCoverageIds).toContain("compatibility-gate");
+      expect(report.compatibility).toMatchObject({
+        compatible: false,
+        liveRun: false,
+        deploymentAttestation: "blocked:pending",
+        behavioralProbe: "blocked:pending",
+        proxyProof: "blocked:pending",
+        parityEvidence: "blocked:pending",
+        benchmarkEvidence: "blocked:pending",
+      });
+      expect(result.stdout).not.toContain("unregistered_artifact");
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a parent-directory symlink replacement before reading its alternate tree", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const originalDirectory = join(temporaryRoot, "contracts/fixtures/deployment-security/browser-auth");
+      const alternateDirectory = join(temporaryRoot, "alternate-browser-auth");
+      await mkdir(alternateDirectory, { recursive: true });
+      await Bun.write(
+        join(alternateDirectory, "cases.json"),
+        await Bun.file(join(originalDirectory, "cases.json")).arrayBuffer(),
+      );
+      const registry = await loadRegistry(temporaryRoot);
+      await rm(originalDirectory, { recursive: true, force: true });
+      await symlink(alternateDirectory, originalDirectory, "dir");
+
+      await expect(loadCase(temporaryRoot, registry, "deployment-security-browser-auth", "login-success"))
+        .rejects.toMatchObject({ code: "unsafe_artifact" });
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds CLI error JSON when a registered artifact path is nearly maximal", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const longPath = await createLongRegisteredPath(temporaryRoot);
+      expect(longPath.length).toBeGreaterThan(900);
+      const result = runCli("--repo-root", temporaryRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      const error = cliError(result);
+      expect(error.code).toBe("artifact_size_mismatch");
+      expect(error.message.length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_LENGTH);
+      expect(result.stderr.length).toBeLessThan(512);
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
