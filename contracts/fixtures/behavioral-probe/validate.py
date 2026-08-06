@@ -15,6 +15,7 @@ import json
 import math
 import re
 import statistics
+import subprocess
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable
 
@@ -299,7 +300,7 @@ REST_REVIEWED_ROUTES = frozenset(
 TICKET_TTL_SECONDS = 30
 WARNING_MAX_LENGTH = 240
 MAX_JSON_INTEGER = 10**308
-EXPECTED_REVIEWED_COMMIT = "e974c302148996a08aa52fae7199945afbe834bd"
+EXPECTED_REVIEWED_COMMIT = "6ff29b05d12fa1efd3e7f49d0cb45f660da1d958"
 
 CASE_SHAPES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "rest": (
@@ -838,6 +839,34 @@ def _artifact_manifest_digest(manifest: list[dict[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _approved_commit_artifact_manifest(repo_root: Path, commit: str) -> list[dict[str, Any]]:
+    """Read approved artifact bytes from the local Git object database.
+
+    Worktree measurements are mutable, but the reviewed source evidence must be
+    anchored to the exact approved remote head and the bytes that existed there.
+    Git is read locally only; any missing object or command failure blocks the
+    baseline without retaining command diagnostics.
+    """
+    require(type(commit) is str and HEX40.fullmatch(commit) is not None, "approved evidence commit is invalid")
+    records: list[dict[str, Any]] = []
+    for relative in EXPECTED_ARTIFACT_PATHS:
+        try:
+            git_path = f"contracts/fixtures/behavioral-probe/{relative}"
+            completed = subprocess.run(
+                ["git", "-C", str(repo_root), "show", f"{commit}:{git_path}"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except (OSError, ValueError) as exc:
+            raise ContractError() from exc
+        require(completed.returncode == 0 and completed.stderr == b"", "approved evidence bytes are unavailable")
+        data = completed.stdout
+        records.append({"path": relative, "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)})
+    return records
+
+
 def _validate_baseline(baseline: dict[str, Any], repo_root: Path) -> None:
     expected_keys = (
         "schema",
@@ -867,12 +896,23 @@ def _validate_baseline(baseline: dict[str, Any], repo_root: Path) -> None:
 
     integrity = strict_keys(
         baseline["integrity"],
-        ("reviewed_commit", "evidence_mode", "immutable_evidence", "canonical_baseline_sha256", "canonical_baseline_size_bytes", "baseline_file_size_bytes", "artifact_manifest_sha256", "artifact_manifest"),
+        ("reviewed_commit", "reviewed_artifact_manifest_sha256", "reviewed_artifact_manifest", "evidence_mode", "immutable_evidence", "canonical_baseline_sha256", "canonical_baseline_size_bytes", "baseline_file_size_bytes", "artifact_manifest_sha256", "artifact_manifest"),
         "baseline.integrity",
     )
     require(integrity["reviewed_commit"] == EXPECTED_REVIEWED_COMMIT and HEX40.fullmatch(integrity["reviewed_commit"]) is not None, "baseline reviewed commit changed")
-    require(integrity["evidence_mode"] == "worktree_recomputed", "baseline evidence mode changed")
+    require(integrity["evidence_mode"] == "worktree_recomputed_against_approved_commit", "baseline evidence mode changed")
     require(integrity["immutable_evidence"] is False, "worktree baseline cannot claim immutable evidence")
+
+    reviewed_manifest = integrity["reviewed_artifact_manifest"]
+    require(type(reviewed_manifest) is list and len(reviewed_manifest) == len(EXPECTED_ARTIFACT_PATHS), "approved artifact manifest changed")
+    for index, record in enumerate(reviewed_manifest):
+        record = strict_keys(record, ("path", "sha256", "size_bytes"), f"baseline.integrity.reviewed_artifact_manifest[{index}]")
+        require(record["path"] == EXPECTED_ARTIFACT_PATHS[index], "approved artifact manifest path changed")
+        require(type(record["sha256"]) is str and HEX64.fullmatch(record["sha256"]) is not None, "approved artifact digest is invalid")
+        require(type(record["size_bytes"]) is int and record["size_bytes"] >= 0, "approved artifact size is invalid")
+    approved_actual = _approved_commit_artifact_manifest(repo_root, integrity["reviewed_commit"])
+    require(reviewed_manifest == approved_actual, "approved artifact bytes do not match reviewed commit")
+    require(integrity["reviewed_artifact_manifest_sha256"] == _artifact_manifest_digest(reviewed_manifest), "approved artifact manifest digest does not match")
     require(type(integrity["canonical_baseline_sha256"]) is str and HEX64.fullmatch(integrity["canonical_baseline_sha256"]) is not None, "baseline canonical digest is invalid")
     canonical = _baseline_canonical_bytes(baseline)
     require(integrity["canonical_baseline_sha256"] == hashlib.sha256(canonical).hexdigest(), "baseline canonical digest does not match")

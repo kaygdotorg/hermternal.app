@@ -129,15 +129,23 @@ optimized validator processes. `build_mode` is N/A because this directory has
 no production or release executable. `threshold` is `null`; no latency,
 render, memory, startup, bundle, or artifact-size threshold is invented.
 
-The baseline is explicitly `evidence_mode: "worktree_recomputed"` with
-`immutable_evidence: false`. It binds to the reviewed commit, the exact
-canonical baseline digest and size, the exact four-artifact manifest, and the
-artifact SHA-256 and byte count for each file. The reviewed canonical digest is
-also held in the checked-in `baseline-canonical-sha256.txt` trust anchor. That
-anchor is intentionally outside the measured artifact manifest so the digest
-check does not become self-referential. The baseline excludes itself from the
-artifact manifest and is not immutable evidence: re-run it on the target
-machine when the fixture, validator, tests, README, or interpreter changes.
+The baseline is explicitly
+`evidence_mode: "worktree_recomputed_against_approved_commit"` with
+`immutable_evidence: false`. The approved reviewed remote head is
+`6ff29b05d12fa1efd3e7f49d0cb45f660da1d958`. The baseline records a separate
+approved-artifact manifest whose SHA-256 and byte counts are read from that
+exact local Git commit, plus the current worktree artifact manifest used for
+the regenerated measurement. This avoids claiming that mutable worktree
+measurements are immutable while preventing a stale reviewed-commit/artifact
+pair. The baseline also binds the exact canonical baseline digest and size and
+the artifact SHA-256 and byte count for every current worktree file.
+
+The canonical baseline digest is held in the checked-in
+`baseline-canonical-sha256.txt` trust anchor. That anchor is intentionally
+outside the measured artifact manifest so the digest check does not become
+self-referential. The baseline excludes itself from the current artifact
+manifest and is not immutable timing evidence: re-run it on the target machine
+when the fixture, validator, tests, README, or interpreter changes.
 
 ## Reproduce the proof
 

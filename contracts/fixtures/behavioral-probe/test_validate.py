@@ -317,8 +317,17 @@ class BehavioralProbeFixtureTests(unittest.TestCase):
         self.assertEqual(self.baseline["optimized"]["repetitions"], 30)
         integrity = self.baseline["integrity"]
         self.assertEqual(integrity["reviewed_commit"], validate.EXPECTED_REVIEWED_COMMIT)
-        self.assertEqual(integrity["evidence_mode"], "worktree_recomputed")
+        self.assertEqual(integrity["reviewed_commit"], "6ff29b05d12fa1efd3e7f49d0cb45f660da1d958")
+        self.assertEqual(integrity["evidence_mode"], "worktree_recomputed_against_approved_commit")
         self.assertFalse(integrity["immutable_evidence"])
+        self.assertEqual(
+            integrity["reviewed_artifact_manifest"],
+            validate._approved_commit_artifact_manifest(REPO_ROOT, validate.EXPECTED_REVIEWED_COMMIT),
+        )
+        self.assertEqual(
+            integrity["reviewed_artifact_manifest_sha256"],
+            validate._artifact_manifest_digest(integrity["reviewed_artifact_manifest"]),
+        )
         self.assertRegex(integrity["canonical_baseline_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(integrity["canonical_baseline_size_bytes"], len(validate._baseline_canonical_bytes(self.baseline)))
         self.assertEqual(integrity["baseline_file_size_bytes"], BASELINE_PATH.stat().st_size)
@@ -331,6 +340,24 @@ class BehavioralProbeFixtureTests(unittest.TestCase):
             self.assertLessEqual(distribution["min"], distribution["p50"])
             self.assertLessEqual(distribution["p50"], distribution["p95"])
             self.assertLessEqual(distribution["p95"], distribution["max"])
+
+    def test_stale_reviewed_commit_or_approved_bytes_fail_closed(self) -> None:
+        stale_commit = copy.deepcopy(self.baseline)
+        stale_commit["integrity"]["reviewed_commit"] = "e974c302148996a08aa52fae7199945afbe834bd"
+        with self.assertRaises(validate.ContractError):
+            validate.validate_baseline(stale_commit, REPO_ROOT)
+
+        stale_bytes = copy.deepcopy(self.baseline)
+        stale_bytes["integrity"]["reviewed_artifact_manifest"][0]["sha256"] = "0" * 64
+        with self.assertRaises(validate.ContractError):
+            validate.validate_baseline(stale_bytes, REPO_ROOT)
+
+        current_bytes_as_approved = copy.deepcopy(self.baseline)
+        current_bytes_as_approved["integrity"]["reviewed_artifact_manifest"] = copy.deepcopy(
+            current_bytes_as_approved["integrity"]["artifact_manifest"]
+        )
+        with self.assertRaises(validate.ContractError):
+            validate.validate_baseline(current_bytes_as_approved, REPO_ROOT)
 
     def test_fabricated_internally_consistent_baseline_is_not_reviewed_evidence(self) -> None:
         mutated = copy.deepcopy(self.baseline)
@@ -367,7 +394,7 @@ class BehavioralProbeFixtureTests(unittest.TestCase):
             "non-UI protocol fixture",
             "later web and Apple clients must preserve",
             "## Measured baseline evidence",
-            "evidence_mode: \"worktree_recomputed\"",
+            "evidence_mode: \"worktree_recomputed_against_approved_commit\"",
             "immutable_evidence: false",
             "threshold` is `null",
             "does not start Hermes",
