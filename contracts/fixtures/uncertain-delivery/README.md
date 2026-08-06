@@ -10,19 +10,30 @@ text, read a transcript, or claim live compatibility.
 - Operation: `C-06`
 - Dashboard contract: `dashboard-v0.0.1`
 - Reviewed Hermes source: `f5be9236e00ddf2f2a412697f267078fc4ee068e`
-- Reviewed Git head anchor: `0ba168f16f6f8e646f5452a15627d7bb829828a5`
+- External expected revision: supplied by review/CI as `HERMTERNAL_C06_EXPECTED_COMMIT`
+- Non-release audit tag: `hermternal-c06-uncertain-delivery-final-anchor`
 - Canonical inputs: `cases.json`
 - Validator: `validate.py`
 - Regression tests: `test_validate.py`
 - Measurement record: `validation-baseline.json`
 - Normative state model: `../../state-models/chat.md`
 
-The validator uses the reviewed Git object as an anchor and hard-coded SHA-256
-bindings for `cases.json`, `validation-baseline.json`, `validate.py`,
-`README.md`, `test_validate.py`, and `../../state-models/chat.md`. The executing
-source and caller-supplied cases and baseline paths must be the repository-owned
-paths. The validator-source digest masks only its own digest literals; it does
-not mask code, schema, reducer, or redaction changes.
+The validator requires an exact 40-character commit object from the external
+review or CI invocation. It does not derive that value from this tree, a branch,
+or a tag. The expected commit supplies immutable Git-tree bytes for the six
+canonical artifacts; the current checkout may be a normal merge commit or a
+later unchanged commit, but its canonical bytes and clean worktree must match
+that external revision exactly. Missing, malformed, unavailable, or mismatched
+external expectation fails closed.
+
+The annotated tag is a non-release audit/availability marker only. It is not a
+signature, release tag, or trust root. A protected repository owner must publish
+it without force-retagging and keep its target equal to the externally supplied
+reviewed commit. A force-retagged, forged, missing, `--no-tags`, shallow, or
+partial clone fails closed. The executing source and caller-supplied cases and
+baseline paths must be repository-owned. The validator-source digest masks only
+its own digest literals; it does not mask code, schema, reducer, or redaction
+changes.
 
 The source observations are limited to the pinned `gateway.ready`,
 `WebSocketDisconnect`, `prompt.submit`, and `session.resume` anchors. They bind
@@ -98,22 +109,46 @@ artifact read, so oversized files and special paths fail without an unbounded
 read or FIFO/device block.
 
 The checked-in case, baseline, executing-source, README, regression tests,
-chat-contract, and artifact files are bound to the repository-owned canonical
-paths and hard-coded digests. In addition, validation requires the annotated
-external Git tag `hermternal-c06-uncertain-delivery-0ba-anchor` to resolve to
-this reviewed head or to the direct parent of the correction commit. A
-candidate commit cannot rewrite that tag as part of its own tree, so a clean
-coordinated replacement based on an older parent cannot rebind the evidence.
-The validator also freezes state meanings, terminal flags, action order, case
-order, and baseline key/type/order rules. Copying or coordinately rebinding a
-mutated case, baseline, source, README, tests, or chat contract therefore fails
-closed instead of replacing reviewed evidence.
+chat-contract, and artifact files are bound to repository-owned canonical paths
+and hard-coded digests. The authoritative trust input is the externally
+supplied `HERMTERNAL_C06_EXPECTED_COMMIT`; it is checked as an exact commit
+object and its canonical tree bytes are compared with the checkout. This is
+independent of branch parent shape, so a normal post-merge `dev`/`main` clone
+and a later unchanged commit can validate when the same reviewed expectation is
+supplied. An absent expectation, altered canonical bytes, force-retagged audit
+tag, missing tags, shallow history, tarball, or partial clone fails closed.
+
+Fresh-clone procedure (the expected commit is supplied by protected review/CI,
+not discovered from a mutable branch):
+
+```text
+git clone <repository-url> <checkout>
+cd <checkout>
+git fetch --tags --unshallow 2>/dev/null || git fetch --tags
+HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 contracts/fixtures/uncertain-delivery/validate.py
+HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -O contracts/fixtures/uncertain-delivery/validate.py
+git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-final-anchor
+git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-final-anchor^{commit}
+```
+
+The audit tag is an annotated, non-release consistency marker. It must be
+protected from force updates by the repository owner and remain equal to the
+reviewed external expectation. A superseding reviewed correction publishes a
+new commit and a new non-release audit tag, updates the protected review/CI
+expected-commit record and this documentation in the same reviewed change, and
+retires the old marker only after consumers have migrated; existing markers are
+never silently moved. Tags are not signatures and do not replace the external
+expected-object control. The validator also freezes state meanings, terminal
+flags, action order, case order, and baseline key/type/order rules. Copying or
+coordinately rebinding a mutated case, baseline, source, README, tests, or chat
+contract therefore fails closed instead of replacing reviewed evidence.
 
 ## Reproduce the proof
 
 Run from the repository root:
 
 ```text
+export HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit>
 python3 contracts/fixtures/uncertain-delivery/validate.py
 python3 -O contracts/fixtures/uncertain-delivery/validate.py
 python3 -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'

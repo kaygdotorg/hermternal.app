@@ -15,10 +15,13 @@ import json
 import math
 import os
 import re
+import selectors
+import signal
 import stat
 import statistics
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,24 +37,25 @@ HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 
 # These identities are deliberately outside the JSON baseline. A mutable
 # timing record or copied validator cannot authorize a different fixture,
-# source file, or benchmark trace by rebinding its own metadata. The annotated
-# Git tag is an external trust anchor: a candidate commit can change its tree,
-# but it cannot rewrite the tag as part of that commit. The content digests
-# below bind every retained evidence file; the validator source digest masks
-# only the self-referential binding literals, so changing validation logic still
+# source file, or benchmark trace by rebinding its own metadata. The exact
+# expected commit is supplied by protected review/CI input, never discovered
+# from this tree, a branch, or a tag. Its Git-tree bytes bind every retained
+# artifact independent of the current branch's parent shape. The non-release
+# tag is only a secondary consistency marker. The validator source digest masks
+# only self-referential binding literals, so changing validation logic still
 # fails.
-TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-0ba-anchor"
+TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-final-anchor"
 CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "validate.py", "test_validate.py", "chat.md")
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_BOUND_SHA256 = {
-    "README.md": "a3593c61a728583fc1844b263aa2bc0ea24a1b98fe6ffe909821b0406d1ce62b",
+    "README.md": "6032ac3dd3087872ae7353502d635a6274230d04ce18cef3bbc7a7941cf36376",
     "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
-    "validate.py": "07a397b38b5f3abeef1c6275c19eed73bb3ba30d190f4e74a18cf564999676ce",
-    "test_validate.py": "cc17820f9da5b9e71c7e8325dfdb896d62e4047fbd0ef3f2374996e3dce16e6e",
+    "validate.py": "5879b1a45c61c950baa709f09a2d5251b3062e6880d04e9dac4b75233cc54a49",
+    "test_validate.py": "c39c090df93f73836f580ab0442419fa33d9e8ec86ff79e499e562f1d5125185",
     "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
 }
-EXPECTED_BASELINE_SHA256 = "b5efdad8723154a48b2351b260af47fa219bbf8d98f11f1ec40f3be8050eb750"
+EXPECTED_BASELINE_SHA256 = "21fc3964c0d9ab7470b32a1f480f607f52b8b78ec296fb75a8a7fc946dd56133"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -246,10 +250,14 @@ MAX_STRING_LENGTH = 16 * 1024
 MAX_INTEGER_DIGITS = 1024
 MAX_ERROR_LENGTH = 240
 MAX_SAMPLE_MS = 1_000_000.0
+MAX_GIT_OUTPUT_BYTES = MAX_JSON_BYTES + 1024
+MAX_GIT_STATUS_BYTES = 64 * 1024
 BENCHMARK_REPETITIONS = 30
+EXPECTED_COMMIT_ENV = "HERMTERNAL_C06_EXPECTED_COMMIT"
+TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
 APPROVED_COMMANDS = {
-    "normal": "python3 contracts/fixtures/uncertain-delivery/validate.py",
-    "optimized": "python3 -O contracts/fixtures/uncertain-delivery/validate.py",
+    "normal": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 contracts/fixtures/uncertain-delivery/validate.py",
+    "optimized": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -O contracts/fixtures/uncertain-delivery/validate.py",
 }
 
 SYNTHETIC_REF = re.compile(r"^(?:session|request)-marker-[0-9]{3}$")
@@ -523,68 +531,217 @@ def _source_digest(path: Path) -> tuple[int, str]:
 
 
 def _git_env() -> dict[str, str]:
+    """Build a neutral Git environment without inherited Git indirection."""
     env = os.environ.copy()
-    for name in (
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_NAMESPACE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_WORK_TREE",
-    ):
-        env.pop(name, None)
-    env["GIT_NO_LAZY_FETCH"] = "1"
-    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    # Remove every inherited GIT_* variable, including numbered config pairs,
+    # helper hooks, grafts, shallow files, and replacement/object redirects.
+    # Deleting by prefix prevents a future redirect name from bypassing this
+    # proof. Only neutral values needed by the bounded Git calls are restored.
+    for name in list(env):
+        if name.startswith("GIT_"):
+            env.pop(name, None)
+    env.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_COUNT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+        }
+    )
     return env
 
 
-def _git_revision(repository: Path, expression: str) -> str | None:
+def _trusted_git_path() -> Path | None:
+    """Use one fixed, authenticated system Git path, never caller PATH."""
+    path = TRUSTED_GIT_EXECUTABLE
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "--verify", expression],
-            capture_output=True,
-            text=True,
-            check=False,
+        if not path.is_absolute() or path.is_symlink() or path.resolve() != path:
+            return None
+        metadata = path.stat()
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & 0o111:
+        return None
+    return path
+
+
+def _kill_git_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=1)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _run_git(
+    repository: Path,
+    arguments: list[str],
+    *,
+    output_limit: int = MAX_GIT_OUTPUT_BYTES,
+) -> tuple[int, bytes, bytes] | None:
+    """Run fixed Git with bounded pipes and complete timeout cleanup."""
+    executable = _trusted_git_path()
+    if executable is None or output_limit <= 0:
+        return None
+    command = [
+        str(executable),
+        "--no-replace-objects",
+        "--no-lazy-fetch",
+        "-C",
+        str(repository),
+        *arguments,
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=_git_env(),
-            timeout=2,
+            start_new_session=True,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError):
         return None
-    if result.returncode != 0 or result.stderr or not result.stdout.endswith("\n"):
+
+    selector = selectors.DefaultSelector()
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    try:
+        if process.stdout is None or process.stderr is None:
+            _kill_git_process(process)
+            return None
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        deadline = time.monotonic() + 2
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_git_process(process)
+                return None
+            events = selector.select(remaining)
+            if not events:
+                continue
+            for key, _ in events:
+                stream_name = key.data
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                except OSError:
+                    _kill_git_process(process)
+                    return None
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                output[stream_name].extend(chunk)
+                if len(output[stream_name]) > output_limit:
+                    _kill_git_process(process)
+                    return None
+        try:
+            returncode = process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            _kill_git_process(process)
+            return None
+        return returncode, bytes(output["stdout"]), bytes(output["stderr"])
+    finally:
+        selector.close()
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+
+def _git_text(repository: Path, arguments: list[str], *, output_limit: int = 4096) -> str | None:
+    result = _run_git(repository, arguments, output_limit=output_limit)
+    if result is None:
         return None
-    value = result.stdout.strip()
+    returncode, stdout, stderr = result
+    if returncode != 0 or stderr:
+        return None
+    try:
+        return stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _git_optional_config(repository: Path, arguments: list[str]) -> tuple[bool, str | None]:
+    result = _run_git(repository, ["config", "--local", *arguments], output_limit=MAX_GIT_STATUS_BYTES)
+    if result is None:
+        return False, None
+    returncode, stdout, stderr = result
+    if returncode == 1 and not stdout and not stderr:
+        return True, None
+    if returncode != 0 or stderr:
+        return False, None
+    try:
+        return True, stdout.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return False, None
+
+
+def _git_revision(repository: Path, expression: str) -> str | None:
+    output = _git_text(repository, ["rev-parse", "--verify", expression], output_limit=128)
+    if output is None or not output.endswith("\n"):
+        return None
+    value = output.strip()
     return value if HEX40.fullmatch(value) else None
 
 
 def _git_object_type(repository: Path, object_name: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repository), "cat-file", "-t", object_name],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=_git_env(),
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
+    output = _git_text(repository, ["cat-file", "-t", object_name], output_limit=64)
+    if output is None or not output.endswith("\n"):
         return None
-    if result.returncode != 0 or result.stderr or not result.stdout.endswith("\n"):
+    return output.strip()
+
+
+def _git_blob(repository: Path, object_name: str) -> bytes | None:
+    if _git_object_type(repository, object_name) != "blob":
         return None
-    return result.stdout.strip()
+    result = _run_git(repository, ["cat-file", "blob", object_name], output_limit=MAX_JSON_BYTES + 1)
+    if result is None:
+        return None
+    returncode, stdout, stderr = result
+    if returncode != 0 or stderr or len(stdout) > MAX_JSON_BYTES:
+        return None
+    return stdout
+
+
+def _git_is_shallow(repository: Path) -> bool | None:
+    output = _git_text(repository, ["rev-parse", "--is-shallow-repository"], output_limit=64)
+    if output is None:
+        return None
+    value = output.strip()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def _external_expected_commit() -> str | None:
+    value = os.environ.get(EXPECTED_COMMIT_ENV)
+    return value if value is not None and HEX40.fullmatch(value) else None
 
 
 def _trusted_anchor_commit(repository: Path) -> str | None:
-    # Require an annotated tag object. Its ref lives outside the candidate
-    # commit tree, so replacing files or hash literals cannot move the anchor.
+    # This non-release tag is only a secondary availability/consistency check.
+    # The external expected commit remains authoritative because tag refs can
+    # be force-retagged by a mirror or local repository owner.
     if _git_object_type(repository, TRUST_ANCHOR_REF) != "tag":
         return None
     return _git_revision(repository, f"{TRUST_ANCHOR_REF}^{{commit}}")
 
 
 def _repository_has_trust_anchor(candidate: Path) -> bool:
-    anchor = _trusted_anchor_commit(candidate)
-    return anchor is not None
+    return _trusted_anchor_commit(candidate) is not None
 
 
 def _repository_root() -> Path:
@@ -601,7 +758,6 @@ def _repository_root() -> Path:
             and (candidate / CANONICAL_FIXTURE_RELATIVE / "cases.json").is_file()
             and (candidate / CANONICAL_FIXTURE_RELATIVE / "validation-baseline.json").is_file()
             and (candidate / CANONICAL_CHAT_RELATIVE).is_file()
-            and _repository_has_trust_anchor(candidate)
         ):
             return candidate
     _fail("canonical_binding")
@@ -628,7 +784,7 @@ def _artifact_digest(fixture_dir: Path, name: str) -> tuple[int, str]:
 
 def _require_exact_trusted_file(path: Path, trusted_path: Path, code: str) -> None:
     try:
-        if path.resolve() != trusted_path.resolve() or _bounded_read_file(path, MAX_JSON_BYTES, code) != _bounded_read_file(trusted_path, MAX_JSON_BYTES, code):
+        if path.is_symlink() or path.resolve() != trusted_path.resolve() or _bounded_read_file(path, MAX_JSON_BYTES, code) != _bounded_read_file(trusted_path, MAX_JSON_BYTES, code):
             _fail(code)
     except ContractError:
         raise
@@ -636,26 +792,196 @@ def _require_exact_trusted_file(path: Path, trusted_path: Path, code: str) -> No
         _fail(code)
 
 
-def _require_clean_bound_worktree(root: Path) -> None:
-    paths = [str(CANONICAL_FIXTURE_RELATIVE / name) for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json")]
-    paths.append(str(CANONICAL_CHAT_RELATIVE))
-    anchor = _trusted_anchor_commit(root)
-    head = _git_revision(root, "HEAD^{commit}")
-    parent = _git_revision(root, "HEAD^{commit}^")
-    if anchor is None or head is None or (head != anchor and parent != anchor):
-        _fail("canonical_binding")
+def _git_metadata_dirs(root: Path) -> tuple[Path, Path] | None:
+    marker = root / ".git"
     try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "diff", "--quiet", "HEAD", "--", *paths],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=_git_env(),
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
+        if marker.is_symlink():
+            return None
+        if marker.is_dir():
+            git_dir = marker.resolve()
+        elif marker.is_file():
+            raw = _bounded_read_file(marker, 4096, "canonical_binding").decode("ascii")
+            line = raw.splitlines()[0]
+            if not line.startswith("gitdir:"):
+                return None
+            git_dir = (root / line[7:].strip()).resolve()
+        else:
+            return None
+        if not git_dir.is_dir():
+            return None
+        commondir_file = git_dir / "commondir"
+        if commondir_file.exists() or commondir_file.is_symlink():
+            if commondir_file.is_symlink() or not commondir_file.is_file():
+                return None
+            relative = _bounded_read_file(commondir_file, 4096, "canonical_binding").decode("ascii").strip()
+            common_dir = (git_dir / relative).resolve()
+        else:
+            common_dir = git_dir
+        if not common_dir.is_dir():
+            return None
+        return git_dir, common_dir
+    except (ContractError, OSError, UnicodeError, IndexError, ValueError):
+        return None
+
+
+def _reject_repository_metadata(root: Path) -> None:
+    metadata = _git_metadata_dirs(root)
+    if metadata is None:
         _fail("canonical_binding")
-    if result.returncode != 0:
+    git_dir, common_dir = metadata
+    for metadata_dir in {git_dir, common_dir}:
+        for relative in (
+            Path("HEAD"),
+            Path("config"),
+            Path("index"),
+            Path("packed-refs"),
+            Path("objects"),
+            Path("objects/info"),
+            Path("refs"),
+            Path("refs/tags"),
+            Path("info"),
+            Path("objects/info/alternates"),
+            Path("objects/info/http-alternates"),
+            Path("info/grafts"),
+            Path("shallow"),
+            Path("refs/replace"),
+        ):
+            path = metadata_dir / relative
+            if path.is_symlink():
+                _fail("canonical_binding")
+        for relative in (Path("config"), Path("config.worktree")):
+            path = metadata_dir / relative
+            if path.exists() or path.is_symlink():
+                if path.is_symlink() or not path.is_file():
+                    _fail("canonical_binding")
+                _bounded_read_file(path, MAX_GIT_STATUS_BYTES, "canonical_binding")
+
+    local_config = _git_text(root, ["config", "--local", "--null", "--list"], output_limit=MAX_GIT_STATUS_BYTES)
+    if local_config is None or (local_config and not local_config.endswith("\0")):
+        _fail("canonical_binding")
+    dangerous_prefixes = (
+        "include",
+        "core.alternaterefs",
+        "core.askpass",
+        "core.fsmonitor",
+        "core.gitproxy",
+        "core.hookspath",
+        "core.sshcommand",
+        "core.usereplacerefs",
+        "credential.",
+        "diff.",
+        "filter.",
+        "http.",
+        "ssh.",
+        "submodule.",
+        "url.",
+    )
+    for record in local_config.split("\0"):
+        if not record:
+            continue
+        key, separator, value = record.partition("\n")
+        if not separator:
+            _fail("canonical_binding")
+        normalized = key.casefold()
+        if normalized == "core.repositoryformatversion" and value != "0":
+            _fail("canonical_binding")
+        if normalized.startswith(dangerous_prefixes):
+            _fail("canonical_binding")
+        if normalized.startswith("extensions."):
+            _fail("canonical_binding")
+        if normalized.endswith(".promisor") or normalized.endswith(".partialclonefilter"):
+            _fail("canonical_binding")
+
+    replace_refs = _git_text(
+        root,
+        ["for-each-ref", "--count=1", "--format=%(refname)", "refs/replace"],
+        output_limit=1024,
+    )
+    if replace_refs is None or replace_refs.strip():
+        _fail("canonical_binding")
+
+    bare_ok, bare = _git_optional_config(root, ["--get", "core.bare"])
+    if not bare_ok or (bare is not None and bare.casefold() not in {"false", "0", "no"}):
+        _fail("canonical_binding")
+    worktree_ok, worktree = _git_optional_config(root, ["--get", "core.worktree"])
+    if not worktree_ok:
+        _fail("canonical_binding")
+    if worktree:
+        configured = Path(worktree)
+        configured_root = (git_dir / configured if not configured.is_absolute() else configured).resolve()
+        if configured_root != root:
+            _fail("canonical_binding")
+    partial_ok, partial = _git_optional_config(root, ["--get-regexp", r"^extensions\.partialClone$"])
+    promisor_ok, promisor = _git_optional_config(root, ["--get-regexp", r"^remote\..*\.promisor$"])
+    if not partial_ok or not promisor_ok or partial or promisor:
+        _fail("canonical_binding")
+
+
+def _require_clean_bound_worktree(root: Path) -> None:
+    root = root.resolve()
+    paths = [
+        str(CANONICAL_FIXTURE_RELATIVE / name)
+        for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json")
+    ] + [str(CANONICAL_CHAT_RELATIVE)]
+    expected = _external_expected_commit()
+    if expected is None:
+        _fail("canonical_binding")
+    if _git_revision(root, f"{expected}^{{commit}}") != expected:
+        _fail("canonical_binding")
+    if _trusted_anchor_commit(root) != expected:
+        _fail("canonical_binding")
+    if _git_revision(root, "HEAD^{commit}") is None:
+        _fail("canonical_binding")
+    bare_state = _git_text(root, ["rev-parse", "--is-bare-repository"], output_limit=64)
+    inside_state = _git_text(root, ["rev-parse", "--is-inside-work-tree"], output_limit=64)
+    if bare_state is None or bare_state.strip() != "false":
+        _fail("canonical_binding")
+    if inside_state is None or inside_state.strip() != "true":
+        _fail("canonical_binding")
+    shown_root = _git_text(root, ["rev-parse", "--show-toplevel"], output_limit=4096)
+    if shown_root is None or Path(shown_root.strip()).resolve() != root:
+        _fail("canonical_binding")
+    shallow = _git_is_shallow(root)
+    if shallow is None or shallow:
+        _fail("canonical_binding")
+    _reject_repository_metadata(root)
+
+    fixture_dir = root / CANONICAL_FIXTURE_RELATIVE
+    expected_paths = {
+        "README.md": CANONICAL_FIXTURE_RELATIVE / "README.md",
+        "cases.json": CANONICAL_FIXTURE_RELATIVE / "cases.json",
+        "validate.py": CANONICAL_FIXTURE_RELATIVE / "validate.py",
+        "test_validate.py": CANONICAL_FIXTURE_RELATIVE / "test_validate.py",
+        "validation-baseline.json": CANONICAL_FIXTURE_RELATIVE / "validation-baseline.json",
+        "chat.md": CANONICAL_CHAT_RELATIVE,
+    }
+    for name, relative in expected_paths.items():
+        current_path = _artifact_path(fixture_dir, name)
+        if current_path.is_symlink():
+            _fail("canonical_binding")
+        expected_bytes = _git_blob(root, f"{expected}:{relative.as_posix()}")
+        if expected_bytes is None or _bounded_read_file(current_path, MAX_JSON_BYTES, "canonical_binding") != expected_bytes:
+            _fail("canonical_binding")
+
+    status = _git_text(
+        root,
+        ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", *paths],
+        output_limit=MAX_GIT_STATUS_BYTES,
+    )
+    if status is None or status:
+        _fail("canonical_binding")
+    index_listing = _git_text(root, ["ls-files", "-v", "--", *paths], output_limit=MAX_GIT_STATUS_BYTES)
+    if index_listing is None:
+        _fail("canonical_binding")
+    for line in index_listing.splitlines():
+        if line[:1] in {"h", "s", "S"}:
+            _fail("canonical_binding")
+    diff = _run_git(
+        root,
+        ["diff", "--no-ext-diff", "--no-textconv", "--quiet", "HEAD", "--", *paths],
+        output_limit=1024,
+    )
+    if diff is None or diff[0] != 0 or diff[1] or diff[2]:
         _fail("canonical_binding")
 
 
