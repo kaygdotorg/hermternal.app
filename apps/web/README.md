@@ -8,7 +8,11 @@ This directory is in the planning, mock, and proof phase. It has no application 
 
 The future web client is a static Svelte 5 and SvelteKit 2 application built with Bun. It owns the web chat and the full web-only `/api/pty` Terminal. Apple clients do not use this Terminal surface.
 
-The planned chat surface has one profile, provider-neutral discovery, session restore, streaming, approvals, clarification, interruption, images only for attachments, and no transcript mirror. Internal stable session and message IDs and required authentication callback routing remain allowed. User-facing deep-link UI and full-text session-search UI are deferred to `v0.0.2` because both UIs need redesign. The deep-link and search contracts remain future compatibility references. User-facing sharing is deferred to `v0.0.2`.
+The planned chat surface has one profile, provider-neutral discovery, session restore, streaming, approvals, clarification, interruption, images only for attachments, and no transcript mirror.
+
+Internal stable session and message IDs remain allowed. Required authentication callback routing also remains allowed.
+
+User-facing deep-link UI and full-text session-search UI are deferred to `v0.0.2`. Both UIs need redesign. The deep-link and search contracts remain future compatibility references. User-facing sharing is deferred to `v0.0.2`.
 
 An active model change applies immediately when the conversation is idle. During streaming, a normal choice may defer to the next turn and does not interrupt the current stream. If the deferred choice needs expensive-model confirmation, the pinned server drops it; the client must confirm and submit it after the turn.
 
