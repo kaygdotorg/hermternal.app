@@ -78,7 +78,10 @@ or live resource names.
   image-inspect JSON record for mutation testing without running a container.
 - `test_validate.py` covers normal and optimized CLI execution, parser and
   classification regressions, synthetic fake-executor flow, redaction, strict
-  JSON limits, identity, isolation, capability gating, and cleanup.
+  JSON limits, identity, isolation, capability gating, and cleanup. The live
+  entrypoint regression uses a temporary synthetic source with mocked local
+  identity reads; it proves the reviewed image digest reaches the executor
+  boundary while the pending capability policy prevents any executor call.
 
 ## Local checks
 

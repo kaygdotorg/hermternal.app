@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Regression tests for the synthetic rootless Hermes gateway readiness contract.
 
-These tests use only checked-in synthetic JSON and a fake argv executor.  They
-never start Podman, connect to the VM, open a socket, invoke Hermes, publish a
-port, call a provider, or use browser authentication.
+These tests use only checked-in synthetic JSON and fake executor boundaries.
+The live entrypoint regression uses a temporary synthetic source with mocked
+local identity reads; it never starts Podman, connects to the VM, opens a
+socket, invokes Hermes, publishes a port, calls a provider, or uses browser
+authentication.
 """
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 import copy
+import io
 import json
 import subprocess
 import sys
@@ -16,6 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Sequence
+from unittest.mock import patch
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent
@@ -410,6 +415,84 @@ class GatewayReadinessTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertEqual(result.classification, "capability_policy_pending")
         self.assertEqual(calls, [])
+
+    def test_synthetic_temp_source_reaches_capability_gate_before_executor(self) -> None:
+        """Exercise --run identity collection without authorizing a live command."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            source_root = Path(directory) / "synthetic-hermes"
+            source_root.mkdir()
+            dockerfile = source_root / "Dockerfile"
+            dockerfile.write_bytes(b"synthetic Dockerfile bytes\n")
+            dockerfile_bytes = dockerfile.read_bytes()
+            git_calls: list[tuple[str, ...]] = []
+            git_outputs = {
+                ("rev-parse", "HEAD"): validate.PINNED_HERMES_SHA,
+                ("rev-parse", "HEAD^{tree}"): validate.PINNED_HERMES_TREE,
+            }
+
+            def synthetic_git(command: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                del kwargs
+                command_tuple = tuple(command)
+                git_calls.append(command_tuple)
+                self.assertEqual(command_tuple[:3], ("git", "-C", str(source_root)))
+                key = command_tuple[3:]
+                self.assertIn(key, git_outputs)
+                return subprocess.CompletedProcess(
+                    command_tuple,
+                    0,
+                    stdout=git_outputs[key] + "\n",
+                    stderr="",
+                )
+
+            real_sha256 = validate.hashlib.sha256
+
+            class SyntheticDigest:
+                def hexdigest(self) -> str:
+                    return validate.PINNED_DOCKERFILE_SHA256
+
+            def synthetic_sha256(data: bytes = b"") -> object:
+                if data == dockerfile_bytes:
+                    return SyntheticDigest()
+                return real_sha256(data)
+
+            original_run_probe = validate.run_probe
+
+            def executor_boundary(*args: object, **kwargs: object) -> validate.ProbeResult:
+                identity = kwargs["identity"]
+                self.assertEqual(identity["image_digest"], validate.PINNED_IMAGE_DIGEST)
+                return original_run_probe(*args, **kwargs)
+
+            output = io.StringIO()
+            with (
+                patch.object(validate.subprocess, "run", side_effect=synthetic_git),
+                patch.object(validate.hashlib, "sha256", side_effect=synthetic_sha256),
+                patch.object(validate, "run_probe", side_effect=executor_boundary),
+                patch.object(
+                    validate,
+                    "run_bounded",
+                    side_effect=AssertionError("capability gate must prevent executor use"),
+                ),
+                redirect_stdout(output),
+            ):
+                returncode = validate.main(
+                    [
+                        "--run",
+                        "--allow-live",
+                        "--source-root",
+                        str(source_root),
+                    ]
+                )
+
+        self.assertEqual(returncode, 3)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["live_run"])
+        self.assertEqual(payload["probe"]["classification"], "capability_policy_pending")
+        self.assertEqual(git_calls, [
+            ("git", "-C", str(source_root), "rev-parse", "HEAD"),
+            ("git", "-C", str(source_root), "rev-parse", "HEAD^{tree}"),
+        ])
 
     def test_exceptional_up_still_attempts_exact_teardown(self) -> None:
         rendered = validate.render_probe("smoke", instance="partial")

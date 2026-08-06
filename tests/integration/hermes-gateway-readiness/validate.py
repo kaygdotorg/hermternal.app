@@ -1007,6 +1007,9 @@ def collect_source_identity(source_root: Path) -> dict[str, Any]:
         "source_tree": git_value("rev-parse", "HEAD^{tree}"),
         "dockerfile_sha256": dockerfile_digest,
         "image_reference": IMAGE_REFERENCE,
+        # Carry the reviewed immutable content binding through source identity;
+        # the tag alone cannot prove that the executor saw the reviewed image.
+        "image_digest": PINNED_IMAGE_DIGEST,
     }
     validate_pinned_identity(identity)
     return identity
