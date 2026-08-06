@@ -11,39 +11,37 @@ The correctness executor is rootless Podman as account `hermternal-test` on the
 `hermternal-test@hermternal-dev`. Docker evidence is comparison-only and is not
 accepted as the correctness executor.
 
-The fixture freezes:
+The active live operation freezes the official upstream image only:
 
-- Hermes commit `f5be9236e00ddf2f2a412697f267078fc4ee068e`.
-- Hermes tree `886db5eb1150f819344d67fedc81aef0caab09ff`.
-- Dockerfile SHA-256
-  `a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc`.
-- Image tag `hermes-agent:hermternal-f5be9236` and the reviewed immutable
-  content digest `sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b`.
-  The digest is derived from the frozen source/tree/Dockerfile/image manifest;
-  it is not replaced by an arbitrary same-repository digest. Mandatory labels
-  `org.opencontainers.image.source`,
-  `org.opencontainers.image.revision`, and
-  `com.hermternal.dockerfile.sha256` bound to the pinned identity.
+- Image reference
+  `docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e`.
+- Pulled image ID
+  `d5ff34e615e41748618093e19c125eece333de04a63f0febf5cead2d3a6e0e0d`.
+- The requested repository digest was present in the image inspection result;
+  the image exposed two repository digests and the requested digest was bound.
+- Upstream OCI revision label `3c27eb6234bf91b8ceee9e9071591b31e9b148cb`.
+- Entrypoint `/opt/hermes/docker/entrypoint-dispatch.sh`, user `root`, and
+  working directory `/opt/hermes`.
 - Command `gateway run --no-supervise`.
 - Exact readiness line `HERMES_BACKEND_READY port=<port>` on stdout.
 - Rootless Podman, cgroup v2, netavark, and overlay as the executor policy.
-  The runner pins Podman's external compose provider to `podman-compose` so a
-  Docker Compose plugin cannot become the correctness executor by precedence.
+  `PODMAN_COMPOSE_PROVIDER=podman-compose` is forced, and `DOCKER_HOST` plus
+  `HERMES_PROVIDER` are removed from the executor environment.
 - A unique-per-run generated internal network and named volume with no host
-  ports. Teardown uses the exact generated project name.
-- No host profile bind, socket mount, provider, browser auth, PTY, or live data.
+  ports, host network, host profile bind, socket mount, provider, browser auth,
+  PTY, or live data.
 - CPU, memory, PID, tmpfs, shared-memory, restart, capability, security, and
-  bounded-log limits. Executor stdout and stderr are captured separately with
-  bounded tails; only successful stdout log queries can establish readiness.
+  bounded-log limits are declared in the reviewed Compose policy. Executor
+  stdout and stderr are captured separately with bounded tails; only successful
+  stdout log queries can establish readiness.
 - Exact project-only teardown: `down --volumes --remove-orphans`.
 - Zero leftover containers, networks, and volumes after teardown.
 
 `cases.json` remains synthetic-only and records `proof_status: not_run`.
-The separately recorded first live attempt is blocked at the strict image
-identity gate. The active capability policy is exactly issue #250's reviewed
-`CAP_CHOWN`, `CAP_SETGID`, and `CAP_SETUID` set, with all other capabilities
-dropped and no-new-privileges enabled. The normal validator and its tests never
-start a VM, Podman stack, port, provider, browser, or PTY.
+The active capability policy remains issue #250's reviewed `CAP_CHOWN`,
+`CAP_SETGID`, and `CAP_SETUID` set. The validator and tests never start a VM,
+Podman stack, port, provider, browser, or PTY. The stopped source-root/image
+adaptation lane is historical evidence only and is not an allowed live command.
 
 ## Command and readiness evidence boundary
 
@@ -61,28 +59,20 @@ classifies a missing marker as timeout or exit-before-ready; it does not infer
 readiness from container creation, an open port, a dashboard message, or a
 successful `podman compose up` return code.
 
-`evidence.json` is the bounded, redacted record of the first live attempt. It
-records `blocked/cleanup_failed` with the image-identity gate failing first,
-the exact approved capability policy, `not_run` for container start, readiness,
-and exit, and the exact teardown attempt with zero leftover containers,
-networks, and volumes. `rerun-evidence.json` separately records the only
-provider-pinned rerun as `blocked/image_identity_mismatch` with successful exact
-teardown and the same zero-leftover proof.
-The first runner result also records `cleanup_failed` because the VM's default
-`podman compose` delegation selected a Docker Compose plugin; the fixture now
-pins `PODMAN_COMPOSE_PROVIDER=podman-compose` for future runs. It contains no
-raw logs, credentials, host paths, provider values, browser data, or live
-resource names. The observed adapter-built image did not satisfy the reviewed
-tag/digest/label binding, so the runner did not start a container and did not
-claim readiness.
-The `72ab...` value in the reviewed fixture is the SHA-256 of the frozen source,
-tree, Dockerfile, and image-reference manifest; it is a synthetic review
-binding, not the OCI repository digest emitted by the adapter build. The VM
-image exposed a different `localhost` repository digest and lacked the required
-provenance labels. Producing and independently attesting an exact rootless OCI
-image binding is tracked separately; this fixture does not weaken its identity
-gate to bridge that gap. Producing and independently attesting the exact
-rootless image binding is tracked in child issue #261.
+`official-evidence.json` is the current bounded, redacted record of the
+official-image operation. The image identity gate passed, Compose config passed,
+and the container started. The exact stdout readiness marker was not observed
+within the 30-second bound, so the result is `blocked/policy_not_applied` and
+makes no readiness claim. Runtime inspection verified PID 1 and the entrypoint,
+but the applied container policy did not match the reviewed capability,
+no-new-privileges, or PID-limit settings. The bounded logs contained no concrete
+upstream runtime error. Exact teardown passed with zero leftover containers,
+networks, or volumes.
+
+`evidence.json` and `rerun-evidence.json` retain the earlier bounded historical
+records. They are not an instruction to repeat the stopped source-root or
+adapter-image lane. No source build, Dockerfile, image adaptation, relabel,
+retag, provider, browser-auth, model-turn, or production claim is made here.
 
 ## Files
 
@@ -90,21 +80,21 @@ rootless image binding is tracked in child issue #261.
   validator independently pins each semantic kind, adversarial input, and
   expected outcome so changing a parser path or both payloads cannot silently
   weaken coverage.
-- `evidence.json` contains the bounded, redacted first-attempt evidence record;
-  `rerun-evidence.json` records the provider-pinned rerun separately.
-- `validate.py` contains the strict JSON loader, redaction boundary,
-  canonical unique-project Compose renderer, exact reviewed image/source
-  checks, readiness parser, timeout/exit classifier, bounded rootless runner,
-  and exact cleanup checks. The offline CLI also accepts a bounded synthetic
-  image-inspect JSON record for mutation testing without running a container.
+- `official-evidence.json` contains the bounded, redacted official-image
+  operation record, including image identity, PID 1, applied-policy inspection,
+  timeout classification, bounded logs, teardown, and zero-leftover proof.
+- `evidence.json` and `rerun-evidence.json` are bounded historical records of
+  the earlier blocked adapter-image attempts.
+- `validate.py` contains the strict JSON loader, redaction boundary, canonical
+  unique-project Compose renderer, historical synthetic contract checks,
+  official immutable-image evidence checks, readiness parser, timeout/exit
+  classifier, bounded rootless runner, and exact cleanup checks. The offline
+  CLI accepts bounded synthetic image-inspect JSON without running a container.
 - `test_validate.py` covers normal and optimized CLI execution, parser and
-  classification regressions, synthetic fake-executor flow, redaction, strict
-  JSON limits, identity, isolation, the exact approved capability set, and
-  cleanup. Preflight regressions prove that Compose and image-identity failures
-  run exact project teardown, enumerate zero leftovers, and never start a
-  container. The live entrypoint regression uses a temporary synthetic source
-  with mocked local identity reads and records the blocked image-identity
-  boundary without invoking a real executor.
+  classification regressions, synthetic fake-executor flow, official-image
+  evidence identity, runtime-policy mismatch, redaction, strict JSON limits,
+  isolation, the exact approved capability set, and cleanup. The checked-in
+  official record is validated only; tests never invoke a live executor.
 
 ## Local checks
 
@@ -124,18 +114,25 @@ python3 -O -m unittest discover \
   -s tests/integration/hermes-gateway-readiness -p 'test_*.py'
 ```
 
-The optional live command requires both `--allow-live` and a checkout whose
-source identity exactly matches the frozen values. The reviewed capability set
-is approved for this separately gated attempt, but the strict image tag,
-digest, and source-label binding remains mandatory. Do not retag, relabel, or
-substitute an adapter-built image that fails that binding.
+The completed live operation used direct SSH as `hermternal-test@hermternal-dev`
+and rootless Podman only. It cleared `DOCKER_HOST` and `HERMES_PROVIDER`, forced
+`PODMAN_COMPOSE_PROVIDER=podman-compose`, pulled and inspected the exact official
+image reference above, then ran the reviewed no-provider Compose policy with
+`--no-build`, no host ports, no host network, no sockets, no `~/.hermes` mount,
+synthetic data, bounded logs, and exact project-only teardown. With the forced
+`podman-compose` 1.3.0 provider, its supported bounded forms were:
 
-```sh
-ssh -T -o ClearAllForwardings=yes hermternal-test@hermternal-dev -- \
-  python3 tests/integration/hermes-gateway-readiness/validate.py \
-  --run --allow-live --source-root /path/to/pinned/hermes-agent-reference
+```text
+podman compose ... config
+podman compose ... up --detach --no-build gateway
+podman compose ... logs --tail 128 gateway
+podman compose ... ps -f json
+podman compose ... down --volumes --remove-orphans
 ```
 
-A successful run would still be a bounded readiness result only. It would not
-claim provider compatibility, browser-auth compatibility, Docker compatibility,
-or production readiness.
+Do not use the stopped `--source-root` command. Do not build Hermes from source,
+create a Dockerfile, adapt an image, retag an image, or weaken the runtime policy
+to turn this blocked result into readiness. A future retry requires a reviewed
+fix for the applied-policy mismatch. This operation does not claim provider
+compatibility, browser-auth compatibility, Docker compatibility, or production
+readiness.

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Regression tests for the synthetic rootless Hermes gateway readiness contract.
+"""Regression tests for the bounded Hermes gateway readiness evidence contract.
 
-These tests use only checked-in synthetic JSON and fake executor boundaries.
-The live entrypoint regression uses a temporary synthetic source with mocked
-local identity reads; it never starts Podman, connects to the VM, opens a
-socket, invokes Hermes, publishes a port, calls a provider, or uses browser
-authentication.
+These tests use checked-in synthetic JSON, the bounded redacted official-image
+record, and fake executor boundaries. They never start Podman, connect to the
+VM, open a socket, invoke Hermes, publish a port, call a provider, or use
+browser authentication. The checked-in official record is evidence to validate,
+not permission to repeat a live operation.
 """
 
 from __future__ import annotations
@@ -78,12 +78,15 @@ class GatewayReadinessTests(unittest.TestCase):
         cls.document = validate.load_json(validate.CASES_PATH)
         cls.evidence = validate.load_json(validate.EVIDENCE_PATH)
         cls.rerun_evidence = validate.load_json(validate.RERUN_EVIDENCE_PATH)
+        cls.official_evidence = validate.load_json(validate.OFFICIAL_EVIDENCE_PATH)
         validate.validate_redaction(cls.document)
         validate.validate_redaction(cls.evidence)
         validate.validate_redaction(cls.rerun_evidence)
+        validate.validate_redaction(cls.official_evidence)
         validate.validate_cases_document(cls.document)
         validate.validate_evidence_document(cls.evidence, cls.document)
         validate.validate_rerun_evidence_document(cls.rerun_evidence, cls.document)
+        validate.validate_official_evidence_document(cls.official_evidence, cls.document)
         cls.cases = {case["id"]: case for case in cls.document["cases"]}
 
     def _run_cli(self, *arguments: str, optimized: bool = False) -> subprocess.CompletedProcess[str]:
@@ -151,6 +154,43 @@ class GatewayReadinessTests(unittest.TestCase):
             "networks": 0,
             "volumes": 0,
         })
+
+    def test_official_image_evidence_is_blocked_without_readiness_or_policy_overclaim(self) -> None:
+        evidence = self.official_evidence
+        self.assertEqual(evidence["image"]["reference"], validate.OFFICIAL_IMAGE_REFERENCE)
+        self.assertEqual(evidence["image"]["digest"], validate.OFFICIAL_IMAGE_DIGEST)
+        self.assertEqual(evidence["image"]["image_id"], validate.OFFICIAL_IMAGE_ID)
+        self.assertEqual(evidence["status"], "blocked")
+        self.assertEqual(evidence["classification"], "policy_not_applied")
+        self.assertEqual(evidence["observations"]["container_start"], "started")
+        self.assertEqual(evidence["observations"]["readiness"], "timeout")
+        self.assertIsNone(evidence["observations"].get("readiness_port"))
+        self.assertEqual(evidence["observations"]["exit_code"], 0)
+        self.assertEqual(evidence["observations"]["leftover_resources"], {
+            "containers": 0,
+            "networks": 0,
+            "volumes": 0,
+        })
+        self.assertEqual(evidence["runtime_identity"]["path"], validate.OFFICIAL_IMAGE_ENTRYPOINT[0])
+        self.assertFalse(evidence["runtime_identity"]["policy"]["cap_drop_all"])
+        self.assertFalse(evidence["runtime_identity"]["policy"]["no_new_privileges"])
+        self.assertEqual(evidence["runtime_identity"]["policy"]["pids_limit"], 2048)
+
+    def test_official_evidence_mutations_fail_closed_in_normal_and_optimized_modes(self) -> None:
+        mutations = (
+            ("image digest drift", ("image", "digest"), "sha256:" + "f" * 64),
+            ("policy claim", ("runtime_identity", "policy", "cap_drop_all"), True),
+            ("leftover boolean", ("observations", "leftover_resources", "containers"), False),
+        )
+        for label, path, value in mutations:
+            with self.subTest(label=label):
+                mutated = copy.deepcopy(self.official_evidence)
+                target = mutated
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_official_evidence_document(mutated, self.document)
 
     def test_real_loader_rejects_boolean_cleanup_values_in_normal_and_optimized_modes(self) -> None:
         """Exercise both checked-in evidence records through the real loader."""

@@ -32,8 +32,10 @@ ROOT = Path(__file__).resolve().parent
 CASES_PATH = ROOT / "cases.json"
 EVIDENCE_PATH = ROOT / "evidence.json"
 RERUN_EVIDENCE_PATH = ROOT / "rerun-evidence.json"
+OFFICIAL_EVIDENCE_PATH = ROOT / "official-evidence.json"
 SCHEMA = "hermternal.integration.hermes-gateway-readiness.v1"
 EVIDENCE_SCHEMA = "hermternal.integration.hermes-gateway-readiness.evidence.v1"
+OFFICIAL_EVIDENCE_SCHEMA = "hermternal.integration.hermes-gateway-readiness.official-evidence.v1"
 OPERATION = "R-02C"
 CONTRACT = "hermes-gateway-readiness-v1"
 PINNED_HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
@@ -61,6 +63,14 @@ require_manifest_digest = hashlib.sha256(IMAGE_CONTENT_MANIFEST.encode("ascii"))
 if require_manifest_digest != REVIEWED_IMAGE_CONTENT_SHA256:
     raise RuntimeError("reviewed image content manifest changed")
 PINNED_IMAGE_DIGEST = f"sha256:{REVIEWED_IMAGE_CONTENT_SHA256}"
+OFFICIAL_IMAGE_REPOSITORY = "docker.io/nousresearch/hermes-agent"
+OFFICIAL_IMAGE_DIGEST = "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e"
+OFFICIAL_IMAGE_REFERENCE = f"{OFFICIAL_IMAGE_REPOSITORY}:v2026.8.3@{OFFICIAL_IMAGE_DIGEST}"
+OFFICIAL_IMAGE_ID = "d5ff34e615e41748618093e19c125eece333de04a63f0febf5cead2d3a6e0e0d"
+OFFICIAL_IMAGE_REVISION = "3c27eb6234bf91b8ceee9e9071591b31e9b148cb"
+OFFICIAL_IMAGE_ENTRYPOINT = ["/opt/hermes/docker/entrypoint-dispatch.sh"]
+OFFICIAL_IMAGE_USER = "root"
+OFFICIAL_IMAGE_WORKING_DIR = "/opt/hermes"
 EXECUTOR = "podman"
 COMPOSE = "compose"
 ROOTLESS_ACCOUNT = "hermternal-test"
@@ -214,6 +224,63 @@ EVIDENCE_OBSERVATION_KEYS = (
     "exit",
     "teardown",
     "leftover_resources",
+)
+OFFICIAL_EVIDENCE_KEYS = (
+    "schema",
+    "operation",
+    "synthetic_only",
+    "live_run",
+    "status",
+    "classification",
+    "teardown_exit_code",
+    "correctness_executor",
+    "ssh_target",
+    "image",
+    "command_candidate",
+    "command_support",
+    "readiness_marker",
+    "readiness_source_status",
+    "capability_policy",
+    "isolation_policy",
+    "observations",
+    "runtime_identity",
+    "diagnostic",
+    "log_tail",
+    "limitations",
+)
+OFFICIAL_IMAGE_KEYS = (
+    "reference",
+    "digest",
+    "image_id",
+    "repo_digest_count",
+    "revision_label",
+    "entrypoint",
+    "cmd",
+    "user",
+    "working_dir",
+)
+OFFICIAL_OBSERVATION_KEYS = (
+    "compose_config",
+    "image_identity",
+    "container_start",
+    "readiness",
+    "exit",
+    "exit_code",
+    "teardown",
+    "leftover_resources",
+    "applied_policy",
+)
+OFFICIAL_RUNTIME_KEYS = ("status", "pid", "path", "args", "entrypoint", "policy")
+OFFICIAL_RUNTIME_POLICY_KEYS = (
+    "cap_drop_all",
+    "cap_add_approved",
+    "no_new_privileges",
+    "published_ports",
+    "host_network",
+    "named_volume_opt_data",
+    "cpu_quota",
+    "memory_limit",
+    "pids_limit",
 )
 
 EXPECTED_CASE_IDS = (
@@ -683,8 +750,18 @@ def _normalize_sensitive_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", key.casefold())
 
 
-ALLOWED_CONTAINER_PATHS = frozenset({"/opt/data"})
+ALLOWED_CONTAINER_PATHS = frozenset({
+    "/opt/data",
+    OFFICIAL_IMAGE_WORKING_DIR,
+    OFFICIAL_IMAGE_ENTRYPOINT[0],
+})
 ALLOWED_CONTAINER_PATH_PREFIXES = ("/tmp:size=", "/run:size=")
+ALLOWED_PUBLIC_IMAGE_VALUES = frozenset({
+    OFFICIAL_IMAGE_REPOSITORY,
+    OFFICIAL_IMAGE_REFERENCE,
+    OFFICIAL_IMAGE_DIGEST,
+    f"{OFFICIAL_IMAGE_REPOSITORY}@{OFFICIAL_IMAGE_DIGEST}",
+})
 
 
 def _walk_redaction(value: Any) -> None:
@@ -702,7 +779,7 @@ def _walk_redaction(value: Any) -> None:
             _walk_redaction(child)
         return
     if type(value) is str:
-        if value == PINNED_IMAGE_DIGEST:
+        if value == PINNED_IMAGE_DIGEST or value in ALLOWED_PUBLIC_IMAGE_VALUES:
             return
         if HEX40_RE.fullmatch(value) or HEX64_RE.fullmatch(value):
             return
@@ -1866,6 +1943,92 @@ def validate_rerun_evidence_document(evidence: Any, cases_document: Mapping[str,
     )
 
 
+def validate_official_evidence_document(
+    evidence: Any,
+    cases_document: Mapping[str, Any],
+) -> None:
+    """Validate the official immutable-image attempt without a readiness overclaim."""
+
+    record = strict_keys(evidence, OFFICIAL_EVIDENCE_KEYS, "official image evidence")
+    require(record["schema"] == OFFICIAL_EVIDENCE_SCHEMA, "official evidence schema changed")
+    require(record["operation"] == OPERATION, "official evidence operation changed")
+    require(record["synthetic_only"] is False, "official evidence must not be synthetic-only")
+    require(record["live_run"] is True, "official evidence must identify the live run")
+    require(record["status"] == "blocked", "official evidence must remain blocked")
+    require(record["classification"] == "policy_not_applied", "official evidence classification changed")
+    require(_int(record["teardown_exit_code"], "official teardown exit code") == 0, "official teardown failed")
+    require(record["correctness_executor"] == "rootless_podman", "official executor changed")
+    require(record["ssh_target"] == SSH_TARGET, "official SSH boundary changed")
+
+    image = strict_keys(record["image"], OFFICIAL_IMAGE_KEYS, "official image identity")
+    require(image["reference"] == OFFICIAL_IMAGE_REFERENCE, "official image reference changed")
+    require(image["digest"] == OFFICIAL_IMAGE_DIGEST, "official image digest changed")
+    require(type(image["image_id"]) is str and HEX64_RE.fullmatch(image["image_id"]) is not None, "official image id is invalid")
+    require(image["image_id"] == OFFICIAL_IMAGE_ID, "official image id changed")
+    require(_int(image["repo_digest_count"], "official repo digest count") == 2, "official repo digest count changed")
+    require(image["revision_label"] == OFFICIAL_IMAGE_REVISION, "official revision label changed")
+    strict_equal(image["entrypoint"], OFFICIAL_IMAGE_ENTRYPOINT, "official image entrypoint")
+    require(image["cmd"] is None, "official image command metadata changed")
+    require(image["user"] == OFFICIAL_IMAGE_USER, "official image user changed")
+    require(image["working_dir"] == OFFICIAL_IMAGE_WORKING_DIR, "official image working directory changed")
+
+    require(record["command_candidate"] == list(PROBE_COMMAND), "official command candidate changed")
+    require(
+        record["command_support"] == "parser_option_present_readiness_candidate_requires_review",
+        "official command support claim changed",
+    )
+    require(record["readiness_marker"] == READINESS_PREFIX, "official readiness marker changed")
+    require(record["readiness_source_status"] == "headless_backend_path_only", "official readiness source claim changed")
+    strict_equal(record["capability_policy"], cases_document["capability_policy"], "official capability policy")
+    strict_equal(record["isolation_policy"], cases_document["isolation_policy"], "official isolation policy")
+
+    observations = strict_keys(record["observations"], OFFICIAL_OBSERVATION_KEYS, "official observations")
+    require(observations["compose_config"] == "passed", "official Compose config must be recorded as passed")
+    require(observations["image_identity"] == "passed", "official image identity must be recorded as passed")
+    require(observations["container_start"] == "started", "official container start must be recorded")
+    require(observations["readiness"] == "timeout", "official readiness result changed")
+    require(observations["exit"] == "observed", "official exit observation changed")
+    require(_int(observations["exit_code"], "official container exit code") == 0, "official exit code changed")
+    require(observations["teardown"] == "passed", "official teardown observation changed")
+    require(observations["applied_policy"] == "failed", "official policy application must remain blocked")
+    leftovers = strict_keys(observations["leftover_resources"], ("containers", "networks", "volumes"), "official leftovers")
+    for resource_name, count in leftovers.items():
+        _int(count, f"official leftovers.{resource_name}")
+    require(leftovers == {"containers": 0, "networks": 0, "volumes": 0}, "official cleanup must prove zero leftovers")
+
+    runtime = strict_keys(record["runtime_identity"], OFFICIAL_RUNTIME_KEYS, "official runtime identity")
+    require(runtime["status"] == "verified", "official runtime identity was not verified")
+    require(_int(runtime["pid"], "official PID 1") > 0, "official PID 1 is invalid")
+    require(runtime["path"] == OFFICIAL_IMAGE_ENTRYPOINT[0], "official PID 1 path changed")
+    strict_equal(runtime["args"], list(PROBE_COMMAND), "official PID 1 arguments")
+    strict_equal(runtime["entrypoint"], OFFICIAL_IMAGE_ENTRYPOINT, "official runtime entrypoint")
+    policy = strict_keys(runtime["policy"], OFFICIAL_RUNTIME_POLICY_KEYS, "official applied policy")
+    require(policy["cap_drop_all"] is False, "official capability-drop observation changed")
+    require(policy["cap_add_approved"] is False, "official capability-add observation changed")
+    require(policy["no_new_privileges"] is False, "official no-new-privileges observation changed")
+    require(policy["published_ports"] is False, "official port exposure observation changed")
+    require(policy["host_network"] is False, "official host-network observation changed")
+    require(policy["named_volume_opt_data"] is True, "official named-volume observation changed")
+    require(_int(policy["cpu_quota"], "official CPU quota") == 500000000, "official CPU limit observation changed")
+    require(_int(policy["memory_limit"], "official memory limit") == 536870912, "official memory limit observation changed")
+    require(_int(policy["pids_limit"], "official PID limit") == 2048, "official PID limit observation changed")
+
+    _text(record["diagnostic"], "official diagnostic", max_length=MAX_ERROR_OUTPUT)
+    _text(record["log_tail"], "official log tail", max_length=MAX_LOG_BYTES)
+    require(
+        record["limitations"]
+        == [
+            "official_upstream_image_only",
+            "readiness_not_proven",
+            "runtime_policy_mismatch",
+            "no_concrete_upstream_error_observed",
+            "no_provider_or_browser_auth",
+            "no_source_equivalence_or_production_claim",
+        ],
+        "official limitations changed",
+    )
+
+
 def _success_payload(
     document: Mapping[str, Any],
     *,
@@ -1933,12 +2096,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         document = load_json(args.cases)
         evidence = load_json(EVIDENCE_PATH)
         rerun_evidence = load_json(RERUN_EVIDENCE_PATH)
+        official_evidence = load_json(OFFICIAL_EVIDENCE_PATH)
         validate_redaction(document)
         validate_redaction(evidence)
         validate_redaction(rerun_evidence)
+        validate_redaction(official_evidence)
         validate_cases_document(document)
         validate_evidence_document(evidence, document)
         validate_rerun_evidence_document(rerun_evidence, document)
+        validate_official_evidence_document(official_evidence, document)
         image_binding: dict[str, Any] | None = None
         if args.image_inspect is not None:
             image_binding = validate_image_binding(

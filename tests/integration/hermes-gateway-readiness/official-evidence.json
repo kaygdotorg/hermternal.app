@@ -1,0 +1,122 @@
+{
+  "schema": "hermternal.integration.hermes-gateway-readiness.official-evidence.v1",
+  "operation": "R-02C",
+  "synthetic_only": false,
+  "live_run": true,
+  "status": "blocked",
+  "classification": "policy_not_applied",
+  "teardown_exit_code": 0,
+  "correctness_executor": "rootless_podman",
+  "ssh_target": "hermternal-test@hermternal-dev",
+  "image": {
+    "reference": "docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+    "digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+    "image_id": "d5ff34e615e41748618093e19c125eece333de04a63f0febf5cead2d3a6e0e0d",
+    "repo_digest_count": 2,
+    "revision_label": "3c27eb6234bf91b8ceee9e9071591b31e9b148cb",
+    "entrypoint": [
+      "/opt/hermes/docker/entrypoint-dispatch.sh"
+    ],
+    "cmd": null,
+    "user": "root",
+    "working_dir": "/opt/hermes"
+  },
+  "command_candidate": [
+    "gateway",
+    "run",
+    "--no-supervise"
+  ],
+  "command_support": "parser_option_present_readiness_candidate_requires_review",
+  "readiness_marker": "HERMES_BACKEND_READY port=",
+  "readiness_source_status": "headless_backend_path_only",
+  "capability_policy": {
+    "status": "approved",
+    "cap_drop": [
+      "ALL"
+    ],
+    "cap_add": [
+      "CAP_CHOWN",
+      "CAP_SETGID",
+      "CAP_SETUID"
+    ],
+    "no_new_privileges": true,
+    "dependency": "issue_250_review"
+  },
+  "isolation_policy": {
+    "project_prefix": "hermes-gateway-readiness",
+    "internal_network": true,
+    "named_volume": true,
+    "published_ports": false,
+    "host_network": false,
+    "host_profile_bind": false,
+    "socket_mount": false,
+    "pty": false,
+    "provider": "none",
+    "browser_auth": false,
+    "model_turn": false,
+    "resources": {
+      "cpu_limit": "0.50",
+      "memory_limit": "512m",
+      "pid_limit": 256,
+      "tmpfs": [
+        "/tmp:size=64m,mode=1777",
+        "/run:size=16m,mode=755"
+      ],
+      "shm_size": "64m"
+    },
+    "teardown": [
+      "down",
+      "--volumes",
+      "--remove-orphans"
+    ]
+  },
+  "observations": {
+    "compose_config": "passed",
+    "image_identity": "passed",
+    "container_start": "started",
+    "readiness": "timeout",
+    "exit": "observed",
+    "exit_code": 0,
+    "teardown": "passed",
+    "leftover_resources": {
+      "containers": 0,
+      "networks": 0,
+      "volumes": 0
+    },
+    "applied_policy": "failed"
+  },
+  "runtime_identity": {
+    "status": "verified",
+    "pid": 121699,
+    "path": "/opt/hermes/docker/entrypoint-dispatch.sh",
+    "args": [
+      "gateway",
+      "run",
+      "--no-supervise"
+    ],
+    "entrypoint": [
+      "/opt/hermes/docker/entrypoint-dispatch.sh"
+    ],
+    "policy": {
+      "cap_drop_all": false,
+      "cap_add_approved": false,
+      "no_new_privileges": false,
+      "published_ports": false,
+      "host_network": false,
+      "named_volume_opt_data": true,
+      "cpu_quota": 500000000,
+      "memory_limit": 536870912,
+      "pids_limit": 2048
+    }
+  },
+  "diagnostic": "no stdout readiness marker before 30s; bounded logs had no concrete upstream error; runtime policy inspection mismatched approved caps, no-new-privileges, and PID limit",
+  "log_tail": "hell-1234/chrome-headless-shell-linux64/chrome-headless-shell [stage2] Setup complete; starting user services [supervise-perms] chowned supervise/ trees for static s6-rc services reconcile: profile=default prior_state=None action=registered",
+  "limitations": [
+    "official_upstream_image_only",
+    "readiness_not_proven",
+    "runtime_policy_mismatch",
+    "no_concrete_upstream_error_observed",
+    "no_provider_or_browser_auth",
+    "no_source_equivalence_or_production_claim"
+  ]
+}
