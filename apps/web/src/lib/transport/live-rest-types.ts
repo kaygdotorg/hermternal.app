@@ -1,18 +1,19 @@
-import type { StrictJsonValue } from './strict-json';
-
 export type NullableString = string | null;
 
 /**
- * Lossless bounded JSON content from the pinned message projection. The root
- * may be null, text, a list, or a dictionary; nested values remain the
- * parser's bounded JSON values so multimodal and tool payloads are not
- * flattened or string-coerced.
+ * The pinned Hermes web type defines message content as text or null. The
+ * transport keeps that source authority instead of widening the REST boundary
+ * to arbitrary JSON values returned by an unreviewed future route.
  */
-export type LiveMessageContent =
-  | null
-  | string
-  | StrictJsonValue[]
-  | { [key: string]: StrictJsonValue };
+export type LiveMessageContent = string | null;
+
+export interface LiveToolCall {
+  id: string;
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
 
 export interface LiveProvider {
   name: string;
@@ -26,28 +27,30 @@ export interface ProviderDiscovery {
 
 export interface AuthIdentity {
   userId: string;
-  email: NullableString;
-  displayName: NullableString;
-  organizationId: NullableString;
+  email: string;
+  displayName: string;
+  organizationId: string;
   provider: string;
-  expiresAt: number | null;
+  expiresAt: number;
 }
 
 export interface LiveSession {
   id: string;
-  title?: NullableString;
-  preview?: NullableString;
-  source?: NullableString;
-  model?: NullableString;
-  startedAt?: NullableString;
-  endedAt?: NullableString;
-  lastActive?: NullableString;
+  source: NullableString;
+  model: NullableString;
+  title: NullableString;
+  startedAt: number;
+  endedAt: number | null;
+  lastActive: number;
+  isActive: boolean;
+  messageCount: number;
+  toolCallCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  preview: NullableString;
   parentSessionId?: NullableString;
-  messageCount?: number;
-  toolCallCount?: number;
-  inputTokens?: number;
-  outputTokens?: number;
-  isActive?: boolean;
+  // These fields are additive session-list metadata observed in the pinned
+  // route. They remain optional because SessionInfo does not require them.
   archived?: boolean;
   pinned?: boolean;
   profile?: string;
@@ -64,9 +67,12 @@ export interface SessionList {
 export type LiveMessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
 export interface LiveMessage {
-  id: number;
   role: LiveMessageRole;
   content: LiveMessageContent;
+  toolCalls?: LiveToolCall[];
+  toolName?: string;
+  toolCallId?: string;
+  timestamp?: number;
 }
 
 export interface SessionMessages {

@@ -1,7 +1,16 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createLiveRestTransport } from '../../src/lib/transport/live-rest-transport';
 
-const SOURCE_COMMIT = '897260f215631a8216cb0a4faf84389c18067089';
+function reviewedSourceCommit(): string {
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  if (!/^[0-9a-f]{40}$/u.test(commit)) {
+    throw new Error('benchmark source commit is not a full Git SHA');
+  }
+  return commit;
+}
+
+const SOURCE_COMMIT = reviewedSourceCommit();
 const PINNED_HERMES_SHA = 'f5be9236e00ddf2f2a412697f267078fc4ee068e';
 const COMMAND = 'bun tests/bench/live-rest-transport.bench.ts';
 const WARMUPS = 5;
@@ -90,8 +99,7 @@ async function measure(
 const sessionId = 'synthetic-session-0001';
 const messagesBody = JSON.stringify({
   session_id: sessionId,
-  messages: Array.from({ length: 500 }, (_, index) => ({
-    id: index + 1,
+  messages: Array.from({ length: 500 }, () => ({
     role: 'assistant',
     content: 'Synthetic benchmark message'
   })),
@@ -99,7 +107,23 @@ const messagesBody = JSON.stringify({
 });
 const sessionsBody = JSON.stringify({
   sessions: Array.from({ length: 100 }, (_, index) => ({
-    id: `synthetic-session-${String(index + 1).padStart(4, '0')}`
+    id: `synthetic-session-${String(index + 1).padStart(4, '0')}`,
+    source: 'synthetic',
+    model: 'synthetic-model',
+    title: 'Synthetic benchmark session',
+    started_at: 1_767_225_600 + index,
+    ended_at: null,
+    last_active: 1_767_225_601 + index,
+    is_active: false,
+    message_count: 1,
+    tool_call_count: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    preview: 'Synthetic benchmark preview',
+    profile: 'synthetic-profile',
+    is_default_profile: true,
+    archived: false,
+    pinned: false
   })),
   total: 100,
   limit: 100,

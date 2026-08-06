@@ -33,9 +33,9 @@ export const LIVE_PROVIDER_DISCOVERY_FIXTURE: ProviderDiscovery = Object.freeze(
 
 export const LIVE_AUTH_IDENTITY_FIXTURE: AuthIdentity = Object.freeze({
   userId: 'synthetic-user',
-  email: null,
+  email: 'synthetic@example.invalid',
   displayName: 'Synthetic User',
-  organizationId: null,
+  organizationId: 'synthetic-org',
   provider: 'synthetic-provider',
   // Synthetic Unix seconds prove the source-backed numeric representation.
   expiresAt: 1_767_225_600
@@ -47,9 +47,9 @@ export const LIVE_SESSION_FIXTURE: LiveSession = Object.freeze({
   preview: 'Synthetic redacted preview',
   source: 'synthetic',
   model: 'synthetic-model',
-  startedAt: '2026-01-01T00:00:00Z',
+  startedAt: 1_767_225_600,
   endedAt: null,
-  lastActive: '2026-01-01T00:00:01Z',
+  lastActive: 1_767_225_601,
   parentSessionId: null,
   messageCount: 1,
   toolCallCount: 0,
@@ -70,7 +70,6 @@ export const LIVE_SESSION_LIST_FIXTURE: SessionList = Object.freeze({
 });
 
 export const LIVE_MESSAGE_FIXTURE: LiveMessage = Object.freeze({
-  id: 1,
   role: 'user',
   content: 'Synthetic redacted message'
 });

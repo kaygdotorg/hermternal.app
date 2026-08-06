@@ -1,7 +1,7 @@
 const DEFAULT_MAX_DEPTH = 16;
-// The route caps permit 100 sessions or 500 messages. A message row costs
-// one object node plus three scalar nodes, so 500 rows need 2,000 nodes before
-// the response, array, pagination, and session-id nodes are counted.
+// The route caps permit 100 sessions or 500 messages. A minimal message row
+// costs one object node plus role and content scalar nodes; optional pinned tool
+// metadata is covered by the remaining bounded node budget.
 const DEFAULT_MAX_NODES = 4_096;
 const DEFAULT_MAX_STRING_LENGTH = 8_192;
 const DEFAULT_MAX_ARRAY_LENGTH = 500;

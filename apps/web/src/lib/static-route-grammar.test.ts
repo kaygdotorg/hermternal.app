@@ -30,6 +30,12 @@ describe('canonical static route grammar', () => {
     expect(HOST_RESERVED_PATH_PREFIXES).toEqual(RESERVED_PATH_PREFIXES);
   });
 
+  it('serves the non-product W-06 browser proof from its generated route document', () => {
+    expect(resolveStaticPath('/__w06/transport', buildDirectory)).toBe(
+      `${buildDirectory}/__w06/transport/index.html`
+    );
+  });
+
   it('keeps worker and host decisions aligned for canonical deep-link cases', () => {
     const supported = [
       '/v1/c/abcdefghijklmnop',

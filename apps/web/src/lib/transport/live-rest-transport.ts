@@ -4,6 +4,7 @@ import type {
   LiveMessage,
   LiveMessageContent,
   LiveProvider,
+  LiveToolCall,
   LiveSession,
   MessageListOptions,
   ProviderDiscovery,
@@ -19,16 +20,18 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_PROVIDER_COUNT = 32;
 const MAX_SESSION_COUNT = 100;
 const MAX_MESSAGE_COUNT = 500;
+const MAX_TOOL_CALL_COUNT = 64;
 const MAX_ID_LENGTH = 128;
 const MAX_TEXT_LENGTH = 8_192;
 const MAX_SHORT_TEXT_LENGTH = 512;
 // These are client representation budgets for source-defined REST values, not
-// invented upstream schema claims. They keep numeric identity and expiry
-// values lossless for the reviewed dashboard horizon without accepting
-// unbounded JSON integers.
-const MAX_MESSAGE_ID = 1_000_000_000;
+// invented upstream schema claims. They keep numeric timestamps lossless for
+// the reviewed dashboard horizon without accepting unbounded JSON integers.
 const MAX_UNIX_SECONDS = 4_294_967_295;
 const API_ROOT = '/api';
+// Cancellation is best-effort at the platform stream boundary. Never let a
+// hostile or synthetic reader's cancel promise hold the REST request forever.
+const RESPONSE_CANCEL_TIMEOUT_MS = 100;
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._~-]{0,126}[A-Za-z0-9])?$/u;
 const PROVIDER_NAME_MAX_LENGTH = 96;
@@ -158,10 +161,12 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
         response.type === 'opaqueredirect' ||
         response.type === 'opaque'
       ) {
+        await cancelResponseBody(response);
         throw new LiveRestError('redirect');
       }
 
       if (!hasJsonContentType(response)) {
+        await cancelResponseBody(response);
         throw new LiveRestError('invalid-response');
       }
 
@@ -391,6 +396,7 @@ async function classifyHttpError(
   abortError: () => LiveRestError | undefined
 ): Promise<LiveRestError> {
   if (response.status === 401) {
+    await cancelResponseBody(response);
     return new LiveRestError('unauthenticated', response.status);
   }
 
@@ -402,6 +408,7 @@ async function classifyHttpError(
         : undefined;
 
   if (expectedDetail === undefined) {
+    await cancelResponseBody(response);
     return new LiveRestError('http', response.status);
   }
 
@@ -442,99 +449,53 @@ async function readBoundedBody(
     throw new LiveRestError('body-too-large');
   }
 
-  if (response.body) {
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    let cancelReader = false;
-
-    try {
-      while (true) {
-        const result = await Promise.race([reader.read(), abortPromise]);
-        if (result.done) {
-          if (declaredLength !== undefined && total !== declaredLength) {
-            throw new LiveRestError('invalid-response');
-          }
-          break;
-        }
-
-        const value = result.value as Uint8Array | undefined;
-        if (!value || !Number.isSafeInteger(value.byteLength) || value.byteLength < 0) {
-          throw new LiveRestError('malformed-json');
-        }
-
-        // Check the stream's advertised chunk size before copying it. This is
-        // the allocation boundary: one oversized chunk must be rejected and
-        // cancelled without first materializing an attacker-sized copy.
-        const remainingBodyBytes = maxBodyBytes - total;
-        if (value.byteLength > remainingBodyBytes) {
-          throw new LiveRestError('body-too-large');
-        }
-        if (declaredLength !== undefined && value.byteLength > declaredLength - total) {
-          throw new LiveRestError('invalid-response');
-        }
-
-        const chunk = Uint8Array.from(value);
-        if (chunk.byteLength !== value.byteLength) {
-          throw new LiveRestError('malformed-json');
-        }
-        total += chunk.byteLength;
-        chunks.push(chunk);
-      }
-    } catch (error) {
-      cancelReader = true;
-      if (error instanceof LiveRestError) {
-        throw error;
-      }
-      const reason = abortError();
-      if (reason) {
-        throw reason;
-      }
-      throw new LiveRestError('network');
-    } finally {
-      if (cancelReader) {
-        try {
-          await reader.cancel();
-        } catch {
-          // The response is already failing closed; cancellation errors are
-          // deliberately not exposed as network diagnostics.
-        }
-      }
-      reader.releaseLock();
-    }
-
-    const bytes = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-
-    return decodeUtf8(bytes);
-  }
-
-  // A null-body Response has no stream to meter. Require a valid declared
-  // length before calling arrayBuffer so the fallback cannot allocate an
-  // unbounded body; the returned bytes are checked for both short and long
-  // metadata mismatches before decoding.
-  if (declaredLength === undefined) {
+  if (!response.body) {
+    // A null-body Response has no cancellable stream and cannot contain a JSON
+    // document. Reject it before calling arrayBuffer: that fallback has no
+    // portable cancellation primitive and could otherwise outlive the request.
     throw new LiveRestError('invalid-response');
   }
 
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let cancelReader = false;
+
   try {
-    const buffer = await Promise.race([response.arrayBuffer(), abortPromise]);
-    if (!buffer || !Number.isSafeInteger(buffer.byteLength) || buffer.byteLength < 0) {
-      throw new LiveRestError('malformed-json');
+    while (true) {
+      const result = await Promise.race([reader.read(), abortPromise]);
+      if (result.done) {
+        if (declaredLength !== undefined && total !== declaredLength) {
+          throw new LiveRestError('invalid-response');
+        }
+        break;
+      }
+
+      const value = result.value as Uint8Array | undefined;
+      if (!value || !Number.isSafeInteger(value.byteLength) || value.byteLength < 0) {
+        throw new LiveRestError('malformed-json');
+      }
+
+      // Check the stream's advertised chunk size before copying it. This is
+      // the allocation boundary: one oversized chunk must be rejected and
+      // cancelled without first materializing an attacker-sized copy.
+      const remainingBodyBytes = maxBodyBytes - total;
+      if (value.byteLength > remainingBodyBytes) {
+        throw new LiveRestError('body-too-large');
+      }
+      if (declaredLength !== undefined && value.byteLength > declaredLength - total) {
+        throw new LiveRestError('invalid-response');
+      }
+
+      const chunk = Uint8Array.from(value);
+      if (chunk.byteLength !== value.byteLength) {
+        throw new LiveRestError('malformed-json');
+      }
+      total += chunk.byteLength;
+      chunks.push(chunk);
     }
-    const view = new Uint8Array(buffer);
-    if (view.byteLength > maxBodyBytes) {
-      throw new LiveRestError('body-too-large');
-    }
-    if (view.byteLength !== declaredLength) {
-      throw new LiveRestError('invalid-response');
-    }
-    return decodeUtf8(Uint8Array.from(view));
   } catch (error) {
+    cancelReader = true;
     if (error instanceof LiveRestError) {
       throw error;
     }
@@ -543,7 +504,22 @@ async function readBoundedBody(
       throw reason;
     }
     throw new LiveRestError('network');
+  } finally {
+    if (cancelReader) {
+      await cancelReaderBounded(reader);
+    } else {
+      releaseReader(reader);
+    }
   }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return decodeUtf8(bytes);
 }
 
 function decodeUtf8(bytes: Uint8Array): string {
@@ -560,15 +536,39 @@ async function cancelResponseBody(response: Response): Promise<void> {
   }
 
   try {
-    const reader = response.body.getReader();
-    try {
-      await reader.cancel();
-    } finally {
-      reader.releaseLock();
-    }
+    await cancelReaderBounded(response.body.getReader());
   } catch {
     // The response is already failing closed; cancellation errors are not
     // exposed as network diagnostics.
+  }
+}
+
+async function cancelReaderBounded(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  let cancellation: Promise<unknown>;
+  try {
+    cancellation = Promise.resolve(reader.cancel());
+  } catch {
+    cancellation = Promise.resolve();
+  }
+
+  try {
+    await Promise.race([
+      cancellation,
+      new Promise<void>((resolve) => setTimeout(resolve, RESPONSE_CANCEL_TIMEOUT_MS))
+    ]);
+  } catch {
+    // The request already fails closed. A rejected cancellation must not
+    // replace the bounded transport error or keep a caller waiting.
+  } finally {
+    releaseReader(reader);
+  }
+}
+
+function releaseReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    reader.releaseLock();
+  } catch {
+    // Synthetic readers may not implement the platform release contract.
   }
 }
 
@@ -632,11 +632,11 @@ function validateAuthIdentity(value: StrictJsonValue): AuthIdentity {
 
   return {
     userId: requireString(object.user_id, MAX_SHORT_TEXT_LENGTH),
-    email: requireNullableString(object.email, MAX_SHORT_TEXT_LENGTH),
-    displayName: requireNullableString(object.display_name, MAX_SHORT_TEXT_LENGTH),
-    organizationId: requireNullableString(object.org_id, MAX_SHORT_TEXT_LENGTH),
+    email: requireString(object.email, MAX_SHORT_TEXT_LENGTH),
+    displayName: requireString(object.display_name, MAX_SHORT_TEXT_LENGTH),
+    organizationId: requireString(object.org_id, MAX_SHORT_TEXT_LENGTH),
     provider: requireString(object.provider, MAX_SHORT_TEXT_LENGTH),
-    expiresAt: requireNullableBoundedInteger(object.expires_at, 0, MAX_UNIX_SECONDS)
+    expiresAt: requireBoundedInteger(object.expires_at, 0, MAX_UNIX_SECONDS)
   };
 }
 
@@ -651,7 +651,21 @@ function validateSessionList(value: StrictJsonValue): SessionList {
 }
 
 function validateSession(value: StrictJsonValue, expectedSessionId?: string): LiveSession {
-  const object = requireObject(value, ['id']);
+  const object = requireObject(value, [
+    'id',
+    'source',
+    'model',
+    'title',
+    'started_at',
+    'ended_at',
+    'last_active',
+    'is_active',
+    'message_count',
+    'tool_call_count',
+    'input_tokens',
+    'output_tokens',
+    'preview'
+  ]);
   const id = requireSessionId(requireString(object.id, MAX_ID_LENGTH));
   if (expectedSessionId !== undefined && id !== expectedSessionId) {
     throw new LiveRestError('invalid-response');
@@ -659,37 +673,21 @@ function validateSession(value: StrictJsonValue, expectedSessionId?: string): Li
 
   return {
     id,
-    ...(object.title !== undefined && { title: requireNullableString(object.title, MAX_TEXT_LENGTH) }),
-    ...(object.preview !== undefined && {
-      preview: requireNullableString(object.preview, MAX_TEXT_LENGTH)
-    }),
-    ...(object.source !== undefined && { source: requireNullableString(object.source, MAX_SHORT_TEXT_LENGTH) }),
-    ...(object.model !== undefined && { model: requireNullableString(object.model, MAX_SHORT_TEXT_LENGTH) }),
-    ...(object.started_at !== undefined && {
-      startedAt: requireNullableString(object.started_at, MAX_SHORT_TEXT_LENGTH)
-    }),
-    ...(object.ended_at !== undefined && {
-      endedAt: requireNullableString(object.ended_at, MAX_SHORT_TEXT_LENGTH)
-    }),
-    ...(object.last_active !== undefined && {
-      lastActive: requireNullableString(object.last_active, MAX_SHORT_TEXT_LENGTH)
-    }),
+    source: requireNullableString(object.source, MAX_SHORT_TEXT_LENGTH),
+    model: requireNullableString(object.model, MAX_SHORT_TEXT_LENGTH),
+    title: requireNullableString(object.title, MAX_TEXT_LENGTH),
+    startedAt: requireBoundedInteger(object.started_at, 0, MAX_UNIX_SECONDS),
+    endedAt: requireNullableBoundedInteger(object.ended_at, 0, MAX_UNIX_SECONDS),
+    lastActive: requireBoundedInteger(object.last_active, 0, MAX_UNIX_SECONDS),
+    isActive: requireBoolean(object.is_active),
+    messageCount: requireBoundedInteger(object.message_count, 0, 1_000_000_000),
+    toolCallCount: requireBoundedInteger(object.tool_call_count, 0, 1_000_000_000),
+    inputTokens: requireBoundedInteger(object.input_tokens, 0, 1_000_000_000),
+    outputTokens: requireBoundedInteger(object.output_tokens, 0, 1_000_000_000),
+    preview: requireNullableString(object.preview, MAX_TEXT_LENGTH),
     ...(object.parent_session_id !== undefined && {
       parentSessionId: requireNullableSessionId(object.parent_session_id)
     }),
-    ...(object.message_count !== undefined && {
-      messageCount: requireBoundedInteger(object.message_count, 0, 1_000_000_000)
-    }),
-    ...(object.tool_call_count !== undefined && {
-      toolCallCount: requireBoundedInteger(object.tool_call_count, 0, 1_000_000_000)
-    }),
-    ...(object.input_tokens !== undefined && {
-      inputTokens: requireBoundedInteger(object.input_tokens, 0, 1_000_000_000)
-    }),
-    ...(object.output_tokens !== undefined && {
-      outputTokens: requireBoundedInteger(object.output_tokens, 0, 1_000_000_000)
-    }),
-    ...(object.is_active !== undefined && { isActive: requireBoolean(object.is_active) }),
     ...(object.archived !== undefined && { archived: requireBoolean(object.archived) }),
     ...(object.pinned !== undefined && { pinned: requireBoolean(object.pinned) }),
     ...(object.profile !== undefined && { profile: requireString(object.profile, MAX_SHORT_TEXT_LENGTH) }),
@@ -726,16 +724,25 @@ function validateSessionMessages(value: StrictJsonValue, expectedSessionId?: str
 }
 
 function validateMessage(value: StrictJsonValue): LiveMessage {
-  const object = requireObject(value, ['id', 'role', 'content']);
+  const object = requireObject(value, ['role', 'content']);
   const role = requireString(object.role, MAX_SHORT_TEXT_LENGTH);
   if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'tool') {
     throw new LiveRestError('invalid-response');
   }
 
   return {
-    id: requireBoundedInteger(object.id, 0, MAX_MESSAGE_ID),
     role,
-    content: requireMessageContent(object.content)
+    content: requireMessageContent(object.content),
+    ...(object.tool_calls !== undefined && { toolCalls: requireToolCalls(object.tool_calls) }),
+    ...(object.tool_name !== undefined && {
+      toolName: requireString(object.tool_name, MAX_SHORT_TEXT_LENGTH)
+    }),
+    ...(object.tool_call_id !== undefined && {
+      toolCallId: requireString(object.tool_call_id, MAX_ID_LENGTH)
+    }),
+    ...(object.timestamp !== undefined && {
+      timestamp: requireBoundedInteger(object.timestamp, 0, MAX_UNIX_SECONDS)
+    })
   };
 }
 
@@ -773,6 +780,13 @@ function requireString(value: StrictJsonValue, maxLength: number): string {
   return value;
 }
 
+function requireBoundedString(value: StrictJsonValue, maxLength: number): string {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw new LiveRestError('invalid-response');
+  }
+  return value;
+}
+
 function requireNullableString(value: StrictJsonValue, maxLength: number): string | null {
   if (value === null) {
     return null;
@@ -791,19 +805,21 @@ function requireMessageContent(value: StrictJsonValue): LiveMessageContent {
   if (value === null) {
     return null;
   }
-  if (typeof value === 'string') {
-    if (value.length > MAX_TEXT_LENGTH) {
-      throw new LiveRestError('invalid-response');
-    }
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value;
-  }
-  if (typeof value === 'object') {
-    return value;
-  }
-  throw new LiveRestError('invalid-response');
+  return requireBoundedString(value, MAX_TEXT_LENGTH);
+}
+
+function requireToolCalls(value: StrictJsonValue): LiveToolCall[] {
+  return requireArray(value, MAX_TOOL_CALL_COUNT).map((toolCall) => {
+    const object = requireObject(toolCall, ['id', 'function']);
+    const functionObject = requireObject(object.function, ['name', 'arguments']);
+    return {
+      id: requireString(object.id, MAX_ID_LENGTH),
+      function: {
+        name: requireString(functionObject.name, MAX_SHORT_TEXT_LENGTH),
+        arguments: requireBoundedString(functionObject.arguments, MAX_TEXT_LENGTH)
+      }
+    };
+  });
 }
 
 function requireSessionId(value: string): string {

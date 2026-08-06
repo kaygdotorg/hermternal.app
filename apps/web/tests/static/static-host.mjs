@@ -19,6 +19,10 @@ const STATIC_FILE_PATHS = Object.freeze([
   '/icon.svg',
   SERVICE_WORKER_SCRIPT_PATH
 ]);
+// The W-06 browser proof is a non-product evidence route. It must serve its
+// generated route document instead of the product's client-route fallback so
+// Playwright executes the transport bundle in the browser realm.
+const W06_BROWSER_PROOF_PATH = '/__w06/transport';
 
 /**
  * @param {string} buildDirectory
@@ -53,6 +57,9 @@ export function resolveStaticPath(rawTarget, buildDirectory = resolve(cwd(), 'bu
   if (isReservedPath(pathname)) {
     return undefined;
   }
+  if (pathname === W06_BROWSER_PROOF_PATH) {
+    return safeBuildPath(buildDirectory, `${W06_BROWSER_PROOF_PATH}/index.html`);
+  }
   if (isSupportedClientRoute(pathname)) {
     return join(buildDirectory, '200.html');
   }
@@ -70,7 +77,12 @@ export function resolveStaticPath(rawTarget, buildDirectory = resolve(cwd(), 'bu
 
 /** @param {string} pathname @returns {string} */
 function contentTypeFor(pathname) {
-  if (pathname === '/' || isSupportedClientRoute(pathname) || pathname.endsWith('.html')) {
+  if (
+    pathname === '/' ||
+    pathname === W06_BROWSER_PROOF_PATH ||
+    isSupportedClientRoute(pathname) ||
+    pathname.endsWith('.html')
+  ) {
     return 'text/html; charset=utf-8';
   }
   if (pathname.endsWith('.js')) return 'text/javascript; charset=utf-8';

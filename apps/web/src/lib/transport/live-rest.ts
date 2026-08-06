@@ -18,6 +18,7 @@ export type {
   LiveMessageRole,
   LiveProvider,
   LiveSession,
+  LiveToolCall,
   MessageListOptions,
   NullableString,
   ProviderDiscovery,
