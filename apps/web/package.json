@@ -1,0 +1,39 @@
+{
+  "name": "@hermternal/web-prototype",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "typecheck": "bun x --package @typescript/native tsc --noEmit --pretty false -p tsconfig.json",
+    "typecheck:version": "bun x --package @typescript/native tsc --version",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:component": "vitest run src/lib/components",
+    "test:e2e": "playwright test",
+    "test:a11y": "playwright test tests/e2e/accessibility.spec.ts",
+    "test:no-network": "bun run test && playwright test tests/e2e/no-network.spec.ts",
+    "test:static": "bun run build && node tests/static/assert-static-build.mjs && node tests/static/assert-css-tokens.mjs && node tests/static/assert-static-routes.mjs",
+    "prepare": "svelte-kit sync"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.62.1",
+    "@sveltejs/adapter-static": "3.0.10",
+    "@sveltejs/kit": "2.70.2",
+    "@sveltejs/vite-plugin-svelte": "7.2.0",
+    "@testing-library/jest-dom": "7.0.0",
+    "@testing-library/svelte": "5.4.2",
+    "@types/node": "26.1.2",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "jsdom": "30.0.1",
+    "playwright": "1.62.1",
+    "svelte": "5.56.8",
+    "svelte-check": "4.7.4",
+    "typescript": "5.9.3",
+    "vite": "8.2.0",
+    "vitest": "4.1.10"
+  }
+}
