@@ -134,3 +134,93 @@ PY
 
 Keep the product milestone `v0.0.1` separate from date-based git tags
 `vYYYY.MM.DD.<patch-num>`.
+
+## Official Hermes Agent test launcher
+
+`scripts/hermes_agent.py` launches disposable official Hermes Agent instances
+for Hermternal browser and Playwright tests. It uses Python's standard library
+and direct rootless Podman. Direct `podman run` matches the validated upstream
+image path and avoids Compose-provider ambiguity without changing the image's
+entrypoint or command behavior.
+
+The default image is pinned by tag and immutable digest:
+
+```text
+docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
+```
+
+The launcher preserves `/opt/hermes/docker/entrypoint-dispatch.sh` and runs
+`gateway run`. It publishes only `127.0.0.1:<requested-port>:9119`, creates one
+host data directory per instance, and enables a synthetic Basic provider. It
+does not build, adapt, retag, relabel, use host networking, mount a host Hermes
+profile or container socket, or apply custom capability, CPU, memory, PID,
+security, or log settings. The dedicated test VM may use its available
+resources.
+
+Run one instance from the repository root on the authorized VM:
+
+```sh
+python3 scripts/hermes_agent.py start \
+  --instance playwright-auth \
+  --port 19119
+```
+
+Run any requested count with unique names and consecutive loopback ports:
+
+```sh
+python3 scripts/hermes_agent.py start-many \
+  --prefix playwright \
+  --count 4 \
+  --base-port 19120
+```
+
+Other operations are:
+
+```sh
+python3 scripts/hermes_agent.py status --instance playwright-auth
+python3 scripts/hermes_agent.py endpoint --instance playwright-auth
+python3 scripts/hermes_agent.py credential-file --instance playwright-auth
+python3 scripts/hermes_agent.py stop --instance playwright-auth
+python3 scripts/hermes_agent.py stop --instance playwright-auth --purge-data
+python3 scripts/hermes_agent.py stop-many \
+  --prefix playwright --count 4 --base-port 19120 --purge-data
+```
+
+Every result is one JSON object. Public output may contain the instance,
+container, loopback endpoint, immutable image, data path, and credential-file
+path. It never contains the generated password. Credentials use mode `0600`
+and live outside Git under `~/.config/hermternal-tests/hermes-agent/` by
+default. Data defaults to `~/.local/share/hermternal-tests/hermes-agent/` and
+non-secret launcher state defaults to
+`~/.local/state/hermternal/hermes-agent/`. Tests may override all three roots.
+
+`start` first requires local rootless Podman and verifies the requested official
+repository digest. It then polls bounded `GET /api/auth/providers` responses.
+Readiness requires HTTP 200 and a `basic` provider with
+`supports_password: true`. A failed start removes only the container created by
+that invocation. Data and credentials remain for diagnosis or retry until an
+explicit `--purge-data` stop. If the official entrypoint created mapped
+container-owned files, purge uses exact-path rootless `podman unshare rm` for
+that one validated instance directory; it never runs a broad prune.
+
+Launcher readiness proves only that the configured Dashboard boundary is
+available. It does not prove Hermternal chat behavior. Run the separate
+Playwright browser-to-Hermes journey before reporting app compatibility.
+
+Offline verification:
+
+```sh
+python3 -m py_compile scripts/hermes_agent.py scripts/test_hermes_agent.py
+python3 scripts/test_hermes_agent.py
+python3 -O scripts/test_hermes_agent.py
+python3 -m unittest scripts.test_hermes_agent
+python3 -O -m unittest scripts.test_hermes_agent
+```
+
+The 16-test suite uses a fake Podman boundary and local synthetic HTTP server.
+It never starts Hermes or reads a real credential. It covers immutable image
+binding, rootless checks, environment cleanup, deterministic scaling, upstream
+command preservation, absence of custom policy flags, credential redaction,
+provider readiness, partial failure rollback, and exact idempotent teardown.
+This command-line artifact has no UI, focus, screen-reader, browser-zoom,
+contrast, motion, or touch-target surface; accessibility checks are N/A.
