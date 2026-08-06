@@ -1,0 +1,54 @@
+{
+  "schema": "hermternal.deployment-security.browser-auth-baseline.v1",
+  "validator": "contracts/fixtures/deployment-security/browser-auth/validate.py",
+  "fixture": "contracts/fixtures/deployment-security/browser-auth/cases.json",
+  "metric": "validator_duration_ms",
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "runs": [
+    {
+      "mode": "normal",
+      "command": "python3 contracts/fixtures/deployment-security/browser-auth/validate.py",
+      "repetitions": 30,
+      "distribution": {
+        "min_ms": 54.048,
+        "p50_ms": 57.773,
+        "p95_ms": 101.193,
+        "p99_ms": 149.121,
+        "max_ms": 166.29,
+        "mean_ms": 65.048
+      },
+      "trace": [
+        57.73, 58.999, 56.197, 55.082, 58.5, 62.545, 62.646, 55.815, 57.936, 56.631,
+        57.816, 57.989, 57.561, 57.271, 54.857, 54.095, 56.138, 55.942, 54.048, 55.331,
+        59.602, 59.666, 55.405, 166.29, 107.088, 93.988, 91.081, 58.586, 59.771, 56.832
+      ]
+    },
+    {
+      "mode": "optimized",
+      "command": "python3 -O contracts/fixtures/deployment-security/browser-auth/validate.py",
+      "repetitions": 30,
+      "distribution": {
+        "min_ms": 54.168,
+        "p50_ms": 58.864,
+        "p95_ms": 123.601,
+        "p99_ms": 164.639,
+        "max_ms": 181.368,
+        "mean_ms": 75.6
+      },
+      "trace": [
+        54.168, 61.611, 58.959, 56.352, 63.145, 106.508, 98.947, 96.906, 69.137, 57.521,
+        57.208, 58.802, 58.925, 56.677, 54.754, 181.368, 65.653, 57.841, 123.504, 111.13,
+        104.381, 101.12, 54.538, 54.938, 54.54, 55.539, 56.436, 57.548, 56.16, 123.681
+      ]
+    }
+  ],
+  "artifact": {
+    "files": ["README.md", "cases.json", "validate.py"],
+    "bytes": 56234,
+    "sha256": "9c45d10c5a7ca0f3702d8457ce9b9c4ceedef5c24e2b0148bde0878084247544"
+  },
+  "threshold": null
+}
