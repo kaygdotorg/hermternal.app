@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import stat
 import statistics
@@ -33,22 +34,24 @@ HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 
 # These identities are deliberately outside the JSON baseline. A mutable
 # timing record or copied validator cannot authorize a different fixture,
-# source file, or benchmark trace by rebinding its own metadata. The reviewed
-# head is a Git object anchor; the content digests below also bind every
-# retained evidence file. The validator source digest masks only these two
-# self-referential binding literals, so changing validation logic still fails.
-REVIEWED_HEAD = "3ec6a1f8eabc935575ba6f334195f9e86abeb1ff"
+# source file, or benchmark trace by rebinding its own metadata. The annotated
+# Git tag is an external trust anchor: a candidate commit can change its tree,
+# but it cannot rewrite the tag as part of that commit. The content digests
+# below bind every retained evidence file; the validator source digest masks
+# only the self-referential binding literals, so changing validation logic still
+# fails.
+TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-0ba-anchor"
 CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "validate.py", "test_validate.py", "chat.md")
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_BOUND_SHA256 = {
-    "README.md": "3e068aaaa8475acc9ef5698ecbae77065a4ad077a8ef0a89c6cbe14880161cf4",
+    "README.md": "a3593c61a728583fc1844b263aa2bc0ea24a1b98fe6ffe909821b0406d1ce62b",
     "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
-    "validate.py": "d613f92ad26dcb809a3759d6bb333d884931414ccb0e77cf6afe713b76b027c9",
-    "test_validate.py": "fa02756e96ccc1fb26759ed76a1a975554f03812a3f02cdc0b9f20166504f960",
+    "validate.py": "07a397b38b5f3abeef1c6275c19eed73bb3ba30d190f4e74a18cf564999676ce",
+    "test_validate.py": "cc17820f9da5b9e71c7e8325dfdb896d62e4047fbd0ef3f2374996e3dce16e6e",
     "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
 }
-EXPECTED_BASELINE_SHA256 = "bfd95d9df18695804f46c63843183c7233e4c514765e0948397d751cc8379b62"
+EXPECTED_BASELINE_SHA256 = "b5efdad8723154a48b2351b260af47fa219bbf8d98f11f1ec40f3be8050eb750"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -519,18 +522,69 @@ def _source_digest(path: Path) -> tuple[int, str]:
     return len(normalized), _sha256_bytes(normalized)
 
 
-def _repository_has_reviewed_anchor(candidate: Path) -> bool:
+def _git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    ):
+        env.pop(name, None)
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
+def _git_revision(repository: Path, expression: str) -> str | None:
     try:
         result = subprocess.run(
-            ["git", "-C", str(candidate), "cat-file", "-e", f"{REVIEWED_HEAD}^{{commit}}"],
+            ["git", "-C", str(repository), "rev-parse", "--verify", expression],
             capture_output=True,
             text=True,
             check=False,
+            env=_git_env(),
             timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0
+        return None
+    if result.returncode != 0 or result.stderr or not result.stdout.endswith("\n"):
+        return None
+    value = result.stdout.strip()
+    return value if HEX40.fullmatch(value) else None
+
+
+def _git_object_type(repository: Path, object_name: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository), "cat-file", "-t", object_name],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_git_env(),
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or result.stderr or not result.stdout.endswith("\n"):
+        return None
+    return result.stdout.strip()
+
+
+def _trusted_anchor_commit(repository: Path) -> str | None:
+    # Require an annotated tag object. Its ref lives outside the candidate
+    # commit tree, so replacing files or hash literals cannot move the anchor.
+    if _git_object_type(repository, TRUST_ANCHOR_REF) != "tag":
+        return None
+    return _git_revision(repository, f"{TRUST_ANCHOR_REF}^{{commit}}")
+
+
+def _repository_has_trust_anchor(candidate: Path) -> bool:
+    anchor = _trusted_anchor_commit(candidate)
+    return anchor is not None
 
 
 def _repository_root() -> Path:
@@ -547,7 +601,7 @@ def _repository_root() -> Path:
             and (candidate / CANONICAL_FIXTURE_RELATIVE / "cases.json").is_file()
             and (candidate / CANONICAL_FIXTURE_RELATIVE / "validation-baseline.json").is_file()
             and (candidate / CANONICAL_CHAT_RELATIVE).is_file()
-            and _repository_has_reviewed_anchor(candidate)
+            and _repository_has_trust_anchor(candidate)
         ):
             return candidate
     _fail("canonical_binding")
@@ -585,24 +639,23 @@ def _require_exact_trusted_file(path: Path, trusted_path: Path, code: str) -> No
 def _require_clean_bound_worktree(root: Path) -> None:
     paths = [str(CANONICAL_FIXTURE_RELATIVE / name) for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json")]
     paths.append(str(CANONICAL_CHAT_RELATIVE))
+    anchor = _trusted_anchor_commit(root)
+    head = _git_revision(root, "HEAD^{commit}")
+    parent = _git_revision(root, "HEAD^{commit}^")
+    if anchor is None or head is None or (head != anchor and parent != anchor):
+        _fail("canonical_binding")
     try:
-        parent = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD^"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=2,
-        )
         result = subprocess.run(
             ["git", "-C", str(root), "diff", "--quiet", "HEAD", "--", *paths],
             capture_output=True,
             text=True,
             check=False,
+            env=_git_env(),
             timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
         _fail("canonical_binding")
-    if parent.returncode != 0 or parent.stdout.strip() != REVIEWED_HEAD or result.returncode != 0:
+    if result.returncode != 0:
         _fail("canonical_binding")
 
 

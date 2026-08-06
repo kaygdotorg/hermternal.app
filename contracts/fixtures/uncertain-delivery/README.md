@@ -10,7 +10,7 @@ text, read a transcript, or claim live compatibility.
 - Operation: `C-06`
 - Dashboard contract: `dashboard-v0.0.1`
 - Reviewed Hermes source: `f5be9236e00ddf2f2a412697f267078fc4ee068e`
-- Reviewed Git head anchor: `3ec6a1f8eabc935575ba6f334195f9e86abeb1ff`
+- Reviewed Git head anchor: `0ba168f16f6f8e646f5452a15627d7bb829828a5`
 - Canonical inputs: `cases.json`
 - Validator: `validate.py`
 - Regression tests: `test_validate.py`
@@ -99,11 +99,15 @@ read or FIFO/device block.
 
 The checked-in case, baseline, executing-source, README, regression tests,
 chat-contract, and artifact files are bound to the repository-owned canonical
-paths and hard-coded digests, with the reviewed Git object required as an
-additional anchor. The validator also freezes state meanings, terminal flags,
-action order, case order, and baseline key/type/order rules. Copying or
-coordinately rebinding a mutated case, baseline, source, README, tests, or
-chat contract therefore fails closed instead of replacing reviewed evidence.
+paths and hard-coded digests. In addition, validation requires the annotated
+external Git tag `hermternal-c06-uncertain-delivery-0ba-anchor` to resolve to
+this reviewed head or to the direct parent of the correction commit. A
+candidate commit cannot rewrite that tag as part of its own tree, so a clean
+coordinated replacement based on an older parent cannot rebind the evidence.
+The validator also freezes state meanings, terminal flags, action order, case
+order, and baseline key/type/order rules. Copying or coordinately rebinding a
+mutated case, baseline, source, README, tests, or chat contract therefore fails
+closed instead of replacing reviewed evidence.
 
 ## Reproduce the proof
 

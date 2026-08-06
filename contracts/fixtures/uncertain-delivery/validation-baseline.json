@@ -15,27 +15,27 @@
   "threshold": null,
   "artifacts": {
     "README.md": {
-      "bytes": 8227,
-      "sha256": "3e068aaaa8475acc9ef5698ecbae77065a4ad077a8ef0a89c6cbe14880161cf4"
+      "bytes": 8514,
+      "sha256": "a3593c61a728583fc1844b263aa2bc0ea24a1b98fe6ffe909821b0406d1ce62b"
     },
     "cases.json": {
       "bytes": 57544,
       "sha256": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337"
     },
     "validate.py": {
-      "bytes": 67588,
-      "sha256": "d613f92ad26dcb809a3759d6bb333d884931414ccb0e77cf6afe713b76b027c9"
+      "bytes": 69337,
+      "sha256": "07a397b38b5f3abeef1c6275c19eed73bb3ba30d190f4e74a18cf564999676ce"
     },
     "test_validate.py": {
-      "bytes": 31571,
-      "sha256": "fa02756e96ccc1fb26759ed76a1a975554f03812a3f02cdc0b9f20166504f960"
+      "bytes": 34169,
+      "sha256": "cc17820f9da5b9e71c7e8325dfdb896d62e4047fbd0ef3f2374996e3dce16e6e"
     },
     "chat.md": {
       "bytes": 12056,
       "sha256": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252"
     }
   },
-  "artifact_manifest_sha256": "0b640422d41d64e1ba547d09ea397776757fd301afec826e9a19f65ad967cdb0",
+  "artifact_manifest_sha256": "1ee89459a21bdba942dc0717feeafd5fb05e4d6d89ae08518d6d8dde6050ee74",
   "normal": {
     "command": "python3 contracts/fixtures/uncertain-delivery/validate.py",
     "repetitions": 30,

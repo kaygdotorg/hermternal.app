@@ -492,10 +492,10 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 1)
                     self.assertNotIn("Traceback", result.stderr)
 
-    def test_coordinated_copied_repository_rebinding_attack_fails_both_modes(self) -> None:
+    def test_committed_coordinated_rebinding_attack_fails_both_modes(self) -> None:
+        """A clean replacement commit cannot rewrite the external tag anchor."""
         with tempfile.TemporaryDirectory() as directory:
             copied_repo = Path(directory) / "copied-repository"
-            head = subprocess.check_output(["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "HEAD"], text=True).strip()
             clone = subprocess.run(
                 ["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(copied_repo)],
                 capture_output=True,
@@ -504,7 +504,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             )
             self.assertEqual(clone.returncode, 0, clone.stderr)
             checkout = subprocess.run(
-                ["git", "-C", str(copied_repo), "checkout", "--detach", head],
+                ["git", "-C", str(copied_repo), "checkout", "--detach", "3ec6a1f8eabc935575ba6f334195f9e86abeb1ff"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -512,19 +512,25 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             self.assertEqual(checkout.returncode, 0, checkout.stderr)
             copied_fixture = copied_repo / "contracts" / "fixtures" / "uncertain-delivery"
             copied_chat = copied_repo / "contracts" / "state-models" / "chat.md"
+            for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json"):
+                shutil.copy2(ROOT / name, copied_fixture / name)
+            shutil.copy2(CHAT_PATH, copied_chat)
 
             cases = json.loads((copied_fixture / "cases.json").read_text(encoding="utf-8"))
-            cases["cases"][0]["notes"] = "coordinated prompt prose rebinding"
+            cases["cases"][0]["notes"] = "committed coordinated prompt prose rebinding"
             (copied_fixture / "cases.json").write_text(json.dumps(cases, indent=2) + "\n", encoding="utf-8")
-            (copied_fixture / "README.md").write_text((copied_fixture / "README.md").read_text(encoding="utf-8") + "\nrebound evidence\n", encoding="utf-8")
-            (copied_fixture / "test_validate.py").write_text((copied_fixture / "test_validate.py").read_text(encoding="utf-8") + "\n# rebound tests\n", encoding="utf-8")
-            copied_chat.write_text(copied_chat.read_text(encoding="utf-8") + "\nrebound contract\n", encoding="utf-8")
+            (copied_fixture / "README.md").write_text((copied_fixture / "README.md").read_text(encoding="utf-8") + "\ncommitted rebound evidence\n", encoding="utf-8")
+            (copied_fixture / "test_validate.py").write_text((copied_fixture / "test_validate.py").read_text(encoding="utf-8") + "\n# committed rebound tests\n", encoding="utf-8")
+            copied_chat.write_text(copied_chat.read_text(encoding="utf-8") + "\ncommitted rebound contract\n", encoding="utf-8")
 
             validator_path = copied_fixture / "validate.py"
-            validator_text = validator_path.read_text(encoding="utf-8") + "\n# rebound validator\n"
+            validator_text = validator_path.read_text(encoding="utf-8") + "\n# committed rebound validator\n"
+            validator_path.write_text(validator_text, encoding="utf-8")
             for name in ("README.md", "cases.json", "test_validate.py", "chat.md"):
+                path = validate._artifact_path(copied_fixture, name)
+                digest = validate._sha256_bytes(path.read_bytes())
                 old_digest = validate.EXPECTED_BOUND_SHA256[name]
-                validator_text = validator_text.replace(f'"{name}": "{old_digest}"', f'"{name}": "' + ("0" * 64) + '"')
+                validator_text = validator_text.replace(f'"{name}": "{old_digest}"', f'"{name}": "{digest}"')
             validator_path.write_text(validator_text, encoding="utf-8")
             rebound_source_digest = validate._source_digest(validator_path)[1]
             old_source_digest = validate.EXPECTED_BOUND_SHA256["validate.py"]
@@ -537,9 +543,51 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             baseline["artifact_manifest_sha256"] = manifest
             baseline_path = copied_fixture / "validation-baseline.json"
             baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-            rebound_baseline_digest = __import__("hashlib").sha256(baseline_path.read_bytes()).hexdigest()
+            rebound_baseline_digest = validate._sha256_bytes(baseline_path.read_bytes())
             validator_text = validator_path.read_text(encoding="utf-8").replace(validate.EXPECTED_BASELINE_SHA256, rebound_baseline_digest)
             validator_path.write_text(validator_text, encoding="utf-8")
+
+            staged = subprocess.run(
+                ["git", "-C", str(copied_repo), "add", "contracts/fixtures/uncertain-delivery", "contracts/state-models/chat.md"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(staged.returncode, 0, staged.stderr)
+            committed = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(copied_repo),
+                    "-c",
+                    "user.name=synthetic",
+                    "-c",
+                    "user.email=synthetic@example.invalid",
+                    "commit",
+                    "-m",
+                    "coordinated replacement",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(committed.returncode, 0, committed.stderr)
+            status = subprocess.run(
+                ["git", "-C", str(copied_repo), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(status.stdout, "")
+            attack_head = subprocess.check_output(["git", "-C", str(copied_repo), "rev-parse", "HEAD^{commit}"], text=True).strip()
+            attack_parent = subprocess.check_output(["git", "-C", str(copied_repo), "rev-parse", "HEAD^{commit}^"], text=True).strip()
+            self.assertNotEqual(attack_head, "0ba168f16f6f8e646f5452a15627d7bb829828a5")
+            self.assertEqual(attack_parent, "3ec6a1f8eabc935575ba6f334195f9e86abeb1ff")
+            tag_type = subprocess.check_output(["git", "-C", str(copied_repo), "cat-file", "-t", validate.TRUST_ANCHOR_REF], text=True).strip()
+            anchor = subprocess.check_output(["git", "-C", str(copied_repo), "rev-parse", f"{validate.TRUST_ANCHOR_REF}^{{commit}}"], text=True).strip()
+            self.assertEqual(tag_type, "tag")
+            self.assertEqual(anchor, "0ba168f16f6f8e646f5452a15627d7bb829828a5")
 
             for optimized in (False, True):
                 command = [sys.executable]
