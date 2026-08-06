@@ -32,10 +32,12 @@ The future milestone is a focused chat client:
 - session creation, restoration, prompts, streaming, interruption, approvals, and clarification;
 - images only for attachments;
 - an active model switch that applies now while idle; a normal streaming choice may defer to the next turn, while an expensive choice may require confirmation and resubmission after the turn;
-- private deep links under `/v1/c/...`; and
+- internal session restoration and stable IDs needed by chat; and
 - the full `/api/pty` Terminal on the web only.
 
-The client does not provide a transcript mirror. It does not add terminal-read, sudo, or secret operations. Sharing starts in `v0.0.2`.
+The client does not provide a transcript mirror. It does not add terminal-read, sudo, or secret operations.
+
+Chat is the v0.0.1 release priority. User-facing deep-link UI and full-text session-search UI are deferred to v0.0.2 because both UIs need redesign. The existing deep-link and search contracts remain future compatibility references. Authentication callback routing and internal stable IDs remain allowed where v0.0.1 needs them. User-facing sharing remains deferred to v0.0.2.
 
 The supported Hermes revision is pinned to `f5be9236e00ddf2f2a412697f267078fc4ee068e`. The pinned Dashboard does not report its source revision. Missing or mismatched deployment attestation, or a failed behavioral probe, blocks live operation.
 
