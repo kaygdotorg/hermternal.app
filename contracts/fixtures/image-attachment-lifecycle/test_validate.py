@@ -6,6 +6,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,24 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
             self.assertEqual(context.exception.code, code)
         self.assertNotIn("data:", str(context.exception))
         self.assertNotIn("/", str(context.exception))
+
+    def run_cli(self, *arguments: str, optimized: bool = False) -> subprocess.CompletedProcess[str]:
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend([str(VALIDATE_PATH), *arguments])
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+
+    def assert_cli_failure(self, *arguments: str) -> None:
+        for optimized in (False, True):
+            result = self.run_cli(*arguments, optimized=optimized)
+            with self.subTest(optimized=optimized, arguments=arguments):
+                self.assertEqual(result.returncode, 2)
+                self.assertLessEqual(len(result.stdout), VALIDATOR.MAX_ERROR_OUTPUT_LENGTH)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+                self.assertNotIn("data:", result.stdout + result.stderr)
+                self.assertNotIn("/private/", result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)["error"]["synthetic_only"], True)
 
     def test_canonical_document_and_baseline(self) -> None:
         VALIDATOR.validate_document(self.document)
@@ -71,6 +90,8 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
         self.assertEqual(self.document["policy_reference"], VALIDATOR.C13_POLICY_REFERENCE)
         self.assertEqual(self.document["limits"]["max_bytes"], 25 * 1024 * 1024)
         self.assertEqual(self.document["c13_consistency"]["c13_case_id"], "invalid-noncanonical-base64")
+        self.assertEqual(self.document["c13_consistency"]["c13_cases_sha256"], VALIDATOR.C13_CASES_SHA256)
+        self.assertEqual(self.document["c13_consistency"]["c13_validator_sha256"], VALIDATOR.C13_VALIDATOR_SHA256)
         self.assertEqual(self.document["c13_consistency"]["c14_case_id"], "malformed-base64")
         self.assertEqual(self.document["c13_consistency"]["expected_decision"], "rejected")
         self.assertTrue(VALIDATOR._format_agrees("gif", "gif87a"))
@@ -173,6 +194,47 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
                     self.assertNotIn("Traceback", result.stdout + result.stderr)
                     self.assertNotIn(stream.name, result.stdout + result.stderr)
 
+    def test_absent_data_url_selected_cli_failure_is_controlled_in_both_modes(self) -> None:
+        candidate = copy.deepcopy(self.document)
+        candidate["cases"][2]["input"]["data_url_state"] = "absent"
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+            json.dump(candidate, stream)
+            stream.flush()
+            self.assert_cli_failure("--cases", stream.name, "--baseline", str(BASELINE_PATH))
+
+    def test_marker_and_timeline_contradictions_fail_in_both_cli_modes(self) -> None:
+        mutations = []
+        transport = copy.deepcopy(self.document)
+        transport["cases"][2]["input"]["transport_state"] = "not_started"
+        mutations.append(transport)
+
+        ordering = copy.deepcopy(self.document)
+        ordering["cases"][6]["timeline"] = [
+            "selected",
+            "preprocess_started",
+            "preprocess_completed",
+            "upload_completed",
+            "upload_started",
+            "upload_progress",
+            "transcript_reference_recorded",
+        ]
+        mutations.append(ordering)
+
+        empty_marker = copy.deepcopy(self.document)
+        empty_marker["cases"][0]["input"]["declared_format"] = "png"
+        mutations.append(empty_marker)
+
+        size_marker = copy.deepcopy(self.document)
+        size_marker["cases"][6]["input"]["size_state"] = "not_applicable"
+        mutations.append(size_marker)
+
+        for index, candidate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    json.dump(candidate, stream)
+                    stream.flush()
+                    self.assert_cli_failure("--cases", stream.name, "--baseline", str(BASELINE_PATH))
+
     def test_duplicate_rejection_happens_before_redaction(self) -> None:
         texts = (
             '{"safe": "marker", "safe": "data:image/png;base64,secret"}',
@@ -231,6 +293,16 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertContractFailure(lambda: VALIDATOR.validate_document(candidate), code)
 
+    def test_retained_text_redaction_bypasses_fail_in_both_cli_modes(self) -> None:
+        for value in ("payload YWJj", "prefix YWJj suffix", "Cookie=session=secret", "Authorization=secret"):
+            candidate = copy.deepcopy(self.document)
+            candidate["cases"][0]["notes"] = value
+            with self.subTest(value=value):
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    json.dump(candidate, stream)
+                    stream.flush()
+                    self.assert_cli_failure("--cases", stream.name, "--baseline", str(BASELINE_PATH))
+
     def test_progress_and_retry_mutations_fail(self) -> None:
         regressed = copy.deepcopy(self.document)
         regressed["cases"][2]["progress"][2]["percent"] = 40
@@ -239,7 +311,7 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
 
         duplicate_start = copy.deepcopy(self.document)
         duplicate_start["cases"][2]["timeline"].insert(4, "upload_started")
-        self.assertContractFailure(lambda: VALIDATOR.validate_document(duplicate_start), "upload_start_count")
+        self.assertContractFailure(lambda: VALIDATOR.validate_document(duplicate_start), "timeline_duplicate_event")
 
         unknown_retry = copy.deepcopy(self.document)
         unknown_retry["cases"][14]["expected"]["retry"] = "safe_after_state_read"
@@ -299,6 +371,49 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
             self.assertEqual(record["repetitions"], 30)
             self.assertEqual(len(record["samples_ms"]), 30)
             self.assertEqual(record["distribution"], VALIDATOR._distribution(record["samples_ms"]))
+
+    def test_canonical_cases_path_is_required_by_real_cli(self) -> None:
+        candidate = copy.deepcopy(self.document)
+        candidate["cases"][0]["notes"] = "changed-but-schema-valid"
+        with tempfile.TemporaryDirectory() as directory:
+            alternate = Path(directory) / "alternate-cases.json"
+            alternate.write_text(json.dumps(candidate), encoding="utf-8")
+            self.assert_cli_failure("--cases", str(alternate), "--baseline", str(BASELINE_PATH))
+
+    def test_c13_semantic_drift_fails_real_cli_in_both_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "contracts" / "fixtures" / "image-attachment-lifecycle"
+            c13 = root / "contracts" / "fixtures" / "attachment-policy"
+            fixture.mkdir(parents=True)
+            c13.mkdir(parents=True)
+            for name in VALIDATOR.ARTIFACT_NAMES:
+                shutil.copy2(FIXTURE_DIR / name, fixture / name)
+            for name in ("cases.json", "validate.py"):
+                shutil.copy2(VALIDATOR.C13_FIXTURE_DIR / name, c13 / name)
+            mutated = json.loads((c13 / "cases.json").read_text(encoding="utf-8"))
+            linked = next(case for case in mutated["cases"] if case["id"] == "invalid-noncanonical-base64")
+            linked["expected"]["reason"] = "accepted"
+            (c13 / "cases.json").write_text(json.dumps(mutated), encoding="utf-8")
+            for optimized in (False, True):
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.append(str(fixture / "validate.py"))
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                with self.subTest(optimized=optimized):
+                    self.assertEqual(result.returncode, 2)
+                    self.assertLessEqual(len(result.stdout), VALIDATOR.MAX_ERROR_OUTPUT_LENGTH)
+                    self.assertNotIn("Traceback", result.stdout + result.stderr)
+                    self.assertNotIn("noncanonical_base64", result.stdout + result.stderr)
+
+    def test_benchmark_provenance_is_required_by_real_cli(self) -> None:
+        candidate = copy.deepcopy(self.baseline)
+        candidate["provenance"]["raw_trace"].pop("sample_count")
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+            json.dump(candidate, stream)
+            stream.flush()
+            self.assert_cli_failure("--baseline", stream.name)
 
     def test_coordinated_artifact_and_baseline_rebinding_fails(self) -> None:
         forged_content = copy.deepcopy(self.baseline)

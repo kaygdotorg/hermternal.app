@@ -14,6 +14,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -25,11 +26,16 @@ from typing import Any, Iterable
 FIXTURE_DIR = Path(__file__).resolve().parent
 CASES_PATH = FIXTURE_DIR / "cases.json"
 BASELINE_PATH = FIXTURE_DIR / "baseline.json"
+C13_FIXTURE_DIR = FIXTURE_DIR.parent / "attachment-policy"
+C13_CASES_PATH = C13_FIXTURE_DIR / "cases.json"
+C13_VALIDATOR_PATH = C13_FIXTURE_DIR / "validate.py"
 SCHEMA = "hermternal.fixture.image-attachment-lifecycle.v1"
 BASELINE_SCHEMA = "hermternal.fixture.image-attachment-lifecycle-baseline.v1"
 CONTRACT = "dashboard-v0.0.1"
 C13_POLICY_REFERENCE = "attachment-policy-c13-f5be9236"
 HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
+C13_CASES_SHA256 = "1329316d990026ff00e1285cfc4c9516cba183af96505f4e4ac5a2b5cbd16e68"
+C13_VALIDATOR_SHA256 = "5257fcdcd94b031a9f89e77f7b97e70936b22787f97efa5eaba563d30a7d3552"
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 DECLARED_FORMATS = frozenset({"png", "jpeg", "gif", "webp", "bmp"})
 DETECTED_FORMATS = frozenset({"png", "jpeg", "gif87a", "gif89a", "webp", "bmp"})
@@ -48,12 +54,12 @@ ARTIFACT_NAMES = ("README.md", "cases.json", "validate.py", "test_validate.py", 
 # evidence artifacts plus the baseline are pinned outside the mutable baseline;
 # editing an artifact and rebinding its local measurements therefore fails.
 CANONICAL_ARTIFACTS: dict[str, dict[str, int | str]] = {
-    "README.md": {"size_bytes": 6291, "sha256": "a18c1d15094654a58bc4987785fc1e60c08d186819a4185426877d8ef882e782"},
-    "cases.json": {"size_bytes": 23896, "sha256": "6c2085bfdec9d2fa16bc79e0ff06efc56d424bce821fdd6ef9543519d3462fe4"},
-    "test_validate.py": {"size_bytes": 17293, "sha256": "bafd8df95e5554e4118ebbfb1cdad8384852eb7b617d41ea44ab47fe623a594b"},
-    "baseline.json": {"size_bytes": 1196, "sha256": "ea46b6bf737df9053a9cc2bca73e6eb6e9e0d3563085bbe36b68c223e8a45d72"},
+    "README.md": {"size_bytes": 7536, "sha256": "3ae61028fad8a039be12bad4f29261e578a2e399736e8e43ddb9e01f02fbc2b4"},
+    "cases.json": {"size_bytes": 24084, "sha256": "2fb48a66e94c20d2133dd387746946643f16061b702566acaf4633fb55a7cd7f"},
+    "test_validate.py": {"size_bytes": 23584, "sha256": "3f3190e582b02d69d2ab0314f7bce19666acf136edce0b4f20b745762deff025"},
+    "baseline.json": {"size_bytes": 2252, "sha256": "1ea90ce6ce43a74ac813dc62dfc97282d6b7e469dfaa119af48bde1310bc5420"},
 }
-CANONICAL_BASELINE_CONTENT_SHA256 = "596f2abd281cb38167167b1630c69ad85db1cae336d0aa2b5a3ecbae02ec6ae7"
+CANONICAL_BASELINE_CONTENT_SHA256 = "1295eb33e4036c47ba61d5bb555c112aa1950d087e43d3e2c5746f5908cda0a2"
 
 EXPECTED_CASE_IDS = (
     "empty-selection",
@@ -92,6 +98,8 @@ C13_CONSISTENCY_KEYS = frozenset(
     {
         "policy_reference",
         "source_sha",
+        "c13_cases_sha256",
+        "c13_validator_sha256",
         "rule",
         "c13_case_id",
         "c14_case_id",
@@ -150,10 +158,35 @@ EXPECTED_KEYS = frozenset(
     }
 )
 BASELINE_ROOT_KEYS = frozenset(
-    {"schema", "synthetic_only", "build_mode", "threshold", "artifact_bytes", "artifact_file_count", "normal", "optimized"}
+    {
+        "schema",
+        "synthetic_only",
+        "build_mode",
+        "threshold",
+        "artifact_bytes",
+        "artifact_file_count",
+        "provenance",
+        "normal",
+        "optimized",
+    }
 )
 BASELINE_MODE_KEYS = frozenset({"repetitions", "samples_ms", "distribution"})
 DISTRIBUTION_KEYS = frozenset({"min", "median", "p95", "max"})
+PROVENANCE_KEYS = frozenset({"environment", "device", "raw_trace"})
+ENVIRONMENT_KEYS = frozenset({"os", "python", "architecture"})
+DEVICE_KEYS = frozenset({"model", "architecture"})
+RAW_TRACE_KEYS = frozenset(
+    {
+        "source",
+        "format",
+        "unit",
+        "normal_samples_field",
+        "optimized_samples_field",
+        "normal_distribution_field",
+        "optimized_distribution_field",
+        "sample_count",
+    }
+)
 
 SELECTIONS = frozenset({"none", "one_image"})
 FORMATS = DECLARED_FORMATS | DETECTED_FORMATS | {"svg", "unknown"}
@@ -354,9 +387,14 @@ _RETAINED_FILENAME_RE = re.compile(
 )
 _RETAINED_HOST_RE = re.compile(r"(?i)(?<![\w.-])(?:[a-z0-9-]+\.)+[a-z]{2,}(?![\w.-])")
 _RETAINED_IPV4_RE = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])")
-_RETAINED_AUTH_RE = re.compile(r"(?i)\b(?:basic|bearer|auth|authorization)\s*[:=]?\s+\S+")
+_RETAINED_AUTH_RE = re.compile(
+    r"(?i)\b(?:basic|bearer|auth|authorization)\s*(?:(?::|=)\s*|\s+)\S+"
+)
 _RETAINED_CREDENTIAL_RE = re.compile(r"(?i)\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S+")
-_RETAINED_COOKIE_RE = re.compile(r"(?i)\bcookie\s*:\s*\S+")
+_RETAINED_COOKIE_RE = re.compile(r"(?i)\bcookie\s*(?:(?::|=)\s*)\S+")
+_RETAINED_BASE64_CONTEXT_RE = re.compile(
+    r"(?i)(?:\b(?:payload|base64|encoded|data|token|value)\s*[:=]?\s*|[=:]\s*)$"
+)
 
 
 def _is_known_digest(value: str) -> bool:
@@ -383,20 +421,38 @@ def _looks_like_base64_token(token: str) -> bool:
 
 
 def _contains_base64_like(value: str) -> bool:
+    """Reject payload-like tokens without treating ordinary prose as payload.
+
+    A short token is ambiguous in free text, so embedded tokens require an
+    encoding label or delimiter. This still rejects ``payload YWJj`` and
+    equals-form payloads while allowing ordinary fixture prose such as
+    ``before`` and ``upload``.
+    """
     stripped = value.strip()
     if _is_known_digest(stripped):
         return False
     for match in _RETAINED_BASE64_TOKEN_RE.finditer(value):
         token = match.group(0)
-        if token == stripped and len(token.rstrip("=")) >= 4 and len(token.rstrip("=")) % 4 != 1:
-            return True
-        if not _looks_like_base64_token(token):
+        raw_length = len(token.rstrip("="))
+        if raw_length < 4 or raw_length % 4 == 1:
             continue
         if token == stripped:
             return True
+        if not _looks_like_base64_token(token):
+            continue
+        context = value[: match.start()]
+        if _RETAINED_BASE64_CONTEXT_RE.search(context):
+            return True
+        uppercase = sum(character.isupper() for character in token)
+        lowercase = sum(character.islower() for character in token)
+        if raw_length < 8 and (
+            any(character.isdigit() or character in "+/" for character in token)
+            or (uppercase >= 2 and lowercase > 0)
+        ):
+            return True
         if len(token) >= 8 and (
             any(character.isdigit() or character in "+/" for character in token)
-            or sum(character.isupper() for character in token) >= 2
+            or uppercase >= 2
         ):
             return True
     return False
@@ -476,6 +532,114 @@ def _format_agrees(declared: str | None, detected: str | None) -> bool:
     return declared == detected and declared in DECLARED_FORMATS
 
 
+def _validate_marker_compatibility(case: dict[str, Any]) -> None:
+    """Bind scalar markers to the lifecycle timeline before deriving outcomes."""
+    input_value = case["input"]
+    timeline = case["timeline"]
+    selection = input_value["selection"]
+    contract = input_value["contract"]
+    data_url_state = input_value["data_url_state"]
+    size_state = input_value["size_state"]
+    transport_state = input_value["transport_state"]
+    cancel_point = input_value["cancel_point"]
+    upload_started = _event_index(timeline, "upload_started")
+
+    require(len(timeline) == len(set(timeline)), "timeline_duplicate_event")
+    if selection == "none":
+        require(input_value["declared_format"] is None and input_value["detected_format"] is None, "empty_format_marker")
+        require(data_url_state == "absent", "empty_data_url_marker")
+        require(size_state == "not_applicable", "empty_size_marker")
+        require(input_value["metadata_state"] == "absent", "empty_metadata_marker")
+        require(transport_state == "not_started", "empty_transport_marker")
+        require(cancel_point == "none", "empty_cancel_marker")
+        require(input_value["state_read"] == "not_required", "empty_state_read_marker")
+        return
+
+    require(selection == "one_image", "selection_marker")
+    if contract != CONTRACT:
+        require(contract == "dashboard-v0.0.2", "contract_marker")
+        require(data_url_state == "synthetic_valid", "blocked_data_url_marker")
+        require(size_state == "within_limit", "blocked_size_marker")
+        require(input_value["metadata_state"] == "absent", "blocked_metadata_marker")
+        require(transport_state == "not_started", "blocked_transport_marker")
+        require(cancel_point == "none", "blocked_cancel_marker")
+        require(input_value["state_read"] == "not_required", "blocked_state_read_marker")
+        require(upload_started is None and timeline == ["selected", "blocked"], "blocked_lifecycle")
+        return
+
+    # A selected attachment must carry an explicit data URL state. ``absent``
+    # is reserved for empty selection; keeping it in the enum prevents a
+    # parser/type bypass but this semantic guard prevents a mapping KeyError.
+    require(data_url_state != "absent", "data_url_state_combination")
+    require(size_state != "not_applicable", "size_state_combination")
+
+    if data_url_state != "synthetic_valid":
+        require(size_state == "within_limit", "invalid_data_size_marker")
+        require(transport_state == "not_started", "invalid_data_transport_marker")
+        require(cancel_point == "none", "invalid_data_cancel_marker")
+        require(input_value["state_read"] == "not_required", "invalid_data_state_read_marker")
+        require(upload_started is None, "invalid_data_upload_marker")
+
+    if size_state == "over_limit":
+        require(data_url_state == "synthetic_valid", "size_data_url_marker")
+        require(_format_agrees(input_value["declared_format"], input_value["detected_format"]), "size_format_marker")
+        require(transport_state == "not_started", "size_transport_marker")
+        require(cancel_point == "none", "size_cancel_marker")
+        require(upload_started is None, "size_upload_marker")
+
+    if transport_state == "not_started":
+        require(upload_started is None, "transport_upload_marker")
+        require("network_interrupted" not in timeline and "response_lost" not in timeline, "transport_event_marker")
+    elif transport_state == "available":
+        require(upload_started is not None, "available_upload_marker")
+        require("network_interrupted" not in timeline and "response_lost" not in timeline, "available_event_marker")
+    elif transport_state == "interrupted_before_upload":
+        interruption_index = _event_index(timeline, "network_interrupted")
+        require(interruption_index is not None, "preflight_interrupt_marker")
+        require(upload_started is None or interruption_index < upload_started, "preflight_order_marker")
+    elif transport_state == "interrupted_after_upload_start":
+        interruption_index = _event_index(timeline, "network_interrupted")
+        require(upload_started is not None and interruption_index is not None, "post_start_interrupt_marker")
+        require(upload_started < interruption_index, "post_start_interrupt_order")
+    elif transport_state == "response_lost_after_upload":
+        response_index = _event_index(timeline, "response_lost")
+        require(upload_started is not None and response_index is not None, "response_lost_marker")
+        require(upload_started < response_index, "response_lost_order_marker")
+
+    if cancel_point == "none":
+        require("cancelled_before_upload" not in timeline and "cancelled_after_upload_start" not in timeline, "cancel_marker")
+    elif cancel_point == "before_upload_start":
+        require(data_url_state == "synthetic_valid" and size_state == "within_limit", "cancel_before_input_marker")
+        require(transport_state == "not_started" and upload_started is None, "cancel_before_transport_marker")
+        require("cancelled_before_upload" in timeline, "cancel_before_timeline_marker")
+    else:
+        require(data_url_state == "synthetic_valid" and size_state == "within_limit", "cancel_after_input_marker")
+        require(transport_state == "available" and upload_started is not None, "cancel_after_transport_marker")
+        require(input_value["state_read"] == "required_before_retry", "cancel_state_read_policy")
+        require("cancelled_after_upload_start" in timeline, "cancel_after_timeline_marker")
+
+    if upload_started is not None:
+        progress_index = _event_index(timeline, "upload_progress")
+        require(progress_index is not None and upload_started < progress_index, "upload_progress_order")
+        completed_index = _event_index(timeline, "upload_completed")
+        if completed_index is not None:
+            require(progress_index < completed_index, "upload_completion_order")
+        reference_index = _event_index(timeline, "transcript_reference_recorded")
+        if reference_index is not None:
+            require(completed_index is not None and completed_index < reference_index, "transcript_reference_order")
+    else:
+        require("upload_progress" not in timeline and "upload_completed" not in timeline, "upload_event_without_start")
+
+    if "transcript_reference_recorded" in timeline:
+        require("upload_completed" in timeline, "transcript_without_completion")
+    if "upload_completed" in timeline:
+        require("upload_started" in timeline, "completion_without_start")
+    if "network_interrupted" in timeline:
+        _require_event_order(timeline, "preprocess_completed", "network_interrupted", "interrupt_preprocess_order")
+    if "response_lost" in timeline:
+        _require_event_order(timeline, "upload_started", "response_lost", "response_lost_upload_order")
+
+
 def _expected_for_case(case: dict[str, Any]) -> dict[str, Any]:
     input_value = case["input"]
     preprocess = case["preprocess"]
@@ -491,7 +655,8 @@ def _expected_for_case(case: dict[str, Any]) -> dict[str, Any]:
             "malformed_base64": "malformed_base64",
             "malformed_data_url": "malformed_data_url",
             "unsupported_format": "unsupported_format",
-        }[input_value["data_url_state"]]
+        }.get(input_value["data_url_state"])
+        require(reason is not None, "data_url_state_combination")
         return {**expected, "decision": "rejected", "attachment_state": "failed", "upload_started": False, "upload_attempts": 0, "duplicate_uploads": 0, "retry": "none", "transcript_reference": None, "diagnostic": f"attachment[rejected;reason={reason}]"}
     if input_value["declared_format"] not in DECLARED_FORMATS:
         return {**expected, "decision": "rejected", "attachment_state": "failed", "upload_started": False, "upload_attempts": 0, "duplicate_uploads": 0, "retry": "none", "transcript_reference": None, "diagnostic": "attachment[rejected;reason=unsupported_format]"}
@@ -617,6 +782,7 @@ def _validate_case_semantics(case: dict[str, Any]) -> None:
     preprocess = case["preprocess"]
     expected = case["expected"]
     timeline = case["timeline"]
+    _validate_marker_compatibility(case)
     calculated = _expected_for_case(case)
     require(expected == calculated, "semantic_drift")
     require(expected["metadata_retained"] is False, "metadata_retained")
@@ -704,9 +870,12 @@ def _validate_case_semantics(case: dict[str, Any]) -> None:
 
 
 def _validate_c13_consistency(document: dict[str, Any], cases: list[dict[str, Any]]) -> None:
+    """Evaluate the pinned C-13 case instead of trusting copied identifiers."""
     consistency = _exact_keys(document["c13_consistency"], C13_CONSISTENCY_KEYS, "c13_consistency_shape")
     _exact_string(consistency["policy_reference"], "c13_consistency_policy", frozenset({C13_POLICY_REFERENCE}))
     _exact_string(consistency["source_sha"], "c13_consistency_source", frozenset({HERMES_SOURCE_SHA}))
+    _exact_string(consistency["c13_cases_sha256"], "c13_consistency_cases_digest", frozenset({C13_CASES_SHA256}))
+    _exact_string(consistency["c13_validator_sha256"], "c13_consistency_validator_digest", frozenset({C13_VALIDATOR_SHA256}))
     _exact_string(consistency["rule"], "c13_consistency_rule", frozenset({"noncanonical_base64_rejected_before_upload"}))
     _exact_string(consistency["c13_case_id"], "c13_consistency_c13_case", frozenset({"invalid-noncanonical-base64"}))
     _exact_string(consistency["c14_case_id"], "c13_consistency_c14_case", frozenset({"malformed-base64"}))
@@ -714,6 +883,26 @@ def _validate_c13_consistency(document: dict[str, Any], cases: list[dict[str, An
     _exact_string(consistency["expected_decision"], "c13_consistency_decision", frozenset({"rejected"}))
     _exact_string(consistency["expected_attachment_state"], "c13_consistency_attachment", frozenset({"failed"}))
     _exact_string(consistency["expected_diagnostic"], "c13_consistency_diagnostic", frozenset({"attachment[rejected;reason=malformed_base64]"}))
+    require(C13_CASES_PATH.is_file() and C13_VALIDATOR_PATH.is_file(), "c13_consistency_files")
+    require(_file_sha256(C13_CASES_PATH) == C13_CASES_SHA256, "c13_consistency_cases_anchor")
+    require(_file_sha256(C13_VALIDATOR_PATH) == C13_VALIDATOR_SHA256, "c13_consistency_validator_anchor")
+    try:
+        spec = importlib.util.spec_from_file_location("hermternal_c13_policy_validator", C13_VALIDATOR_PATH)
+        require(spec is not None and spec.loader is not None, "c13_consistency_loader")
+        c13_validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(c13_validator)
+        c13_document = c13_validator.load_document(C13_CASES_PATH)
+        c13_validator.validate_document(c13_document)
+        c13_by_id = {case["id"]: case for case in c13_document["cases"]}
+        c13_case = c13_by_id[consistency["c13_case_id"]]
+        c13_result = c13_validator.evaluate_case(c13_case)
+    except Exception:
+        raise ContractError("c13_consistency_artifact") from None
+    require(c13_case["state"] == "ready", "c13_consistency_state_link")
+    require(c13_result == c13_case["expected"], "c13_consistency_outcome_link")
+    require(c13_result["decision"] == "rejected", "c13_consistency_decision_result")
+    require(c13_result["reason"] == "noncanonical_base64", "c13_consistency_reason_result")
+    require(c13_result["attachment_state"] == "failed", "c13_consistency_attachment_result")
     by_id = {case["id"]: case for case in cases}
     linked = by_id[consistency["c14_case_id"]]
     require(linked["input"]["data_url_state"] == consistency["c14_data_url_state"], "c13_consistency_input")
@@ -776,10 +965,33 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_benchmark_provenance(provenance: Any) -> None:
+    """Require environment, device, and inline raw-trace provenance."""
+    root = _exact_keys(provenance, PROVENANCE_KEYS, "baseline_provenance_shape")
+    environment = _exact_keys(root["environment"], ENVIRONMENT_KEYS, "baseline_environment_shape")
+    device = _exact_keys(root["device"], DEVICE_KEYS, "baseline_device_shape")
+    trace = _exact_keys(root["raw_trace"], RAW_TRACE_KEYS, "baseline_trace_shape")
+    for key in ENVIRONMENT_KEYS:
+        value = _exact_string(environment[key], f"baseline_environment_{key}")
+        require(bool(value.strip()), f"baseline_environment_{key}_empty")
+    for key in DEVICE_KEYS:
+        value = _exact_string(device[key], f"baseline_device_{key}")
+        require(bool(value.strip()), f"baseline_device_{key}_empty")
+    _exact_string(trace["source"], "baseline_trace_source", frozenset({"real-cli-subprocess-wall-time"}))
+    _exact_string(trace["format"], "baseline_trace_format", frozenset({"inline-json-raw-samples"}))
+    _exact_string(trace["unit"], "baseline_trace_unit", frozenset({"milliseconds"}))
+    _exact_string(trace["normal_samples_field"], "baseline_trace_normal_samples", frozenset({"normal_samples_ms"}))
+    _exact_string(trace["optimized_samples_field"], "baseline_trace_optimized_samples", frozenset({"optimized_samples_ms"}))
+    _exact_string(trace["normal_distribution_field"], "baseline_trace_normal_distribution", frozenset({"normal_distribution"}))
+    _exact_string(trace["optimized_distribution_field"], "baseline_trace_optimized_distribution", frozenset({"optimized_distribution"}))
+    require(_exact_int(trace["sample_count"], "baseline_trace_sample_count") == 60, "baseline_trace_sample_count_value")
+
+
 def validate_baseline(
     baseline: dict[str, Any],
     baseline_path: Path | None = None,
     fixture_dir: Path = FIXTURE_DIR,
+    cases_path: Path | None = None,
 ) -> None:
     _exact_keys(baseline, BASELINE_ROOT_KEYS, "baseline_shape")
     require(baseline["schema"] == BASELINE_SCHEMA, "baseline_schema")
@@ -787,12 +999,15 @@ def validate_baseline(
     require(baseline["synthetic_only"] is True, "baseline_synthetic")
     require(baseline["build_mode"] == "not-applicable-no-production-executable", "baseline_build_mode")
     require(baseline["threshold"] is None, "baseline_threshold")
+    _validate_benchmark_provenance(baseline["provenance"])
     artifact_paths = tuple(fixture_dir / name for name in ARTIFACT_NAMES)
     _exact_int(baseline["artifact_bytes"], "baseline_artifact_bytes")
     _exact_int(baseline["artifact_file_count"], "baseline_artifact_file_count")
     require(all(path.is_file() for path in artifact_paths), "baseline_artifact_files")
     require(baseline["artifact_file_count"] == len(artifact_paths), "baseline_artifact_file_count_value")
     require(baseline["artifact_bytes"] == artifact_bytes(fixture_dir), "baseline_artifact_bytes_value")
+    checked_cases_path = cases_path or fixture_dir / "cases.json"
+    require(checked_cases_path.resolve() == (fixture_dir / "cases.json").resolve(), "baseline_cases_path_anchor")
     for name, expected_meta in CANONICAL_ARTIFACTS.items():
         path = fixture_dir / name
         require(path.stat().st_size == int(expected_meta["size_bytes"]), "baseline_artifact_size_anchor")
@@ -840,8 +1055,8 @@ def run(argv: Iterable[str] | None = None) -> int:
         document = load_json(args.cases)
         baseline = load_json(args.baseline)
         validate_document(document)
-        validate_baseline(baseline, baseline_path=args.baseline)
-    except (ContractError, OSError, UnicodeError, json.JSONDecodeError, RecursionError, ValueError, TypeError, MemoryError):
+        validate_baseline(baseline, baseline_path=args.baseline, fixture_dir=FIXTURE_DIR, cases_path=args.cases)
+    except (ContractError, OSError, UnicodeError, json.JSONDecodeError, RecursionError, ValueError, TypeError, KeyError, IndexError, MemoryError):
         _print_error("contract")
         return 2
     print(f"image_attachment_lifecycle_validation=ok cases={len(document['cases'])} threshold=null artifact_bytes={artifact_bytes()}")

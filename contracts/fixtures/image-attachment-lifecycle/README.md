@@ -18,8 +18,10 @@ policy reference is `attachment-policy-c13-f5be9236`.
 
 The root `c13_consistency` assertion binds C-13 case
 `invalid-noncanonical-base64` to the C-14 `malformed-base64` lifecycle marker.
-That marker must be rejected before upload, remain in the failed attachment
-state, and retain only the semantic diagnostic
+Validation pins and evaluates the canonical C-13 cases and validator artifacts,
+then checks the linked C-13 outcome is still rejected for
+`noncanonical_base64`. The C-14 marker must be rejected before upload, remain in
+the failed attachment state, and retain only the semantic diagnostic
 `attachment[rejected;reason=malformed_base64]`. No C-13 file is edited by this
 fixture.
 
@@ -92,9 +94,12 @@ headers in addition to URLs, paths, hosts, and filenames.
 
 The checked-in baseline is evidence, not a trust root. The validator pins the
 SHA-256 and byte count of the README, cases, tests, and baseline outside the
-mutable baseline object, and also hashes the canonical baseline content. A
+mutable baseline object, and also hashes the canonical baseline content. The
+CLI binds `--cases` to the canonical checked-in cases path; an alternate,
+even schema-valid cases file cannot validate as canonical evidence. A
 coordinated artifact plus baseline rebinding therefore fails instead of
-replacing the reviewed evidence.
+replacing the reviewed evidence. The C-13 consistency check independently pins
+and evaluates the referenced C-13 cases and validator artifacts.
 
 ## Verification commands
 
@@ -108,6 +113,20 @@ python3 -m unittest discover -s contracts/fixtures/image-attachment-lifecycle -p
 python3 -O -m unittest discover -s contracts/fixtures/image-attachment-lifecycle -p 'test_validate.py' -v
 ```
 
+The focused suite has twenty-two tests, including real normal and optimized
+CLI regressions for malformed markers, contradictory lifecycle evidence,
+retained-text bypasses, C-13 drift, alternate cases paths, and missing
+benchmark provenance.
+
+The unchanged C-13 control remains part of the evidence gate:
+
+```text
+python3 contracts/fixtures/attachment-policy/validate.py
+python3 -O contracts/fixtures/attachment-policy/validate.py
+python3 -m unittest discover -s contracts/fixtures/attachment-policy -p 'test_*.py' -v
+python3 -O -m unittest discover -s contracts/fixtures/attachment-policy -p 'test_*.py' -v
+```
+
 Compile with an external cache so the fixture directory remains free of
 `__pycache__` output:
 
@@ -116,10 +135,13 @@ PYTHONPYCACHEPREFIX=/tmp/hermternal-image-lifecycle-pycache python3 -m py_compil
 PYTHONPYCACHEPREFIX=/tmp/hermternal-image-lifecycle-pycache-opt python3 -O -m py_compile contracts/fixtures/image-attachment-lifecycle/validate.py contracts/fixtures/image-attachment-lifecycle/test_validate.py
 ```
 
-`baseline.json` records thirty deterministic normal samples and thirty
+`baseline.json` records thirty raw normal subprocess samples and thirty
 optimized samples with min, median, p95, and max distributions. Its
-`threshold` is intentionally `null`: this fixture records measured evidence
-without inventing a performance budget for a non-production validator.
+`provenance` records the measured environment (`Darwin 25.5.0`, Python
+`3.14.6`, `arm64`), device (`Mac14,6`), and an inline raw subprocess trace
+whose sample and distribution fields are explicitly named. Its `threshold` is
+intentionally `null`: this fixture records measured evidence without inventing
+a performance budget for a non-production validator.
 
 ## Accessibility and design scope
 
