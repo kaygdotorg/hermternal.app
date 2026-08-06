@@ -132,11 +132,16 @@ MAX_INTEGER_DIGITS = 100
 MAX_INTEGER = 10**MAX_INTEGER_DIGITS - 1
 MAX_ERROR_LENGTH = 240
 BASELINE_REPETITIONS = 30
+SCANNED_ARTIFACT_SUFFIXES = frozenset({".json", ".md", ".py", ".txt"})
 # This trust anchor authenticates the canonical observed baseline content. The
 # canonicalizer omits only this validator's own manifest digest and derived byte
 # total, which would otherwise create a self-referential hash cycle.
 BASELINE_SELF_MANIFEST_PATH = "contracts/fixtures/validator/validate.py"
-BASELINE_CANONICAL_SHA256 = "a3fb7afbaca3e7ca6742b60397773bfbaa3555cfd38cfadbc1b6f84e789da4ce"
+CENTRAL_VALIDATOR_SOURCE_PATHS = frozenset({
+    "contracts/fixtures/validator/test_validate.py",
+    "contracts/fixtures/validator/validate.py",
+})
+BASELINE_CANONICAL_SHA256 = "ab0887dfe6ab9b739ee9a8e965cb6131196463a6b94f6da37567188cdedb9086"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -162,7 +167,13 @@ SENSITIVE_MARKER = re.compile(
 
 SENSITIVE_KEYS = frozenset(
     {
+        "access_key",
+        "access_key_id",
+        "access_keys",
         "access_token",
+        "api_key",
+        "api_key_value",
+        "api_keys",
         "attach_handle",
         "attach_handles",
         "attach_id",
@@ -172,6 +183,10 @@ SENSITIVE_KEYS = frozenset(
         "authorization_headers",
         "auth_header",
         "auth_headers",
+        "aws_access_key_id",
+        "aws_access_key_ids",
+        "aws_secret_access_key",
+        "aws_secret_access_keys",
         "bearer",
         "bearers",
         "bearer_token",
@@ -183,6 +198,8 @@ SENSITIVE_KEYS = frozenset(
         "credential",
         "credential_value",
         "credentials",
+        "client_secret",
+        "client_secrets",
         "header_value",
         "host",
         "hostname",
@@ -203,6 +220,8 @@ SENSITIVE_KEYS = frozenset(
         "refresh_token",
         "refresh_tokens",
         "secret",
+        "secret_key",
+        "secret_keys",
         "secret_value",
         "session_cookie",
         "session_token",
@@ -220,6 +239,10 @@ SENSITIVE_KEYS = frozenset(
         "transcript_bytes",
         "websocket_ticket",
         "websocket_tickets",
+        "provider_api_key",
+        "provider_api_keys",
+        "x_api_key",
+        "x_api_keys",
     }
 )
 SENSITIVE_DESCRIPTOR_KEYS = frozenset({
@@ -255,8 +278,25 @@ STRUCTURAL_SENSITIVE_MARKERS = frozenset({
 TEST_NEGATIVE_BASIC_AUTH_PATHS = frozenset({
     "deployment-security/external-allowlist/test_validate.py",
 })
+TEST_NEGATIVE_RFC7617_TOKEN_PATHS = frozenset({
+    # These indexed Python sources retain the exact token as deliberate
+    # negative-test input. JSON, Markdown, text, and every other Python source
+    # remain fail-closed for the same bytes.
+    "deployment-security/external-allowlist/test_validate.py",
+    "image-attachment-lifecycle/test_validate.py",
+})
 TEST_NEGATIVE_BASIC_AUTH_CANDIDATE = "QWxhZGRpbjpvcGVuIHNlc2FtZQ" + "=="
 TEST_NEGATIVE_BASIC_AUTH_CANDIDATES = frozenset({TEST_NEGATIVE_BASIC_AUTH_CANDIDATE})
+EXACT_ASSIGNMENT_ALLOWANCES = {
+    # These are retained source-review or negative-test fragments. Every
+    # allowance is exact-path and exact-value; no caller can opt into a broad
+    # dotted-value or synthetic credential exemption.
+    "deployment-security/ws-ticket/README.md": frozenset({"Abcdefgh"}),
+    "source-audit/native-password-provider/source_audit.json": frozenset({"body.password"}),
+    "source-audit/native-password-provider/validate.py": frozenset({"body.password"}),
+    "source-audit/oauth-browser/test_oauth_browser.py": frozenset({"request.get"}),
+}
+RAW_RFC7617_TOKEN_PATTERN = re.compile(re.escape(TEST_NEGATIVE_BASIC_AUTH_CANDIDATE), re.IGNORECASE)
 
 SAFE_ERROR_MESSAGE = "fixture registry input rejected"
 
@@ -412,15 +452,23 @@ def _is_explicit_synthetic_marker(value: str) -> bool:
     )
 
 
-def _is_placeholder(value: str, *, allow_synthetic_markers: bool = False) -> bool:
+def _is_placeholder(
+    value: str,
+    *,
+    allow_synthetic_markers: bool = False,
+    allow_structural_placeholders: bool = True,
+) -> bool:
     lowered = value.casefold()
-    return (
-        value.startswith("<")
-        or lowered in {"false", "none", "null", "redacted", "not_recorded", "not_retained"}
-        or "body." in lowered
+    structural = (
+        "body." in lowered
         or "request." in lowered
         or "source." in lowered
         or lowered.endswith((".password", ".token", ".ticket", ".cookie"))
+    )
+    return (
+        value.startswith("<")
+        or lowered in {"false", "none", "null", "redacted", "not_recorded", "not_retained"}
+        or (allow_structural_placeholders and structural)
         or (allow_synthetic_markers and _is_explicit_synthetic_marker(value))
     )
 
@@ -449,10 +497,20 @@ def _validate_sensitive_marker(value: Any, *, key: str = "") -> None:
     raise ValidationError()
 
 
-def _validate_url_hosts(value: str, *, allow_synthetic_markers: bool = False) -> None:
+def _validate_url_hosts(
+    value: str,
+    *,
+    allow_synthetic_markers: bool = False,
+    regex_pattern: bool = False,
+) -> None:
     for match in URL_PATTERN.finditer(value):
+        raw_url = match.group(0)
+        if regex_pattern and any(character in raw_url for character in "\\[](){}?+*|^$"):
+            # Avoid URL parser bracket errors for character classes while still
+            # scanning the same regex literal for concrete credential values.
+            continue
         try:
-            parsed = urlsplit(match.group(0))
+            parsed = urlsplit(raw_url)
             host = parsed.hostname
         except ValueError as exc:
             raise ValidationError() from exc
@@ -460,6 +518,11 @@ def _validate_url_hosts(value: str, *, allow_synthetic_markers: bool = False) ->
             continue
         lowered = host.casefold().replace("\\.", ".").rstrip(".`'\"),]}>;:!? ")
         if lowered.startswith("<") and lowered.endswith(">"):
+            continue
+        # A detector regex can describe a host with character classes and
+        # escapes. Those bytes are rule syntax, not a retained host. Concrete
+        # hosts inside a regex call still go through the normal allowlist.
+        if regex_pattern and any(character in lowered for character in "\\[](){}?+*|^$"):
             continue
         require(
             lowered.endswith(".test")
@@ -479,94 +542,340 @@ def _validate_text_value(
     check_assignments: bool = True,
     allow_synthetic_markers: bool = False,
     allowed_basic_auth_candidates: frozenset[str] = frozenset(),
+    allowed_raw_rfc7617_tokens: frozenset[str] = frozenset(),
+    allowed_assignment_values: frozenset[str] = frozenset(),
+    regex_pattern: bool = False,
 ) -> None:
     if not allow_nul:
         require("\x00" not in value, "text contains an embedded NUL")
-    private_key = PRIVATE_KEY_PATTERN.search(value)
+    # Some domain fixtures intentionally retain malformed control-byte input as
+    # a negative case. Remove NULs only for credential matching so a split
+    # bearer/basic/assignment value cannot evade the shared scanner.
+    scanned_value = value.replace("\x00", "")
+    private_key = PRIVATE_KEY_PATTERN.search(scanned_value)
     require(
         private_key is None
         or (allow_synthetic_markers and _is_explicit_synthetic_marker(value)),
         "private key material is not allowed",
     )
-    provider_key = AWS_KEY_PATTERN.search(value)
+    provider_key = AWS_KEY_PATTERN.search(scanned_value)
     require(
         provider_key is None
-        or (allow_synthetic_markers and _is_placeholder(provider_key.group(0), allow_synthetic_markers=True)),
+        or (
+            allow_synthetic_markers
+            and _is_placeholder(
+                provider_key.group(0),
+                allow_synthetic_markers=True,
+                allow_structural_placeholders=False,
+            )
+        ),
         "provider key material is not allowed",
     )
-    provider_token = PROVIDER_TOKEN_PATTERN.search(value)
+    provider_token = PROVIDER_TOKEN_PATTERN.search(scanned_value)
     require(
         provider_token is None
-        or (allow_synthetic_markers and _is_placeholder(provider_token.group(0), allow_synthetic_markers=True)),
+        or (
+            allow_synthetic_markers
+            and _is_placeholder(
+                provider_token.group(0),
+                allow_synthetic_markers=True,
+                allow_structural_placeholders=False,
+            )
+        ),
         "provider token material is not allowed",
     )
+    allowed_rfc7617_tokens = allowed_basic_auth_candidates | allowed_raw_rfc7617_tokens
+    for match in RAW_RFC7617_TOKEN_PATTERN.finditer(scanned_value):
+        candidate = match.group(0)
+        require(candidate in allowed_rfc7617_tokens, "raw RFC 7617 token is not allowed")
     patterns = (BEARER_VALUE_PATTERN, BASIC_VALUE_PATTERN, JWT_PATTERN)
     if check_assignments:
         patterns += (ASSIGNMENT_SECRET_PATTERN,)
     for pattern in patterns:
-        match = pattern.search(value)
-        if match is None:
-            continue
-        candidate = match.group(1) if match.lastindex else match.group(0)
-        exact_test_allowance = (
-            pattern is BASIC_VALUE_PATTERN
-            and candidate in allowed_basic_auth_candidates
-        )
-        require(
-            exact_test_allowance
-            or _is_placeholder(candidate, allow_synthetic_markers=allow_synthetic_markers),
-            "credential-shaped value is not allowed",
-        )
-    _validate_url_hosts(value, allow_synthetic_markers=allow_synthetic_markers)
+        for match in pattern.finditer(scanned_value):
+            candidate = match.group(1) if match.lastindex else match.group(0)
+            exact_basic_allowance = (
+                pattern is BASIC_VALUE_PATTERN
+                and candidate in allowed_basic_auth_candidates
+            )
+            exact_assignment_allowance = (
+                pattern is ASSIGNMENT_SECRET_PATTERN
+                and candidate in allowed_assignment_values
+            )
+            # Synthetic marker vocabulary is useful for non-Basic negative
+            # cases, but it must never turn an arbitrary credential-shaped
+            # Basic value into an accepted retained string.
+            placeholder = _is_placeholder(
+                candidate,
+                allow_synthetic_markers=(allow_synthetic_markers and pattern is not BASIC_VALUE_PATTERN),
+                # Dotted source expressions are allowed only by an exact
+                # path/value assignment allowance. They must not make a
+                # credential-shaped Bearer, Basic, JWT, or assignment value
+                # look redacted merely because it resembles source syntax.
+                allow_structural_placeholders=False,
+            )
+            require(
+                exact_basic_allowance or exact_assignment_allowance or placeholder,
+                "credential-shaped value is not allowed",
+            )
+    _validate_url_hosts(
+        scanned_value,
+        allow_synthetic_markers=allow_synthetic_markers,
+        regex_pattern=regex_pattern,
+    )
 
 
-def _validate_redaction_tree(value: Any) -> None:
+def _validate_redaction_tree(
+    value: Any,
+    *,
+    allowed_assignment_values: frozenset[str] = frozenset(),
+) -> None:
     if type(value) is dict:
         for key, child in value.items():
             # Object keys are retained input too. Scan them before treating a
             # normalized key as structural so nested credential-shaped keys
             # cannot bypass the value scanner.
-            _validate_text_value(key)
+            _validate_text_value(key, allowed_assignment_values=allowed_assignment_values)
             normalized = _normalize_key(key)
             if normalized in SENSITIVE_KEYS:
                 _validate_sensitive_marker(child, key=normalized)
             else:
-                _validate_redaction_tree(child)
+                _validate_redaction_tree(child, allowed_assignment_values=allowed_assignment_values)
         return
     if type(value) is list:
         for child in value:
-            _validate_redaction_tree(child)
+            _validate_redaction_tree(child, allowed_assignment_values=allowed_assignment_values)
         return
     if type(value) is str:
         # Domain fixtures may intentionally include control bytes as a negative
         # input (for example a filename NUL). They are not retained secrets;
         # registry, schema, and baseline documents still reject NUL strictly.
-        _validate_text_value(value, allow_nul=True)
+        _validate_text_value(
+            value,
+            allow_nul=True,
+            allowed_assignment_values=allowed_assignment_values,
+        )
 
 
-def _validate_text_file(path: Path) -> None:
+def _validate_text_file(
+    path: Path,
+    *,
+    allowed_assignment_values: frozenset[str] = frozenset(),
+) -> None:
     data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES)
     try:
         text = data.decode("utf-8")
     except UnicodeError as exc:
         raise ValidationError() from exc
     require(len(text) <= MAX_ARTIFACT_BYTES, "text artifact is too large")
-    _validate_text_value(text, check_assignments=False)
+    # Markdown and text are retained artifacts too; disabling assignment
+    # matching here would let password=, token=, ticket=, cookie=, or secret=
+    # values bypass the shared redaction boundary. One reviewed negative-test
+    # fragment remains exact-path and exact-value scoped below.
+    _validate_text_value(
+        text,
+        check_assignments=True,
+        allowed_assignment_values=allowed_assignment_values,
+    )
+
+
+_STATIC_UNKNOWN = object()
+# Unknown runtime fields are rendered as an explicit synthetic host/value. The
+# pre-dot portion is long enough to trigger Basic detection, while the `.invalid`
+# suffix remains an allowed host boundary for dynamic URL diagnostics.
+_STATIC_DYNAMIC_VALUE = "syntheticinvalid.invalid"
+
+
+def _static_scalar(value: Any) -> Any:
+    if type(value) is str:
+        return value
+    if type(value) is bytes:
+        try:
+            return value.decode("utf-8")
+        except UnicodeError:
+            return _STATIC_UNKNOWN
+    if type(value) in {int, float, bool} or value is None:
+        return value
+    return _STATIC_UNKNOWN
+
+
+def _bounded_static_text(value: Any) -> Any:
+    if type(value) is str and len(value) <= MAX_ARTIFACT_BYTES:
+        return value
+    return _STATIC_UNKNOWN
+
+
+def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
+    if isinstance(node, ast.Constant):
+        return _static_scalar(node.value)
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id, _STATIC_UNKNOWN)
+    if isinstance(node, ast.JoinedStr):
+        pieces: list[str] = []
+        for part in node.values:
+            if isinstance(part, ast.Constant):
+                literal = _static_scalar(part.value)
+                if type(literal) is not str:
+                    return _STATIC_UNKNOWN
+                pieces.append(literal)
+                continue
+            if not isinstance(part, ast.FormattedValue):
+                return _STATIC_UNKNOWN
+            formatted = _static_value(part.value, bindings)
+            if formatted is _STATIC_UNKNOWN:
+                return _STATIC_UNKNOWN
+            if part.conversion == 115:
+                formatted = str(formatted)
+            elif part.conversion == 114:
+                formatted = repr(formatted)
+            elif part.conversion == 97:
+                formatted = ascii(formatted)
+            format_spec = ""
+            if part.format_spec is not None:
+                format_spec = _static_value(part.format_spec, bindings)
+                if type(format_spec) is not str:
+                    return _STATIC_UNKNOWN
+            try:
+                pieces.append(format(formatted, format_spec))
+            except (TypeError, ValueError, OverflowError):
+                return _STATIC_UNKNOWN
+        return _bounded_static_text("".join(pieces))
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_value(node.left, bindings)
+        right = _static_value(node.right, bindings)
+        if type(left) is str and type(right) is str:
+            return _bounded_static_text(left + right)
+        return _STATIC_UNKNOWN
+    if isinstance(node, (ast.List, ast.Tuple)):
+        values: list[Any] = []
+        for child in node.elts:
+            value = _static_value(child, bindings)
+            if value is _STATIC_UNKNOWN:
+                return _STATIC_UNKNOWN
+            values.append(value)
+        return values if isinstance(node, ast.List) else tuple(values)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        method = node.func.attr
+        receiver = _static_value(node.func.value, bindings)
+        if method == "format" and type(receiver) is str:
+            args: list[Any] = []
+            for argument in node.args:
+                value = _static_value(argument, bindings)
+                if value is _STATIC_UNKNOWN:
+                    return _STATIC_UNKNOWN
+                args.append(value)
+            keywords: dict[str, Any] = {}
+            for keyword in node.keywords:
+                if keyword.arg is None:
+                    return _STATIC_UNKNOWN
+                value = _static_value(keyword.value, bindings)
+                if value is _STATIC_UNKNOWN:
+                    return _STATIC_UNKNOWN
+                keywords[keyword.arg] = value
+            try:
+                return _bounded_static_text(receiver.format(*args, **keywords))
+            except (IndexError, KeyError, ValueError, TypeError, OverflowError):
+                return _STATIC_UNKNOWN
+        if method == "join" and type(receiver) is str and len(node.args) == 1 and not node.keywords:
+            values = _static_value(node.args[0], bindings)
+            if isinstance(values, (list, tuple)) and all(type(value) is str for value in values):
+                return _bounded_static_text(receiver.join(values))
+    return _STATIC_UNKNOWN
+
+
+def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
+    """Render unresolved string expressions with a credential-shaped sentinel."""
+    value = _static_value(node, bindings)
+    if type(value) is str:
+        return value
+    if isinstance(node, ast.Constant):
+        literal = _static_scalar(node.value)
+        return literal if type(literal) is str else _STATIC_DYNAMIC_VALUE
+    if isinstance(node, ast.Name):
+        bound = bindings.get(node.id, _STATIC_UNKNOWN)
+        return bound if type(bound) is str else _STATIC_DYNAMIC_VALUE
+    if isinstance(node, ast.JoinedStr):
+        pieces: list[str] = []
+        for part in node.values:
+            if isinstance(part, ast.Constant):
+                literal = _static_scalar(part.value)
+                pieces.append(literal if type(literal) is str else _STATIC_DYNAMIC_VALUE)
+            elif isinstance(part, ast.FormattedValue):
+                pieces.append(_conservative_text(part.value, bindings))
+            else:
+                pieces.append(_STATIC_DYNAMIC_VALUE)
+        return "".join(pieces)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _conservative_text(node.left, bindings) + _conservative_text(node.right, bindings)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        method = node.func.attr
+        receiver = _conservative_text(node.func.value, bindings)
+        if method == "format" and not node.keywords:
+            args = [_conservative_text(argument, bindings) for argument in node.args]
+            try:
+                return receiver.format(*args)
+            except (IndexError, KeyError, ValueError, TypeError, OverflowError):
+                return receiver + " " + " ".join(args)
+        if method == "join" and len(node.args) == 1 and not node.keywords:
+            sequence = node.args[0]
+            if isinstance(sequence, (ast.List, ast.Tuple)):
+                return receiver.join(_conservative_text(child, bindings) for child in sequence.elts)
+            return receiver + _STATIC_DYNAMIC_VALUE
+    return _STATIC_DYNAMIC_VALUE
+
+
+def _collect_static_bindings(tree: ast.AST) -> dict[str, Any]:
+    bindings: dict[str, Any] = {}
+    # A few fixed passes resolve simple module/function-local chains without
+    # executing source. Unresolved runtime values remain represented by the
+    # conservative sentinel and therefore cannot hide a credential prefix.
+    for _ in range(4):
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                value = _static_value(node.value, bindings)
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                value = _static_value(node.value, bindings) if node.value is not None else _STATIC_UNKNOWN
+                targets = (node.target,)
+            else:
+                continue
+            if type(value) is not str:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and bindings.get(target.id, _STATIC_UNKNOWN) != value:
+                    bindings[target.id] = value
+                    changed = True
+        if not changed:
+            break
+    return bindings
+
+
+def _regex_call_nodes(tree: ast.AST) -> set[int]:
+    result: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "compile" or not isinstance(node.func.value, ast.Name) or node.func.value.id not in {"re", "regex"}:
+            continue
+        result.update(id(child) for child in ast.walk(node))
+    return result
 
 
 def _validate_python_file(
     path: Path,
     *,
     allow_test_negative_basic_auth: bool = False,
+    allow_test_negative_rfc7617_token: bool = False,
+    allowed_assignment_values: frozenset[str] = frozenset(),
 ) -> None:
-    """Scan Python source while allowing explicit negative-test markers.
+    """Scan Python literals, comments, and bounded string constructions.
 
     Fixture tests intentionally contain credential-shaped inputs to prove that
-    their domain validators reject them. Parse source literals instead of
-    scanning detector regex definitions as if they were retained credentials;
-    unmarked bearer, provider, key, JWT, and URL values still fail closed. The
-    RFC 7617 sample is allowed only for the one registered test path that owns
-    that negative case; validator and other non-test sources never inherit it.
+    their domain validators reject them. Regex-call arguments are still
+    scanned for concrete credential data; only regex syntax is treated as such
+    when checking URL hosts. The two exact negative-test allowances are passed
+    by the manifest path, never inferred from a string's synthetic marker.
     """
     data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES)
     try:
@@ -576,53 +885,48 @@ def _validate_python_file(
         raise ValidationError() from exc
     require(len(text) <= MAX_ARTIFACT_BYTES, "text artifact is too large")
 
-    regex_literals: set[int] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr != "compile" or not isinstance(node.func.value, ast.Name) or node.func.value.id not in {"re", "regex"}:
-            continue
-        for child in ast.walk(node):
-            if isinstance(child, ast.Constant) and type(child.value) is str:
-                regex_literals.add(id(child))
+    allowed_basic_auth_candidates = (
+        TEST_NEGATIVE_BASIC_AUTH_CANDIDATES
+        if allow_test_negative_basic_auth
+        else frozenset()
+    )
+    allowed_raw_rfc7617_tokens = (
+        TEST_NEGATIVE_BASIC_AUTH_CANDIDATES
+        if allow_test_negative_rfc7617_token
+        else frozenset()
+    )
+    bindings = _collect_static_bindings(tree)
+    regex_nodes = _regex_call_nodes(tree)
 
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Constant) or type(node.value) not in {str, bytes} or id(node) in regex_literals:
-            continue
-        value = node.value
-        if type(value) is bytes:
-            try:
-                value = value.decode("utf-8")
-            except UnicodeError:
-                # Domain fixtures may carry intentionally invalid binary inputs;
-                # text credential checks cannot interpret those bytes.
-                continue
+    def scan(value: str, *, regex_pattern: bool = False) -> None:
         _validate_text_value(
             value,
             allow_nul=True,
             check_assignments=True,
             allow_synthetic_markers=True,
-            allowed_basic_auth_candidates=(
-                TEST_NEGATIVE_BASIC_AUTH_CANDIDATES
-                if allow_test_negative_basic_auth
-                else frozenset()
-            ),
+            allowed_basic_auth_candidates=allowed_basic_auth_candidates,
+            allowed_raw_rfc7617_tokens=allowed_raw_rfc7617_tokens,
+            allowed_assignment_values=allowed_assignment_values,
+            regex_pattern=regex_pattern,
         )
+
+    for node in ast.walk(tree):
+        regex_pattern = id(node) in regex_nodes
+        if isinstance(node, ast.Constant):
+            value = _static_scalar(node.value)
+            if type(value) is str:
+                scan(value, regex_pattern=regex_pattern)
+        elif isinstance(node, (ast.JoinedStr, ast.BinOp, ast.Call)):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "compile":
+                continue
+            scan(_conservative_text(node, bindings), regex_pattern=regex_pattern)
+
     # Comments document detector rules and may contain source-shaped examples;
-    # scan them too, but permit only the same explicit synthetic markers.
+    # scan them too, with the same exact path-scoped allowances.
     try:
         for token in tokenize.generate_tokens(io.StringIO(text).readline):
             if token.type == tokenize.COMMENT:
-                _validate_text_value(
-                    token.string,
-                    check_assignments=True,
-                    allow_synthetic_markers=True,
-                    allowed_basic_auth_candidates=(
-                        TEST_NEGATIVE_BASIC_AUTH_CANDIDATES
-                        if allow_test_negative_basic_auth
-                        else frozenset()
-                    ),
-                )
+                scan(token.string)
     except tokenize.TokenError as exc:
         raise ValidationError() from exc
 
@@ -736,18 +1040,29 @@ def _validate_manifest_file(
     require(digest == hashlib.sha256(data).hexdigest(), "artifact digest changed")
     total_bytes[0] += len(data)
     require(total_bytes[0] <= MAX_TOTAL_ARTIFACT_BYTES, "fixture artifacts exceed aggregate byte limit")
-    if actual.suffix.casefold() == ".json":
+    relative_path = actual.relative_to(fixtures_root).as_posix()
+    suffix = actual.suffix.casefold()
+    # A registered file must have a scanner with defined semantics. Digesting
+    # an unknown extension without inspecting its content would create an
+    # unscanned credential boundary, so fail closed instead.
+    require(suffix in SCANNED_ARTIFACT_SUFFIXES, "registered artifact extension is unsupported")
+    allowed_assignment_values = EXACT_ASSIGNMENT_ALLOWANCES.get(relative_path, frozenset())
+    if suffix == ".json":
         document = load_json(actual, require_object=False, limit=MAX_ARTIFACT_BYTES, reject_nul=False)
-        _validate_redaction_tree(document)
+        _validate_redaction_tree(document, allowed_assignment_values=allowed_assignment_values)
         _reject_live_claims(document)
-    elif actual.suffix.casefold() == ".py":
-        relative_path = actual.relative_to(fixtures_root).as_posix()
+    elif suffix == ".py":
         _validate_python_file(
             actual,
             allow_test_negative_basic_auth=relative_path in TEST_NEGATIVE_BASIC_AUTH_PATHS,
+            allow_test_negative_rfc7617_token=relative_path in TEST_NEGATIVE_RFC7617_TOKEN_PATHS,
+            allowed_assignment_values=allowed_assignment_values,
         )
-    elif actual.suffix.casefold() in {".md", ".txt"}:
-        _validate_text_file(actual)
+    else:
+        _validate_text_file(
+            actual,
+            allowed_assignment_values=allowed_assignment_values,
+        )
     return path
 
 
@@ -1041,6 +1356,10 @@ def _validate_baseline(
         require(size == len(data) and digest == hashlib.sha256(data).hexdigest(), "baseline artifact manifest is stale")
         total += len(data)
     require(type(document["artifact_size_bytes"]) is int and type(document["artifact_size_bytes"]) is not bool and document["artifact_size_bytes"] == total, "baseline artifact size is stale")
+    # The baseline manifest is the aggregate validator's source boundary. Keep
+    # both central sources inside the immutable binding so a future edit cannot
+    # silently become an unverified scanner hole.
+    require(CENTRAL_VALIDATOR_SOURCE_PATHS.issubset(set(listed)), "central validator source is outside the baseline binding")
     for mode in ("normal", "optimized"):
         measurement = strict_keys(document[mode], MEASUREMENT_KEYS, f"baseline.{mode}")
         expected_command = "python3 -O contracts/fixtures/validator/validate.py" if mode == "optimized" else "python3 contracts/fixtures/validator/validate.py"
