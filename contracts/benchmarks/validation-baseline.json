@@ -145,8 +145,8 @@
   "artifacts": [
     {
       "path": "README.md",
-      "bytes": 6849,
-      "sha256": "3a3f53cf541b8b00e55630be40137f722eeb5ad9b308137892283cd0170417ec"
+      "bytes": 6916,
+      "sha256": "4d8626acd899ef0262146a88608024b990b6b7b22125f0e4f583a6fdc5753458"
     },
     {
       "path": "benchmark-evidence.json",
@@ -155,13 +155,13 @@
     },
     {
       "path": "validate.py",
-      "bytes": 37973,
-      "sha256": "9273b5fbbe572606caba36f0d8092fc1798e16871084dbf1834ae4c20d3df82e"
+      "bytes": 38528,
+      "sha256": "18a2bc631534d5faa99e32996193cf569b4cc3850b59915a4ede433c13a60929"
     },
     {
       "path": "test_validate.py",
-      "bytes": 19488,
-      "sha256": "b7f662f6b833201ef98e01ce1a2bb990d0fe66a4df190439f37702ae79a09555"
+      "bytes": 20606,
+      "sha256": "2a4441fe87231e91e35d8c96a56168d701f17fbe1b26ab4d1d6cc5517865c229"
     },
     {
       "path": "sample-provenance.json",
@@ -179,7 +179,7 @@
       "sha256": "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"
     }
   ],
-  "artifact_manifest_sha256": "40663ea59885bd956657be4328001d854268b7112e4f7ed698018139a0ea3bed",
+  "artifact_manifest_sha256": "6af4c39f9f9f7811e2565d17926fd3eda56eb078d87cf50dc8795f5bd9940ae8",
   "redaction": {
     "policy": "semantic_only",
     "synthetic_only": true,

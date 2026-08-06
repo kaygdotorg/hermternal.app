@@ -77,8 +77,9 @@ distribution drift, missing or unreviewed artifact paths or byte identities,
 invalid artifact hashes, non-null thresholds or budgets, and secret-shaped
 values. The baseline's `validate.py` entry is locally checked but is excluded
 from the code-pinned byte anchor to avoid a self-hash cycle. Hostnames,
-IPv4/IPv6 addresses, `localhost`, URLs, bearer values, and API-key assignments
-are outside the redaction boundary. Explicit exceptions are used instead of
+IPv4/IPv6 addresses, `localhost`, URLs, bearer values, API-key assignments,
+and provider-token shapes such as `ghp_…`, `sk-…`, and `xoxb-…` are outside the
+redaction boundary. Explicit exceptions are used instead of
 executable `assert` statements, so normal and optimized Python runs retain the
 same checks.
 

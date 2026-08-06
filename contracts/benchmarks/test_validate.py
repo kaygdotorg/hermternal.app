@@ -291,6 +291,28 @@ class BenchmarkEvidenceTests(unittest.TestCase):
             with self.subTest(mutation=label):
                 self._assert_cli_document_failure(candidate, secret)
 
+    def test_provider_token_shapes_fail_across_text_fields_in_both_cli_modes(self) -> None:
+        """Reject provider credentials even in otherwise-valid text fields."""
+        tokens = (
+            ("GitHub classic token", "ghp_" + ("a" * 36)),
+            ("OpenAI or Stripe token", "sk-" + ("b" * 32)),
+            ("Slack bot token", "xoxb-" + ("c" * 24)),
+        )
+        fields = (
+            ("metric.name", lambda document, token: document["metric"].__setitem__("name", token)),
+            ("run.command", lambda document, token: document["runs"][0].__setitem__("command", token)),
+            (
+                "environment.device",
+                lambda document, token: document["runs"][0]["environment"].__setitem__("device", token),
+            ),
+        )
+        for field_label, set_value in fields:
+            for token_label, token in tokens:
+                candidate = copy.deepcopy(self.document)
+                set_value(candidate, token)
+                with self.subTest(field=field_label, token=token_label):
+                    self._assert_cli_document_failure(candidate, token)
+
     def test_missing_recorded_artifact_fails_in_both_cli_modes(self) -> None:
         """Exercise local artifact absence without mutating the checkout.
 

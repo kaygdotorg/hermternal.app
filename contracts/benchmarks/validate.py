@@ -175,6 +175,14 @@ HOSTNAME_RE = re.compile(
 )
 IPV4_RE = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])")
 IPV6_RE = re.compile(r"(?i)(?<![0-9a-f:])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![0-9a-f:])")
+# Provider credentials are forbidden even when they appear in a field that
+# otherwise permits a harmless identifier, such as metric.name.  Keep the
+# suffix bounded so diagnostics stay cheap while covering common GitHub,
+# GitLab, OpenAI/Stripe, Slack, and JWT-shaped token markers.
+PROVIDER_TOKEN_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:github_pat_|gh[pousr]_|glpat-|sk[-_]|xox[baprs]-|eyJ)"
+    r"[A-Za-z0-9._-]{8,}(?![A-Za-z0-9._-])"
+)
 
 BASELINE_COMMANDS = {
     "normal": "python3 contracts/benchmarks/validate.py --skip-baseline",
@@ -234,9 +242,9 @@ EXPECTED_ARTIFACT_METADATA = {
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
     BASELINE_EVIDENCE_ID: (
-        ("README.md", 6849, "3a3f53cf541b8b00e55630be40137f722eeb5ad9b308137892283cd0170417ec"),
+        ("README.md", 6916, "4d8626acd899ef0262146a88608024b990b6b7b22125f0e4f583a6fdc5753458"),
         ("benchmark-evidence.json", 6446, "aa652867dc336467ab07873964f54a9d5000cfb01b1d55756091be2e8797a6eb"),
-        ("test_validate.py", 19488, "b7f662f6b833201ef98e01ce1a2bb990d0fe66a4df190439f37702ae79a09555"),
+        ("test_validate.py", 20606, "2a4441fe87231e91e35d8c96a56168d701f17fbe1b26ab4d1d6cc5517865c229"),
         ("sample-provenance.json", 2304, "cafd3009688c9a1adace242ec3a087b74fda313fcf1921762c82fc8fca2aa283"),
         ("synthetic/workload.json", 4042, "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"),
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
@@ -478,6 +486,7 @@ def _finite_decimal(value: Any, label: str, *, positive: bool = False) -> Decima
 
 
 def _reject_sensitive_text(text: str, label: str, *, allow_relative_artifact_path: bool = False) -> None:
+    require(PROVIDER_TOKEN_RE.search(text) is None, f"{label} contains a provider token")
     require(SENSITIVE_ASSIGNMENT_RE.search(text) is None, f"{label} contains sensitive material")
     require(BEARER_RE.search(text) is None, f"{label} contains a bearer value")
     require(PRIVATE_KEY_RE.search(text) is None, f"{label} contains key material")
@@ -851,7 +860,7 @@ def validate_baseline(value: Any, root: Path = ROOT) -> dict[str, Any]:
 
 def _redacted_error(message: object) -> str:
     text = str(message)
-    for pattern in (BEARER_RE, SENSITIVE_ASSIGNMENT_RE, PRIVATE_KEY_RE, EMAIL_RE, ABSOLUTE_PATH_RE, URL_RE, HOSTNAME_RE, IPV4_RE, IPV6_RE):
+    for pattern in (PROVIDER_TOKEN_RE, BEARER_RE, SENSITIVE_ASSIGNMENT_RE, PRIVATE_KEY_RE, EMAIL_RE, ABSOLUTE_PATH_RE, URL_RE, HOSTNAME_RE, IPV4_RE, IPV6_RE):
         text = pattern.sub("<redacted>", text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > MAX_ERROR_OUTPUT:
