@@ -1,16 +1,16 @@
 {
-  "schema": "hermternal.deployment.host-origin-mapping.v1",
+  "schema": "hermternal.deployment.host-origin-mapping.v2",
   "fixture_id": "host-origin-mapping-dep-03-f5be9236",
   "issue": "DEP-03",
   "contract": "dashboard-v0.0.1",
   "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
   "synthetic_only": true,
   "live_claim": false,
-  "proof_mode": "offline_disposable_mapping_model",
+  "proof_mode": "offline_disposable_raw_request_mapping_model",
   "mapping": {
     "configured_public_scheme": "https",
-    "configured_public_host": "configured_public_host",
-    "configured_public_origin": "configured_public_https_origin",
+    "configured_public_host": "chat.public.invalid",
+    "configured_public_origin": "https://chat.public.invalid",
     "hermes_bound_authority": "fixed_private_non_loopback_9119",
     "hermes_required_origin": "mapped_private_http_origin",
     "mapping_source": "trusted_edge_configuration_only",
@@ -32,39 +32,54 @@
       "decision",
       "responding_layer",
       "upstream_called",
+      "public_scheme_result",
       "public_host_result",
       "public_origin_result",
       "mapped_host_marker",
       "mapped_origin_marker"
     ],
     "forbidden_retained_classes": [
-      "raw_header_values",
+      "raw_request_values",
       "credentials",
       "cookies",
       "bearer_values",
       "ticket_values",
       "live_hosts",
       "private_addresses",
+      "filesystem_paths",
       "user_data",
       "transcripts"
     ],
+    "structural_exemptions": [
+      "reserved_invalid_fixture_authorities",
+      "exact_validator_command_paths",
+      "exact_artifact_filenames",
+      "reviewed_route_path"
+    ],
     "maximum_failure_line_characters": 240,
-    "maximum_retained_evidence_bytes": 4096,
+    "maximum_retained_evidence_bytes": 12288,
     "failure_output": "one_bounded_semantic_json_line"
   },
   "cases": [
     {
       "id": "accept-exact-browser-mapping",
       "request": {
-        "public_host": "exact_configured",
-        "public_origin": "exact_configured_https",
-        "upstream_override": "absent"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "forward_with_configured_mapping",
         "status": null,
         "responding_layer": "upstream",
         "upstream_called": true,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "accepted_exact",
         "public_origin_result": "accepted_exact",
         "mapped_host_marker": "fixed_private_non_loopback_9119",
@@ -72,17 +87,99 @@
       }
     },
     {
-      "id": "reject-mismatched-host",
+      "id": "reject-http-scheme",
       "request": {
-        "public_host": "mismatched_public_host",
-        "public_origin": "exact_configured_https",
-        "upstream_override": "absent"
+        "scheme": "http",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_scheme",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "rejected_mismatch",
+        "public_host_result": "not_evaluated",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-scheme-case",
+      "request": {
+        "scheme": "HTTPS",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_scheme",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "rejected_mismatch",
+        "public_host_result": "not_evaluated",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-missing-scheme",
+      "request": {
+        "scheme": null,
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_scheme",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "rejected_missing",
+        "public_host_result": "not_evaluated",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-port",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid:443"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "reject_public_host",
         "status": 421,
         "responding_layer": "edge",
         "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "rejected_mismatch",
         "public_origin_result": "not_evaluated",
         "mapped_host_marker": null,
@@ -90,35 +187,223 @@
       }
     },
     {
-      "id": "reject-hostile-host-syntax",
+      "id": "reject-host-case",
       "request": {
-        "public_host": "hostile_host_syntax",
-        "public_origin": "exact_configured_https",
-        "upstream_override": "absent"
+        "scheme": "https",
+        "host_values": [
+          "CHAT.PUBLIC.INVALID"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "reject_public_host",
         "status": 421,
         "responding_layer": "edge",
         "upstream_called": false,
-        "public_host_result": "rejected_hostile",
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_mismatch",
         "public_origin_result": "not_evaluated",
         "mapped_host_marker": null,
         "mapped_origin_marker": null
       }
     },
     {
-      "id": "reject-missing-host",
+      "id": "reject-host-trailing-dot",
       "request": {
-        "public_host": "missing",
-        "public_origin": "exact_configured_https",
-        "upstream_override": "absent"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid."
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "reject_public_host",
         "status": 421,
         "responding_layer": "edge",
         "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_mismatch",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-multiple-values",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid",
+          "other.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_multiple",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-leading-whitespace",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          " chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_whitespace",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-trailing-whitespace",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid "
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_whitespace",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-userinfo",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "user@chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_malformed",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-scheme-prefix",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "https://chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_malformed",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-empty-label",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat..public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_malformed",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-missing",
+      "request": {
+        "scheme": "https",
+        "host_values": [],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "rejected_missing",
         "public_origin_result": "not_evaluated",
         "mapped_host_marker": null,
@@ -126,17 +411,24 @@
       }
     },
     {
-      "id": "reject-mismatched-origin",
+      "id": "reject-origin-http",
       "request": {
-        "public_host": "exact_configured",
-        "public_origin": "mismatched_public_origin",
-        "upstream_override": "absent"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "http://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "reject_public_origin",
         "status": 403,
         "responding_layer": "edge",
         "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "accepted_exact",
         "public_origin_result": "rejected_mismatch",
         "mapped_host_marker": null,
@@ -144,35 +436,275 @@
       }
     },
     {
-      "id": "reject-hostile-origin-syntax",
+      "id": "reject-origin-port",
       "request": {
-        "public_host": "exact_configured",
-        "public_origin": "hostile_origin_syntax",
-        "upstream_override": "absent"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid:443"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "reject_public_origin",
         "status": 403,
         "responding_layer": "edge",
         "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "accepted_exact",
-        "public_origin_result": "rejected_hostile",
+        "public_origin_result": "rejected_mismatch",
         "mapped_host_marker": null,
         "mapped_origin_marker": null
       }
     },
     {
-      "id": "reject-null-origin",
+      "id": "reject-origin-host-case",
       "request": {
-        "public_host": "exact_configured",
-        "public_origin": "null_origin",
-        "upstream_override": "absent"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://CHAT.PUBLIC.INVALID"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "reject_public_origin",
         "status": 403,
         "responding_layer": "edge",
         "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_mismatch",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-scheme-case",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "HTTPS://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_mismatch",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-trailing-dot",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid."
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_mismatch",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-trailing-slash",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid/"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_malformed",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-multiple-values",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid",
+          "https://other.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_multiple",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-leading-whitespace",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          " https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_whitespace",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-trailing-whitespace",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid "
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_whitespace",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-userinfo",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://user@chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_malformed",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-query",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid?x"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_malformed",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-null",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "null"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "accepted_exact",
         "public_origin_result": "rejected_null",
         "mapped_host_marker": null,
@@ -180,17 +712,24 @@
       }
     },
     {
-      "id": "reject-wildcard-origin",
+      "id": "reject-origin-wildcard",
       "request": {
-        "public_host": "exact_configured",
-        "public_origin": "wildcard_origin",
-        "upstream_override": "absent"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "*"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "reject_public_origin",
         "status": 403,
         "responding_layer": "edge",
         "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "accepted_exact",
         "public_origin_result": "rejected_wildcard",
         "mapped_host_marker": null,
@@ -198,17 +737,22 @@
       }
     },
     {
-      "id": "reject-missing-browser-origin",
+      "id": "reject-origin-missing",
       "request": {
-        "public_host": "exact_configured",
-        "public_origin": "missing",
-        "upstream_override": "absent"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [],
+        "upstream_host_override": null,
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "reject_public_origin",
         "status": 403,
         "responding_layer": "edge",
         "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "accepted_exact",
         "public_origin_result": "rejected_missing",
         "mapped_host_marker": null,
@@ -216,17 +760,24 @@
       }
     },
     {
-      "id": "reject-request-host-override",
+      "id": "reject-host-override",
       "request": {
-        "public_host": "exact_configured",
-        "public_origin": "exact_configured_https",
-        "upstream_override": "request_supplied_host"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": "attacker.private.invalid",
+        "upstream_origin_override": null
       },
       "expected": {
         "decision": "reject_upstream_override",
         "status": 421,
         "responding_layer": "edge",
         "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "accepted_exact",
         "public_origin_result": "accepted_exact",
         "mapped_host_marker": null,
@@ -234,17 +785,24 @@
       }
     },
     {
-      "id": "reject-request-origin-override",
+      "id": "reject-origin-override",
       "request": {
-        "public_host": "exact_configured",
-        "public_origin": "exact_configured_https",
-        "upstream_override": "request_supplied_origin"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": null,
+        "upstream_origin_override": "http://attacker.private.invalid"
       },
       "expected": {
         "decision": "reject_upstream_override",
         "status": 403,
         "responding_layer": "edge",
         "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
         "public_host_result": "accepted_exact",
         "public_origin_result": "accepted_exact",
         "mapped_host_marker": null,
@@ -252,18 +810,50 @@
       }
     },
     {
-      "id": "reject-host-and-origin-before-mapping",
+      "id": "reject-both-overrides",
       "request": {
-        "public_host": "hostile_host_syntax",
-        "public_origin": "hostile_origin_syntax",
-        "upstream_override": "request_supplied_both"
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "upstream_host_override": "attacker.private.invalid",
+        "upstream_origin_override": "http://attacker.private.invalid"
+      },
+      "expected": {
+        "decision": "reject_upstream_override",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "accepted_exact",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-before-hostile-origin-and-overrides",
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "bad host"
+        ],
+        "origin_values": [
+          "null"
+        ],
+        "upstream_host_override": "attacker.private.invalid",
+        "upstream_origin_override": "http://attacker.private.invalid"
       },
       "expected": {
         "decision": "reject_public_host",
         "status": 421,
         "responding_layer": "edge",
         "upstream_called": false,
-        "public_host_result": "rejected_hostile",
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_whitespace",
         "public_origin_result": "not_evaluated",
         "mapped_host_marker": null,
         "mapped_origin_marker": null

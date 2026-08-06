@@ -8,79 +8,105 @@
 
 **Status:** deterministic synthetic fixture and offline validator only
 
-This exclusive fixture models one public-to-private mapping boundary. It does not
-start Hermes, a proxy, DNS, TLS, a browser, a socket, or a network service. It
-contains no deployable Caddy or Traefik configuration, hostname, address,
-credential, ticket, cookie, transcript, or live request. Passing evidence proves
+This exclusive fixture models one public-to-private mapping boundary. It does
+not start Hermes, a proxy, DNS, TLS, a browser, a socket, or a network service.
+It contains no deployable proxy configuration, credential, ticket, cookie,
+transcript, live request, live host, or private address. Passing evidence proves
 only the checked-in disposable model.
 
-## Mapping invariant
+## Raw request and mapping invariant
 
-The model represents the exact configured public values with synthetic markers:
+The source fixture carries bounded raw synthetic request values. The configured
+public authority uses the reserved RFC 2606 `.invalid` namespace:
 
-- public scheme: `https`;
-- public Host: `configured_public_host`;
-- browser Origin: `configured_public_https_origin`;
-- mapped upstream Host: `fixed_private_non_loopback_9119`; and
-- mapped upstream Origin: `mapped_private_http_origin`.
+- scheme `https`;
+- Host `chat.public.invalid`; and
+- Origin `https://chat.public.invalid`.
 
-The edge first accepts only the exact configured public Host. It then accepts
-only the exact configured browser Origin. Only after both checks pass does it
-write the two mapped upstream values from trusted configuration. Request input
-cannot select or override either mapped value. This order preserves the pinned
-Hermes source-compatible check while making the edge, narrow route allowlist,
-private bind, and firewall the public-origin controls described by
-[`docs/deployment/proof-matrix.md`](../../../../docs/deployment/proof-matrix.md).
+These exact reserved values are structural fixture syntax, not live deployment
+values. Host and Origin are arrays so the proof distinguishes one field from
+missing or multiple header fields. The validator does not strip whitespace,
+fold case, remove a trailing dot, infer a default port, decode escapes, or
+otherwise normalize input into acceptance.
 
-This tradeoff is explicit: Hermes sees the mapped private authority, not the
-public browser authority. This fixture therefore does not claim that Hermes
-independently validated the public Origin.
+The edge derives each classification independently. It validates scheme, then
+Host, then browser Origin. Only after all three exact checks pass does it write
+the mapped upstream Host marker `fixed_private_non_loopback_9119` and Origin
+marker `mapped_private_http_origin` from trusted configuration. Any non-null
+request-supplied upstream override rejects. Request input never selects either
+mapped value.
 
-## Success and fail-closed cases
+This order preserves the pinned Hermes source-compatible check while making the
+edge, narrow route allowlist, private bind, and firewall the public-origin
+controls described by the deployment proof matrix. The tradeoff is explicit:
+Hermes sees the mapped private authority, not the public browser authority. This
+fixture does not claim that Hermes independently validated the public Origin.
 
-The accepted browser WebSocket case records a forward decision and the exact two
-configured mapping markers. It does not fabricate a live `101` result. Rejected
-cases cover:
+## Exact fail-closed coverage
 
-- mismatched, hostile, and missing public Host values;
-- mismatched, hostile, `null`, wildcard, and missing browser Origin values;
-- request-supplied upstream Host or Origin overrides; and
-- simultaneous hostile Host, hostile Origin, and override input, proving Host
-  rejection occurs first.
+The accepted browser WebSocket case records a forward decision and the two
+configured mapping markers. It does not fabricate a live upgrade result.
+Rejected cases and parser regressions cover:
 
-Host rejection returns the synthetic edge status `421`. Origin rejection returns
-`403`. Every rejection records `upstream_called: false` and retains no mapped
-upstream values. A status without the responding layer and upstream-call result
-cannot pass.
+- wrong, missing, empty, whitespace-bearing, control-bearing, or case-mutated
+  scheme values;
+- missing or multiple Host fields, comma-joined values, ports, case changes,
+  trailing dots, whitespace, userinfo, scheme prefixes, paths, queries,
+  fragments, escapes, malformed labels, IP literals, and non-ASCII values;
+- missing or multiple Origin fields, comma-joined values, wrong or case-mutated
+  schemes and hosts, explicit ports, trailing dots or slashes, paths, queries,
+  fragments, whitespace, userinfo, malformed authorities, escapes, IP literals,
+  non-ASCII values, `null`, and wildcard values;
+- empty or populated request-supplied upstream Host and Origin overrides; and
+- compound hostile inputs proving scheme, Host, Origin, host override, and
+  origin override precedence.
+
+Scheme and Host policy rejection uses synthetic edge status `421`. Origin policy
+rejection uses `403`. Every rejection records `upstream_called: false` and no
+mapped upstream markers. A status without the responding layer and upstream-call
+result cannot pass.
 
 ## Bounded and redacted evidence
 
-Retained case evidence is limited to eight reviewed semantic fields and 4096
-canonical UTF-8 bytes. Failure output is one JSON line capped at 240 characters.
-The validator never copies an attacker-controlled key, path, header, or value
-into diagnostics.
+Retained case evidence is limited to nine reviewed semantic fields and 12288
+canonical UTF-8 bytes. It never contains raw request scheme, Host, Origin, or
+override values. Failure output is one JSON line capped at 240 characters and
+never copies an attacker-controlled argument, key, header, or value.
 
-The source artifacts and retained evidence reject credential assignments,
-Authorization, Cookie, ticket, private-key, URL, hostname, IP-address,
-filesystem-path, email, user-data, and transcript-shaped material. Structural
-fixture filenames, the reviewed route, and synthetic mapping markers are
-validated before narrow scanner exemptions apply. The fixture stores semantic
-input classes such as `hostile_host_syntax`; it does not retain hostile raw Host
-or Origin bytes.
+The validator scans every retained artifact: `README.md`, `cases.json`,
+`validate.py`, `test_validate.py`, and `validation-baseline.json`. It rejects
+credential assignments, Basic or Bearer payloads, Cookie payloads, ticket
+payloads, private-key material, URLs, hostnames, IPv4 and IPv6 addresses,
+absolute filesystem paths, email addresses, user data, and transcript-shaped
+material.
 
-## Validation and mutation coverage
+Exemptions are narrow and structural:
+
+- exact reserved `.invalid` fixture authorities and their frozen mutation forms;
+- the exact reviewed WebSocket route;
+- exact artifact filenames and validator command paths; and
+- complete detector-definition or explicit negative-test-canary source lines.
+
+Prefix, suffix, alternate host, alternate URL, and adjacent content do not inherit
+an exemption. Tests append each forbidden class to every artifact and require
+rejection.
+
+## Validation, mutation, and identity binding
 
 `validate.py` uses only the Python standard library. It rejects duplicate JSON
 keys, non-finite numbers, malformed UTF-8, excessive input, deep or wide JSON,
 unknown keys, changed case order, changed mapping or policy, semantic outcome
-mismatches, unbounded evidence, unsafe retained data, and changed benchmark
-evidence. Explicit exceptions preserve the same checks under `python3 -O`.
+mismatches, unsafe retained data, and changed benchmark evidence. Explicit
+exceptions preserve the same checks under `python3 -O`.
 
-`test_validate.py` runs real normal and optimized validator processes. Mutation
-tests change every mapping field, every request classification, accepted and
-rejected expected results, evidence bounds, the baseline, duplicate keys,
-encoding, and retained-data canaries. Normal and optimized failures must have the
-same bounded semantic output and status `2`.
+The validator code-pins the canonical cases digest, a canonical semantic digest
+over mapping, policy, evidence contract, raw requests, and independently
+computed outcomes, plus the baseline digest. The baseline repeats the semantic
+digest and binds the normalized README, cases, validator, and tests. Coordinated
+fixture, expected-result, semantic, and baseline mutations fail unless an
+independent reviewed root is also updated. Aggregate registration supplies that
+independent five-file raw digest and size root after the aggregate owner releases
+exclusive ownership.
 
 Run from the repository root:
 
@@ -100,31 +126,18 @@ python3 -m py_compile \
   contracts/fixtures/deployment-security/host-origin-mapping/test_validate.py
 ```
 
-A temporary mutated fixture can be checked without requiring its benchmark to
-match:
-
-```sh
-python3 contracts/fixtures/deployment-security/host-origin-mapping/validate.py \
-  --cases <synthetic-temporary-file> --skip-baseline
-```
-
-## Baseline and scope limits
-
 `validation-baseline.json` records 30 observed normal-process samples and 30
-optimized-process samples, exact commands, the local environment, linear
-interpolated distribution statistics, and a normalized SHA-256 digest over the
-README, cases, validator, and tests. The validator code-pins the exact cases and
-baseline identities. `threshold` is `null` because DEP-03 has no reviewed
-latency budget. These measurements are reproducibility evidence, not a
-performance promise.
+optimized-process samples. `threshold` is `null` because DEP-03 has no reviewed
+latency budget. The observations are reproducibility evidence, not a performance
+promise.
 
 Accessibility is N/A. This non-UI fixture creates no controls, focus order,
 semantic names, screen-reader or VoiceOver surface, Switch Control behavior,
 Dynamic Type or browser-zoom layout, contrast, motion, transparency, or touch
-targets. It does not remove any client accessibility requirement.
+targets. It removes no client accessibility requirement.
 
-The fixture does not prove a live edge, Hermes behavior, Caddy/Traefik parity,
-TLS, DNS, private reachability, firewall enforcement, authentication, or a
-production deployment. It does not broaden the DEP-02 allowlist and is not
-registered in the aggregate fixture index by this issue; registry ownership
-remains separate.
+The fixture does not prove a live edge, Hermes behavior, proxy parity, TLS, DNS,
+private reachability, firewall enforcement, authentication, or production
+deployment. It does not broaden the DEP-02 allowlist. Aggregate registry edits
+remain blocked until the active registry-owner lane merges and releases those
+files.
