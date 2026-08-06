@@ -53,11 +53,11 @@ EXPECTED_BOUND_SHA256 = {
     "README.md": "1ef9daff8bd9d6b260489966cba522088d76c6d08f0e263514e83f5d362a726d",
     "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
     "preflight.py": "03ae31cced667f4dea1f1e4b3358e2be20cd1e4484c47c649ef60882af886c3c",
-    "validate.py": "8c7bdf74d81cec36709fa45b8d0d0d5df9365d193d3929ebe3f07acd334cdad3",
+    "validate.py": "e6bbc18ab945c0dd636a2615f6bdb947b0a9c857487a4009c7b37a5579192b27",
     "test_validate.py": "d19840026d9d913e9943bd333baaf07551950fba95d555ff083ba6a523871a93",
     "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
 }
-EXPECTED_BASELINE_SHA256 = "e166ea66f475664039b08691e7e1aa475d52ce2fb596b80a571ff886f0a4a903"
+EXPECTED_BASELINE_SHA256 = "e5a11f906c36bf0eeeb819d66d1a7ecec2c4bb6ea6d7cbecd6b8f9b80e4011c1"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
