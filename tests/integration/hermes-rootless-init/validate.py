@@ -112,6 +112,48 @@ CASE_IDS = (
     "unsafe-workaround-arbitrary-user",
     "unsafe-workaround-capability-escalation",
 )
+MATRIX_COMMON_KEYS = {
+    "executor",
+    "user_namespace",
+    "volume_state",
+    "required_caps",
+    "conditional_caps",
+    "not_source_justified",
+    "reason_codes",
+}
+MATRIX_EXECUTORS = {"docker", "podman"}
+POLICY_REASON_CODES = {
+    "unsafe-workaround-capability-escalation": [
+        "privileged",
+        "capability_escalation",
+        "host_network",
+        "published_port",
+        "host_profile_bind",
+        "no_new_privileges_disabled",
+    ],
+    "unsafe-workaround-arbitrary-user": ["arbitrary_user_override"],
+}
+RUNTIME_CASE_KEYS = {
+    "id",
+    "kind",
+    "executor",
+    "rootless",
+    "boundary",
+    "runtime",
+    "cleanup",
+    "expected",
+}
+HARNESS_CASE_KEYS = {"id", "kind", "executor", "rootless", "observed", "expected"}
+POLICY_CASE_KEYS = {"id", "kind", "executor", "rootless", "mutation", "expected"}
+CLEANUP_CASE_KEYS = {"id", "kind", "executor", "rootless", "runtime", "cleanup", "expected"}
+CASE_KEYS_BY_ID = {
+    "docker-cap-drop-all-exit-126": RUNTIME_CASE_KEYS,
+    "podman-rootless-supervise-perms-exit-2": RUNTIME_CASE_KEYS,
+    "harness-hostconfig-binds-volume-assertion": HARNESS_CASE_KEYS,
+    "unsafe-workaround-capability-escalation": POLICY_CASE_KEYS,
+    "unsafe-workaround-arbitrary-user": POLICY_CASE_KEYS,
+    "cleanup-after-failed-readiness": CLEANUP_CASE_KEYS,
+}
 
 
 class ValidationError(ValueError):
@@ -290,6 +332,8 @@ def _validate_source(data: dict[str, Any]) -> None:
 
 
 def _validate_matrix(data: dict[str, Any]) -> None:
+    # Executor identity is evidence, not decoration: duplicates or a missing
+    # variant could make an incomplete matrix look like a passing comparison.
     matrix = _exact_keys(data["capability_matrix"], {"status", "not_live_verified", "entries"})
     if _string(matrix["status"]) != "candidate_only_pending_review":
         raise ValidationError("candidate_status_mismatch")
@@ -298,14 +342,16 @@ def _validate_matrix(data: dict[str, Any]) -> None:
     entries = _list(matrix["entries"])
     if len(entries) != 2:
         raise ValidationError("capability_entry_count")
+    seen_executors: set[str] = set()
     for entry in entries:
-        required_keys = {"executor", "user_namespace", "volume_state", "required_caps", "conditional_caps", "not_source_justified", "reason_codes"}
-        if isinstance(entry, dict) and "preconditions" in entry:
-            required_keys.add("preconditions")
+        if not isinstance(entry, dict):
+            raise ValidationError("object_required")
+        executor = _string(entry.get("executor"))
+        if executor not in MATRIX_EXECUTORS or executor in seen_executors:
+            raise ValidationError("capability_executor_count")
+        seen_executors.add(executor)
+        required_keys = MATRIX_COMMON_KEYS | ({"preconditions"} if executor == "podman" else set())
         item = _exact_keys(entry, required_keys)
-        executor = _string(item["executor"])
-        if executor not in {"docker", "podman"}:
-            raise ValidationError("executor_mismatch")
         namespace = _string(item["user_namespace"])
         expected_namespace = "rootful" if executor == "docker" else "rootless"
         if namespace != expected_namespace:
@@ -319,9 +365,11 @@ def _validate_matrix(data: dict[str, Any]) -> None:
         if reasons != ["stage2_targeted_chown", "stage2_setuidgid", "main_wrapper_setuidgid"]:
             raise ValidationError("capability_reason_mismatch")
         if executor == "podman":
-            preconditions = _string_list(item.get("preconditions"))
+            preconditions = _string_list(item["preconditions"])
             if preconditions != ["subuid_mapping_includes_hermes_uid", "subgid_mapping_includes_hermes_gid", "rootless_user_namespace"]:
                 raise ValidationError("rootless_precondition_mismatch")
+    if seen_executors != MATRIX_EXECUTORS:
+        raise ValidationError("capability_executor_count")
 
 
 def _validate_proposed_run(data: dict[str, Any]) -> None:
@@ -423,6 +471,16 @@ def _validate_cleanup(value: Any) -> None:
             raise ValidationError("cleanup_leftovers")
 
 
+def _validate_executor_identity(executor_value: Any, rootless_value: Any) -> str:
+    executor = _string(executor_value)
+    rootless = _bool(rootless_value)
+    if executor == "docker" and not rootless:
+        return executor
+    if executor == "podman" and rootless:
+        return executor
+    raise ValidationError("executor_identity_mismatch")
+
+
 def _validate_runtime_case(case: dict[str, Any]) -> str:
     runtime = _exact_keys(
         case["runtime"],
@@ -441,12 +499,7 @@ def _validate_runtime_case(case: dict[str, Any]) -> str:
         raise ValidationError("raw_log_retention")
     _validate_boundary(case["boundary"])
     _validate_cleanup(case["cleanup"])
-    executor = _string(case["executor"])
-    rootless = _bool(case["rootless"])
-    if executor == "docker" and rootless:
-        raise ValidationError("docker_rootless_flag")
-    if executor == "podman" and not rootless:
-        raise ValidationError("podman_rootless_required")
+    executor = _validate_executor_identity(case["executor"], case["rootless"])
     if executor == "docker":
         if (exit_code, failure_code, warning_codes) != (126, "s6_setuidgid_permission_denied", []):
             raise ValidationError("docker_observation_mismatch")
@@ -469,17 +522,13 @@ def _validate_harness_case(case: dict[str, Any]) -> str:
         raise ValidationError("mount_observation_mismatch")
     if _string(observed["assertion"]) != "named_volume_must_not_appear_in_hostconfig_binds":
         raise ValidationError("harness_assertion_mismatch")
+    if _validate_executor_identity(case["executor"], case["rootless"]) != "docker":
+        raise ValidationError("harness_executor_mismatch")
     return "harness_defect"
 
 
 def _validate_policy_case(case: dict[str, Any]) -> str:
-    mutation = _exact_keys(case["mutation"], set(case["mutation"]))
-    executor = _string(case["executor"])
-    rootless = _bool(case["rootless"])
-    if executor == "docker" and rootless:
-        raise ValidationError("docker_rootless_flag")
-    if executor == "podman" and not rootless:
-        raise ValidationError("podman_rootless_required")
+    _validate_executor_identity(case["executor"], case["rootless"])
     if case["id"] == "unsafe-workaround-capability-escalation":
         expected_keys = {
             "cap_drop",
@@ -491,8 +540,7 @@ def _validate_policy_case(case: dict[str, Any]) -> str:
             "host_profile_bind",
             "network_internal",
         }
-        if set(mutation) != expected_keys:
-            raise ValidationError("unsafe_mutation_keys")
+        mutation = _exact_keys(case["mutation"], expected_keys)
         _string_list(mutation["cap_drop"], exact=[])
         _string_list(mutation["cap_add"], exact=["ALL"])
         if not _bool(mutation["privileged"]):
@@ -518,8 +566,7 @@ def _validate_policy_case(case: dict[str, Any]) -> str:
             "host_profile_bind",
             "network_internal",
         }
-        if set(mutation) != expected_keys:
-            raise ValidationError("unsafe_user_mutation_keys")
+        mutation = _exact_keys(case["mutation"], expected_keys)
         if _string(mutation["user_override"]) != "arbitrary_non_hermes_uid":
             raise ValidationError("arbitrary_user_mutation_missing")
         _string_list(mutation["cap_drop"], exact=["ALL"])
@@ -540,7 +587,7 @@ def _validate_cleanup_case(case: dict[str, Any]) -> str:
     if (_string(runtime["readiness"]), _string(runtime["failure_code"])) != ("failed", "s6_supervise_perms_chown_warning"):
         raise ValidationError("cleanup_runtime_mismatch")
     _validate_cleanup(case["cleanup"])
-    if _string(case["executor"]) != "podman" or _bool(case["rootless"]) is not True:
+    if _validate_executor_identity(case["executor"], case["rootless"]) != "podman":
         raise ValidationError("cleanup_executor_mismatch")
     return "cleanup_complete"
 
@@ -548,22 +595,10 @@ def _validate_cleanup_case(case: dict[str, Any]) -> str:
 def _validate_case(case: Any) -> tuple[str, str]:
     if not isinstance(case, dict):
         raise ValidationError("case_object_required")
-    allowed_keys = {
-        "id",
-        "kind",
-        "executor",
-        "rootless",
-        "expected",
-        "boundary",
-        "runtime",
-        "cleanup",
-        "observed",
-        "mutation",
-    }
-    if not set(case) <= allowed_keys:
-        raise ValidationError("case_keys_mismatch")
-    item = case
-    case_id = _string(item["id"])
+    case_id = _string(case.get("id"))
+    if case_id not in CASE_KEYS_BY_ID:
+        raise ValidationError("unknown_case")
+    item = _exact_keys(case, CASE_KEYS_BY_ID[case_id])
     kind = _string(item["kind"])
     expected = item["expected"]
     if not isinstance(expected, dict):
@@ -589,15 +624,15 @@ def _validate_case(case: Any) -> tuple[str, str]:
         if expected != {"classification": classification, "correction": "inspect_native_mount_type_and_source_kind"}:
             raise ValidationError("harness_expected_mismatch")
         return case_id, classification
-    if case_id in {"unsafe-workaround-capability-escalation", "unsafe-workaround-arbitrary-user"}:
+    if case_id in POLICY_REASON_CODES:
         if kind != "policy_mutation":
             raise ValidationError("unsafe_case_kind")
         classification = _validate_policy_case(item)
-        if set(expected) != {"classification", "reason_codes"}:
+        if expected.keys() != {"classification", "reason_codes"}:
             raise ValidationError("unsafe_expected_keys")
-        reason_codes = _string_list(expected["reason_codes"])
-        if expected["classification"] != classification or not reason_codes:
+        if expected["classification"] != classification:
             raise ValidationError("unsafe_expected_mismatch")
+        _string_list(expected["reason_codes"], exact=POLICY_REASON_CODES[case_id])
         return case_id, classification
     if case_id == "cleanup-after-failed-readiness":
         if kind != "cleanup_observation":
@@ -674,11 +709,22 @@ def validate_fixture(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Apply URL/header/assignment redactions before path and blob scans so a
+# secret query parameter or credential cannot be exposed by a later rewrite.
 _REDACTION_PATTERNS = (
-    (re.compile(r"(?i)(authorization\s*:\s*(?:basic|bearer)\s+)[^\s,]+"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)(cookie\s*:\s*)[^\r\n]+"), r"\1[REDACTED]"),
     (re.compile(r"https?://[^\s]+"), "[REDACTED_URL]"),
-    (re.compile(r"(?:/Users|/private|/home|/tmp|/var)/[^\s]+"), "[REDACTED_PATH]"),
+    (re.compile(r"(?i)\bauthorization\s*:\s*(?:basic|bearer|token)\s+[^\s,;]+"), "Authorization: [REDACTED]"),
+    (re.compile(r"(?i)\bx-api-key\s*:\s*[^\s,;]+"), "X-API-Key: [REDACTED]"),
+    (re.compile(r"(?i)\bcookie\s*:\s*[^\r\n]+"), "Cookie: [REDACTED]"),
+    (
+        re.compile(
+            r'''(?i)\b(?:api[_-]?key|access[_-]?key|token)\s*[:=]\s*(?:"[^"\\r\\n]*"|'[^'\\r\\n]*'|[^\s,;]+)'''
+        ),
+        "[REDACTED_ASSIGNMENT]",
+    ),
+    (re.compile(r"(?i)\b[A-Z]:[\\/][^\s,;]+"), "[REDACTED_PATH]"),
+    (re.compile(r"(?<![A-Za-z0-9_])\\\\[^\s,;]+"), "[REDACTED_PATH]"),
+    (re.compile(r"(?<![A-Za-z0-9_])/(?!/)[^\s,;]+"), "[REDACTED_PATH]"),
     (re.compile(r"\b(?:[A-Za-z0-9+/]{32,}={0,2})\b"), "[REDACTED_BLOB]"),
 )
 
@@ -691,7 +737,7 @@ def redact_diagnostic(value: str) -> str:
     for pattern, replacement in _REDACTION_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
     # Exercise the base64 decoder only as a shape check; never retain bytes.
-    for token in re.findall(r"\b[A-Za-z0-9+/]{24,}={0,2}\b", redacted):
+    for token in re.findall(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,}={0,2}", redacted):
         try:
             base64.b64decode(token, validate=True)
         except Exception:

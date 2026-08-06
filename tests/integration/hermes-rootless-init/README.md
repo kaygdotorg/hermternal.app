@@ -61,6 +61,12 @@ for each executor:
 | Docker | rootful | `CAP_CHOWN`, `CAP_SETGID`, `CAP_SETUID` | the image's root bootstrap remains PID 1 |
 | Podman | rootless | `CAP_CHOWN`, `CAP_SETGID`, `CAP_SETUID` | rootless user namespace and subordinate UID/GID mappings include the target `hermes` IDs |
 
+The validator requires exactly one Docker/rootful entry and exactly one
+Podman/rootless entry. Entry order is not evidence identity: duplicates,
+omissions, executor/namespace swaps, and Docker-only `preconditions` fields are
+rejected. The matrix remains candidate-only and retains the exact three-capability
+set; it is not a live approval.
+
 `CAP_CHOWN` can be omitted only for a separately verified, already-owned
 volume with no UID/GID remap. The checked-in case is a fresh named volume, so
 the candidate includes it. The source does not justify adding
@@ -122,9 +128,20 @@ The deterministic fixture distinguishes:
 - `cleanup_complete`: a failed readiness attempt is still safely cleaned when
   the exact generated project is recognized and all leftover counts are zero.
 
+For `unsafe_workaround_rejected`, reason codes are exact and mutation-bound:
+capability escalation requires `privileged`, `capability_escalation`,
+`host_network`, `published_port`, `host_profile_bind`, and
+`no_new_privileges_disabled`; arbitrary-user override requires only
+`arbitrary_user_override`. Wrong, reordered, missing, or extra codes fail.
+
 The validator never echoes raw logs, paths, URLs, credentials, cookies,
-headers, tokens, PTY bytes, or hostile JSON keys. Errors are one bounded JSON
-line and remain redacted under normal and optimized Python execution.
+headers, tokens, PTY bytes, or hostile JSON keys. The public redaction helper
+also removes `Authorization: Token`, `X-API-Key`, `api_key`/`access_key`/`token`
+assignments, Base64-shaped blobs, and POSIX, Windows, or UNC absolute paths.
+Errors are one bounded JSON line and remain redacted under normal and optimized
+Python execution. Each case kind has an exact top-level schema; fields from a
+runtime, harness, policy, or cleanup variant cannot be carried into another
+variant.
 
 ## Offline verification
 
@@ -139,6 +156,12 @@ python3 -m py_compile \
   tests/integration/hermes-rootless-init/validate.py \
   tests/integration/hermes-rootless-init/test_validate.py
 ```
+
+The regression suite runs the real validator CLI in both normal and optimized
+Python modes. Its table-driven nearby mutations cover duplicate or missing
+Docker/Podman matrix entries, Docker-only fields, wrong/reordered/missing/extra
+policy reason codes, irrelevant case-variant fields, unsafe live claims, and
+sensitive diagnostic shapes.
 
 This is a non-UI protocol fixture. Accessibility verification is N/A because
 it creates no controls, focus order, semantic names, screen-reader or

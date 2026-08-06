@@ -15,6 +15,7 @@ import validate
 
 FIXTURE_DIR = Path(__file__).resolve().parent
 FIXTURE_PATH = FIXTURE_DIR / "cases.json"
+PYTHON_MODES = (("normal", False), ("optimized", True))
 
 
 class RootlessInitValidatorTests(unittest.TestCase):
@@ -24,6 +25,13 @@ class RootlessInitValidatorTests(unittest.TestCase):
     def assert_rejected(self, fixture: dict[str, object]) -> None:
         with self.assertRaises(validate.ValidationError):
             validate.validate_fixture(fixture)
+
+    def run_cli(self, path: Path = FIXTURE_PATH, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend([str(validate.__file__), "--fixture", str(path)])
+        return subprocess.run(command, capture_output=True, text=True, check=False)
 
     def test_checked_in_fixture_distinguishes_all_required_classes(self) -> None:
         summary = validate.validate_fixture(self.fixture)
@@ -43,19 +51,16 @@ class RootlessInitValidatorTests(unittest.TestCase):
 
     def test_real_cli_passes_in_normal_and_optimized_python(self) -> None:
         outputs: list[dict[str, object]] = []
-        for optimized in (False, True):
-            command = [sys.executable]
-            if optimized:
-                command.append("-O")
-            command.extend([str(validate.__file__)])
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0, (optimized, result.stderr))
-            self.assertNotIn("Traceback", result.stdout + result.stderr)
-            parsed = json.loads(result.stdout)
-            self.assertTrue(parsed["ok"])
-            self.assertEqual(parsed["case_count"], 6)
-            self.assertEqual(parsed["errors"], [])
-            outputs.append(parsed)
+        for mode, optimized in PYTHON_MODES:
+            with self.subTest(mode=mode):
+                result = self.run_cli(optimized=optimized)
+                self.assertEqual(result.returncode, 0, (mode, result.stderr))
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+                parsed = json.loads(result.stdout)
+                self.assertTrue(parsed["ok"])
+                self.assertEqual(parsed["case_count"], 6)
+                self.assertEqual(parsed["errors"], [])
+                outputs.append(parsed)
         self.assertEqual(outputs[0], outputs[1])
 
     def test_real_cli_rejects_mutated_fixture_without_echoing_input(self) -> None:
@@ -64,19 +69,101 @@ class RootlessInitValidatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mutated.json"
             path.write_text(json.dumps(mutated), encoding="utf-8")
-            for optimized in (False, True):
-                command = [sys.executable]
-                if optimized:
-                    command.append("-O")
-                command.extend([str(validate.__file__), "--fixture", str(path)])
-                result = subprocess.run(command, capture_output=True, text=True, check=False)
-                self.assertEqual(result.returncode, 1, (optimized, result.stderr))
-                self.assertNotIn("Traceback", result.stdout + result.stderr)
-                parsed = json.loads(result.stdout)
-                self.assertFalse(parsed["ok"])
-                self.assertEqual(parsed["errors"], ["validation_failed"])
-                self.assertNotIn(str(path), result.stdout)
-                self.assertNotIn("CAP_SYS_ADMIN", result.stdout)
+            for mode, optimized in PYTHON_MODES:
+                with self.subTest(mode=mode):
+                    result = self.run_cli(path, optimized=optimized)
+                    self.assertEqual(result.returncode, 1, (mode, result.stderr))
+                    self.assertNotIn("Traceback", result.stdout + result.stderr)
+                    parsed = json.loads(result.stdout)
+                    self.assertFalse(parsed["ok"])
+                    self.assertEqual(parsed["errors"], ["validation_failed"])
+                    self.assertNotIn(str(path), result.stdout)
+                    self.assertNotIn("CAP_SYS_ADMIN", result.stdout)
+
+    def test_real_cli_rejects_nearby_mutations_in_both_python_modes(self) -> None:
+        def duplicate_docker(value: dict[str, object]) -> None:
+            entry = value["capability_matrix"]["entries"][1]
+            entry["executor"] = "docker"
+            entry["user_namespace"] = "rootful"
+            entry.pop("preconditions")
+
+        def duplicate_podman(value: dict[str, object]) -> None:
+            entry = value["capability_matrix"]["entries"][0]
+            entry["executor"] = "podman"
+            entry["user_namespace"] = "rootless"
+            entry["preconditions"] = [
+                "subuid_mapping_includes_hermes_uid",
+                "subgid_mapping_includes_hermes_gid",
+                "rootless_user_namespace",
+            ]
+
+        def docker_preconditions(value: dict[str, object]) -> None:
+            value["capability_matrix"]["entries"][0]["preconditions"] = ["unexpected"]
+
+        def wrong_reason(value: dict[str, object]) -> None:
+            case = next(item for item in value["cases"] if item["id"] == "unsafe-workaround-capability-escalation")
+            case["expected"]["reason_codes"] = ["not-a-real-reason"]
+
+        def reordered_reasons(value: dict[str, object]) -> None:
+            case = next(item for item in value["cases"] if item["id"] == "unsafe-workaround-capability-escalation")
+            case["expected"]["reason_codes"] = list(reversed(case["expected"]["reason_codes"]))
+
+        def missing_reason(value: dict[str, object]) -> None:
+            case = next(item for item in value["cases"] if item["id"] == "unsafe-workaround-capability-escalation")
+            case["expected"]["reason_codes"] = case["expected"]["reason_codes"][:-1]
+
+        def extra_reason(value: dict[str, object]) -> None:
+            case = next(item for item in value["cases"] if item["id"] == "unsafe-workaround-capability-escalation")
+            case["expected"]["reason_codes"].append("not-a-real-reason")
+
+        def runtime_irrelevant_field(value: dict[str, object]) -> None:
+            case = next(item for item in value["cases"] if item["id"] == "docker-cap-drop-all-exit-126")
+            case["mutation"] = {}
+
+        def harness_irrelevant_field(value: dict[str, object]) -> None:
+            case = next(item for item in value["cases"] if item["id"] == "harness-hostconfig-binds-volume-assertion")
+            case["runtime"] = {}
+
+        def policy_irrelevant_field(value: dict[str, object]) -> None:
+            case = next(item for item in value["cases"] if item["id"] == "unsafe-workaround-arbitrary-user")
+            case["boundary"] = {}
+
+        def cleanup_irrelevant_field(value: dict[str, object]) -> None:
+            case = next(item for item in value["cases"] if item["id"] == "cleanup-after-failed-readiness")
+            case["observed"] = {}
+
+        def live_claim(value: dict[str, object]) -> None:
+            value["live_execution"] = True
+
+        mutations = (
+            ("duplicate_docker", duplicate_docker),
+            ("duplicate_podman", duplicate_podman),
+            ("docker_preconditions", docker_preconditions),
+            ("wrong_reason", wrong_reason),
+            ("reordered_reasons", reordered_reasons),
+            ("missing_reason", missing_reason),
+            ("extra_reason", extra_reason),
+            ("runtime_irrelevant_field", runtime_irrelevant_field),
+            ("harness_irrelevant_field", harness_irrelevant_field),
+            ("policy_irrelevant_field", policy_irrelevant_field),
+            ("cleanup_irrelevant_field", cleanup_irrelevant_field),
+            ("live_claim", live_claim),
+        )
+        for label, mutate in mutations:
+            mutated = copy.deepcopy(self.fixture)
+            mutate(mutated)
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / f"{label}.json"
+                path.write_text(json.dumps(mutated), encoding="utf-8")
+                for mode, optimized in PYTHON_MODES:
+                    with self.subTest(mutation=label, mode=mode):
+                        result = self.run_cli(path, optimized=optimized)
+                        self.assertEqual(result.returncode, 1, (label, mode, result.stderr))
+                        self.assertNotIn("Traceback", result.stdout + result.stderr)
+                        parsed = json.loads(result.stdout)
+                        self.assertFalse(parsed["ok"])
+                        self.assertEqual(parsed["errors"], ["validation_failed"])
+                        self.assertNotIn(str(path), result.stdout)
 
     def test_duplicate_keys_are_rejected_before_schema_validation(self) -> None:
         with self.assertRaises(validate.DuplicateKeyError):
@@ -181,21 +268,33 @@ class RootlessInitValidatorTests(unittest.TestCase):
         self.assertFalse(self.fixture["approved_boundary"]["host_profile_bind"])
 
     def test_redaction_is_bounded_and_removes_sensitive_shapes(self) -> None:
-        hostile = (
-            "Authorization: Bearer live-secret-token "
-            "Cookie: session=private-cookie "
-            "https://private.example.test/path?token=secret "
-            "/Users/operator/private/transcript.txt "
-            "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+        samples = (
+            ("authorization_token", "Authorization: Token live-secret-token", ("live-secret-token",)),
+            ("authorization_bearer", "Authorization: Bearer live-bearer-token", ("live-bearer-token",)),
+            ("api_header", "X-API-Key: live-api-key", ("live-api-key",)),
+            ("api_assignment", "api_key=live-api-key", ("live-api-key",)),
+            ("access_assignment", "access_key: 'live-access-key'", ("live-access-key",)),
+            ("token_assignment", "token=\"live-assignment-token\"", ("live-assignment-token",)),
+            ("cookie", "Cookie: session=private-cookie", ("private-cookie",)),
+            ("url", "https://private.example.test/path?token=secret", ("https://private.example.test", "secret")),
+            ("mac_path", "/Applications/Private.app/data", ("/Applications/Private.app",)),
+            ("unix_path", "/Users/operator/private/transcript.txt", ("/Users/operator",)),
+            ("windows_path", r"C:\\Users\\operator\\private\\token.txt", (r"C:\\Users\\operator",)),
+            ("unc_path", r"\\\\server\\share\\private.txt", (r"\\\\server\\share",)),
+            ("base64_blob", "QWxhZGRpbjpvcGVuIHNlc2FtZQ==", ("QWxhZGRpbjpvcGVu",)),
         )
-        redacted = validate.redact_diagnostic(hostile)
+        for label, hostile, forbidden_values in samples:
+            with self.subTest(shape=label):
+                redacted = validate.redact_diagnostic(hostile)
+                self.assertLessEqual(len(redacted.encode("utf-8")), validate.MAX_ERROR_MESSAGE_BYTES)
+                for forbidden in forbidden_values:
+                    self.assertNotIn(forbidden, redacted)
+                self.assertIn("[REDACTED", redacted)
+
+        combined = " ".join(sample[1] for sample in samples)
+        redacted = validate.redact_diagnostic(combined)
         self.assertLessEqual(len(redacted.encode("utf-8")), validate.MAX_ERROR_MESSAGE_BYTES)
-        self.assertNotIn("live-secret-token", redacted)
-        self.assertNotIn("private-cookie", redacted)
-        self.assertNotIn("https://private.example.test", redacted)
-        self.assertNotIn("/Users/operator", redacted)
-        self.assertNotIn("QWxhZGRpbjpvcGVu", redacted)
-        self.assertIn("[REDACTED]", redacted)
+        self.assertIn("[REDACTED", redacted)
 
     def test_proposed_run_is_rootless_podman_and_preserves_boundary(self) -> None:
         proposal = self.fixture["proposed_one_run"]
