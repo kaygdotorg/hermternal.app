@@ -1,6 +1,6 @@
 # Protocol fixtures
 
-This directory will contain synthetic, redacted request, response, WebSocket, Terminal, and recovery fixtures for both clients.
+This directory contains synthetic, redacted request, response, WebSocket, Terminal, and recovery fixtures for both clients.
 
 ## Required coverage
 
@@ -23,6 +23,47 @@ Fixtures must represent:
 Fixtures must identify the pinned Hermes revision `f5be9236e00ddf2f2a412697f267078fc4ee068e`, contract version, expected state transitions, and whether the fixture is web-only or shared. A native OAuth/OIDC provider that requires an unsupported callback transport is a negative fixture, not a fallback path.
 
 Use synthetic data only. Do not commit credentials, cookies, WebSocket tickets, ticket fragments, live transcripts, hostnames, tokens, secrets, provider data, or user data. Invalid-ticket fixtures use non-secret markers and verify that the pinned source's bounded audit fragment is removed from retained logs. Fixtures describe behavior; they do not create a transcript mirror.
+
+## C-19 aggregate registry
+
+[`index.json`](index.json) is the language-neutral registry consumed by later
+TypeScript and Swift parity checks. [`schema.json`](schema.json) documents the
+wire-neutral shape. Each ready fixture root lists every checked-in artifact,
+its byte count, and its SHA-256 digest. The aggregate validator also rejects
+unsafe paths, duplicate JSON keys, non-finite numbers, oversized input,
+malformed UTF-8, credential-shaped values, live claims, symlinks, and unindexed
+artifacts. Domain validators remain authoritative for case semantics; the
+aggregate layer does not run them and makes no network request.
+
+A registry can be structurally valid while coverage remains `partial`. A
+`pending`, `empty`, `failure`, `cancelled`, or `unknown` coverage row is never
+promoted to successful evidence. The checked-in index keeps the C-05 connection
+restoration and C-08 stream-dependent units pending until their fixtures exist.
+`live_claim` is always `false`; a passing validator proves only synthetic
+artifact integrity and registry consistency.
+
+The validator emits one bounded semantic JSON line. Failures do not echo
+arguments, paths, keys, values, secrets, or tracebacks. Normal and optimized
+Python runs share the same checks:
+
+```sh
+python3 contracts/fixtures/validator/validate.py
+python3 -O contracts/fixtures/validator/validate.py
+python3 contracts/fixtures/validator/test_validate.py
+python3 -O contracts/fixtures/validator/test_validate.py
+python3 -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
+python3 -O -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
+python3 -m py_compile \
+  contracts/fixtures/validator/validate.py \
+  contracts/fixtures/validator/test_validate.py
+```
+
+The validator is offline. It does not start Hermes, contact a proxy or
+identity provider, open a socket, follow a referenced URL, or claim deployment
+compatibility. `validator/validation-baseline.json` records 30 raw process
+samples and their min/p50/p95/max/mean distributions for normal and optimized
+runs. It is reproducibility evidence only: `threshold` is intentionally `null`
+until the benchmark-method work defines an approved budget.
 
 ## P0-01 source review
 

@@ -1,0 +1,406 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermternal.invalid/schema/fixture-index.v1.json",
+  "title": "Hermternal language-neutral fixture index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "contract",
+    "hermes_source_sha",
+    "synthetic_only",
+    "live_claim",
+    "evidence_status",
+    "fixture_roots",
+    "coverage",
+    "parity",
+    "states",
+    "redaction",
+    "benchmark"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hermternal.fixture-index.v1"
+    },
+    "contract": {
+      "const": "dashboard-v0.0.1"
+    },
+    "hermes_source_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "synthetic_only": {
+      "const": true
+    },
+    "live_claim": {
+      "const": false
+    },
+    "evidence_status": {
+      "enum": [
+        "partial",
+        "complete"
+      ]
+    },
+    "fixture_roots": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/fixture"
+      },
+      "minItems": 1
+    },
+    "coverage": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/coverage"
+      },
+      "minItems": 1
+    },
+    "parity": {
+      "$ref": "#/$defs/parity"
+    },
+    "states": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/state"
+      },
+      "minItems": 1
+    },
+    "redaction": {
+      "$ref": "#/$defs/redaction"
+    },
+    "benchmark": {
+      "$ref": "#/$defs/benchmark"
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._/-]+$",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "platforms": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "web",
+          "ios",
+          "ipados",
+          "macos"
+        ]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "size_bytes"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path",
+        "status",
+        "contract",
+        "hermes_source_sha",
+        "synthetic_only",
+        "live_claim",
+        "platforms",
+        "states",
+        "coverage_ids",
+        "validator",
+        "files"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "pending"
+          ]
+        },
+        "contract": {
+          "const": "dashboard-v0.0.1"
+        },
+        "hermes_source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "synthetic_only": {
+          "const": true
+        },
+        "live_claim": {
+          "const": false
+        },
+        "platforms": {
+          "$ref": "#/$defs/platforms"
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "coverage_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "validator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/path"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file"
+          },
+          "minItems": 0
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "fixture_ids",
+        "platforms",
+        "required_states",
+        "notes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "pending",
+            "empty",
+            "failure",
+            "cancelled",
+            "unknown"
+          ]
+        },
+        "fixture_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "uniqueItems": true
+        },
+        "platforms": {
+          "$ref": "#/$defs/platforms"
+        },
+        "required_states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "parity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "fixture_source",
+        "platforms",
+        "pty_policy",
+        "missing_result_policy",
+        "result_equivalence",
+        "live_claim"
+      ],
+      "properties": {
+        "status": {
+          "const": "synthetic_observed"
+        },
+        "fixture_source": {
+          "const": "one_shared_registry"
+        },
+        "platforms": {
+          "$ref": "#/$defs/platforms"
+        },
+        "pty_policy": {
+          "const": "web_only_apple_blocked"
+        },
+        "missing_result_policy": {
+          "const": "block"
+        },
+        "result_equivalence": {
+          "const": "semantic_outcomes_not_platform_specific_wire_bytes"
+        },
+        "live_claim": {
+          "const": false
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "evidence_state",
+        "gate_decision",
+        "safe_state",
+        "retry_policy"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "evidence_state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "gate_decision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "safe_state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "retry_policy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "synthetic_only",
+        "contains_credentials",
+        "contains_cookies",
+        "contains_bearer_values",
+        "contains_ticket_values",
+        "contains_raw_pty_bytes",
+        "contains_transcripts",
+        "contains_live_hosts",
+        "contains_user_data",
+        "failure_output"
+      ],
+      "properties": {
+        "synthetic_only": {
+          "const": true
+        },
+        "contains_credentials": {
+          "const": false
+        },
+        "contains_cookies": {
+          "const": false
+        },
+        "contains_bearer_values": {
+          "const": false
+        },
+        "contains_ticket_values": {
+          "const": false
+        },
+        "contains_raw_pty_bytes": {
+          "const": false
+        },
+        "contains_transcripts": {
+          "const": false
+        },
+        "contains_live_hosts": {
+          "const": false
+        },
+        "contains_user_data": {
+          "const": false
+        },
+        "failure_output": {
+          "const": "one_bounded_semantic_json_line"
+        }
+      }
+    },
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "threshold",
+        "evidence_mode",
+        "build_mode"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "threshold": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "evidence_mode": {
+          "const": "observed_worktree_only"
+        },
+        "build_mode": {
+          "const": "N/A - no production or release executable"
+        }
+      }
+    }
+  }
+}

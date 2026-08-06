@@ -1,0 +1,1324 @@
+{
+  "schema": "hermternal.fixture-index.v1",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "live_claim": false,
+  "evidence_status": "partial",
+  "fixture_roots": [
+    {
+      "id": "attachment-policy",
+      "path": "attachment-policy",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "empty",
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "images-only-attachments"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "attachment-policy/README.md",
+          "sha256": "350d05a20260ea384575d9c9508246d23a2bbfdd1f0dd1e8834c56afd93a3730",
+          "size_bytes": 10377
+        },
+        {
+          "path": "attachment-policy/cases.json",
+          "sha256": "1329316d990026ff00e1285cfc4c9516cba183af96505f4e4ac5a2b5cbd16e68",
+          "size_bytes": 31110
+        },
+        {
+          "path": "attachment-policy/test_attachment_policy.py",
+          "sha256": "ac532286699a8db1747a8fb2cade5e482a894289a8b51cec70ffbbdb672a6b22",
+          "size_bytes": 29711
+        },
+        {
+          "path": "attachment-policy/validate.py",
+          "sha256": "5257fcdcd94b031a9f89e77f7b97e70936b22787f97efa5eaba563d30a7d3552",
+          "size_bytes": 48788
+        }
+      ]
+    },
+    {
+      "id": "behavioral-probe",
+      "path": "behavioral-probe",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "empty",
+        "failure",
+        "pending",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "behavioral-probe",
+        "malformed-json-redaction"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "behavioral-probe/README.md",
+          "sha256": "7a3f350bef2d83d832103ab57f283f6ff8f072a34a42c9cdaea38ad17376d065",
+          "size_bytes": 9387
+        },
+        {
+          "path": "behavioral-probe/baseline-canonical-sha256.txt",
+          "sha256": "142431718d63b7f886c9057339b18fcd42b1962cb95d2a05ae7dc04e62d5f06c",
+          "size_bytes": 65
+        },
+        {
+          "path": "behavioral-probe/probe-baseline.json",
+          "sha256": "2336209230cffe3d04515b54bbd9c17f3c514da1c86e064384b773a63b3d42bd",
+          "size_bytes": 4059
+        },
+        {
+          "path": "behavioral-probe/probe-fixtures.json",
+          "sha256": "9e9ba4463c1203b9963b14a6d33a04674f967530fb210f1dd77ba881a073ad87",
+          "size_bytes": 71389
+        },
+        {
+          "path": "behavioral-probe/test_validate.py",
+          "sha256": "1a859e6afbe283e7736d24e980daca1d76513e1c603683afbb19903bd4bb795c",
+          "size_bytes": 25252
+        },
+        {
+          "path": "behavioral-probe/validate.py",
+          "sha256": "3dbb2a18ce9e8b16482a0c75aaec857607a7dc4a4126a6f156094947e569df60",
+          "size_bytes": 54195
+        }
+      ]
+    },
+    {
+      "id": "compatibility-attestation",
+      "path": "compatibility-attestation",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "deployment-attestation"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "compatibility-attestation/README.md",
+          "sha256": "d473be26713ee91383cb0ae4b70dc47430d5aa9fe96445e84a2cec788ebc18f3",
+          "size_bytes": 7537
+        },
+        {
+          "path": "compatibility-attestation/cases.json",
+          "sha256": "bdac588896e47eb62e3292e2ab284a1b6cef0916e9e5ed83bafe28cc5de763c4",
+          "size_bytes": 7447
+        },
+        {
+          "path": "compatibility-attestation/revision_attestation.json",
+          "sha256": "3969cf7fb5bb4845b8f2b77e85f367e3040dc1d6157494f34edeeba02109b9bc",
+          "size_bytes": 1679
+        },
+        {
+          "path": "compatibility-attestation/test_validate.py",
+          "sha256": "aab4a96742d284b04bc22db65f9b812d71f5e78195b39754300ab88bdf99f5f9",
+          "size_bytes": 23419
+        },
+        {
+          "path": "compatibility-attestation/validate.py",
+          "sha256": "da997795d5fa478ca0eeaab2e9a236e5a990355a97ce20f5d800df7805ea8781",
+          "size_bytes": 45544
+        },
+        {
+          "path": "compatibility-attestation/validation-baseline.json",
+          "sha256": "a74730b86d03c96e70720402a6280f1545a02665056583fde00ea7c62733d861",
+          "size_bytes": 1558
+        }
+      ]
+    },
+    {
+      "id": "deep-link-grammar",
+      "path": "deep-link-grammar",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "private-deep-link"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deep-link-grammar/README.md",
+          "sha256": "398f6fb1d339ed6289ae0f2dc57d861a8886b2598eedbefe6f8e0204cc925cb3",
+          "size_bytes": 7384
+        },
+        {
+          "path": "deep-link-grammar/cases.json",
+          "sha256": "91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96",
+          "size_bytes": 12925
+        },
+        {
+          "path": "deep-link-grammar/test_validate.py",
+          "sha256": "d6dca76d3483b00858f559cd59eabd97b0341e0f5205bc8b067fbecd5ce3d385",
+          "size_bytes": 12970
+        },
+        {
+          "path": "deep-link-grammar/validate.py",
+          "sha256": "c01cc7958ebd573fa336d72de551e9c4b45e27397c6a38f5012eff35edff314e",
+          "size_bytes": 32925
+        }
+      ]
+    },
+    {
+      "id": "deployment-security-browser-auth",
+      "path": "deployment-security/browser-auth",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "browser-cookie-auth"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/browser-auth/README.md",
+          "sha256": "598be54b18e333ccc90caaac3c19b8710805ae4cbabe9097e03410fe7e5df2be",
+          "size_bytes": 8028
+        },
+        {
+          "path": "deployment-security/browser-auth/cases.json",
+          "sha256": "5a8a6377c79c26ffd6b64db324d92877be1d2ce55aae3196911ea80060d8a4b8",
+          "size_bytes": 18126
+        },
+        {
+          "path": "deployment-security/browser-auth/test_validate.py",
+          "sha256": "c7fab44e0a1ef0589eb808e7f310b5f9bbdd8a89c3dd08b2ba0c5e2777ae8f43",
+          "size_bytes": 16376
+        },
+        {
+          "path": "deployment-security/browser-auth/validate.py",
+          "sha256": "672a2f9a8d88e72341ddde6a509f9ef20e427ac3e8af707bc93b99173f1a3038",
+          "size_bytes": 42082
+        },
+        {
+          "path": "deployment-security/browser-auth/validation-baseline.json",
+          "sha256": "32c1e7811e52bb6d59b168aa7da2c094be0782268e727b0d83adc666d6b3bb14",
+          "size_bytes": 2308
+        }
+      ]
+    },
+    {
+      "id": "deployment-security-private-network-firewall",
+      "path": "deployment-security/private-network-firewall",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "private-network-firewall"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/private-network-firewall/README.md",
+          "sha256": "12dd9ccf0a97437221b216707f7357dfd168b0e153c8a18d95cec1d570bf62ac",
+          "size_bytes": 7161
+        },
+        {
+          "path": "deployment-security/private-network-firewall/cases.json",
+          "sha256": "1bd23d7bfc48eb758071598246ad138eaa787616539ee50926c5cbb91b3f95b8",
+          "size_bytes": 17789
+        },
+        {
+          "path": "deployment-security/private-network-firewall/test_validate.py",
+          "sha256": "3d65f8a1b0adf4d69db5e58e49838fb397bca0562cb658435f2333c25fa398f8",
+          "size_bytes": 17745
+        },
+        {
+          "path": "deployment-security/private-network-firewall/validate.py",
+          "sha256": "727c5301b07eddb424c28485c0d95c7cf474b723243614a4b066880d0b0dee32",
+          "size_bytes": 45646
+        },
+        {
+          "path": "deployment-security/private-network-firewall/validation-baseline-sha256.txt",
+          "sha256": "a3606634d1769de97b9f63354b70796e399c8f6a77e6ba34d1f0e587e672560b",
+          "size_bytes": 65
+        },
+        {
+          "path": "deployment-security/private-network-firewall/validation-baseline.json",
+          "sha256": "ff94c07032eda3c5a340a3746623b1b767653bffbaaca3cbd1ba0c04482843d7",
+          "size_bytes": 2396
+        }
+      ]
+    },
+    {
+      "id": "deployment-security-ws-ticket",
+      "path": "deployment-security/ws-ticket",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "websocket-tickets"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/ws-ticket/README.md",
+          "sha256": "c8f2335eb4a2ccb490eafacd43184a093a45953fe3ebc13c71cd1f1129ca89d9",
+          "size_bytes": 6927
+        },
+        {
+          "path": "deployment-security/ws-ticket/probe-baseline.json",
+          "sha256": "6a69abbc7b42bee6e2fdf300ddeb1b1152699895fc871d749fe355be188d510c",
+          "size_bytes": 3158
+        },
+        {
+          "path": "deployment-security/ws-ticket/test_validate.py",
+          "sha256": "a9d701c3201f3b46204f0c9dadadc0ae675a11a5a37443b7a3684e8a35f04cdb",
+          "size_bytes": 23654
+        },
+        {
+          "path": "deployment-security/ws-ticket/ticket-fixtures.json",
+          "sha256": "90a29f60aa84b662cb647cb11672394d13e97f61f7875ff5b176745996b2558b",
+          "size_bytes": 37600
+        },
+        {
+          "path": "deployment-security/ws-ticket/validate.py",
+          "sha256": "0e0d074ae7b9939482acd3e85e3fb52e12c56230a1a9db824318e24bf4367b8d",
+          "size_bytes": 55327
+        }
+      ]
+    },
+    {
+      "id": "provider-discovery",
+      "path": "provider-discovery",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "empty",
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "provider-discovery"
+      ],
+      "validator": "test_provider_discovery.py",
+      "files": [
+        {
+          "path": "provider-discovery/README.md",
+          "sha256": "e5c168421409ffbdb57f727e42fd6ac61aa51e6ffe023d9dac721e487c99bea4",
+          "size_bytes": 6539
+        },
+        {
+          "path": "provider-discovery/cases.json",
+          "sha256": "ce70efc373265bfaffe30bbdaa4e3d4cb3b668f0235c7703f5f6ad3204d2179e",
+          "size_bytes": 9495
+        },
+        {
+          "path": "provider-discovery/source_audit.json",
+          "sha256": "23563811f9c95e058319fd92e515c39251de025c4308acabc9ae2a79674ad188",
+          "size_bytes": 7415
+        },
+        {
+          "path": "provider-discovery/test_provider_discovery.py",
+          "sha256": "43ec37983f7d303b07c0b47383e907c999930047697f89a05127f29390576a18",
+          "size_bytes": 59213
+        }
+      ]
+    },
+    {
+      "id": "pty-contract",
+      "path": "pty-contract",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "web-pty"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "pty-contract/README.md",
+          "sha256": "aa32371e4703ddfdf5a96ce1c8b57abd5ece1c91076566e45941b76909d9df96",
+          "size_bytes": 6883
+        },
+        {
+          "path": "pty-contract/pty-contract-fixtures.json",
+          "sha256": "4a8e7d9988c3414360b1d0b0a929214291042576b6b1ffb7fdc287203632448e",
+          "size_bytes": 27864
+        },
+        {
+          "path": "pty-contract/test_validate.py",
+          "sha256": "cd9ba26d566fa5d9963611b0d38f222b702c6ce1236b6c4bf9aa007e21f31b14",
+          "size_bytes": 19426
+        },
+        {
+          "path": "pty-contract/validate.py",
+          "sha256": "7a240e5028e49c3f71d5ed1e89bacd0c867d3b282a5c86c1e8aefc716441ebdc",
+          "size_bytes": 81576
+        },
+        {
+          "path": "pty-contract/validation-baseline.json",
+          "sha256": "211e6d4c1bee194abd2b93dedfabfe18916981ac33eb4e0dab2ad7c24449a099",
+          "size_bytes": 2053
+        }
+      ]
+    },
+    {
+      "id": "route-allowlist",
+      "path": "route-allowlist",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "route-and-method-allowlist"
+      ],
+      "validator": "test_route_allowlist.py",
+      "files": [
+        {
+          "path": "route-allowlist/README.md",
+          "sha256": "026f0e238ce6b30b69204720c3b9374623a85a767aaf11b5cf98876461c23933",
+          "size_bytes": 10587
+        },
+        {
+          "path": "route-allowlist/cases.json",
+          "sha256": "a006ebb435abe0be048bf308f337435de2a3115a9c6f75ccd125d51e78a1c759",
+          "size_bytes": 14563
+        },
+        {
+          "path": "route-allowlist/route_allowlist.json",
+          "sha256": "0d0e9b3d54eefd15abea8fd6869e4e7a95908c9bf057441979e980490bad4e69",
+          "size_bytes": 16444
+        },
+        {
+          "path": "route-allowlist/source_audit.json",
+          "sha256": "65a26cdea086d28ee90cc7e22d81c3e48715ea28a89f1bedb9f70c4a050aa78d",
+          "size_bytes": 20165
+        },
+        {
+          "path": "route-allowlist/test_route_allowlist.py",
+          "sha256": "023adfa76aa009dbfe8984da6c88d87f9f5925d9b8143aba344162158046fb54",
+          "size_bytes": 117452
+        }
+      ]
+    },
+    {
+      "id": "source-audit-compatibility-gate",
+      "path": "source-audit/compatibility-gate",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "compatibility-gate"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "source-audit/compatibility-gate/README.md",
+          "sha256": "e4c42cc109cd85c5da35d43ea8e9f1462193ab3c0755d1f6a25d2dd6fa6d6e74",
+          "size_bytes": 11463
+        },
+        {
+          "path": "source-audit/compatibility-gate/compatibility_record.json",
+          "sha256": "baddfc67cb92cfe024dc64310a4f9b6f6ea28dab26652a1965fcf7579084559f",
+          "size_bytes": 11030
+        },
+        {
+          "path": "source-audit/compatibility-gate/test_validate.py",
+          "sha256": "4581791f875c1e8f1c6415b35679b91daa33411ce3bc3f8fa1f1919d2bf13167",
+          "size_bytes": 27230
+        },
+        {
+          "path": "source-audit/compatibility-gate/validate.py",
+          "sha256": "7de6c1742b932c14d6bf521fca03b90b737b7d31a224fee22cdadc46e8dceac8",
+          "size_bytes": 41817
+        }
+      ]
+    },
+    {
+      "id": "source-audit-model-options",
+      "path": "source-audit/model-options",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "empty",
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "model-options-source-review",
+        "model-switching"
+      ],
+      "validator": "test_model_options.py",
+      "files": [
+        {
+          "path": "source-audit/model-options/absent.json",
+          "sha256": "c850fa9d5276ab6f0a3929c9f97bc8b997df9c78ddaf404dd05006c1b9553637",
+          "size_bytes": 769
+        },
+        {
+          "path": "source-audit/model-options/empty.json",
+          "sha256": "12b8e155cba83bb50efbef4dda698b844a451454d5580465f4c1a3b7059ca74d",
+          "size_bytes": 815
+        },
+        {
+          "path": "source-audit/model-options/malformed.json",
+          "sha256": "e75fe09973cd14cd618601d0d3b180ba8a7dac7f63874df2ccfd1956b3a88054",
+          "size_bytes": 987
+        },
+        {
+          "path": "source-audit/model-options/present.json",
+          "sha256": "c9850521d8d0deb1a571d3284d7f1f994550871d10ad5b6a1823b9ab2edb4d3a",
+          "size_bytes": 1275
+        },
+        {
+          "path": "source-audit/model-options/test_model_options.py",
+          "sha256": "35cbd50542f7cafb3322ab240a4320c87b7523079aee14f484f4789e6c696a9d",
+          "size_bytes": 29971
+        },
+        {
+          "path": "source-audit/model-options/unknown-operation.json",
+          "sha256": "84195ae496a31c5e9d484e2634832c70a117138fa133d6d6f3c1427ce08ff23b",
+          "size_bytes": 835
+        }
+      ]
+    },
+    {
+      "id": "source-audit-native-bearer",
+      "path": "source-audit/native-bearer",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "native-bearer-auth"
+      ],
+      "validator": "test_native_bearer.py",
+      "files": [
+        {
+          "path": "source-audit/native-bearer/README.md",
+          "sha256": "0dd3d1b68658107bd3b7ec5cee236ef196e4dc34f82edd9426eb1a0cb1787308",
+          "size_bytes": 5677
+        },
+        {
+          "path": "source-audit/native-bearer/cases.json",
+          "sha256": "56d5c98a29672d8b383c1f0200abd389ea945d54b722313db088de7360274439",
+          "size_bytes": 22650
+        },
+        {
+          "path": "source-audit/native-bearer/source_audit.json",
+          "sha256": "bc12353629eceaf157ba6320cafcf8e8393d001c41390f14449b14daf682ff70",
+          "size_bytes": 17900
+        },
+        {
+          "path": "source-audit/native-bearer/test_native_bearer.py",
+          "sha256": "2ae703faf534e3460ce31e05d1b5e789cf6b51777120cf6a241b3dbb2f71620b",
+          "size_bytes": 35389
+        }
+      ]
+    },
+    {
+      "id": "source-audit-native-password-provider",
+      "path": "source-audit/native-password-provider",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "native-password-provider-auth",
+        "websocket-tickets"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "source-audit/native-password-provider/README.md",
+          "sha256": "dd48adfdf5f29efa95e0c2e597ab135ef7dd756c946053ecc7d2ae8dc65c8b5b",
+          "size_bytes": 7817
+        },
+        {
+          "path": "source-audit/native-password-provider/cases.json",
+          "sha256": "961cb83fc91f32fdb4b969d47620b8ca9cbaa4a05bf4006b18239e2b7864ffcf",
+          "size_bytes": 13939
+        },
+        {
+          "path": "source-audit/native-password-provider/source_audit.json",
+          "sha256": "85371c36972e529e7ea7291d9cf0c967ce3ad9f292ea4246a304f07d5fdd54c8",
+          "size_bytes": 11293
+        },
+        {
+          "path": "source-audit/native-password-provider/test_native_password_provider.py",
+          "sha256": "08ab58022f90cac2adfb457be02ef1811ecf57e469f74cbfc130fea3aa7aaffb",
+          "size_bytes": 16437
+        },
+        {
+          "path": "source-audit/native-password-provider/validate.py",
+          "sha256": "e7548a9db48dd63058082e0079d1a3e538cda56e0eb742d8393e1c832a912982",
+          "size_bytes": 74800
+        }
+      ]
+    },
+    {
+      "id": "source-audit-oauth-browser",
+      "path": "source-audit/oauth-browser",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "browser-cookie-auth"
+      ],
+      "validator": "test_oauth_browser.py",
+      "files": [
+        {
+          "path": "source-audit/oauth-browser/README.md",
+          "sha256": "0a747bb69eb1c9097a74df78fb0830b9a603a91b60523dfa9682cf38e0dd9600",
+          "size_bytes": 8660
+        },
+        {
+          "path": "source-audit/oauth-browser/cases.json",
+          "sha256": "a0961278dc2f34562b16ab7d30776972d12d201de74edd7e08463cdbd5f50178",
+          "size_bytes": 7512
+        },
+        {
+          "path": "source-audit/oauth-browser/source_audit.json",
+          "sha256": "7b7758611a9aeb520353b473e6af00136a229d623ea77c806f49f2c2c5b3e131",
+          "size_bytes": 6881
+        },
+        {
+          "path": "source-audit/oauth-browser/source_excerpts/cookies.py.txt",
+          "sha256": "4061f5e075fee015151a14ab75c7b77661400bb2ec0fa402559c0d49cae36f3e",
+          "size_bytes": 418
+        },
+        {
+          "path": "source-audit/oauth-browser/source_excerpts/nous_provider.py.txt",
+          "sha256": "53f633d5e405459ad0d042470e06af545fad6d1d02b86f23a473ece283ce8c87",
+          "size_bytes": 1898
+        },
+        {
+          "path": "source-audit/oauth-browser/source_excerpts/routes_auth.py.txt",
+          "sha256": "7a748fc29acee3d055049f0b1a12bba9e7d8aa13bc4852827888a0ebaaa507b4",
+          "size_bytes": 3456
+        },
+        {
+          "path": "source-audit/oauth-browser/test_oauth_browser.py",
+          "sha256": "b1e4b456c478288ded3675ad09aba603832355bf17f189a868758cdbe35f9d1a",
+          "size_bytes": 87727
+        }
+      ]
+    },
+    {
+      "id": "source-audit-planning-reconciliation",
+      "path": "source-audit/planning-reconciliation",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "planning-reconciliation"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "source-audit/planning-reconciliation/README.md",
+          "sha256": "39cd6aae225fe883a87558d2a52ba7800424ed269aa553f850a3071d25beb89d",
+          "size_bytes": 4870
+        },
+        {
+          "path": "source-audit/planning-reconciliation/planning_review.json",
+          "sha256": "0a84cba82e6e966ab35de187f560fd38d6e10c43dd2204062d6ebf2bc5c32077",
+          "size_bytes": 20045
+        },
+        {
+          "path": "source-audit/planning-reconciliation/test_validate.py",
+          "sha256": "4e912278671dc7809216fc26e280e191cf7279180186d45390b41b892b24407f",
+          "size_bytes": 23038
+        },
+        {
+          "path": "source-audit/planning-reconciliation/validate.py",
+          "sha256": "09f5b87f7ebb49de73a706508ab2ec26ac4b8bd734c6532a16d0b7ddd6c26587",
+          "size_bytes": 51103
+        }
+      ]
+    },
+    {
+      "id": "source-audit-pty-attach",
+      "path": "source-audit/pty-attach",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "pty-attach-lifecycle",
+        "web-pty"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "source-audit/pty-attach/README.md",
+          "sha256": "3f1172482e5b0373ebbfbc9b4b5a85104a324fa801b9fe6f9da3a5b2a25e586b",
+          "size_bytes": 7940
+        },
+        {
+          "path": "source-audit/pty-attach/pty-attach-fixtures.json",
+          "sha256": "0e32d184fa2ef693a126ecfc284eb6566fd2b0e55f662003c3f36f2209456d7a",
+          "size_bytes": 16276
+        },
+        {
+          "path": "source-audit/pty-attach/source-evidence.json",
+          "sha256": "90291fcff446327a2c5f13758d3d6d78efe076ebbc78fb5fc72f1c5d7bd97fc3",
+          "size_bytes": 10812
+        },
+        {
+          "path": "source-audit/pty-attach/validate.py",
+          "sha256": "14c312b23037e7a23495ccce169ad4c26fd3b2917b7229dd508c5867cbbba694",
+          "size_bytes": 115214
+        },
+        {
+          "path": "source-audit/pty-attach/validation-baseline.json",
+          "sha256": "496f989e8a0399ff1eef0f98c66186014e40668633d99786619b1f5d24149d6d",
+          "size_bytes": 460
+        }
+      ]
+    }
+  ],
+  "coverage": [
+    {
+      "id": "approvals-and-clarification",
+      "status": "pending",
+      "fixture_ids": [],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "C-08-dependent action fixtures are not checked in; pending is blocked, not a success."
+    },
+    {
+      "id": "behavioral-probe",
+      "status": "ready",
+      "fixture_ids": [
+        "behavioral-probe"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "The shared probe matrix is synthetic and remains blocked from live compatibility."
+    },
+    {
+      "id": "browser-cookie-auth",
+      "status": "ready",
+      "fixture_ids": [
+        "deployment-security-browser-auth",
+        "source-audit-oauth-browser"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Browser cookie and OAuth source evidence is synthetic; no cookie value is retained."
+    },
+    {
+      "id": "chat-stream-and-completion",
+      "status": "pending",
+      "fixture_ids": [],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "C-08 chat stream and completion fixtures are pending; no stream is reported as proven."
+    },
+    {
+      "id": "compatibility-gate",
+      "status": "ready",
+      "fixture_ids": [
+        "source-audit-compatibility-gate"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "The compatibility gate is an offline synthetic record."
+    },
+    {
+      "id": "connection-restoration",
+      "status": "pending",
+      "fixture_ids": [],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "C-05 state-model evidence exists, but the aggregate chat restoration fixture is pending."
+    },
+    {
+      "id": "deployment-attestation",
+      "status": "ready",
+      "fixture_ids": [
+        "compatibility-attestation"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Attestation fixtures record match and mismatch observations without a live claim."
+    },
+    {
+      "id": "images-only-attachments",
+      "status": "ready",
+      "fixture_ids": [
+        "attachment-policy"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Only the reviewed images-only policy is represented; preprocessing work remains separate."
+    },
+    {
+      "id": "malformed-json-redaction",
+      "status": "ready",
+      "fixture_ids": [
+        "behavioral-probe"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Malformed input is represented by bounded semantic markers and never raw material."
+    },
+    {
+      "id": "model-options-source-review",
+      "status": "ready",
+      "fixture_ids": [
+        "source-audit-model-options"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "empty",
+        "success",
+        "failure"
+      ],
+      "notes": "The source-reviewed model-options fixtures distinguish absent, empty, present, malformed, and unknown results."
+    },
+    {
+      "id": "model-switching",
+      "status": "pending",
+      "fixture_ids": [
+        "source-audit-model-options"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "The model-options source review supports this unit, but complete deferred-switch fixtures are pending C-08."
+    },
+    {
+      "id": "native-bearer-auth",
+      "status": "ready",
+      "fixture_ids": [
+        "source-audit-native-bearer"
+      ],
+      "platforms": [
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Native bearer source review is allowlist-only and contains no bearer value."
+    },
+    {
+      "id": "native-password-provider-auth",
+      "status": "ready",
+      "fixture_ids": [
+        "source-audit-native-password-provider"
+      ],
+      "platforms": [
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Native password-provider evidence records isolated cookie and ticket semantics without values."
+    },
+    {
+      "id": "planning-reconciliation",
+      "status": "ready",
+      "fixture_ids": [
+        "source-audit-planning-reconciliation"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Planning claims are reconciled to local synthetic source evidence."
+    },
+    {
+      "id": "private-deep-link",
+      "status": "ready",
+      "fixture_ids": [
+        "deep-link-grammar"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Private deep-link grammar is validated with reserved synthetic origins only."
+    },
+    {
+      "id": "private-network-firewall",
+      "status": "ready",
+      "fixture_ids": [
+        "deployment-security-private-network-firewall"
+      ],
+      "platforms": [
+        "web"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Private-network and firewall cases remain offline synthetic topology evidence."
+    },
+    {
+      "id": "provider-discovery",
+      "status": "ready",
+      "fixture_ids": [
+        "provider-discovery"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "empty",
+        "success",
+        "failure"
+      ],
+      "notes": "Provider discovery is provider-neutral and has explicit empty and failure outcomes."
+    },
+    {
+      "id": "pty-attach-lifecycle",
+      "status": "ready",
+      "fixture_ids": [
+        "source-audit-pty-attach"
+      ],
+      "platforms": [
+        "web"
+      ],
+      "required_states": [
+        "success",
+        "failure",
+        "unknown"
+      ],
+      "notes": "Attach, legacy disconnect, supersession, and unknown-result safety are synthetic only."
+    },
+    {
+      "id": "route-and-method-allowlist",
+      "status": "ready",
+      "fixture_ids": [
+        "route-allowlist"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "The aggregate consumes the reviewed route and method allowlist only."
+    },
+    {
+      "id": "web-pty",
+      "status": "ready",
+      "fixture_ids": [
+        "pty-contract",
+        "source-audit-pty-attach"
+      ],
+      "platforms": [
+        "web"
+      ],
+      "required_states": [
+        "success",
+        "failure",
+        "unknown"
+      ],
+      "notes": "PTY fixtures are web-only and preserve bounded, non-replayable byte semantics."
+    },
+    {
+      "id": "websocket-tickets",
+      "status": "ready",
+      "fixture_ids": [
+        "deployment-security-ws-ticket",
+        "source-audit-native-password-provider"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "Ticket fixtures prove only synthetic mint, use, denial, expiry, reuse, and redaction semantics."
+    }
+  ],
+  "parity": {
+    "status": "synthetic_observed",
+    "fixture_source": "one_shared_registry",
+    "platforms": [
+      "web",
+      "ios",
+      "ipados",
+      "macos"
+    ],
+    "pty_policy": "web_only_apple_blocked",
+    "missing_result_policy": "block",
+    "result_equivalence": "semantic_outcomes_not_platform_specific_wire_bytes",
+    "live_claim": false
+  },
+  "states": [
+    {
+      "id": "pending",
+      "evidence_state": "collection_in_progress",
+      "gate_decision": "blocked",
+      "safe_state": "no_success_claim",
+      "retry_policy": "wait_or_cancel"
+    },
+    {
+      "id": "empty",
+      "evidence_state": "no_observations",
+      "gate_decision": "blocked",
+      "safe_state": "no_success_claim",
+      "retry_policy": "collect_required_evidence"
+    },
+    {
+      "id": "success",
+      "evidence_state": "synthetic_fixture_validated",
+      "gate_decision": "blocked_live_compatibility",
+      "safe_state": "artifact_only_no_live_claim",
+      "retry_policy": "not_applicable"
+    },
+    {
+      "id": "failure",
+      "evidence_state": "required_case_failed",
+      "gate_decision": "blocked",
+      "safe_state": "retain_failure_evidence",
+      "retry_policy": "idempotent_collection_only"
+    },
+    {
+      "id": "cancelled",
+      "evidence_state": "cancelled_before_completion",
+      "gate_decision": "blocked",
+      "safe_state": "no_outward_change",
+      "retry_policy": "resume_after_source_state_reread"
+    },
+    {
+      "id": "unknown",
+      "evidence_state": "result_unavailable",
+      "gate_decision": "blocked",
+      "safe_state": "no_duplicate_prompt_session_ticket_or_pty_input",
+      "retry_policy": "reread_source_state_before_retry"
+    }
+  ],
+  "redaction": {
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_cookies": false,
+    "contains_bearer_values": false,
+    "contains_ticket_values": false,
+    "contains_raw_pty_bytes": false,
+    "contains_transcripts": false,
+    "contains_live_hosts": false,
+    "contains_user_data": false,
+    "failure_output": "one_bounded_semantic_json_line"
+  },
+  "benchmark": {
+    "path": "validator/validation-baseline.json",
+    "threshold": null,
+    "evidence_mode": "observed_worktree_only",
+    "build_mode": "N/A - no production or release executable"
+  }
+}

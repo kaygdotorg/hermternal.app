@@ -1,0 +1,124 @@
+{
+  "schema": "hermternal.fixture-validator-baseline.v1",
+  "fixture_schema": "hermternal.fixture-index.v1",
+  "validator": "Python standard library only",
+  "synthetic_only": true,
+  "build_mode": "N/A - no production or release executable",
+  "threshold": null,
+  "environment": {
+    "python": "3.14.6",
+    "implementation": "CPython",
+    "platform": "darwin",
+    "machine": "arm64"
+  },
+  "artifact_manifest": [
+    {
+      "path": "contracts/fixtures/index.json",
+      "sha256": "c1291dc9a0762fdf65e9776bad0cb294accbbf5547633f18eab76328e5d322eb",
+      "size_bytes": 38471
+    },
+    {
+      "path": "contracts/fixtures/schema.json",
+      "sha256": "842830b13cc8d6f03d152b3ea4d615086082f44f95b6dcbcf65d763c9f81ca56",
+      "size_bytes": 8799
+    },
+    {
+      "path": "contracts/fixtures/validator/test_validate.py",
+      "sha256": "2d495bb25070c00b5a1d8662ae75a4d7fe6cf6020e023d695d1c226317647310",
+      "size_bytes": 7377
+    },
+    {
+      "path": "contracts/fixtures/validator/validate.py",
+      "sha256": "6b16a8e9adfe6bf25ee8c9a4504149434ee5294bc78836b7ccdd8f6954ea1ae3",
+      "size_bytes": 40546
+    }
+  ],
+  "artifact_size_bytes": 95193,
+  "normal": {
+    "command": "python3 contracts/fixtures/validator/validate.py",
+    "repetitions": 30,
+    "samples_ms": [
+      131.729,
+      129.057,
+      130.375,
+      132.51,
+      130.161,
+      129.482,
+      131.442,
+      130.353,
+      128.751,
+      132.554,
+      132.001,
+      131.898,
+      138.813,
+      131.347,
+      134.899,
+      134.578,
+      135.72,
+      136.525,
+      136.69,
+      134.628,
+      135.949,
+      137.043,
+      132.682,
+      131.826,
+      131.342,
+      142.464,
+      135.337,
+      130.066,
+      135.275,
+      134.248
+    ],
+    "distribution_ms": {
+      "min": 128.751,
+      "p50": 132.51,
+      "p95": 138.813,
+      "max": 142.464,
+      "mean": 133.325
+    }
+  },
+  "optimized": {
+    "command": "python3 -O contracts/fixtures/validator/validate.py",
+    "repetitions": 30,
+    "samples_ms": [
+      136.151,
+      132.866,
+      130.362,
+      134.545,
+      132.289,
+      134.864,
+      135.852,
+      135.87,
+      137.951,
+      138.906,
+      138.604,
+      134.298,
+      135.638,
+      134.521,
+      133.889,
+      133.566,
+      135.705,
+      130.865,
+      131.046,
+      132.927,
+      133.23,
+      132.713,
+      131.199,
+      133.897,
+      138.161,
+      132.534,
+      132.391,
+      131.77,
+      134.847,
+      136.479
+    ],
+    "distribution_ms": {
+      "min": 130.362,
+      "p50": 133.897,
+      "p95": 138.604,
+      "max": 138.906,
+      "mean": 134.265
+    }
+  },
+  "notes": "Observed process durations only; threshold intentionally remains null until B-01 approves a budget."
+}
