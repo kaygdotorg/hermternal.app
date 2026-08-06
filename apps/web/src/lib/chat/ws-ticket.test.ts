@@ -1,23 +1,23 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from "vitest";
 import {
   CHAT_WEBSOCKET_PATH,
+  MAX_WS_TICKET_RESPONSE_BYTES,
   WS_TICKET_PATH,
   WsTicketError,
   createWsTicketClient,
-  createWsTicketRequestBoundary
-} from './ws-ticket';
-import type { WsTicketFetch } from './ws-ticket';
+  createWsTicketRequestBoundary,
+} from "./ws-ticket";
+import type { WsTicketClientOptions, WsTicketFetch } from "./ws-ticket";
 
 function opaqueTicket(): string {
-  return crypto.randomUUID().replaceAll('-', '');
+  return crypto.randomUUID().replaceAll("-", "");
 }
 
 function jsonResponse(value: unknown, status = 200): Response {
-  return {
-    ok: status >= 200 && status < 300,
+  return new Response(JSON.stringify(value), {
     status,
-    json: async () => value
-  } as Response;
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 function deferred<T>(): {
@@ -35,12 +35,12 @@ function deferred<T>(): {
   return {
     promise,
     resolve: resolvePromise,
-    reject: rejectPromise
+    reject: rejectPromise,
   };
 }
 
-describe('createWsTicketRequestBoundary', () => {
-  it('sends only the fixed same-origin POST shape', async () => {
+describe("createWsTicketRequestBoundary", () => {
+  it("sends only the fixed same-origin POST shape", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const fetcher: WsTicketFetch = async (input, init) => {
       calls.push({ input, init });
@@ -50,29 +50,29 @@ describe('createWsTicketRequestBoundary', () => {
     const signal = new AbortController().signal;
 
     await boundary({
-      method: 'POST',
+      method: "POST",
       path: WS_TICKET_PATH,
-      credentials: 'same-origin',
-      signal
+      credentials: "same-origin",
+      signal,
     });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.input).toBe(WS_TICKET_PATH);
     expect(calls[0]?.init).toMatchObject({
-      method: 'POST',
-      mode: 'same-origin',
-      credentials: 'same-origin',
-      cache: 'no-store',
-      redirect: 'error',
-      headers: { Accept: 'application/json' },
-      signal
+      method: "POST",
+      mode: "same-origin",
+      credentials: "same-origin",
+      cache: "no-store",
+      redirect: "error",
+      headers: { Accept: "application/json" },
+      signal,
     });
     const headers = calls[0]?.init?.headers as Record<string, string>;
-    expect('authorization' in headers).toBe(false);
-    expect('cookie' in headers).toBe(false);
+    expect("authorization" in headers).toBe(false);
+    expect("cookie" in headers).toBe(false);
   });
 
-  it('maps invalid authentication to a bounded semantic failure without reading the body', async () => {
+  it("maps invalid authentication to a bounded semantic failure without reading the body", async () => {
     const rawResponseMarker = opaqueTicket();
     let bodyRead = false;
     const fetcher: WsTicketFetch = async () =>
@@ -82,41 +82,105 @@ describe('createWsTicketRequestBoundary', () => {
         json: async () => {
           bodyRead = true;
           return { detail: `Bearer ${rawResponseMarker}` };
-        }
+        },
       }) as Response;
     const boundary = createWsTicketRequestBoundary(fetcher);
 
     await expect(
       boundary({
-        method: 'POST',
+        method: "POST",
         path: WS_TICKET_PATH,
-        credentials: 'same-origin',
-        signal: new AbortController().signal
-      })
-    ).rejects.toMatchObject({ code: 'authentication-failed', status: 401 });
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "authentication-failed", status: 401 });
     expect(bodyRead).toBe(false);
+  });
+
+  it("rejects duplicate ticket keys instead of accepting a parser overwrite", async () => {
+    const first = opaqueTicket();
+    const second = opaqueTicket();
+    const fetcher: WsTicketFetch = async () =>
+      new Response(`{"ticket":"${first}","ticket":"${second}"}`, {
+        headers: { "Content-Type": "application/json" },
+      });
+    const boundary = createWsTicketRequestBoundary(fetcher);
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "response-invalid" });
+  });
+
+  it("cancels an oversized streaming body before consuming the full response", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_WS_TICKET_RESPONSE_BYTES + 1));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher: WsTicketFetch = async () =>
+      new Response(body, { headers: { "Content-Type": "application/json" } });
+    const boundary = createWsTicketRequestBoundary(fetcher);
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "response-invalid" });
+    expect(cancelled).toBe(true);
   });
 });
 
-describe('createWsTicketClient', () => {
-  it('requires the exact response shape and never copies a rejected value into the error', async () => {
+describe("createWsTicketClient", () => {
+  it("derives the upgrade origin from browser location and ignores an injected origin", async () => {
+    let upgradeUrl: URL | undefined;
+    const options = {
+      origin: "https://attacker.invalid",
+      request: async () => ({ ticket: opaqueTicket() }),
+      connect: async (url: URL) => {
+        upgradeUrl = url;
+        return "connected";
+      },
+    } as unknown as WsTicketClientOptions<string>;
+    const client = createWsTicketClient(options);
+
+    await expect(client.open()).resolves.toBe("connected");
+    expect(upgradeUrl?.hostname).toBe(location.hostname);
+    expect(upgradeUrl?.port).toBe(location.port);
+    expect(upgradeUrl?.protocol).toBe(
+      location.protocol === "https:" ? "wss:" : "ws:",
+    );
+    expect(upgradeUrl?.hostname).not.toBe("attacker.invalid");
+  });
+
+  it("requires the exact response shape and never copies a rejected value into the error", async () => {
     const rawResponseMarker = opaqueTicket();
-    const connect = vi.fn(async () => 'never-connected');
+    const connect = vi.fn(async () => "never-connected");
     const client = createWsTicketClient({
-      origin: 'https://synthetic.invalid',
       request: async () => ({ ticket: rawResponseMarker, unexpected: true }),
-      connect
+      connect,
     });
 
     const error = await client.open().catch((value: unknown) => value);
 
     expect(error).toBeInstanceOf(WsTicketError);
-    expect((error as WsTicketError).code).toBe('response-invalid');
+    expect((error as WsTicketError).code).toBe("response-invalid");
     expect((error as Error).message.includes(rawResponseMarker)).toBe(false);
     expect(connect).not.toHaveBeenCalled();
   });
 
-  it('coalesces one active attempt and acquires a fresh value after it settles', async () => {
+  it("coalesces one active attempt and acquires a fresh value after it settles", async () => {
     const firstGate = deferred<void>();
     const tickets = [opaqueTicket(), opaqueTicket()];
     let requestCount = 0;
@@ -124,7 +188,7 @@ describe('createWsTicketClient', () => {
     const request = vi.fn(async () => {
       const ticket = tickets[requestCount++];
       if (!ticket) {
-        throw new WsTicketError('request-failed');
+        throw new WsTicketError("request-failed");
       }
       if (requestCount === 1) {
         await firstGate.promise;
@@ -136,9 +200,8 @@ describe('createWsTicketClient', () => {
       return upgradeUrls.length;
     });
     const client = createWsTicketClient({
-      origin: 'https://synthetic.invalid',
       request,
-      connect
+      connect,
     });
 
     const first = client.open();
@@ -156,40 +219,43 @@ describe('createWsTicketClient', () => {
       upgradeUrls.every((url) => {
         const keys = [...url.searchParams.keys()];
         return (
-          (url.protocol === 'wss:' || url.protocol === 'ws:') &&
+          (url.protocol === "wss:" || url.protocol === "ws:") &&
           url.pathname === CHAT_WEBSOCKET_PATH &&
           keys.length === 1 &&
-          keys[0] === 'ticket' &&
-          url.hash === ''
+          keys[0] === "ticket" &&
+          url.hash === ""
         );
-      })
+      }),
     ).toBe(true);
-    expect(upgradeUrls[0]?.searchParams.get('ticket') === upgradeUrls[1]?.searchParams.get('ticket')).toBe(
-      false
-    );
+    expect(
+      upgradeUrls[0]?.searchParams.get("ticket") ===
+        upgradeUrls[1]?.searchParams.get("ticket"),
+    ).toBe(false);
   });
 
-  it('cancels before a response is verified and does not connect or retry automatically', async () => {
+  it("cancels before a response is verified and does not connect or retry automatically", async () => {
     const responseGate = deferred<{ ticket: string }>();
     const controller = new AbortController();
-    const connect = vi.fn(async () => 'connected');
+    const connect = vi.fn(async () => "connected");
     const request = vi.fn(async () => responseGate.promise);
     const client = createWsTicketClient({
-      origin: 'https://synthetic.invalid',
       request,
-      connect
+      connect,
     });
 
     const attempt = client.open(controller.signal);
     controller.abort();
     responseGate.resolve({ ticket: opaqueTicket() });
 
-    await expect(attempt).rejects.toMatchObject({ code: 'cancelled', name: 'AbortError' });
+    await expect(attempt).rejects.toMatchObject({
+      code: "cancelled",
+      name: "AbortError",
+    });
     expect(connect).not.toHaveBeenCalled();
     expect(request).toHaveBeenCalledTimes(1);
   });
 
-  it('requires an explicit retry after authentication failure and redacts arbitrary boundary errors', async () => {
+  it("requires an explicit retry after authentication failure and redacts arbitrary boundary errors", async () => {
     const rawErrorMarker = opaqueTicket();
     const freshTicket = opaqueTicket();
     let requestCount = 0;
@@ -200,26 +266,25 @@ describe('createWsTicketClient', () => {
       }
       return { ticket: freshTicket };
     });
-    const connect = vi.fn(async () => 'connected');
+    const connect = vi.fn(async () => "connected");
     const client = createWsTicketClient({
-      origin: 'https://synthetic.invalid',
       request,
-      connect
+      connect,
     });
 
     const firstError = await client.open().catch((value: unknown) => value);
     expect(firstError).toBeInstanceOf(WsTicketError);
-    expect((firstError as WsTicketError).code).toBe('request-failed');
+    expect((firstError as WsTicketError).code).toBe("request-failed");
     expect((firstError as Error).message.includes(rawErrorMarker)).toBe(false);
     expect(request).toHaveBeenCalledTimes(1);
     expect(connect).not.toHaveBeenCalled();
 
-    await expect(client.retry()).resolves.toBe('connected');
+    await expect(client.retry()).resolves.toBe("connected");
     expect(request).toHaveBeenCalledTimes(2);
     expect(connect).toHaveBeenCalledTimes(1);
   });
 
-  it('does not forward an abort reason that could contain sensitive input', async () => {
+  it("does not forward an abort reason that could contain sensitive input", async () => {
     const controller = new AbortController();
     const requestSignal = deferred<AbortSignal>();
     const request = vi.fn(async (input) => {
@@ -227,9 +292,8 @@ describe('createWsTicketClient', () => {
       return new Promise<{ ticket: string }>(() => undefined);
     });
     const client = createWsTicketClient({
-      origin: 'https://synthetic.invalid',
       request,
-      connect: async () => 'never-connected'
+      connect: async () => "never-connected",
     });
 
     const attempt = client.open(controller.signal);
@@ -237,6 +301,6 @@ describe('createWsTicketClient', () => {
     controller.abort(opaqueTicket());
 
     expect(signal.aborted).toBe(true);
-    await expect(attempt).rejects.toMatchObject({ code: 'cancelled' });
+    await expect(attempt).rejects.toMatchObject({ code: "cancelled" });
   });
 });

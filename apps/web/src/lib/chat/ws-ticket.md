@@ -11,10 +11,12 @@ integration.
 - Let the browser send its protected same-origin cookie through
   `credentials: 'same-origin'`; JavaScript never reads or supplies a cookie,
   bearer value, password, refresh value, or authorization header.
-- Require the exact response shape `{ ticket: string }`, with no extra fields and
-  a bounded URL-safe value.
-- Put the value only in the ephemeral `ws(s)://<origin>/api/ws?ticket=...`
-  upgrade URL passed to the injected connector.
+- Read at most 2 KiB of UTF-8 JSON, cancel an oversized or malformed stream, and
+  require the exact textual shape `{ "ticket": "<URL-safe value>" }`. Duplicate,
+  escaped, missing, or extra keys fail closed before upgrade.
+- Derive the upgrade authority only from the browser's current `location.origin`.
+  Caller input cannot replace the origin. Put the value only in the ephemeral
+  `ws(s)://<current-origin>/api/ws?ticket=...` URL passed to the injected connector.
 - Coalesce duplicate calls while one attempt is active. After an attempt settles,
   the next explicit call acquires a fresh ticket instead of reusing the old one.
 - Propagate an `AbortSignal`; cancellation discards an unverified response and

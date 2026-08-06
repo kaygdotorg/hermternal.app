@@ -1,24 +1,25 @@
-export const WS_TICKET_PATH = '/api/auth/ws-ticket' as const;
-export const CHAT_WEBSOCKET_PATH = '/api/ws' as const;
+export const WS_TICKET_PATH = "/api/auth/ws-ticket" as const;
+export const CHAT_WEBSOCKET_PATH = "/api/ws" as const;
 export const WS_TICKET_TTL_SECONDS = 30 as const;
 export const MAX_WS_TICKET_LENGTH = 512 as const;
+export const MAX_WS_TICKET_RESPONSE_BYTES = 2 * 1024;
 export const MAX_WS_TICKET_ERROR_LENGTH = 240 as const;
 
 export type WsTicketErrorCode =
-  | 'cancelled'
-  | 'authentication-failed'
-  | 'response-invalid'
-  | 'request-failed'
-  | 'upgrade-failed'
-  | 'origin-unavailable';
+  | "cancelled"
+  | "authentication-failed"
+  | "response-invalid"
+  | "request-failed"
+  | "upgrade-failed"
+  | "origin-unavailable";
 
 const ERROR_MESSAGES: Record<WsTicketErrorCode, string> = {
-  cancelled: 'WebSocket ticket acquisition was cancelled.',
-  'authentication-failed': 'WebSocket ticket authentication failed.',
-  'response-invalid': 'WebSocket ticket response was invalid.',
-  'request-failed': 'WebSocket ticket request failed.',
-  'upgrade-failed': 'WebSocket upgrade failed.',
-  'origin-unavailable': 'WebSocket upgrade origin was unavailable.'
+  cancelled: "WebSocket ticket acquisition was cancelled.",
+  "authentication-failed": "WebSocket ticket authentication failed.",
+  "response-invalid": "WebSocket ticket response was invalid.",
+  "request-failed": "WebSocket ticket request failed.",
+  "upgrade-failed": "WebSocket upgrade failed.",
+  "origin-unavailable": "WebSocket upgrade origin was unavailable.",
 };
 
 /**
@@ -33,16 +34,16 @@ export class WsTicketError extends Error {
 
   constructor(code: WsTicketErrorCode, status?: number) {
     super(ERROR_MESSAGES[code].slice(0, MAX_WS_TICKET_ERROR_LENGTH));
-    this.name = code === 'cancelled' ? 'AbortError' : 'WsTicketError';
+    this.name = code === "cancelled" ? "AbortError" : "WsTicketError";
     this.code = code;
     this.status = normalizeStatus(status);
-    this.retryable = code === 'request-failed' || code === 'upgrade-failed';
+    this.retryable = code === "request-failed" || code === "upgrade-failed";
   }
 }
 
 export class WsTicketCancelledError extends WsTicketError {
   constructor() {
-    super('cancelled');
+    super("cancelled");
   }
 }
 
@@ -52,13 +53,15 @@ export class WsTicketCancelledError extends WsTicketError {
  * bearer value cannot be supplied or promoted into the WebSocket upgrade.
  */
 export interface WsTicketRequestInput {
-  readonly method: 'POST';
+  readonly method: "POST";
   readonly path: typeof WS_TICKET_PATH;
-  readonly credentials: 'same-origin';
+  readonly credentials: "same-origin";
   readonly signal: AbortSignal;
 }
 
-export type WsTicketRequestBoundary = (input: WsTicketRequestInput) => Promise<unknown>;
+export type WsTicketRequestBoundary = (
+  input: WsTicketRequestInput,
+) => Promise<unknown>;
 
 export interface WsTicketFetch {
   (input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
@@ -66,18 +69,12 @@ export interface WsTicketFetch {
 
 export type WsTicketUpgradeBoundary<Connection> = (
   upgradeUrl: URL,
-  signal: AbortSignal
+  signal: AbortSignal,
 ) => Connection | Promise<Connection>;
 
 export interface WsTicketClientOptions<Connection> {
   readonly request: WsTicketRequestBoundary;
   readonly connect: WsTicketUpgradeBoundary<Connection>;
-  /**
-   * Use the browser origin by default. Tests and later app shells may inject
-   * an origin, but the path remains fixed and deep-link/search input is never
-   * used to construct the upgrade URL.
-   */
-  readonly origin?: string | URL;
 }
 
 export interface WsTicketClient<Connection> {
@@ -92,37 +89,39 @@ export interface WsTicketClient<Connection> {
  * Keeping fetch injected makes the client deterministic in Vitest and lets
  * W-06 provide its own typed transport without changing this security seam.
  */
-export function createWsTicketRequestBoundary(fetcher: WsTicketFetch): WsTicketRequestBoundary {
+export function createWsTicketRequestBoundary(
+  fetcher: WsTicketFetch,
+): WsTicketRequestBoundary {
   return async ({ method, path, credentials, signal }): Promise<unknown> => {
-    if (method !== 'POST' || path !== WS_TICKET_PATH || credentials !== 'same-origin') {
-      throw new WsTicketError('request-failed');
+    if (
+      method !== "POST" ||
+      path !== WS_TICKET_PATH ||
+      credentials !== "same-origin"
+    ) {
+      throw new WsTicketError("request-failed");
     }
 
     try {
       const response = await fetcher(path, {
         method,
-        mode: 'same-origin',
+        mode: "same-origin",
         credentials,
-        cache: 'no-store',
-        redirect: 'error',
-        headers: { Accept: 'application/json' },
-        signal
+        cache: "no-store",
+        redirect: "error",
+        headers: { Accept: "application/json" },
+        signal,
       });
 
       if (!response.ok) {
         throw new WsTicketError(
           response.status === 401 || response.status === 403
-            ? 'authentication-failed'
-            : 'request-failed',
-          response.status
+            ? "authentication-failed"
+            : "request-failed",
+          response.status,
         );
       }
 
-      try {
-        return await response.json();
-      } catch {
-        throw new WsTicketError('response-invalid');
-      }
+      return await readTicketResponse(response, signal);
     } catch (error) {
       if (signal.aborted || isAbortLike(error)) {
         throw new WsTicketCancelledError();
@@ -132,9 +131,117 @@ export function createWsTicketRequestBoundary(fetcher: WsTicketFetch): WsTicketR
         throw error;
       }
 
-      throw new WsTicketError('request-failed');
+      throw new WsTicketError("request-failed");
     }
   };
+}
+
+async function readTicketResponse(
+  response: Response,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const contentType = response.headers
+    .get("content-type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (contentType !== "application/json" || response.body === null) {
+    await cancelBody(response.body);
+    throw new WsTicketError("response-invalid");
+  }
+
+  let declaredLength: number | undefined;
+  try {
+    declaredLength = parseContentLength(response.headers.get("content-length"));
+  } catch {
+    await cancelBody(response.body);
+    throw new WsTicketError("response-invalid");
+  }
+  if (
+    declaredLength !== undefined &&
+    declaredLength > MAX_WS_TICKET_RESPONSE_BYTES
+  ) {
+    await cancelBody(response.body);
+    throw new WsTicketError("response-invalid");
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+
+  try {
+    while (true) {
+      const result = await awaitWithAbort(reader.read(), signal);
+      if (result.done) {
+        break;
+      }
+      byteLength += result.value.byteLength;
+      if (byteLength > MAX_WS_TICKET_RESPONSE_BYTES) {
+        throw new WsTicketError("response-invalid");
+      }
+      chunks.push(result.value);
+    }
+
+    if (declaredLength !== undefined && declaredLength !== byteLength) {
+      throw new WsTicketError("response-invalid");
+    }
+
+    const body = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+    } catch {
+      throw new WsTicketError("response-invalid");
+    }
+
+    const match =
+      /^[ \t\r\n]*\{[ \t\r\n]*"ticket"[ \t\r\n]*:[ \t\r\n]*"([A-Za-z0-9_-]{1,512})"[ \t\r\n]*\}[ \t\r\n]*$/.exec(
+        text,
+      );
+    if (!match?.[1]) {
+      throw new WsTicketError("response-invalid");
+    }
+    return { ticket: match[1] };
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    if (signal.aborted || isAbortLike(error)) {
+      throw new WsTicketCancelledError();
+    }
+    if (error instanceof WsTicketError) {
+      throw error;
+    }
+    throw new WsTicketError("response-invalid");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseContentLength(value: string | null): number | undefined {
+  if (value === null) {
+    return undefined;
+  }
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new WsTicketError("response-invalid");
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new WsTicketError("response-invalid");
+  }
+  return parsed;
+}
+
+async function cancelBody(
+  body: ReadableStream<Uint8Array> | null,
+): Promise<void> {
+  if (body !== null) {
+    await body.cancel().catch(() => undefined);
+  }
 }
 
 /**
@@ -144,7 +251,7 @@ export function createWsTicketRequestBoundary(fetcher: WsTicketFetch): WsTicketR
  * fixtures, reports, or error text.
  */
 export function createWsTicketClient<Connection>(
-  options: WsTicketClientOptions<Connection>
+  options: WsTicketClientOptions<Connection>,
 ): WsTicketClient<Connection> {
   let activeAttempt: Promise<Connection> | undefined;
 
@@ -165,15 +272,15 @@ export function createWsTicketClient<Connection>(
 
   return {
     open: startAttempt,
-    retry: startAttempt
+    retry: startAttempt,
   };
 }
 
 async function runAttempt<Connection>(
   options: WsTicketClientOptions<Connection>,
-  callerSignal?: AbortSignal
+  callerSignal?: AbortSignal,
 ): Promise<Connection> {
-  const origin = resolveOrigin(options.origin);
+  const origin = resolveOrigin();
   const controller = new AbortController();
   const unlinkAbort = linkAbort(callerSignal, controller);
 
@@ -188,11 +295,19 @@ async function runAttempt<Connection>(
     // The URL is handed directly to the connector and is not stored on the
     // client. Connector implementations must honor the supplied signal.
     throwIfAborted(callerSignal);
-    const connection = await upgradeTicket(options.connect, upgradeUrl, controller.signal);
+    const connection = await upgradeTicket(
+      options.connect,
+      upgradeUrl,
+      controller.signal,
+    );
     throwIfAborted(callerSignal);
     return connection;
   } catch (error) {
-    if (callerSignal?.aborted || controller.signal.aborted || isAbortLike(error)) {
+    if (
+      callerSignal?.aborted ||
+      controller.signal.aborted ||
+      isAbortLike(error)
+    ) {
       throw new WsTicketCancelledError();
     }
 
@@ -200,7 +315,7 @@ async function runAttempt<Connection>(
       throw error;
     }
 
-    throw new WsTicketError('upgrade-failed');
+    throw new WsTicketError("upgrade-failed");
   } finally {
     unlinkAbort();
   }
@@ -208,19 +323,19 @@ async function runAttempt<Connection>(
 
 async function requestTicket(
   request: WsTicketRequestBoundary,
-  signal: AbortSignal
+  signal: AbortSignal,
 ): Promise<unknown> {
   try {
     return await awaitWithAbort(
       Promise.resolve(
         request({
-          method: 'POST',
+          method: "POST",
           path: WS_TICKET_PATH,
-          credentials: 'same-origin',
-          signal
-        })
+          credentials: "same-origin",
+          signal,
+        }),
       ),
-      signal
+      signal,
     );
   } catch (error) {
     if (signal.aborted || isAbortLike(error)) {
@@ -231,17 +346,20 @@ async function requestTicket(
       throw error;
     }
 
-    throw new WsTicketError('request-failed');
+    throw new WsTicketError("request-failed");
   }
 }
 
 async function upgradeTicket<Connection>(
   connect: WsTicketUpgradeBoundary<Connection>,
   upgradeUrl: URL,
-  signal: AbortSignal
+  signal: AbortSignal,
 ): Promise<Connection> {
   try {
-    return await awaitWithAbort(Promise.resolve(connect(upgradeUrl, signal)), signal);
+    return await awaitWithAbort(
+      Promise.resolve(connect(upgradeUrl, signal)),
+      signal,
+    );
   } catch (error) {
     if (signal.aborted || isAbortLike(error)) {
       throw new WsTicketCancelledError();
@@ -251,11 +369,14 @@ async function upgradeTicket<Connection>(
       throw error;
     }
 
-    throw new WsTicketError('upgrade-failed');
+    throw new WsTicketError("upgrade-failed");
   }
 }
 
-function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+function awaitWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
   if (signal.aborted) {
     return Promise.reject(new WsTicketCancelledError());
   }
@@ -264,7 +385,7 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
     let settled = false;
 
     const cleanup = (): void => {
-      signal.removeEventListener('abort', onAbort);
+      signal.removeEventListener("abort", onAbort);
     };
 
     const settle = (callback: () => void): void => {
@@ -280,17 +401,17 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
       settle(() => reject(new WsTicketCancelledError()));
     };
 
-    signal.addEventListener('abort', onAbort, { once: true });
+    signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
       (value) => settle(() => resolve(value)),
-      (error: unknown) => settle(() => reject(error))
+      (error: unknown) => settle(() => reject(error)),
     );
   });
 }
 
 function parseTicketResponse(value: unknown): string {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new WsTicketError('response-invalid');
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new WsTicketError("response-invalid");
   }
 
   const record = value as Record<string, unknown>;
@@ -299,46 +420,50 @@ function parseTicketResponse(value: unknown): string {
 
   if (
     keys.length !== 1 ||
-    keys[0] !== 'ticket' ||
-    typeof ticket !== 'string' ||
+    keys[0] !== "ticket" ||
+    typeof ticket !== "string" ||
     ticket.length === 0 ||
     ticket.length > MAX_WS_TICKET_LENGTH ||
     !/^[A-Za-z0-9_-]+$/.test(ticket)
   ) {
-    throw new WsTicketError('response-invalid');
+    throw new WsTicketError("response-invalid");
   }
 
   return ticket;
 }
 
-function resolveOrigin(input?: string | URL): URL {
-  const candidate = input ?? (typeof location === 'undefined' ? undefined : location.origin);
-
-  if (!candidate) {
-    throw new WsTicketError('origin-unavailable');
+function resolveOrigin(): URL {
+  if (typeof location === "undefined") {
+    throw new WsTicketError("origin-unavailable");
   }
 
   try {
-    const parsed = new URL(candidate.toString());
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      throw new Error('unsupported-origin');
+    const parsed = new URL(location.origin);
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      parsed.origin !== location.origin
+    ) {
+      throw new Error("unsupported-origin");
     }
-    return new URL(parsed.origin);
+    return parsed;
   } catch {
-    throw new WsTicketError('origin-unavailable');
+    throw new WsTicketError("origin-unavailable");
   }
 }
 
 function createUpgradeUrl(origin: URL, ticket: string): URL {
   const url = new URL(CHAT_WEBSOCKET_PATH, origin);
-  url.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.search = '';
-  url.hash = '';
-  url.searchParams.set('ticket', ticket);
+  url.protocol = origin.protocol === "https:" ? "wss:" : "ws:";
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("ticket", ticket);
   return url;
 }
 
-function linkAbort(signal: AbortSignal | undefined, controller: AbortController): () => void {
+function linkAbort(
+  signal: AbortSignal | undefined,
+  controller: AbortController,
+): () => void {
   if (!signal) {
     return () => undefined;
   }
@@ -354,8 +479,8 @@ function linkAbort(signal: AbortSignal | undefined, controller: AbortController)
     return () => undefined;
   }
 
-  signal.addEventListener('abort', onAbort, { once: true });
-  return () => signal.removeEventListener('abort', onAbort);
+  signal.addEventListener("abort", onAbort, { once: true });
+  return () => signal.removeEventListener("abort", onAbort);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -365,16 +490,19 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 function isAbortLike(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null || !('name' in error)) {
+  if (typeof error !== "object" || error === null || !("name" in error)) {
     return false;
   }
 
   const name = (error as { name?: unknown }).name;
-  return name === 'AbortError' || name === 'CanceledError';
+  return name === "AbortError" || name === "CanceledError";
 }
 
 function normalizeStatus(status: number | undefined): number | undefined {
-  return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+  return typeof status === "number" &&
+    Number.isInteger(status) &&
+    status >= 100 &&
+    status <= 599
     ? status
     : undefined;
 }
