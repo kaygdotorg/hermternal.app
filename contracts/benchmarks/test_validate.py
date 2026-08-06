@@ -307,6 +307,30 @@ class BenchmarkEvidenceTests(unittest.TestCase):
                 script_path=copied_root / "validate.py",
             )
 
+    def test_rebound_trace_bytes_and_manifest_fail_in_both_cli_modes(self) -> None:
+        """Reject coordinated trace replacement and candidate metadata rebinding.
+
+        A local file check alone would accept replacement bytes after the
+        evidence record's byte count, hash, and manifest were recomputed.  The
+        subprocess uses a copied root to exercise that mutation without
+        changing checked-in artifacts or racing another test process.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            copied_root = Path(directory) / "benchmarks"
+            shutil.copytree(FIXTURE_DIR, copied_root)
+            replacement = b'{"schema":"hermternal.benchmark-trace.v1","events":[]}'
+            (copied_root / "synthetic" / "trace.json").write_bytes(replacement)
+
+            candidate = copy.deepcopy(self.document)
+            trace_artifact = candidate["artifacts"][1]
+            trace_artifact["bytes"] = len(replacement)
+            trace_artifact["sha256"] = hashlib.sha256(replacement).hexdigest()
+            candidate["artifact_manifest_sha256"] = validate.artifact_manifest_digest(candidate["artifacts"])
+            self._assert_cli_failure(
+                json.dumps(candidate, separators=(",", ":")).encode(),
+                script_path=copied_root / "validate.py",
+            )
+
     def test_threshold_and_budget_cannot_become_unreviewed_limits(self) -> None:
         for key in ("threshold", "budget"):
             mutated = copy.deepcopy(self.document)

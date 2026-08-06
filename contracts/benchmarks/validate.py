@@ -221,6 +221,30 @@ EXPECTED_ARTIFACT_PATHS = {
         "synthetic/trace.json",
     ),
 }
+# These byte identities are a second, code-pinned review anchor.  Artifact
+# records may restate them, but cannot change the bytes that this validator
+# considers reviewed.  The validator source is the one deliberate exception:
+# pinning its own hash would create a self-hash cycle when this constant changes.
+# Its submitted metadata is still checked against the local file when artifact
+# verification is enabled; every other artifact, including the synthetic trace,
+# must match this immutable anchor exactly.
+EXPECTED_ARTIFACT_METADATA = {
+    EVIDENCE_ID: (
+        ("synthetic/workload.json", 4042, "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"),
+        ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
+    ),
+    BASELINE_EVIDENCE_ID: (
+        ("README.md", 6849, "3a3f53cf541b8b00e55630be40137f722eeb5ad9b308137892283cd0170417ec"),
+        ("benchmark-evidence.json", 6446, "aa652867dc336467ab07873964f54a9d5000cfb01b1d55756091be2e8797a6eb"),
+        ("test_validate.py", 19488, "b7f662f6b833201ef98e01ce1a2bb990d0fe66a4df190439f37702ae79a09555"),
+        ("sample-provenance.json", 2304, "cafd3009688c9a1adace242ec3a087b74fda313fcf1921762c82fc8fca2aa283"),
+        ("synthetic/workload.json", 4042, "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"),
+        ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
+    ),
+}
+SELF_AUTHENTICATED_ARTIFACT_PATHS = {
+    BASELINE_EVIDENCE_ID: frozenset({"validate.py"}),
+}
 EXPECTED_RUN_METADATA = {
     EVIDENCE_ID: {
         "web-cold-production": {
@@ -678,6 +702,20 @@ def _validate_artifacts(value: Any, label: str) -> list[dict[str, Any]]:
     return artifacts
 
 
+def _reviewed_artifact_metadata(
+    artifacts: list[dict[str, Any]],
+    evidence_id: str,
+) -> tuple[tuple[str, int, str], ...]:
+    """Return candidate metadata covered by the independent review anchor."""
+
+    self_paths = SELF_AUTHENTICATED_ARTIFACT_PATHS.get(evidence_id, frozenset())
+    return tuple(
+        (artifact["path"], artifact["bytes"], artifact["sha256"])
+        for artifact in artifacts
+        if artifact["path"] not in self_paths
+    )
+
+
 def _validate_local_artifacts(artifacts: list[dict[str, Any]], root: Path) -> None:
     resolved_root = root.resolve()
     for artifact in artifacts:
@@ -767,6 +805,10 @@ def validate_evidence(
     require(
         tuple(artifact["path"] for artifact in artifacts) == EXPECTED_ARTIFACT_PATHS[evidence_id],
         f"{label}.artifacts are not the reviewed set",
+    )
+    require(
+        _reviewed_artifact_metadata(artifacts, evidence_id) == EXPECTED_ARTIFACT_METADATA[evidence_id],
+        f"{label}.artifacts do not match the reviewed byte identities",
     )
     require(
         record["artifact_manifest_sha256"] == artifact_manifest_digest(artifacts),

@@ -27,8 +27,9 @@ shape is used for every later harness run:
   digest, and distribution;
 - `artifacts` records the exact permitted relative artifact paths, byte counts,
   and SHA-256 hashes. `artifact_manifest_sha256` hashes the ordered metadata
-  list, and the validator rejects any path inventory other than the reviewed
-  set;
+  list, and a separate code-pinned review anchor binds every non-validator
+  artifact byte identity, including the synthetic trace; the validator rejects
+  any path inventory or byte identity other than the reviewed set;
 - `redaction` records the semantic-only, synthetic-only boundary; and
 - `threshold` and `budget` are required to remain `null` until a later review
   approves a performance budget.
@@ -72,8 +73,10 @@ characters, excessive nesting or node counts, unknown keys, reordered closed
 schemas, wrong scalar types, invalid platform/build/state combinations,
 repeated or unreviewed run IDs, source/environment/fixture identity drift,
 sample-count drift, forged samples without matching provenance bytes,
-distribution drift, missing or unreviewed artifact paths, invalid artifact
-hashes, non-null thresholds or budgets, and secret-shaped values. Hostnames,
+distribution drift, missing or unreviewed artifact paths or byte identities,
+invalid artifact hashes, non-null thresholds or budgets, and secret-shaped
+values. The baseline's `validate.py` entry is locally checked but is excluded
+from the code-pinned byte anchor to avoid a self-hash cycle. Hostnames,
 IPv4/IPv6 addresses, `localhost`, URLs, bearer values, and API-key assignments
 are outside the redaction boundary. Explicit exceptions are used instead of
 executable `assert` statements, so normal and optimized Python runs retain the
