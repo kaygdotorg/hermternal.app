@@ -18,8 +18,12 @@ describe('AuthPreview', () => {
     const onAction = vi.fn();
     render(AuthPreview, { state: 'password', onAction });
 
-    fireEvent.input(screen.getByLabelText('Username'), { target: { value: 'sam' } });
-    fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'not-a-secret-fixture' } });
+    fireEvent.input(screen.getByLabelText('Username'), {
+      target: { value: 'sam' }
+    });
+    fireEvent.input(screen.getByLabelText('Password'), {
+      target: { value: 'not-a-secret-fixture' }
+    });
     const form = screen.getByRole('form', { name: 'Hermes password sign in' });
     fireEvent.submit(form);
     fireEvent.submit(form);
@@ -30,6 +34,39 @@ describe('AuthPreview', () => {
     await waitFor(() => expect(screen.getByLabelText('Password')).toHaveValue(''));
   });
 
+  it('passes live credentials only to the transient password callback and clears the form', async () => {
+    const onAction = vi.fn();
+    const onPasswordSubmit = vi.fn();
+    render(AuthPreview, {
+      discoveryMode: 'live',
+      state: 'password',
+      onAction,
+      onPasswordSubmit
+    });
+
+    fireEvent.input(screen.getByLabelText('Username'), {
+      target: { value: 'synthetic-user' }
+    });
+    fireEvent.input(screen.getByLabelText('Password'), {
+      target: { value: 'transient-password' }
+    });
+    fireEvent.submit(screen.getByRole('form', { name: 'Hermes password sign in' }));
+
+    expect(onPasswordSubmit).toHaveBeenCalledTimes(1);
+    expect(onPasswordSubmit).toHaveBeenCalledWith({
+      username: 'synthetic-user',
+      password: 'transient-password'
+    });
+    expect(onAction).not.toHaveBeenCalledWith({
+      type: 'submit-password-fixture'
+    });
+    expect(JSON.stringify(onAction.mock.calls)).not.toContain('transient-password');
+    await waitFor(() => {
+      expect(screen.getByLabelText('Username')).toHaveValue('');
+      expect(screen.getByLabelText('Password')).toHaveValue('');
+    });
+  });
+
   it('rejects blank credentials and clears the uncontrolled form on cancel and state changes', async () => {
     const onAction = vi.fn();
     const view = render(AuthPreview, { state: 'password', onAction });
@@ -38,12 +75,16 @@ describe('AuthPreview', () => {
     fireEvent.submit(form);
     expect(onAction).not.toHaveBeenCalled();
 
-    fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'temporary-fixture' } });
+    fireEvent.input(screen.getByLabelText('Password'), {
+      target: { value: 'temporary-fixture' }
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Back to providers' }));
     await waitFor(() => expect(screen.getByLabelText('Password')).toHaveValue(''));
 
     await view.rerender({ state: 'password' });
-    fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'state-change-fixture' } });
+    fireEvent.input(screen.getByLabelText('Password'), {
+      target: { value: 'state-change-fixture' }
+    });
     await view.rerender({ state: 'provider-selection' });
     await view.rerender({ state: 'password' });
 
@@ -84,7 +125,11 @@ describe('AuthPreview', () => {
     live.unmount();
 
     const pendingAction = vi.fn();
-    const pending = render(AuthPreview, { discoveryMode: 'live', state: 'discovery-pending', onAction: pendingAction });
+    const pending = render(AuthPreview, {
+      discoveryMode: 'live',
+      state: 'discovery-pending',
+      onAction: pendingAction
+    });
     expect(screen.getByText(/same-origin GET \/api\/auth\/providers request is pending/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Nous, loading' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel discovery' }));

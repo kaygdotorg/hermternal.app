@@ -41,10 +41,20 @@ export type AuthAction =
 
 export type AuthActionHandler = (action: AuthAction) => void;
 
+export interface PasswordSubmission {
+  username: string;
+  password: string;
+}
+
+export type PasswordSubmissionHandler = (submission: PasswordSubmission) => void;
+
 export interface AuthPreviewProps {
   appearance?: Appearance;
   state?: AuthViewState;
   providers?: AuthProvider[];
   discoveryMode?: AuthDiscoveryMode;
   onAction?: AuthActionHandler;
+  onPasswordSubmit?: PasswordSubmissionHandler;
+  failureMessage?: string;
+  failureCode?: string;
 }

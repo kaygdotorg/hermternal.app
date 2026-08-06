@@ -48,7 +48,10 @@ export class BrowserAuthSession {
   private readonly discoverProviderRegistry: (signal?: AbortSignal) => Promise<ProviderDiscoveryResult>;
   private readonly invalidateLocalSession: () => void;
   private readonly subscribers = new Set<BrowserAuthSubscriber>();
-  private snapshot: BrowserAuthSnapshot = { status: 'signed_out', providers: [] };
+  private snapshot: BrowserAuthSnapshot = {
+    status: 'signed_out',
+    providers: []
+  };
   private controller: AbortController | undefined;
   private generation = 0;
   private disposed = false;
@@ -95,8 +98,19 @@ export class BrowserAuthSession {
     this.assertActive();
     const provider = this.snapshot.providers.find((candidate) => candidate.id === providerId);
     if (!provider || this.isBusy()) return undefined;
-    this.publish({ ...this.snapshot, status: 'signed_out', selectedProviderId: provider.id, errorCode: undefined });
+    this.publish({
+      ...this.snapshot,
+      status: 'signed_out',
+      selectedProviderId: provider.id,
+      errorCode: undefined
+    });
     return provider;
+  }
+
+  clearSelection(): void {
+    this.assertActive();
+    if (this.isBusy()) return;
+    this.publish({ status: 'signed_out', providers: this.snapshot.providers });
   }
 
   async loginWithPassword(input: Omit<PasswordLoginInput, 'provider'>): Promise<void> {
@@ -116,7 +130,11 @@ export class BrowserAuthSession {
     try {
       const result = await this.client.loginWithPassword({ provider: provider.id, ...input }, operation.signal);
       if (!this.isCurrent(operation.generation)) return;
-      this.publish({ status: 'authenticated', identity: result.identity, providers: [] });
+      this.publish({
+        status: 'authenticated',
+        identity: result.identity,
+        providers: []
+      });
     } catch (error) {
       if (!this.isCurrent(operation.generation) || isAbort(error)) return;
       this.publishFailure(error, provider.id);

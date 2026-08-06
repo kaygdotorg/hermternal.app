@@ -3,7 +3,14 @@
   import Pill from '$lib/workspace/Pill.svelte';
   import ProviderCard from './ProviderCard.svelte';
   import { DEFAULT_PROVIDERS } from './fixtures';
-  import type { AuthAction, AuthActionHandler, AuthDiscoveryMode, AuthProvider, AuthViewState } from './types';
+  import type {
+    AuthAction,
+    AuthActionHandler,
+    AuthDiscoveryMode,
+    AuthProvider,
+    AuthViewState,
+    PasswordSubmissionHandler
+  } from './types';
   import type { Appearance } from '$lib/workspace/types';
 
   export let appearance: Appearance = 'light';
@@ -11,6 +18,9 @@
   export let providers: AuthProvider[] = DEFAULT_PROVIDERS;
   export let discoveryMode: AuthDiscoveryMode = 'fixture';
   export let onAction: AuthActionHandler = () => {};
+  export let onPasswordSubmit: PasswordSubmissionHandler | undefined = undefined;
+  export let failureMessage: string | undefined = undefined;
+  export let failureCode: string | undefined = undefined;
 
   let passwordVisible = false;
   let previousState = state;
@@ -120,8 +130,22 @@
     if (!form.checkValidity()) return;
 
     submissionLocked = true;
+    const data = new FormData(form);
+    const username = data.get('username');
+    const password = data.get('password');
     formResetKey += 1;
     passwordVisible = false;
+
+    if (discoveryMode === 'live') {
+      if (onPasswordSubmit && typeof username === 'string' && typeof password === 'string') {
+        // The live callback receives transient values once. Auth actions and observable
+        // component state remain credential-free, and the keyed form is cleared now.
+        onPasswordSubmit({ username, password });
+      } else {
+        submissionLocked = false;
+      }
+      return;
+    }
     onAction({ type: 'submit-password-fixture' });
   }
 </script>
@@ -197,7 +221,9 @@
             : 'Prototype-only pending state · no sign-in action is available.'}
         </p>
       {:else if state === 'discovery-empty'}
-        <div class="failure-icon" aria-hidden="true"><Icon name="warning" size={20} /></div>
+        <div class="failure-icon" aria-hidden="true">
+          <Icon name="warning" size={20} />
+        </div>
         <div class="failure-heading">
           <h1>No sign-in methods available</h1>
           <p>
@@ -225,12 +251,20 @@
         </p>
       {:else if isPasswordState}
         <header class="panel-heading">
-          <p class="eyebrow">BASIC AUTH PROVIDER{state === 'password-submitting' ? ' · SUBMITTING' : ''}</p>
-          <h1>{state === 'password-submitting' ? 'Signing in to Hermes' : 'Sign in to Hermes'}</h1>
+          <p class="eyebrow">
+            BASIC AUTH PROVIDER{state === 'password-submitting' ? ' · SUBMITTING' : ''}
+          </p>
+          <h1>
+            {state === 'password-submitting' ? 'Signing in to Hermes' : 'Sign in to Hermes'}
+          </h1>
           <p>
             {state === 'password-submitting'
-              ? 'Static submitting state only · the synthetic values were cleared and no request was made.'
-              : 'Enter synthetic fixture values to review the sign-in state. Nothing is sent or retained by this prototype.'}
+              ? discoveryMode === 'live'
+                ? 'Your password was cleared from the form and sent only to the configured Hermes origin for this sign-in attempt.'
+                : 'Static submitting state only · the synthetic values were cleared and no request was made.'
+              : discoveryMode === 'live'
+                ? 'Your password is sent only to the configured Hermes origin for this sign-in attempt.'
+                : 'Enter synthetic fixture values to review the sign-in state. Nothing is sent or retained by this prototype.'}
           </p>
         </header>
 
@@ -243,7 +277,7 @@
               disabled={state === 'password-submitting'}
               name="username"
               required
-              value="alex"
+              value={discoveryMode === 'live' ? '' : 'alex'}
             />
 
             <div class="password-label-row">
@@ -259,7 +293,7 @@
             </div>
             <input
               id="auth-password"
-              autocomplete="off"
+              autocomplete={discoveryMode === 'live' ? 'current-password' : 'off'}
               disabled={state === 'password-submitting'}
               name="password"
               required
@@ -303,7 +337,9 @@
           onActivate={() => handleAction({ type: 'cancel-callback' })}
         />
       {:else if state === 'session-expired'}
-        <div class="session-icon" aria-hidden="true"><Icon name="refresh" size={20} /></div>
+        <div class="session-icon" aria-hidden="true">
+          <Icon name="refresh" size={20} />
+        </div>
         <div class="session-copy">
           <h1>Session expired</h1>
           <p>
@@ -325,23 +361,41 @@
         </div>
         <div class="failure-heading">
           <h1>{discoveryFailureHeading(state)}</h1>
-          <p>{discoveryFailureCopy(state)}</p>
+          <p>
+            {state === 'failure' && discoveryMode === 'live' && failureMessage
+              ? failureMessage
+              : discoveryFailureCopy(state)}
+          </p>
         </div>
         <div class="failure-detail">
-          <strong>{discoveryFailureDetail(state)}</strong>
-          <p>{discoveryFailureDetailCopy(state)}</p>
+          <strong
+            >{state === 'failure' && discoveryMode === 'live' && failureCode
+              ? failureCode
+              : discoveryFailureDetail(state)}</strong
+          >
+          <p>
+            {state === 'failure' && discoveryMode === 'live'
+              ? 'The fixed diagnostic contains no credential or provider response detail.'
+              : discoveryFailureDetailCopy(state)}
+          </p>
         </div>
         <div class="failure-actions">
           <Pill
             label={state === 'failure' ? 'Try again' : 'Retry discovery'}
             icon="refresh"
             variant="action"
-            onActivate={() => handleAction({ type: state === 'failure' ? 'retry-authentication' : 'retry-discovery' })}
+            onActivate={() =>
+              handleAction({
+                type: state === 'failure' ? 'retry-authentication' : 'retry-discovery'
+              })}
           />
           <Pill
             label={state === 'failure' ? 'Choose provider' : 'Back to sign-in'}
             variant="ghost"
-            onActivate={() => handleAction({ type: state === 'failure' ? 'choose-provider-again' : 'back-to-sign-in' })}
+            onActivate={() =>
+              handleAction({
+                type: state === 'failure' ? 'choose-provider-again' : 'back-to-sign-in'
+              })}
           />
         </div>
         <p class="metadata">{discoveryFailureMetadata(state)}</p>
