@@ -86,10 +86,17 @@ budgets:
 - Session `started_at` and `last_active` are required integer Unix-second values;
   `ended_at` is a required nullable integer. Source string timestamps are not
   coerced. The pinned session counters and booleans are required as well.
-- Message content is `null` or a bounded string, including an empty string.
-  Optional source-defined tool metadata is projected only when its fields have
-  the pinned scalar/object shapes; arbitrary arrays and dictionaries at the
-  content root are rejected.
+- A returned session ID is validated independently. It may differ from the
+  requested path because Hermes resolves aliases and continuation sessions to a
+  canonical ID before returning session details or messages.
+- Source-defined strings stay bounded but may be empty when the pinned
+  TypeScript type says only `string`. This includes identity display fields,
+  nullable session text when it is non-null, provider display labels, profiles,
+  message content, and optional tool metadata. Empty strings are rejected only
+  for reviewed local identifiers such as provider names and session IDs.
+- Message content is `null` or a bounded string. Optional source-defined tool
+  metadata is projected only when its fields have the pinned scalar/object
+  shapes; arbitrary arrays and dictionaries at the content root are rejected.
 - Duplicate keys, non-finite or unsafe numbers, excessive depth, nodes, strings,
   arrays, and object keys are rejected before these conversions. Unknown additive
   fields are ignored only after those parser budgets pass.

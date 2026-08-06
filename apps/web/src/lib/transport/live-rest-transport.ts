@@ -238,7 +238,7 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
       const requestedSessionId = validateSessionId(sessionId);
       return request(
         `/sessions/${encodeURIComponent(requestedSessionId)}`,
-        (value) => validateSession(value, requestedSessionId),
+        validateSession,
         signal
       );
     },
@@ -252,7 +252,7 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
       const query = buildPaginationQuery(options, MAX_MESSAGE_COUNT);
       return request(
         `/sessions/${encodeURIComponent(requestedSessionId)}/messages${query}`,
-        (value) => validateSessionMessages(value, requestedSessionId),
+        validateSessionMessages,
         signal
       );
     }
@@ -606,7 +606,7 @@ function validateProviderDiscovery(value: StrictJsonValue): ProviderDiscovery {
       if (!isSafeProviderName(name) || seen.has(name)) {
         throw new LiveRestError('invalid-response');
       }
-      const displayName = requireString(item.display_name, MAX_SHORT_TEXT_LENGTH);
+      const displayName = requireBoundedString(item.display_name, MAX_SHORT_TEXT_LENGTH);
       if (!isSafeProviderDisplayName(displayName)) {
         throw new LiveRestError('invalid-response');
       }
@@ -631,10 +631,10 @@ function validateAuthIdentity(value: StrictJsonValue): AuthIdentity {
   ]);
 
   return {
-    userId: requireString(object.user_id, MAX_SHORT_TEXT_LENGTH),
-    email: requireString(object.email, MAX_SHORT_TEXT_LENGTH),
-    displayName: requireString(object.display_name, MAX_SHORT_TEXT_LENGTH),
-    organizationId: requireString(object.org_id, MAX_SHORT_TEXT_LENGTH),
+    userId: requireBoundedString(object.user_id, MAX_SHORT_TEXT_LENGTH),
+    email: requireBoundedString(object.email, MAX_SHORT_TEXT_LENGTH),
+    displayName: requireBoundedString(object.display_name, MAX_SHORT_TEXT_LENGTH),
+    organizationId: requireBoundedString(object.org_id, MAX_SHORT_TEXT_LENGTH),
     provider: requireString(object.provider, MAX_SHORT_TEXT_LENGTH),
     expiresAt: requireBoundedInteger(object.expires_at, 0, MAX_UNIX_SECONDS)
   };
@@ -650,7 +650,7 @@ function validateSessionList(value: StrictJsonValue): SessionList {
   return { sessions, total, limit, offset };
 }
 
-function validateSession(value: StrictJsonValue, expectedSessionId?: string): LiveSession {
+function validateSession(value: StrictJsonValue): LiveSession {
   const object = requireObject(value, [
     'id',
     'source',
@@ -666,10 +666,10 @@ function validateSession(value: StrictJsonValue, expectedSessionId?: string): Li
     'output_tokens',
     'preview'
   ]);
+  // The route may return a canonical ID after resolving an alias or
+  // continuation. The response ID must be safe, but it need not equal the
+  // requested path segment.
   const id = requireSessionId(requireString(object.id, MAX_ID_LENGTH));
-  if (expectedSessionId !== undefined && id !== expectedSessionId) {
-    throw new LiveRestError('invalid-response');
-  }
 
   return {
     id,
@@ -690,14 +690,16 @@ function validateSession(value: StrictJsonValue, expectedSessionId?: string): Li
     }),
     ...(object.archived !== undefined && { archived: requireBoolean(object.archived) }),
     ...(object.pinned !== undefined && { pinned: requireBoolean(object.pinned) }),
-    ...(object.profile !== undefined && { profile: requireString(object.profile, MAX_SHORT_TEXT_LENGTH) }),
+    ...(object.profile !== undefined && {
+      profile: requireBoundedString(object.profile, MAX_SHORT_TEXT_LENGTH)
+    }),
     ...(object.is_default_profile !== undefined && {
       isDefaultProfile: requireBoolean(object.is_default_profile)
     })
   };
 }
 
-function validateSessionMessages(value: StrictJsonValue, expectedSessionId?: string): SessionMessages {
+function validateSessionMessages(value: StrictJsonValue): SessionMessages {
   const object = requireObject(value, ['session_id', 'messages', 'pagination']);
   const messages = requireArray(object.messages, MAX_MESSAGE_COUNT).map(validateMessage);
   const pagination = requireObject(object.pagination, ['limit', 'offset', 'returned']);
@@ -707,10 +709,10 @@ function validateSessionMessages(value: StrictJsonValue, expectedSessionId?: str
     throw new LiveRestError('invalid-response');
   }
 
+  // Hermes may resolve aliases or continuation sessions before returning the
+  // canonical ID. Validate the returned identifier independently instead of
+  // requiring it to equal the literal path segment supplied by the caller.
   const sessionId = requireSessionId(requireString(object.session_id, MAX_ID_LENGTH));
-  if (expectedSessionId !== undefined && sessionId !== expectedSessionId) {
-    throw new LiveRestError('invalid-response');
-  }
 
   return {
     sessionId,
@@ -735,10 +737,10 @@ function validateMessage(value: StrictJsonValue): LiveMessage {
     content: requireMessageContent(object.content),
     ...(object.tool_calls !== undefined && { toolCalls: requireToolCalls(object.tool_calls) }),
     ...(object.tool_name !== undefined && {
-      toolName: requireString(object.tool_name, MAX_SHORT_TEXT_LENGTH)
+      toolName: requireBoundedString(object.tool_name, MAX_SHORT_TEXT_LENGTH)
     }),
     ...(object.tool_call_id !== undefined && {
-      toolCallId: requireString(object.tool_call_id, MAX_ID_LENGTH)
+      toolCallId: requireBoundedString(object.tool_call_id, MAX_ID_LENGTH)
     }),
     ...(object.timestamp !== undefined && {
       timestamp: requireBoundedInteger(object.timestamp, 0, MAX_UNIX_SECONDS)
@@ -774,6 +776,9 @@ function requireArray(value: StrictJsonValue, maxLength: number): StrictJsonValu
 }
 
 function requireString(value: StrictJsonValue, maxLength: number): string {
+  // Empty strings are rejected only where the reviewed local contract assigns
+  // identifier semantics. Source-defined display and metadata strings use the
+  // bounded validator below because the pinned TypeScript types permit empty.
   if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) {
     throw new LiveRestError('invalid-response');
   }
@@ -791,7 +796,7 @@ function requireNullableString(value: StrictJsonValue, maxLength: number): strin
   if (value === null) {
     return null;
   }
-  return requireString(value, maxLength);
+  return requireBoundedString(value, maxLength);
 }
 
 function requireNullableBoundedInteger(value: StrictJsonValue, min: number, max: number): number | null {
@@ -813,9 +818,9 @@ function requireToolCalls(value: StrictJsonValue): LiveToolCall[] {
     const object = requireObject(toolCall, ['id', 'function']);
     const functionObject = requireObject(object.function, ['name', 'arguments']);
     return {
-      id: requireString(object.id, MAX_ID_LENGTH),
+      id: requireBoundedString(object.id, MAX_ID_LENGTH),
       function: {
-        name: requireString(functionObject.name, MAX_SHORT_TEXT_LENGTH),
+        name: requireBoundedString(functionObject.name, MAX_SHORT_TEXT_LENGTH),
         arguments: requireBoundedString(functionObject.arguments, MAX_TEXT_LENGTH)
       }
     };

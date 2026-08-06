@@ -384,6 +384,96 @@ describe('createLiveRestTransport', () => {
     });
   });
 
+  it('accepts empty source-defined strings while identifier fields remain non-empty', async () => {
+    const providers = JSON.parse(rawProviderDiscovery()) as {
+      providers: Array<Record<string, unknown>>;
+    };
+    providers.providers[0].display_name = '';
+
+    const auth = JSON.parse(rawAuthIdentity()) as Record<string, unknown>;
+    auth.user_id = '';
+    auth.email = '';
+    auth.display_name = '';
+    auth.org_id = '';
+
+    const session = JSON.parse(rawSession()) as Record<string, unknown>;
+    session.source = '';
+    session.model = '';
+    session.title = '';
+    session.preview = '';
+    session.profile = '';
+
+    const messages = {
+      session_id: LIVE_SESSION_MESSAGES_FIXTURE.sessionId,
+      messages: [
+        {
+          role: 'tool',
+          content: '',
+          tool_name: '',
+          tool_call_id: '',
+          tool_calls: [{ id: '', function: { name: '', arguments: '' } }]
+        }
+      ],
+      pagination: { limit: null, offset: 0, returned: 1 }
+    };
+
+    const fixture = fetchSequence(
+      response(JSON.stringify(providers)),
+      response(JSON.stringify(auth)),
+      response(JSON.stringify(session)),
+      response(JSON.stringify(messages))
+    );
+    const transport = createLiveRestTransport({ fetch: fixture.fetch });
+
+    await expect(transport.getProviders()).resolves.toMatchObject({
+      providers: [{ displayName: '' }]
+    });
+    await expect(transport.getAuthState()).resolves.toMatchObject({
+      userId: '',
+      email: '',
+      displayName: '',
+      organizationId: ''
+    });
+    await expect(transport.getSession(LIVE_SESSION_FIXTURE.id)).resolves.toMatchObject({
+      source: '',
+      model: '',
+      title: '',
+      preview: '',
+      profile: ''
+    });
+    await expect(
+      transport.getSessionMessages(LIVE_SESSION_MESSAGES_FIXTURE.sessionId)
+    ).resolves.toMatchObject({
+      messages: [
+        {
+          role: 'tool',
+          content: '',
+          toolName: '',
+          toolCallId: '',
+          toolCalls: [{ id: '', function: { name: '', arguments: '' } }]
+        }
+      ]
+    });
+
+    const emptyProvider = JSON.parse(rawProviderDiscovery()) as {
+      providers: Array<Record<string, unknown>>;
+    };
+    emptyProvider.providers[0].name = '';
+    await expect(
+      createLiveRestTransport({
+        fetch: fetchSequence(response(JSON.stringify(emptyProvider))).fetch
+      }).getProviders()
+    ).rejects.toMatchObject({ code: 'invalid-response' });
+
+    const emptySessionId = JSON.parse(rawSession()) as Record<string, unknown>;
+    emptySessionId.id = '';
+    await expect(
+      createLiveRestTransport({
+        fetch: fetchSequence(response(JSON.stringify(emptySessionId))).fetch
+      }).getSession(LIVE_SESSION_FIXTURE.id)
+    ).rejects.toMatchObject({ code: 'invalid-response' });
+  });
+
   it('ignores bounded additive fields across providers, auth, sessions, and messages', async () => {
     const provider = JSON.parse(rawProviderDiscovery()) as {
       providers: Array<Record<string, unknown>>;
@@ -592,7 +682,7 @@ describe('createLiveRestTransport', () => {
     ).rejects.toMatchObject({ code: 'invalid-response' });
   });
 
-  it('fails closed on duplicate JSON keys, mismatched pagination, and session ID mismatches', async () => {
+  it('fails closed on duplicate keys and pagination errors while accepting resolved session IDs', async () => {
     const duplicate = fetchSequence(response('{"providers":[],"providers":[]}'));
     await expect(createLiveRestTransport({ fetch: duplicate.fetch }).getProviders()).rejects.toMatchObject({
       code: 'malformed-json'
@@ -616,15 +706,17 @@ describe('createLiveRestTransport', () => {
       createLiveRestTransport({ fetch: invalidReturnedId.fetch }).getSession(LIVE_SESSION_FIXTURE.id)
     ).rejects.toMatchObject({ code: 'invalid-response' });
 
-    const wrongDetailId = fetchSequence(response(rawSession({ ...LIVE_SESSION_FIXTURE, id: 'synthetic-session-0002' })));
+    const resolvedDetailId = fetchSequence(
+      response(rawSession({ ...LIVE_SESSION_FIXTURE, id: 'synthetic-session-0002' }))
+    );
     await expect(
-      createLiveRestTransport({ fetch: wrongDetailId.fetch }).getSession(LIVE_SESSION_FIXTURE.id)
-    ).rejects.toMatchObject({ code: 'invalid-response' });
+      createLiveRestTransport({ fetch: resolvedDetailId.fetch }).getSession(LIVE_SESSION_FIXTURE.id)
+    ).resolves.toMatchObject({ id: 'synthetic-session-0002' });
 
-    const wrongMessagesId = fetchSequence(response(rawSessionMessages('synthetic-session-0002')));
+    const resolvedMessagesId = fetchSequence(response(rawSessionMessages('synthetic-session-0002')));
     await expect(
-      createLiveRestTransport({ fetch: wrongMessagesId.fetch }).getSessionMessages(LIVE_SESSION_FIXTURE.id)
-    ).rejects.toMatchObject({ code: 'invalid-response' });
+      createLiveRestTransport({ fetch: resolvedMessagesId.fetch }).getSessionMessages(LIVE_SESSION_FIXTURE.id)
+    ).resolves.toMatchObject({ sessionId: 'synthetic-session-0002' });
   });
 
   it('rejects oversized, wrong-media, malformed-UTF8, redirected, and non-success responses', async () => {
