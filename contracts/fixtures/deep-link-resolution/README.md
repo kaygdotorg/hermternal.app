@@ -29,13 +29,13 @@ and denied sessions return the same `session_not_found` result.
 
 A latest-descendant trace contains an explicit bounded lineage list. Each node
 has an exact session ID, root ID, parent ID, and integer sequence. The reducer
-walks parent links iteratively. It selects the one descendant with the highest
-sequence.
+walks parent links iteratively. Every child sequence must be greater than its
+parent sequence. It selects the one strict descendant with the highest sequence.
+It never selects the requested root when descendants exist.
 
-The proof includes sibling branches, a highest-sequence tie, and malformed
-sequence data. A tie, cycle, missing parent, wrong root, duplicate node, or
-non-integer sequence returns `lineage_unavailable`. The reducer does not use a
-hard-coded descendant ID.
+The proof includes canonical sibling, tie, non-integer, decreasing, cycle,
+missing-parent, wrong-root, and duplicate-node cases. Each malformed case returns
+`lineage_unavailable`. The reducer does not use a hard-coded descendant ID.
 
 The pinned session-lineage fixture confirms the reviewed root and branch parent
 relationship. Resolver sequence evidence adds only deterministic synthetic
@@ -43,12 +43,16 @@ ordering. It does not claim a live Hermes ordering field.
 
 ## Pending target and reload
 
-The receive time plus 300 seconds is the exact deadline. One trace expires at
-the deadline. One trace proves that the target remains pending one second
-before the deadline.
+The receive time plus 300 seconds is the exact deadline. Every pending action
+requires a time before the deadline. At exact second 300, authentication,
+lookup, message handling, completion, interruption, recovery, cancellation, and
+logout expire the target before acting. One trace proves that the target remains
+pending one second before the deadline.
 
-Success, failure, expiry, and logout erase all pending target data. Reload does
-not reuse erased target data. It repeats grammar parsing, authentication
+Success, failure, cancellation, expiry, and logout erase the raw input link and
+all pending target IDs. The focused result records the exact message ID. Reload
+does not reuse erased target data. Its reload event supplies a fresh synthetic
+input and repeats grammar parsing, authentication
 confirmation, and exact lookup from the original synthetic input.
 
 An interrupted lookup can recover only before its deadline. Recovery confirms
@@ -72,15 +76,17 @@ All fixture and evidence data is inert JSON. The loader rejects duplicate keys,
 non-finite numbers, overflow, wrong exact types, oversized strings or
 containers, excessive nodes, and excessive depth. The JSON walk is iterative.
 
-Every artifact is opened once. The validator reads it in bounded 64 KiB chunks.
-It enforces the one MiB limit before full allocation. It hashes and parses the
-same immutable bytes. It rejects symlinks, inode replacement, size changes, and
-modification-time changes during a read.
+Every artifact is opened once. The validator rejects symlinks and special files
+before a blocking open. It reads regular files in bounded 64 KiB chunks. It
+enforces the one MiB limit before full allocation. It hashes and parses the same
+immutable bytes. It rejects inode replacement, size changes, and modification-
+time changes during a read.
 
-`review-root.json` is the local independent review registry.
-`review-root-sha256.txt` is its reviewed trust anchor. The review root binds the
-cases, tests, validator source, raw evidence, baseline, documentation, and exact
-dependency bytes. Cases and baselines cannot authorize changes to themselves.
+`review-root.json` binds the cases, tests, exact validator source, raw evidence,
+baseline, documentation, and exact dependency bytes. Its durable digest anchor
+is `contracts/fixtures/review-anchors/deep-link-resolution.sha256`, outside this
+mutable local proof set. Coordinated replacement of the local artifacts, review
+root, a local digest copy, and source constants still fails against that anchor.
 Shared aggregate registration remains serialized behind PR #265.
 
 Argument parsing is inside the controlled failure boundary. Unknown arguments,

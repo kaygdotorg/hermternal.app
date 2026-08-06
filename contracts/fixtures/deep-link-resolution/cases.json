@@ -22,9 +22,9 @@
   },
   "invariants": {
     "exact_ids": "full opaque IDs are preserved without normalization",
-    "latest_descendant": "explicit bounded sequence evidence selects one unique descendant",
-    "authorization": "missing and denied share one session-not-found outcome",
-    "pending_target": "link and IDs are erased on success, failure, expiry, or logout",
+    "latest_descendant": "strict monotonic sequence evidence selects one unique descendant",
+    "authorization_safe_parity": "missing and denied share one session-not-found outcome",
+    "pending_target": "raw link and IDs are erased on every terminal outcome including cancellation",
     "reload": "repeat parse and authentication resolution before lookup",
     "creation": false,
     "sharing": false,
@@ -69,9 +69,11 @@
           "session_opened",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": "session-root-0000000000000000000000000000000000000001",
         "root_id": "session-root-0000000000000000000000000000000000000001",
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "session",
         "pending_link": null,
         "pending_session_id": null,
@@ -125,9 +127,11 @@
           "message_anchor_focused",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
         "root_id": "session-root-0000000000000000000000000000000000000001",
         "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "focused_message_id": "synthetic-message-anchor-00000000000000000000000000000001",
         "focus": "message",
         "pending_link": null,
         "pending_session_id": null,
@@ -202,9 +206,11 @@
           "session_opened",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
         "root_id": "session-root-0000000000000000000000000000000000000001",
         "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "focused_message_id": null,
         "focus": "session",
         "pending_link": null,
         "pending_session_id": null,
@@ -272,9 +278,11 @@
           "no_session_created",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": null,
         "pending_session_id": null,
@@ -336,9 +344,11 @@
           "no_session_created",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": null,
         "pending_session_id": null,
@@ -353,6 +363,372 @@
         "network": false
       },
       "notes": "A non-integer sequence is malformed and fails closed."
+    },
+    {
+      "id": "latest-descendant-decreasing-order-fails-closed",
+      "link": "hermternal://open/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "latest_descendant",
+      "lineage_ordering": [
+        {
+          "session_id": "session-root-0000000000000000000000000000000000000001",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": null,
+          "sequence": 9
+        },
+        {
+          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-root-0000000000000000000000000000000000000001",
+          "sequence": 2
+        },
+        {
+          "session_id": "session-branch-0000000000000000000000000000000000000002",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-root-0000000000000000000000000000000000000001",
+          "sequence": 3
+        }
+      ],
+      "events": [
+        {
+          "type": "receive",
+          "at_seconds": 1000
+        },
+        {
+          "type": "lookup_present",
+          "at_seconds": 1001
+        }
+      ],
+      "expected": {
+        "decision": "lineage_unavailable",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "failed"
+        ],
+        "effects": [
+          "grammar_validated",
+          "deadline_set_300_seconds",
+          "authentication_confirmed",
+          "authenticated_lookup_started",
+          "lineage_ordering_rejected",
+          "no_session_created",
+          "pending_target_erased"
+        ],
+        "link_input": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "focused_message_id": null,
+        "focus": "none",
+        "pending_link": null,
+        "pending_session_id": null,
+        "pending_message_id": null,
+        "deadline_seconds": null,
+        "lookup_attempts": 1,
+        "parse_attempts": 1,
+        "authentication_checks": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A child sequence that does not advance beyond its parent fails closed."
+    },
+    {
+      "id": "latest-descendant-cycle-fails-closed",
+      "link": "hermternal://open/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "latest_descendant",
+      "lineage_ordering": [
+        {
+          "session_id": "session-root-0000000000000000000000000000000000000001",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": null,
+          "sequence": 1
+        },
+        {
+          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-branch-0000000000000000000000000000000000000002",
+          "sequence": 2
+        },
+        {
+          "session_id": "session-branch-0000000000000000000000000000000000000002",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-sibling-0000000000000000000000000000000000000003",
+          "sequence": 3
+        }
+      ],
+      "events": [
+        {
+          "type": "receive",
+          "at_seconds": 1000
+        },
+        {
+          "type": "lookup_present",
+          "at_seconds": 1001
+        }
+      ],
+      "expected": {
+        "decision": "lineage_unavailable",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "failed"
+        ],
+        "effects": [
+          "grammar_validated",
+          "deadline_set_300_seconds",
+          "authentication_confirmed",
+          "authenticated_lookup_started",
+          "lineage_ordering_rejected",
+          "no_session_created",
+          "pending_target_erased"
+        ],
+        "link_input": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "focused_message_id": null,
+        "focus": "none",
+        "pending_link": null,
+        "pending_session_id": null,
+        "pending_message_id": null,
+        "deadline_seconds": null,
+        "lookup_attempts": 1,
+        "parse_attempts": 1,
+        "authentication_checks": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A parent cycle fails closed."
+    },
+    {
+      "id": "latest-descendant-missing-parent-fails-closed",
+      "link": "hermternal://open/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "latest_descendant",
+      "lineage_ordering": [
+        {
+          "session_id": "session-root-0000000000000000000000000000000000000001",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": null,
+          "sequence": 1
+        },
+        {
+          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-missing-0000000000000000000000000000000000000004",
+          "sequence": 2
+        },
+        {
+          "session_id": "session-branch-0000000000000000000000000000000000000002",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-root-0000000000000000000000000000000000000001",
+          "sequence": 3
+        }
+      ],
+      "events": [
+        {
+          "type": "receive",
+          "at_seconds": 1000
+        },
+        {
+          "type": "lookup_present",
+          "at_seconds": 1001
+        }
+      ],
+      "expected": {
+        "decision": "lineage_unavailable",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "failed"
+        ],
+        "effects": [
+          "grammar_validated",
+          "deadline_set_300_seconds",
+          "authentication_confirmed",
+          "authenticated_lookup_started",
+          "lineage_ordering_rejected",
+          "no_session_created",
+          "pending_target_erased"
+        ],
+        "link_input": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "focused_message_id": null,
+        "focus": "none",
+        "pending_link": null,
+        "pending_session_id": null,
+        "pending_message_id": null,
+        "deadline_seconds": null,
+        "lookup_attempts": 1,
+        "parse_attempts": 1,
+        "authentication_checks": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A missing parent fails closed."
+    },
+    {
+      "id": "latest-descendant-wrong-root-fails-closed",
+      "link": "hermternal://open/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "latest_descendant",
+      "lineage_ordering": [
+        {
+          "session_id": "session-root-0000000000000000000000000000000000000001",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": null,
+          "sequence": 1
+        },
+        {
+          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "root_id": "session-sibling-0000000000000000000000000000000000000003",
+          "parent_id": "session-root-0000000000000000000000000000000000000001",
+          "sequence": 2
+        },
+        {
+          "session_id": "session-branch-0000000000000000000000000000000000000002",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-root-0000000000000000000000000000000000000001",
+          "sequence": 3
+        }
+      ],
+      "events": [
+        {
+          "type": "receive",
+          "at_seconds": 1000
+        },
+        {
+          "type": "lookup_present",
+          "at_seconds": 1001
+        }
+      ],
+      "expected": {
+        "decision": "lineage_unavailable",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "failed"
+        ],
+        "effects": [
+          "grammar_validated",
+          "deadline_set_300_seconds",
+          "authentication_confirmed",
+          "authenticated_lookup_started",
+          "lineage_ordering_rejected",
+          "no_session_created",
+          "pending_target_erased"
+        ],
+        "link_input": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "focused_message_id": null,
+        "focus": "none",
+        "pending_link": null,
+        "pending_session_id": null,
+        "pending_message_id": null,
+        "deadline_seconds": null,
+        "lookup_attempts": 1,
+        "parse_attempts": 1,
+        "authentication_checks": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A node with the wrong root fails closed."
+    },
+    {
+      "id": "latest-descendant-duplicate-node-fails-closed",
+      "link": "hermternal://open/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "latest_descendant",
+      "lineage_ordering": [
+        {
+          "session_id": "session-root-0000000000000000000000000000000000000001",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": null,
+          "sequence": 1
+        },
+        {
+          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-root-0000000000000000000000000000000000000001",
+          "sequence": 2
+        },
+        {
+          "session_id": "session-branch-0000000000000000000000000000000000000002",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-root-0000000000000000000000000000000000000001",
+          "sequence": 3
+        },
+        {
+          "session_id": "session-branch-0000000000000000000000000000000000000002",
+          "root_id": "session-root-0000000000000000000000000000000000000001",
+          "parent_id": "session-root-0000000000000000000000000000000000000001",
+          "sequence": 3
+        }
+      ],
+      "events": [
+        {
+          "type": "receive",
+          "at_seconds": 1000
+        },
+        {
+          "type": "lookup_present",
+          "at_seconds": 1001
+        }
+      ],
+      "expected": {
+        "decision": "lineage_unavailable",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "failed"
+        ],
+        "effects": [
+          "grammar_validated",
+          "deadline_set_300_seconds",
+          "authentication_confirmed",
+          "authenticated_lookup_started",
+          "lineage_ordering_rejected",
+          "no_session_created",
+          "pending_target_erased"
+        ],
+        "link_input": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "focused_message_id": null,
+        "focus": "none",
+        "pending_link": null,
+        "pending_session_id": null,
+        "pending_message_id": null,
+        "deadline_seconds": null,
+        "lookup_attempts": 1,
+        "parse_attempts": 1,
+        "authentication_checks": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A duplicate session node fails closed."
     },
     {
       "id": "unknown-session-safe-not-found",
@@ -387,9 +763,11 @@
           "no_session_created",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": null,
         "pending_session_id": null,
@@ -438,9 +816,11 @@
           "no_session_created",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": null,
         "pending_session_id": null,
@@ -495,9 +875,11 @@
           "message_not_found_fallback",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
         "root_id": "session-root-0000000000000000000000000000000000000001",
         "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "focused_message_id": null,
         "focus": "session_start",
         "pending_link": null,
         "pending_session_id": null,
@@ -556,9 +938,11 @@
           "session_opened",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
         "root_id": "session-root-0000000000000000000000000000000000000001",
         "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "focused_message_id": null,
         "focus": "session",
         "pending_link": null,
         "pending_session_id": null,
@@ -604,9 +988,11 @@
           "deadline_reached_300_seconds",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": null,
         "pending_session_id": null,
@@ -650,9 +1036,11 @@
           "deadline_set_300_seconds",
           "deadline_not_reached"
         ],
+        "link_input": "https://synthetic.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001",
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": "https://synthetic.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001",
         "pending_session_id": "session-root-0000000000000000000000000000000000000001",
@@ -697,9 +1085,11 @@
           "deadline_set_300_seconds",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": null,
         "pending_session_id": null,
@@ -714,6 +1104,55 @@
         "network": false
       },
       "notes": "Logout erases pending link and ID data."
+    },
+    {
+      "id": "cancel-clears-pending-target",
+      "link": "hermternal://open/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": false,
+      "lookup_mode": "exact",
+      "lineage_ordering": [],
+      "events": [
+        {
+          "type": "receive",
+          "at_seconds": 1000
+        },
+        {
+          "type": "cancel",
+          "at_seconds": 1001
+        }
+      ],
+      "expected": {
+        "decision": "cancelled",
+        "final_state": "cancelled",
+        "state_trace": [
+          "idle",
+          "auth_pending",
+          "cancelled"
+        ],
+        "effects": [
+          "grammar_validated",
+          "deadline_set_300_seconds",
+          "pending_target_erased"
+        ],
+        "link_input": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "focused_message_id": null,
+        "focus": "none",
+        "pending_link": null,
+        "pending_session_id": null,
+        "pending_message_id": null,
+        "deadline_seconds": null,
+        "lookup_attempts": 0,
+        "parse_attempts": 1,
+        "authentication_checks": 0,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "Cancellation erases the raw link and all pending target data."
     },
     {
       "id": "direct-reload-reparses-and-reauthenticates",
@@ -736,7 +1175,8 @@
         },
         {
           "type": "reload",
-          "at_seconds": 1100
+          "at_seconds": 1100,
+          "link": "https://synthetic.hermternal.test/v1/c/session-branch-0000000000000000000000000000000000000002"
         },
         {
           "type": "receive",
@@ -781,9 +1221,11 @@
           "session_opened",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
         "root_id": "session-root-0000000000000000000000000000000000000001",
         "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "focused_message_id": null,
         "focus": "session",
         "pending_link": null,
         "pending_session_id": null,
@@ -850,9 +1292,11 @@
           "session_opened",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
         "root_id": "session-root-0000000000000000000000000000000000000001",
         "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "focused_message_id": null,
         "focus": "session",
         "pending_link": null,
         "pending_session_id": null,
@@ -891,9 +1335,11 @@
           "grammar_rejected_before_lookup",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": null,
         "pending_session_id": null,
@@ -932,9 +1378,11 @@
           "grammar_rejected_before_lookup",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": null,
         "pending_session_id": null,
@@ -964,9 +1412,11 @@
           "idle"
         ],
         "effects": [],
+        "link_input": null,
         "opened_session_id": null,
         "root_id": null,
         "parent_id": null,
+        "focused_message_id": null,
         "focus": "none",
         "pending_link": null,
         "pending_session_id": null,
@@ -1041,9 +1491,11 @@
           "message_anchor_focused",
           "pending_target_erased"
         ],
+        "link_input": null,
         "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
         "root_id": "session-root-0000000000000000000000000000000000000001",
         "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "focused_message_id": "synthetic-message-anchor-00000000000000000000000000000001",
         "focus": "message",
         "pending_link": null,
         "pending_session_id": null,

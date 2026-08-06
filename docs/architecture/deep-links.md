@@ -5,8 +5,8 @@ Status: normative planning contract for Hermternal v1 deep links.
 Deep links identify Hermternal content. They do not identify a Hermes HTTP
 route, carry authentication material, or create a session. The grammar is
 versioned separately from the product release and the Hermes Dashboard
-protocol. This document freezes the parse boundary only; resolution, access
-results, lineage, and message-result boards belong to dependent contract work.
+protocol. This document freezes the parse boundary and the synthetic resolver
+contract. Runtime resolution and message-result boards remain later work.
 
 The companion synthetic proof is
 [`contracts/fixtures/deep-link-grammar/README.md`](../../contracts/fixtures/deep-link-grammar/README.md).
@@ -142,7 +142,7 @@ A resolver MUST process a candidate in this order:
    it does not exist, open the session and show a clear **message not found**
    state.
 6. Use the same safe **session not found** or **not available** result for an
-   unknown or unauthorised target. Do not reveal another user's IDs.
+   unknown or unauthorized target. Do not reveal another user's IDs.
 7. Erase the pending raw link, session ID, message ID, and deadline after
    success, failure, cancellation, expiry, or logout.
 
@@ -154,9 +154,10 @@ the same full IDs and does not duplicate a session, prompt, or message.
 
 A valid target may wait for authentication in process memory for at most 300
 seconds. The resolver records the receive time and the exact receive-plus-300
-second deadline. It may expire the target only at or after that deadline.
-Success, failure, cancellation, expiry, and logout erase all pending target
-data.
+second deadline. Authentication, lookup, message focus, completion,
+interruption, recovery, cancellation, and logout require `now < deadline`.
+At exact second 300, every pending path expires before it can act. Success,
+failure, cancellation, expiry, and logout erase the raw link and all target IDs.
 
 A direct load and reload use the same steps. Reload MUST parse the link again,
 confirm authentication again, and perform a new exact lookup. It MUST NOT reuse
@@ -166,8 +167,10 @@ recorded deadline. Recovery confirms authentication before an idempotent retry.
 A latest-descendant lookup requires explicit bounded lineage ordering evidence.
 Each node has an exact session ID, root ID, parent ID, and integer sequence. The
 resolver walks parent links and selects one unique descendant with the highest
-sequence. A tie, cycle, missing parent, wrong root, duplicate node, or malformed
-sequence fails closed. The resolver MUST NOT use a hard-coded descendant,
+sequence. Every child sequence MUST be greater than its parent sequence. The
+requested root is not its own latest descendant when descendants exist. A tie,
+cycle, missing parent, wrong root, duplicate node, decreasing sequence, or
+malformed sequence fails closed. The resolver MUST NOT use a hard-coded descendant,
 rewrite lineage, or infer lineage from display IDs.
 
 Unknown and unauthorized sessions return the same `session_not_found` result.
@@ -205,14 +208,16 @@ network use for every synthetic trace.
 
 Both proofs use strict bounded JSON validation. They reject duplicate keys,
 non-finite values, overflow, wrong exact types, oversized strings or
-containers, excessive nodes, and excessive depth. The bound walk is iterative.
+containers, excessive nodes, and excessive depth. The bounded walk is iterative.
 
 The resolver proof streams each regular non-symlink artifact once. It enforces
 the byte limit before full allocation. It hashes and parses the same immutable
-bytes. It rejects replacement or metadata changes during a read. An independent
-review root binds cases, tests, validator source, evidence, baseline,
-documentation, and dependencies. Cases and baselines do not authorize their own
-changes.
+bytes. It rejects a symlink or special file before a blocking open. It also
+rejects replacement or metadata changes during a read. An independent review
+root binds cases, tests, exact validator source, evidence, baseline,
+documentation, and dependencies. Its digest anchor is outside the mutable local
+proof set. Cases, baselines, source, and local root copies cannot authorize a
+coordinated replacement.
 
 Argument parsing is inside the fixed redaction boundary. Unknown arguments that
 contain links or IDs return one fixed JSON error on standard output and no raw
