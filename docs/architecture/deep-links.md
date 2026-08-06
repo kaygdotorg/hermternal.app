@@ -143,8 +143,8 @@ A resolver MUST process a candidate in this order:
    state.
 6. Use the same safe **session not found** or **not available** result for an
    unknown or unauthorised target. Do not reveal another user's IDs.
-7. Remove the pending target from memory after success, failure, cancellation,
-   expiry, or logout.
+7. Erase the pending raw link, session ID, message ID, and deadline after
+   success, failure, cancellation, expiry, or logout.
 
 A deep link MUST NOT create a session, select another server profile, read a
 filesystem or local `~/.hermes` directory, act as a bearer credential, or
@@ -153,14 +153,22 @@ transcript mirror. Opening the same valid link twice is idempotent: it targets
 the same full IDs and does not duplicate a session, prompt, or message.
 
 A valid target may wait for authentication in process memory for at most 300
-seconds. Success, failure, cancellation, expiry, and logout clear it. A direct
-load and reload use the same steps. An interrupted authenticated lookup may
-retry only the same validated target.
+seconds. The resolver records the receive time and the exact receive-plus-300
+second deadline. It may expire the target only at or after that deadline.
+Success, failure, cancellation, expiry, and logout erase all pending target
+data.
 
-A latest-descendant lookup keeps both identities. The requested session ID
-remains the exact ID from the link. The opened session ID may be the reviewed
-latest descendant. Its root and parent IDs MUST match the pinned lineage
-evidence. The resolver MUST NOT rewrite lineage or infer it from display IDs.
+A direct load and reload use the same steps. Reload MUST parse the link again,
+confirm authentication again, and perform a new exact lookup. It MUST NOT reuse
+erased pending values. An interrupted lookup may recover only before its
+recorded deadline. Recovery confirms authentication before an idempotent retry.
+
+A latest-descendant lookup requires explicit bounded lineage ordering evidence.
+Each node has an exact session ID, root ID, parent ID, and integer sequence. The
+resolver walks parent links and selects one unique descendant with the highest
+sequence. A tie, cycle, missing parent, wrong root, duplicate node, or malformed
+sequence fails closed. The resolver MUST NOT use a hard-coded descendant,
+rewrite lineage, or infer lineage from display IDs.
 
 Unknown and unauthorized sessions return the same `session_not_found` result.
 The result MUST NOT state whether the session exists. A missing message returns
@@ -198,8 +206,18 @@ network use for every synthetic trace.
 Both proofs use strict bounded JSON validation. They reject duplicate keys,
 non-finite values, overflow, wrong exact types, oversized strings or
 containers, excessive nodes, and excessive depth. The bound walk is iterative.
-Exact artifact identities and mutation tests stop coordinated drift or
-artifact rebinding. Errors use one fixed redacted payload.
+
+The resolver proof streams each regular non-symlink artifact once. It enforces
+the byte limit before full allocation. It hashes and parses the same immutable
+bytes. It rejects replacement or metadata changes during a read. An independent
+review root binds cases, tests, validator source, evidence, baseline,
+documentation, and dependencies. Cases and baselines do not authorize their own
+changes.
+
+Argument parsing is inside the fixed redaction boundary. Unknown arguments that
+contain links or IDs return one fixed JSON error on standard output and no raw
+standard-error text. Performance evidence uses inclusive linear interpolation
+R-7 and has a null threshold.
 
 The proofs do not authenticate a user, prove ownership, inspect Hermes, call a
 network, create universal-link entitlements, or implement web, iOS, iPadOS, or

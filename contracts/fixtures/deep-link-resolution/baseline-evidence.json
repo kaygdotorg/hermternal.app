@@ -1,5 +1,6 @@
 {
   "schema": "hermternal.deep-link-resolution-baseline-evidence.v1",
+  "percentile_method": "inclusive_linear_interpolation_r7",
   "normal": {
     "samples_ms": [
       373.735,
@@ -36,7 +37,7 @@
     "distribution": {
       "min": 147.280459,
       "p50": 242.687813,
-      "p95": 629.299333,
+      "p95": 559.644058,
       "max": 673.528459,
       "mean": 299.641703
     }
@@ -77,7 +78,7 @@
     "distribution": {
       "min": 92.498334,
       "p50": 151.238583,
-      "p95": 225.883583,
+      "p95": 222.135383,
       "max": 236.905208,
       "mean": 155.370844
     }

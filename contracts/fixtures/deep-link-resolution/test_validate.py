@@ -1,227 +1,89 @@
 """Regression tests for the offline synthetic C-16 resolver proof."""
-
 from __future__ import annotations
-
-import copy
-import json
+import copy, json, os, py_compile, subprocess, sys, tempfile, unittest
 from pathlib import Path
-import py_compile
-import subprocess
-import sys
-import tempfile
-import unittest
 from unittest import mock
-
-
-FIXTURE_DIR = Path(__file__).resolve().parent
-if str(FIXTURE_DIR) not in sys.path:
-    sys.path.insert(0, str(FIXTURE_DIR))
-
+FIXTURE_DIR=Path(__file__).resolve().parent
+if str(FIXTURE_DIR) not in sys.path: sys.path.insert(0,str(FIXTURE_DIR))
 import validate  # noqa: E402
 
-
 class DeepLinkResolutionTests(unittest.TestCase):
-    """Keep resolver traces, dependency identities, and safe failures aligned."""
+ @classmethod
+ def setUpClass(cls)->None:
+  cls.store=validate.ArtifactStore(); cls.document=validate.parse_json_bytes(cls.store.read(FIXTURE_DIR/'cases.json').data); cls.lineage=validate.pinned_lineage(cls.store)
+ def cli(self,optimized:bool=False,*args:str)->subprocess.CompletedProcess[str]:
+  command=[sys.executable]+(['-O'] if optimized else[])+[str(FIXTURE_DIR/'validate.py'),*args]
+  return subprocess.run(command,capture_output=True,text=True,check=False)
+ def test_checked_in_cli_normal_and_optimized(self)->None:
+  for optimized in (False,True):
+   result=self.cli(optimized); self.assertEqual(result.returncode,0,result.stdout+result.stderr); self.assertEqual(result.stderr,''); self.assertEqual(result.stdout,'deep_link_resolution_validation=ok cases=18 mutations=20\n')
+ def test_unknown_cli_args_are_fixed_and_redacted(self)->None:
+  secret=f'https://synthetic.hermternal.test/v1/c/{validate.ROOT_ID}'
+  expected=json.dumps(validate.ERROR_PAYLOAD,separators=(',',':'),sort_keys=True)+'\n'
+  for optimized in (False,True):
+   result=self.cli(optimized,'--unknown',secret); self.assertEqual(result.returncode,1); self.assertEqual(result.stdout,expected); self.assertEqual(result.stderr,''); self.assertNotIn(secret,result.stdout+result.stderr); self.assertNotIn(validate.ROOT_ID,result.stdout+result.stderr)
+ def test_all_traces_are_deterministic_and_offline(self)->None:
+  self.assertEqual(tuple(case['id'] for case in self.document['cases']),validate.CASE_IDS)
+  for case in self.document['cases']:
+   actual=validate.reduce_case(case,self.lineage); self.assertTrue(validate.strict_equal(actual,case['expected']),case['id']); self.assertEqual(actual['session_creations'],0); self.assertEqual(actual['shares'],0); self.assertFalse(actual['transcript_mirror']); self.assertFalse(actual['network'])
+ def test_latest_descendant_uses_ordering_not_constant(self)->None:
+  cases={case['id']:case for case in self.document['cases']}; ordered=copy.deepcopy(cases['latest-descendant-ordered-branching']); self.assertEqual(ordered['expected']['opened_session_id'],validate.BRANCH_ID)
+  for item in ordered['lineage_ordering']:
+   if item['session_id']==validate.SIBLING_ID: item['sequence']=4
+  changed=validate.reduce_case(ordered,self.lineage); self.assertEqual(changed['opened_session_id'],validate.SIBLING_ID); self.assertNotEqual(changed['opened_session_id'],validate.BRANCH_ID)
+  self.assertEqual(cases['latest-descendant-order-tie-fails-closed']['expected']['decision'],'lineage_unavailable'); self.assertEqual(cases['latest-descendant-malformed-order-fails-closed']['expected']['decision'],'lineage_unavailable')
+ def test_authorization_safe_results_match(self)->None:
+  cases={case['id']:case for case in self.document['cases']}; self.assertTrue(validate.strict_equal(cases['unknown-session-safe-not-found']['expected'],cases['unauthorized-session-safe-not-found']['expected']))
+ def test_cleanup_erases_all_target_data(self)->None:
+  terminal={'opened','failed','expired','signed_out'}
+  for case in self.document['cases']:
+   result=case['expected']
+   if result['final_state'] in terminal:
+    for key in ('pending_link','pending_session_id','pending_message_id','deadline_seconds'): self.assertIsNone(result[key],f"{case['id']}:{key}")
+ def test_reload_reparses_and_reauthenticates(self)->None:
+  case=next(c for c in self.document['cases'] if c['id']=='direct-reload-reparses-and-reauthenticates'); result=case['expected']; self.assertEqual(result['parse_attempts'],2); self.assertEqual(result['authentication_checks'],2); self.assertEqual(result['lookup_attempts'],2); self.assertEqual(result['effects'].count('grammar_validated'),2); self.assertEqual(result['effects'].count('authentication_confirmed'),2)
+ def test_deadline_is_explicit_and_inclusive(self)->None:
+  cases={case['id']:case for case in self.document['cases']}; expired=cases['pending-target-expires-at-deadline']['expected']; early=cases['pending-target-before-deadline-stays-pending']['expected']; self.assertEqual(expired['decision'],'target_expired'); self.assertIsNone(expired['deadline_seconds']); self.assertEqual(early['final_state'],'auth_pending'); self.assertEqual(early['deadline_seconds'],1300); self.assertIn('deadline_not_reached',early['effects'])
+ def test_r7_p95_matches_repository_method(self)->None:
+  evidence=validate.parse_json_bytes(validate.read_artifact_once(FIXTURE_DIR/'baseline-evidence.json').data); validate.validate_evidence(evidence); self.assertEqual(evidence['normal']['distribution']['p95'],559.644058); self.assertEqual(evidence['optimized']['distribution']['p95'],222.135383)
+ def test_streaming_limit_stops_before_full_allocation(self)->None:
+  with tempfile.TemporaryDirectory() as directory:
+   path=Path(directory)/'large.json'; path.write_bytes(b'x'*10_000)
+   with self.assertRaises(validate.ContractError): validate.read_artifact_once(path,4096)
+ def test_symlink_and_path_replacement_are_rejected(self)->None:
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory); real=root/'real'; real.write_text('{}'); link=root/'link'; link.symlink_to(real)
+   with self.assertRaises(validate.ContractError): validate.read_artifact_once(link)
+   path=root/'race'; replacement=root/'replacement'; path.write_bytes(b'a'*70_000); replacement.write_bytes(b'b'*70_000)
+   original_read=os.read; changed=False
+   def racing_read(fd:int,size:int)->bytes:
+    nonlocal changed
+    chunk=original_read(fd,size)
+    if chunk and not changed: changed=True; os.replace(replacement,path)
+    return chunk
+   with mock.patch('validate.os.read',side_effect=racing_read):
+    with self.assertRaises(validate.ContractError): validate.read_artifact_once(path)
+ def test_store_reads_each_path_once(self)->None:
+  store=validate.ArtifactStore(); path=FIXTURE_DIR/'cases.json'
+  with mock.patch('validate.read_artifact_once',wraps=validate.read_artifact_once) as reader:
+   first=store.read(path); second=store.read(path); self.assertIs(first,second); self.assertEqual(reader.call_count,1)
+ def test_duplicate_nonfinite_exact_type_and_depth_rejected(self)->None:
+  with self.assertRaises(validate.ContractError): validate.parse_json_bytes(b'{"a":1,"a":2}')
+  with self.assertRaises(validate.ContractError): validate.parse_json_bytes(b'{"a":NaN}')
+  changed=copy.deepcopy(self.document); changed['pending_ttl_seconds']=True
+  with self.assertRaises(validate.ContractError): validate.validate_document(changed,validate.ArtifactStore())
+  deep=None
+  for _ in range(validate.MAX_DEPTH+1): deep=[deep]
+  with self.assertRaises(validate.ContractError): validate.validate_tree(deep)
+ def test_external_review_root_blocks_coordinated_rebinding(self)->None:
+  changed=copy.deepcopy(self.document); changed['cases'][0]['notes']='coordinated drift'
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory); cases=root/'cases.json'; evidence=root/'evidence.json'; baseline=root/'baseline.json'; cases.write_text(json.dumps(changed)); evidence.write_bytes((FIXTURE_DIR/'baseline-evidence.json').read_bytes()); baseline.write_bytes((FIXTURE_DIR/'validation-baseline.json').read_bytes())
+   with mock.patch.object(validate,'REVIEW_ROOT_DIGEST_PARTS',('0'*16,)*4):
+    with self.assertRaises(validate.ContractError): validate.validate_all(cases,baseline,evidence)
+ def test_review_root_binds_validator_and_all_evidence(self)->None:
+  count,mutations=validate.validate_all(FIXTURE_DIR/'cases.json',FIXTURE_DIR/'validation-baseline.json',FIXTURE_DIR/'baseline-evidence.json'); self.assertEqual((count,mutations),(18,20))
+ def test_mutations_and_compile(self)->None:
+  self.assertEqual(validate.validate_mutations(self.document),20); py_compile.compile(str(FIXTURE_DIR/'validate.py'),doraise=True); py_compile.compile(str(FIXTURE_DIR/'test_validate.py'),doraise=True)
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.document = validate.load_json(FIXTURE_DIR / "cases.json")
-        cls.evidence = validate.load_json(FIXTURE_DIR / "baseline-evidence.json")
-        cls.baseline = validate.load_json(FIXTURE_DIR / "validation-baseline.json")
-        validate.validate_document(cls.document)
-
-    def run_cli(self, optimized: bool = False, *extra: str) -> subprocess.CompletedProcess[str]:
-        command = [sys.executable]
-        if optimized:
-            command.append("-O")
-        command.extend([str(FIXTURE_DIR / "validate.py"), *extra])
-        return subprocess.run(command, check=False, capture_output=True, text=True)
-
-    def assert_fixed_failure(self, path: Path, flag: str = "--cases") -> None:
-        expected = json.dumps(validate.ERROR_PAYLOAD, separators=(",", ":"), sort_keys=True) + "\n"
-        for optimized in (False, True):
-            with self.subTest(optimized=optimized, path=path.name):
-                completed = self.run_cli(optimized, flag, str(path))
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertEqual(completed.stdout, expected)
-                self.assertEqual(completed.stderr, "")
-                self.assertNotIn(validate.ROOT_ID, completed.stdout)
-
-    def test_checked_in_validator_passes_in_normal_and_optimized_modes(self) -> None:
-        for optimized in (False, True):
-            completed = self.run_cli(optimized)
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            self.assertEqual(completed.stderr, "")
-            self.assertEqual(
-                completed.stdout,
-                "deep_link_resolution_validation=ok cases=15 mutations=18\n",
-            )
-
-    def test_all_cases_reduce_to_exact_expected_results(self) -> None:
-        grammar = validate.load_grammar_module()
-        lineage = validate.lineage_inventory()
-        self.assertEqual(tuple(case["id"] for case in self.document["cases"]), validate.CASE_IDS)
-        for case in self.document["cases"]:
-            with self.subTest(case=case["id"]):
-                self.assertTrue(validate.strict_equal(validate.reduce_case(case, grammar, lineage), case["expected"]))
-                self.assertEqual(case["expected"]["session_creations"], 0)
-                self.assertEqual(case["expected"]["shares"], 0)
-                self.assertFalse(case["expected"]["transcript_mirror"])
-                self.assertFalse(case["expected"]["network"])
-
-    def test_missing_and_denied_are_authorization_safe_parity(self) -> None:
-        cases = {case["id"]: case for case in self.document["cases"]}
-        missing = cases["unknown-session-safe-not-found"]["expected"]
-        denied = cases["unauthorized-session-safe-not-found"]["expected"]
-        self.assertTrue(validate.strict_equal(missing, denied))
-        self.assertEqual(missing["decision"], "session_not_found")
-
-    def test_latest_descendant_preserves_reviewed_lineage(self) -> None:
-        cases = {case["id"]: case for case in self.document["cases"]}
-        for case_id in ("latest-descendant-preserves-lineage", "latest-descendant-message-focus"):
-            result = cases[case_id]["expected"]
-            self.assertEqual(result["requested_session_id"], validate.ROOT_ID)
-            self.assertEqual(result["opened_session_id"], validate.BRANCH_ID)
-            self.assertEqual(result["root_id"], validate.ROOT_ID)
-            self.assertEqual(result["parent_id"], validate.ROOT_ID)
-
-    def test_message_focus_and_fallback_are_distinct(self) -> None:
-        cases = {case["id"]: case for case in self.document["cases"]}
-        focused = cases["authenticated-message-anchor-focus"]["expected"]
-        fallback = cases["message-not-found-opens-session"]["expected"]
-        self.assertEqual(focused["decision"], "message_focused")
-        self.assertEqual(focused["focus"], "message")
-        self.assertEqual(fallback["decision"], "message_not_found")
-        self.assertEqual(fallback["focus"], "session_start")
-        self.assertEqual(fallback["opened_session_id"], validate.BRANCH_ID)
-
-    def test_pending_target_clears_on_success_expiry_logout_and_failure(self) -> None:
-        terminal = {
-            "authenticated-exact-root-direct-load",
-            "pending-auth-resolves-and-clears",
-            "pending-target-expires",
-            "logout-clears-pending-target",
-            "unknown-session-safe-not-found",
-            "unauthorized-session-safe-not-found",
-            "interrupted-lookup-recovers",
-        }
-        for case in self.document["cases"]:
-            if case["id"] in terminal:
-                self.assertFalse(case["expected"]["pending_target"], case["id"])
-                self.assertIn("pending_target_cleared", case["expected"]["effects"])
-
-    def test_reload_reopens_idempotently_without_creation(self) -> None:
-        case = next(case for case in self.document["cases"] if case["id"] == "direct-reload-idempotent-reopen")
-        result = case["expected"]
-        self.assertEqual(result["lookup_attempts"], 2)
-        self.assertEqual(result["opened_session_id"], validate.BRANCH_ID)
-        self.assertIn("idempotent_reopen", result["effects"])
-        self.assertEqual(result["session_creations"], 0)
-
-    def test_private_https_and_hermternal_boundaries_stop_before_lookup(self) -> None:
-        cases = {case["id"]: case for case in self.document["cases"]}
-        for case_id in ("invalid-private-https-origin", "invalid-hermternal-authority"):
-            result = cases[case_id]["expected"]
-            self.assertEqual(result["decision"], "invalid_link")
-            self.assertEqual(result["lookup_attempts"], 0)
-            self.assertIsNone(result["requested_session_id"])
-
-    def test_duplicate_keys_and_nonfinite_numbers_fail_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            duplicate = Path(directory) / "duplicate.json"
-            duplicate.write_text('{"schema":"one","schema":"two"}', encoding="utf-8")
-            nonfinite = Path(directory) / "nonfinite.json"
-            nonfinite.write_text('{"schema":NaN}', encoding="utf-8")
-            for path in (duplicate, nonfinite):
-                with self.subTest(path=path.name):
-                    with self.assertRaises(validate.ContractError):
-                        validate.load_json(path)
-                    self.assert_fixed_failure(path)
-
-    def test_overflow_exact_types_and_container_bounds_fail_closed(self) -> None:
-        mutations = []
-        integer = copy.deepcopy(self.document)
-        integer["pending_ttl_seconds"] = validate.MAX_INTEGER + 1
-        mutations.append(integer)
-        boolean = copy.deepcopy(self.document)
-        boolean["pending_ttl_seconds"] = True
-        mutations.append(boolean)
-        container = copy.deepcopy(self.document)
-        container["cases"][0]["events"] = ["receive"] * (validate.MAX_CONTAINER_ITEMS + 1)
-        mutations.append(container)
-        for index, mutated in enumerate(mutations):
-            with self.subTest(index=index):
-                with self.assertRaises(validate.ContractError):
-                    if index == 1:
-                        validate.validate_document(mutated)
-                    else:
-                        validate.validate_tree(mutated)
-
-    def test_byte_string_node_and_depth_bounds_are_iterative(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            too_large = Path(directory) / "large.json"
-            too_large.write_bytes(b" " * (validate.MAX_FILE_BYTES + 1))
-            with self.assertRaises(validate.ContractError):
-                validate.load_json(too_large)
-        with self.assertRaises(validate.ContractError):
-            validate.validate_tree("x" * (validate.MAX_STRING_BYTES + 1))
-        with mock.patch.object(validate, "MAX_NODES", 3):
-            with self.assertRaises(validate.ContractError):
-                validate.validate_tree([1, 2, 3])
-        deep: object = None
-        for _ in range(validate.MAX_DEPTH + 1):
-            deep = [deep]
-        with self.assertRaises(validate.ContractError):
-            validate.validate_tree(deep)
-
-    def test_coordinated_dependency_drift_and_rebinding_still_fail(self) -> None:
-        changed = copy.deepcopy(self.document)
-        fake = "0" * 64
-        changed["dependencies"]["deep-link-grammar/cases.json"]["sha256"] = fake
-        rebound = dict(validate.DEPENDENCIES)
-        rebound["deep-link-grammar/cases.json"] = fake
-        with mock.patch.object(validate, "DEPENDENCIES", rebound):
-            with self.assertRaises(validate.ContractError):
-                validate.verify_dependencies(changed)
-
-        rebound_document = copy.deepcopy(self.document)
-        rebound_document["dependencies"]["deep-link-grammar/cases.json"] = copy.deepcopy(
-            rebound_document["dependencies"]["session-lineage/cases.json"]
-        )
-        with self.assertRaises(validate.ContractError):
-            validate.verify_dependencies(rebound_document)
-
-    def test_coordinated_fixture_and_baseline_drift_fail_exact_identities(self) -> None:
-        changed = copy.deepcopy(self.document)
-        changed["cases"][0]["notes"] = "coordinated drift"
-        with tempfile.TemporaryDirectory() as directory:
-            cases = Path(directory) / "cases.json"
-            cases.write_text(json.dumps(changed), encoding="utf-8")
-            self.assert_fixed_failure(cases)
-
-        changed_baseline = copy.deepcopy(self.baseline)
-        changed_evidence = copy.deepcopy(self.evidence)
-        changed_evidence["normal"]["samples_ms"][0] += 1.0
-        changed_evidence["normal"]["distribution"] = validate.distribution(changed_evidence["normal"]["samples_ms"])
-        changed_baseline["normal"] = changed_evidence["normal"]
-        changed_evidence_bytes = (json.dumps(changed_evidence, indent=2) + "\n").encode()
-        changed_baseline["artifact_identities"]["baseline-evidence.json"] = validate.sha256_bytes(
-            changed_evidence_bytes
-        )
-        with self.assertRaises(validate.ContractError):
-            validate.validate_baseline(changed_baseline, changed_evidence)
-
-    def test_raw_samples_have_null_threshold_and_exact_distribution(self) -> None:
-        validate.validate_evidence(self.evidence)
-        validate.validate_baseline(self.baseline, self.evidence)
-        self.assertIsNone(self.baseline["threshold"])
-        self.assertEqual(self.baseline["repetitions"], 30)
-
-    def test_mutation_inventory_and_py_compile(self) -> None:
-        self.assertEqual(validate.validate_mutations(self.document), 18)
-        py_compile.compile(str(FIXTURE_DIR / "validate.py"), doraise=True)
-        py_compile.compile(str(FIXTURE_DIR / "test_validate.py"), doraise=True)
-
-
-if __name__ == "__main__":
-    unittest.main()
+if __name__=='__main__': unittest.main()

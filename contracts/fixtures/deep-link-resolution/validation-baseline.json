@@ -1,24 +1,17 @@
 {
-  "schema": "hermternal.deep-link-resolution-baseline.v1",
+  "schema": "hermternal.deep-link-resolution-baseline.v2",
   "validator": "contracts/fixtures/deep-link-resolution/validate.py",
   "commands": {
     "normal": "python3 contracts/fixtures/deep-link-resolution/validate.py",
     "optimized": "python3 -O contracts/fixtures/deep-link-resolution/validate.py"
   },
   "build_mode": "N/A",
-  "artifact_identities": {
-    "README.md": "e41548568383d270efced3a2b98b0e6d51f422c50d7272ee3ca556848668b943",
-    "cases.json": "114ddc9c752683a7c4604f0cbd04f05bb8e35f7df60aa24ebca0ec48653e3613",
-    "test_validate.py": "01c14852b414fe824fb78c6bf4d38fd89133f6a737ef4203380f81eb37da8a78",
-    "baseline-evidence.json": "6c707fa158140c64816eb6a6d6ad3480c12981d4d61c07029a58862656bb7e46",
-    "validate.py.normalized": "f353f1aa534ccdfbeda335f83bbd3d740e692c924d7e0ee7645009a7cdf69561",
-    "docs/architecture/deep-links.md": "d21a885d35df34f3c63b1d9d5c3b32c1563c4f02e35c862fea4d5080997dc96c"
-  },
   "environment": {
     "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
     "python": "3.14.6"
   },
   "repetitions": 30,
+  "percentile_method": "inclusive_linear_interpolation_r7",
   "normal": {
     "samples_ms": [
       373.735,
@@ -55,7 +48,7 @@
     "distribution": {
       "min": 147.280459,
       "p50": 242.687813,
-      "p95": 629.299333,
+      "p95": 559.644058,
       "max": 673.528459,
       "mean": 299.641703
     }
@@ -96,7 +89,7 @@
     "distribution": {
       "min": 92.498334,
       "p50": 151.238583,
-      "p95": 225.883583,
+      "p95": 222.135383,
       "max": 236.905208,
       "mean": 155.370844
     }

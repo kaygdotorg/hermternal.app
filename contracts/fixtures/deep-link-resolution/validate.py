@@ -1,596 +1,278 @@
 """Validate deterministic synthetic deep-link resolver traces offline.
 
-The proof reads checked-in JSON and one pinned grammar module. It never opens a
-socket, contacts Hermes, reads a transcript store, creates a session, or shares
-a link. Resolver state is reduced from inert event strings so fixture data
-cannot execute code.
+The validator reads bounded immutable byte snapshots. It never opens a socket,
+contacts Hermes, reads a transcript store, creates a session, or shares a link.
+Fixture events are inert JSON data.
 """
-
 from __future__ import annotations
-
-import argparse
-import copy
-from dataclasses import dataclass
-import hashlib
-import importlib.util
-import json
-import math
+import argparse, copy, hashlib, json, math, os, re, stat, statistics
+from dataclasses import dataclass, field
+from decimal import Decimal, localcontext
 from pathlib import Path
-import statistics
-import sys
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
-
-FIXTURE_DIR = Path(__file__).resolve().parent
-REPO_ROOT = FIXTURE_DIR.parents[2]
-SCHEMA = "hermternal.deep-link-resolution.v1"
-BASELINE_SCHEMA = "hermternal.deep-link-resolution-baseline.v1"
-EVIDENCE_SCHEMA = "hermternal.deep-link-resolution-baseline-evidence.v1"
-CONTRACT = "dashboard-v0.0.1"
-OPERATION = "C-16"
-HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
-PENDING_TTL_SECONDS = 300
-ERROR_PAYLOAD = {"error": {"code": "contract", "message": "deep-link resolution fixture rejected"}}
-
-MAX_FILE_BYTES = 1_048_576
-MAX_STRING_BYTES = 4_096
-MAX_CONTAINER_ITEMS = 256
-MAX_NODES = 50_000
-MAX_DEPTH = 32
-MAX_INTEGER = 1_000_000_000
-MAX_FLOAT = 1_000_000_000.0
-
-DEPENDENCIES = {
-    "deep-link-grammar/cases.json": "91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96",
-    "deep-link-grammar/validate.py": "c01cc7958ebd573fa336d72de551e9c4b45e27397c6a38f5012eff35edff314e",
-    "session-lineage/cases.json": "ebd320005dea1623b691346ef6b2b38a60fb510c7b4ed16855c02e9d395540ea",
-    "session-lineage/validation-baseline.json": "c62ffce8836f873c03143d2716b83e99db1843083bef82d5697cd5a613f88b3d",
+FIXTURE_DIR=Path(__file__).resolve().parent
+REPO_ROOT=FIXTURE_DIR.parents[2]
+SCHEMA="hermternal.deep-link-resolution.v2"
+BASELINE_SCHEMA="hermternal.deep-link-resolution-baseline.v2"
+EVIDENCE_SCHEMA="hermternal.deep-link-resolution-baseline-evidence.v1"
+REVIEW_SCHEMA="hermternal.deep-link-resolution-review-root.v1"
+CONTRACT="dashboard-v0.0.1"; OPERATION="C-16"
+HERMES_SOURCE_SHA="f5be9236e00ddf2f2a412697f267078fc4ee068e"
+PENDING_TTL_SECONDS=300
+ERROR_PAYLOAD={"error":{"code":"contract","message":"deep-link resolution fixture rejected"}}
+MAX_FILE_BYTES=1_048_576; MAX_STRING_BYTES=4096; MAX_CONTAINER_ITEMS=256
+MAX_NODES=50_000; MAX_DEPTH=32; MAX_INTEGER=1_000_000_000
+MAX_LINEAGE_NODES=32; READ_CHUNK_BYTES=65_536
+ROOT_ID="session-root-0000000000000000000000000000000000000001"
+BRANCH_ID="session-branch-0000000000000000000000000000000000000002"
+SIBLING_ID="session-sibling-0000000000000000000000000000000000000003"
+MESSAGE_ID="synthetic-message-anchor-00000000000000000000000000000001"
+DEFAULT_ORIGIN="https://synthetic.hermternal.test"
+DEPENDENCIES={
+ "deep-link-grammar/cases.json":"91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96",
+ "deep-link-grammar/validate.py":"c01cc7958ebd573fa336d72de551e9c4b45e27397c6a38f5012eff35edff314e",
+ "session-lineage/cases.json":"ebd320005dea1623b691346ef6b2b38a60fb510c7b4ed16855c02e9d395540ea",
+ "session-lineage/validation-baseline.json":"c62ffce8836f873c03143d2716b83e99db1843083bef82d5697cd5a613f88b3d",
 }
-
-ROOT_ID = "session-root-0000000000000000000000000000000000000001"
-BRANCH_ID = "session-branch-0000000000000000000000000000000000000002"
-MESSAGE_ID = "synthetic-message-anchor-00000000000000000000000000000001"
-CASE_IDS = (
-    "authenticated-exact-root-direct-load",
-    "authenticated-message-anchor-focus",
-    "latest-descendant-preserves-lineage",
-    "unknown-session-safe-not-found",
-    "unauthorized-session-safe-not-found",
-    "message-not-found-opens-session",
-    "pending-auth-resolves-and-clears",
-    "pending-target-expires",
-    "logout-clears-pending-target",
-    "direct-reload-idempotent-reopen",
-    "interrupted-lookup-recovers",
-    "invalid-private-https-origin",
-    "invalid-hermternal-authority",
-    "empty-no-target",
-    "latest-descendant-message-focus",
+CASE_IDS=(
+ "authenticated-exact-root-direct-load","authenticated-message-anchor-focus",
+ "latest-descendant-ordered-branching","latest-descendant-order-tie-fails-closed",
+ "latest-descendant-malformed-order-fails-closed","unknown-session-safe-not-found",
+ "unauthorized-session-safe-not-found","message-not-found-opens-session",
+ "pending-auth-resolves-and-clears","pending-target-expires-at-deadline",
+ "pending-target-before-deadline-stays-pending","logout-clears-pending-target",
+ "direct-reload-reparses-and-reauthenticates","interrupted-lookup-recovers",
+ "invalid-private-https-origin","invalid-hermternal-authority","empty-no-target",
+ "latest-descendant-message-focus",
 )
+# The independent review root authorizes local artifacts. These chunks are
+# normalized only when the root records the validator source identity.
+REVIEW_ROOT_DIGEST_PARTS=(
+ "8e2c2bd594313c9f",
+ "370dbbbf33918ab4",
+ "47678f6365af6741",
+ "0a07fb34e5473f86",
+)
+class ContractError(ValueError): pass
+def require(condition:bool)->None:
+ if not condition: raise ContractError("contract rejected")
+def sha256_bytes(data:bytes)->str: return hashlib.sha256(data).hexdigest()
+@dataclass(frozen=True)
+class Artifact:
+ path:Path; data:bytes; sha256:str
 
-# These identities are filled after reviewed generation. Source normalization
-# replaces their values, so rebinding a manifest still changes the normalized
-# validator digest unless the behavior itself is unchanged.
-CASES_SHA256 = "114ddc9c752683a7c4604f0cbd04f05bb8e35f7df60aa24ebca0ec48653e3613"
-BASELINE_SHA256 = "f144479c36852dd0193ef66669b6b67cd7b7f6d2f0e2aaf68596911c909ee313"
-NORMALIZED_VALIDATOR_SHA256 = "f353f1aa534ccdfbeda335f83bbd3d740e692c924d7e0ee7645009a7cdf69561"
-
-
-class ContractError(ValueError):
-    """A fixed-output contract rejection."""
-
-
-def require(condition: bool, message: str = "contract rejected") -> None:
-    """Keep validation active in normal and optimized interpreters."""
-
-    if not condition:
-        raise ContractError(message)
-
-
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ContractError("duplicate key")
-        result[key] = value
-    return result
-
-
-def _reject_constant(_value: str) -> Any:
-    raise ContractError("non-finite number")
-
-
-def validate_tree(root: Any) -> None:
-    """Validate JSON bounds iteratively to avoid recursive parser walks."""
-
-    stack: list[tuple[Any, int]] = [(root, 0)]
-    nodes = 0
-    while stack:
-        value, depth = stack.pop()
-        nodes += 1
-        require(nodes <= MAX_NODES, "node bound")
-        require(depth <= MAX_DEPTH, "depth bound")
-        value_type = type(value)
-        if value is None or value_type is bool:
-            continue
-        if value_type is str:
-            require(len(value.encode("utf-8")) <= MAX_STRING_BYTES, "string bound")
-            continue
-        if value_type is int:
-            require(abs(value) <= MAX_INTEGER, "integer overflow")
-            continue
-        if value_type is float:
-            require(math.isfinite(value) and abs(value) <= MAX_FLOAT, "float overflow")
-            continue
-        if value_type is list:
-            require(len(value) <= MAX_CONTAINER_ITEMS, "list bound")
-            for item in reversed(value):
-                stack.append((item, depth + 1))
-            continue
-        if value_type is dict:
-            require(len(value) <= MAX_CONTAINER_ITEMS, "object bound")
-            for key, item in value.items():
-                require(type(key) is str, "key type")
-                stack.append((key, depth + 1))
-                stack.append((item, depth + 1))
-            continue
-        raise ContractError("unsupported type")
-
-
-def load_json(path: Path) -> Any:
-    """Load bounded UTF-8 JSON with duplicate and non-finite rejection."""
-
-    try:
-        data = path.read_bytes()
-    except OSError as exc:
-        raise ContractError("read failed") from exc
-    require(len(data) <= MAX_FILE_BYTES, "byte bound")
-    try:
-        document = json.loads(
-            data.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_keys,
-            parse_constant=_reject_constant,
-        )
-    except (UnicodeError, json.JSONDecodeError, ContractError) as exc:
-        raise ContractError("json rejected") from exc
-    validate_tree(document)
-    return document
-
-
-def strict_equal(actual: Any, expected: Any) -> bool:
-    """Compare exact JSON types without bool/int coercion or recursion."""
-
-    pending: list[tuple[Any, Any]] = [(actual, expected)]
-    while pending:
-        left, right = pending.pop()
-        if type(left) is not type(right):
-            return False
-        if type(left) is dict:
-            if list(left) != list(right):
-                return False
-            pending.extend((left[key], right[key]) for key in left)
-        elif type(left) is list:
-            if len(left) != len(right):
-                return False
-            pending.extend(zip(left, right))
-        elif left != right:
-            return False
-    return True
-
-
-def _dependency_path(name: str) -> Path:
-    return REPO_ROOT / "contracts" / "fixtures" / name
-
-
-def verify_dependencies(document: Mapping[str, Any]) -> None:
-    """Bind resolver evidence to exact grammar and lineage artifact bytes."""
-
-    identities = document["dependencies"]
-    require(type(identities) is dict and list(identities) == list(DEPENDENCIES), "dependency inventory")
-    for name, digest in DEPENDENCIES.items():
-        path = _dependency_path(name)
-        require(identities[name] == {"sha256": digest}, "dependency identity")
-        require(sha256_bytes(path.read_bytes()) == digest, "dependency drift")
-
-
-def load_grammar_module() -> Any:
-    """Load only the pinned local parser; fixture event data remains inert."""
-
-    path = _dependency_path("deep-link-grammar/validate.py")
-    spec = importlib.util.spec_from_file_location("deep_link_grammar_contract", path)
-    require(spec is not None and spec.loader is not None, "grammar unavailable")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def lineage_inventory() -> dict[str, tuple[str, str | None]]:
-    """Extract reviewed exact identities from the pinned lineage cases."""
-
-    document = load_json(_dependency_path("session-lineage/cases.json"))
-    found: dict[str, tuple[str, str | None]] = {}
-    for case in document["cases"]:
-        expected = case["expected"]
-        session_id = expected["session_id"]
-        if session_id in {ROOT_ID, BRANCH_ID} and expected["durable"] is True:
-            found[session_id] = (expected["root_id"], expected["parent_id"])
-    require(found == {ROOT_ID: (ROOT_ID, None), BRANCH_ID: (ROOT_ID, ROOT_ID)}, "lineage binding")
-    return found
-
-
+def read_artifact_once(path:Path,limit:int=MAX_FILE_BYTES)->Artifact:
+ """Stream a stable regular file; reject symlinks and path replacement."""
+ flags=os.O_RDONLY | (getattr(os,"O_NOFOLLOW",0))
+ try: descriptor=os.open(path,flags)
+ except OSError as exc: raise ContractError("contract rejected") from exc
+ try:
+  before=os.fstat(descriptor); require(stat.S_ISREG(before.st_mode) and before.st_size<=limit)
+  chunks=[]; total=0; digest=hashlib.sha256()
+  while True:
+   chunk=os.read(descriptor,min(READ_CHUNK_BYTES,limit+1-total))
+   if not chunk: break
+   total+=len(chunk); require(total<=limit); digest.update(chunk); chunks.append(chunk)
+  after=os.fstat(descriptor)
+  require((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns))
+  current=os.stat(path,follow_symlinks=False)
+  require(stat.S_ISREG(current.st_mode) and not stat.S_ISLNK(current.st_mode))
+  require((current.st_dev,current.st_ino)==(after.st_dev,after.st_ino))
+  data=b"".join(chunks); require(len(data)==after.st_size)
+  return Artifact(path,data,digest.hexdigest())
+ except OSError as exc: raise ContractError("contract rejected") from exc
+ finally: os.close(descriptor)
+class ArtifactStore:
+ def __init__(self)->None: self.items:dict[Path,Artifact]={}
+ def read(self,path:Path)->Artifact:
+  key=Path(os.path.abspath(path))
+  if key not in self.items: self.items[key]=read_artifact_once(key)
+  return self.items[key]
+def _pairs(pairs:list[tuple[str,Any]])->dict[str,Any]:
+ result={}
+ for key,value in pairs: require(key not in result); result[key]=value
+ return result
+def _constant(_value:str)->Any: raise ContractError("contract rejected")
+def parse_json_bytes(data:bytes)->Any:
+ try: value=json.loads(data.decode("utf-8"),object_pairs_hook=_pairs,parse_constant=_constant)
+ except (UnicodeError,json.JSONDecodeError,ContractError) as exc: raise ContractError("contract rejected") from exc
+ validate_tree(value); return value
+def validate_tree(root:Any)->None:
+ """Apply exact JSON bounds with an iterative walk."""
+ stack=[(root,0)]; nodes=0
+ while stack:
+  value,depth=stack.pop(); nodes+=1; require(nodes<=MAX_NODES and depth<=MAX_DEPTH); kind=type(value)
+  if value is None or kind is bool: continue
+  if kind is str: require(len(value.encode())<=MAX_STRING_BYTES)
+  elif kind is int: require(abs(value)<=MAX_INTEGER)
+  elif kind is float: require(math.isfinite(value) and abs(value)<=MAX_INTEGER)
+  elif kind is list: require(len(value)<=MAX_CONTAINER_ITEMS); stack.extend((item,depth+1) for item in reversed(value))
+  elif kind is dict:
+   require(len(value)<=MAX_CONTAINER_ITEMS)
+   for key,item in value.items(): require(type(key)is str); stack.extend(((key,depth+1),(item,depth+1)))
+  else: raise ContractError("contract rejected")
+def strict_equal(left:Any,right:Any)->bool:
+ pending=[(left,right)]
+ while pending:
+  a,b=pending.pop()
+  if type(a)is not type(b): return False
+  if type(a)is dict:
+   if list(a)!=list(b): return False
+   pending.extend((a[key],b[key]) for key in a)
+  elif type(a)is list:
+   if len(a)!=len(b): return False
+   pending.extend(zip(a,b))
+  elif a!=b: return False
+ return True
+def parse_link(link:Any)->tuple[bool,str|None,str|None]:
+ """Apply the exact private grammar without opaque-ID normalization."""
+ if type(link)is not str or len(link.encode())>MAX_STRING_BYTES: return False,None,None
+ if any(ord(c)>127 or ord(c)<32 or 127<=ord(c)<=159 for c in link): return False,None,None
+ if any(m in link for m in ("%","\\","?","#")) or link.endswith("/"): return False,None,None
+ if link.startswith(DEFAULT_ORIGIN+"/"): path=link[len(DEFAULT_ORIGIN):]
+ elif link.startswith("hermternal://open/"): path=link[len("hermternal://open"):]
+ else: return False,None,None
+ parts=path.split("/")
+ if len(parts)not in {4,6} or parts[:3]!=["","v1","c"] or (len(parts)==6 and parts[4]!="m"): return False,None,None
+ ids=[parts[3]]+([parts[5]] if len(parts)==6 else[]); allowed=frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+ if any(len(v)<16 or "..." in v or any(c not in allowed for c in v) for v in ids): return False,None,None
+ return True,ids[0],ids[1] if len(ids)==2 else None
+def pinned_lineage(store:ArtifactStore)->dict[str,tuple[str,str|None]]:
+ artifact=store.read(REPO_ROOT/"contracts/fixtures/session-lineage/cases.json"); require(artifact.sha256==DEPENDENCIES["session-lineage/cases.json"])
+ document=parse_json_bytes(artifact.data); found={}
+ for case in document["cases"]:
+  expected=case["expected"]; sid=expected["session_id"]
+  if sid in {ROOT_ID,BRANCH_ID} and expected["durable"] is True: found[sid]=(expected["root_id"],expected["parent_id"])
+ require(found=={ROOT_ID:(ROOT_ID,None),BRANCH_ID:(ROOT_ID,ROOT_ID)}); return found
+def latest_descendant(requested:str,evidence:Any,lineage:Mapping[str,tuple[str,str|None]])->tuple[str,str,str|None]:
+ """Derive one latest descendant from explicit bounded sequence evidence."""
+ require(type(evidence)is list and 1<=len(evidence)<=MAX_LINEAGE_NODES); nodes={}
+ for item in evidence:
+  require(type(item)is dict and list(item)==["session_id","root_id","parent_id","sequence"])
+  sid,root,parent,sequence=item.values(); require(type(sid)is str and type(root)is str and (parent is None or type(parent)is str)); require(type(sequence)is int and 0<=sequence<=MAX_INTEGER and sid not in nodes); nodes[sid]=(root,parent,sequence)
+ require(requested in nodes)
+ for sid,(root,parent,_sequence) in nodes.items():
+  require(root==requested); require(parent is None if sid==requested else parent in nodes)
+ candidates=[]
+ for sid,(_root,_parent,sequence) in nodes.items():
+  cursor=sid; visited=set()
+  while cursor!=requested:
+   require(cursor not in visited and len(visited)<MAX_LINEAGE_NODES); visited.add(cursor); parent=nodes[cursor][1]; require(parent is not None); cursor=parent
+  candidates.append((sequence,sid))
+ highest=max(sequence for sequence,_sid in candidates); winners=[sid for sequence,sid in candidates if sequence==highest]; require(len(winners)==1)
+ selected=winners[0]; root,parent,_sequence=nodes[selected]
+ if selected in lineage: require(lineage[selected]==(root,parent))
+ return selected,root,parent
 @dataclass
 class Resolver:
-    """Small deterministic reducer for synthetic resolver events."""
-
-    requested_session_id: str | None
-    message_id: str | None
-    authenticated: bool
-    lookup_mode: str
-    valid_target: bool
-    state: str = "idle"
-    pending_target: bool = False
-    opened_session_id: str | None = None
-    root_id: str | None = None
-    parent_id: str | None = None
-    focus: str = "none"
-    decision: str = "pending"
-    lookup_attempts: int = 0
-    state_trace: list[str] | None = None
-    effects: list[str] | None = None
-
-    def __post_init__(self) -> None:
-        self.state_trace = [self.state]
-        self.effects = []
-
-    def transition(self, state: str) -> None:
-        if self.state != state:
-            self.state = state
-            self.state_trace.append(state)
-
-    def clear(self, effect: str) -> None:
-        self.pending_target = False
-        self.effects.append(effect)
-
-    def apply(self, event: str, lineage: Mapping[str, tuple[str, str | None]]) -> None:
-        if event == "receive":
-            if not self.valid_target:
-                self.effects.append("grammar_rejected_before_lookup")
-                self.decision = "invalid_link"
-                self.transition("failed")
-                self.clear("pending_target_cleared")
-            elif self.authenticated:
-                self.pending_target = True
-                self.lookup_attempts += 1
-                self.effects.extend(("validated_target_held_in_memory", "authenticated_lookup_started"))
-                self.transition("lookup_pending")
-            else:
-                self.pending_target = True
-                self.effects.append("validated_target_held_in_memory")
-                self.transition("auth_pending")
-            return
-        if event == "authenticated":
-            require(self.state == "auth_pending" and self.pending_target, "auth state")
-            self.authenticated = True
-            self.lookup_attempts += 1
-            self.effects.append("authenticated_lookup_started")
-            self.transition("lookup_pending")
-            return
-        if event == "lookup_present":
-            require(self.state == "lookup_pending" and self.pending_target, "lookup state")
-            target = BRANCH_ID if self.lookup_mode == "latest_descendant" else self.requested_session_id
-            require(target in lineage, "lookup identity")
-            self.opened_session_id = target
-            self.root_id, self.parent_id = lineage[target]
-            self.effects.append("exact_full_id_resolved")
-            if self.lookup_mode == "latest_descendant":
-                self.effects.extend(("latest_descendant_selected", "lineage_preserved"))
-            self.transition("session_open")
-            return
-        if event in {"lookup_missing", "lookup_denied"}:
-            require(self.state == "lookup_pending", "not-found state")
-            self.opened_session_id = None
-            self.root_id = None
-            self.parent_id = None
-            self.decision = "session_not_found"
-            self.effects.extend(("authorization_safe_session_not_found", "no_session_created"))
-            self.transition("failed")
-            self.clear("pending_target_cleared")
-            return
-        if event == "message_present":
-            require(self.state == "session_open" and self.message_id is not None, "message state")
-            self.focus = "message"
-            self.decision = "message_focused"
-            self.effects.append("message_anchor_focused")
-            self.transition("opened")
-            self.clear("pending_target_cleared")
-            return
-        if event == "message_missing":
-            require(self.state == "session_open" and self.message_id is not None, "message fallback state")
-            self.focus = "session_start"
-            self.decision = "message_not_found"
-            self.effects.extend(("session_opened", "message_not_found_fallback"))
-            self.transition("opened")
-            self.clear("pending_target_cleared")
-            return
-        if event == "complete":
-            require(self.state == "session_open" and self.message_id is None, "complete state")
-            self.focus = "session"
-            self.decision = "session_opened"
-            self.effects.append("session_opened")
-            self.transition("opened")
-            self.clear("pending_target_cleared")
-            return
-        if event == "reload":
-            require(self.state == "opened", "reload state")
-            self.pending_target = True
-            self.lookup_attempts += 1
-            self.effects.extend(("direct_reload", "idempotent_reopen"))
-            self.transition("lookup_pending")
-            return
-        if event == "interrupt":
-            require(self.state == "lookup_pending", "interrupt state")
-            self.effects.append("lookup_interrupted_safe_state")
-            self.transition("interrupted")
-            return
-        if event == "recover":
-            require(self.state == "interrupted" and self.pending_target, "recover state")
-            self.lookup_attempts += 1
-            self.effects.append("authenticated_lookup_retried_idempotently")
-            self.transition("lookup_pending")
-            return
-        if event == "expire":
-            require(self.pending_target and self.state in {"auth_pending", "lookup_pending", "interrupted"}, "expiry state")
-            self.decision = "target_expired"
-            self.transition("expired")
-            self.clear("pending_target_cleared")
-            return
-        if event == "logout":
-            require(self.pending_target, "logout state")
-            self.authenticated = False
-            self.decision = "signed_out"
-            self.transition("signed_out")
-            self.clear("pending_target_cleared")
-            return
-        raise ContractError("unknown event")
-
-    def result(self) -> dict[str, Any]:
-        return {
-            "decision": self.decision,
-            "final_state": self.state,
-            "state_trace": self.state_trace,
-            "effects": self.effects,
-            "requested_session_id": self.requested_session_id if self.valid_target else None,
-            "opened_session_id": self.opened_session_id,
-            "root_id": self.root_id,
-            "parent_id": self.parent_id,
-            "message_id": self.message_id if self.valid_target else None,
-            "focus": self.focus,
-            "pending_target": self.pending_target,
-            "lookup_attempts": self.lookup_attempts,
-            "session_creations": 0,
-            "shares": 0,
-            "transcript_mirror": False,
-            "network": False,
-        }
-
-
-def reduce_case(case: Mapping[str, Any], grammar: Any, lineage: Mapping[str, tuple[str, str | None]]) -> dict[str, Any]:
-    link = case["link"]
-    if link is None:
-        valid = False
-        session_id = None
-        message_id = None
-    else:
-        parsed = grammar.parse_link(link)
-        valid = parsed.valid
-        session_id = parsed.session_id
-        message_id = parsed.message_id
-    resolver = Resolver(session_id, message_id, case["authenticated"], case["lookup_mode"], valid)
-    for event in case["events"]:
-        resolver.apply(event, lineage)
-    return resolver.result()
-
-
-ROOT_KEYS = [
-    "schema", "operation", "contract", "hermes_source_sha", "synthetic_only",
-    "network", "pending_ttl_seconds", "dependencies", "invariants", "cases", "redaction",
-]
-CASE_KEYS = ["id", "link", "authenticated", "lookup_mode", "events", "expected", "notes"]
-EXPECTED_KEYS = [
-    "decision", "final_state", "state_trace", "effects", "requested_session_id",
-    "opened_session_id", "root_id", "parent_id", "message_id", "focus",
-    "pending_target", "lookup_attempts", "session_creations", "shares",
-    "transcript_mirror", "network",
-]
-INVARIANTS = {
-    "exact_ids": "full opaque IDs are preserved without normalization",
-    "lookup": "authenticated Dashboard lookup only",
-    "latest_descendant": "selected descendant keeps exact root and parent lineage",
-    "authorization": "missing and denied share one session-not-found outcome",
-    "message_anchor": "focus exact message or open session with message-not-found fallback",
-    "pending_target": "memory only; clear on success, failure, expiry, cancellation, or logout",
-    "creation": False,
-    "sharing": False,
-    "local_transcript_mirror": False,
-}
-REDACTION = {
-    "synthetic_only": True,
-    "raw_links_in_errors": False,
-    "raw_ids_in_errors": False,
-    "fixed_error": ERROR_PAYLOAD,
-}
-
-
-def validate_expected(value: Any) -> None:
-    require(type(value) is dict and list(value) == EXPECTED_KEYS, "expected shape")
-    string_or_none = ("requested_session_id", "opened_session_id", "root_id", "parent_id", "message_id")
-    for key in string_or_none:
-        require(value[key] is None or type(value[key]) is str, "identity type")
-    for key in ("decision", "final_state", "focus"):
-        require(type(value[key]) is str, "string type")
-    for key in ("state_trace", "effects"):
-        require(type(value[key]) is list and all(type(item) is str for item in value[key]), "list type")
-    require(type(value["pending_target"]) is bool, "pending type")
-    for key in ("lookup_attempts", "session_creations", "shares"):
-        require(type(value[key]) is int and 0 <= value[key] <= 10, "counter type")
-    require(value["transcript_mirror"] is False and value["network"] is False, "offline invariant")
-    require(value["session_creations"] == 0 and value["shares"] == 0, "side-effect invariant")
-
-
-def validate_document(document: Mapping[str, Any]) -> None:
-    require(type(document) is dict and list(document) == ROOT_KEYS, "root shape")
-    require(document["schema"] == SCHEMA and document["operation"] == OPERATION, "schema pin")
-    require(document["contract"] == CONTRACT and document["hermes_source_sha"] == HERMES_SOURCE_SHA, "contract pin")
-    require(document["synthetic_only"] is True and document["network"] is False, "scope pin")
-    require(type(document["pending_ttl_seconds"]) is int and document["pending_ttl_seconds"] == PENDING_TTL_SECONDS, "ttl pin")
-    require(strict_equal(document["invariants"], INVARIANTS), "invariant drift")
-    require(strict_equal(document["redaction"], REDACTION), "redaction drift")
-    verify_dependencies(document)
-    cases = document["cases"]
-    require(type(cases) is list and [case.get("id") if type(case) is dict else None for case in cases] == list(CASE_IDS), "case inventory")
-    grammar = load_grammar_module()
-    lineage = lineage_inventory()
-    for case in cases:
-        require(type(case) is dict and list(case) == CASE_KEYS, "case shape")
-        require(type(case["id"]) is str and type(case["notes"]) is str, "case strings")
-        require(case["link"] is None or type(case["link"]) is str, "link type")
-        require(type(case["authenticated"]) is bool, "auth type")
-        require(type(case["lookup_mode"]) is str and case["lookup_mode"] in {"exact", "latest_descendant"}, "lookup mode")
-        require(type(case["events"]) is list and all(type(event) is str for event in case["events"]), "events type")
-        validate_expected(case["expected"])
-        require(strict_equal(reduce_case(case, grammar, lineage), case["expected"]), "trace drift")
-        require(case["expected"]["requested_session_id"] in {None, ROOT_ID, BRANCH_ID}, "opaque ID binding")
-
-
-def validate_mutations(document: Mapping[str, Any]) -> int:
-    """Reject schema drift, dependency rebinding, unsafe results, and trace drift."""
-
-    mutations: tuple[tuple[str, Callable[[dict[str, Any]], None]], ...] = (
-        ("extra root", lambda value: value.update({"extra": True})),
-        ("synthetic false", lambda value: value.update({"synthetic_only": False})),
-        ("ttl bool", lambda value: value.update({"pending_ttl_seconds": True})),
-        ("dependency drift", lambda value: value["dependencies"]["deep-link-grammar/cases.json"].update({"sha256": "0" * 64})),
-        ("dependency rebinding", lambda value: value["dependencies"].update({"deep-link-grammar/cases.json": value["dependencies"]["session-lineage/cases.json"]})),
-        ("case order", lambda value: value["cases"].reverse()),
-        ("case extra", lambda value: value["cases"][0].update({"extra": False})),
-        ("auth exact type", lambda value: value["cases"][0].update({"authenticated": 1})),
-        ("counter bool", lambda value: value["cases"][0]["expected"].update({"lookup_attempts": True})),
-        ("event drift", lambda value: value["cases"][0]["events"].append("reload")),
-        ("expected drift", lambda value: value["cases"][0]["expected"].update({"decision": "pending"})),
-        ("creation side effect", lambda value: value["cases"][0]["expected"].update({"session_creations": 1})),
-        ("sharing side effect", lambda value: value["cases"][0]["expected"].update({"shares": 1})),
-        ("transcript mirror", lambda value: value["cases"][0]["expected"].update({"transcript_mirror": True})),
-        ("raw error", lambda value: value["redaction"]["fixed_error"]["error"].update({"message": ROOT_ID})),
-        ("lineage root drift", lambda value: value["cases"][2]["expected"].update({"root_id": BRANCH_ID})),
-        ("authorization oracle", lambda value: value["cases"][4]["expected"].update({"decision": "denied"})),
-        ("pending retained", lambda value: value["cases"][6]["expected"].update({"pending_target": True})),
-    )
-    count = 0
-    for label, mutate in mutations:
-        changed = copy.deepcopy(document)
-        mutate(changed)
-        try:
-            validate_document(changed)
-        except ContractError:
-            count += 1
-        else:
-            raise ContractError(f"mutation accepted: {label}")
-    return count
-
-
-def normalized_validator_bytes() -> bytes:
-    """Normalize only identity literals to break the validator self-hash cycle."""
-
-    text = Path(__file__).read_text(encoding="utf-8")
-    for name in ("CASES_SHA256", "BASELINE_SHA256", "NORMALIZED_VALIDATOR_SHA256"):
-        text = __import__("re").sub(rf'^{name} = "[^"]+"$', f'{name} = "<REVIEWED>"', text, flags=__import__("re").MULTILINE)
-    return text.encode("utf-8")
-
-
-def distribution(samples: list[float]) -> dict[str, float]:
-    ordered = sorted(samples)
-    return {
-        "min": round(min(samples), 6),
-        "p50": round(statistics.median(samples), 6),
-        "p95": round(ordered[28], 6),
-        "max": round(max(samples), 6),
-        "mean": round(statistics.mean(samples), 6),
-    }
-
-
-def validate_evidence(evidence: Any) -> None:
-    require(type(evidence) is dict and list(evidence) == ["schema", "normal", "optimized"], "evidence shape")
-    require(evidence["schema"] == EVIDENCE_SCHEMA, "evidence schema")
-    for mode in ("normal", "optimized"):
-        item = evidence[mode]
-        require(type(item) is dict and list(item) == ["samples_ms", "distribution"], "mode shape")
-        samples = item["samples_ms"]
-        require(type(samples) is list and len(samples) == 30, "sample count")
-        require(all(type(sample) is float and math.isfinite(sample) and 0 < sample <= MAX_FLOAT for sample in samples), "sample type")
-        require(strict_equal(item["distribution"], distribution(samples)), "distribution drift")
-
-
-def validate_baseline(baseline: Any, evidence: Any) -> None:
-    keys = ["schema", "validator", "commands", "build_mode", "artifact_identities", "environment", "repetitions", "normal", "optimized", "threshold"]
-    require(type(baseline) is dict and list(baseline) == keys, "baseline shape")
-    require(baseline["schema"] == BASELINE_SCHEMA, "baseline schema")
-    require(baseline["validator"] == "contracts/fixtures/deep-link-resolution/validate.py", "validator path")
-    require(baseline["commands"] == {"normal": "python3 contracts/fixtures/deep-link-resolution/validate.py", "optimized": "python3 -O contracts/fixtures/deep-link-resolution/validate.py"}, "commands")
-    require(baseline["build_mode"] == "N/A" and baseline["threshold"] is None, "threshold")
-    require(type(baseline["repetitions"]) is int and baseline["repetitions"] == 30, "repetitions")
-    require(strict_equal(baseline["normal"], evidence["normal"]) and strict_equal(baseline["optimized"], evidence["optimized"]), "sample binding")
-    identities = baseline["artifact_identities"]
-    identity_names = [
-        "README.md",
-        "cases.json",
-        "test_validate.py",
-        "baseline-evidence.json",
-        "validate.py.normalized",
-        "docs/architecture/deep-links.md",
-    ]
-    require(type(identities) is dict and list(identities) == identity_names, "artifact identities")
-    require(identities["README.md"] == sha256_bytes((FIXTURE_DIR / "README.md").read_bytes()), "readme identity")
-    require(identities["cases.json"] == CASES_SHA256, "cases identity")
-    require(identities["test_validate.py"] == sha256_bytes((FIXTURE_DIR / "test_validate.py").read_bytes()), "tests identity")
-    require(identities["baseline-evidence.json"] == sha256_bytes((FIXTURE_DIR / "baseline-evidence.json").read_bytes()), "evidence identity")
-    require(identities["validate.py.normalized"] == NORMALIZED_VALIDATOR_SHA256, "validator identity")
-    require(identities["docs/architecture/deep-links.md"] == sha256_bytes((REPO_ROOT / "docs/architecture/deep-links.md").read_bytes()), "architecture identity")
-    require(sha256_bytes(normalized_validator_bytes()) == NORMALIZED_VALIDATOR_SHA256, "validator drift")
-
-
-def validate_all(cases_path: Path, baseline_path: Path, evidence_path: Path) -> tuple[int, int]:
-    cases_bytes = cases_path.read_bytes()
-    require(len(cases_bytes) <= MAX_FILE_BYTES and sha256_bytes(cases_bytes) == CASES_SHA256, "cases bytes")
-    document = load_json(cases_path)
-    validate_document(document)
-    evidence = load_json(evidence_path)
-    validate_evidence(evidence)
-    baseline_bytes = baseline_path.read_bytes()
-    require(len(baseline_bytes) <= MAX_FILE_BYTES and sha256_bytes(baseline_bytes) == BASELINE_SHA256, "baseline bytes")
-    baseline = load_json(baseline_path)
-    validate_baseline(baseline, evidence)
-    return len(document["cases"]), validate_mutations(document)
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cases", type=Path, default=FIXTURE_DIR / "cases.json")
-    parser.add_argument("--baseline", type=Path, default=FIXTURE_DIR / "validation-baseline.json")
-    parser.add_argument("--evidence", type=Path, default=FIXTURE_DIR / "baseline-evidence.json")
-    args = parser.parse_args(argv)
-    try:
-        case_count, mutation_count = validate_all(args.cases, args.baseline, args.evidence)
-    except Exception:
-        print(json.dumps(ERROR_PAYLOAD, separators=(",", ":"), sort_keys=True))
-        return 1
-    print(f"deep_link_resolution_validation=ok cases={case_count} mutations={mutation_count}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+ link_input:str|None; authenticated_context:bool; lookup_mode:str; ordering:Any
+ state:str="idle"; pending_link:str|None=None; pending_session_id:str|None=None; pending_message_id:str|None=None; deadline_seconds:int|None=None
+ opened_session_id:str|None=None; root_id:str|None=None; parent_id:str|None=None; focus:str="none"; decision:str="pending"
+ lookup_attempts:int=0; parse_attempts:int=0; authentication_checks:int=0
+ state_trace:list[str]=field(default_factory=lambda:["idle"]); effects:list[str]=field(default_factory=list)
+ def transition(self,state:str)->None:
+  if self.state!=state: self.state=state; self.state_trace.append(state)
+ def cleanup(self)->None:
+  self.pending_link=self.pending_session_id=self.pending_message_id=None; self.deadline_seconds=None; self.effects.append("pending_target_erased")
+ def receive(self,now:int)->None:
+  self.parse_attempts+=1; valid,sid,mid=parse_link(self.link_input)
+  if not valid: self.decision="invalid_link"; self.effects.append("grammar_rejected_before_lookup"); self.transition("failed"); self.cleanup(); return
+  self.pending_link=self.link_input; self.pending_session_id=sid; self.pending_message_id=mid; self.deadline_seconds=now+PENDING_TTL_SECONDS; self.effects.extend(("grammar_validated","deadline_set_300_seconds"))
+  if self.authenticated_context: self.authentication_checks+=1; self.lookup_attempts+=1; self.effects.extend(("authentication_confirmed","authenticated_lookup_started")); self.transition("lookup_pending")
+  else: self.transition("auth_pending")
+ def apply(self,event:Mapping[str,Any],lineage:Mapping[str,tuple[str,str|None]])->None:
+  require(type(event)is dict and list(event)==["type","at_seconds"]); kind,now=event.values(); require(type(kind)is str and type(now)is int and 0<=now<=MAX_INTEGER)
+  if kind=="receive": require(self.state=="idle"); self.receive(now)
+  elif kind=="authenticated": require(self.state=="auth_pending" and self.deadline_seconds is not None and now<self.deadline_seconds); self.authentication_checks+=1; self.lookup_attempts+=1; self.effects.extend(("authentication_confirmed","authenticated_lookup_started")); self.transition("lookup_pending")
+  elif kind=="lookup_present":
+   require(self.state=="lookup_pending" and self.pending_session_id is not None)
+   try:
+    if self.lookup_mode=="latest_descendant": selected,root,parent=latest_descendant(self.pending_session_id,self.ordering,lineage); self.effects.extend(("latest_descendant_selected_from_sequence","lineage_preserved"))
+    else: selected=self.pending_session_id; require(selected in lineage); root,parent=lineage[selected]
+   except ContractError: self.decision="lineage_unavailable"; self.effects.extend(("lineage_ordering_rejected","no_session_created")); self.transition("failed"); self.cleanup(); return
+   self.opened_session_id,self.root_id,self.parent_id=selected,root,parent; self.effects.append("exact_full_id_resolved"); self.transition("session_open")
+  elif kind in {"lookup_missing","lookup_denied"}: require(self.state=="lookup_pending"); self.decision="session_not_found"; self.effects.extend(("authorization_safe_session_not_found","no_session_created")); self.transition("failed"); self.cleanup()
+  elif kind=="message_present": require(self.state=="session_open" and self.pending_message_id is not None); self.focus,self.decision="message","message_focused"; self.effects.append("message_anchor_focused"); self.transition("opened"); self.cleanup()
+  elif kind=="message_missing": require(self.state=="session_open" and self.pending_message_id is not None); self.focus,self.decision="session_start","message_not_found"; self.effects.extend(("session_opened","message_not_found_fallback")); self.transition("opened"); self.cleanup()
+  elif kind=="complete": require(self.state=="session_open" and self.pending_message_id is None); self.focus,self.decision="session","session_opened"; self.effects.append("session_opened"); self.transition("opened"); self.cleanup()
+  elif kind=="reload": require(self.state=="opened" and self.pending_link is None and self.deadline_seconds is None); self.effects.append("direct_reload_requires_fresh_resolution"); self.transition("idle")
+  elif kind=="interrupt": require(self.state=="lookup_pending"); self.effects.append("lookup_interrupted_safe_state"); self.transition("interrupted")
+  elif kind=="recover": require(self.state=="interrupted" and self.pending_session_id is not None and self.deadline_seconds is not None and now<self.deadline_seconds); self.authentication_checks+=1; self.lookup_attempts+=1; self.effects.extend(("authentication_reconfirmed","authenticated_lookup_retried_idempotently")); self.transition("lookup_pending")
+  elif kind=="expire":
+   require(self.deadline_seconds is not None)
+   if now<self.deadline_seconds: self.effects.append("deadline_not_reached")
+   else: self.decision="target_expired"; self.effects.append("deadline_reached_300_seconds"); self.transition("expired"); self.cleanup()
+  elif kind=="logout": require(self.pending_session_id is not None); self.authenticated_context=False; self.decision="signed_out"; self.transition("signed_out"); self.cleanup()
+  else: raise ContractError("contract rejected")
+ def result(self)->dict[str,Any]:
+  return {"decision":self.decision,"final_state":self.state,"state_trace":self.state_trace,"effects":self.effects,"opened_session_id":self.opened_session_id,"root_id":self.root_id,"parent_id":self.parent_id,"focus":self.focus,"pending_link":self.pending_link,"pending_session_id":self.pending_session_id,"pending_message_id":self.pending_message_id,"deadline_seconds":self.deadline_seconds,"lookup_attempts":self.lookup_attempts,"parse_attempts":self.parse_attempts,"authentication_checks":self.authentication_checks,"session_creations":0,"shares":0,"transcript_mirror":False,"network":False}
+def reduce_case(case:Mapping[str,Any],lineage:Mapping[str,tuple[str,str|None]])->dict[str,Any]:
+ resolver=Resolver(case["link"],case["authenticated"],case["lookup_mode"],case["lineage_ordering"]); previous=-1
+ for event in case["events"]: require(type(event)is dict and type(event.get("at_seconds"))is int and event["at_seconds"]>=previous); previous=event["at_seconds"]; resolver.apply(event,lineage)
+ return resolver.result()
+ROOT_KEYS=["schema","operation","contract","hermes_source_sha","synthetic_only","network","pending_ttl_seconds","dependencies","invariants","cases","redaction"]
+CASE_KEYS=["id","link","authenticated","lookup_mode","lineage_ordering","events","expected","notes"]
+EXPECTED_KEYS=["decision","final_state","state_trace","effects","opened_session_id","root_id","parent_id","focus","pending_link","pending_session_id","pending_message_id","deadline_seconds","lookup_attempts","parse_attempts","authentication_checks","session_creations","shares","transcript_mirror","network"]
+INVARIANTS={"exact_ids":"full opaque IDs are preserved without normalization","latest_descendant":"explicit bounded sequence evidence selects one unique descendant","authorization":"missing and denied share one session-not-found outcome","pending_target":"link and IDs are erased on success, failure, expiry, or logout","reload":"repeat parse and authentication resolution before lookup","creation":False,"sharing":False,"local_transcript_mirror":False}
+REDACTION={"synthetic_only":True,"raw_links_in_errors":False,"raw_ids_in_errors":False,"fixed_error":ERROR_PAYLOAD}
+def verify_dependencies(document:Mapping[str,Any],store:ArtifactStore)->None:
+ identities=document["dependencies"]; require(type(identities)is dict and list(identities)==list(DEPENDENCIES))
+ for name,expected in DEPENDENCIES.items(): artifact=store.read(REPO_ROOT/"contracts/fixtures"/name); require(identities[name]=={"sha256":expected} and artifact.sha256==expected)
+def validate_expected(value:Any)->None:
+ require(type(value)is dict and list(value)==EXPECTED_KEYS)
+ for key in ("decision","final_state","focus"): require(type(value[key])is str)
+ for key in ("state_trace","effects"): require(type(value[key])is list and all(type(item)is str for item in value[key]))
+ for key in ("opened_session_id","root_id","parent_id","pending_link","pending_session_id","pending_message_id"): require(value[key] is None or type(value[key])is str)
+ require(value["deadline_seconds"] is None or type(value["deadline_seconds"])is int)
+ for key in ("lookup_attempts","parse_attempts","authentication_checks","session_creations","shares"): require(type(value[key])is int and 0<=value[key]<=10)
+ require(value["session_creations"]==0 and value["shares"]==0 and value["transcript_mirror"] is False and value["network"] is False)
+ if value["final_state"] in {"opened","failed","expired","signed_out"}: require(all(value[key] is None for key in ("pending_link","pending_session_id","pending_message_id","deadline_seconds")))
+def validate_document(document:Mapping[str,Any],store:ArtifactStore)->None:
+ require(type(document)is dict and list(document)==ROOT_KEYS); require(document["schema"]==SCHEMA and document["operation"]==OPERATION and document["contract"]==CONTRACT and document["hermes_source_sha"]==HERMES_SOURCE_SHA); require(document["synthetic_only"] is True and document["network"] is False and type(document["pending_ttl_seconds"])is int and document["pending_ttl_seconds"]==PENDING_TTL_SECONDS); require(strict_equal(document["invariants"],INVARIANTS) and strict_equal(document["redaction"],REDACTION)); verify_dependencies(document,store); lineage=pinned_lineage(store)
+ cases=document["cases"]; require(type(cases)is list and [case.get("id") if type(case)is dict else None for case in cases]==list(CASE_IDS))
+ for case in cases:
+  require(type(case)is dict and list(case)==CASE_KEYS and type(case["id"])is str and type(case["notes"])is str and (case["link"] is None or type(case["link"])is str) and type(case["authenticated"])is bool and case["lookup_mode"] in {"exact","latest_descendant"} and type(case["lineage_ordering"])is list and len(case["lineage_ordering"])<=MAX_LINEAGE_NODES and type(case["events"])is list); validate_expected(case["expected"]); require(strict_equal(reduce_case(case,lineage),case["expected"]))
+def validate_mutations(document:Mapping[str,Any],store:ArtifactStore|None=None)->int:
+ mutations=(
+  lambda v:v.update({"extra":True}),lambda v:v.update({"pending_ttl_seconds":True}),lambda v:v["dependencies"]["deep-link-grammar/cases.json"].update({"sha256":"0"*64}),lambda v:v["cases"].reverse(),lambda v:v["cases"][0].update({"authenticated":1}),lambda v:v["cases"][0]["events"][0].update({"at_seconds":True}),lambda v:v["cases"][0]["events"][1].update({"at_seconds":0}),lambda v:v["cases"][0]["expected"].update({"decision":"pending"}),lambda v:v["cases"][0]["expected"].update({"session_creations":1}),lambda v:v["cases"][0]["expected"].update({"pending_session_id":ROOT_ID}),lambda v:v["cases"][0]["expected"].update({"deadline_seconds":1300}),lambda v:v["cases"][12]["expected"].update({"parse_attempts":1}),lambda v:v["cases"][12]["expected"].update({"authentication_checks":1}),lambda v:v["cases"][2]["lineage_ordering"][1].update({"sequence":5}),lambda v:v["cases"][3]["expected"].update({"decision":"session_opened"}),lambda v:v["cases"][4]["expected"].update({"decision":"session_opened"}),lambda v:v["cases"][9]["events"][1].update({"at_seconds":1299}),lambda v:v["cases"][6]["expected"].update({"decision":"denied"}),lambda v:v["redaction"]["fixed_error"]["error"].update({"message":ROOT_ID}),lambda v:v["cases"][0]["expected"].update({"network":True}),
+ )
+ completed=0; shared_store=store or ArtifactStore()
+ for mutate in mutations:
+  changed=copy.deepcopy(document); mutate(changed)
+  try: validate_document(changed,shared_store)
+  except ContractError: completed+=1
+  else: raise ContractError("contract rejected")
+ return completed
+def percentile_r7(values:list[float],quantile:Decimal)->float:
+ ordered=sorted(Decimal(str(value)) for value in values); position=Decimal(len(ordered)-1)*quantile; lower=int(position); upper=min(lower+1,len(ordered)-1); fraction=position-Decimal(lower)
+ with localcontext() as context: context.prec=50; value=ordered[lower]+(ordered[upper]-ordered[lower])*fraction
+ return round(float(value),6)
+def distribution(samples:list[float])->dict[str,float]: return {"min":round(min(samples),6),"p50":percentile_r7(samples,Decimal("0.50")),"p95":percentile_r7(samples,Decimal("0.95")),"max":round(max(samples),6),"mean":round(statistics.mean(samples),6)}
+def validate_evidence(evidence:Any)->None:
+ require(type(evidence)is dict and list(evidence)==["schema","percentile_method","normal","optimized"] and evidence["schema"]==EVIDENCE_SCHEMA and evidence["percentile_method"]=="inclusive_linear_interpolation_r7")
+ for mode in ("normal","optimized"):
+  item=evidence[mode]; require(type(item)is dict and list(item)==["samples_ms","distribution"]); samples=item["samples_ms"]; require(type(samples)is list and len(samples)==30 and all(type(sample)is float and math.isfinite(sample) and sample>0 for sample in samples)); require(strict_equal(item["distribution"],distribution(samples)))
+def validate_baseline(baseline:Any,evidence:Any)->None:
+ keys=["schema","validator","commands","build_mode","environment","repetitions","percentile_method","normal","optimized","threshold"]
+ require(type(baseline)is dict and list(baseline)==keys and baseline["schema"]==BASELINE_SCHEMA and baseline["validator"]=="contracts/fixtures/deep-link-resolution/validate.py" and baseline["commands"]=={"normal":"python3 contracts/fixtures/deep-link-resolution/validate.py","optimized":"python3 -O contracts/fixtures/deep-link-resolution/validate.py"} and baseline["build_mode"]=="N/A" and baseline["threshold"] is None and type(baseline["repetitions"])is int and baseline["repetitions"]==30 and baseline["percentile_method"]=="inclusive_linear_interpolation_r7" and strict_equal(baseline["normal"],evidence["normal"]) and strict_equal(baseline["optimized"],evidence["optimized"]))
+def normalized_validator_bytes(data:bytes)->bytes:
+ text=data.decode(); text=re.sub(r'REVIEW_ROOT_DIGEST_PARTS=\(\n(?: "[^"]+",\n){4}\)', 'REVIEW_ROOT_DIGEST_PARTS=(\n "<REVIEWED>",\n "<REVIEWED>",\n "<REVIEWED>",\n "<REVIEWED>",\n)',text); return text.encode()
+def validate_review_root(root:Any,artifacts:Mapping[str,Artifact])->None:
+ require(type(root)is dict and list(root)==["schema","reviewed_operation","artifact_sha256"] and root["schema"]==REVIEW_SCHEMA and root["reviewed_operation"]==OPERATION)
+ names=["README.md","cases.json","test_validate.py","validate.py.normalized","baseline-evidence.json","validation-baseline.json","docs/architecture/deep-links.md",*DEPENDENCIES]; identities=root["artifact_sha256"]; require(type(identities)is dict and list(identities)==names)
+ for name in names:
+  actual=sha256_bytes(normalized_validator_bytes(artifacts["validate.py"].data)) if name=="validate.py.normalized" else artifacts[name].sha256; require(identities[name]==actual)
+def validate_all(cases_path:Path,baseline_path:Path,evidence_path:Path)->tuple[int,int]:
+ store=ArtifactStore(); paths={"README.md":FIXTURE_DIR/"README.md","cases.json":cases_path,"test_validate.py":FIXTURE_DIR/"test_validate.py","validate.py":FIXTURE_DIR/"validate.py","baseline-evidence.json":evidence_path,"validation-baseline.json":baseline_path,"docs/architecture/deep-links.md":REPO_ROOT/"docs/architecture/deep-links.md"}; paths.update({name:REPO_ROOT/"contracts/fixtures"/name for name in DEPENDENCIES}); artifacts={name:store.read(path) for name,path in paths.items()}; review=store.read(FIXTURE_DIR/"review-root.json"); digest=store.read(FIXTURE_DIR/"review-root-sha256.txt"); approved="".join(REVIEW_ROOT_DIGEST_PARTS); require(len(approved)==64 and digest.data==(approved+"\n").encode("ascii") and review.sha256==approved); validate_review_root(parse_json_bytes(review.data),artifacts); document=parse_json_bytes(artifacts["cases.json"].data); validate_document(document,store); evidence=parse_json_bytes(artifacts["baseline-evidence.json"].data); validate_evidence(evidence); baseline=parse_json_bytes(artifacts["validation-baseline.json"].data); validate_baseline(baseline,evidence); return len(document["cases"]),validate_mutations(document,store)
+def controlled_arguments(argv:list[str]|None)->argparse.Namespace:
+ parser=argparse.ArgumentParser(add_help=False,exit_on_error=False)
+ parser.add_argument("--cases",type=Path,default=FIXTURE_DIR/"cases.json"); parser.add_argument("--baseline",type=Path,default=FIXTURE_DIR/"validation-baseline.json"); parser.add_argument("--evidence",type=Path,default=FIXTURE_DIR/"baseline-evidence.json")
+ try: args,unknown=parser.parse_known_args(argv)
+ except (argparse.ArgumentError,SystemExit) as exc: raise ContractError("contract rejected") from exc
+ require(not unknown); return args
+def main(argv:list[str]|None=None)->int:
+ try: args=controlled_arguments(argv); count,mutations=validate_all(args.cases,args.baseline,args.evidence)
+ except Exception: print(json.dumps(ERROR_PAYLOAD,separators=(",",":"),sort_keys=True)); return 1
+ print(f"deep_link_resolution_validation=ok cases={count} mutations={mutations}"); return 0
+if __name__=="__main__": raise SystemExit(main())

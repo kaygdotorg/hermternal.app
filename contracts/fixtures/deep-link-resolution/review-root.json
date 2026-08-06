@@ -1,0 +1,17 @@
+{
+  "schema": "hermternal.deep-link-resolution-review-root.v1",
+  "reviewed_operation": "C-16",
+  "artifact_sha256": {
+    "README.md": "c1f173cc55a0a13d6cd95e2713380654ea6cbc9d82fb95f4639cadcb66b68401",
+    "cases.json": "db4eeb8ae4a04251634f83da349fde1cea913b045f6cd94bad6df497b433c424",
+    "test_validate.py": "86610866fbc38f5e7cb01630f1301aa20a859aadd46b427c1262fd6a2133e2ba",
+    "validate.py.normalized": "0377eab16a9139141a98c8e8e7a6a5eb971d4ca16effc34bc13ab78415289531",
+    "baseline-evidence.json": "a69e94bff3426015bcc5cc9dcea6deb498d3c88b1664c47c649f4cb4e18da722",
+    "validation-baseline.json": "32d6db975d7566dc83c448b5598c07b1f26e7853b86e308e0eb6e39e21f88b81",
+    "docs/architecture/deep-links.md": "3b4c45fb1f2a7fd8458faab4afee671c7b3e8eb17e03a7f4da22f3ae78882ffa",
+    "deep-link-grammar/cases.json": "91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96",
+    "deep-link-grammar/validate.py": "c01cc7958ebd573fa336d72de551e9c4b45e27397c6a38f5012eff35edff314e",
+    "session-lineage/cases.json": "ebd320005dea1623b691346ef6b2b38a60fb510c7b4ed16855c02e9d395540ea",
+    "session-lineage/validation-baseline.json": "c62ffce8836f873c03143d2716b83e99db1843083bef82d5697cd5a613f88b3d"
+  }
+}
