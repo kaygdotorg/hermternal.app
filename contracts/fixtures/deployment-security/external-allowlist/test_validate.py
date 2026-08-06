@@ -25,6 +25,27 @@ if str(FIXTURE_DIR) not in sys.path:
 import validate  # noqa: E402
 
 
+BASE64_REDACTION_CASES = (
+    ("standard-padded-one-byte", "aA=="),
+    ("standard-padded-two-bytes", "aGE="),
+    ("standard-padded-five-bytes", "aGVsbG8="),
+    ("standard-padded-four-bytes", "YWJjZA=="),
+    ("standard-unpadded-three-bytes", "aGFp"),
+    ("standard-unpadded-five-bytes", "aGVsbG8"),
+    ("standard-unpadded-seven-bytes", "AQIDBAUGBw"),
+    ("standard-unpadded-six-bytes", "YWJjZGVm"),
+    ("standard-uppercase", "QUJDREVG"),
+    ("urlsafe-padded-one-byte", "-w=="),
+    ("urlsafe-padded-four-bytes", "-__v-w=="),
+    ("urlsafe-unpadded-four-bytes", "-__v-w"),
+    ("urlsafe-unpadded-six-bytes", "-__v-__v"),
+    ("urlsafe-noncanonical-pad-bits", "YWJjZGVm-_"),
+    ("standard-noncanonical-pad-bits", "Zh=="),
+    ("standard-excessive-padding", "aGVsbG8==="),
+    ("urlsafe-noncanonical-padded", "AQIDBAUG-_=="),
+)
+
+
 class ExternalAllowlistTests(unittest.TestCase):
     """Keep the frozen matrix, model, parser, redaction, and baseline aligned."""
 
@@ -358,21 +379,41 @@ class ExternalAllowlistTests(unittest.TestCase):
                 with self.assertRaises(validate.ValidationError):
                     validate.validate_redaction({"message": message})
 
-    def test_error_compaction_redacts_retained_edge_shapes_in_normal_and_optimized_modes(self) -> None:
-        checks = (
-            ("retained=QUJDREVG", ("QUJDREVG",)),
-            ("retained=AQIDBAUG-_==", ("AQIDBAUG-_==",)),
-            ("retained=YWJjZGVm", ("YWJjZGVm",)),
-            ("retained=YWJjZGVm-_", ("YWJjZGVm-_",)),
-            ("retained=/tmp", ("/tmp",)),
-            ("retained=localhost:3000", ("localhost:3000",)),
-        )
-        for message, markers in checks:
-            with self.subTest(message=message):
-                self._assert_helper_redaction(message, markers)
+    def test_error_compaction_redacts_canonical_base64_classes_in_both_modes(self) -> None:
+        for label, value in BASE64_REDACTION_CASES:
+            with self.subTest(label=label, value=value):
+                self._assert_helper_redaction(f"retained={value}", (value,))
 
-    def test_real_cli_rejects_retained_edge_shapes_in_normal_and_optimized_modes(self) -> None:
-        for value in ("QUJDREVG", "AQIDBAUG-_==", "YWJjZGVm", "YWJjZGVm-_", "/tmp", "localhost:3000"):
+        for safe_text in (
+            "Provider",
+            "Password",
+            "WebSocket",
+            "Repeating",
+            "Dashboard",
+            "Filesystem",
+            "Underscore",
+            "dashboard-v0.0.1",
+            "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+            "x%2Dhttp%2Dmethod",
+        ):
+            with self.subTest(safe_text=safe_text):
+                for optimized in (False, True):
+                    self.assertEqual(self._run_compact_error(safe_text, optimized=optimized).stdout.strip(), json.dumps(safe_text))
+
+    def test_real_cli_rejects_canonical_base64_classes_in_both_modes(self) -> None:
+        for label, value in BASE64_REDACTION_CASES:
+            for location in ("description", "header", "hostile-key"):
+                with self.subTest(label=label, value=value, location=location):
+                    mutated = copy.deepcopy(self.document)
+                    if location == "description":
+                        mutated["cases"][0]["description"] = value
+                    elif location == "header":
+                        mutated["cases"][0]["request"]["headers"]["X-Note"] = value
+                    else:
+                        mutated["cases"][0]["request"][value] = "synthetic"
+                    self._assert_cli_redaction_failure(mutated, (value,))
+
+        for value in ("/tmp", "localhost:3000"):
             with self.subTest(value=value):
                 mutated = copy.deepcopy(self.document)
                 mutated["cases"][0]["request"]["headers"]["X-Note"] = value

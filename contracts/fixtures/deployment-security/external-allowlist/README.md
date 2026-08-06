@@ -145,15 +145,19 @@ tracebacks, usage text, untrusted argument values, or request material.
 
 ### Retained-output redaction
 
-The retained-output scanner rejects data URLs, padded and unpadded Base64-like
-runs (including short unpadded standard and URL-safe forms, URL-safe
-`-`/`_` samples, and embedded runs), absolute POSIX and Windows paths
-(including `/tmp`),
-relative paths, filenames, hostnames (including `localhost:3000`), email or
-IPv4 host-shaped values, and Basic, Cookie, Bearer, and
-sensitive-assignment payloads. It scans both values and object keys.
-Diagnostic locations use fixed semantic labels such as `$.<field>` and `$[]`;
-attacker-controlled keys never become error paths.
+The retained-output scanner rejects data URLs, plausible padded and unpadded
+standard or URL-safe Base64 runs, absolute POSIX and Windows paths (including
+`/tmp`), relative paths, filenames, hostnames (including `localhost:3000`),
+email or IPv4 host-shaped values, and Basic, Cookie, Bearer, and
+sensitive-assignment payloads. Base64 candidates are bounded, decoded with
+strict standard-library validation, and re-encoded before acceptance; terminal
+padding must be canonical and nonzero unused pad bits are rejected. The
+scanner uses payload-shaped punctuation, digits, and mixed-case signals so
+ordinary contract prose and hyphenated route identifiers are not treated as
+encoded payloads. Structural route, platform, and evidence fields are exempt
+only where their frozen syntax is independently validated. It scans both values
+and object keys. Diagnostic locations use fixed semantic labels such as
+`$.<field>` and `$[]`; attacker-controlled keys never become error paths.
 
 The manifest's frozen route paths, source-contract path, artifact filenames and
 hashes, and validator command strings are structural syntax. Those fields are

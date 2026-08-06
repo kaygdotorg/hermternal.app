@@ -10,6 +10,8 @@ symbolic requests against an exact method/path/client/transport/auth boundary.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import math
@@ -35,8 +37,8 @@ PREFIX = "/hermes"
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py")
 # Evidence is pinned after the fixture is reviewed; a copied baseline cannot
 # self-rebind its digest to a mutated README, manifest, or validator.
-EXPECTED_ARTIFACT_BYTES = 115142
-EXPECTED_ARTIFACT_SHA256 = "a0c7006975f230e7ffc0704526ffcd4a9f8da6ea54a0bde9f67b385ae355e4fe"
+EXPECTED_ARTIFACT_BYTES = 120224
+EXPECTED_ARTIFACT_SHA256 = "2823677ebb8db8a0fee4c10b3c89246ba6cd8436852dd7ed04ada11e3e1432ea"
 
 MAX_JSON_BYTES = 512 * 1024
 MAX_JSON_DEPTH = 64
@@ -100,11 +102,13 @@ SENSITIVE_ASSIGNMENT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Retained-output redaction is deliberately lexical.  It does not decode,
-# resolve, or read anything; it only rejects material that could put a URL,
-# credential, path, filename, host, or encoded payload into diagnostics.  The
-# structural fields below are independently frozen by the contract validator,
-# so their route syntax and evidence hashes are not mistaken for user data.
+# Retained-output redaction is deliberately bounded and local.  It never
+# resolves or reads anything; the Base64 branch decodes only short candidates,
+# re-encodes them to enforce canonical pad bits, and rejects material that could
+# put a URL, credential, path, filename, host, or encoded payload into
+# diagnostics.  The structural fields below are independently frozen by the
+# contract validator, so their route syntax and evidence hashes are not
+# mistaken for user data.
 REDACTION_STRUCTURAL_FIELDS = frozenset(
     {
         "schema",
@@ -132,6 +136,11 @@ REDACTION_STRUCTURAL_EXEMPT_PATTERNS = frozenset(
         "ip_address",
     }
 )
+_BASE64_CANDIDATE_RE = re.compile(
+    r"(?<![A-Za-z0-9+/_%-])"
+    r"[A-Za-z0-9+/_-]{2,}={0,}"
+    r"(?![A-Za-z0-9+/_=-])"
+)
 RETAINED_VALUE_PATTERNS = (
     ("url", re.compile(r"\b(?:https?|wss?|ftp)://[^\s<>\"']+", re.IGNORECASE)),
     ("data_url", re.compile(r"(?<![A-Za-z0-9])data:[^\s<>\"']+", re.IGNORECASE)),
@@ -143,33 +152,12 @@ RETAINED_VALUE_PATTERNS = (
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
     (
         "base64",
-        # Keep the lexical boundary broad enough for short unpadded samples
-        # and URL-safe payloads without decoding or validating them.  Standard
-        # tokens use a digit/symbol or a strong mixed-case signal; URL-safe
-        # tokens require mixed case plus '-'/'_' so ordinary contract labels
-        # and method-override aliases are not classified as retained payloads.
-        re.compile(
-            r"(?<![A-Za-z0-9+/_%-])"
-            r"(?:"
-            r"[A-Za-z0-9+/_-]{8,}={1,2}(?![A-Za-z0-9+/_=-])"
-            r"|"
-            r"(?<![A-Za-z0-9+/_%-])(?=[A-Za-z0-9+/]{8,}(?![A-Za-z0-9+/]))"
-            r"(?:"
-            r"(?=[A-Za-z0-9+/]*[0-9+/])"
-            r"|(?=(?:[A-Za-z0-9+/]*[A-Z]){3})(?=(?:[A-Za-z0-9+/]*[a-z]){2})"
-            r"|(?=[A-Z]{8,}(?![A-Za-z0-9+/]))"
-            r")"
-            r"(?![0-9A-Fa-f]{8,}(?![A-Za-z0-9+/]))"
-            r"[A-Za-z0-9+/]{8,}(?![A-Za-z0-9+/_-])"
-            r"|"
-            r"(?<![A-Za-z0-9+/_%-])(?=[A-Za-z0-9+/_-]{8,}(?![A-Za-z0-9+/_-]))"
-            r"(?!(?:[A-Za-z0-9_]*-){2})"
-            r"(?=[A-Za-z0-9+/_-]*[-_])"
-            r"(?=(?:[A-Za-z0-9+/_-]*[A-Z]){2})"
-            r"(?=(?:[A-Za-z0-9+/_-]*[a-z]){2})"
-            r"[A-Za-z0-9+/_-]{8,}(?![A-Za-z0-9+/_-])"
-            r")"
-        ),
+        # Candidate discovery is intentionally permissive; the bounded
+        # canonical decoder below decides whether a run is plausible retained
+        # payload.  Keeping padding in a separate terminal group lets the
+        # decoder reject internal, excessive, or noncanonical padding rather
+        # than silently accepting a regex-shaped example.
+        _BASE64_CANDIDATE_RE,
     ),
     (
         "absolute_path",
@@ -258,12 +246,153 @@ class ValidationError(ValueError):
     """Raised when the closed external allowlist contract is violated."""
 
 
+def _base64_candidate_state(token: str) -> str | None:
+    """Return the canonicality state of one bounded Base64 candidate.
+
+    The standard-library decoder accepts nonzero unused pad bits, so decoding
+    alone is not sufficient.  Re-encoding the bounded byte result enforces the
+    canonical spelling for both alphabets and for padded versus unpadded input.
+    """
+
+    if len(token) > MAX_STRING_LENGTH:
+        # Validation rejects oversized strings before this path; compact_error
+        # still redacts an oversized payload-shaped run without decoding it.
+        return "noncanonical"
+    core = token.rstrip("=")
+    padding = token[len(core) :]
+    if len(core) < 2 or "=" in core or len(core) % 4 == 1:
+        return None
+    url_safe = "-" in core or "_" in core
+    if url_safe and any(character in "+/" for character in core):
+        return None
+    required_padding = (-len(core)) % 4
+    if len(padding) > 2:
+        return "noncanonical"
+    if padding and len(padding) != required_padding:
+        return "noncanonical"
+
+    padded = core + "=" * required_padding
+    try:
+        decoded = base64.b64decode(
+            padded,
+            altchars=b"-_" if url_safe else None,
+            validate=True,
+        )
+    except (binascii.Error, ValueError):
+        return None
+    canonical = base64.b64encode(
+        decoded,
+        altchars=b"-_" if url_safe else None,
+    ).decode("ascii")
+    expected = canonical if padding else canonical.rstrip("=")
+    return "canonical" if token == expected else "noncanonical"
+
+
+def _base64_candidate_is_plausible(
+    value: str,
+    match: re.Match[str],
+    token: str,
+    state: str,
+    *,
+    is_key: bool = False,
+) -> bool:
+    """Keep canonical detection bounded without classifying contract prose.
+
+    Padded runs are unambiguous.  For unpadded runs, punctuation, digits, and
+    a strong mixed-case signal identify payload-shaped material; ordinary words
+    such as ``Provider`` and ``contract`` do not.  URL-safe detection requires
+    an edge/repeated marker or an assignment-like context, which avoids treating
+    method-override aliases and hyphenated route IDs as payloads.
+    """
+
+    if state not in {"canonical", "noncanonical"}:
+        return False
+    core = token.rstrip("=")
+    padding = token[len(core) :]
+    if len(core) < 2:
+        return False
+    preceding = value[match.start() - 1] if match.start() else ""
+    assignment_context = bool(preceding) and preceding in "=:+,;"
+    whole_token = token == value.strip()
+    if padding:
+        return True
+
+    upper_count = sum(character.isupper() for character in core)
+    lower_count = sum(character.islower() for character in core)
+    digit_or_standard_symbol = any(character.isdigit() or character in "+/" for character in core)
+    url_marker_count = sum(character in "-_" for character in core)
+    if "-" in core or "_" in core:
+        if (
+            len(core) < 6
+            and not assignment_context
+            and not whole_token
+            and not core.startswith(("-", "_"))
+            and not core.endswith(("-", "_"))
+        ):
+            return False
+        if is_key:
+            return (
+                ("_" in core and upper_count >= 2)
+                or (core.startswith("-") and (url_marker_count >= 3 or whole_token))
+            )
+        return (
+            ("_" in core and (upper_count >= 2 or digit_or_standard_symbol))
+            or core.startswith(("-", "_"))
+            or core.endswith(("-", "_"))
+            or (assignment_context and url_marker_count >= 2 and (upper_count >= 2 or digit_or_standard_symbol))
+        )
+
+    if len(core) < 6 and not assignment_context and not whole_token:
+        return False
+    return (
+        digit_or_standard_symbol
+        or (upper_count >= 2 and lower_count >= 1)
+        or upper_count >= 8
+        or (len(core) < 6 and (assignment_context or whole_token) and upper_count >= 1 and lower_count >= 1)
+    )
+
+
+def _base64_candidate_spans(
+    value: str,
+    *,
+    field_name: str | None = None,
+    is_key: bool = False,
+) -> list[tuple[int, int]]:
+    """Find plausible canonical or noncanonical Base64 runs in bounded text."""
+
+    if _pattern_is_exempt("base64", field_name):
+        return []
+    spans: list[tuple[int, int]] = []
+    for match in _BASE64_CANDIDATE_RE.finditer(value):
+        token = match.group(0)
+        state = _base64_candidate_state(token)
+        if state is not None and _base64_candidate_is_plausible(
+            value,
+            match,
+            token,
+            state,
+            is_key=is_key,
+        ):
+            spans.append(match.span())
+    return spans
+
+
+def _redact_base64_candidates(value: str) -> str:
+    """Replace payload-shaped Base64 runs without decoding unbounded input."""
+
+    for start, end in reversed(_base64_candidate_spans(value)):
+        value = f"{value[:start]}[REDACTED]{value[end:]}"
+    return value
+
+
 def compact_error(message: object) -> str:
     """Return one bounded semantic diagnostic without retained user material."""
 
     redacted = str(message)
-    for _, pattern in RETAINED_VALUE_PATTERNS:
-        redacted = pattern.sub("[REDACTED]", redacted)
+    for pattern_name, pattern in RETAINED_VALUE_PATTERNS:
+        if pattern_name != "base64":
+            redacted = pattern.sub("[REDACTED]", redacted)
+    redacted = _redact_base64_candidates(redacted)
 
     def redact_assignment(match: re.Match[str]) -> str:
         del match
@@ -424,11 +553,23 @@ def _pattern_is_exempt(pattern_name: str, field_name: str | None) -> bool:
     )
 
 
-def _check_retained_text(value: str, path: str, field_name: str | None = None) -> None:
+def _check_retained_text(
+    value: str,
+    path: str,
+    field_name: str | None = None,
+    *,
+    is_key: bool = False,
+) -> None:
     for pattern_name, pattern in RETAINED_VALUE_PATTERNS:
+        if pattern_name == "base64":
+            continue
         if _pattern_is_exempt(pattern_name, field_name):
             continue
         require(pattern.search(value) is None, f"retained sensitive value at {path}")
+    require(
+        not _base64_candidate_spans(value, field_name=field_name, is_key=is_key),
+        f"retained sensitive value at {path}",
+    )
     require(SENSITIVE_ASSIGNMENT_RE.search(value) is None, f"retained sensitive value at {path}")
 
 
@@ -437,7 +578,7 @@ def _walk_redaction(value: Any, path: str = "$", *, field_name: str | None = Non
 
     if type(value) is dict:
         for key, child in value.items():
-            _check_retained_text(key, f"{path}.<field-name>")
+            _check_retained_text(key, f"{path}.<field-name>", field_name=key, is_key=True)
             normalized = _normalize_sensitive_key(key)
             require(normalized not in SENSITIVE_NORMALIZED_KEYS, f"sensitive fixture field at {path}.<field>")
             _walk_redaction(child, f"{path}.<field>", field_name=key)
