@@ -1,0 +1,2131 @@
+{
+  "schema": "hermternal.session-lineage.v1",
+  "operation": "C-07B",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "surface": "shared-web-apple",
+  "compatibility": {
+    "pinned_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "contract": "dashboard-v0.0.1",
+    "lineage_wire_schema": "not_defined_by_pinned_dashboard",
+    "unsupported_parent_policy": "fail_closed_without_wire_fallback",
+    "unknown_result_policy": "reconcile_server_state_before_retry",
+    "new_session_policy": "explicit_user_action_only",
+    "live_claim": false
+  },
+  "source_observations": [
+    {
+      "id": "create-session-identity",
+      "path": "tui_gateway/methods_session.py",
+      "anchor": "@method(\"session.create\")",
+      "observation": "session.create allocates the live session identity used by later session operations; an empty create is not durable until the first prompt persistence boundary.",
+      "contract_relevance": "A new root or branch must use one complete identity and must not be copied into a second implicit session."
+    },
+    {
+      "id": "resume-session-identity",
+      "path": "tui_gateway/methods_session.py",
+      "anchor": "@method(\"session.resume\")",
+      "observation": "session.resume reopens an addressable stored session and returns an error when the stored identity is missing.",
+      "contract_relevance": "Resume reuses the exact session and root identities; a missing identity cannot become a new session fallback."
+    },
+    {
+      "id": "reopen-same-session",
+      "path": "hermes_state.py",
+      "anchor": "def reopen_session(self, session_id: str)",
+      "observation": "reopen_session clears ended markers for the supplied session id before its durable history is read.",
+      "contract_relevance": "A closed parent remains an addressable lineage anchor; reopening it must not change its root or parent identity."
+    },
+    {
+      "id": "idempotent-session-row",
+      "path": "hermes_state.py",
+      "anchor": "def create_session(self, session_id: str, source: str, **kwargs)",
+      "observation": "SessionDB creation is keyed by the stored session id and is idempotent for a repeated create of the same row.",
+      "contract_relevance": "Repeated lineage creation with the same idempotency key reuses one identity and records no second child."
+    },
+    {
+      "id": "session-close-detach",
+      "path": "tui_gateway/ws.py",
+      "anchor": "_close_sessions_for_transport",
+      "observation": "Transport loss detaches sessions for bounded recovery rather than proving that the server session was deleted.",
+      "contract_relevance": "Closed and interrupted lineage state must be reconciled or explicitly resumed, not silently replaced."
+    },
+    {
+      "id": "unknown-dispatch-result",
+      "path": "tui_gateway/ws.py",
+      "anchor": "server.dispatch",
+      "observation": "Dispatch and parse failures are explicit errors rather than successful method results.",
+      "contract_relevance": "Unknown or incompatible lineage evidence fails closed and cannot trigger an automatic new session."
+    }
+  ],
+  "states": [
+    {
+      "id": "empty",
+      "meaning": "No lineage operation is active and no session identity is selected.",
+      "allowed_actions": [
+        "create_root",
+        "resume_existing"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "pending_create",
+      "meaning": "A root or branch identity request is pending.",
+      "allowed_actions": [
+        "wait",
+        "interrupt",
+        "cancel"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "ready",
+      "meaning": "A selected session has a validated root and parent lineage.",
+      "allowed_actions": [
+        "create_branch",
+        "resume",
+        "close"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "restoring",
+      "meaning": "The exact selected session identity is being resumed.",
+      "allowed_actions": [
+        "wait",
+        "cancel"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "closed",
+      "meaning": "The durable session is closed or detached but remains addressable.",
+      "allowed_actions": [
+        "resume",
+        "create_branch",
+        "create_root"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "interrupted",
+      "meaning": "Creation or resume stopped before its result was safely known.",
+      "allowed_actions": [
+        "reconcile",
+        "retry_idempotent",
+        "sign_out"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "delivery_uncertain",
+      "meaning": "A creation result is unknown and source state must be reread first.",
+      "allowed_actions": [
+        "reconcile",
+        "cancel",
+        "sign_out"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "failed",
+      "meaning": "A known lineage or restore operation failed without a fallback.",
+      "allowed_actions": [
+        "explicit_retry",
+        "create_root",
+        "sign_out"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "incompatible",
+      "meaning": "Lineage evidence is malformed, foreign, unsupported, or unsafe.",
+      "allowed_actions": [
+        "stop",
+        "sign_out"
+      ],
+      "terminal": true
+    }
+  ],
+  "invariants": {
+    "identity": {
+      "session_id": "full_opaque_id_required",
+      "root_id": "required_and_stable_for_every_created_session",
+      "parent_id": "null_only_for_root",
+      "display_or_prefix_id": "not_supported"
+    },
+    "creation": {
+      "root": "explicit_create_without_parent",
+      "branch": "explicit_create_with_durable_open_or_closed_parent",
+      "empty_durability": "not_durable_until_persistence_boundary",
+      "duplicate": "same_idempotency_key_reuses_one_identity",
+      "implicit_fallback": "blocked"
+    },
+    "lineage": {
+      "root_kind": "root",
+      "branch_kind": "branch",
+      "root_preservation": "branch_root_equals_parent_root",
+      "parent_validation": [
+        "present",
+        "full_id",
+        "not_self",
+        "acyclic",
+        "not_deleted"
+      ],
+      "closed_parent": "addressable_fork_anchor"
+    },
+    "resume": {
+      "same_session": "reuse_exact_session_id_and_lineage",
+      "new_session": "separate_explicit_create",
+      "missing": "failed_without_new_session",
+      "deleted": "failed_without_new_session",
+      "duplicate": "one_restore_attempt_per_identity"
+    },
+    "failure": {
+      "interrupted": "safe_state_and_idempotent_retry_only",
+      "unknown": "reconcile_server_state_before_retry",
+      "cyclic_or_invalid_parent": "incompatible",
+      "foreign_identity": "incompatible"
+    },
+    "compatibility": {
+      "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "parent_wire_field": "unsupported_without_new_contract",
+      "missing_or_mismatched": "incompatible"
+    },
+    "history": {
+      "source_of_truth": "server_owned_projection",
+      "local_lineage_only": true,
+      "mirror": false
+    }
+  },
+  "cases": [
+    {
+      "id": "state-empty-no-session",
+      "initial_state": "empty",
+      "initial_context": {
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "none"
+      },
+      "events": [],
+      "expected": {
+        "decision": "pending",
+        "final_state": "empty",
+        "trace": [
+          "empty"
+        ],
+        "effects": [],
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "An empty state has no selected identity and no lineage side effect."
+    },
+    {
+      "id": "create-new-root-empty",
+      "initial_state": "empty",
+      "initial_context": {
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "none"
+      },
+      "events": [
+        "session.create.root.request:create-key-root-0000000000000000000000000000000000000001",
+        "session.create.accepted:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:none:root"
+      ],
+      "expected": {
+        "decision": "root_created",
+        "final_state": "empty",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty"
+        ],
+        "effects": [
+          "root_creation_requested",
+          "root_identity_allocated"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "An explicit root create allocates one complete root identity but remains non-durable until persistence."
+    },
+    {
+      "id": "create-new-root-duplicate-idempotent",
+      "initial_state": "empty",
+      "initial_context": {
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "none"
+      },
+      "events": [
+        "session.create.root.request:create-key-root-0000000000000000000000000000000000000001",
+        "session.create.accepted:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:none:root",
+        "session.create.duplicate:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:none:root:create-key-root-0000000000000000000000000000000000000001"
+      ],
+      "expected": {
+        "decision": "duplicate_creation_reused",
+        "final_state": "empty",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty"
+        ],
+        "effects": [
+          "root_creation_requested",
+          "root_identity_allocated",
+          "duplicate_creation_suppressed"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": true,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "A repeated root create acknowledgement reuses the same complete identity."
+    },
+    {
+      "id": "persist-new-root-lineage",
+      "initial_state": "empty",
+      "initial_context": {
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "none"
+      },
+      "events": [
+        "session.create.root.request:create-key-root-0000000000000000000000000000000000000001",
+        "session.create.accepted:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:none:root",
+        "session.lineage.persisted:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:none:root"
+      ],
+      "expected": {
+        "decision": "lineage_persisted",
+        "final_state": "ready",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty",
+          "ready"
+        ],
+        "effects": [
+          "root_creation_requested",
+          "root_identity_allocated",
+          "durable_lineage_recorded"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "The first persistence boundary makes the root addressable without changing its identity."
+    },
+    {
+      "id": "create-branch-from-open-root",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002",
+        "session.create.accepted:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch",
+        "session.lineage.persisted:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch"
+      ],
+      "expected": {
+        "decision": "lineage_persisted",
+        "final_state": "ready",
+        "trace": [
+          "ready",
+          "pending_create",
+          "empty",
+          "ready"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "branch_identity_allocated",
+          "parent_identity_bound",
+          "durable_lineage_recorded"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "A fork from an open durable parent preserves the root and binds the exact parent."
+    },
+    {
+      "id": "create-branch-from-closed-parent",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "closed",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-closed-branch-0000000000000000000000000000000000000003:session-root-0000000000000000000000000000000000000001:create-key-closed-0000000000000000000000000000000000000003",
+        "session.create.accepted:session-closed-branch-0000000000000000000000000000000000000003:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch",
+        "session.lineage.persisted:session-closed-branch-0000000000000000000000000000000000000003:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch"
+      ],
+      "expected": {
+        "decision": "lineage_persisted",
+        "final_state": "ready",
+        "trace": [
+          "closed",
+          "pending_create",
+          "empty",
+          "ready"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "branch_identity_allocated",
+          "parent_identity_bound",
+          "durable_lineage_recorded"
+        ],
+        "session_id": "session-closed-branch-0000000000000000000000000000000000000003",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "closed",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "A closed durable parent remains an addressable fork anchor; closing is not deletion."
+    },
+    {
+      "id": "create-branch-duplicate-idempotent",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002",
+        "session.create.accepted:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch",
+        "session.create.duplicate:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "duplicate_creation_reused",
+        "final_state": "empty",
+        "trace": [
+          "ready",
+          "pending_create",
+          "empty"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "branch_identity_allocated",
+          "parent_identity_bound",
+          "duplicate_creation_suppressed"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": true,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "A repeated branch create does not create a second child or alter the parent link."
+    },
+    {
+      "id": "create-branch-duplicate-after-persistence",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002",
+        "session.create.accepted:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch",
+        "session.lineage.persisted:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch",
+        "session.create.duplicate:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "duplicate_creation_reused",
+        "final_state": "ready",
+        "trace": [
+          "ready",
+          "pending_create",
+          "empty",
+          "ready"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "branch_identity_allocated",
+          "parent_identity_bound",
+          "durable_lineage_recorded",
+          "duplicate_creation_suppressed"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": true,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "A duplicate create arriving after persistence is suppressed while the durable branch remains ready."
+    },
+    {
+      "id": "resume-existing-branch",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.resume.request:session-branch-0000000000000000000000000000000000000002",
+        "session.resume.present:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch"
+      ],
+      "expected": {
+        "decision": "resume_same_session",
+        "final_state": "ready",
+        "trace": [
+          "closed",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "resume_same_identity_requested",
+          "same_session_identity_reused"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 1,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "Resume returns the same branch identity, root identity, parent identity, and lineage kind."
+    },
+    {
+      "id": "resume-closed-parent",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "closed",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.resume.request:session-root-0000000000000000000000000000000000000001",
+        "session.resume.present:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:none:root"
+      ],
+      "expected": {
+        "decision": "resume_same_session",
+        "final_state": "ready",
+        "trace": [
+          "closed",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "resume_same_identity_requested",
+          "same_session_identity_reused"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 1,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "Resuming a closed root reopens that root; it does not create a replacement."
+    },
+    {
+      "id": "duplicate-resume-is-idempotent",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "closed",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.resume.request:session-branch-0000000000000000000000000000000000000002",
+        "session.resume.request:session-branch-0000000000000000000000000000000000000002",
+        "session.resume.present:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch"
+      ],
+      "expected": {
+        "decision": "resume_same_session",
+        "final_state": "ready",
+        "trace": [
+          "closed",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "resume_same_identity_requested",
+          "duplicate_resume_suppressed",
+          "same_session_identity_reused"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "closed",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 1,
+        "duplicate_suppressed": true,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "Concurrent resume requests share one restore attempt for one exact identity."
+    },
+    {
+      "id": "resume-missing-fails-closed",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.resume.request:session-branch-0000000000000000000000000000000000000002",
+        "session.resume.missing"
+      ],
+      "expected": {
+        "decision": "resume_missing",
+        "final_state": "failed",
+        "trace": [
+          "closed",
+          "restoring",
+          "failed"
+        ],
+        "effects": [
+          "resume_same_identity_requested",
+          "stored_identity_missing",
+          "no_new_session_fallback"
+        ],
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "open",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 1,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "explicit_new_session_only",
+        "compatibility": "passed",
+        "error_kind": "resume_missing",
+        "transcript_mirror": false
+      },
+      "notes": "A missing stored identity fails without silently creating a new session."
+    },
+    {
+      "id": "resume-deleted-fails-closed",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "closed",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.resume.request:session-root-0000000000000000000000000000000000000001",
+        "session.resume.deleted"
+      ],
+      "expected": {
+        "decision": "resume_deleted",
+        "final_state": "failed",
+        "trace": [
+          "closed",
+          "restoring",
+          "failed"
+        ],
+        "effects": [
+          "resume_same_identity_requested",
+          "stored_identity_deleted",
+          "no_new_session_fallback"
+        ],
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 1,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "explicit_new_session_only",
+        "compatibility": "passed",
+        "error_kind": "resume_deleted",
+        "transcript_mirror": false
+      },
+      "notes": "A deleted identity is not treated as a closed resumable identity."
+    },
+    {
+      "id": "branch-missing-parent-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "missing",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request.missing:session-branch-0000000000000000000000000000000000000002:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "parent_missing",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "A branch without a parent reference is incompatible."
+    },
+    {
+      "id": "branch-invalid-parent-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "invalid",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request.bad:session-branch-0000000000000000000000000000000000000002:parent-prefix:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "parent_invalid",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "A parent reference that is not a complete opaque ID is incompatible."
+    },
+    {
+      "id": "branch-self-parent-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request.self:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "self_parent",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "A session cannot name itself as its parent."
+    },
+    {
+      "id": "branch-cyclic-parent-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001",
+          "session-cycle-0000000000000000000000000000000000000004"
+        ],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request.cycle:session-cycle-0000000000000000000000000000000000000004:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "cyclic_parent",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001",
+          "session-cycle-0000000000000000000000000000000000000004"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "A parent graph that already contains the child is cyclic and stops."
+    },
+    {
+      "id": "branch-parent-identity-mismatch-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-foreign-0000000000000000000000000000000000000009:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "parent_identity_mismatch",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "A branch request for a different parent identity cannot borrow the selected root."
+    },
+    {
+      "id": "branch-deleted-parent-fails-closed",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": true,
+        "candidate_parent_state": "deleted",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request.deleted:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "closed",
+          "incompatible"
+        ],
+        "effects": [
+          "parent_deleted",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": true,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "A deleted parent cannot be used for a new branch."
+    },
+    {
+      "id": "create-interrupted-preserves-parent",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002",
+        "session.create.interrupted"
+      ],
+      "expected": {
+        "decision": "creation_interrupted",
+        "final_state": "interrupted",
+        "trace": [
+          "ready",
+          "pending_create",
+          "interrupted"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "creation_interrupted_safe_state",
+          "no_duplicate_creation"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "reread_before_idempotent_retry",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "An interrupted fork keeps the existing parent selected and permits only an idempotent retry."
+    },
+    {
+      "id": "create-interrupted-idempotent-retry",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002",
+        "session.create.interrupted",
+        "session.create.retry:create-key-branch-0000000000000000000000000000000000000002",
+        "session.create.accepted:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch"
+      ],
+      "expected": {
+        "decision": "branch_created",
+        "final_state": "empty",
+        "trace": [
+          "ready",
+          "pending_create",
+          "interrupted",
+          "pending_create",
+          "empty"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "creation_interrupted_safe_state",
+          "no_duplicate_creation",
+          "idempotent_retry_only",
+          "branch_identity_allocated",
+          "parent_identity_bound"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 2,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "The same creation key may be retried after interruption without changing lineage."
+    },
+    {
+      "id": "create-unknown-enters-uncertain",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-unknown-0000000000000000000000000000000000000004",
+        "session.create.unknown"
+      ],
+      "expected": {
+        "decision": "creation_result_unknown",
+        "final_state": "delivery_uncertain",
+        "trace": [
+          "ready",
+          "pending_create",
+          "delivery_uncertain"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "creation_result_unknown",
+          "reconcile_before_retry"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "reconcile_before_retry",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "An unknown branch result is delivery uncertainty, not a failure or a new-session signal."
+    },
+    {
+      "id": "unknown-create-reconcile-present-no-duplicate",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-unknown-0000000000000000000000000000000000000004",
+        "session.create.unknown",
+        "session.create.reconcile.present:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch"
+      ],
+      "expected": {
+        "decision": "creation_reconciled",
+        "final_state": "ready",
+        "trace": [
+          "ready",
+          "pending_create",
+          "delivery_uncertain",
+          "ready"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "creation_result_unknown",
+          "reconcile_before_retry",
+          "same_creation_reconciled",
+          "no_duplicate_creation"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "Re-reading the server finds the original branch and prevents a duplicate creation."
+    },
+    {
+      "id": "unknown-create-reconcile-missing-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-unknown-0000000000000000000000000000000000000004",
+        "session.create.unknown",
+        "session.create.reconcile.missing"
+      ],
+      "expected": {
+        "decision": "creation_unknown_missing",
+        "final_state": "failed",
+        "trace": [
+          "ready",
+          "pending_create",
+          "delivery_uncertain",
+          "failed"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "creation_result_unknown",
+          "reconcile_before_retry",
+          "creation_not_found_after_reread",
+          "no_new_session_fallback"
+        ],
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "explicit_new_session_only",
+        "compatibility": "passed",
+        "error_kind": "unknown_creation_missing",
+        "transcript_mirror": false
+      },
+      "notes": "A missing result after an unknown create remains failed until an explicit user choice."
+    },
+    {
+      "id": "unknown-create-retry-before-reconcile-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-unknown-0000000000000000000000000000000000000004",
+        "session.create.unknown",
+        "session.create.retry:create-key-unknown-0000000000000000000000000000000000000004"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "pending_create",
+          "delivery_uncertain",
+          "incompatible"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "creation_result_unknown",
+          "reconcile_before_retry",
+          "retry_before_reconcile",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "Retrying an unknown create before reconciliation is incompatible and cannot duplicate a child."
+    },
+    {
+      "id": "resume-interrupted-safe-state",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.resume.request:session-branch-0000000000000000000000000000000000000002",
+        "session.resume.interrupted"
+      ],
+      "expected": {
+        "decision": "resume_interrupted",
+        "final_state": "interrupted",
+        "trace": [
+          "closed",
+          "restoring",
+          "interrupted"
+        ],
+        "effects": [
+          "resume_same_identity_requested",
+          "resume_interrupted_safe_state"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 1,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "reconcile_before_retry",
+        "compatibility": "passed",
+        "error_kind": "resume_interrupted",
+        "transcript_mirror": false
+      },
+      "notes": "An interrupted resume preserves the exact stored lineage and requires a safe reread."
+    },
+    {
+      "id": "compatibility-failure-blocks-new-root",
+      "initial_state": "empty",
+      "initial_context": {
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "failed",
+        "result": "none"
+      },
+      "events": [
+        "session.create.root.request:create-key-root-0000000000000000000000000000000000000001"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "empty",
+          "incompatible"
+        ],
+        "effects": [
+          "compatibility_gate_failed",
+          "no_new_session_fallback",
+          "root_create_in_wrong_state"
+        ],
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "Missing or mismatched compatibility evidence blocks root creation without a fallback."
+    },
+    {
+      "id": "compatibility-failure-blocks-branch",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "failed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "compatibility_gate_failed",
+          "no_new_session_fallback",
+          "branch_parent_not_durable"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "A compatibility failure blocks lineage expansion even when a parent identity exists."
+    },
+    {
+      "id": "unknown-lineage-event-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "unknown.event"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "unknown_lineage_event",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "Unknown lineage evidence never becomes an implicit create or resume action."
+    },
+    {
+      "id": "malformed-lineage-event-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.malformed"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "malformed_lineage_evidence",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "Malformed lineage evidence closes the operation with one semantic failure."
+    },
+    {
+      "id": "resume-foreign-full-id-fails-closed",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.resume.request:session-foreign-0000000000000000000000000000000000000009"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "closed",
+          "incompatible"
+        ],
+        "effects": [
+          "resume_identity_mismatch",
+          "no_new_session_fallback"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": true,
+        "retry_policy": "none",
+        "compatibility": "failed",
+        "error_kind": "incompatible",
+        "transcript_mirror": false
+      },
+      "notes": "A full but foreign session ID is rejected rather than mapped by prefix or similarity."
+    },
+    {
+      "id": "explicit-new-root-after-missing-resume",
+      "initial_state": "closed",
+      "initial_context": {
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "detached",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.resume.request:session-branch-0000000000000000000000000000000000000002",
+        "session.resume.missing",
+        "user.choose.new.root:create-key-explicit-0000000000000000000000000000000000000005",
+        "session.create.accepted:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:none:root"
+      ],
+      "expected": {
+        "decision": "root_created",
+        "final_state": "empty",
+        "trace": [
+          "closed",
+          "restoring",
+          "failed",
+          "pending_create",
+          "empty"
+        ],
+        "effects": [
+          "resume_same_identity_requested",
+          "stored_identity_missing",
+          "no_new_session_fallback",
+          "explicit_new_session_requested",
+          "root_identity_allocated"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 1,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "A new root is allowed only after an explicit user choice, never as automatic resume recovery."
+    },
+    {
+      "id": "new-root-never-inherits-parent",
+      "initial_state": "empty",
+      "initial_context": {
+        "session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "lineage_kind": "none",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "candidate_parent_state": "none",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "none"
+      },
+      "events": [
+        "session.create.root.request:create-key-explicit-0000000000000000000000000000000000000005",
+        "session.create.accepted:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:none:root"
+      ],
+      "expected": {
+        "decision": "root_created",
+        "final_state": "empty",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty"
+        ],
+        "effects": [
+          "root_creation_requested",
+          "root_identity_allocated"
+        ],
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": false,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": false,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "An explicit new root has a null parent and does not inherit a previous lineage."
+    }
+  ],
+  "redaction": {
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_cookies": false,
+    "contains_tickets": false,
+    "contains_prompts": false,
+    "contains_transcripts": false,
+    "contains_transcript_mirror": false,
+    "contains_hosts": false,
+    "contains_user_data": false,
+    "diagnostic_policy": "stable semantic errors only; retain no raw values, paths, or payloads"
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "schema": "hermternal.session-lineage-baseline.v1",
+  "validator": "contracts/fixtures/session-lineage/validate.py",
+  "command": "python3 contracts/fixtures/session-lineage/validate.py",
+  "build_mode": "N/A",
+  "artifact_files": [
+    {
+      "path": "README.md",
+      "sha256": "cd609d64f7f97e7c880fdaa5b4ec8361c074f2a0f6a59af38f851c8c182933eb",
+      "size_bytes": 6865
+    },
+    {
+      "path": "cases.json",
+      "sha256": "ebd320005dea1623b691346ef6b2b38a60fb510c7b4ed16855c02e9d395540ea",
+      "size_bytes": 77253
+    },
+    {
+      "path": "validate.py",
+      "sha256": "4d50047cfc402d5c0b96c54a9feeb5d724455c28e38dd42321e09347c78ab21e",
+      "size_bytes": 77967
+    },
+    {
+      "path": "test_validate.py",
+      "sha256": "5f0b0574f0195748a25c801e35e4985d2847e94e3ff4a941948f0240a85861f5",
+      "size_bytes": 24156
+    },
+    {
+      "path": "baseline-evidence.json",
+      "sha256": "30b82db987f901cf11d5aeb9abaf115a47d9790fa56504e4b3d79e8d4834890b",
+      "size_bytes": 1450
+    }
+  ],
+  "artifact_bytes": 187691,
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "repetitions": 30,
+  "normal": {
+    "command": "python3 contracts/fixtures/session-lineage/validate.py",
+    "samples_ms": [
+      67.187291,
+      70.866959,
+      67.874,
+      68.59225,
+      67.939292,
+      67.902583,
+      65.725292,
+      66.675292,
+      66.020875,
+      67.101875,
+      67.849208,
+      67.735,
+      67.299958,
+      69.167875,
+      70.186292,
+      68.790208,
+      68.480625,
+      69.012667,
+      67.61775,
+      70.4495,
+      67.448542,
+      67.49225,
+      67.405667,
+      69.623458,
+      70.403209,
+      67.753917,
+      69.222166,
+      69.703875,
+      71.183875,
+      68.17375
+    ],
+    "distribution": {
+      "min": 65.725292,
+      "p50": 67.920938,
+      "p95": 70.866959,
+      "max": 71.183875,
+      "mean": 68.36285
+    }
+  },
+  "optimized": {
+    "command": "python3 -O contracts/fixtures/session-lineage/validate.py",
+    "samples_ms": [
+      71.189083,
+      70.417041,
+      68.657208,
+      69.713542,
+      69.706291,
+      66.074542,
+      66.490917,
+      65.990416,
+      66.418,
+      67.2095,
+      67.236833,
+      67.235791,
+      68.643375,
+      67.170167,
+      65.837875,
+      68.511333,
+      67.586666,
+      65.974375,
+      65.228667,
+      66.89125,
+      67.343167,
+      66.442417,
+      67.0575,
+      67.174792,
+      69.597292,
+      68.643208,
+      68.502084,
+      69.137584,
+      69.023708,
+      69.009042
+    ],
+    "distribution": {
+      "min": 65.228667,
+      "p50": 67.29,
+      "p95": 70.417041,
+      "max": 71.189083,
+      "mean": 67.803789
+    }
+  },
+  "threshold": null
+}
