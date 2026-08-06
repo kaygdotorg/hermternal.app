@@ -52,6 +52,34 @@ class ExternalAllowlistTests(unittest.TestCase):
             )
             return subprocess.run(command, check=False, capture_output=True, text=True)
 
+    def _run_compact_error(self, message: str, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
+        script = (
+            "import json, sys\n"
+            f"sys.path.insert(0, {str(FIXTURE_DIR)!r})\n"
+            "import validate\n"
+            "print(json.dumps(validate.compact_error(sys.argv[1])))\n"
+        )
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(["-c", script, message])
+        return subprocess.run(command, check=False, capture_output=True, text=True)
+
+    def _assert_helper_redaction(self, message: str, markers: tuple[str, ...]) -> None:
+        outputs: list[str] = []
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                completed = self._run_compact_error(message, optimized=optimized)
+                self.assertEqual(completed.returncode, 0)
+                self.assertEqual(completed.stderr, "")
+                compacted = json.loads(completed.stdout)
+                self.assertIsInstance(compacted, str)
+                self.assertLessEqual(len(compacted), validate.MAX_ERROR_OUTPUT)
+                for marker in markers:
+                    self.assertNotIn(marker, compacted)
+                outputs.append(compacted)
+        self.assertEqual(outputs[0], outputs[1])
+
     def _assert_cli_failure(self, content: bytes) -> None:
         for optimized in (False, True):
             with self.subTest(optimized=optimized):
@@ -308,6 +336,8 @@ class ExternalAllowlistTests(unittest.TestCase):
             "api-key=synthetic",
             "secret: synthetic",
             "data:image/png;base64,iVBORw0KGgo=",
+            "short unpadded QUJDREVG value",
+            "URL-safe padded AQIDBAUG-_== value",
             "embedded padded AQIDBAUGBwgJ== value",
             "embedded unpadded AQIDBAUGBwgJ value",
             "artifact at /Users/alice/private/report.txt",
@@ -323,6 +353,22 @@ class ExternalAllowlistTests(unittest.TestCase):
             with self.subTest(message=message):
                 with self.assertRaises(validate.ValidationError):
                     validate.validate_redaction({"message": message})
+
+    def test_error_compaction_redacts_short_and_url_safe_base64_in_normal_and_optimized_modes(self) -> None:
+        checks = (
+            ("retained=QUJDREVG", ("QUJDREVG",)),
+            ("retained=AQIDBAUG-_==", ("AQIDBAUG-_==",)),
+        )
+        for message, markers in checks:
+            with self.subTest(message=message):
+                self._assert_helper_redaction(message, markers)
+
+    def test_real_cli_rejects_short_and_url_safe_base64_in_normal_and_optimized_modes(self) -> None:
+        for value in ("QUJDREVG", "AQIDBAUG-_=="):
+            with self.subTest(value=value):
+                mutated = copy.deepcopy(self.document)
+                mutated["cases"][0]["request"]["headers"]["X-Note"] = value
+                self._assert_cli_redaction_failure(mutated, (value,))
 
     def test_real_cli_redacts_retained_output_in_normal_and_optimized_modes(self) -> None:
         markers = (

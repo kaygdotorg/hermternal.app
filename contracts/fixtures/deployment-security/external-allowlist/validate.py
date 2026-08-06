@@ -35,8 +35,8 @@ PREFIX = "/hermes"
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py")
 # Evidence is pinned after the fixture is reviewed; a copied baseline cannot
 # self-rebind its digest to a mutated README, manifest, or validator.
-EXPECTED_ARTIFACT_BYTES = 114002
-EXPECTED_ARTIFACT_SHA256 = "9922058f6d4a963088204d2d8cad53822cb4c88aa775748076d8183efb384cd0"
+EXPECTED_ARTIFACT_BYTES = 114343
+EXPECTED_ARTIFACT_SHA256 = "81260771d6b4e422dc21019c3b666ce9c80e37da8b45317b0fade289a9dd33a9"
 
 MAX_JSON_BYTES = 512 * 1024
 MAX_JSON_DEPTH = 64
@@ -141,8 +141,11 @@ RETAINED_VALUE_PATTERNS = (
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
     (
         "base64",
+        # Keep the lexical boundary broad enough for short unpadded samples
+        # and URL-safe '-'/'_' payloads without decoding or validating them.
         re.compile(
-            r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{8,}={1,2}(?![A-Za-z0-9+/=])"
+            r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{8,}={1,2}(?![A-Za-z0-9+/_=-])"
+            r"|(?<![A-Za-z0-9+/])(?=[A-Z]{8,}(?![A-Za-z0-9+/]))[A-Z]{8,}(?![A-Za-z0-9+/])"
             r"|(?<![A-Za-z0-9+/])(?=[A-Za-z0-9+/]{12,}(?![A-Za-z0-9+/]))"
             r"(?:(?=[A-Za-z0-9+/]*[0-9+/])|(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z]))"
             r"(?![0-9A-Fa-f]{12,}(?![A-Za-z0-9+/]))[A-Za-z0-9+/]{12,}(?![A-Za-z0-9+/])"

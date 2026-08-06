@@ -146,19 +146,20 @@ tracebacks, usage text, untrusted argument values, or request material.
 ### Retained-output redaction
 
 The retained-output scanner rejects data URLs, padded and unpadded Base64-like
-runs (including embedded runs), absolute POSIX and Windows paths, relative
-paths, filenames, hostnames, email or IPv4 host-shaped values, and Basic,
-Cookie, Bearer, and sensitive-assignment payloads. It scans both values and
-object keys. Diagnostic locations use fixed semantic labels such as
-`$.<field>` and `$[]`; attacker-controlled keys never become error paths.
+runs (including short unpadded uppercase samples, URL-safe `-`/`_` forms, and
+embedded runs), absolute POSIX and Windows paths, relative paths, filenames,
+hostnames, email or IPv4 host-shaped values, and Basic, Cookie, Bearer, and
+sensitive-assignment payloads. It scans both values and object keys.
+Diagnostic locations use fixed semantic labels such as `$.<field>` and `$[]`;
+attacker-controlled keys never become error paths.
 
 The manifest's frozen route paths, source-contract path, artifact filenames and
 hashes, and validator command strings are structural syntax. Those fields are
 independently checked against the closed contract and are exempt only from the
 heuristics that would classify their syntax as a retained user path, filename,
-host, or encoded payload. Credential and URL checks still apply. Normal and
-optimized real-CLI regressions exercise every retained-data class and require
-the same bounded semantic failure in both modes.
+host, or encoded payload. Credential and URL checks still apply. The helper
+and real-CLI regressions exercise every retained-data class in both normal and
+optimized modes and require the same bounded semantic failure in both modes.
 
 Run from the repository root:
 
