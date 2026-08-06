@@ -16,6 +16,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -444,6 +445,28 @@ SENSITIVE_ASSIGNMENT = re.compile(
     r"\s*[:=]\s*(?P<value>[^\s,}]+)",
     re.IGNORECASE,
 )
+DIAGNOSTIC_ASSIGNMENT_NAME = (
+    r"(?:access[\s_-]*token|refresh[\s_-]*token|client[\s_-]*secret|"
+    r"cookie[\s_-]*value|api[\s_-]*key|authorization|bearer|password|token)"
+)
+DIAGNOSTIC_SENSITIVE_ASSIGNMENT = re.compile(
+    rf"\b(?P<name>{DIAGNOSTIC_ASSIGNMENT_NAME})\s*[:=]\s*"
+    r"(?P<value>(?:Bearer\s+)?(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|[^\s,}\]]+))",
+    re.IGNORECASE,
+)
+DIAGNOSTIC_SENSITIVE_NAMES = frozenset(
+    {
+        "accesstoken",
+        "refreshtoken",
+        "clientsecret",
+        "cookievalue",
+        "apikey",
+        "authorization",
+        "bearer",
+        "password",
+        "token",
+    }
+)
 SECRET_VALUE_PATTERNS = (
     re.compile(r"(?:ghp_live_|github_pat_|sk_live_|xox[baprs]-)[A-Za-z0-9_=-]+", re.IGNORECASE),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
@@ -467,11 +490,13 @@ def compact_error(message: object) -> str:
         redacted = pattern.sub("[REDACTED]", redacted)
 
     def redact_assignment(match: re.Match[str]) -> str:
-        value = match.group("value")
-        prefix = match.group(0)[: -len(value)]
-        return f"{prefix}[REDACTED]"
+        name = re.sub(r"[\s_-]+", "", match.group("name")).lower()
+        if name not in DIAGNOSTIC_SENSITIVE_NAMES:
+            return match.group(0)
+        value_start = match.start("value") - match.start()
+        return f"{match.group(0)[:value_start]}[REDACTED]"
 
-    redacted = SENSITIVE_ASSIGNMENT.sub(redact_assignment, redacted)
+    redacted = DIAGNOSTIC_SENSITIVE_ASSIGNMENT.sub(redact_assignment, redacted)
     if len(redacted) > MAX_ERROR_OUTPUT:
         return f"{redacted[: MAX_ERROR_OUTPUT - 3]}..."
     return redacted
@@ -650,10 +675,24 @@ def pkce_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-def fixture_artifact_bytes() -> int:
-    paths = [SOURCE_AUDIT_PATH, CASES_PATH]
+def fixture_artifact_bytes(
+    audit_path: Path = SOURCE_AUDIT_PATH,
+    cases_path: Path = CASES_PATH,
+) -> int:
+    """Measure the selected JSON overrides plus immutable source excerpts."""
+
+    paths = [audit_path, cases_path]
     paths.extend(SOURCE_EXCERPT_DIR / filename for filename in EXCERPT_FILES.values())
     return sum(path.stat().st_size for path in paths)
+
+
+def fixture_artifact_files(
+    audit_path: Path = SOURCE_AUDIT_PATH,
+    cases_path: Path = CASES_PATH,
+) -> str:
+    """Name the selected fixture paths rather than default paths."""
+
+    return f"{audit_path.name},{cases_path.name},source_excerpts/*"
 
 
 def load_source_excerpts() -> dict[str, str]:
@@ -1137,6 +1176,7 @@ class BrowserOAuthContractTests(unittest.TestCase):
         expected_message: str,
         *,
         option: str = "--cases",
+        forbidden_fragments: tuple[str, ...] = (),
     ) -> None:
         for optimized in (False, True):
             with self.subTest(optimized=optimized, message=expected_message):
@@ -1153,6 +1193,8 @@ class BrowserOAuthContractTests(unittest.TestCase):
                 self.assertLessEqual(len(result.stderr.rstrip("\n")), MAX_ERROR_OUTPUT)
                 for pattern in SECRET_VALUE_PATTERNS:
                     self.assertIsNone(pattern.search(result.stderr), result.stderr)
+                for fragment in forbidden_fragments:
+                    self.assertNotIn(fragment, result.stderr)
                 self.assertIn("validation error", result.stderr.lower())
                 self.assertIn(expected_message, result.stderr)
 
@@ -1254,6 +1296,20 @@ class BrowserOAuthContractTests(unittest.TestCase):
         oversized_integer = f'{{"value":{"7" * (MAX_JSON_INTEGER_DIGITS + 1)}}}'
         self._assert_cli_parser_failure(oversized_integer, INTEGER_DIGIT_LIMIT_ERROR)
 
+        for assignment, secret in (
+            ("password=super-secret-value", "super-secret-value"),
+            ("api_key=fixture-api-key-value", "fixture-api-key-value"),
+            ("authorization=fixture-authorization-value", "fixture-authorization-value"),
+            ("token=fixture-token-value", "fixture-token-value"),
+        ):
+            forged = copy.deepcopy(self.cases)
+            forged["cases"][0]["request"]["pkce_cookie"]["provider"] = assignment
+            self._assert_cli_parser_failure(
+                json.dumps(forged),
+                "pkce_cookie.provider is not synthetic",
+                forbidden_fragments=(assignment, secret),
+            )
+
         deep_document: dict[str, Any] = {}
         cursor = deep_document
         for _ in range(MAX_JSON_DEPTH + 1):
@@ -1262,6 +1318,54 @@ class BrowserOAuthContractTests(unittest.TestCase):
             cursor = child
         self._assert_cli_parser_failure(json.dumps(deep_document), "maximum JSON nesting depth")
         self._assert_cli_parser_failure('{"cases":[}', "invalid JSON input")
+
+        # The subprocess runs the full suite; skip this test in that child so
+        # the override evidence check cannot recursively launch itself.
+        if os.environ.get("HERMTERNAL_SKIP_OVERRIDE_EVIDENCE_REGRESSION") != "1":
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                audit_path = root / "override-audit.json"
+                cases_path = root / "override-cases.json"
+                audit_path.write_text(
+                    SOURCE_AUDIT_PATH.read_text(encoding="utf-8") + "\n",
+                    encoding="utf-8",
+                )
+                cases_path.write_text(
+                    CASES_PATH.read_text(encoding="utf-8") + " \n",
+                    encoding="utf-8",
+                )
+                expected_bytes = fixture_artifact_bytes(audit_path, cases_path)
+                expected_files = fixture_artifact_files(audit_path, cases_path)
+                for optimized in (False, True):
+                    with self.subTest(override_evidence_optimized=optimized):
+                        command = [sys.executable]
+                        if optimized:
+                            command.append("-O")
+                        command.extend(
+                            [
+                                str(Path(__file__)),
+                                "--audit",
+                                str(audit_path),
+                                "--cases",
+                                str(cases_path),
+                            ]
+                        )
+                        environment = os.environ.copy()
+                        environment["HERMTERNAL_SKIP_OVERRIDE_EVIDENCE_REGRESSION"] = "1"
+                        result = subprocess.run(
+                            command,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            env=environment,
+                        )
+                        self.assertEqual(result.returncode, 0, (optimized, result.stdout, result.stderr))
+                        self.assertIn(f"fixture_artifact_bytes={expected_bytes}", result.stdout)
+                        self.assertIn(f"fixture_artifact_files={expected_files}", result.stdout)
+                        self.assertNotIn(
+                            "fixture_artifact_files=source_audit.json,cases.json,source_excerpts/*",
+                            result.stdout,
+                        )
 
         case_mutations = (
             ("case-null", lambda forged: forged["cases"].__setitem__(0, None), "fixture case must be an object"),
@@ -1715,8 +1819,8 @@ def run(argv: list[str] | None = None) -> int:
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     elapsed_ms = (time.perf_counter() - started) * 1000
     print(f"fixture_validation_ms={elapsed_ms:.3f}")
-    print(f"fixture_artifact_bytes={fixture_artifact_bytes()}")
-    print("fixture_artifact_files=source_audit.json,cases.json,source_excerpts/*")
+    print(f"fixture_artifact_bytes={fixture_artifact_bytes(args.audit, args.cases)}")
+    print(f"fixture_artifact_files={fixture_artifact_files(args.audit, args.cases)}")
     return 0 if result.wasSuccessful() else 1
 
 
