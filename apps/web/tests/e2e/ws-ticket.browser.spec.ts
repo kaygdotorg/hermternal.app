@@ -54,7 +54,7 @@ test("real browser acquisition keeps the ticket only in the ephemeral upgrade UR
     });
   });
 
-  await page.goto("/");
+  await page.goto("/?scenario=success");
   const result = await page.evaluate(
     async ({ moduleUrl, expectedTicket }) => {
       const module = await import(moduleUrl);
@@ -148,7 +148,7 @@ test("real browser cancellation does not create an upgrade or an automatic retry
     }
   });
 
-  await page.goto("/");
+  await page.goto("/?scenario=success");
   const result = await page.evaluate(async (moduleUrl) => {
     const module = await import(moduleUrl);
     const controller = new AbortController();
@@ -215,7 +215,7 @@ test("real browser retry is explicit and redacts an authentication response", as
     });
   });
 
-  await page.goto("/");
+  await page.goto("/?scenario=success");
   const result = await page.evaluate(
     async ({ moduleUrl, marker }) => {
       const module = await import(moduleUrl);
