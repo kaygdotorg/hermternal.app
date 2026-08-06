@@ -1,0 +1,249 @@
+{
+  "schema": "hermternal.integration.hermes-upstream-fleet-cases.v1",
+  "operation": "R-02C",
+  "contract": "hermes-upstream-fleet-v1",
+  "image": "docker.io/nousresearch/hermes-agent@sha256:9a515dbef568dc625b217a7e699128e1a9d5abc8f4f93fd743fc894b0e7b0ccb",
+  "image_source": "https://hub.docker.com/r/nousresearch/hermes-agent",
+  "executor": {
+    "engine": "podman",
+    "compose": "podman-compose",
+    "rootless": true,
+    "docker_allowed": false,
+    "provider": "none"
+  },
+  "budget": {
+    "cpu": "6.00",
+    "memory_mib": 18432,
+    "pids": 3712
+  },
+  "profiles": {
+    "auth": {
+      "name": "auth",
+      "cpu": "0.75",
+      "memory_mib": 2048,
+      "pids": 512
+    },
+    "sessions-search": {
+      "name": "sessions-search",
+      "cpu": "1.25",
+      "memory_mib": 4096,
+      "pids": 768
+    },
+    "stream-reconnect": {
+      "name": "stream-reconnect",
+      "cpu": "1.00",
+      "memory_mib": 3072,
+      "pids": 768
+    },
+    "image-pty": {
+      "name": "image-pty",
+      "cpu": "1.50",
+      "memory_mib": 6144,
+      "pids": 1024
+    }
+  },
+  "isolation": {
+    "private_network": true,
+    "named_volume": true,
+    "published_ports": false,
+    "host_network": false,
+    "host_hermes_mount": false,
+    "podman_socket_mount": false,
+    "docker_socket_mount": false,
+    "image_build": false,
+    "image_retag": false,
+    "image_relabel": false,
+    "provider_inheritance": false,
+    "teardown": ["down", "--volumes", "--remove-orphans"]
+  },
+  "evidence": {
+    "bounded_bytes": 16384,
+    "raw_engine_output": false,
+    "redacted": true,
+    "zero_leftovers_required": true
+  },
+  "cases": [
+    {
+      "id": "plan-all-reviewed-profiles",
+      "kind": "budget",
+      "input": {
+        "fleet_id": "reviewed",
+        "instances": [
+          "auth:auth",
+          "search:sessions-search",
+          "stream:stream-reconnect",
+          "pty:image-pty"
+        ]
+      },
+      "expected": {
+        "decision": "allow",
+        "cpu": "4.50",
+        "memory_mib": 15360,
+        "pids": 3072
+      }
+    },
+    {
+      "id": "reject-cpu-over-budget",
+      "kind": "budget",
+      "input": {
+        "fleet_id": "too-many",
+        "instances": [
+          "one:image-pty",
+          "two:image-pty",
+          "three:image-pty",
+          "four:image-pty",
+          "five:image-pty"
+        ]
+      },
+      "expected": {
+        "decision": "deny",
+        "reason": "cpu_budget_exceeded"
+      }
+    },
+    {
+      "id": "names-are-deterministic-and-isolated",
+      "kind": "isolation",
+      "input": {
+        "fleet_id": "parallel",
+        "instances": ["one:auth", "two:auth"]
+      },
+      "expected": {
+        "projects_unique": true,
+        "networks_unique": true,
+        "volumes_unique": true,
+        "project_prefix": "hermes-upstream-fleet-parallel-"
+      }
+    },
+    {
+      "id": "render-uses-official-immutable-image",
+      "kind": "image",
+      "input": {
+        "fleet_id": "digest",
+        "instance": "one:auth"
+      },
+      "expected": {
+        "image": "docker.io/nousresearch/hermes-agent@sha256:9a515dbef568dc625b217a7e699128e1a9d5abc8f4f93fd743fc894b0e7b0ccb",
+        "tag": false,
+        "build": false,
+        "retag": false,
+        "relabel": false
+      }
+    },
+    {
+      "id": "render-is-private-and-provider-free",
+      "kind": "isolation",
+      "input": {
+        "fleet_id": "private",
+        "instance": "one:auth"
+      },
+      "expected": {
+        "internal_network": true,
+        "ports": false,
+        "host_network": false,
+        "host_mounts": false,
+        "provider_auto_discovery": "0",
+        "provider": "none"
+      }
+    },
+    {
+      "id": "clean-inherited-docker-and-provider-environment",
+      "kind": "environment",
+      "input": {
+        "DOCKER_HOST": "tcp://host.invalid:2375",
+        "COMPOSE_PROJECT_NAME": "host-project",
+        "HERMES_PROVIDER": "host-provider",
+        "OPENAI_API_KEY": "synthetic-secret"
+      },
+      "expected": {
+        "docker_host": false,
+        "compose_project": false,
+        "hermes_provider": false,
+        "provider_secret": false,
+        "podman_compose_provider": "podman-compose",
+        "auto_discovery": "0"
+      }
+    },
+    {
+      "id": "docker-provider-is-rejected",
+      "kind": "executor",
+      "input": {
+        "command": ["docker", "compose", "up"]
+      },
+      "expected": {
+        "decision": "deny",
+        "reason": "docker_executor_rejected"
+      }
+    },
+    {
+      "id": "partial-start-cleans-every-project",
+      "kind": "cleanup",
+      "input": {
+        "start_results": ["started", "start_failed", "started"],
+        "teardown": ["down", "--volumes", "--remove-orphans"]
+      },
+      "expected": {
+        "cleanup_all_instances": true,
+        "zero_leftovers": true
+      }
+    },
+    {
+      "id": "interrupted-start-cleans-every-project",
+      "kind": "cleanup",
+      "input": {
+        "interruption": true
+      },
+      "expected": {
+        "cleanup_all_instances": true,
+        "zero_leftovers": true
+      }
+    },
+    {
+      "id": "teardown-is-idempotent",
+      "kind": "cleanup",
+      "input": {
+        "first": "removed",
+        "second": "removed",
+        "second_is_noop": true
+      },
+      "expected": {
+        "zero_leftovers": true
+      }
+    },
+    {
+      "id": "endpoint-never-publishes-a-host-port",
+      "kind": "endpoint",
+      "input": {
+        "fleet_id": "endpoint",
+        "instance": "one:auth"
+      },
+      "expected": {
+        "endpoint": "http://hermes:8000",
+        "scope": "private_compose_network",
+        "published": false
+      }
+    },
+    {
+      "id": "readiness-is-process-only",
+      "kind": "readiness",
+      "input": {
+        "compatibility_claim": false
+      },
+      "expected": {
+        "chat": false,
+        "browser": false,
+        "provider": false
+      }
+    },
+    {
+      "id": "vm-demo-needs-explicit-authorization",
+      "kind": "vm",
+      "input": {
+        "HERMTERNAL_UPSTREAM_FLEET_VM_DEMO": "unset"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason": "vm_authorization_required"
+      }
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "schema": "hermternal.integration.hermes-upstream-fleet-vm-evidence.v1",
+  "operation": "R-02C",
+  "issue": 272,
+  "authorized": true,
+  "live_run": true,
+  "proof_status": "blocked_readiness",
+  "executor": {
+    "engine": "podman",
+    "podman_version": "5.4.2",
+    "compose": "podman-compose",
+    "compose_version": "1.3.0",
+    "rootless": true,
+    "account_uid": 1001,
+    "network_backend": "netavark"
+  },
+  "provider": "none",
+  "image": {
+    "repository": "docker.io/nousresearch/hermes-agent",
+    "reference": "docker.io/nousresearch/hermes-agent@sha256:9a515dbef568dc625b217a7e699128e1a9d5abc8f4f93fd743fc894b0e7b0ccb",
+    "repo_digest": "docker.io/nousresearch/hermes-agent@sha256:9a515dbef568dc625b217a7e699128e1a9d5abc8f4f93fd743fc894b0e7b0ccb",
+    "digest_verified": true,
+    "official": true
+  },
+  "instance": {
+    "id": "official",
+    "profile": "auth",
+    "project": "hermes-upstream-fleet-vm-demo-official",
+    "network": "hermes-upstream-fleet-vm-demo-official-private",
+    "volume": "hermes-upstream-fleet-vm-demo-official-data",
+    "resources": {
+      "name": "auth",
+      "cpu": "0.75",
+      "memory_mib": 2048,
+      "pids": 512
+    },
+    "endpoint": "http://hermes:8000",
+    "endpoint_scope": "private_compose_network",
+    "published": false
+  },
+  "readiness": {
+    "status": "not_ready",
+    "classification": "process_not_running",
+    "compatibility_claim": false
+  },
+  "teardown": {
+    "command": ["down", "--volumes", "--remove-orphans"],
+    "status": 0,
+    "classification": "removed",
+    "zero_leftovers": true
+  },
+  "leftover_listing": {
+    "label": "io.podman.compose.project=hermes-upstream-fleet-vm-demo-official",
+    "commands": [
+      ["podman", "ps", "-a", "--filter", "label=io.podman.compose.project=hermes-upstream-fleet-vm-demo-official", "--format", "json"],
+      ["podman", "network", "ls", "--filter", "label=io.podman.compose.project=hermes-upstream-fleet-vm-demo-official", "--format", "json"],
+      ["podman", "volume", "ls", "--filter", "label=io.podman.compose.project=hermes-upstream-fleet-vm-demo-official", "--format", "json"]
+    ],
+    "counts": {
+      "containers": 0,
+      "networks": 0,
+      "volumes": 0
+    }
+  },
+  "redacted": true,
+  "raw_engine_output": false,
+  "limitations": [
+    "process_readiness_only",
+    "no_provider",
+    "no_browser_or_chat_compatibility_claim"
+  ]
+}
