@@ -45,7 +45,7 @@ The canonical B-01 validator at `contracts/benchmarks/validate.py` validates che
 
 All inputs are repository source, static assets, and synthetic prototype data. Evidence contains no credentials, cookies, tokens, user data, transcripts, live hosts, network traces, or provider data.
 
-Measured values in the checked-in evidence are observations from one local machine only. They do not establish a regression threshold or approved budget.
+The checked-in observation used an Apple M2 Max with Bun 1.3.14, Node 26.7.0, and Vite 8.2.0. Cold p50/p95/p99 were `2936.682/3942.342/4292.039 ms`. Warm p50/p95/p99 were `2777.726/3365.798/3803.639 ms`. The excluded warm-up and all 60 measured builds produced artifact digest `78ae81588063c7327dcee1f04832d255f01bb8f48518777670d1c92ce2099cb9`. These observations from one local machine do not establish a regression threshold or approved budget.
 
 ## Run and verify
 
@@ -55,11 +55,16 @@ Install pinned web dependencies once from `apps/web/`:
 bun install --frozen-lockfile
 ```
 
-Run focused tests and TypeScript 7:
+Run focused tests and TypeScript 7 from `apps/web/`:
 
 ```sh
 bun test benchmarks/production-build/run.test.ts benchmarks/production-build/evidence.test.ts
 bun x --package @typescript/native tsc --noEmit --pretty false -p tsconfig.json
+```
+
+Run canonical evidence validation from the repository root:
+
+```sh
 python3 contracts/benchmarks/validate.py --evidence apps/web/benchmarks/production-build/evidence/benchmark-evidence.json --skip-baseline
 python3 -O contracts/benchmarks/validate.py --evidence apps/web/benchmarks/production-build/evidence/benchmark-evidence.json --skip-baseline
 ```

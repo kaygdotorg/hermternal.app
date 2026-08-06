@@ -75,7 +75,12 @@ repeated or unreviewed run IDs, source/environment/fixture identity drift,
 sample-count drift, forged samples without matching provenance bytes,
 distribution drift, missing or unreviewed artifact paths or byte identities,
 invalid artifact hashes, non-null thresholds or budgets, and secret-shaped
-values. The baseline's `validate.py` entry is locally checked but is excluded
+values. The registered web production-build record additionally binds its exact
+workload, raw trace, complete B-01 provenance, sandbox mode, resource limits,
+resolved dependency and toolchain byte identities, and one generated artifact
+identity. Local artifact reads walk directory descriptors with `O_NOFOLLOW`, so
+root, intermediate, and file symlinks fail before an external target is read.
+The baseline's `validate.py` entry is locally checked but is excluded
 from the code-pinned byte anchor to avoid a self-hash cycle. Hostnames,
 IPv4/IPv6 addresses, `localhost`, URLs, bearer values, API-key assignments,
 and provider-token shapes such as `ghp_…`, `sk-…`, and `xoxb-…` are outside the
@@ -105,6 +110,8 @@ python3 contracts/benchmarks/validate.py
 python3 -O contracts/benchmarks/validate.py
 python3 contracts/benchmarks/validate.py --skip-baseline
 python3 -O contracts/benchmarks/validate.py --skip-baseline
+python3 contracts/benchmarks/validate.py --evidence apps/web/benchmarks/production-build/evidence/benchmark-evidence.json --skip-baseline
+python3 -O contracts/benchmarks/validate.py --evidence apps/web/benchmarks/production-build/evidence/benchmark-evidence.json --skip-baseline
 python3 contracts/benchmarks/test_validate.py
 python3 -O contracts/benchmarks/test_validate.py
 python3 -m unittest discover -s contracts/benchmarks -p 'test_*.py'

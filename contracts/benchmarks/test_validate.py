@@ -34,6 +34,12 @@ class BenchmarkEvidenceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.document = validate.load_json(validate.EVIDENCE_PATH)
         validate.validate_evidence(cls.document)
+        cls.web_document = validate.load_json(validate.WEB_EVIDENCE_PATH)
+        validate.validate_evidence(
+            cls.web_document,
+            root=validate.WEB_BENCHMARK_ROOT,
+            expected_id=validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID,
+        )
 
     def _run_cli(
         self,
@@ -313,6 +319,47 @@ class BenchmarkEvidenceTests(unittest.TestCase):
                 with self.subTest(field=field_label, token=token_label):
                     self._assert_cli_document_failure(candidate, token)
 
+    def test_registered_web_evidence_passes_normal_and_optimized_cli(self) -> None:
+        for optimized in (False, True):
+            command = [sys.executable]
+            if optimized:
+                command.append("-O")
+            command.extend((str(validate.EVIDENCE_PATH.with_name("validate.py")), "--evidence", str(validate.WEB_EVIDENCE_PATH), "--skip-baseline"))
+            completed = subprocess.run(command, check=False, capture_output=True, text=True)
+            with self.subTest(optimized=optimized):
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                self.assertEqual(completed.stderr, "")
+                payload = json.loads(completed.stdout)
+                self.assertEqual(payload["evidence_id"], validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID)
+
+    def test_web_evidence_cannot_rebind_its_canonical_root(self) -> None:
+        raw = validate.WEB_EVIDENCE_PATH.read_bytes()
+        self._assert_cli_failure(raw)
+
+    def test_web_trace_replacement_and_symlink_escape_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            copied_root = Path(directory) / "production-build"
+            shutil.copytree(validate.WEB_BENCHMARK_ROOT, copied_root)
+            trace_path = copied_root / "evidence" / "raw-trace.json"
+            trace_path.write_bytes(b'{"schema":"hermternal.web-production-build-trace.v1"}')
+            with self.assertRaises(validate.ValidationError):
+                validate.validate_evidence(
+                    copy.deepcopy(self.web_document),
+                    root=copied_root,
+                    expected_id=validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID,
+                )
+
+            trace_path.unlink()
+            external = Path(directory) / "external.json"
+            external.write_bytes(validate.WEB_BENCHMARK_ROOT.joinpath("evidence/raw-trace.json").read_bytes())
+            trace_path.symlink_to(external)
+            with self.assertRaises(validate.ValidationError):
+                validate.validate_evidence(
+                    copy.deepcopy(self.web_document),
+                    root=copied_root,
+                    expected_id=validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID,
+                )
+
     def test_missing_recorded_artifact_fails_in_both_cli_modes(self) -> None:
         """Exercise local artifact absence without mutating the checkout.
 
@@ -380,6 +427,7 @@ class BenchmarkEvidenceTests(unittest.TestCase):
     def test_duplicate_keys_nonfinite_numbers_and_invalid_utf8_are_controlled(self) -> None:
         self._assert_cli_failure(b'{"schema":1,"schema":2}')
         self._assert_cli_failure(b'{"schema":NaN}')
+        self._assert_cli_failure(b'{"schema":1e999}')
         self._assert_cli_failure(b"\xff\xfe\xfd")
 
     def test_error_output_does_not_echo_sensitive_arguments_or_values(self) -> None:
