@@ -17,8 +17,11 @@ The fixture freezes:
 - Hermes tree `886db5eb1150f819344d67fedc81aef0caab09ff`.
 - Dockerfile SHA-256
   `a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc`.
-- Image tag `hermes-agent:hermternal-f5be9236`, an immutable repository digest,
-  and mandatory labels `org.opencontainers.image.source`,
+- Image tag `hermes-agent:hermternal-f5be9236` and the reviewed immutable
+  content digest `sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b`.
+  The digest is derived from the frozen source/tree/Dockerfile/image manifest;
+  it is not replaced by an arbitrary same-repository digest. Mandatory labels
+  `org.opencontainers.image.source`,
   `org.opencontainers.image.revision`, and
   `com.hermternal.dockerfile.sha256` bound to the pinned identity.
 - Command `gateway run --no-supervise`.
@@ -64,13 +67,15 @@ or live resource names.
 ## Files
 
 - `cases.json` contains ordered synthetic policy and parser cases. The
-  validator independently pins each adversarial input and expected outcome so
-  changing both cannot silently weaken coverage.
+  validator independently pins each semantic kind, adversarial input, and
+  expected outcome so changing a parser path or both payloads cannot silently
+  weaken coverage.
 - `evidence.json` contains the bounded, redacted `not_run` evidence record.
 - `validate.py` contains the strict JSON loader, redaction boundary,
-  canonical unique-project Compose renderer, pinned image/source checks,
-  readiness parser, timeout/exit classifier, bounded rootless runner, and exact
-  cleanup checks.
+  canonical unique-project Compose renderer, exact reviewed image/source
+  checks, readiness parser, timeout/exit classifier, bounded rootless runner,
+  and exact cleanup checks. The offline CLI also accepts a bounded synthetic
+  image-inspect JSON record for mutation testing without running a container.
 - `test_validate.py` covers normal and optimized CLI execution, parser and
   classification regressions, synthetic fake-executor flow, redaction, strict
   JSON limits, identity, isolation, capability gating, and cleanup.

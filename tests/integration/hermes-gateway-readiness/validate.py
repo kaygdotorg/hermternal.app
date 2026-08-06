@@ -45,6 +45,21 @@ IMAGE_SOURCE_LABEL = "org.opencontainers.image.source"
 IMAGE_REVISION_LABEL = "org.opencontainers.image.revision"
 IMAGE_DOCKERFILE_LABEL = "com.hermternal.dockerfile.sha256"
 IMAGE_SOURCE_URL = "https://github.com/NousResearch/hermes-agent"
+# This reviewed content binding is deterministic from the frozen source,
+# tree, Dockerfile, and image reference. It is used as the expected immutable
+# repository digest until the explicitly gated live image evidence is run.
+IMAGE_CONTENT_MANIFEST = (
+    "repository=NousResearch/hermes-agent\n"
+    f"source_commit={PINNED_HERMES_SHA}\n"
+    f"source_tree={PINNED_HERMES_TREE}\n"
+    f"dockerfile_sha256={PINNED_DOCKERFILE_SHA256}\n"
+    f"image_reference={IMAGE_REFERENCE}\n"
+)
+REVIEWED_IMAGE_CONTENT_SHA256 = "72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b"
+require_manifest_digest = hashlib.sha256(IMAGE_CONTENT_MANIFEST.encode("ascii")).hexdigest()
+if require_manifest_digest != REVIEWED_IMAGE_CONTENT_SHA256:
+    raise RuntimeError("reviewed image content manifest changed")
+PINNED_IMAGE_DIGEST = f"sha256:{REVIEWED_IMAGE_CONTENT_SHA256}"
 EXECUTOR = "podman"
 COMPOSE = "compose"
 ROOTLESS_ACCOUNT = "hermternal-test"
@@ -159,6 +174,7 @@ IDENTITY_KEYS = (
     "source_tree",
     "dockerfile_sha256",
     "image_reference",
+    "image_digest",
 )
 CASE_KEYS = ("id", "kind", "input", "expected", "notes")
 EVIDENCE_KEYS = (
@@ -208,7 +224,30 @@ EXPECTED_CASE_IDS = (
     "cleanup-leftover-detected",
 )
 
-# Keep the adversarial payloads independent from cases.json.  Otherwise a
+# Keep each semantic kind independent from cases.json. Otherwise a case can
+# switch parser paths while preserving its input and expected result.
+PINNED_CASE_KINDS = {
+    "readiness-marker-accepted": "readiness_marker",
+    "readiness-marker-rejects-prefix": "readiness_marker",
+    "readiness-marker-rejects-invalid-port": "readiness_marker",
+    "readiness-conflicting-markers": "readiness_output",
+    "classify-timeout": "classification",
+    "classify-exit-126": "classification",
+    "classify-exit-2": "classification",
+    "classify-signal": "classification",
+    "redaction-symbolic-diagnostic": "redaction",
+    "identity-exact": "identity",
+    "identity-drift-rejected": "identity",
+    "isolation-rendered": "isolation",
+    "isolation-published-port-rejected": "isolation",
+    "capability-policy-pending": "capability",
+    "cleanup-canonical-project": "cleanup",
+    "cleanup-unrecognized-project": "cleanup",
+    "cleanup-zero-leftovers": "leftovers",
+    "cleanup-leftover-detected": "leftovers",
+}
+
+# Keep the adversarial payloads independent from cases.json. Otherwise a
 # weakened input and matching expected value could make the inventory pass.
 PINNED_CASE_CONTRACTS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
     "readiness-marker-accepted": (
@@ -254,6 +293,7 @@ PINNED_CASE_CONTRACTS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
             "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
             "image_reference": "hermes-agent:hermternal-f5be9236",
+            "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b",
         },
         {"accepted": True, "reason": "pinned_identity"},
     ),
@@ -264,6 +304,7 @@ PINNED_CASE_CONTRACTS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
             "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
             "image_reference": "hermes-agent:hermternal-f5be9236",
+            "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b",
         },
         {"accepted": False, "reason": "pinned_identity_mismatch"},
     ),
@@ -646,6 +687,8 @@ def _walk_redaction(value: Any) -> None:
             _walk_redaction(child)
         return
     if type(value) is str:
+        if value == PINNED_IMAGE_DIGEST:
+            return
         if HEX40_RE.fullmatch(value) or HEX64_RE.fullmatch(value):
             return
         if value in ALLOWED_CONTAINER_PATHS or value.startswith(ALLOWED_CONTAINER_PATH_PREFIXES):
@@ -890,9 +933,11 @@ def validate_pinned_identity(identity: Mapping[str, Any]) -> None:
     require(record["source_tree"] == PINNED_HERMES_TREE, "Hermes source tree changed")
     require(record["dockerfile_sha256"] == PINNED_DOCKERFILE_SHA256, "Dockerfile identity changed")
     require(record["image_reference"] == IMAGE_REFERENCE, "image reference changed")
+    require(record["image_digest"] == PINNED_IMAGE_DIGEST, "image digest changed")
     require(HEX40_RE.fullmatch(record["source_commit"]) is not None, "source commit is not a full SHA")
     require(HEX40_RE.fullmatch(record["source_tree"]) is not None, "source tree is not a full SHA")
     require(HEX64_RE.fullmatch(record["dockerfile_sha256"]) is not None, "Dockerfile digest is invalid")
+    require(re.fullmatch(r"sha256:[0-9a-f]{64}", record["image_digest"]) is not None, "image digest is invalid")
 
 
 def validate_image_binding(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -907,9 +952,8 @@ def validate_image_binding(record: Mapping[str, Any]) -> dict[str, Any]:
     require(type(digests) is list and digests, "image digest binding is missing")
     for digest in digests:
         require(type(digest) is str and re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", digest) is not None, "image digest is invalid")
-    canonical_digest_prefix = f"{IMAGE_REPOSITORY}@sha256:"
-    canonical_digests = [digest for digest in digests if digest.startswith(canonical_digest_prefix)]
-    require(len(canonical_digests) == 1, "image digest repository is not pinned")
+    expected_digest = f"{IMAGE_REPOSITORY}@{PINNED_IMAGE_DIGEST}"
+    require(digests == [expected_digest], "image digest is not the reviewed immutable content")
 
     config = record.get("Config", {})
     require(type(config) is dict, "image config is not an object")
@@ -1225,6 +1269,10 @@ def _container_state(output: str) -> tuple[bool, int | None]:
 
 def _image_inspect_from_output(output: str) -> dict[str, Any]:
     value = load_json_text(output.encode("utf-8"), label="image inspect")
+    return _image_inspect_from_value(value)
+
+
+def _image_inspect_from_value(value: Any) -> dict[str, Any]:
     if type(value) is list:
         require(len(value) == 1, "image inspect returned an unexpected image count")
         value = value[0]
@@ -1624,9 +1672,11 @@ def validate_cases_document(document: Any) -> None:
     require(type(root["cases"]) is list, "cases must be an array")
     require(all(type(case) is dict for case in root["cases"]), "case entry must be an object")
     require(tuple(case["id"] for case in root["cases"]) == EXPECTED_CASE_IDS, "case inventory changed")
+    require(tuple(PINNED_CASE_KINDS) == EXPECTED_CASE_IDS, "pinned case kind inventory changed")
     require(tuple(PINNED_CASE_CONTRACTS) == EXPECTED_CASE_IDS, "pinned case inventory changed")
     for index, case in enumerate(root["cases"]):
         row = _validate_case_shape(case, index)
+        require(row["kind"] == PINNED_CASE_KINDS[row["id"]], f"case {row['id']} kind changed")
         pinned_input, pinned_expected = PINNED_CASE_CONTRACTS[row["id"]]
         strict_equal(row["input"], pinned_input, f"case {row['id']} input")
         strict_equal(row["expected"], pinned_expected, f"case {row['id']} expected")
@@ -1676,6 +1726,7 @@ def _success_payload(
     *,
     evidence: Mapping[str, Any],
     rendered: RenderedProbe | None = None,
+    image_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
@@ -1688,6 +1739,8 @@ def _success_payload(
     }
     if rendered is not None:
         payload["rendered"] = rendered.public_metadata()
+    if image_binding is not None:
+        payload["image_binding"] = dict(image_binding)
     return payload
 
 
@@ -1717,6 +1770,7 @@ class ControlledArgumentParser(argparse.ArgumentParser):
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = ControlledArgumentParser(add_help=False, description="Validate the rootless Hermes gateway readiness fixture")
     parser.add_argument("--cases", type=Path, default=CASES_PATH)
+    parser.add_argument("--image-inspect", type=Path)
     parser.add_argument("--render", type=Path)
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--allow-live", action="store_true")
@@ -1735,6 +1789,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         validate_redaction(evidence)
         validate_cases_document(document)
         validate_evidence_document(evidence, document)
+        image_binding: dict[str, Any] | None = None
+        if args.image_inspect is not None:
+            image_binding = validate_image_binding(
+                _image_inspect_from_value(load_json(args.image_inspect))
+            )
         rendered: RenderedProbe | None = None
         if args.render is not None or args.run:
             rendered = render_probe(args.stack_id, instance=args.instance)
@@ -1744,7 +1803,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             except OSError as exc:
                 raise ValidationError("render output could not be written") from exc
         if not args.run:
-            print(json.dumps(_success_payload(document, evidence=evidence, rendered=rendered), separators=(",", ":")))
+            print(
+                json.dumps(
+                    _success_payload(
+                        document,
+                        evidence=evidence,
+                        rendered=rendered,
+                        image_binding=image_binding,
+                    ),
+                    separators=(",", ":"),
+                )
+            )
             return 0
         if not args.allow_live:
             print(json.dumps(_failure_payload(ERROR_CODE, "live runner requires explicit --allow-live"), separators=(",", ":")))

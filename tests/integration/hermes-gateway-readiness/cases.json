@@ -11,7 +11,8 @@
     "source_commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
     "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
     "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
-    "image_reference": "hermes-agent:hermternal-f5be9236"
+    "image_reference": "hermes-agent:hermternal-f5be9236",
+    "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b"
   },
   "executor_policy": {
     "name": "rootless_podman",
@@ -205,7 +206,8 @@
         "source_commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
         "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
         "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
-        "image_reference": "hermes-agent:hermternal-f5be9236"
+        "image_reference": "hermes-agent:hermternal-f5be9236",
+        "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b"
       },
       "expected": {
         "accepted": true,
@@ -221,7 +223,8 @@
         "source_commit": "0000000000000000000000000000000000000000",
         "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
         "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
-        "image_reference": "hermes-agent:hermternal-f5be9236"
+        "image_reference": "hermes-agent:hermternal-f5be9236",
+        "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b"
       },
       "expected": {
         "accepted": false,

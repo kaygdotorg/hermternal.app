@@ -31,6 +31,7 @@ IDENTITY = {
     "source_tree": validate.PINNED_HERMES_TREE,
     "dockerfile_sha256": validate.PINNED_DOCKERFILE_SHA256,
     "image_reference": validate.IMAGE_REFERENCE,
+    "image_digest": validate.PINNED_IMAGE_DIGEST,
 }
 APPROVED_POLICY = {
     "status": "approved",
@@ -39,6 +40,21 @@ APPROVED_POLICY = {
     "no_new_privileges": True,
     "dependency": "issue_250_review",
 }
+
+
+def image_inspect_payload(*, digest: str = validate.PINNED_IMAGE_DIGEST) -> dict[str, object]:
+    return {
+        "RepoTags": [validate.IMAGE_REFERENCE],
+        "Id": "sha256:" + "1" * 64,
+        "RepoDigests": [validate.IMAGE_REPOSITORY + "@" + digest],
+        "Config": {
+            "Labels": {
+                validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
+                validate.IMAGE_REVISION_LABEL: validate.PINNED_HERMES_SHA,
+                validate.IMAGE_DOCKERFILE_LABEL: validate.PINNED_DOCKERFILE_SHA256,
+            }
+        },
+    }
 
 
 class GatewayReadinessTests(unittest.TestCase):
@@ -60,6 +76,26 @@ class GatewayReadinessTests(unittest.TestCase):
             command.append("-O")
         command.extend([str(FIXTURE_DIR / "validate.py"), *arguments])
         return subprocess.run(command, check=False, capture_output=True, text=True)
+
+    def _run_cli_with_temp_json(
+        self,
+        document: object,
+        *,
+        image_inspect: object | None = None,
+        optimized: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run the real validator CLI against one synthetic mutation."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases_path = root / "cases.json"
+            cases_path.write_text(json.dumps(document), encoding="utf-8")
+            arguments = ["--cases", str(cases_path)]
+            if image_inspect is not None:
+                image_path = root / "image-inspect.json"
+                image_path.write_text(json.dumps(image_inspect), encoding="utf-8")
+                arguments.extend(["--image-inspect", str(image_path)])
+            return self._run_cli(*arguments, optimized=optimized)
 
     def test_checked_in_contract_is_synthetic_and_blocked(self) -> None:
         self.assertEqual(tuple(self.cases), validate.EXPECTED_CASE_IDS)
@@ -89,6 +125,20 @@ class GatewayReadinessTests(unittest.TestCase):
         case["expected"] = {"accepted": False, "port": None}
         with self.assertRaises(validate.ValidationError):
             validate.validate_cases_document(weakened)
+
+    def test_cli_rejects_case_kind_mutation_in_normal_and_optimized_modes(self) -> None:
+        mutated = copy.deepcopy(self.document)
+        case = next(row for row in mutated["cases"] if row["id"] == "readiness-marker-accepted")
+        case["kind"] = "readiness_output"
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                completed = self._run_cli_with_temp_json(mutated, optimized=optimized)
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stderr, "")
+                payload = json.loads(completed.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                self.assertNotIn("readiness_output", completed.stdout)
 
     def test_exact_readiness_marker_and_duplicate_rejection(self) -> None:
         self.assertEqual(validate.parse_readiness_marker("HERMES_BACKEND_READY port=9119"), 9119)
@@ -192,7 +242,7 @@ class GatewayReadinessTests(unittest.TestCase):
         inspect = {
             "RepoTags": [validate.IMAGE_REFERENCE],
             "Id": "sha256:" + "1" * 64,
-            "RepoDigests": ["hermes-agent@sha256:" + "a" * 64],
+            "RepoDigests": [validate.IMAGE_REPOSITORY + "@" + validate.PINNED_IMAGE_DIGEST],
             "Config": {
                 "Labels": {
                     validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
@@ -218,14 +268,43 @@ class GatewayReadinessTests(unittest.TestCase):
         wrong_dockerfile["Config"]["Labels"][validate.IMAGE_DOCKERFILE_LABEL] = "0" * 64
         mutations.append(wrong_dockerfile)
         wrong_digest_repository = copy.deepcopy(inspect)
-        wrong_digest_repository["RepoDigests"] = ["other-image@sha256:" + "a" * 64]
+        wrong_digest_repository["RepoDigests"] = ["other-image@" + validate.PINNED_IMAGE_DIGEST]
         mutations.append(wrong_digest_repository)
+        same_repository_digest_drift = copy.deepcopy(inspect)
+        same_repository_digest_drift["RepoDigests"] = [
+            validate.IMAGE_REPOSITORY + "@sha256:" + "f" * 64
+        ]
+        mutations.append(same_repository_digest_drift)
         for mutation in mutations:
             with self.subTest(mutation=mutation), self.assertRaises(validate.ValidationError):
                 validate.validate_image_binding(mutation)
         inspect["RepoTags"] = ["hermes-agent:other"]
         with self.assertRaises(validate.ValidationError):
             validate.validate_image_binding(inspect)
+
+    def test_cli_rejects_same_repository_image_digest_drift_in_both_modes(self) -> None:
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                accepted = self._run_cli_with_temp_json(
+                    self.document,
+                    image_inspect=image_inspect_payload(),
+                    optimized=optimized,
+                )
+                self.assertEqual(accepted.returncode, 0, accepted.stderr)
+                accepted_payload = json.loads(accepted.stdout)
+                self.assertTrue(accepted_payload["image_binding"]["digest_verified"])
+
+                drifted = self._run_cli_with_temp_json(
+                    self.document,
+                    image_inspect=image_inspect_payload(digest="sha256:" + "f" * 64),
+                    optimized=optimized,
+                )
+                self.assertEqual(drifted.returncode, 2)
+                self.assertEqual(drifted.stderr, "")
+                payload = json.loads(drifted.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                self.assertNotIn("f" * 64, drifted.stdout)
 
     def test_redaction_rejects_secrets_hosts_urls_and_host_paths(self) -> None:
         validate.validate_redaction({"internal": "/opt/data", "tmpfs": "/tmp:size=64m,mode=1777"})
@@ -346,7 +425,7 @@ class GatewayReadinessTests(unittest.TestCase):
                 payload = {
                     "RepoTags": [validate.IMAGE_REFERENCE],
                     "Id": "sha256:" + "3" * 64,
-                    "RepoDigests": ["hermes-agent@sha256:" + "c" * 64],
+                    "RepoDigests": [validate.IMAGE_REPOSITORY + "@" + validate.PINNED_IMAGE_DIGEST],
                     "Config": {
                         "Labels": {
                             validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
@@ -391,7 +470,7 @@ class GatewayReadinessTests(unittest.TestCase):
                 payload = {
                     "RepoTags": [validate.IMAGE_REFERENCE],
                     "Id": "sha256:" + "4" * 64,
-                    "RepoDigests": ["hermes-agent@sha256:" + "d" * 64],
+                    "RepoDigests": [validate.IMAGE_REPOSITORY + "@" + validate.PINNED_IMAGE_DIGEST],
                     "Config": {
                         "Labels": {
                             validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
@@ -436,7 +515,7 @@ class GatewayReadinessTests(unittest.TestCase):
                 payload = {
                     "RepoTags": [validate.IMAGE_REFERENCE],
                     "Id": "sha256:" + "5" * 64,
-                    "RepoDigests": ["hermes-agent@sha256:" + "e" * 64],
+                    "RepoDigests": [validate.IMAGE_REPOSITORY + "@" + validate.PINNED_IMAGE_DIGEST],
                     "Config": {
                         "Labels": {
                             validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
@@ -485,7 +564,7 @@ class GatewayReadinessTests(unittest.TestCase):
                 payload = {
                     "RepoTags": [validate.IMAGE_REFERENCE],
                     "Id": "sha256:" + "1" * 64,
-                    "RepoDigests": ["hermes-agent@sha256:" + "a" * 64],
+                    "RepoDigests": [validate.IMAGE_REPOSITORY + "@" + validate.PINNED_IMAGE_DIGEST],
                     "Config": {
                         "Labels": {
                             validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
@@ -545,7 +624,7 @@ class GatewayReadinessTests(unittest.TestCase):
                         [{
                             "RepoTags": [validate.IMAGE_REFERENCE],
                             "Id": "sha256:" + "2" * 64,
-                            "RepoDigests": ["hermes-agent@sha256:" + "b" * 64],
+                            "RepoDigests": [validate.IMAGE_REPOSITORY + "@" + validate.PINNED_IMAGE_DIGEST],
                             "Config": {
                                 "Labels": {
                                     validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
