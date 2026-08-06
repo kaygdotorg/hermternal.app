@@ -244,6 +244,96 @@
         "decision": "deny",
         "reason": "vm_authorization_required"
       }
+    },
+    {
+      "id": "teardown-all-inventories-missing-manifest",
+      "kind": "cleanup",
+      "input": {
+        "manifest": "missing-or-corrupt",
+        "resource_scope": "exact_project_label_and_generated_names",
+        "regression_modes": ["normal", "optimized"]
+      },
+      "expected": {
+        "resource_inventory_required": true,
+        "zero_leftovers_without_live_listing": false,
+        "fail_closed": true
+      }
+    },
+    {
+      "id": "generated-state-files-reject-links-and-special-files",
+      "kind": "filesystem",
+      "input": {
+        "compose": ["dangling_symlink", "live_symlink", "directory"],
+        "state": ["dangling_symlink", "live_symlink", "directory"],
+        "regression_modes": ["normal", "optimized"]
+      },
+      "expected": {
+        "no_follow": true,
+        "regular_files_only": true
+      }
+    },
+    {
+      "id": "readiness-requires-structured-container-state",
+      "kind": "readiness",
+      "input": {
+        "accepted": "State=running",
+        "rejected": ["running", "not running", "Status=running"],
+        "regression_modes": ["normal", "optimized"]
+      },
+      "expected": {
+        "substring_match": false,
+        "compatibility_claim": false
+      }
+    },
+    {
+      "id": "captured-engine-output-is-byte-bounded-and-redacted",
+      "kind": "evidence",
+      "input": {
+        "streams": ["stdout", "stderr"],
+        "multibyte": true,
+        "regression_modes": ["normal", "optimized"]
+      },
+      "expected": {
+        "capture_bytes": 65536,
+        "diagnostic_redaction": true,
+        "raw_engine_output": false
+      }
+    },
+    {
+      "id": "trusted-executables-ignore-path-shadowing",
+      "kind": "executor",
+      "input": {
+        "blocked_environment": ["CONTAINER_HOST", "CONTAINER_CONNECTION"],
+        "absolute_resolution": true,
+        "regression_modes": ["normal", "optimized"]
+      },
+      "expected": {
+        "caller_path": false,
+        "self_report_only": false
+      }
+    },
+    {
+      "id": "start-and-demo-cleanup-cover-all-exceptions",
+      "kind": "cleanup",
+      "input": {
+        "exceptions": ["worker", "interruption", "listing", "teardown"],
+        "regression_modes": ["normal", "optimized"]
+      },
+      "expected": {
+        "exact_project_zero_proof": true,
+        "uncertainty_is_failure": true
+      }
+    },
+    {
+      "id": "preflight-bypass-is-private-test-seam",
+      "kind": "executor",
+      "input": {
+        "production_flag": "absent",
+        "regression_modes": ["normal", "optimized"]
+      },
+      "expected": {
+        "mandatory_preflight": true
+      }
     }
   ]
 }

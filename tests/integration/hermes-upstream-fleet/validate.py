@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import errno
 import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -58,6 +61,24 @@ MAX_ID_LENGTH = 14
 MAX_COMBINED_ID_LENGTH = 27
 MAX_EVIDENCE_BYTES = 16 * 1024
 MAX_DIAGNOSTIC_BYTES = 512
+# Capture is bounded while pipes are drained, not after an unbounded
+# subprocess.run() allocation.  Structured JSON that exceeds this budget is
+# rejected by its parser instead of being treated as complete evidence.
+MAX_CAPTURE_BYTES = 64 * 1024
+MAX_STATE_BYTES = 512 * 1024
+STATE_DIR_MODE = 0o700
+STATE_FILE_MODE = 0o600
+TRUSTED_EXECUTABLE_DIRS = (
+    Path("/opt/homebrew/bin"),
+    Path("/usr/local/bin"),
+    Path("/usr/bin"),
+    Path("/bin"),
+)
+TRUSTED_EXECUTABLE_CANDIDATES = {
+    ENGINE_EXECUTABLE: tuple(directory / ENGINE_EXECUTABLE for directory in TRUSTED_EXECUTABLE_DIRS),
+    COMPOSE_EXECUTABLE: tuple(directory / COMPOSE_EXECUTABLE for directory in TRUSTED_EXECUTABLE_DIRS),
+}
+TRUSTED_PATH = os.pathsep.join(str(directory) for directory in TRUSTED_EXECUTABLE_DIRS)
 ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,12}[a-z0-9])?$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 IMAGE_RE = re.compile(r"^docker\.io/nousresearch/hermes-agent@sha256:[0-9a-f]{64}$")
@@ -225,6 +246,8 @@ BLOCKED_ENV_EXACT = {
     "DOCKER_CONTEXT",
     "DOCKER_TLS_VERIFY",
     "DOCKER_CERT_PATH",
+    "CONTAINER_HOST",
+    "CONTAINER_CONNECTION",
     "COMPOSE_FILE",
     "COMPOSE_PROJECT_NAME",
     "COMPOSE_PROFILES",
@@ -262,13 +285,17 @@ def clean_environment(source: Mapping[str, str] | None = None) -> dict[str, str]
 
     values = dict(os.environ if source is None else source)
     for name in tuple(values):
+        upper = name.upper()
         if (
-            name in BLOCKED_ENV_EXACT
-            or name.startswith(BLOCKED_ENV_PREFIXES)
-            or _is_provider_secret(name)
+            upper in BLOCKED_ENV_EXACT
+            or upper.startswith(BLOCKED_ENV_PREFIXES)
+            or _is_provider_secret(upper)
         ):
             values.pop(name, None)
-    # This is a launcher-owned policy value, not caller-provided provider data.
+    # Absolute executable paths make the caller's PATH irrelevant.  Keep a
+    # fixed search path too because podman-compose may launch podman itself.
+    values["PATH"] = TRUSTED_PATH
+    # These are launcher-owned policy values, not caller-provided provider data.
     values["PODMAN_COMPOSE_PROVIDER"] = "podman-compose"
     values["HERMES_PROVIDER_AUTO_DISCOVERY"] = "0"
     return values
@@ -482,16 +509,193 @@ def validate_rendered_compose(rendered: str, instance: InstancePlan) -> None:
         raise ContractError("named_volume_missing")
 
 
+def _prepare_state_dir(state_dir: Path) -> Path:
+    """Create and validate the launcher directory without following a link."""
+
+    path = Path(state_dir)
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=STATE_DIR_MODE)
+        info = os.lstat(path)
+    except OSError:
+        raise ContractError("state_dir_unusable") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ContractError("state_dir_unusable")
+    return path
+
+
+def _open_state_dir(state_dir: Path) -> int:
+    path = _prepare_state_dir(state_dir)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            os.close(descriptor)
+            raise ContractError("state_dir_unusable")
+        return descriptor
+    except ContractError:
+        raise
+    except OSError:
+        raise ContractError("state_dir_unusable") from None
+
+
+def _path_kind(path: Path) -> str:
+    """Classify a generated path using lstat so dangling links are visible."""
+
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    if stat.S_ISLNK(info.st_mode):
+        try:
+            os.stat(path)
+        except FileNotFoundError:
+            return "dangling_symlink"
+        except OSError:
+            return "symlink"
+        return "symlink"
+    if not stat.S_ISREG(info.st_mode):
+        return "non_regular"
+    return "regular"
+
+
+def _path_contract_error(kind: str, path_kind: str) -> ContractError:
+    if path_kind == "symlink" or path_kind == "dangling_symlink":
+        return ContractError(f"{kind}_symlink_rejected")
+    if path_kind == "non_regular":
+        return ContractError(f"{kind}_non_regular_rejected")
+    return ContractError(f"{kind}_unreadable")
+
+
+def _open_regular_file(path: Path, kind: str) -> int:
+    """Open one generated file with no-follow and a regular-file check."""
+
+    existing = _path_kind(path)
+    if existing == "missing":
+        raise ContractError(f"{kind}_missing")
+    if existing != "regular":
+        raise _path_contract_error(kind, existing)
+    parent_descriptor = _open_state_dir(path.parent)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        try:
+            descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            raise ContractError(f"{kind}_missing") from None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ContractError(f"{kind}_symlink_rejected") from None
+            raise ContractError(f"{kind}_unreadable") from None
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            os.close(descriptor)
+            raise ContractError(f"{kind}_non_regular_rejected")
+        return descriptor
+    finally:
+        os.close(parent_descriptor)
+
+
+def _write_regular_file(path: Path, content: str, kind: str) -> None:
+    """Write a generated file through a no-follow descriptor."""
+
+    existing = _path_kind(path)
+    if existing != "missing" and existing != "regular":
+        raise _path_contract_error(kind, existing)
+    parent_descriptor = _open_state_dir(path.parent)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_TRUNC
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(path.name, flags, STATE_FILE_MODE, dir_fd=parent_descriptor)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ContractError(f"{kind}_symlink_rejected") from None
+            raise ContractError(f"{kind}_unreadable") from None
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ContractError(f"{kind}_non_regular_rejected")
+        raw = content.encode("utf-8")
+        offset = 0
+        while offset < len(raw):
+            offset += os.write(descriptor, raw[offset:])
+        os.fsync(descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_descriptor)
+
+
+def _read_regular_file(path: Path, kind: str) -> bytes:
+    descriptor = _open_regular_file(path, kind)
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, MAX_STATE_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_STATE_BYTES:
+                raise ContractError("json_too_large")
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks)
+
+
+def _unlink_owned_file(path: Path, kind: str, *, allow_dangling_symlink: bool = False) -> bool:
+    """Unlink only the generated name inside an opened state directory."""
+
+    parent_descriptor = _open_state_dir(path.parent)
+    try:
+        try:
+            info = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise ContractError(f"{kind}_unreadable") from None
+        if stat.S_ISLNK(info.st_mode):
+            if not allow_dangling_symlink:
+                raise ContractError(f"{kind}_symlink_rejected")
+            try:
+                os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=True)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise ContractError(f"{kind}_symlink_rejected") from None
+            else:
+                raise ContractError(f"{kind}_symlink_rejected")
+        elif not stat.S_ISREG(info.st_mode):
+            raise ContractError(f"{kind}_non_regular_rejected")
+        try:
+            os.unlink(path.name, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise ContractError(f"{kind}_unreadable") from None
+        return True
+    finally:
+        os.close(parent_descriptor)
+
+
 def compose_path(state_dir: Path, instance: InstancePlan) -> Path:
-    return state_dir / f"{instance.project}.compose.yaml"
+    return Path(state_dir) / f"{instance.project}.compose.yaml"
 
 
 def render_to_directory(plan: FleetPlan, state_dir: Path) -> dict[str, Path]:
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = _prepare_state_dir(state_dir)
     paths: dict[str, Path] = {}
     for instance in plan.instances:
         path = compose_path(state_dir, instance)
-        path.write_text(render_compose(instance), encoding="utf-8")
+        _write_regular_file(path, render_compose(instance), "compose")
         paths[instance.instance_id] = path
     return paths
 
@@ -522,23 +726,20 @@ def manifest_for(plan: FleetPlan) -> dict[str, object]:
 
 
 def write_manifest(plan: FleetPlan, state_dir: Path) -> Path:
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = _prepare_state_dir(state_dir)
     path = state_path(state_dir, plan.fleet_id)
-    if path.is_symlink():
-        raise ContractError("state_symlink_rejected")
-    path.write_text(json.dumps(manifest_for(plan), sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    _write_regular_file(
+        path,
+        json.dumps(manifest_for(plan), sort_keys=True, indent=2) + "\n",
+        "state",
+    )
     return path
 
 
 def load_json(path: Path) -> Any:
     """Load a small UTF-8 JSON document with duplicate-key rejection."""
 
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        raise ContractError("state_unreadable") from None
-    if len(raw) > 512 * 1024:
-        raise ContractError("json_too_large")
+    raw = _read_regular_file(path, "state")
 
     def pairs(pairs_list: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -556,8 +757,11 @@ def load_json(path: Path) -> Any:
 
 def load_manifest(state_dir: Path, fleet_id: str) -> FleetPlan:
     path = state_path(state_dir, fleet_id)
-    if not path.is_file() or path.is_symlink():
+    kind = _path_kind(path)
+    if kind == "missing":
         raise ContractError("state_missing")
+    if kind != "regular":
+        raise _path_contract_error("state", kind)
     document = load_json(path)
     if not isinstance(document, dict) or document.get("schema") != SCHEMA:
         raise ContractError("state_schema_invalid")
@@ -596,10 +800,30 @@ def load_manifest(state_dir: Path, fleet_id: str) -> FleetPlan:
     return plan
 
 
+def _capture_text(value: object, limit: int = MAX_CAPTURE_BYTES) -> str:
+    """Keep captured streams bounded by UTF-8 bytes, including multibyte text."""
+
+    if value is None:
+        raw = b""
+    elif isinstance(value, bytes):
+        raw = value
+    else:
+        raw = str(value).encode("utf-8", errors="replace")
+    bounded = raw[:limit]
+    value = bounded.decode("utf-8", errors="replace")
+    encoded = value.encode("utf-8")
+    if len(encoded) > limit:
+        # A replacement character can expand one truncated byte into three
+        # encoded bytes.  Drop only the incomplete tail so the retained text
+        # remains within the byte contract even for a multibyte boundary.
+        value = encoded[:limit].decode("utf-8", errors="ignore")
+    return value
+
+
 def redacted_diagnostic(text: str) -> str:
     """Bound diagnostics without retaining paths, URLs, credentials, or tokens."""
 
-    value = str(text)
+    value = _capture_text(text)
     substitutions = (
         (r"(?i)(authorization\s*[:=]\s*(?:bearer|token|basic)\s+)[^\s,;]+", r"\1[REDACTED]"),
         (r"(?i)((?:api[_-]?key|access[_-]?key|token|password|secret)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]"),
@@ -610,8 +834,10 @@ def redacted_diagnostic(text: str) -> str:
     )
     for pattern, replacement in substitutions:
         value = re.sub(pattern, replacement, value)
-    if len(value) > MAX_DIAGNOSTIC_BYTES:
-        value = value[:MAX_DIAGNOSTIC_BYTES] + "…"
+    raw = value.encode("utf-8")
+    if len(raw) > MAX_DIAGNOSTIC_BYTES:
+        marker = "…".encode("utf-8")
+        value = raw[: MAX_DIAGNOSTIC_BYTES - len(marker)].decode("utf-8", errors="ignore") + "…"
     return value
 
 
@@ -628,11 +854,117 @@ def emit(document: Mapping[str, object]) -> None:
 
 
 def _coerce_result(value: object) -> CommandResult:
+    """Normalize runner output before any parser or retained evidence sees it."""
+
     if isinstance(value, CommandResult):
-        return value
+        return CommandResult(
+            value.returncode,
+            _capture_text(value.stdout),
+            _capture_text(value.stderr),
+            value.timed_out,
+        )
     if isinstance(value, subprocess.CompletedProcess):
-        return CommandResult(value.returncode, str(value.stdout or ""), str(value.stderr or ""))
+        return CommandResult(
+            value.returncode,
+            _capture_text(value.stdout),
+            _capture_text(value.stderr),
+        )
     raise ContractError("runner_result_invalid")
+
+
+def _resolve_trusted_executable(name: str) -> str:
+    """Resolve only fixed absolute roots, never the caller's PATH."""
+
+    candidates = TRUSTED_EXECUTABLE_CANDIDATES.get(name)
+    if candidates is None:
+        raise ContractError("trusted_executable_invalid")
+    trusted_roots = tuple(path.resolve() for path in TRUSTED_EXECUTABLE_DIRS)
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            info = resolved.stat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or not (info.st_mode & 0o111):
+            continue
+        if not any(resolved == root or root in resolved.parents for root in trusted_roots):
+            continue
+        return str(resolved)
+    raise ContractError("trusted_executable_missing")
+
+
+def _resolve_command(command: Sequence[str]) -> tuple[str, ...]:
+    if not command:
+        raise ContractError("empty_command")
+    first = command[0]
+    if first in {ENGINE_EXECUTABLE, COMPOSE_EXECUTABLE}:
+        return (_resolve_trusted_executable(first), *command[1:])
+    if first.startswith("/"):
+        try:
+            info = Path(first).stat()
+        except OSError:
+            raise ContractError("executable_invalid") from None
+        if not stat.S_ISREG(info.st_mode) or not (info.st_mode & 0o111):
+            raise ContractError("executable_invalid")
+    return tuple(command)
+
+
+def _drain_pipe(pipe: Any) -> bytes:
+    captured = bytearray()
+    try:
+        while True:
+            chunk = pipe.read(8192)
+            if not chunk:
+                return bytes(captured)
+            if len(captured) < MAX_CAPTURE_BYTES:
+                captured.extend(chunk[: MAX_CAPTURE_BYTES - len(captured)])
+    finally:
+        pipe.close()
+
+
+def _run_subprocess(command: Sequence[str], env: Mapping[str, str], timeout: float) -> CommandResult:
+    """Drain both streams concurrently while retaining only bounded bytes."""
+
+    try:
+        process = subprocess.Popen(
+            tuple(command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            env=dict(env),
+        )
+    except FileNotFoundError:
+        return CommandResult(127, stderr="not_found")
+    except OSError:
+        return CommandResult(126, stderr="not_executable")
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout_result: list[bytes] = []
+    stderr_result: list[bytes] = []
+
+    def collect(pipe: Any, destination: list[bytes]) -> None:
+        destination.append(_drain_pipe(pipe))
+
+    stdout_thread = threading.Thread(target=collect, args=(process.stdout, stdout_result), daemon=True)
+    stderr_thread = threading.Thread(target=collect, args=(process.stderr, stderr_result), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    timed_out = False
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        returncode = process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    return CommandResult(
+        124 if timed_out else returncode,
+        _capture_text(stdout_result[0] if stdout_result else b""),
+        _capture_text(stderr_result[0] if stderr_result else b""),
+        timed_out=timed_out,
+    )
 
 
 def invoke(
@@ -651,20 +983,7 @@ def invoke(
     env = clean_environment(source_environment)
     if runner is not None:
         return _coerce_result(runner(command, env, timeout))
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=timeout,
-        )
-    except FileNotFoundError:
-        return CommandResult(127, stderr="not_found")
-    except subprocess.TimeoutExpired as exc:
-        return CommandResult(124, str(exc.stdout or ""), str(exc.stderr or ""), timed_out=True)
-    return CommandResult(completed.returncode, completed.stdout or "", completed.stderr or "")
+    return _run_subprocess(_resolve_command(command), env, timeout)
 
 
 def compose_command(instance: InstancePlan, path: Path, action: Sequence[str]) -> tuple[str, ...]:
@@ -753,22 +1072,66 @@ def preflight(*, runner: Runner | None = None) -> None:
     verify_official_image(runner=runner)
 
 
-def _running_marker(output: str) -> bool:
-    value = output.lower()
-    return bool(
-        re.search(r"\b(?:running|up)\b", value)
-        or '"state":"running"' in value
-        or '"status":"up"' in value
-    )
+def _resource_labels(item: object) -> dict[str, str] | None:
+    if not isinstance(item, dict):
+        return None
+    for key in ("Labels", "labels", "Label"):
+        labels = item.get(key)
+        if isinstance(labels, dict) and all(isinstance(name, str) and isinstance(value, str) for name, value in labels.items()):
+            return labels
+    return None
+
+
+def _parse_container_states(output: str, project: str) -> list[str] | None:
+    """Parse Podman's JSON state enum; prose such as ``not running`` is invalid."""
+
+    try:
+        document = json.loads(output or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, list):
+        return None
+    allowed = {"created", "configured", "dead", "exited", "paused", "running", "stopped"}
+    states: list[str] = []
+    for item in document:
+        if not isinstance(item, dict):
+            return None
+        labels = _resource_labels(item)
+        if labels is not None and labels.get("io.podman.compose.project") not in {None, project}:
+            return None
+        state = item.get("State", item.get("state"))
+        if not isinstance(state, str):
+            return None
+        normalized = state.strip().lower()
+        if normalized not in allowed:
+            return None
+        states.append(normalized)
+    return states
 
 
 def status_one(instance: InstancePlan, path: Path, *, runner: Runner | None = None) -> InstanceOperation:
-    result = invoke(compose_command(instance, path, ("ps",)), runner=runner, timeout=30.0)
+    del path  # Native Podman state is authoritative; Compose prose is not.
+    result = invoke(
+        (
+            ENGINE_EXECUTABLE,
+            "ps",
+            "-a",
+            "--filter",
+            f"label=io.podman.compose.project={instance.project}",
+            "--format",
+            "json",
+        ),
+        runner=runner,
+        timeout=30.0,
+    )
     if result.timed_out:
         return InstanceOperation(instance, "status_timeout", 124)
     if result.returncode != 0:
         return InstanceOperation(instance, "status_failed", result.returncode)
-    return InstanceOperation(instance, "running" if _running_marker(result.stdout) else "not_running", 0)
+    states = _parse_container_states(result.stdout, instance.project)
+    if states is None:
+        return InstanceOperation(instance, "status_unknown", result.returncode)
+    return InstanceOperation(instance, "running" if states and all(state == "running" for state in states) else "not_running", 0)
 
 
 def readiness_one(instance: InstancePlan, path: Path, *, runner: Runner | None = None) -> InstanceOperation:
@@ -793,77 +1156,117 @@ def endpoint_one(instance: InstancePlan) -> dict[str, object]:
     }
 
 
-def _parse_resource_count(stdout: str) -> int | None:
+def _resource_command(kind: str, *, project: str | None = None) -> tuple[str, ...]:
+    if kind == "containers":
+        command = [ENGINE_EXECUTABLE, "ps", "-a"]
+    elif kind == "networks":
+        command = [ENGINE_EXECUTABLE, "network", "ls"]
+    elif kind == "volumes":
+        command = [ENGINE_EXECUTABLE, "volume", "ls"]
+    else:
+        raise ContractError("resource_kind_invalid")
+    command.extend(["--filter", "label=io.podman.compose.project"])
+    if project is not None:
+        command[-1] = f"label=io.podman.compose.project={project}"
+    command.extend(["--format", "json"])
+    return tuple(command)
+
+
+def _parse_resource_items(stdout: str) -> list[object] | None:
     try:
         document = json.loads(stdout or "[]")
     except (TypeError, json.JSONDecodeError):
         return None
-    if isinstance(document, list):
-        return len(document)
-    if isinstance(document, dict):
-        return 1
-    return None
+    if not isinstance(document, list):
+        return None
+    return document
+
+
+def _parse_resource_count(stdout: str) -> int | None:
+    items = _parse_resource_items(stdout)
+    return None if items is None else len(items)
+
+
+def _zero_leftovers_for_project(project: str, *, runner: Runner | None = None) -> dict[str, int | None]:
+    counts: dict[str, int | None] = {}
+    for kind in ("containers", "networks", "volumes"):
+        result = invoke(_resource_command(kind, project=project), runner=runner, timeout=30.0)
+        if result.returncode != 0 or result.timed_out:
+            counts[kind] = None
+            continue
+        counts[kind] = _parse_resource_count(result.stdout)
+    return counts
 
 
 def zero_leftovers(instance: InstancePlan, *, runner: Runner | None = None) -> dict[str, int | None]:
-    """Inspect only Podman's generated Compose project label.
+    """Inspect only exact native Podman listings for one generated project."""
 
-    The label is generated by the selected ``podman-compose`` provider and
-    scopes all three listings to this instance's project.  Using the native
-    Podman listing commands avoids Docker-provider fallback and avoids broad
-    host-wide cleanup or resource enumeration.
-    """
+    return _zero_leftovers_for_project(instance.project, runner=runner)
 
-    label = f"io.podman.compose.project={instance.project}"
-    counts: dict[str, int | None] = {}
-    for key, command in (
-        (
-            "containers",
-            (
-                ENGINE_EXECUTABLE,
-                "ps",
-                "-a",
-                "--filter",
-                f"label={label}",
-                "--format",
-                "json",
-            ),
-        ),
-        (
-            "networks",
-            (
-                ENGINE_EXECUTABLE,
-                "network",
-                "ls",
-                "--filter",
-                f"label={label}",
-                "--format",
-                "json",
-            ),
-        ),
-        (
-            "volumes",
-            (
-                ENGINE_EXECUTABLE,
-                "volume",
-                "ls",
-                "--filter",
-                f"label={label}",
-                "--format",
-                "json",
-            ),
-        ),
-    ):
-        result = invoke(command, runner=runner, timeout=30.0)
+
+def _resource_name(item: object) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    for key in ("Name", "name"):
+        value = item.get(key)
+        if isinstance(value, str):
+            return value
+    for key in ("Names", "names"):
+        value = item.get(key)
+        if isinstance(value, list) and value and isinstance(value[0], str):
+            return value[0]
+    return None
+
+
+def _discover_fleet_projects(fleet_id: str, *, runner: Runner | None = None) -> tuple[list[str], bool]:
+    """Discover only valid project labels belonging to one requested fleet."""
+
+    validate_identifier(fleet_id, "fleet")
+    prefix = f"{PROJECT_PREFIX}-{fleet_id}-"
+    projects: set[str] = set()
+    for kind in ("containers", "networks", "volumes"):
+        try:
+            result = invoke(_resource_command(kind), runner=runner, timeout=30.0)
+        except BaseException:
+            return sorted(projects), False
         if result.returncode != 0 or result.timed_out:
-            counts[key] = None
-            continue
-        counts[key] = _parse_resource_count(result.stdout)
-    return counts
+            return sorted(projects), False
+        items = _parse_resource_items(result.stdout)
+        if items is None:
+            return sorted(projects), False
+        for item in items:
+            if not isinstance(item, dict):
+                return sorted(projects), False
+            labels = _resource_labels(item)
+            project = labels.get("io.podman.compose.project") if labels is not None else None
+            if project is None:
+                continue
+            if not isinstance(project, str) or not project.startswith(prefix):
+                continue
+            instance_id = project[len(prefix) :]
+            try:
+                validate_identifier(instance_id, "instance")
+                expected_project, _, _ = make_names(fleet_id, instance_id)
+            except ContractError:
+                return sorted(projects), False
+            if project != expected_project:
+                return sorted(projects), False
+            # Keep every valid project label, even when a resource name is
+            # malformed.  The exact recheck must then report that leftover
+            # instead of skipping it and falsely proving zero resources.
+            projects.add(project)
+    return sorted(projects), True
 
 
 def _is_zero(leftovers: Mapping[str, int | None]) -> bool:
     return all(leftovers.get(key) == 0 for key in ("containers", "networks", "volumes"))
+
+
+def _safe_zero_leftovers(instance: InstancePlan, *, runner: Runner | None = None) -> dict[str, int | None]:
+    try:
+        return zero_leftovers(instance, runner=runner)
+    except BaseException:
+        return {"containers": None, "networks": None, "volumes": None}
 
 
 def teardown_one(
@@ -872,17 +1275,29 @@ def teardown_one(
     *,
     runner: Runner | None = None,
 ) -> InstanceOperation:
-    if path.exists() and path.is_symlink():
-        raise ContractError("compose_symlink_rejected")
-    if path.exists():
-        down = invoke(
-            compose_command(instance, path, ("down", "--volumes", "--remove-orphans")),
-            runner=runner,
-            timeout=120.0,
-        )
-    else:
+    kind = _path_kind(path)
+    if kind == "regular":
+        try:
+            down = invoke(
+                compose_command(instance, path, ("down", "--volumes", "--remove-orphans")),
+                runner=runner,
+                timeout=120.0,
+            )
+        except BaseException:
+            down = CommandResult(126, timed_out=False)
+    elif kind == "missing":
         down = CommandResult(0)
-    leftovers = zero_leftovers(instance, runner=runner)
+    else:
+        leftovers = _safe_zero_leftovers(instance, runner=runner)
+        if kind == "dangling_symlink" and _is_zero(leftovers):
+            try:
+                _unlink_owned_file(path, "compose", allow_dangling_symlink=True)
+            except BaseException:
+                return InstanceOperation(instance, "teardown_failed", None, leftovers)
+            return InstanceOperation(instance, "removed", 0, leftovers)
+        return InstanceOperation(instance, "teardown_failed", None, leftovers)
+
+    leftovers = _safe_zero_leftovers(instance, runner=runner)
     if down.returncode != 0 or down.timed_out:
         return InstanceOperation(instance, "teardown_failed", down.returncode, leftovers)
     if not _is_zero(leftovers):
@@ -893,14 +1308,21 @@ def teardown_one(
 def _run_parallel(
     instances: Sequence[InstancePlan],
     operation: Callable[[InstancePlan], InstanceOperation],
+    *,
+    on_error: Callable[[InstancePlan, BaseException], InstanceOperation] | None = None,
 ) -> list[InstanceOperation]:
     if not instances:
         return []
     results: list[InstanceOperation] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(instances))) as pool:
-        futures = [pool.submit(operation, instance) for instance in instances]
-        for future in futures:
-            results.append(future.result())
+        futures = [(instance, pool.submit(operation, instance)) for instance in instances]
+        for instance, future in futures:
+            try:
+                results.append(future.result())
+            except BaseException as exc:
+                if on_error is None:
+                    raise
+                results.append(on_error(instance, exc))
     return results
 
 
@@ -959,17 +1381,17 @@ def start_fleet(
     state_dir: Path,
     *,
     runner: Runner | None = None,
-    enforce_preflight: bool = True,
 ) -> dict[str, object]:
-    """Render, start concurrently, and clean every project on partial failure."""
+    """Render, preflight, start, and clean every project on every failure."""
 
-    paths = render_to_directory(plan, state_dir)
-    write_manifest(plan, state_dir)
+    state_dir = Path(state_dir)
+    paths = {instance.instance_id: compose_path(state_dir, instance) for instance in plan.instances}
     operations: list[InstanceOperation] = []
     failure: str | None = None
     try:
-        if enforce_preflight:
-            preflight(runner=runner)
+        paths = render_to_directory(plan, state_dir)
+        write_manifest(plan, state_dir)
+        preflight(runner=runner)
 
         def start_one(instance: InstancePlan) -> InstanceOperation:
             result = invoke(
@@ -995,46 +1417,79 @@ def start_fleet(
         failure = "start_failed"
 
     if failure is None:
-        return _evidence(plan, "start", "started", operations, zero=True)
+        # Starting is not cleanup proof.  Only a live teardown listing may set
+        # zero_leftovers=true.
+        return _evidence(plan, "start", "started", operations, zero=None)
 
-    cleanup: list[InstanceOperation] = []
+    def cleanup_error(instance: InstancePlan, _error: BaseException) -> InstanceOperation:
+        return InstanceOperation(
+            instance,
+            "cleanup_exception",
+            None,
+            _safe_zero_leftovers(instance, runner=runner),
+        )
+
     try:
         cleanup = _run_parallel(
             plan.instances,
             lambda instance: teardown_one(instance, paths[instance.instance_id], runner=runner),
+            on_error=cleanup_error,
         )
-    except KeyboardInterrupt:
-        cleanup = [InstanceOperation(instance, "cleanup_interrupted") for instance in plan.instances]
-    zero = bool(cleanup) and all(operation.status == "removed" for operation in cleanup)
-    combined: list[InstanceOperation] = []
-    cleanup_by_id = {operation.instance.instance_id: operation for operation in cleanup}
-    for instance in plan.instances:
-        started = next((item for item in operations if item.instance.instance_id == instance.instance_id), None)
-        cleanup_operation = cleanup_by_id.get(instance.instance_id)
-        if started is not None and started.status != "started":
-            combined.append(started)
-        elif cleanup_operation is not None:
-            combined.append(
-                InstanceOperation(
-                    instance,
-                    f"{failure}:{cleanup_operation.status}",
-                    cleanup_operation.exit_code,
-                    cleanup_operation.leftovers,
-                )
+    except BaseException:
+        cleanup = [
+            InstanceOperation(
+                instance,
+                "cleanup_exception",
+                None,
+                _safe_zero_leftovers(instance, runner=runner),
             )
+            for instance in plan.instances
+        ]
+    zero = bool(cleanup) and all(
+        operation.status == "removed"
+        and operation.leftovers is not None
+        and _is_zero(operation.leftovers)
+        for operation in cleanup
+    )
     if zero:
-        _remove_state_artifacts(plan, state_dir)
+        try:
+            _remove_state_artifacts(plan, state_dir)
+        except BaseException:
+            zero = False
+    cleanup_by_id = {operation.instance.instance_id: operation for operation in cleanup}
+    started_by_id = {operation.instance.instance_id: operation for operation in operations}
+    combined: list[InstanceOperation] = []
+    for instance in plan.instances:
+        started = started_by_id.get(instance.instance_id)
+        cleanup_operation = cleanup_by_id.get(instance.instance_id)
+        statuses = [failure]
+        if started is not None and started.status != "started":
+            statuses.append(started.status)
+        if cleanup_operation is not None:
+            statuses.append(cleanup_operation.status)
+        combined.append(
+            InstanceOperation(
+                instance,
+                ":".join(statuses),
+                (cleanup_operation or started).exit_code if (cleanup_operation or started) else None,
+                (cleanup_operation or started).leftovers if (cleanup_operation or started) else None,
+            )
+        )
     return _evidence(plan, "start", "failed", combined, zero=zero)
 
 
 def _remove_state_artifacts(plan: FleetPlan, state_dir: Path) -> None:
     for instance in plan.instances:
-        path = compose_path(state_dir, instance)
-        if path.is_file() and not path.is_symlink():
-            path.unlink()
-    manifest = state_path(state_dir, plan.fleet_id)
-    if manifest.is_file() and not manifest.is_symlink():
-        manifest.unlink()
+        _unlink_owned_file(
+            compose_path(state_dir, instance),
+            "compose",
+            allow_dangling_symlink=True,
+        )
+    _unlink_owned_file(
+        state_path(state_dir, plan.fleet_id),
+        "state",
+        allow_dangling_symlink=True,
+    )
 
 
 def teardown_fleet(
@@ -1051,29 +1506,94 @@ def teardown_fleet(
         if not selected:
             raise ContractError("unrecognized_instance")
 
+    def cleanup_error(instance: InstancePlan, _error: BaseException) -> InstanceOperation:
+        return InstanceOperation(
+            instance,
+            "cleanup_exception",
+            None,
+            _safe_zero_leftovers(instance, runner=runner),
+        )
+
     operations = _run_parallel(
         selected,
         lambda instance: teardown_one(instance, compose_path(state_dir, instance), runner=runner),
+        on_error=cleanup_error,
     )
-    zero = all(operation.status == "removed" for operation in operations)
+    zero = bool(operations) and all(
+        operation.status == "removed"
+        and operation.leftovers is not None
+        and _is_zero(operation.leftovers)
+        for operation in operations
+    )
     if zero:
-        for instance in selected:
-            path = compose_path(state_dir, instance)
-            if path.is_file() and not path.is_symlink():
-                path.unlink()
-        remaining = [instance for instance in plan.instances if instance not in selected]
-        if not remaining:
-            manifest = state_path(state_dir, plan.fleet_id)
-            if manifest.is_file() and not manifest.is_symlink():
-                manifest.unlink()
-        else:
-            remaining_plan = build_plan(
-                plan.fleet_id,
-                [(instance.instance_id, instance.profile.name) for instance in remaining],
-            )
-            write_manifest(remaining_plan, state_dir)
+        try:
+            for instance in selected:
+                _unlink_owned_file(compose_path(state_dir, instance), "compose", allow_dangling_symlink=True)
+            remaining = [instance for instance in plan.instances if instance not in selected]
+            if not remaining:
+                _unlink_owned_file(
+                    state_path(state_dir, plan.fleet_id),
+                    "state",
+                    allow_dangling_symlink=True,
+                )
+            else:
+                remaining_plan = build_plan(
+                    plan.fleet_id,
+                    [(instance.instance_id, instance.profile.name) for instance in remaining],
+                )
+                write_manifest(remaining_plan, state_dir)
+        except BaseException:
+            zero = False
     status = "removed" if zero else "cleanup_failed"
     return _evidence(plan, "teardown", status, operations, zero=zero)
+
+
+def _teardown_without_manifest(
+    fleet_id: str,
+    state_dir: Path,
+    *,
+    reason: str,
+    runner: Runner | None = None,
+) -> dict[str, object]:
+    """Inventory exact project labels when trusted state is unavailable.
+
+    A missing state file is idempotent only after all three native listings
+    prove that no valid project label remains.  A corrupt state file is never
+    treated as removable state; any uncertainty returns cleanup_failed.
+    """
+
+    del state_dir  # The inventory is deliberately independent of untrusted state.
+    projects, complete = _discover_fleet_projects(fleet_id, runner=runner)
+    inventory: list[dict[str, object]] = []
+    all_zero = complete
+    for project in projects:
+        leftovers = _safe_zero_leftovers_for_project(project, runner=runner)
+        all_zero = all_zero and _is_zero(leftovers)
+        inventory.append({"project": project, "leftovers": leftovers})
+    idempotent = reason == "state_missing" and complete and all_zero
+    return {
+        "schema": SCHEMA,
+        "action": "teardown",
+        "status": "removed" if idempotent else "cleanup_failed",
+        "fleet_id": fleet_id,
+        "instances": inventory,
+        "zero_leftovers": True if idempotent else False,
+        "idempotent": idempotent,
+        "manifest": "missing" if reason == "state_missing" else "unusable",
+        "resource_inventory_complete": complete,
+        "redaction": {"bounded": True, "raw_engine_output": False},
+    }
+
+
+def _safe_zero_leftovers_for_project(
+    project: str,
+    *,
+    runner: Runner | None = None,
+) -> dict[str, int | None]:
+    try:
+        return _zero_leftovers_for_project(project, runner=runner)
+    except BaseException:
+        return {"containers": None, "networks": None, "volumes": None}
 
 
 def status_fleet(plan: FleetPlan, state_dir: Path, *, runner: Runner | None = None) -> dict[str, object]:
@@ -1105,13 +1625,44 @@ def demo(
     if os.environ.get("HERMTERNAL_UPSTREAM_FLEET_VM_DEMO") != "1":
         raise ContractError("vm_authorization_required")
     plan = build_plan("vm-demo", [("official", "auth")])
-    started = start_fleet(plan, state_dir, runner=runner, enforce_preflight=True)
+    try:
+        started = start_fleet(plan, state_dir, runner=runner)
+    except BaseException:
+        started = _evidence(
+            plan,
+            "start",
+            "failed",
+            [InstanceOperation(instance, "start_exception") for instance in plan.instances],
+            zero=False,
+        )
     if started.get("status") != "started":
+        try:
+            retry_cleanup = teardown_fleet(plan, state_dir, runner=runner)
+        except BaseException:
+            retry_cleanup = _evidence(
+                plan,
+                "teardown",
+                "cleanup_failed",
+                [
+                    InstanceOperation(
+                        instance,
+                        "cleanup_exception",
+                        None,
+                        _safe_zero_leftovers(instance, runner=runner),
+                    )
+                    for instance in plan.instances
+                ],
+                zero=False,
+            )
+        retry_status = str(retry_cleanup.get("status", "cleanup_failed"))
         return {
             **started,
             "action": "demo",
+            "status": "failed" if retry_status == "removed" else "cleanup_failed",
             "authorization": True,
             "live_run": True,
+            "teardown": retry_status,
+            "zero_leftovers": retry_cleanup.get("zero_leftovers") is True,
             "official_image_evidence": {
                 "reference": PINNED_IMAGE,
                 "digest_verified": False,
@@ -1129,15 +1680,24 @@ def demo(
 
     cleanup_status = "cleanup_failed"
     cleanup_zero = False
+    cleanup: dict[str, object] | None = None
     try:
         cleanup = teardown_fleet(plan, state_dir, runner=runner)
         cleanup_status = str(cleanup.get("status", "cleanup_failed"))
         cleanup_zero = cleanup.get("zero_leftovers") is True
     except BaseException:
         # Keep the demo result bounded while making cleanup uncertainty visible.
+        cleanup = None
         cleanup_status = "cleanup_failed"
         cleanup_zero = False
 
+    observed_leftovers: Mapping[str, object] = {}
+    if cleanup is not None:
+        entries = cleanup.get("instances")
+        if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+            value = entries[0].get("leftovers")
+            if isinstance(value, dict):
+                observed_leftovers = value
     final_status = readiness_status if cleanup_status == "removed" else "cleanup_failed"
     return {
         "schema": SCHEMA,
@@ -1166,9 +1726,9 @@ def demo(
             "teardown_status": cleanup_status,
             "leftovers": {
                 "label": f"io.podman.compose.project={plan.instances[0].project}",
-                "containers": 0 if cleanup_zero else None,
-                "networks": 0 if cleanup_zero else None,
-                "volumes": 0 if cleanup_zero else None,
+                "containers": observed_leftovers.get("containers"),
+                "networks": observed_leftovers.get("networks"),
+                "volumes": observed_leftovers.get("volumes"),
             },
         },
         "teardown_command": ["down", "--volumes", "--remove-orphans"],
@@ -1377,7 +1937,13 @@ def make_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _manifest_unusable(code: str) -> bool:
+    return code.startswith("state_") or code in {"json_invalid", "json_too_large", "duplicate_json_key"}
+
+
+def main(argv: Sequence[str] | None = None, *, _runner: Runner | None = None) -> int:
+    """CLI entry point; ``_runner`` is a private offline-test seam only."""
+
     parser = make_parser()
     args = parser.parse_args(argv)
     try:
@@ -1394,22 +1960,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "render",
                     "rendered",
                     [InstanceOperation(instance, "rendered") for instance in plan.instances],
-                    zero=True,
+                    zero=None,
                 )
             )
             return 0
         if args.command == "start":
             plan = _argument_plan(args)
-            result = start_fleet(plan, args.state_dir)
+            result = start_fleet(plan, args.state_dir, runner=_runner)
             emit(result)
             return 0 if result.get("status") == "started" else 1
         if args.command == "status":
             plan = load_manifest(args.state_dir, args.fleet_id)
-            emit(status_fleet(plan, args.state_dir))
+            emit(status_fleet(plan, args.state_dir, runner=_runner))
             return 0
         if args.command == "readiness":
             plan = load_manifest(args.state_dir, args.fleet_id)
-            result = readiness_fleet(plan, args.state_dir)
+            result = readiness_fleet(plan, args.state_dir, runner=_runner)
             emit(result)
             return 0 if result.get("status") == "process_ready" else 1
         if args.command == "endpoint":
@@ -1423,30 +1989,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 plan = load_manifest(args.state_dir, args.fleet_id)
             except ContractError as exc:
-                if exc.code == "state_missing" and args.all:
-                    emit(
-                        {
-                            "schema": SCHEMA,
-                            "action": "teardown",
-                            "status": "removed",
-                            "fleet_id": args.fleet_id,
-                            "instances": [],
-                            "zero_leftovers": True,
-                            "idempotent": True,
-                            "redaction": {"bounded": True, "raw_engine_output": False},
-                        }
+                if args.all and _manifest_unusable(exc.code):
+                    result = _teardown_without_manifest(
+                        args.fleet_id,
+                        args.state_dir,
+                        reason=exc.code,
+                        runner=_runner,
                     )
-                    return 0
+                    emit(result)
+                    return 0 if result.get("status") == "removed" else 1
                 raise
             result = teardown_fleet(
                 plan,
                 args.state_dir,
                 instance_id=args.instance,
+                runner=_runner,
             )
             emit(result)
             return 0 if result.get("status") == "removed" else 1
         if args.command == "demo":
-            result = demo(args.state_dir)
+            result = demo(args.state_dir, runner=_runner)
             emit(result)
             return 0 if result.get("status") in {"process_ready", "not_ready"} else 1
         raise ContractError("unknown_command")

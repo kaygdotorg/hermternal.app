@@ -90,9 +90,11 @@ python3 tests/integration/hermes-upstream-fleet/validate.py \
 
 `endpoint` returns `http://hermes:8000` with `scope=private_compose_network`
 and `published=false`. It is an internal service address, not a host/public
-endpoint. `readiness` reports only the process-level Compose state. A running
-container is not evidence of Hermes chat behavior, browser authentication,
-provider access, PTY correctness, or compatibility.
+endpoint. `readiness` reads the structured native Podman container-state enum
+for the exact project label. Plain text, substring matches, and values such as
+`not running` are not readiness evidence. A running container is not evidence
+of Hermes chat behavior, browser authentication, provider access, PTY
+correctness, or compatibility.
 
 `start` renders every project before launching and starts them concurrently.
 Any failed start, worker exception, or interruption invokes
@@ -101,22 +103,37 @@ that had not started. Teardown then checks only generated project labels and
 the exact generated network and volume names. A cleanup result is successful
 only when container, network, and volume leftovers are all zero. State files
 are removed only after that proof. A per-instance teardown cannot target an
-unrecognized project.
+unrecognized project. `teardown --all` does not treat a missing or corrupt
+manifest as proof of cleanup. It first lists Podman resources carrying the
+exact `io.podman.compose.project` label and generated network or volume name;
+any incomplete listing or remaining resource returns `cleanup_failed` without
+broad host cleanup. Only a missing manifest plus complete live zero listings
+is an idempotent no-op.
+
+Live engine calls use trusted absolute `podman` and `podman-compose` paths and a
+fixed launcher-owned `PATH`. `CONTAINER_HOST` and `CONTAINER_CONNECTION` are
+removed with Docker, Compose, Hermes-provider, and secret variables. The
+preflight check is mandatory on the production command path; the fake runner
+is a private unit-test seam only.
 
 ## Bounded evidence
 
 Public command output is one compact JSON line capped at 16 KiB. It retains
 stable statuses, exit codes, generated safe names, reviewed resource totals,
-and the exact approved image digest. It never retains engine stdout/stderr,
-URLs supplied by the caller, paths, environment values, credentials, cookies,
-provider names, or transcript content. Diagnostic strings are separately
-redacted and capped at 512 bytes for unit-level testing.
+and the exact approved image digest. Engine stdout/stderr is drained with a
+64 KiB UTF-8 byte cap at collection time; diagnostic use redacts paths, URLs,
+credentials, cookies, and tokens before the 512-byte retained diagnostic cap.
+Public evidence never retains engine stdout/stderr, URLs supplied by the
+caller, paths, environment values, credentials, cookies, provider names, or
+transcript content.
 
 The checked-in `cases.json` is synthetic policy data. It records the expected
 normal and optimized regressions for naming, concurrency, digest binding,
-resource budgets, Docker/provider rejection, partial failure, interruption,
-idempotent cleanup, zero leftovers, and process-only readiness. It does not
-claim live readiness.
+resource budgets, Docker/provider rejection, remote-container environment
+redirection, trusted executable resolution, regular-file handling, bounded
+multibyte capture, structured readiness, partial failure, interruption,
+missing-manifest inventory, idempotent cleanup, exact zero leftovers, and
+process-only readiness. It does not claim live readiness.
 
 `vm-demo-evidence.json` is the one authorized VM observation. It retains the
 exact official `RepoDigest`, rootless Podman and `podman-compose` identity,
@@ -159,6 +176,8 @@ python3 -O tests/integration/hermes-upstream-fleet/validate.py plan \
   --fleet-id checked --count 1 --profile auth
 python3 tests/integration/hermes-upstream-fleet/test_validate.py
 python3 -O tests/integration/hermes-upstream-fleet/test_validate.py
+# Both modes include the harmless exploit regressions for state, files,
+# readiness, capture, environment, executables, and cleanup.
 python3 -m py_compile \
   tests/integration/hermes-upstream-fleet/validate.py \
   tests/integration/hermes-upstream-fleet/test_validate.py
