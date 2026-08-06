@@ -146,7 +146,11 @@
       "selected_session_source": "server",
       "new_transport_is_new_session": false,
       "preserve_selected_session_on_reconnect": true,
-      "preserve_draft_on_reconnect": true
+      "preserve_draft_on_reconnect": true,
+      "selected_profile_source": "configured",
+      "preserve_selected_profile_on_reconnect": true,
+      "preserve_active_profile_on_restore": true,
+      "profile_drift_result": "incompatible"
     },
     "cancellation_policy": {
       "cancel_state": "closing",
@@ -177,6 +181,8 @@
       "initial_context": {
         "authenticated": false,
         "selected_session": null,
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "empty",
         "attestation": "pending",
         "probe": "pending",
@@ -193,11 +199,14 @@
         ],
         "effects": [],
         "selected_session": null,
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "empty",
         "ticket_generations": [],
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Offline is safe and has no transport side effect."
@@ -208,6 +217,8 @@
       "initial_context": {
         "authenticated": false,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -224,11 +235,14 @@
         ],
         "effects": [],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [],
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Authentication is required before a connection can open."
@@ -239,6 +253,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -274,6 +290,8 @@
           "server_session_restored"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -281,6 +299,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Gateway readiness and both compatibility gates precede selected-session restoration."
@@ -291,6 +310,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -314,6 +335,8 @@
           "retry_before_restore_blocked"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -321,6 +344,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Application methods cannot cross the gateway.ready barrier."
@@ -331,6 +355,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -353,6 +379,8 @@
           "behavioral_probe_passed"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -360,9 +388,59 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Passing evidence without gateway.ready does not enable the connection."
+    },
+    {
+      "id": "gateway-ready-timeout-fails",
+      "initial_state": "handshaking",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "attestation.pass",
+        "probe.pass",
+        "gateway.ready.timeout"
+      ],
+      "expected": {
+        "decision": "handshake_failed",
+        "final_state": "failed",
+        "trace": [
+          "handshaking",
+          "failed"
+        ],
+        "effects": [
+          "attestation_verified",
+          "behavioral_probe_passed",
+          "gateway_ready_timeout",
+          "transport_closed",
+          "handshake_failed"
+        ],
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "transport_closed": true,
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A missing gateway.ready deadline closes the transport and reports a semantic handshake failure."
     },
     {
       "id": "attestation-mismatch-blocks",
@@ -370,6 +448,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -393,6 +473,8 @@
           "compatibility_attestation_failed"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -400,6 +482,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "A missing or mismatched attestation blocks the surface."
@@ -410,6 +493,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -435,6 +520,8 @@
           "behavioral_probe_failed"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -442,6 +529,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "A failed behavioral probe blocks the surface."
@@ -452,6 +540,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -468,6 +558,8 @@
         ],
         "effects": [],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -475,6 +567,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Ready is observable only after the compatibility gate has passed."
@@ -485,6 +578,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -509,6 +604,8 @@
           "server_session_restored"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -516,6 +613,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Restoration resolves the selected server-owned session."
@@ -526,6 +624,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": null,
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "empty",
         "attestation": "passed",
         "probe": "passed",
@@ -550,6 +650,8 @@
           "server_session_empty"
         ],
         "selected_session": null,
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "empty",
         "ticket_generations": [
           1
@@ -557,6 +659,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "An empty restore result returns to ready without inventing a session."
@@ -567,6 +670,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -583,6 +688,8 @@
         ],
         "effects": [],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -590,6 +697,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Restoring is a barrier and does not permit prompt retry."
@@ -600,6 +708,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -616,6 +726,8 @@
         ],
         "effects": [],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -623,6 +735,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Reconnecting keeps local safe state while a new transport is pending."
@@ -633,6 +746,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -649,6 +764,8 @@
         ],
         "effects": [],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -656,6 +773,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "A known failure remains recoverable only through explicit user action."
@@ -666,6 +784,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -682,6 +802,8 @@
         ],
         "effects": [],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -689,6 +811,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Incompatibility is terminal for this surface and has no fallback."
@@ -699,6 +822,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -740,6 +865,8 @@
           "server_session_restored"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1,
@@ -748,9 +875,76 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
-      "notes": "Reconnect uses a new ticket and restores before recovery actions."
+      "notes": "Reconnect uses a new ticket and restores before recovery actions while preserving the configured profile."
+    },
+    {
+      "id": "reconnect-profile-drift-rejected",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "transport.loss",
+        "ticket.fresh",
+        "transport.open",
+        "gateway.ready",
+        "attestation.pass",
+        "probe.pass",
+        "session.resume.start",
+        "profile.drift"
+      ],
+      "expected": {
+        "decision": "profile_mismatch",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "reconnecting",
+          "handshaking",
+          "ready",
+          "restoring",
+          "incompatible"
+        ],
+        "effects": [
+          "transport_lost",
+          "reconnect_started",
+          "fresh_ticket_minted",
+          "transport_open",
+          "gateway_ready_received",
+          "attestation_verified",
+          "behavioral_probe_passed",
+          "compatibility_gate_passed",
+          "restore_started",
+          "profile_drift_observed",
+          "profile_drift_rejected",
+          "transport_closed"
+        ],
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-002",
+        "draft": "present",
+        "ticket_generations": [
+          1,
+          2
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "transport_closed": true,
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Reconnect and restore reject an active profile that drifts from the selected configured profile."
     },
     {
       "id": "reconnect-without-fresh-ticket",
@@ -758,6 +952,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -783,6 +979,8 @@
           "fresh_ticket_required"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -790,6 +988,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": true,
         "prompt_auto_resubmitted": false
       },
       "notes": "A reconnect cannot reuse the old upgrade credential."
@@ -800,6 +999,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -825,6 +1026,8 @@
           "reused_ticket_rejected"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -832,9 +1035,58 @@
         "restore_barrier": "pending",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": true,
         "prompt_auto_resubmitted": false
       },
       "notes": "A reused or consumed ticket enters authentication recovery."
+    },
+    {
+      "id": "restore-profile-drift-rejected",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "session.resume.start",
+        "profile.drift"
+      ],
+      "expected": {
+        "decision": "profile_mismatch",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "restoring",
+          "incompatible"
+        ],
+        "effects": [
+          "restore_started",
+          "profile_drift_observed",
+          "profile_drift_rejected",
+          "transport_closed"
+        ],
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-002",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "transport_closed": true,
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "Restore rejects profile drift while preserving the selected configured profile."
     },
     {
       "id": "restore-before-idempotent-retry",
@@ -842,6 +1094,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -863,6 +1117,8 @@
           "retry_before_restore_blocked"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -870,6 +1126,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "History retry is blocked until restore completes."
@@ -880,6 +1137,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -903,6 +1162,8 @@
           "retry_idempotent_session_history"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -910,6 +1171,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "History is the only kind of retry represented after restore."
@@ -920,6 +1182,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -941,6 +1205,8 @@
           "non_idempotent_retry_blocked"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -948,6 +1214,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Prompt submission is not an idempotent retry."
@@ -958,6 +1225,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -982,6 +1251,8 @@
           "prompt_delivery_uncertain"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -989,6 +1260,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "deferred_to_C-06",
         "compatibility_gate": "passed",
+        "transport_closed": true,
         "prompt_auto_resubmitted": false
       },
       "notes": "A lost result enters delivery_uncertain and preserves the draft."
@@ -999,6 +1271,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1023,6 +1297,8 @@
           "server_session_restored"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1030,6 +1306,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "deferred_to_C-06",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "C-05 stops after restore and defers resend choice to C-06."
@@ -1040,6 +1317,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1061,6 +1340,8 @@
           "prompt_auto_resubmit_blocked"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1068,6 +1349,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "deferred_to_C-06",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "The connection contract never auto-resubmits an uncertain prompt."
@@ -1078,6 +1360,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -1103,6 +1387,8 @@
           "cleanup_complete"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1110,6 +1396,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Cancellation closes cleanup and suppresses reconnect."
@@ -1120,6 +1407,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1145,6 +1434,8 @@
           "cleanup_complete"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1152,6 +1443,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Restore cancellation preserves safe local state."
@@ -1162,6 +1454,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -1187,6 +1481,8 @@
           "cleanup_complete"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1194,6 +1490,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Reconnect cancellation never schedules another reconnect."
@@ -1204,6 +1501,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1230,6 +1529,8 @@
           "cleanup_complete"
         ],
         "selected_session": null,
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1237,6 +1538,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Sign-out clears the selected server session but preserves the draft."
@@ -1247,6 +1549,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -1268,6 +1572,8 @@
           "cleanup_complete"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1275,6 +1581,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Closing completes cleanup and does not reconnect."
@@ -1285,6 +1592,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1306,6 +1615,8 @@
           "ticket_invalidated"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1313,6 +1624,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Authentication rejection invalidates the connection path."
@@ -1323,6 +1635,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -1344,6 +1658,8 @@
           "compatibility_close_blocked"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1351,6 +1667,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Known host or origin rejection is incompatible for this surface."
@@ -1361,6 +1678,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1382,6 +1701,8 @@
           "compatibility_close_blocked"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1389,6 +1710,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "A disabled embedded chat surface is incompatible."
@@ -1399,6 +1721,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1420,6 +1744,8 @@
           "known_backend_failure"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1427,6 +1753,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "A known peer rejection is a failed connection outcome."
@@ -1437,6 +1764,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1458,6 +1787,8 @@
           "known_backend_failure"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1465,6 +1796,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "A superseded attachment is a failed operation, not an unknown close."
@@ -1475,6 +1807,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1496,6 +1830,8 @@
           "known_backend_failure"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1503,6 +1839,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "A PTY exit is a known failed outcome; this fixture does not reconnect Terminal."
@@ -1513,6 +1850,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1534,6 +1873,8 @@
           "known_backend_failure"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1541,6 +1882,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "A known backend failure is recoverable only by explicit retry."
@@ -1551,6 +1893,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1572,6 +1916,8 @@
           "unknown_event_blocked"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1579,6 +1925,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Unknown events cannot become interactive behavior."
@@ -1589,6 +1936,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1610,6 +1959,8 @@
           "unknown_close_code_blocked"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1617,6 +1968,7 @@
         "restore_barrier": "passed",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Unknown close codes cannot trigger an unsafe fallback."
@@ -1627,6 +1979,8 @@
       "initial_context": {
         "authenticated": false,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -1661,6 +2015,8 @@
           "compatibility_gate_passed"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1668,6 +2024,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Authentication recovery mints a fresh ticket before opening the transport."
@@ -1678,6 +2035,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -1699,6 +2058,8 @@
           "transport_unavailable"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1706,6 +2067,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "A network loss returns to offline without claiming rejection."
@@ -1716,6 +2078,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -1737,6 +2101,8 @@
           "prompt_send_before_ready_blocked"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1744,6 +2110,7 @@
         "restore_barrier": "not_required",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Prompt send before handshake readiness is blocked."
@@ -1754,6 +2121,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "pending",
         "probe": "pending",
@@ -1779,6 +2148,8 @@
           "cleanup_complete"
         ],
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1786,6 +2157,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "none",
         "compatibility_gate": "pending",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Selected session and draft remain local during explicit reconnect cancellation."
@@ -1796,6 +2168,8 @@
       "initial_context": {
         "authenticated": true,
         "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "attestation": "passed",
         "probe": "passed",
@@ -1822,6 +2196,8 @@
           "cleanup_complete"
         ],
         "selected_session": null,
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
         "draft": "present",
         "ticket_generations": [
           1
@@ -1829,6 +2205,7 @@
         "restore_barrier": "pending",
         "prompt_retry": "deferred_to_C-06",
         "compatibility_gate": "passed",
+        "transport_closed": false,
         "prompt_auto_resubmitted": false
       },
       "notes": "Sign-out is safe even while prompt delivery remains uncertain."

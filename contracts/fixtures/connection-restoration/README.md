@@ -16,7 +16,7 @@ The source SHA binds the planning contract to the reviewed manifest. It is not a
 
 ## What the fixture proves
 
-`cases.json` contains a closed 42-case inventory. Each case has an initial state and safe local context, an ordered synthetic event sequence, and an expected result. `validate.py` keeps the case inventory and semantics in code, then requires the checked-in JSON to match those definitions exactly. This prevents a mutated fixture from changing both its input and its claimed result together.
+`cases.json` contains a closed 45-case inventory. Each case has an initial state and safe local context, an ordered synthetic event sequence, and an expected result. `validate.py` keeps the case inventory and semantics in code, then requires the checked-in JSON to match those definitions exactly. This prevents a mutated fixture from changing both its input and its claimed result together.
 
 The inventory covers every C-05 connection state:
 
@@ -35,11 +35,13 @@ The inventory covers every C-05 connection state:
 It also covers these ordering and recovery rules:
 
 - the first application event is gated by `gateway.ready`;
+- a missing or timed-out `gateway.ready` closes the transport and reports semantic `handshake_failed` in recoverable `failed` state;
 - attestation and behavioral probe are separate compatibility gates;
 - `ready` is allowed only after both gates pass;
 - reconnect requires a fresh ticket generation;
 - a new transport is not a new server session;
-- the selected server session and local draft remain stable through transport loss and safe reconnect cancellation;
+- the selected server session, configured profile, active profile, and local draft remain stable through transport loss and safe reconnect cancellation;
+- restore rejects an active profile that drifts from the selected configured profile and preserves the selected profile marker in the result;
 - server-owned session restoration is a barrier before an idempotent retry;
 - only `session.resume`, `session.history`, `session.status`, and `model.options` are retryable read operations;
 - `prompt.submit` is never automatically retried;

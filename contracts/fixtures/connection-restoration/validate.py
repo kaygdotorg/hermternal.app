@@ -95,6 +95,8 @@ CASE_KEYS = ("id", "initial_state", "initial_context", "events", "expected", "no
 CONTEXT_KEYS = (
     "authenticated",
     "selected_session",
+    "selected_profile",
+    "active_profile",
     "draft",
     "attestation",
     "probe",
@@ -108,11 +110,14 @@ EXPECTED_KEYS = (
     "trace",
     "effects",
     "selected_session",
+    "selected_profile",
+    "active_profile",
     "draft",
     "ticket_generations",
     "restore_barrier",
     "prompt_retry",
     "compatibility_gate",
+    "transport_closed",
     "prompt_auto_resubmitted",
 )
 REDACTION_KEYS = (
@@ -245,6 +250,10 @@ EXPECTED_INVARIANTS = {
         "new_transport_is_new_session": False,
         "preserve_selected_session_on_reconnect": True,
         "preserve_draft_on_reconnect": True,
+        "selected_profile_source": "configured",
+        "preserve_selected_profile_on_reconnect": True,
+        "preserve_active_profile_on_restore": True,
+        "profile_drift_result": "incompatible",
     },
     "cancellation_policy": {
         "cancel_state": "closing",
@@ -421,6 +430,8 @@ def _context(
     *,
     authenticated: bool = True,
     selected_session: str | None = "session-marker-001",
+    selected_profile: str | None = "profile-marker-001",
+    active_profile: str | None = "profile-marker-001",
     draft: str = "present",
     attestation: str = "pending",
     probe: str = "pending",
@@ -431,6 +442,8 @@ def _context(
     return {
         "authenticated": authenticated,
         "selected_session": selected_session,
+        "selected_profile": selected_profile,
+        "active_profile": active_profile,
         "draft": draft,
         "attestation": attestation,
         "probe": probe,
@@ -456,6 +469,7 @@ CASE_DEFINITIONS = (
     _case("initial-connect-ready", "connecting", _context(attestation="pending", probe="pending"), ("transport.open", "gateway.ready", "attestation.pass", "probe.pass", "session.resume.start", "session.resume.ok"), "Gateway readiness and both compatibility gates precede selected-session restoration."),
     _case("gateway-ready-barrier", "handshaking", _context(attestation="pending", probe="pending"), ("gateway.ready", "retry.session.status"), "Application methods cannot cross the gateway.ready barrier."),
     _case("gates-before-gateway", "handshaking", _context(attestation="pending", probe="pending"), ("attestation.pass", "probe.pass"), "Passing evidence without gateway.ready does not enable the connection."),
+    _case("gateway-ready-timeout-fails", "handshaking", _context(attestation="pending", probe="pending"), ("attestation.pass", "probe.pass", "gateway.ready.timeout"), "A missing gateway.ready deadline closes the transport and reports a semantic handshake failure."),
     _case("attestation-mismatch-blocks", "handshaking", _context(attestation="pending", probe="pending"), ("gateway.ready", "attestation.fail"), "A missing or mismatched attestation blocks the surface."),
     _case("probe-failure-blocks", "handshaking", _context(attestation="pending", probe="pending"), ("gateway.ready", "attestation.pass", "probe.fail"), "A failed behavioral probe blocks the surface."),
     _case("state-ready", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), (), "Ready is observable only after the compatibility gate has passed."),
@@ -465,9 +479,11 @@ CASE_DEFINITIONS = (
     _case("state-reconnecting", "reconnecting", _context(attestation="pending", probe="pending", gateway_ready=False), (), "Reconnecting keeps local safe state while a new transport is pending."),
     _case("state-failed", "failed", _context(), (), "A known failure remains recoverable only through explicit user action."),
     _case("state-incompatible", "incompatible", _context(), (), "Incompatibility is terminal for this surface and has no fallback."),
-    _case("reconnect-fresh-ticket-and-restore", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), ("transport.loss", "ticket.fresh", "transport.open", "gateway.ready", "attestation.pass", "probe.pass", "session.resume.start", "session.resume.ok"), "Reconnect uses a new ticket and restores before recovery actions."),
+    _case("reconnect-fresh-ticket-and-restore", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), ("transport.loss", "ticket.fresh", "transport.open", "gateway.ready", "attestation.pass", "probe.pass", "session.resume.start", "session.resume.ok"), "Reconnect uses a new ticket and restores before recovery actions while preserving the configured profile."),
+    _case("reconnect-profile-drift-rejected", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), ("transport.loss", "ticket.fresh", "transport.open", "gateway.ready", "attestation.pass", "probe.pass", "session.resume.start", "profile.drift"), "Reconnect and restore reject an active profile that drifts from the selected configured profile."),
     _case("reconnect-without-fresh-ticket", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), ("transport.loss", "transport.open"), "A reconnect cannot reuse the old upgrade credential."),
     _case("reconnect-ticket-reuse-blocked", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), ("transport.loss", "ticket.reuse"), "A reused or consumed ticket enters authentication recovery."),
+    _case("restore-profile-drift-rejected", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), ("session.resume.start", "profile.drift"), "Restore rejects profile drift while preserving the selected configured profile."),
     _case("restore-before-idempotent-retry", "restoring", _context(attestation="passed", probe="passed", gateway_ready=True), ("retry.session.history",), "History retry is blocked until restore completes."),
     _case("idempotent-retry-after-restore", "restoring", _context(attestation="passed", probe="passed", gateway_ready=True), ("session.resume.ok", "retry.session.history"), "History is the only kind of retry represented after restore."),
     _case("non-idempotent-retry-blocked", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), ("retry.prompt.submit",), "Prompt submission is not an idempotent retry."),
@@ -506,6 +522,8 @@ def _initial_state_context(initial_state: str, context: dict[str, Any]) -> dict[
         "state": state,
         "authenticated": context["authenticated"],
         "selected_session": context["selected_session"],
+        "selected_profile": context["selected_profile"],
+        "active_profile": context["active_profile"],
         "draft": context["draft"],
         "attestation": context["attestation"],
         "probe": context["probe"],
@@ -520,6 +538,7 @@ def _initial_state_context(initial_state: str, context: dict[str, Any]) -> dict[
         "decision": "blocked" if state == "incompatible" else state,
         "required_ticket_generation": None,
         "auto_resubmitted": False,
+        "transport_closed": False,
     }
 
 
@@ -528,6 +547,15 @@ def _fail_closed(runtime: dict[str, Any], effect: str) -> None:
     runtime["compatibility_gate"] = "blocked"
     runtime["decision"] = "blocked"
     runtime["effects"].append(effect)
+
+
+def _reject_profile_drift(runtime: dict[str, Any]) -> None:
+    """Reject a transport whose active profile differs from the configured selection."""
+    runtime["state"] = "incompatible"
+    runtime["compatibility_gate"] = "blocked"
+    runtime["decision"] = "profile_mismatch"
+    runtime["transport_closed"] = True
+    runtime["effects"].extend(["profile_drift_observed", "profile_drift_rejected", "transport_closed"])
 
 
 def _maybe_ready(runtime: dict[str, Any]) -> None:
@@ -596,7 +624,18 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
         runtime["probe"] = "pending"
         runtime["compatibility_gate"] = "pending"
         runtime["decision"] = "handshaking"
+        runtime["transport_closed"] = False
         runtime["effects"].append("transport_open")
+        return
+    if event == "gateway.ready.timeout":
+        if state != "handshaking":
+            _fail_closed(runtime, "gateway_ready_timeout_out_of_order")
+            return
+        runtime["transport_closed"] = True
+        runtime["state"] = "failed"
+        runtime["compatibility_gate"] = "blocked"
+        runtime["decision"] = "handshake_failed"
+        runtime["effects"].extend(["gateway_ready_timeout", "transport_closed", "handshake_failed"])
         return
     if event == "gateway.ready":
         if state != "handshaking":
@@ -640,6 +679,9 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
         if state not in {"ready", "delivery_uncertain"}:
             _fail_closed(runtime, "restore_out_of_order")
             return
+        if runtime["active_profile"] != runtime["selected_profile"]:
+            _reject_profile_drift(runtime)
+            return
         runtime["state"] = "restoring"
         runtime["restore_barrier"] = "pending"
         runtime["decision"] = "restoring"
@@ -648,6 +690,9 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
     if event == "session.resume.ok":
         if state != "restoring":
             _fail_closed(runtime, "restore_result_out_of_order")
+            return
+        if runtime["active_profile"] != runtime["selected_profile"]:
+            _reject_profile_drift(runtime)
             return
         runtime["state"] = "ready"
         runtime["restore_barrier"] = "passed"
@@ -658,11 +703,21 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
         if state != "restoring":
             _fail_closed(runtime, "empty_restore_out_of_order")
             return
+        if runtime["active_profile"] != runtime["selected_profile"]:
+            _reject_profile_drift(runtime)
+            return
         runtime["state"] = "ready"
         runtime["selected_session"] = None
         runtime["restore_barrier"] = "passed"
         runtime["decision"] = "restored_empty"
         runtime["effects"].append("server_session_empty")
+        return
+    if event == "profile.drift":
+        if state != "restoring":
+            _fail_closed(runtime, "profile_drift_out_of_order")
+            return
+        runtime["active_profile"] = "profile-marker-002"
+        _reject_profile_drift(runtime)
         return
     if event == "transport.loss":
         if state not in {"ready", "restoring", "handshaking"}:
@@ -673,6 +728,7 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
         runtime["gateway_ready"] = False
         runtime["attestation"] = "pending"
         runtime["probe"] = "pending"
+        runtime["transport_closed"] = True
         runtime["effects"].append("transport_lost")
         if runtime["prompt_delivery"] == "in_flight":
             runtime["state"] = "delivery_uncertain"
@@ -788,11 +844,14 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
         "trace": trace,
         "effects": runtime["effects"],
         "selected_session": runtime["selected_session"],
+        "selected_profile": runtime["selected_profile"],
+        "active_profile": runtime["active_profile"],
         "draft": runtime["draft"],
         "ticket_generations": runtime["ticket_generations"],
         "restore_barrier": runtime["restore_barrier"],
         "prompt_retry": runtime["prompt_retry"],
         "compatibility_gate": runtime["compatibility_gate"],
+        "transport_closed": runtime["transport_closed"],
         "prompt_auto_resubmitted": runtime["auto_resubmitted"],
     }
 
@@ -849,6 +908,9 @@ def validate_document(document: dict[str, Any]) -> None:
         _strict_bool(item["initial_context"]["authenticated"], "authenticated")
         selected = item["initial_context"]["selected_session"]
         _require(selected is None or type(selected) is str, "selected session must be text or null")
+        for profile_key in ("selected_profile", "active_profile"):
+            profile = item["initial_context"][profile_key]
+            _require(profile is None or type(profile) is str, f"{profile_key} must be text or null")
         _require(item["initial_context"]["draft"] in {"empty", "present"}, "draft state changed")
         for key in ("attestation", "probe"):
             _require(item["initial_context"][key] in {"missing", "pending", "passed", "failed"}, f"{key} state changed")

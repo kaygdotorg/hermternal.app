@@ -32,9 +32,33 @@ class ConnectionRestorationValidationTests(unittest.TestCase):
         command.extend([str(ROOT / "validate.py"), *extra])
         return subprocess.run(command, check=False, capture_output=True, text=True)
 
+    def evaluate_case_subprocess(self, case_id: str, optimized: bool = False) -> dict[str, object]:
+        script = """
+import importlib.util
+import json
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("validate", root / "validate.py")
+validate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(validate)
+case_id = sys.argv[2]
+case_id, initial_state, context, events, _ = validate._case_definition_map()[case_id]
+case = {"initial_state": initial_state, "initial_context": context, "events": list(events)}
+print(json.dumps(validate.evaluate_case(case), sort_keys=True))
+"""
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(["-c", script, str(ROOT), case_id])
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        return json.loads(result.stdout)
+
     def test_checked_in_document_and_baseline_validate(self) -> None:
         case_count, artifact_bytes = validate.validate_all(self.document, self.baseline)
-        self.assertEqual(case_count, 42)
+        self.assertEqual(case_count, 45)
         self.assertGreater(artifact_bytes, 0)
         self.assertEqual(len(self.document["states"]), 11)
         self.assertIsNone(self.baseline["threshold"])
@@ -48,7 +72,7 @@ class ConnectionRestorationValidationTests(unittest.TestCase):
         self.assertEqual(normal.stdout, optimized.stdout)
         self.assertEqual(normal.stderr, "")
         self.assertEqual(optimized.stderr, "")
-        self.assertIn("states=11 cases=42", normal.stdout)
+        self.assertIn("states=11 cases=45", normal.stdout)
 
     def test_gateway_and_compatibility_barriers(self) -> None:
         ready = self.cases["initial-connect-ready"]["expected"]
@@ -65,6 +89,15 @@ class ConnectionRestorationValidationTests(unittest.TestCase):
         self.assertEqual(self.cases["probe-failure-blocks"]["expected"]["final_state"], "incompatible")
         self.assertEqual(self.cases["gates-before-gateway"]["expected"]["final_state"], "handshaking")
 
+        timeout = self.cases["gateway-ready-timeout-fails"]["expected"]
+        self.assertEqual(timeout["trace"], ["handshaking", "failed"])
+        self.assertEqual(timeout["final_state"], "failed")
+        self.assertEqual(timeout["decision"], "handshake_failed")
+        self.assertTrue(timeout["transport_closed"])
+        self.assertIn("gateway_ready_timeout", timeout["effects"])
+        self.assertIn("transport_closed", timeout["effects"])
+        self.assertIn("handshake_failed", timeout["effects"])
+
     def test_reconnect_uses_fresh_ticket_and_restores_before_retry(self) -> None:
         self.assertEqual(
             validate.RETRYABLE_METHODS,
@@ -76,6 +109,8 @@ class ConnectionRestorationValidationTests(unittest.TestCase):
         self.assertEqual(reconnect["final_state"], "ready")
         self.assertIn("server_session_restored", reconnect["effects"])
         self.assertEqual(reconnect["selected_session"], "session-marker-001")
+        self.assertEqual(reconnect["selected_profile"], "profile-marker-001")
+        self.assertEqual(reconnect["active_profile"], "profile-marker-001")
         self.assertEqual(reconnect["draft"], "present")
 
         no_fresh_ticket = self.cases["reconnect-without-fresh-ticket"]["expected"]
@@ -89,6 +124,27 @@ class ConnectionRestorationValidationTests(unittest.TestCase):
         allowed = self.cases["idempotent-retry-after-restore"]["expected"]
         self.assertEqual(allowed["final_state"], "ready")
         self.assertEqual(allowed["decision"], "idempotent_retry")
+
+    def test_timeout_and_profile_drift_regressions_run_in_both_modes(self) -> None:
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized, case_id="gateway-ready-timeout-fails"):
+                timeout = self.evaluate_case_subprocess("gateway-ready-timeout-fails", optimized)
+                self.assertEqual(timeout["final_state"], "failed")
+                self.assertEqual(timeout["decision"], "handshake_failed")
+                self.assertTrue(timeout["transport_closed"])
+                self.assertIn("gateway_ready_timeout", timeout["effects"])
+                self.assertIn("handshake_failed", timeout["effects"])
+
+            for case_id in ("reconnect-profile-drift-rejected", "restore-profile-drift-rejected"):
+                with self.subTest(optimized=optimized, case_id=case_id):
+                    drift = self.evaluate_case_subprocess(case_id, optimized)
+                    self.assertEqual(drift["final_state"], "incompatible")
+                    self.assertEqual(drift["decision"], "profile_mismatch")
+                    self.assertEqual(drift["selected_profile"], "profile-marker-001")
+                    self.assertEqual(drift["active_profile"], "profile-marker-002")
+                    self.assertTrue(drift["transport_closed"])
+                    self.assertIn("profile_drift_observed", drift["effects"])
+                    self.assertIn("profile_drift_rejected", drift["effects"])
 
     def test_uncertain_delivery_is_preserved_and_deferred_to_c06(self) -> None:
         uncertain = self.cases["prompt-transport-loss-uncertain"]["expected"]
