@@ -11,22 +11,44 @@
   export let providers: AuthProvider[] = DEFAULT_PROVIDERS;
   export let onAction: AuthActionHandler = () => {};
 
-  let username = 'alex';
-  // This value is a deliberately synthetic fixture; it never crosses a transport boundary.
-  let password = 'fixture-value';
   let passwordVisible = false;
+  let previousState = state;
+  let submissionLocked = false;
+  let formResetKey = 0;
 
+  $: if (state !== previousState) {
+    resetPasswordEntry();
+    previousState = state;
+  }
   $: isProviderState = state === 'provider-selection' || state === 'discovery-pending';
   $: isPasswordState = state === 'password' || state === 'password-submitting';
   $: panelClass = isProviderState ? 'provider-panel' : state === 'session-expired' ? 'session-panel' : 'narrow-panel';
 
+  function resetPasswordEntry(): void {
+    passwordVisible = false;
+    submissionLocked = false;
+    formResetKey += 1;
+  }
+
   function handleAction(action: AuthAction): void {
     if (action.type === 'toggle-password-visibility') passwordVisible = !passwordVisible;
+    if (action.type === 'back-to-providers' || action.type === 'cancel-callback' || action.type === 'choose-provider-again' || action.type === 'back-to-sign-in' || action.type === 'discard-draft') {
+      resetPasswordEntry();
+    }
     onAction(action);
   }
 
-  function submitPassword(): void {
-    onAction({ type: 'submit-password', username, password });
+  function handlePasswordSubmit(event: SubmitEvent): void {
+    event.preventDefault();
+    if (state === 'password-submitting' || submissionLocked) return;
+
+    const form = event.currentTarget as HTMLFormElement;
+    if (!form.checkValidity()) return;
+
+    submissionLocked = true;
+    formResetKey += 1;
+    passwordVisible = false;
+    onAction({ type: 'submit-password-fixture' });
   }
 </script>
 
@@ -48,7 +70,7 @@
         <header class="panel-heading">
           <p class="eyebrow">HERMTERNAL</p>
           <h1>Connect to Hermes</h1>
-          <p>Choose one available sign-in method. Hermternal does not rank providers or retain reusable credentials.</p>
+          <p>Choose one synthetic sign-in method. This preview never stores reusable credentials or calls a provider.</p>
         </header>
 
         <div class="provider-list" aria-label="Available sign-in providers">
@@ -57,12 +79,12 @@
           {/each}
         </div>
 
-        <p class="provider-note"><span aria-hidden="true" class="note-dot"></span>Connected to the configured HTTPS origin. Only providers reported by Hermes are shown.</p>
+        <p class="provider-note"><span aria-hidden="true" class="note-dot"></span>Synthetic fixture only · provider choices are local presentation data; no discovery request is made.</p>
       {:else if state === 'discovery-pending'}
         <header class="panel-heading">
           <p class="eyebrow">PROVIDER DISCOVERY · PENDING</p>
           <h1>Discovering sign-in methods</h1>
-          <p>Waiting for the configured Hermes deployment to report providers. Controls stay unavailable until the result is complete.</p>
+          <p>Static pending state only. No discovery request runs, and controls stay unavailable until the fixture state changes.</p>
         </header>
 
         <div class="provider-list" aria-label="Provider discovery in progress" aria-busy="true">
@@ -71,47 +93,51 @@
           {/each}
         </div>
 
-        <p class="provider-note"><span aria-hidden="true" class="note-dot"></span>Mocked only · provider discovery is pending; no sign-in action is available.</p>
+        <p class="provider-note"><span aria-hidden="true" class="note-dot"></span>Prototype-only pending state · no sign-in action is available.</p>
       {:else if isPasswordState}
         <header class="panel-heading">
           <p class="eyebrow">BASIC AUTH PROVIDER{state === 'password-submitting' ? ' · SUBMITTING' : ''}</p>
           <h1>{state === 'password-submitting' ? 'Signing in to Hermes' : 'Sign in to Hermes'}</h1>
-          <p>{state === 'password-submitting' ? 'Mocked only · submitting once to the configured Hermes origin. Controls remain disabled while the request is represented.' : 'Your password is sent only to the configured Hermes origin for this session. It is not retained by this prototype.'}</p>
+          <p>{state === 'password-submitting' ? 'Static submitting state only · the synthetic values were cleared and no request was made.' : 'Enter synthetic fixture values to review the sign-in state. Nothing is sent or retained by this prototype.'}</p>
         </header>
 
-        <form aria-label="Hermes password sign in" class="password-form" onsubmit={(event) => { event.preventDefault(); submitPassword(); }}>
-          <label class="field-label" for="auth-username">Username</label>
-          <input id="auth-username" bind:value={username} disabled={state === 'password-submitting'} autocomplete="username" />
+        {#key formResetKey}
+          <form aria-label="Hermes password sign in" class="password-form" onsubmit={handlePasswordSubmit}>
+            <label class="field-label" for="auth-username">Username</label>
+            <input id="auth-username" autocomplete="username" disabled={state === 'password-submitting'} name="username" required value="alex" />
 
-          <div class="password-label-row">
-            <label class="field-label" for="auth-password">Password</label>
-            <button
-              aria-label={passwordVisible ? 'Hide password' : 'Show password'}
-              class="show-password"
+            <div class="password-label-row">
+              <label class="field-label" for="auth-password">Password</label>
+              <button
+                aria-label={passwordVisible ? 'Hide password' : 'Show password'}
+                class="show-password"
+                disabled={state === 'password-submitting'}
+                type="button"
+                onclick={() => handleAction({ type: 'toggle-password-visibility' })}
+              >{passwordVisible ? 'Hide' : 'Show'}</button>
+            </div>
+            <input
+              id="auth-password"
+              autocomplete="off"
               disabled={state === 'password-submitting'}
-              type="button"
-              onclick={() => handleAction({ type: 'toggle-password-visibility' })}
-            >{passwordVisible ? 'Hide' : 'Show'}</button>
-          </div>
-          <input
-            id="auth-password"
-            bind:value={password}
-            disabled={state === 'password-submitting'}
-            autocomplete="current-password"
-            type={passwordVisible ? 'text' : 'password'}
-          />
-
-          <div class="auth-action">
-            <Pill
-              ariaLabel={state === 'password-submitting' ? 'Signing in' : 'Sign in'}
-              disabled={state === 'password-submitting'}
-              label={state === 'password-submitting' ? 'Signing in…' : 'Sign in'}
-              variant="action"
-              onActivate={submitPassword}
+              name="password"
+              required
+              type={passwordVisible ? 'text' : 'password'}
+              value=""
             />
-          </div>
-          <Pill label={state === 'password-submitting' ? 'Cancel sign-in' : 'Back to providers'} variant="ghost" onActivate={() => handleAction({ type: 'back-to-providers' })} />
-        </form>
+
+            <div class="auth-action">
+              <Pill
+                ariaLabel={state === 'password-submitting' ? 'Signing in' : 'Sign in'}
+                buttonType="submit"
+                disabled={state === 'password-submitting'}
+                label={state === 'password-submitting' ? 'Signing in…' : 'Sign in'}
+                variant="action"
+              />
+            </div>
+            <Pill label={state === 'password-submitting' ? 'Cancel sign-in' : 'Back to providers'} variant="ghost" onActivate={() => handleAction({ type: 'back-to-providers' })} />
+          </form>
+        {/key}
 
         {#if state === 'password-submitting'}
           <p class="interaction-note">Static mocked state · 44px targets · focus order is fields → sign in → cancel.</p>
@@ -120,33 +146,33 @@
         <div class="callback-progress" aria-hidden="true"><span></span></div>
         <div class="callback-message">
           <h1>Completing sign-in</h1>
-          <p>Checking the provider response and creating a protected browser session.</p>
+          <p>Static callback state only. No provider response is read and no browser session is created.</p>
         </div>
         <div class="privacy-note">
           <span aria-hidden="true" class="info-icon"><Icon name="info" size={16} /></span>
-          <p>Do not close this tab. Callback parameters are checked once and are not rendered into the transcript.</p>
+          <p>Prototype-only callback presentation. No callback parameters or transcript data are read.</p>
         </div>
         <Pill label="Cancel and return to providers" variant="ghost" onActivate={() => handleAction({ type: 'cancel-callback' })} />
       {:else if state === 'session-expired'}
         <div class="session-icon" aria-hidden="true"><Icon name="refresh" size={20} /></div>
         <div class="session-copy">
           <h1>Session expired</h1>
-          <p>Sign in again to continue. Your draft stays on this device until you choose what to do.</p>
+          <p>Static expiry state only. This preview does not persist a draft; choose how to represent the next local state.</p>
         </div>
         <div class="session-actions">
           <Pill label="Sign in again" variant="action" onActivate={() => handleAction({ type: 'sign-in-again' })} />
           <Pill label="Discard draft" variant="ghost" onActivate={() => handleAction({ type: 'discard-draft' })} />
         </div>
-        <p class="provider-note"><span aria-hidden="true" class="note-dot"></span>Draft retained locally. No prompt was sent after the session expired.</p>
+        <p class="provider-note"><span aria-hidden="true" class="note-dot"></span>Prototype-only state · no draft or prompt was persisted after expiry.</p>
       {:else if state === 'failure' || state === 'discovery-retry' || state === 'provider-unavailable'}
         <div class="failure-icon" aria-hidden="true"><Icon name={state === 'discovery-retry' ? 'refresh' : 'warning'} size={20} /></div>
         <div class="failure-heading">
           <h1>{state === 'failure' ? 'Sign-in did not complete' : state === 'discovery-retry' ? 'Retry provider discovery' : 'Provider discovery stopped'}</h1>
-          <p>{state === 'failure' ? 'Hermes rejected this attempt. No session was created and no credential was retained.' : state === 'discovery-retry' ? 'The previous result was unknown. A fresh user action is required before sign-in can continue.' : 'No usable provider list was returned. The client fails closed and does not invent a sign-in method.'}</p>
+          <p>{state === 'failure' ? 'Synthetic failure state only. No request was made, no session was created, and no credential was retained.' : state === 'discovery-retry' ? 'Synthetic retry state only. A fresh local action is required before the preview can continue.' : 'No usable fixture provider list is available. The preview fails closed and exposes no invented sign-in method.'}</p>
         </div>
         <div class="failure-detail">
-          <strong>{state === 'failure' ? 'The provider rejected this request' : state === 'discovery-retry' ? 'Ready to retry' : 'provider_unavailable'}</strong>
-          <p>{state === 'failure' ? 'Try again, or choose another provider. Error details do not include credentials.' : state === 'discovery-retry' ? 'Retry is idempotent; duplicate submits stay blocked until the first result settles.' : 'Empty or malformed provider data was rejected before sign-in actions were exposed.'}</p>
+          <strong>{state === 'failure' ? 'Synthetic sign-in failure' : state === 'discovery-retry' ? 'Ready to retry locally' : 'provider_unavailable'}</strong>
+          <p>{state === 'failure' ? 'Choose another local fixture state. Error details do not include credentials.' : state === 'discovery-retry' ? 'Retry is represented locally; duplicate submits stay blocked until the fixture state changes.' : 'Empty or malformed fixture data is rejected before sign-in actions are exposed.'}</p>
         </div>
         <div class="failure-actions">
           <Pill
@@ -161,7 +187,7 @@
             onActivate={() => handleAction({ type: state === 'failure' ? 'choose-provider-again' : 'back-to-sign-in' })}
           />
         </div>
-        <p class="metadata">{state === 'failure' ? 'Reference: AUTH-REJECTED · Safe to retry' : state === 'discovery-retry' ? 'Mocked fixture · user initiated · safe to cancel' : 'Mocked fixture · empty + malformed · no credentials'}</p>
+        <p class="metadata">{state === 'failure' ? 'Synthetic fixture · safe to retry' : state === 'discovery-retry' ? 'Synthetic fixture · user initiated · safe to cancel' : 'Synthetic fixture · empty + malformed · no credentials'}</p>
       {/if}
     </div>
   </div>
@@ -183,10 +209,12 @@
     --radius-pill: 999px;
     --radius-input: 12px;
     --radius-glass: 22px;
+    position: relative;
     box-sizing: border-box;
     width: 100%;
     min-width: 0;
     min-height: 900px;
+    overflow: hidden;
     background: var(--canvas);
     color: var(--ink);
     font-family: 'Instrument Sans', system-ui, sans-serif;

@@ -1,10 +1,39 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
   import type { WorkspaceActionHandler } from './types';
 
+  type InspectorTab = 'artifacts' | 'sources' | 'files';
+
+  const tabs: Array<{ id: InspectorTab; label: string; count?: string }> = [
+    { id: 'artifacts', label: 'Artifacts' },
+    { id: 'sources', label: 'Sources', count: '12' },
+    { id: 'files', label: 'Files', count: '3' }
+  ];
+
   export let onAction: WorkspaceActionHandler = () => {};
-  let activeTab: 'artifacts' | 'sources' | 'files' = 'artifacts';
+  let activeTab: InspectorTab = 'artifacts';
+  let tabButtons: HTMLButtonElement[] = [];
+
+  function selectTab(tab: InspectorTab): void {
+    activeTab = tab;
+  }
+
+  async function handleTabKeydown(event: KeyboardEvent, index: number): Promise<void> {
+    const key = event.key;
+    if (key !== 'ArrowRight' && key !== 'ArrowLeft' && key !== 'Home' && key !== 'End') return;
+
+    event.preventDefault();
+    const nextIndex = key === 'Home'
+      ? 0
+      : key === 'End'
+        ? tabs.length - 1
+        : (index + (key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    activeTab = tabs[nextIndex].id;
+    await tick();
+    tabButtons[nextIndex]?.focus();
+  }
 </script>
 
 <aside aria-label="Workspace inspector" class="inspector">
@@ -16,18 +45,19 @@
     <Pill ariaLabel="Close workspace inspector" icon="close" iconOnly label="Close inspector" variant="ghost" onActivate={() => onAction({ type: 'toggle-inspector' })} />
   </header>
 
-  <div class="inspector-tabs" role="tablist" aria-label="Inspector sections">
-    {#each [
-      { id: 'artifacts', label: 'Artifacts', count: '' },
-      { id: 'sources', label: 'Sources', count: '12' },
-      { id: 'files', label: 'Files', count: '3' }
-    ] as tab}
+  <div aria-label="Inspector sections" aria-orientation="horizontal" class="inspector-tabs" role="tablist">
+    {#each tabs as tab, index (tab.id)}
       <button
+        id={`inspector-tab-${tab.id}`}
+        aria-controls={`inspector-panel-${tab.id}`}
         aria-selected={activeTab === tab.id}
+        bind:this={tabButtons[index]}
         class:active={activeTab === tab.id}
         role="tab"
+        tabindex={activeTab === tab.id ? 0 : -1}
         type="button"
-        onclick={() => (activeTab = tab.id as typeof activeTab)}
+        onclick={() => selectTab(tab.id)}
+        onkeydown={(event) => handleTabKeydown(event, index)}
       >
         <span>{tab.label}</span>
         {#if tab.count}<span class="tab-count">{tab.count}</span>{/if}
@@ -35,46 +65,65 @@
     {/each}
   </div>
 
-  {#if activeTab === 'artifacts'}
-    <section class="artifact-card" aria-labelledby="artifact-heading">
-      <header class="artifact-header">
-        <span aria-hidden="true" class="artifact-icon"><Icon name="image" size={20} /></span>
-        <div class="artifact-title">
-          <h3 id="artifact-heading">EMEA logistics map</h3>
-          <p>Generated · mock · just now</p>
-        </div>
-        <Pill ariaLabel="Undo artifact action" icon="refresh" iconOnly label="Undo" variant="ghost" />
-      </header>
-
-      <figure class="artifact-preview" aria-labelledby="artifact-caption">
-        <figcaption id="artifact-caption">Synthetic container load by hub</figcaption>
-        <div aria-hidden="true" class="thumbnail-bars">
-          <span class="bar bar-one"></span>
-          <span class="bar bar-two"></span>
-          <span class="bar bar-three"></span>
-          <span class="bar bar-four"></span>
-        </div>
-        <p class="thumbnail-note">Presentation-only thumbnail · no live analytics</p>
-      </figure>
-
-      <div class="artifact-actions">
-        <Pill ariaLabel="Open artifact preview" icon="arrow-up" label="Open" variant="selected" onActivate={() => onAction({ type: 'toggle-inspector' })} />
-        <Pill ariaLabel="Download artifact preview" icon="arrow-down" iconOnly label="Download" variant="ghost" />
+  <div
+    id="inspector-panel-artifacts"
+    aria-labelledby="inspector-tab-artifacts"
+    class="artifact-card"
+    hidden={activeTab !== 'artifacts'}
+    role="tabpanel"
+    tabindex="0"
+  >
+    <header class="artifact-header">
+      <span aria-hidden="true" class="artifact-icon"><Icon name="image" size={20} /></span>
+      <div class="artifact-title">
+        <h3 id="artifact-heading">EMEA logistics map</h3>
+        <p>Generated · mock · just now</p>
       </div>
-    </section>
-  {:else if activeTab === 'sources'}
-    <div class="empty-tab" role="tabpanel">
-      <Icon name="tool" size={20} />
-      <h3>Synthetic sources</h3>
-      <p>Source references stay local to this fixture. No remote documents are loaded.</p>
+      <Pill ariaLabel="Undo artifact action" icon="refresh" iconOnly label="Undo" title="Undo is deferred in this preview" variant="ghost" />
+    </header>
+
+    <figure class="artifact-preview" aria-labelledby="artifact-caption">
+      <figcaption id="artifact-caption">Synthetic container load by hub</figcaption>
+      <div aria-hidden="true" class="thumbnail-bars">
+        <span class="bar bar-one"></span>
+        <span class="bar bar-two"></span>
+        <span class="bar bar-three"></span>
+        <span class="bar bar-four"></span>
+      </div>
+      <p class="thumbnail-note">Presentation-only thumbnail · no live analytics</p>
+    </figure>
+
+    <div class="artifact-actions">
+      <Pill ariaLabel="Open artifact preview" disabled icon="arrow-up" label="Open" title="Artifact preview is presentation-only" variant="ghost" />
+      <Pill ariaLabel="Download artifact preview" icon="arrow-down" iconOnly label="Download" title="Download is deferred in this preview" variant="ghost" />
     </div>
-  {:else}
-    <div class="empty-tab" role="tabpanel">
-      <Icon name="image" size={20} />
-      <h3>Fixture files</h3>
-      <p>Attachments are represented as local placeholders until a later product phase.</p>
-    </div>
-  {/if}
+  </div>
+
+  <div
+    id="inspector-panel-sources"
+    aria-labelledby="inspector-tab-sources"
+    class="empty-tab"
+    hidden={activeTab !== 'sources'}
+    role="tabpanel"
+    tabindex="0"
+  >
+    <Icon name="tool" size={20} />
+    <h3>Synthetic sources</h3>
+    <p>Source references stay local to this fixture. No remote documents are loaded.</p>
+  </div>
+
+  <div
+    id="inspector-panel-files"
+    aria-labelledby="inspector-tab-files"
+    class="empty-tab"
+    hidden={activeTab !== 'files'}
+    role="tabpanel"
+    tabindex="0"
+  >
+    <Icon name="image" size={20} />
+    <h3>Fixture files</h3>
+    <p>Attachments are represented as local placeholders until a later product phase.</p>
+  </div>
 </aside>
 
 <style>

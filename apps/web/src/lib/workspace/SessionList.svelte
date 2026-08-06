@@ -47,6 +47,7 @@
             description={session.detail}
             fullWidth
             icon="conversation"
+            ariaCurrent={session.id === activeSessionId ? 'page' : undefined}
             label={session.title}
             selected={session.id === activeSessionId}
             variant={session.id === activeSessionId ? 'selected' : 'ghost'}
@@ -73,6 +74,7 @@
             description={session.detail}
             fullWidth
             icon="conversation"
+            ariaCurrent={session.id === activeSessionId ? 'page' : undefined}
             label={session.title}
             selected={session.id === activeSessionId}
             variant={session.id === activeSessionId ? 'selected' : 'ghost'}

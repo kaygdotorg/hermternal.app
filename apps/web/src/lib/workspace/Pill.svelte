@@ -11,18 +11,25 @@
   export let shortcut: string | undefined = undefined;
   export let ariaLabel = label;
   export let title: string | undefined = undefined;
+  export let disabledReason = 'Deferred in this preview';
   export let variant: PillVariant = 'neutral';
   export let fullWidth = false;
   export let iconOnly = false;
   export let selected = false;
+  export let toggleable = false;
   export let expanded = false;
+  export let expandable = false;
+  export let ariaControls: string | undefined = undefined;
+  export let ariaCurrent: 'page' | 'step' | 'location' | 'date' | 'time' | 'true' | 'false' | undefined = undefined;
   export let disabled = false;
-  export let onActivate: () => void = () => {};
+  export let buttonType: 'button' | 'submit' | 'reset' = 'button';
+  export let onActivate: (() => void) | undefined = undefined;
 
   let driftX = 0;
   let driftY = 0;
   let pressed = false;
   let pressPulse = 0;
+  let pointerActivationHandled = false;
 
   function reducedMotion(): boolean {
     return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -45,39 +52,64 @@
     pressed = false;
   }
 
-  function handlePointerDown(): void {
-    if (disabled) return;
+  function handlePointerDown(event: PointerEvent): void {
+    if (disabled || !onActivate || event.button !== 0) return;
     pressed = true;
+    pointerActivationHandled = true;
     pressPulse = 0;
     requestAnimationFrame(() => {
       pressPulse = 1;
     });
+    // Pointer activation is immediate. The following click is suppressed so
+    // mouse and touch cannot emit the same presentation action twice.
+    onActivate();
+  }
+
+  function handlePointerUp(): void {
+    pressed = false;
+    if (pointerActivationHandled) {
+      setTimeout(() => {
+        pointerActivationHandled = false;
+      }, 0);
+    }
+  }
+
+  function handlePointerCancel(): void {
+    resetMotion();
+    pointerActivationHandled = false;
   }
 
   function handleClick(): void {
-    if (!disabled) onActivate();
+    if (disabled || !onActivate) return;
+    if (pointerActivationHandled) {
+      pointerActivationHandled = false;
+      return;
+    }
+    onActivate();
   }
 </script>
 
 <button
-  aria-expanded={expanded}
+  aria-controls={expandable ? ariaControls : undefined}
+  aria-current={ariaCurrent}
+  aria-expanded={expandable ? expanded : undefined}
   aria-label={ariaLabel}
-  aria-pressed={selected}
+  aria-pressed={toggleable ? selected : undefined}
   class:full-width={fullWidth}
   class:icon-only={iconOnly}
   class:pulsing={pressPulse === 1}
   class:pressed
   class:selected
   class="pill {variant}"
-  disabled={disabled}
-  title={title ?? ariaLabel}
-  type="button"
+  disabled={disabled || (buttonType === 'button' && !onActivate)}
+  title={title ?? (buttonType === 'button' && !onActivate ? disabledReason : ariaLabel)}
+  type={buttonType}
   style={`--drift-x: ${driftX}px; --drift-y: ${driftY}px;`}
-  onpointercancel={resetMotion}
+  onpointercancel={handlePointerCancel}
   onpointerdown={handlePointerDown}
   onpointerleave={resetMotion}
   onpointermove={handlePointerMove}
-  onpointerup={() => (pressed = false)}
+  onpointerup={handlePointerUp}
   onclick={handleClick}
 >
   {#if monogram}

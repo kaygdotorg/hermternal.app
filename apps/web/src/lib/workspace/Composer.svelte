@@ -11,13 +11,26 @@
 
   let draft = '';
   let selectedModel = model;
+  let lastSubmittedText = '';
+  let editedSinceSubmit = true;
+
+  function sendMessage(): void {
+    const text = draft.trim();
+    if (!text || disabled || isStreaming || (!editedSinceSubmit && text === lastSubmittedText)) return;
+
+    lastSubmittedText = text;
+    editedSinceSubmit = false;
+    draft = '';
+    onAction({ type: 'send', text });
+  }
+
+  function handleDraftInput(): void {
+    editedSinceSubmit = true;
+  }
 
   function handleSubmit(event: SubmitEvent): void {
     event.preventDefault();
-    const text = draft.trim();
-    if (!text || disabled) return;
-    onAction({ type: 'send', text });
-    draft = '';
+    sendMessage();
   }
 
   function handleKeydown(event: KeyboardEvent): void {
@@ -42,9 +55,10 @@
       disabled={disabled}
       placeholder={placeholder}
       rows="1"
+      oninput={handleDraftInput}
       onkeydown={handleKeydown}
     ></textarea>
-    <span class="field-hint">⌘ Enter to send · Shift Enter for a new line</span>
+    <span class="field-hint">⌘/Ctrl Enter to send · Shift Enter for a new line</span>
   </label>
 
   <div class="composer-controls">
@@ -68,7 +82,7 @@
       {#if isStreaming}
         <Pill ariaLabel="Stop response" icon="stop" label="Stop" variant="danger" onActivate={() => onAction({ type: 'stop' })} />
       {:else}
-        <Pill ariaLabel="Send message" icon="send" iconOnly label="Send message" variant="action" disabled={disabled || !draft.trim()} />
+        <Pill ariaLabel="Send message" icon="send" iconOnly label="Send message" variant="action" disabled={disabled || !draft.trim()} onActivate={sendMessage} />
       {/if}
     </div>
   </div>

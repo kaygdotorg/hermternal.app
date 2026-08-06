@@ -56,7 +56,7 @@
     <Pill ariaLabel="Open workspace options" icon="menu" iconOnly label="Workspace options" variant="ghost" />
   </div>
 
-  <div class="workspace-grid">
+  <div class:inspector-hidden={!inspectorVisible} class="workspace-grid">
     <aside class:open={mobileSidebarOpen} class="sidebar">
       <SessionList activeSessionId={activeSessionId} sessions={sessions} onAction={handleAction} />
     </aside>
@@ -65,7 +65,7 @@
       <ConversationHeader model={localModel} title={localTitle} onAction={handleAction} />
 
       <div class="conversation-body">
-        <Timeline items={timeline} onAction={handleAction} />
+        <Timeline items={timeline} runtimeState={state} onAction={handleAction} />
 
         <div class:empty-layer={state === 'empty'} class:visible={state !== 'ready'} class="state-layer">
           <StateBanner state={state} onAction={handleAction} />
@@ -111,6 +111,7 @@
     --radius-nested-glass: 14px;
     --radius-popover: 18px;
     --radius-glass: 22px;
+    position: relative;
     box-sizing: border-box;
     width: 100%;
     min-width: 0;
@@ -172,6 +173,10 @@
     gap: 16px;
     min-height: 928px;
     padding: 16px;
+  }
+
+  .workspace-grid.inspector-hidden {
+    grid-template-columns: minmax(220px, 276px) minmax(0, 1fr);
   }
 
   .sidebar,
@@ -297,8 +302,13 @@
       left: 8px;
       z-index: 8;
       display: none;
-      width: min(276px, calc(100vw - 16px));
+      box-sizing: border-box;
+      width: min(276px, calc(100% - 16px));
+      max-width: calc(100% - 16px);
       height: min(720px, calc(100dvh - 80px));
+      max-height: calc(100dvh - 80px);
+      overflow: auto;
+      contain: layout paint;
     }
 
     .sidebar.open {

@@ -10,7 +10,7 @@ export const DEFAULT_PROVIDERS: AuthProvider[] = [
     name: 'Nous',
     monogram: 'N',
     kind: 'oauth',
-    description: 'OAuth · opens the provider'
+    description: 'OAuth · local fixture only'
   },
   {
     id: 'hermes-password',

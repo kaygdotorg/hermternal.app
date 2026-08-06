@@ -37,6 +37,49 @@ test('UI preview exposes local state controls and dark appearance', async ({ pag
   await expect(page.getByRole('heading', { name: 'Sign-in did not complete' })).toBeVisible();
 });
 
+test('narrow absolute surfaces stay contained and Send activates the local action', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/ui-preview');
+
+  const auth = page.locator('.auth-preview');
+  const statusBar = page.locator('.mobile-status-bar');
+  const authBox = await auth.boundingBox();
+  const statusBox = await statusBar.boundingBox();
+  expect(authBox).not.toBeNull();
+  expect(statusBox).not.toBeNull();
+  expect(Math.abs((statusBox?.y ?? 0) - (authBox?.y ?? 0))).toBeLessThanOrEqual(1);
+
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+  await page.getByRole('button', { name: 'Open conversations' }).click();
+  const workspace = page.locator('.workspace-preview');
+  const sidebar = page.locator('.workspace-preview .sidebar');
+  const workspaceBox = await workspace.boundingBox();
+  const sidebarBox = await sidebar.boundingBox();
+  expect(workspaceBox).not.toBeNull();
+  expect(sidebarBox).not.toBeNull();
+  expect(Math.abs((sidebarBox?.y ?? 0) - ((workspaceBox?.y ?? 0) + 64))).toBeLessThanOrEqual(1);
+  expect((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0)).toBeLessThanOrEqual((workspaceBox?.x ?? 0) + (workspaceBox?.width ?? 0) + 1);
+
+  const composer = page.getByRole('textbox', { name: 'Message Hermes' });
+  await composer.fill('Pointer fixture');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.locator('.section-note').first()).toHaveText('send');
+});
+
+test('password preview submits only a credential-free local fixture action', async ({ page }) => {
+  await page.goto('/ui-preview');
+  await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+
+  await page.getByLabel('Username').fill('sam');
+  await page.getByRole('textbox', { name: 'Password' }).fill('browser-only-fixture');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting');
+  await expect(page.getByRole('textbox', { name: 'Password' })).toHaveValue('');
+  await expect(page.locator('.section-note').nth(1)).toHaveText('submit-password-fixture');
+  await expect(page.getByText(/sent only to the configured/i)).not.toBeVisible();
+});
+
 test('UI preview has no axe violations', async ({ page }) => {
   await page.goto('/ui-preview');
 

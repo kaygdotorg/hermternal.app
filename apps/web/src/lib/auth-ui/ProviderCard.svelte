@@ -14,7 +14,7 @@
       ? 'Checking provider manifest'
       : 'Validating provider entries'
     : expanded && provider.kind === 'oauth'
-      ? `${provider.description} · Opens a secure provider window`
+      ? `${provider.description} · No provider window opens in this preview`
       : provider.description;
 
   let trailingIcon: IconName = 'arrow-right';
@@ -31,7 +31,7 @@
     label={provider.name}
     monogram={provider.monogram}
     trailingIcon={trailingIcon}
-    variant={expanded ? 'selected' : 'neutral'}
+    variant="neutral"
     onActivate={() => onAction({ type: 'choose-provider', providerId: provider.id })}
   />
 </div>
@@ -59,7 +59,8 @@
     line-height: 16px;
   }
 
-  .provider-card:hover :global(.pill:not(:disabled)) {
+  .provider-card:hover :global(.pill:not(:disabled)),
+  .provider-card.expanded :global(.pill:not(:disabled)) {
     background: color-mix(in srgb, var(--signal) 5%, var(--surface));
   }
 

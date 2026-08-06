@@ -8,7 +8,7 @@ const provider: AuthProvider = {
   name: 'Nous',
   monogram: 'N',
   kind: 'oauth',
-  description: 'OAuth · opens the provider'
+  description: 'OAuth · local fixture only'
 };
 
 describe('ProviderCard', () => {

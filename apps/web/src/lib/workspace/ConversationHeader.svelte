@@ -11,10 +11,12 @@
   let editing = false;
   let draftTitle = title;
   let titleEditor: HTMLInputElement | undefined;
+  let suppressBlurCommit = false;
 
   $: if (!editing) draftTitle = title;
 
   async function startEditing(): Promise<void> {
+    suppressBlurCommit = false;
     draftTitle = title;
     editing = true;
     await tick();
@@ -23,9 +25,19 @@
   }
 
   function finishEditing(): void {
+    if (suppressBlurCommit) {
+      suppressBlurCommit = false;
+      return;
+    }
     const nextTitle = draftTitle.trim();
     if (nextTitle) onAction({ type: 'edit-title', title: nextTitle });
     editing = false;
+  }
+
+  function cancelEditing(): void {
+    suppressBlurCommit = true;
+    editing = false;
+    draftTitle = title;
   }
 
   function handleTitleKeydown(event: KeyboardEvent): void {
@@ -34,8 +46,7 @@
       finishEditing();
     } else if (event.key === 'Escape') {
       event.preventDefault();
-      editing = false;
-      draftTitle = title;
+      cancelEditing();
     }
   }
 </script>
@@ -59,9 +70,8 @@
         ariaLabel="Edit conversation title"
         fullWidth
         label={title}
-        selected
         trailingIcon="chevron-down"
-        variant="selected"
+        variant="neutral"
         onActivate={startEditing}
       />
     {/if}
@@ -73,9 +83,11 @@
       icon="conversation"
       label="Chat"
       selected
+      title="Chat mode is current in this preview"
+      toggleable
       variant="selected"
     />
-    <Pill ariaLabel="Open terminal mode" icon="terminal" label="Terminal" variant="ghost" />
+    <Pill ariaLabel="Open terminal mode" icon="terminal" label="Terminal" title="Terminal mode is deferred in this preview" variant="ghost" />
   </div>
 
   <Pill ariaLabel="Workspace options" icon="menu" iconOnly label="Workspace options" variant="ghost" />

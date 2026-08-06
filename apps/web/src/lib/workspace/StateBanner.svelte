@@ -45,7 +45,7 @@
       <strong>Start with a question</strong>
       <span>This session is ready for a fresh start. Available controls remain local to this preview.</span>
     </div>
-    <Pill label="Choose an action" icon="spark" variant="selected" onActivate={() => onAction({ type: 'new-session' })} />
+    <Pill label="Choose an action" icon="spark" variant="action" onActivate={() => onAction({ type: 'new-session' })} />
     <p>Mocked fixture only · synthetic empty state · no live connection</p>
   </div>
 {:else if state === 'offline'}
@@ -57,7 +57,7 @@
         <span>Drafts stay on this device. Sending is paused.</span>
       </div>
     </div>
-    <Pill label="Check connection" icon="refresh" variant="selected" onActivate={() => onAction({ type: 'check-connection' })} />
+    <Pill label="Check connection" icon="refresh" variant="action" onActivate={() => onAction({ type: 'check-connection' })} />
   </div>
 {:else if state === 'reconnecting'}
   <div aria-live="polite" class="state-card reconnect-state" data-testid="reconnect-state" role="status">
@@ -138,6 +138,8 @@
   .state-copy > div,
   .empty-copy,
   .error-copy {
+    display: flex;
+    min-width: 0;
     flex-direction: column;
     gap: 2px;
   }

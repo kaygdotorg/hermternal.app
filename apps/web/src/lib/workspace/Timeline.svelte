@@ -2,16 +2,32 @@
   import Icon from './Icon.svelte';
   import type { IconName } from './icon-types';
   import Pill from './Pill.svelte';
-  import type { TimelineItem, WorkspaceActionHandler } from './types';
+  import type { TimelineItem, WorkspaceActionHandler, WorkspaceRuntimeState } from './types';
 
   export let items: TimelineItem[] = [];
+  export let runtimeState: WorkspaceRuntimeState = 'ready';
   export let onAction: WorkspaceActionHandler = () => {};
+
+  $: timelineActionsDisabled = runtimeState !== 'ready';
+  $: approvalDisabledReason = runtimeState === 'stopped'
+    ? 'Approval is unavailable after the response stopped.'
+    : runtimeState === 'offline'
+      ? 'Approval is unavailable while offline.'
+      : runtimeState === 'reconnecting'
+        ? 'Approval is unavailable while reconnecting.'
+        : 'Timeline actions are unavailable while this response is in progress.';
 
   function toolIcon(status: 'completed' | 'running' | 'pending' | 'failed'): IconName {
     if (status === 'completed') return 'check';
     if (status === 'failed') return 'warning';
     if (status === 'pending') return 'clock';
     return 'spark';
+  }
+
+  function answerClarification(itemId: string, answer: string): void {
+    // Keep the state gate in the handler as well as the native disabled attribute so synthetic or programmatic events cannot bypass it.
+    if (timelineActionsDisabled) return;
+    onAction({ type: 'answer-clarification', itemId, answer });
   }
 </script>
 
@@ -70,16 +86,25 @@
         {#if item.status === 'pending'}
           <div class="approval-actions">
             <Pill
+              ariaLabel={timelineActionsDisabled ? `${item.confirmLabel}, unavailable` : item.confirmLabel}
+              disabled={timelineActionsDisabled}
               label={item.confirmLabel}
+              title={timelineActionsDisabled ? approvalDisabledReason : undefined}
               variant="action"
               onActivate={() => onAction({ type: 'approve-tool', itemId: item.id })}
             />
             <Pill
+              ariaLabel={timelineActionsDisabled ? `${item.rejectLabel}, unavailable` : item.rejectLabel}
+              disabled={timelineActionsDisabled}
               label={item.rejectLabel}
+              title={timelineActionsDisabled ? approvalDisabledReason : undefined}
               variant="ghost"
               onActivate={() => onAction({ type: 'reject-tool', itemId: item.id })}
             />
           </div>
+          {#if timelineActionsDisabled}
+            <p class="approval-gate" role="status">{approvalDisabledReason}</p>
+          {/if}
         {/if}
       </article>
     {:else if item.kind === 'clarification'}
@@ -94,24 +119,27 @@
         <div class="clarification-options" role="group" aria-label="Clarification choices">
           {#each item.options as option}
             <button
+              aria-label={timelineActionsDisabled ? `${option}, unavailable` : option}
               aria-pressed={item.selectedOption === option}
               class:selected={item.selectedOption === option}
+              disabled={timelineActionsDisabled}
+              title={timelineActionsDisabled ? approvalDisabledReason : undefined}
               type="button"
-              onclick={() => onAction({ type: 'answer-clarification', itemId: item.id, answer: option })}
+              onclick={() => answerClarification(item.id, option)}
             >{option}</button>
           {/each}
         </div>
+        {#if timelineActionsDisabled}
+          <p class="approval-gate">{approvalDisabledReason}</p>
+        {/if}
       </article>
     {:else if item.kind === 'image'}
       <figure class="timeline-row image-card">
-        {#if item.attachment.src}
-          <img src={item.attachment.src} alt={item.attachment.alt} />
-        {:else}
-          <div aria-label={item.attachment.alt} class="image-placeholder" role="img">
-            <Icon name="image" size={28} />
-            <span>Image placeholder</span>
-          </div>
-        {/if}
+        <!-- The preview intentionally never mounts caller-provided image URLs. A later packaged-asset adapter can add safe local imagery without creating an implicit network boundary. -->
+        <div aria-label={item.attachment.alt} class="image-placeholder" role="img">
+          <Icon name="image" size={28} />
+          <span>{item.attachment.src ? 'Image source omitted from this local preview' : 'Image placeholder'}</span>
+        </div>
         <figcaption>{item.attachment.caption}</figcaption>
       </figure>
     {:else if item.kind === 'streaming'}
@@ -391,6 +419,13 @@
     padding-left: 36px;
   }
 
+  .approval-gate {
+    margin: -4px 0 0 36px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 16px;
+  }
+
   .clarification-card {
     display: flex;
     flex-direction: column;
@@ -439,7 +474,6 @@
     margin: 0 28px;
   }
 
-  .image-card img,
   .image-placeholder {
     display: flex;
     width: 100%;
@@ -580,6 +614,10 @@
     .approval-actions,
     .clarification-options {
       padding-left: 0;
+    }
+
+    .approval-gate {
+      margin-left: 0;
     }
 
     .step-status,

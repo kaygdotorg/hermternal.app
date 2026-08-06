@@ -24,7 +24,7 @@ export interface AuthProvider {
 export type AuthAction =
   | { type: 'choose-provider'; providerId: string }
   | { type: 'back-to-providers' }
-  | { type: 'submit-password'; username: string; password: string }
+  | { type: 'submit-password-fixture' }
   | { type: 'toggle-password-visibility' }
   | { type: 'cancel-callback' }
   | { type: 'retry-authentication' }

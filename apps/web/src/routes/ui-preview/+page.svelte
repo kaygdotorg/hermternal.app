@@ -56,6 +56,7 @@
       authState = action.type === 'retry-discovery' ? 'discovery-pending' : 'provider-selection';
     }
 
+    if (action.type === 'submit-password-fixture') authState = 'password-submitting';
     if (action.type === 'sign-in-again') authState = 'provider-selection';
   }
 </script>
