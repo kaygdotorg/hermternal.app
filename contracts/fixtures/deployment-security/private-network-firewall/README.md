@@ -55,7 +55,12 @@ The ordered case inventory covers:
 - a missing firewall rule.
 
 Every computed outcome is required to remain a synthetic result with no live
-claim. Unknown or incomplete topology blocks before any upstream access.
+claim. Every allow case, including topology validation, static root delivery,
+and reviewed Hermes routes, carries the configured public HTTPS origin, approved
+topology state, exact fixed private non-loopback bind on TCP `9119`, and the
+present narrow firewall rule for `approved_proxy_network_identity`. Unknown or
+incomplete topology, unsafe origins, noncanonical binds, broad or missing rules,
+direct client paths, and management exposure block before any upstream access.
 
 ## Strict validation and redaction
 

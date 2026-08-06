@@ -104,7 +104,7 @@
       "id": "topology-approved",
       "kind": "topology",
       "input": {
-        "origin": "not_applicable",
+        "origin": "configured_public_https_origin",
         "client_surface": "proof_harness",
         "route": null,
         "network_path": "offline_fixture",
@@ -133,7 +133,7 @@
         "route": "/",
         "network_path": "public_https_to_proxy",
         "hermes_bind": "fixed_private_non_loopback_9119",
-        "firewall_source": "not_applicable",
+        "firewall_source": "approved_proxy_network_identity",
         "topology_state": "approved",
         "firewall_rule": "present"
       },

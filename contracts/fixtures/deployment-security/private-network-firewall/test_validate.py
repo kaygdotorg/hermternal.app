@@ -119,6 +119,35 @@ class PrivateNetworkFirewallTests(unittest.TestCase):
                 self.assertEqual(expected["reason"], reason)
                 self.assertFalse(expected["live_claim"])
 
+    def test_every_allow_case_rejects_noncanonical_topology_mutations_in_both_modes(self) -> None:
+        positive_ids = (
+            "topology-approved",
+            "static-client-root-approved",
+            "reviewed-chat-via-proxy-approved",
+            "reviewed-pty-via-proxy-approved",
+        )
+        mutations = (
+            ("origin", "unconfigured_public_https_origin"),
+            ("client_surface", "direct_client"),
+            ("network_path", "public_to_private_9119"),
+            ("network_path", "client_to_private_9119"),
+            ("hermes_bind", "unknown_bind"),
+            ("firewall_source", "direct_client"),
+            ("firewall_source", "public_internet"),
+            ("firewall_source", "unknown_network_identity"),
+            ("topology_state", "wrong_origin"),
+            ("firewall_rule", "broad"),
+            ("firewall_rule", "absent"),
+            ("route", "/api/config"),
+        )
+        for case_id in positive_ids:
+            for field, value in mutations:
+                with self.subTest(case_id=case_id, field=field, value=value):
+                    mutated = copy.deepcopy(self.document)
+                    target = next(case for case in mutated["cases"] if case["id"] == case_id)
+                    target["input"][field] = value
+                    self._assert_cli_failure(json.dumps(mutated).encode())
+
     def test_proxy_variants_are_equal_neutral_metadata_only(self) -> None:
         contract = self.document["proxy_contract"]
         self.assertEqual(contract["variants"], ["caddy", "traefik"])

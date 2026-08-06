@@ -328,7 +328,10 @@ CASE_KINDS = frozenset({"topology", "positive", "negative", "incompatible", "mal
 REASONS = frozenset(
     {
         "topology_approved",
+        "topology_case_shape_invalid",
+        "topology_state_not_approved",
         "static_client_at_root",
+        "static_client_path_invalid",
         "proxy_to_private_hermes",
         "direct_public_access_denied",
         "direct_client_access_denied",
@@ -337,7 +340,9 @@ REASONS = frozenset(
         "localhost_only_assumption_rejected",
         "public_bind_rejected",
         "private_port_mismatch",
+        "unknown_hermes_bind",
         "broad_firewall_source_denied",
+        "firewall_rule_not_narrow",
         "unknown_network_identity",
         "management_route_not_exposed",
         "unknown_route_not_exposed",
@@ -719,19 +724,9 @@ def _outcome(
 
 
 def evaluate_case(case: Any) -> dict[str, Any]:
-    """Evaluate one already-shaped case using the independent boundary model."""
+    """Evaluate one already-shaped case without trusting its case identifier."""
 
     request = case["input"]
-    case_id = case["id"]
-    if case_id == "topology-approved":
-        return _outcome(
-            decision="allow",
-            route_action="topology_validated",
-            firewall_action="allow",
-            upstream_reached=False,
-            observed_layer="offline_validator",
-            reason="topology_approved",
-        )
     if request["topology_state"] in {"unknown", "malformed"}:
         return _outcome(
             decision="deny",
@@ -777,6 +772,15 @@ def evaluate_case(case: Any) -> dict[str, Any]:
             observed_layer="offline_validator",
             reason="private_port_mismatch",
         )
+    if request["hermes_bind"] == "unknown_bind":
+        return _outcome(
+            decision="deny",
+            route_action="deny_bind",
+            firewall_action="deny",
+            upstream_reached=False,
+            observed_layer="offline_validator",
+            reason="unknown_hermes_bind",
+        )
     if request["network_path"] == "public_to_private_9119":
         return _outcome(
             decision="deny",
@@ -811,6 +815,15 @@ def evaluate_case(case: Any) -> dict[str, Any]:
                 else "unknown_network_identity"
             ),
         )
+    if request["firewall_rule"] in {"broad", "unknown"}:
+        return _outcome(
+            decision="deny",
+            route_action="deny_firewall_rule",
+            firewall_action="deny",
+            upstream_reached=False,
+            observed_layer="offline_validator",
+            reason="firewall_rule_not_narrow",
+        )
     if request["origin"] == "unconfigured_public_https_origin":
         return _outcome(
             decision="deny",
@@ -828,6 +841,69 @@ def evaluate_case(case: Any) -> dict[str, Any]:
             upstream_reached=False,
             observed_layer="proxy",
             reason="additional_origin_denied",
+        )
+    if request["origin"] != "configured_public_https_origin":
+        return _outcome(
+            decision="deny",
+            route_action="deny_origin",
+            firewall_action="deny",
+            upstream_reached=False,
+            observed_layer="proxy",
+            reason="unconfigured_origin_denied",
+        )
+    if request["hermes_bind"] != "fixed_private_non_loopback_9119":
+        return _outcome(
+            decision="deny",
+            route_action="deny_bind",
+            firewall_action="deny",
+            upstream_reached=False,
+            observed_layer="offline_validator",
+            reason="unknown_hermes_bind",
+        )
+    if request["topology_state"] != "approved":
+        return _outcome(
+            decision="deny",
+            route_action="block_topology",
+            firewall_action="deny",
+            upstream_reached=False,
+            observed_layer="offline_validator",
+            reason="topology_state_not_approved",
+        )
+    if request["firewall_source"] != "approved_proxy_network_identity":
+        return _outcome(
+            decision="deny",
+            route_action="deny_firewall_rule",
+            firewall_action="deny",
+            upstream_reached=False,
+            observed_layer="offline_validator",
+            reason="unknown_network_identity",
+        )
+    if request["firewall_rule"] != "present":
+        return _outcome(
+            decision="deny",
+            route_action="deny_firewall_rule",
+            firewall_action="deny",
+            upstream_reached=False,
+            observed_layer="offline_validator",
+            reason="firewall_rule_not_narrow",
+        )
+    if request["route"] is None:
+        if request["client_surface"] == "proof_harness" and request["network_path"] == "offline_fixture":
+            return _outcome(
+                decision="allow",
+                route_action="topology_validated",
+                firewall_action="allow",
+                upstream_reached=False,
+                observed_layer="offline_validator",
+                reason="topology_approved",
+            )
+        return _outcome(
+            decision="deny",
+            route_action="block_topology",
+            firewall_action="deny",
+            upstream_reached=False,
+            observed_layer="offline_validator",
+            reason="topology_case_shape_invalid",
         )
     if request["route"] in EXPECTED_ROUTE_POLICY["blocked_management_prefixes"]:
         return _outcome(
@@ -849,11 +925,7 @@ def evaluate_case(case: Any) -> dict[str, Any]:
             reason="unknown_route_not_exposed",
         )
     if request["route"] == "/":
-        if (
-            request["origin"] == "configured_public_https_origin"
-            and request["client_surface"] == "public_browser"
-            and request["network_path"] == "public_https_to_proxy"
-        ):
+        if request["client_surface"] == "public_browser" and request["network_path"] == "public_https_to_proxy":
             return _outcome(
                 decision="allow",
                 route_action="serve_static",
@@ -868,17 +940,9 @@ def evaluate_case(case: Any) -> dict[str, Any]:
             firewall_action="deny",
             upstream_reached=False,
             observed_layer="proxy",
-            reason="unconfigured_origin_denied",
+            reason="static_client_path_invalid",
         )
-    if request["network_path"] == "public_to_private_9119":
-        reason = "direct_public_access_denied"
-    elif request["network_path"] == "client_to_private_9119":
-        reason = "direct_client_access_denied"
-    elif request["client_surface"] != "proxy" or request["network_path"] != "proxy_to_private_9119":
-        reason = "unknown_network_identity"
-    elif request["firewall_source"] != "approved_proxy_network_identity":
-        reason = "unknown_network_identity"
-    else:
+    if request["client_surface"] == "proxy" and request["network_path"] == "proxy_to_private_9119":
         return _outcome(
             decision="allow",
             route_action="proxy_reviewed_route",
@@ -889,11 +953,11 @@ def evaluate_case(case: Any) -> dict[str, Any]:
         )
     return _outcome(
         decision="deny",
-        route_action="deny_private_direct" if "direct" in reason else "deny_firewall_rule",
+        route_action="deny_firewall_rule",
         firewall_action="deny",
         upstream_reached=False,
         observed_layer="firewall",
-        reason=reason,
+        reason="unknown_network_identity",
     )
 
 
