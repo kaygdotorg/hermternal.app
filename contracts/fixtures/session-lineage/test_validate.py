@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -88,7 +90,7 @@ print(json.dumps(results))
 
     def test_checked_in_document_and_baseline_validate(self) -> None:
         case_count, artifact_bytes = validate.validate_all(self.document, self.baseline)
-        self.assertEqual(case_count, 32)
+        self.assertEqual(case_count, 33)
         self.assertGreater(artifact_bytes, 0)
         self.assertEqual(len(self.document["states"]), 9)
         self.assertIsNone(self.baseline["threshold"])
@@ -104,7 +106,7 @@ print(json.dumps(results))
         self.assertEqual(normal.stdout, optimized.stdout)
         self.assertEqual(normal.stderr, "")
         self.assertEqual(optimized.stderr, "")
-        self.assertIn("states=9 cases=32", normal.stdout)
+        self.assertIn("states=9 cases=33", normal.stdout)
 
     def test_root_branch_and_resume_preserve_full_lineage(self) -> None:
         root = self.cases["persist-new-root-lineage"]["expected"]
@@ -162,6 +164,12 @@ print(json.dumps(results))
         self.assertEqual(branch_duplicate["decision"], "duplicate_creation_reused")
         self.assertEqual(branch_duplicate["creation_attempts"], 1)
 
+        persisted_duplicate = self.cases["create-branch-duplicate-after-persistence"]["expected"]
+        self.assertEqual(persisted_duplicate["final_state"], "ready")
+        self.assertEqual(persisted_duplicate["decision"], "duplicate_creation_reused")
+        self.assertTrue(persisted_duplicate["durable"])
+        self.assertTrue(persisted_duplicate["duplicate_suppressed"])
+
         resume_duplicate = self.cases["duplicate-resume-is-idempotent"]["expected"]
         self.assertEqual(resume_duplicate["resume_attempts"], 1)
         self.assertTrue(resume_duplicate["duplicate_suppressed"])
@@ -181,6 +189,42 @@ print(json.dumps(results))
                 self.assertEqual(result["error_kind"], "incompatible")
                 self.assertIn(effect, result["effects"])
                 self.assertTrue(result["transport_closed"])
+
+    def test_direct_reducer_rejects_short_and_ellipsis_lineage_ids(self) -> None:
+        traces = (
+            (
+                "ready",
+                validate._root_context(candidate_parent_state="open"),
+                f"session.create.branch.request:x:{validate.ROOT_SESSION_ID}:{validate.BRANCH_CREATE_KEY}",
+            ),
+            (
+                "ready",
+                validate._root_context(candidate_parent_state="open"),
+                f"session.create.branch.request:{validate.BRANCH_SESSION_ID}:...:{validate.BRANCH_CREATE_KEY}",
+            ),
+            (
+                "empty",
+                validate._context(),
+                f"session.create.accepted:x:{validate.ROOT_SESSION_ID}:none:root",
+            ),
+            (
+                "closed",
+                validate._branch_context(state="closed", parent_state="open"),
+                "session.resume.request:x",
+            ),
+            (
+                "empty",
+                validate._context(),
+                "session.create.root.request:x",
+            ),
+        )
+        for initial_state, context, event in traces:
+            with self.subTest(event=event):
+                runtime = validate._initial_runtime(initial_state, context)
+                validate._transition(runtime, event)
+                self.assertEqual(runtime["state"], "incompatible")
+                self.assertTrue(runtime["transport_closed"])
+                self.assertIn("no_new_session_fallback", runtime["effects"])
 
     def test_interrupted_and_unknown_creation_require_safe_recovery(self) -> None:
         interrupted = self.cases["create-interrupted-preserves-parent"]["expected"]
@@ -274,6 +318,48 @@ print(json.dumps(results))
                             {"error": {"code": "contract", "message": "session lineage fixture rejected"}},
                         )
 
+    def test_coordinated_source_cases_and_manifest_mutation_fails_reviewed_anchors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            copied_root = Path(directory) / "session-lineage"
+            shutil.copytree(ROOT, copied_root)
+
+            validator_path = copied_root / "validate.py"
+            validator_source = validator_path.read_text(encoding="utf-8")
+            validator_source = validator_source.replace(
+                "HERMES_SOURCE_SHA = REVIEWED_SOURCE_SHA",
+                'HERMES_SOURCE_SHA = "0000000000000000000000000000000000000000"',
+                1,
+            )
+            validator_path.write_text(validator_source, encoding="utf-8")
+
+            cases_path = copied_root / "cases.json"
+            cases = json.loads(cases_path.read_text(encoding="utf-8"))
+            cases["hermes_source_sha"] = "0000000000000000000000000000000000000000"
+            cases_path.write_text(json.dumps(cases, indent=2) + "\n", encoding="utf-8")
+
+            baseline_path = copied_root / "validation-baseline.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            for artifact in baseline["artifact_files"]:
+                if artifact["path"] == "cases.json":
+                    data = cases_path.read_bytes()
+                    artifact["sha256"] = hashlib.sha256(data).hexdigest()
+                    artifact["size_bytes"] = len(data)
+            baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+
+            for optimized in (False, True):
+                with self.subTest(optimized=optimized):
+                    command = [sys.executable]
+                    if optimized:
+                        command.append("-O")
+                    command.append(str(validator_path))
+                    result = subprocess.run(command, check=False, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stderr, "")
+                    self.assertEqual(
+                        json.loads(result.stdout),
+                        {"error": {"code": "contract", "message": "session lineage fixture rejected"}},
+                    )
+
     def test_redaction_rejects_sensitive_values_and_keys_in_both_modes(self) -> None:
         rejected = [
             "Bearer synthetic-token",
@@ -340,6 +426,7 @@ print(json.dumps(results))
                 "overflow.json": b'{"value":1e9999}',
                 "huge-int.json": b'{"value":' + b"1" + (b"0" * validate.MAX_INTEGER_DIGITS) + b"}",
                 "deep.json": (b"[" * (validate.MAX_JSON_DEPTH + 2) + b"0" + b"]" * (validate.MAX_JSON_DEPTH + 2)),
+                "oversized-key.json": b'{"' + (b"k" * (validate.MAX_STRING_LENGTH + 1)) + b'":1}',
                 "invalid-utf8.json": b'{"value":"\xff"}',
             }
             for name, data in mutations.items():
@@ -348,6 +435,17 @@ print(json.dumps(results))
                     path.write_bytes(data)
                     with self.assertRaises(validate.ContractError):
                         validate._load_json(path, "synthetic input")
+
+            oversized_key = root / "oversized-key.json"
+            for optimized in (False, True):
+                with self.subTest(name="oversized-key-cli", optimized=optimized):
+                    result = self.run_cli(optimized, "--cases", str(oversized_key))
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stderr, "")
+                    self.assertEqual(
+                        json.loads(result.stdout),
+                        {"error": {"code": "contract", "message": "session lineage fixture rejected"}},
+                    )
 
     def test_exact_schema_duplicate_case_and_redacted_cli_failure(self) -> None:
         extra_key = copy.deepcopy(self.document)

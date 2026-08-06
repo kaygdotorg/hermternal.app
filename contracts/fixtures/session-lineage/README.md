@@ -51,13 +51,22 @@ parent/fork wire schema. Therefore this fixture models lineage metadata as a
 reviewed synthetic contract boundary and fails closed when evidence is absent,
 foreign, malformed, unsupported, cyclic, self-referential, or incompatible.
 
+The validator does not treat `validation-baseline.json` as its own trust
+anchor. It checks the manifest bytes against a reviewed digest, checks the
+source pin against independently assembled reviewed chunks, checks the
+external artifact digests against reviewed literals, and checks normalized
+validator source separately. Coordinated edits to the cases, source pin,
+manifest, or validator therefore fail before semantic success is reported.
+
 ## Contract rules
 
 ### Identity
 
 - IDs are opaque, exact, ASCII, single-segment values.
-- A full ID is required. Prefixes, ellipses, Unicode lookalikes, URL escapes,
-  path separators, and ticket-bearing values are not accepted.
+- A full ID is required. Direct lineage traces also require the reviewed
+  synthetic ID length floor; one-character values, prefixes, ellipses, Unicode
+  lookalikes, URL escapes, path separators, and ticket-bearing values are not
+  accepted.
 - A root has `root_id == session_id` and `parent_id == null`.
 - A branch has a new `session_id`, the inherited `root_id`, and the exact
   durable parent in `parent_id`.
@@ -68,8 +77,9 @@ foreign, malformed, unsupported, cyclic, self-referential, or incompatible.
 Creation is explicit. Root creation has no parent. Branch creation requires a
 complete durable parent that is open or closed, and the requested child must
 not already occur in its ancestor list. A repeated create with the same
-idempotency key and complete identity is suppressed. It does not create a
-second child or rewrite the parent link.
+idempotency key and complete identity is suppressed, including after the
+lineage has crossed the persistence boundary. It does not create a second
+child or rewrite the parent link.
 
 Creation is lazy with respect to durable persistence: an accepted identity is
 not treated as durable until the synthetic `session.lineage.persisted` event.
@@ -105,8 +115,11 @@ reconstruction.
 ## Files
 
 - `cases.json` contains the closed schema, source observations, state and
-  invariant tables, redaction policy, and 32 exact semantic traces.
-- `validate.py` is the standard-library-only validator and reducer.
+  invariant tables, redaction policy, and 33 exact semantic traces.
+- `validate.py` is the standard-library-only validator and reducer. It carries
+  immutable reviewed digests for the source pin and external fixture artifacts;
+  the baseline records a normalized validator-source digest to avoid a
+  self-hash cycle.
 - `test_validate.py` exercises the checked-in contract, both CLI modes, strict
   JSON handling, redaction, identity binding, and semantic failure paths.
 - `baseline-evidence.json` contains 30 measured normal and 30 measured `-O`

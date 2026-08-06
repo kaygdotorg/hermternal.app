@@ -606,6 +606,70 @@
       "notes": "A repeated branch create does not create a second child or alter the parent link."
     },
     {
+      "id": "create-branch-duplicate-after-persistence",
+      "initial_state": "ready",
+      "initial_context": {
+        "session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "lineage_kind": "root",
+        "parent_state": "none",
+        "ancestor_ids": [],
+        "durable": true,
+        "deleted": false,
+        "candidate_parent_state": "open",
+        "operation": "idle",
+        "idempotency_key": null,
+        "creation_attempts": 0,
+        "resume_attempts": 0,
+        "transport": "connected",
+        "compatibility": "passed",
+        "result": "present"
+      },
+      "events": [
+        "session.create.branch.request:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:create-key-branch-0000000000000000000000000000000000000002",
+        "session.create.accepted:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch",
+        "session.lineage.persisted:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch",
+        "session.create.duplicate:session-branch-0000000000000000000000000000000000000002:session-root-0000000000000000000000000000000000000001:session-root-0000000000000000000000000000000000000001:branch:create-key-branch-0000000000000000000000000000000000000002"
+      ],
+      "expected": {
+        "decision": "duplicate_creation_reused",
+        "final_state": "ready",
+        "trace": [
+          "ready",
+          "pending_create",
+          "empty",
+          "ready"
+        ],
+        "effects": [
+          "branch_creation_requested",
+          "branch_identity_allocated",
+          "parent_identity_bound",
+          "durable_lineage_recorded",
+          "duplicate_creation_suppressed"
+        ],
+        "session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "lineage_kind": "branch",
+        "parent_state": "open",
+        "ancestor_ids": [
+          "session-root-0000000000000000000000000000000000000001"
+        ],
+        "durable": true,
+        "deleted": false,
+        "creation_attempts": 1,
+        "resume_attempts": 0,
+        "duplicate_suppressed": true,
+        "transport_closed": false,
+        "retry_policy": "none",
+        "compatibility": "passed",
+        "error_kind": null,
+        "transcript_mirror": false
+      },
+      "notes": "A duplicate create arriving after persistence is suppressed while the durable branch remains ready."
+    },
+    {
       "id": "resume-existing-branch",
       "initial_state": "closed",
       "initial_context": {

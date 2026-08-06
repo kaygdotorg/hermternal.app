@@ -26,7 +26,28 @@ SCHEMA = "hermternal.session-lineage.v1"
 BASELINE_SCHEMA = "hermternal.session-lineage-baseline.v1"
 OPERATION = "C-07B"
 CONTRACT = "dashboard-v0.0.1"
-HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
+# These reviewed anchors are intentionally independent of the mutable JSON
+# documents. The source SHA is assembled from stable chunks so replacing the
+# public alias or the document value cannot silently move the trust boundary.
+# BEGIN REVIEWED TRUST ANCHORS
+REVIEWED_SOURCE_SHA_PARTS = (
+    "f5be9236",
+    "e00ddf2f",
+    "2a412697",
+    "f267078f",
+    "c4ee068e",
+)
+REVIEWED_SOURCE_SHA = "".join(REVIEWED_SOURCE_SHA_PARTS)
+REVIEWED_ARTIFACT_SHA256 = {
+    "README.md": "cd609d64f7f97e7c880fdaa5b4ec8361c074f2a0f6a59af38f851c8c182933eb",
+    "cases.json": "ebd320005dea1623b691346ef6b2b38a60fb510c7b4ed16855c02e9d395540ea",
+    "test_validate.py": "5f0b0574f0195748a25c801e35e4985d2847e94e3ff4a941948f0240a85861f5",
+    "baseline-evidence.json": "30b82db987f901cf11d5aeb9abaf115a47d9790fa56504e4b3d79e8d4834890b",
+}
+REVIEWED_BASELINE_SHA256 = "c62ffce8836f873c03143d2716b83e99db1843083bef82d5697cd5a613f88b3d"
+REVIEWED_VALIDATOR_CANONICAL_SHA256 = "4d50047cfc402d5c0b96c54a9feeb5d724455c28e38dd42321e09347c78ab21e"
+# END REVIEWED TRUST ANCHORS
+HERMES_SOURCE_SHA = REVIEWED_SOURCE_SHA
 SURFACE = "shared-web-apple"
 
 STATES = (
@@ -56,6 +77,7 @@ NEW_ROOT_CREATE_KEY = "create-key-explicit-0000000000000000000000000000000000000
 
 FULL_ID_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._~-]{0,126}[A-Za-z0-9])?$")
 MAX_IDENTIFIER_LENGTH = 128
+MIN_TRACE_ID_LENGTH = 16
 MAX_JSON_BYTES = 1024 * 1024
 MAX_JSON_DEPTH = 64
 MAX_JSON_NODES = 4096
@@ -75,8 +97,6 @@ REVIEWED_BASELINE_PLATFORM = "macOS-26.5.2-arm64-arm-64bit-Mach-O"
 REVIEWED_BASELINE_PYTHON = "3.14.6"
 BASELINE_EVIDENCE_PATH = ROOT / "baseline-evidence.json"
 BASELINE_EVIDENCE_SCHEMA = "hermternal.session-lineage-baseline-evidence.v1"
-BASELINE_EVIDENCE_SHA256 = "1d74dd8b8aac106d8bb142fd10ca3e1304ed437e0103f62481365aa81aad40f1"
-BASELINE_CANONICAL_IDENTITY_SHA256 = "510de031527e4eab98308df56345f9ddba5081979bb2a239e63ab4bb1c74e54c"
 
 ROOT_KEYS = (
     "schema",
@@ -192,7 +212,7 @@ BASELINE_ARTIFACTS = (
 )
 
 EXPECTED_COMPATIBILITY = {
-    "pinned_source_sha": HERMES_SOURCE_SHA,
+    "pinned_source_sha": REVIEWED_SOURCE_SHA,
     "contract": CONTRACT,
     "lineage_wire_schema": "not_defined_by_pinned_dashboard",
     "unsupported_parent_policy": "fail_closed_without_wire_fallback",
@@ -338,7 +358,7 @@ EXPECTED_INVARIANTS = {
         "foreign_identity": "incompatible",
     },
     "compatibility": {
-        "source_sha": HERMES_SOURCE_SHA,
+        "source_sha": REVIEWED_SOURCE_SHA,
         "parent_wire_field": "unsupported_without_new_contract",
         "missing_or_mismatched": "incompatible",
     },
@@ -451,6 +471,7 @@ def _check_bounds(value: Any, *, depth: int = 0, nodes: list[int] | None = None)
         _require(len(value) <= MAX_OBJECT_KEYS, "JSON object key limit exceeded")
         for key, item in value.items():
             _require(type(key) is str, "JSON object key must be text")
+            _require(len(key) <= MAX_STRING_LENGTH, "JSON object key length limit exceeded")
             _check_bounds(item, depth=depth + 1, nodes=nodes)
 
 
@@ -479,6 +500,48 @@ def _load_json(path: Path, label: str) -> Any:
 
 def _canonical_json_bytes(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+
+def _canonical_validator_bytes() -> bytes:
+    """Return validator source with reviewed literal anchors normalized.
+
+    The validator entry in the baseline uses this digest instead of its raw
+    file hash. This removes the impossible hash-of-a-file-that-contains-its
+    own-hash cycle while still detecting edits to reducer and validation code.
+    """
+    try:
+        source = Path(__file__).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ContractError("validator source unavailable") from exc
+    normalized = source
+    for name in ("REVIEWED_BASELINE_SHA256", "REVIEWED_VALIDATOR_CANONICAL_SHA256"):
+        pattern = rf'(?m)^{name} = "[^\n]*"$'
+        normalized, replacements = re.subn(pattern, f'{name} = "<reviewed-literal>"', normalized)
+        _require(replacements == 1, "reviewed trust anchors unavailable")
+    return normalized.encode("utf-8")
+
+
+def _validator_canonical_sha256() -> str:
+    return hashlib.sha256(_canonical_validator_bytes()).hexdigest()
+
+
+def _validate_reviewed_file_digest(path: Path, artifact_name: str) -> None:
+    expected = REVIEWED_ARTIFACT_SHA256.get(artifact_name)
+    if artifact_name == "validation-baseline.json":
+        expected = REVIEWED_BASELINE_SHA256
+    _require(expected is not None, "reviewed artifact anchor unavailable")
+    try:
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ContractError("reviewed artifact unavailable") from exc
+    _require(actual == expected, "reviewed artifact trust anchor mismatch")
+
+
+def _validate_reviewed_trust_anchors(cases_path: Path = CASES_PATH, baseline_path: Path = BASELINE_PATH) -> None:
+    _require(_validator_canonical_sha256() == REVIEWED_VALIDATOR_CANONICAL_SHA256, "validator trust anchor mismatch")
+    _validate_reviewed_file_digest(cases_path, "cases.json")
+    _validate_reviewed_file_digest(BASELINE_EVIDENCE_PATH, "baseline-evidence.json")
+    _validate_reviewed_file_digest(baseline_path, "validation-baseline.json")
 
 
 def _normalize_redaction_key(key: str) -> str:
@@ -659,10 +722,36 @@ def _incompatible(runtime: dict[str, Any], effect: str) -> None:
 
 
 def _parse_parts(event: str, prefix: str, count: int) -> list[str] | None:
-    if not event.startswith(prefix):
+    if type(event) is not str or not event.startswith(prefix):
         return None
     parts = event[len(prefix) :].split(":")
     if len(parts) != count or any(part == "" for part in parts):
+        return None
+    return parts
+
+
+def _validate_trace_id(value: Any, label: str) -> str:
+    _validate_full_id(value, label)
+    _require(len(value) >= MIN_TRACE_ID_LENGTH, f"{label} is abbreviated")
+    return value
+
+
+def _parse_trace_parts(
+    event: str,
+    prefix: str,
+    count: int,
+    id_indexes: tuple[int, ...],
+    allow_none_indexes: tuple[int, ...] = (),
+) -> list[str] | None:
+    parts = _parse_parts(event, prefix, count)
+    if parts is None:
+        return None
+    try:
+        for index in id_indexes:
+            if index in allow_none_indexes and parts[index] == "none":
+                continue
+            _validate_trace_id(parts[index], f"event field {index}")
+    except ContractError:
         return None
     return parts
 
@@ -672,7 +761,17 @@ def _lineage_payload(event: str, prefix: str) -> tuple[str, str, str | None, str
     if parts is None:
         return None
     session_id, root_id, parent_token, lineage_kind = parts
-    parent_id = None if parent_token == "none" else parent_token
+    try:
+        _validate_trace_id(session_id, "event session id")
+        _validate_trace_id(root_id, "event root id")
+        if parent_token == "none":
+            parent_id = None
+        else:
+            parent_id = _validate_trace_id(parent_token, "event parent id")
+        _require(lineage_kind in {"root", "branch"}, "event lineage kind changed")
+        _require((lineage_kind == "root") == (parent_id is None), "event root-parent shape changed")
+    except ContractError:
+        return None
     return session_id, root_id, parent_id, lineage_kind
 
 
@@ -791,7 +890,7 @@ def _begin_branch_creation(runtime: dict[str, Any], child_id: str, parent_id: st
 def _transition(runtime: dict[str, Any], event: str) -> None:
     state = runtime["state"]
 
-    root_request = _parse_parts(event, "session.create.root.request:", 1)
+    root_request = _parse_trace_parts(event, "session.create.root.request:", 1, (0,))
     if root_request is not None:
         key = root_request[0]
         if state == "empty" and runtime["session_id"] is None and runtime["compatibility"] == "passed":
@@ -800,7 +899,7 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
             _incompatible(runtime, "root_create_in_wrong_state")
         return
 
-    branch_request = _parse_parts(event, "session.create.branch.request:", 3)
+    branch_request = _parse_trace_parts(event, "session.create.branch.request:", 3, (0, 1, 2))
     if branch_request is not None:
         child_id, parent_id, key = branch_request
         if state not in {"ready", "closed"} or not runtime["durable"]:
@@ -827,27 +926,27 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
         _begin_branch_creation(runtime, child_id, parent_id, key)
         return
 
-    missing_parent = _parse_parts(event, "session.create.branch.request.missing:", 2)
+    missing_parent = _parse_trace_parts(event, "session.create.branch.request.missing:", 2, (0, 1))
     if missing_parent is not None:
         _incompatible(runtime, "parent_missing")
         return
 
-    invalid_parent = _parse_parts(event, "session.create.branch.request.bad:", 3)
+    invalid_parent = _parse_trace_parts(event, "session.create.branch.request.bad:", 3, (0, 2))
     if invalid_parent is not None:
         _incompatible(runtime, "parent_invalid")
         return
 
-    self_parent = _parse_parts(event, "session.create.branch.request.self:", 2)
+    self_parent = _parse_trace_parts(event, "session.create.branch.request.self:", 2, (0, 1))
     if self_parent is not None:
         _incompatible(runtime, "self_parent")
         return
 
-    cyclic_parent = _parse_parts(event, "session.create.branch.request.cycle:", 3)
+    cyclic_parent = _parse_trace_parts(event, "session.create.branch.request.cycle:", 3, (0, 1, 2))
     if cyclic_parent is not None:
         _incompatible(runtime, "cyclic_parent")
         return
 
-    deleted_parent = _parse_parts(event, "session.create.branch.request.deleted:", 3)
+    deleted_parent = _parse_trace_parts(event, "session.create.branch.request.deleted:", 3, (0, 1, 2))
     if deleted_parent is not None:
         _incompatible(runtime, "parent_deleted")
         return
@@ -860,12 +959,12 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
             _apply_created_identity(runtime, accepted, reconciled=False)
         return
 
-    duplicate = _parse_parts(event, "session.create.duplicate:", 5)
+    duplicate = _parse_trace_parts(event, "session.create.duplicate:", 5, (0, 1, 2, 4), (2,))
     if duplicate is not None:
         session_id, root_id, parent_token, lineage_kind, key = duplicate
         parent_id = None if parent_token == "none" else parent_token
         last = runtime.get("last_creation")
-        if state == "empty" and last == {"payload": (session_id, root_id, parent_id, lineage_kind), "idempotency_key": key}:
+        if state in {"empty", "ready"} and last == {"payload": (session_id, root_id, parent_id, lineage_kind), "idempotency_key": key}:
             runtime["duplicate_suppressed"] = True
             runtime["decision"] = "duplicate_creation_reused"
             _effect(runtime, "duplicate_creation_suppressed")
@@ -913,7 +1012,7 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
             _incompatible(runtime, "unknown_creation_result_out_of_order")
         return
 
-    retry = _parse_parts(event, "session.create.retry:", 1)
+    retry = _parse_trace_parts(event, "session.create.retry:", 1, (0,))
     if retry is not None:
         key = retry[0]
         if state == "interrupted" and runtime.get("pending_idempotency_key") == key:
@@ -960,7 +1059,7 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
             _incompatible(runtime, "reconcile_missing_out_of_order")
         return
 
-    explicit_new = _parse_parts(event, "user.choose.new.root:", 1)
+    explicit_new = _parse_trace_parts(event, "user.choose.new.root:", 1, (0,))
     if explicit_new is not None:
         if (
             state == "failed"
@@ -985,7 +1084,7 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
             _incompatible(runtime, "close_without_durable_identity")
         return
 
-    resume_request = _parse_parts(event, "session.resume.request:", 1)
+    resume_request = _parse_trace_parts(event, "session.resume.request:", 1, (0,))
     if resume_request is not None:
         target_id = resume_request[0]
         if state == "restoring":
@@ -1101,6 +1200,13 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
 
 
 def _initial_runtime(initial_state: str, context: dict[str, Any]) -> dict[str, Any]:
+    _require(initial_state in STATES, "initial state changed")
+    _validate_context(context, "initial_context")
+    for field in ("session_id", "root_id", "parent_id", "idempotency_key"):
+        if context[field] is not None:
+            _validate_trace_id(context[field], f"initial_context.{field}")
+    for index, ancestor_id in enumerate(context["ancestor_ids"]):
+        _validate_trace_id(ancestor_id, f"initial_context.ancestor_ids[{index}]")
     runtime = dict(context)
     runtime.update(
         {
@@ -1235,6 +1341,18 @@ def _case_definitions() -> list[tuple[str, str, dict[str, Any], tuple[str, ...],
                 f"session.create.duplicate:{BRANCH_SESSION_ID}:{ROOT_SESSION_ID}:{ROOT_SESSION_ID}:branch:{BRANCH_CREATE_KEY}",
             ),
             "A repeated branch create does not create a second child or alter the parent link.",
+        ),
+        (
+            "create-branch-duplicate-after-persistence",
+            "ready",
+            _root_context(candidate_parent_state="open"),
+            (
+                f"session.create.branch.request:{BRANCH_SESSION_ID}:{ROOT_SESSION_ID}:{BRANCH_CREATE_KEY}",
+                f"session.create.accepted:{BRANCH_SESSION_ID}:{ROOT_SESSION_ID}:{ROOT_SESSION_ID}:branch",
+                f"session.lineage.persisted:{BRANCH_SESSION_ID}:{ROOT_SESSION_ID}:{ROOT_SESSION_ID}:branch",
+                f"session.create.duplicate:{BRANCH_SESSION_ID}:{ROOT_SESSION_ID}:{ROOT_SESSION_ID}:branch:{BRANCH_CREATE_KEY}",
+            ),
+            "A duplicate create arriving after persistence is suppressed while the durable branch remains ready.",
         ),
         (
             "resume-existing-branch",
@@ -1538,7 +1656,7 @@ def validate_document(document: dict[str, Any]) -> None:
     _require(document["schema"] == SCHEMA, "schema changed")
     _require(document["operation"] == OPERATION, "operation changed")
     _require(document["contract"] == CONTRACT, "contract changed")
-    _require(document["hermes_source_sha"] == HERMES_SOURCE_SHA, "source revision changed")
+    _require(document["hermes_source_sha"] == REVIEWED_SOURCE_SHA, "source revision changed")
     _require(type(document["synthetic_only"]) is bool and document["synthetic_only"], "fixture must remain synthetic")
     _require(document["surface"] == SURFACE, "surface changed")
     compatibility = _strict_keys(document["compatibility"], COMPATIBILITY_KEYS, "compatibility")
@@ -1599,7 +1717,7 @@ def _load_canonical_baseline_evidence() -> dict[str, Any]:
         raw = BASELINE_EVIDENCE_PATH.read_bytes()
     except OSError as exc:
         raise ContractError("canonical baseline evidence unavailable") from exc
-    _require(hashlib.sha256(raw).hexdigest() == BASELINE_EVIDENCE_SHA256, "canonical baseline evidence changed")
+    _require(hashlib.sha256(raw).hexdigest() == REVIEWED_ARTIFACT_SHA256["baseline-evidence.json"], "canonical baseline evidence changed")
     value = _load_json(BASELINE_EVIDENCE_PATH, "canonical baseline evidence")
     _strict_keys(value, EVIDENCE_KEYS, "canonical baseline evidence")
     _require(value["schema"] == BASELINE_EVIDENCE_SCHEMA, "canonical baseline evidence schema changed")
@@ -1609,24 +1727,6 @@ def _load_canonical_baseline_evidence() -> dict[str, Any]:
         _strict_keys(value[mode]["distribution"], DISTRIBUTION_KEYS, f"canonical baseline evidence.{mode}.distribution")
         _strict_equal(value[mode]["distribution"], _dist(samples), f"canonical baseline evidence.{mode}.distribution")
     return value
-
-
-def _baseline_identity_digest(baseline: dict[str, Any]) -> str:
-    identity = {
-        "schema": baseline["schema"],
-        "validator": baseline["validator"],
-        "command": baseline["command"],
-        "build_mode": baseline["build_mode"],
-        "environment": baseline["environment"],
-        "repetitions": baseline["repetitions"],
-        "normal": baseline["normal"],
-        "optimized": baseline["optimized"],
-        "normal_command": baseline["normal"]["command"],
-        "optimized_command": baseline["optimized"]["command"],
-        "canonical_evidence_sha256": BASELINE_EVIDENCE_SHA256,
-        "threshold": baseline["threshold"],
-    }
-    return hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
 
 
 def _validate_baseline(baseline: dict[str, Any]) -> int:
@@ -1658,7 +1758,15 @@ def _validate_baseline(baseline: dict[str, Any]) -> int:
             data = path.read_bytes()
         except OSError as exc:
             raise ContractError("baseline artifact is missing") from exc
-        _require(hashlib.sha256(data).hexdigest() == artifact["sha256"], "baseline artifact digest mismatch")
+        actual_digest = (
+            _validator_canonical_sha256()
+            if artifact["path"] == "validate.py"
+            else hashlib.sha256(data).hexdigest()
+        )
+        _require(actual_digest == artifact["sha256"], "baseline artifact digest mismatch")
+        reviewed_digest = REVIEWED_ARTIFACT_SHA256.get(artifact["path"])
+        if reviewed_digest is not None:
+            _require(artifact["sha256"] == reviewed_digest, "reviewed artifact manifest changed")
         _require(len(data) == artifact["size_bytes"], "baseline artifact size mismatch")
         artifact_bytes += len(data)
     _strict_int(baseline["artifact_bytes"], "baseline artifact bytes")
@@ -1672,12 +1780,12 @@ def _validate_baseline(baseline: dict[str, Any]) -> int:
         _strict_equal(benchmark["distribution"], _dist(samples), f"baseline.{mode}.distribution")
         _strict_equal(samples, evidence[mode]["samples_ms"], f"baseline.{mode}.samples_ms")
         _strict_equal(benchmark["distribution"], evidence[mode]["distribution"], f"baseline.{mode}.distribution")
-    _require(_baseline_identity_digest(baseline) == BASELINE_CANONICAL_IDENTITY_SHA256, "baseline canonical identity changed")
     _validate_redaction(baseline, "baseline")
     return artifact_bytes
 
 
 def validate_all(document: dict[str, Any], baseline: dict[str, Any]) -> tuple[int, int]:
+    _require(_validator_canonical_sha256() == REVIEWED_VALIDATOR_CANONICAL_SHA256, "validator trust anchor mismatch")
     validate_document(document)
     artifact_bytes = _validate_baseline(baseline)
     return len(document["cases"]), artifact_bytes
@@ -1716,6 +1824,7 @@ def main(argv: list[str] | None = None) -> int:
         cases_path, baseline_path = _parse_cli(list(sys.argv[1:] if argv is None else argv))
         document = _load_json(cases_path, "cases")
         baseline = _load_json(baseline_path, "baseline")
+        _validate_reviewed_trust_anchors(cases_path, baseline_path)
         _require(type(document) is dict, "cases root must be an object")
         _require(type(baseline) is dict, "baseline root must be an object")
         case_count, artifact_bytes = validate_all(document, baseline)
