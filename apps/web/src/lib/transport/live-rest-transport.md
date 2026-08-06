@@ -34,9 +34,26 @@ or other non-idempotent route is enabled.
 - Session IDs are opaque single ASCII path segments. Traversal, encoded slash,
   controls, non-ASCII, query-bearing, and overlong values fail before fetch.
 - Response bodies are byte-capped, UTF-8 decoded with fatal errors, parsed by a
-  duplicate-key rejecting bounded JSON parser, and checked against closed route
-  schemas. Unknown keys, malformed values, unsafe numbers, excessive nesting,
-  and mismatched pagination fail closed.
+  duplicate-key rejecting bounded JSON parser, and projected onto the reviewed
+  route fields. Unknown additive fields are ignored after bounded parsing; missing
+  required fields, wrong types, unsafe numbers, excessive nesting, and mismatched
+  pagination fail closed. A null-body fallback requires a valid declared byte
+  length before allocation and rejects missing or lying length metadata.
+- Provider discovery preserves source registration order, requires unique stable
+  lowercase provider IDs, rejects separators, controls, and case-expansion folds,
+  and treats display labels as bounded data without control characters.
+
+## Resource budgets
+
+- Request timeout: `10_000ms` default, `30_000ms` maximum.
+- Response body: `128KiB` default, `1MiB` maximum, checked before decode.
+- Route arrays: `32` providers, `100` sessions, and `500` messages.
+- Strict JSON parser: depth `16`, strings `8,192` characters, object keys `64`,
+  arrays `500`, and nodes `4,096`. A minimal 500-message response costs
+  `2,007` nodes: the root object, message array, session ID, pagination object,
+  three pagination scalars, and four nodes per message row. The larger node cap
+  leaves bounded room for reviewed additive fields without making route limits
+  unreachable.
 - Redirects, non-success HTTP statuses, network failures, timeout, and abort
   produce bounded fixed diagnostics. Server error bodies are not echoed.
 
@@ -44,3 +61,18 @@ The fixtures in `live-rest-fixtures.ts` are synthetic redacted evidence only.
 They contain no live provider data, hostnames, cookies, credentials, tickets,
 transcripts, or user data. Real compatibility testing must use the official
 upstream Hermes image only; this change never builds Hermes from source.
+
+## Browser and benchmark evidence
+
+`tests/e2e/live-rest-boundary.spec.ts` loads the non-product
+`/__w06/transport` harness. That bundled page imports the exported transport,
+executes it in the Chromium realm, and supplies only a deterministic fetcher;
+it does not call `fetch` directly or inspect cookies. The harness checks the
+request init contract and proves attacker origins, search, and ticket roots are
+rejected before their fetchers can run.
+
+Run the local synthetic route-cap benchmark with
+`bun run benchmark:transport`. It performs five warmups and twenty timed runs
+for 100 sessions and 500 messages, reports UTF-8 body bytes plus median and p95
+latency, and never contacts a server or provider. The output is evidence for
+parser/transport cost only, not a production performance claim.

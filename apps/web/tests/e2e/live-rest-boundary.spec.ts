@@ -1,82 +1,84 @@
 import { expect, test } from '@playwright/test';
 
+type BrowserProofResult = {
+  providers: Array<{ name: string; displayName: string; supportsPassword: boolean }>;
+  calls: Array<{
+    input: string;
+    method: string | null;
+    credentials: string | null;
+    cache: string | null;
+    redirect: string | null;
+    headers: Record<string, string>;
+    hasBody: boolean;
+    hasAuthorization: boolean;
+  }>;
+  forbidden: Array<{ apiBaseUrl: string; errorCode: string | null }>;
+  forbiddenFetcherCalls: number;
+};
+
+type W06ProofWindow = Window & {
+  __hermternalW06BrowserProof?: () => Promise<BrowserProofResult>;
+};
+
 test.describe('W-06 same-origin REST boundary', () => {
-  test('proves the browser proxy path is same-origin and cookie-only', async ({ page, baseURL }) => {
-    const origin = new URL(baseURL ?? 'http://127.0.0.1:4173').origin;
+  test('executes the exported transport in the browser context', async ({ page }) => {
+    await page.goto('/__w06/transport');
     await page.context().addCookies([
       {
         name: 'synthetic_session_cookie',
         value: 'synthetic-cookie-marker',
-        url: `${origin}/`
+        url: new URL(page.url()).origin + '/'
       }
     ]);
 
-    let observedRequest: { url: string; method: string; headers: Record<string, string> } | undefined;
-    await page.route('**/api/auth/providers', async (route) => {
-      const request = route.request();
-      observedRequest = {
-        url: request.url(),
-        method: request.method(),
-        headers: request.headers()
-      };
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          providers: [
-            {
-              name: 'synthetic-provider',
-              display_name: 'Synthetic Provider',
-              supports_password: false
-            }
-          ]
-        })
-      });
-    });
-
-    await page.goto('/');
     const result = await page.evaluate(async () => {
-      const response = await fetch('/api/auth/providers', {
+      const proofWindow = window as W06ProofWindow;
+      if (!proofWindow.__hermternalW06BrowserProof) {
+        throw new Error('The bundled W-06 browser proof is not available.');
+      }
+      return await proofWindow.__hermternalW06BrowserProof();
+    });
+    const proof = result as BrowserProofResult;
+
+    expect(proof.providers).toEqual([
+      {
+        name: 'synthetic-provider',
+        displayName: 'Synthetic Provider',
+        supportsPassword: false
+      }
+    ]);
+    expect(proof.calls).toEqual([
+      {
+        input: '/api/auth/providers',
         method: 'GET',
         credentials: 'same-origin',
         cache: 'no-store',
         redirect: 'error',
-        headers: { accept: 'application/json' }
-      });
-      return {
-        status: response.status,
-        body: await response.json()
-      };
-    });
-
-    expect(result.status).toBe(200);
-    expect(result.body.providers).toHaveLength(1);
-    expect(observedRequest).toMatchObject({
-      url: `${origin}/api/auth/providers`,
-      method: 'GET'
-    });
-    expect(observedRequest?.headers.cookie).toContain('synthetic_session_cookie=synthetic-cookie-marker');
-    expect(observedRequest?.headers.authorization).toBeUndefined();
-    expect(observedRequest?.url).not.toContain('ticket');
-    expect(observedRequest?.url).not.toContain('search');
+        headers: { accept: 'application/json' },
+        hasBody: false,
+        hasAuthorization: false
+      }
+    ]);
   });
 
-  test('rejects an external API base before any cross-origin request can be made', async ({ page, baseURL }) => {
-    await page.goto('/');
-    const result = await page.evaluate(() => {
-      const current = new URL(location.href);
-      const external = new URL('https://attacker.invalid/api', current);
-      const sameOrigin = new URL('/api', current);
-      return {
-        sameOriginAccepted: sameOrigin.origin === current.origin && sameOrigin.pathname === '/api',
-        externalRejected: external.origin !== current.origin,
-        externalPath: external.pathname
-      };
-    });
+  test('rejects forbidden origins and API roots before the transport fetcher runs', async ({ page }) => {
+    await page.goto('/__w06/transport');
 
-    expect(result.sameOriginAccepted).toBe(true);
-    expect(result.externalRejected).toBe(true);
-    expect(result.externalPath).toBe('/api');
-    expect(new URL(baseURL ?? 'http://127.0.0.1:4173').origin).not.toBe('https://attacker.invalid');
+    const result = await page.evaluate(async () => {
+      const proofWindow = window as W06ProofWindow;
+      if (!proofWindow.__hermternalW06BrowserProof) {
+        throw new Error('The bundled W-06 browser proof is not available.');
+      }
+      return await proofWindow.__hermternalW06BrowserProof();
+    });
+    const proof = result as BrowserProofResult;
+
+    expect(proof.forbidden).toEqual([
+      { apiBaseUrl: 'https://attacker.invalid/api', errorCode: 'invalid-url' },
+      { apiBaseUrl: '//attacker.invalid/api', errorCode: 'invalid-url' },
+      { apiBaseUrl: '/api/search', errorCode: 'invalid-url' },
+      { apiBaseUrl: '/api/ws-ticket', errorCode: 'invalid-url' }
+    ]);
+    expect(proof.forbiddenFetcherCalls).toBe(0);
   });
 });

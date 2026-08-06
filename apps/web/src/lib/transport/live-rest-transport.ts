@@ -25,6 +25,8 @@ const API_ROOT = '/api';
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._~-]{0,126}[A-Za-z0-9])?$/u;
 const PROVIDER_NAME_MAX_LENGTH = 96;
+const PROVIDER_NAME_FORBIDDEN_PATTERN = /[\s/\\\p{C}]/u;
+const PROVIDER_CONTROL_PATTERN = /\p{C}/u;
 
 export type LiveRestErrorCode =
   | 'aborted'
@@ -63,10 +65,8 @@ export interface LiveRestTransportOptions {
   timeoutMs?: number;
   /** Cap response bytes before decoding or parsing untrusted JSON. */
   maxBodyBytes?: number;
-  /** Must resolve to the current origin and the exact `/api` root. */
+  /** Must resolve to the real browser origin and the exact `/api` root. */
   apiBaseUrl?: string;
-  /** Test-only origin context for validating an absolute same-origin base URL. */
-  origin?: string;
 }
 
 export interface LiveRestTransport {
@@ -96,13 +96,17 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
 
   const timeoutMs = normalizeTimeout(options.timeoutMs);
   const maxBodyBytes = normalizeBodyLimit(options.maxBodyBytes);
-  const apiBaseUrl = normalizeApiBaseUrl(options.apiBaseUrl, options.origin);
+  const apiBaseUrl = normalizeApiBaseUrl(options.apiBaseUrl);
 
   async function request<T>(
     path: string,
     validator: (value: StrictJsonValue) => T,
     signal?: AbortSignal
   ): Promise<T> {
+    if (signal?.aborted) {
+      throw new LiveRestError('aborted');
+    }
+
     const controller = new AbortController();
     let abortKind: 'aborted' | 'timeout' | undefined;
     let abortReject: ((error: LiveRestError) => void) | undefined;
@@ -143,6 +147,10 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
 
       if (response.redirected || response.type === 'opaqueredirect' || response.type === 'opaque') {
         throw new LiveRestError('redirect');
+      }
+
+      if (!hasJsonContentType(response)) {
+        throw new LiveRestError('invalid-response');
       }
 
       if (response.status !== 200) {
@@ -210,7 +218,12 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
     },
 
     getSession(sessionId: string, signal?: AbortSignal): Promise<LiveSession> {
-      return request(`/sessions/${encodeSessionId(sessionId)}`, validateSession, signal);
+      const requestedSessionId = validateSessionId(sessionId);
+      return request(
+        `/sessions/${encodeURIComponent(requestedSessionId)}`,
+        (value) => validateSession(value, requestedSessionId),
+        signal
+      );
     },
 
     getSessionMessages(
@@ -218,10 +231,11 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
       options: MessageListOptions = {},
       signal?: AbortSignal
     ): Promise<SessionMessages> {
+      const requestedSessionId = validateSessionId(sessionId);
       const query = buildPaginationQuery(options, MAX_MESSAGE_COUNT);
       return request(
-        `/sessions/${encodeSessionId(sessionId)}/messages${query}`,
-        validateSessionMessages,
+        `/sessions/${encodeURIComponent(requestedSessionId)}/messages${query}`,
+        (value) => validateSessionMessages(value, requestedSessionId),
         signal
       );
     }
@@ -238,7 +252,7 @@ export function validateSessionId(sessionId: string): string {
   return sessionId;
 }
 
-export function normalizeApiBaseUrl(value = API_ROOT, origin = currentOrigin()): string {
+export function normalizeApiBaseUrl(value = API_ROOT): string {
   if (typeof value !== 'string' || value.length === 0 || value.includes('?') || value.includes('#')) {
     throw new LiveRestError('invalid-url');
   }
@@ -247,15 +261,16 @@ export function normalizeApiBaseUrl(value = API_ROOT, origin = currentOrigin()):
     return API_ROOT;
   }
 
-  if (!origin || value.startsWith('//') || !/^[a-z][a-z\d+.-]*:/iu.test(value)) {
+  const browserOrigin = currentOrigin();
+  if (!browserOrigin || value.startsWith('//') || !/^[a-z][a-z\d+.-]*:/iu.test(value)) {
     throw new LiveRestError('invalid-url');
   }
 
   let candidate: URL;
   let expectedOrigin: URL;
   try {
-    candidate = new URL(value, origin);
-    expectedOrigin = new URL(origin);
+    candidate = new URL(value, browserOrigin);
+    expectedOrigin = new URL(browserOrigin);
   } catch {
     throw new LiveRestError('invalid-url');
   }
@@ -283,8 +298,32 @@ function buildRequestUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/$/u, '')}${path}`;
 }
 
-function encodeSessionId(sessionId: string): string {
-  return encodeURIComponent(validateSessionId(sessionId));
+function hasJsonContentType(response: Response): boolean {
+  const contentType = response.headers.get('content-type');
+  if (!contentType) {
+    return false;
+  }
+  return contentType.split(';', 1)[0]?.trim().toLowerCase() === 'application/json';
+}
+
+function declaredBodyLength(response: Response): number | undefined {
+  const contentLength = response.headers.get('content-length')?.trim();
+  if (!contentLength) {
+    return undefined;
+  }
+  if (!/^\d+$/u.test(contentLength)) {
+    throw new LiveRestError('invalid-response');
+  }
+  const parsed = Number(contentLength);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new LiveRestError('invalid-response');
+  }
+  return parsed;
+}
+
+function declaredBodyExceedsLimit(response: Response, maxBodyBytes: number): boolean {
+  const length = declaredBodyLength(response);
+  return length !== undefined && length > maxBodyBytes;
 }
 
 function buildPaginationQuery(
@@ -365,7 +404,7 @@ async function classifyHttpError(
     throw new LiveRestError('malformed-json');
   }
 
-  const object = requireObject(parsed, ['detail'], ['detail']);
+  const object = requireObject(parsed, ['detail']);
   if (object.detail !== expectedDetail) {
     throw new LiveRestError('invalid-response');
   }
@@ -381,6 +420,10 @@ async function readBoundedBody(
   abortPromise: Promise<never>,
   abortError: () => LiveRestError | undefined
 ): Promise<string> {
+  if (declaredBodyExceedsLimit(response, maxBodyBytes)) {
+    throw new LiveRestError('body-too-large');
+  }
+
   if (response.body) {
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -425,20 +468,30 @@ async function readBoundedBody(
       offset += chunk.byteLength;
     }
 
-    try {
-      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    } catch {
-      throw new LiveRestError('malformed-json');
-    }
+    return decodeUtf8(bytes);
+  }
+
+  // A null-body Response has no stream to meter. Require a valid declared
+  // length before calling arrayBuffer so the fallback cannot allocate an
+  // unbounded body; the returned bytes are checked again for lying metadata.
+  const declaredLength = declaredBodyLength(response);
+  if (declaredLength === undefined) {
+    throw new LiveRestError('invalid-response');
+  }
+  if (declaredLength > maxBodyBytes) {
+    throw new LiveRestError('body-too-large');
   }
 
   try {
-    const text = await Promise.race([response.text(), abortPromise]);
-    const bytes = new TextEncoder().encode(text);
-    if (bytes.byteLength > maxBodyBytes) {
+    const buffer = await Promise.race([response.arrayBuffer(), abortPromise]);
+    if (!buffer || typeof buffer.byteLength !== 'number') {
+      throw new LiveRestError('malformed-json');
+    }
+    const view = new Uint8Array(buffer);
+    if (view.byteLength > maxBodyBytes || view.byteLength > declaredLength) {
       throw new LiveRestError('body-too-large');
     }
-    return text;
+    return decodeUtf8(Uint8Array.from(view));
   } catch (error) {
     if (error instanceof LiveRestError) {
       throw error;
@@ -451,39 +504,56 @@ async function readBoundedBody(
   }
 }
 
+function decodeUtf8(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new LiveRestError('malformed-json');
+  }
+}
+
 function isSafeProviderName(value: string): boolean {
-  if (value.length < 1 || value.length > PROVIDER_NAME_MAX_LENGTH) {
-    return false;
-  }
-  for (const character of value) {
-    const codePoint = character.codePointAt(0);
-    if (codePoint === undefined || codePoint <= 0x1f || codePoint === 0x7f) {
-      return false;
-    }
-  }
-  return true;
+  // JavaScript has no Unicode casefold primitive. Requiring lower-case identity
+  // plus a stable upper/lower round trip rejects expansion folds such as ß and
+  // ligatures while preserving source-backed lowercase Unicode such as é. The
+  // dotless-i exception matches Python casefold, which preserves U+0131.
+  const lowerCaseIdentity = value === value.toLowerCase();
+  const upperLower = value.toUpperCase().toLowerCase();
+  const stableCaseFold =
+    value === upperLower || value.replaceAll('ı', 'i') === upperLower;
+  return (
+    value.length >= 1 &&
+    value.length <= PROVIDER_NAME_MAX_LENGTH &&
+    lowerCaseIdentity &&
+    stableCaseFold &&
+    !PROVIDER_NAME_FORBIDDEN_PATTERN.test(value)
+  );
+}
+
+function isSafeProviderDisplayName(value: string): boolean {
+  return !PROVIDER_CONTROL_PATTERN.test(value);
 }
 
 function validateProviderDiscovery(value: StrictJsonValue): ProviderDiscovery {
-  const object = requireObject(value, ['providers'], ['providers']);
+  const object = requireObject(value, ['providers']);
   const providers = requireArray(object.providers, MAX_PROVIDER_COUNT);
   const seen = new Set<string>();
 
   return {
     providers: providers.map((provider) => {
-      const item = requireObject(provider, ['name', 'display_name', 'supports_password'], [
-        'name',
-        'display_name',
-        'supports_password'
-      ]);
+      const item = requireObject(provider, ['name', 'display_name', 'supports_password']);
       const name = requireString(item.name, 96);
       if (!isSafeProviderName(name) || seen.has(name)) {
+        throw new LiveRestError('invalid-response');
+      }
+      const displayName = requireString(item.display_name, MAX_SHORT_TEXT_LENGTH);
+      if (!isSafeProviderDisplayName(displayName)) {
         throw new LiveRestError('invalid-response');
       }
       seen.add(name);
       return {
         name,
-        displayName: requireString(item.display_name, MAX_SHORT_TEXT_LENGTH),
+        displayName,
         supportsPassword: requireBoolean(item.supports_password)
       } satisfies LiveProvider;
     })
@@ -491,11 +561,14 @@ function validateProviderDiscovery(value: StrictJsonValue): ProviderDiscovery {
 }
 
 function validateAuthIdentity(value: StrictJsonValue): AuthIdentity {
-  const object = requireObject(
-    value,
-    ['user_id', 'email', 'display_name', 'org_id', 'provider', 'expires_at'],
-    ['user_id', 'email', 'display_name', 'org_id', 'provider', 'expires_at']
-  );
+  const object = requireObject(value, [
+    'user_id',
+    'email',
+    'display_name',
+    'org_id',
+    'provider',
+    'expires_at'
+  ]);
 
   return {
     userId: requireString(object.user_id, MAX_SHORT_TEXT_LENGTH),
@@ -508,13 +581,8 @@ function validateAuthIdentity(value: StrictJsonValue): AuthIdentity {
 }
 
 function validateSessionList(value: StrictJsonValue): SessionList {
-  const object = requireObject(value, ['sessions', 'total', 'limit', 'offset'], [
-    'sessions',
-    'total',
-    'limit',
-    'offset'
-  ]);
-  const sessions = requireArray(object.sessions, MAX_SESSION_COUNT).map(validateSession);
+  const object = requireObject(value, ['sessions', 'total', 'limit', 'offset']);
+  const sessions = requireArray(object.sessions, MAX_SESSION_COUNT).map((session) => validateSession(session));
   const total = requireBoundedInteger(object.total, 0, 1_000_000_000);
   const limit = requireBoundedInteger(object.limit, 1, MAX_SESSION_COUNT);
   const offset = requireBoundedInteger(object.offset, 0, 1_000_000);
@@ -522,30 +590,15 @@ function validateSessionList(value: StrictJsonValue): SessionList {
   return { sessions, total, limit, offset };
 }
 
-function validateSession(value: StrictJsonValue): LiveSession {
-  const object = requireObject(value, [
-    'id',
-    'title',
-    'preview',
-    'source',
-    'model',
-    'started_at',
-    'ended_at',
-    'last_active',
-    'parent_session_id',
-    'message_count',
-    'tool_call_count',
-    'input_tokens',
-    'output_tokens',
-    'is_active',
-    'archived',
-    'pinned',
-    'profile',
-    'is_default_profile'
-  ], ['id']);
+function validateSession(value: StrictJsonValue, expectedSessionId?: string): LiveSession {
+  const object = requireObject(value, ['id']);
+  const id = requireSessionId(requireString(object.id, MAX_ID_LENGTH));
+  if (expectedSessionId !== undefined && id !== expectedSessionId) {
+    throw new LiveRestError('invalid-response');
+  }
 
   return {
-    id: requireSessionId(requireString(object.id, MAX_ID_LENGTH)),
+    id,
     ...(object.title !== undefined && { title: requireNullableString(object.title, MAX_TEXT_LENGTH) }),
     ...(object.preview !== undefined && {
       preview: requireNullableString(object.preview, MAX_TEXT_LENGTH)
@@ -586,26 +639,23 @@ function validateSession(value: StrictJsonValue): LiveSession {
   };
 }
 
-function validateSessionMessages(value: StrictJsonValue): SessionMessages {
-  const object = requireObject(value, ['session_id', 'messages', 'pagination'], [
-    'session_id',
-    'messages',
-    'pagination'
-  ]);
+function validateSessionMessages(value: StrictJsonValue, expectedSessionId?: string): SessionMessages {
+  const object = requireObject(value, ['session_id', 'messages', 'pagination']);
   const messages = requireArray(object.messages, MAX_MESSAGE_COUNT).map(validateMessage);
-  const pagination = requireObject(object.pagination, ['limit', 'offset', 'returned'], [
-    'limit',
-    'offset',
-    'returned'
-  ]);
+  const pagination = requireObject(object.pagination, ['limit', 'offset', 'returned']);
   const returned = requireBoundedInteger(pagination.returned, 0, MAX_MESSAGE_COUNT);
 
   if (returned !== messages.length) {
     throw new LiveRestError('invalid-response');
   }
 
+  const sessionId = requireSessionId(requireString(object.session_id, MAX_ID_LENGTH));
+  if (expectedSessionId !== undefined && sessionId !== expectedSessionId) {
+    throw new LiveRestError('invalid-response');
+  }
+
   return {
-    sessionId: requireSessionId(requireString(object.session_id, MAX_ID_LENGTH)),
+    sessionId,
     messages,
     pagination: {
       limit: pagination.limit === null ? null : requireBoundedInteger(pagination.limit, 1, MAX_MESSAGE_COUNT),
@@ -616,7 +666,7 @@ function validateSessionMessages(value: StrictJsonValue): SessionMessages {
 }
 
 function validateMessage(value: StrictJsonValue): LiveMessage {
-  const object = requireObject(value, ['id', 'role', 'content'], ['id', 'role', 'content']);
+  const object = requireObject(value, ['id', 'role', 'content']);
   const role = requireString(object.role, MAX_SHORT_TEXT_LENGTH);
   if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'tool') {
     throw new LiveRestError('invalid-response');
@@ -631,20 +681,16 @@ function validateMessage(value: StrictJsonValue): LiveMessage {
 
 function requireObject(
   value: StrictJsonValue,
-  allowedKeys: string[],
   requiredKeys: string[]
 ): { [key: string]: StrictJsonValue } {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new LiveRestError('invalid-response');
   }
 
+  // C-01 permits additive server fields. The bounded parser has already
+  // accounted for their bytes, depth, nodes, and scalar limits; this projection
+  // reads only reviewed semantics and never copies unknown data into models.
   const object = value as { [key: string]: StrictJsonValue };
-  const allowed = new Set(allowedKeys);
-  for (const key of Object.keys(object)) {
-    if (!allowed.has(key)) {
-      throw new LiveRestError('invalid-response');
-    }
-  }
   for (const key of requiredKeys) {
     if (!(key in object)) {
       throw new LiveRestError('invalid-response');

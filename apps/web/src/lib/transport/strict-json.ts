@@ -1,7 +1,10 @@
 const DEFAULT_MAX_DEPTH = 16;
-const DEFAULT_MAX_NODES = 512;
+// The route caps permit 100 sessions or 500 messages. A message row costs
+// one object node plus three scalar nodes, so 500 rows need 2,000 nodes before
+// the response, array, pagination, and session-id nodes are counted.
+const DEFAULT_MAX_NODES = 4_096;
 const DEFAULT_MAX_STRING_LENGTH = 8_192;
-const DEFAULT_MAX_ARRAY_LENGTH = 128;
+const DEFAULT_MAX_ARRAY_LENGTH = 500;
 const DEFAULT_MAX_OBJECT_KEYS = 64;
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 
@@ -30,9 +33,9 @@ export class StrictJsonError extends Error {
 
 /**
  * Parses an already bounded UTF-8 response without JSON.parse's duplicate-key
- * ambiguity. Unknown schema keys are rejected by the route validators after
- * this parser returns; keeping those checks separate lets every route share
- * the same depth, node, string, and number limits.
+ * ambiguity. Route projections require reviewed fields and ignore bounded
+ * additive fields after this parser returns; keeping those checks separate lets
+ * every route share the same depth, node, string, and number limits.
  */
 export function parseStrictJson(text: string, limits: StrictJsonLimits = {}): StrictJsonValue {
   const parser = new JsonParser({
@@ -54,10 +57,18 @@ interface NormalizedLimits {
   maxObjectKeys: number;
 }
 
-function hasControlCharacters(value: string): boolean {
+function hasForbiddenControlCharacters(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0);
-    if (codePoint !== undefined && codePoint <= 0x1f) {
+    // Raw controls are rejected while parsing. Escaped tab, LF, and CR are
+    // valid JSON whitespace in transcript content and remain data after decode.
+    if (
+      codePoint !== undefined &&
+      codePoint <= 0x1f &&
+      codePoint !== 0x09 &&
+      codePoint !== 0x0a &&
+      codePoint !== 0x0d
+    ) {
       return true;
     }
   }
@@ -253,7 +264,7 @@ class JsonParser {
         if (
           typeof value !== 'string' ||
           value.length > this.limits.maxStringLength ||
-          hasControlCharacters(value)
+          hasForbiddenControlCharacters(value)
         ) {
           throw new StrictJsonError();
         }
