@@ -80,4 +80,19 @@ describe('ui preview route', () => {
       expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-appearance', 'dark');
     });
   });
+
+  it('fails closed when live discovery is requested without the explicit build gate', async () => {
+    const originalPath = `${window.location.pathname}${window.location.search}`;
+    window.history.pushState({}, '', '/ui-preview?authDiscovery=live');
+
+    render(PreviewPage);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-discovery-mode', 'live');
+      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
+    });
+    expect(screen.getByText('live-discovery-disabled')).toBeInTheDocument();
+
+    window.history.replaceState({}, '', originalPath);
+  });
 });
