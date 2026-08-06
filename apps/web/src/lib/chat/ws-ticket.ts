@@ -1,0 +1,380 @@
+export const WS_TICKET_PATH = '/api/auth/ws-ticket' as const;
+export const CHAT_WEBSOCKET_PATH = '/api/ws' as const;
+export const WS_TICKET_TTL_SECONDS = 30 as const;
+export const MAX_WS_TICKET_LENGTH = 512 as const;
+export const MAX_WS_TICKET_ERROR_LENGTH = 240 as const;
+
+export type WsTicketErrorCode =
+  | 'cancelled'
+  | 'authentication-failed'
+  | 'response-invalid'
+  | 'request-failed'
+  | 'upgrade-failed'
+  | 'origin-unavailable';
+
+const ERROR_MESSAGES: Record<WsTicketErrorCode, string> = {
+  cancelled: 'WebSocket ticket acquisition was cancelled.',
+  'authentication-failed': 'WebSocket ticket authentication failed.',
+  'response-invalid': 'WebSocket ticket response was invalid.',
+  'request-failed': 'WebSocket ticket request failed.',
+  'upgrade-failed': 'WebSocket upgrade failed.',
+  'origin-unavailable': 'WebSocket upgrade origin was unavailable.'
+};
+
+/**
+ * Public failure shape for this boundary. Messages are selected from a closed
+ * set so response bodies, cookie values, bearer values, and ticket fragments
+ * can never cross into retained error text.
+ */
+export class WsTicketError extends Error {
+  readonly code: WsTicketErrorCode;
+  readonly status?: number;
+  readonly retryable: boolean;
+
+  constructor(code: WsTicketErrorCode, status?: number) {
+    super(ERROR_MESSAGES[code].slice(0, MAX_WS_TICKET_ERROR_LENGTH));
+    this.name = code === 'cancelled' ? 'AbortError' : 'WsTicketError';
+    this.code = code;
+    this.status = normalizeStatus(status);
+    this.retryable = code === 'request-failed' || code === 'upgrade-failed';
+  }
+}
+
+export class WsTicketCancelledError extends WsTicketError {
+  constructor() {
+    super('cancelled');
+  }
+}
+
+/**
+ * The request boundary intentionally has no headers or credential input. The
+ * browser's protected same-origin cookie is selected by the adapter, while a
+ * bearer value cannot be supplied or promoted into the WebSocket upgrade.
+ */
+export interface WsTicketRequestInput {
+  readonly method: 'POST';
+  readonly path: typeof WS_TICKET_PATH;
+  readonly credentials: 'same-origin';
+  readonly signal: AbortSignal;
+}
+
+export type WsTicketRequestBoundary = (input: WsTicketRequestInput) => Promise<unknown>;
+
+export interface WsTicketFetch {
+  (input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+}
+
+export type WsTicketUpgradeBoundary<Connection> = (
+  upgradeUrl: URL,
+  signal: AbortSignal
+) => Connection | Promise<Connection>;
+
+export interface WsTicketClientOptions<Connection> {
+  readonly request: WsTicketRequestBoundary;
+  readonly connect: WsTicketUpgradeBoundary<Connection>;
+  /**
+   * Use the browser origin by default. Tests and later app shells may inject
+   * an origin, but the path remains fixed and deep-link/search input is never
+   * used to construct the upgrade URL.
+   */
+  readonly origin?: string | URL;
+}
+
+export interface WsTicketClient<Connection> {
+  /** Start one attempt, or coalesce with the currently active attempt. */
+  open(signal?: AbortSignal): Promise<Connection>;
+  /** Explicit recovery entry point; it never performs an automatic retry. */
+  retry(signal?: AbortSignal): Promise<Connection>;
+}
+
+/**
+ * Adapt an injected fetch implementation to the narrow W-05 request shape.
+ * Keeping fetch injected makes the client deterministic in Vitest and lets
+ * W-06 provide its own typed transport without changing this security seam.
+ */
+export function createWsTicketRequestBoundary(fetcher: WsTicketFetch): WsTicketRequestBoundary {
+  return async ({ method, path, credentials, signal }): Promise<unknown> => {
+    if (method !== 'POST' || path !== WS_TICKET_PATH || credentials !== 'same-origin') {
+      throw new WsTicketError('request-failed');
+    }
+
+    try {
+      const response = await fetcher(path, {
+        method,
+        mode: 'same-origin',
+        credentials,
+        cache: 'no-store',
+        redirect: 'error',
+        headers: { Accept: 'application/json' },
+        signal
+      });
+
+      if (!response.ok) {
+        throw new WsTicketError(
+          response.status === 401 || response.status === 403
+            ? 'authentication-failed'
+            : 'request-failed',
+          response.status
+        );
+      }
+
+      try {
+        return await response.json();
+      } catch {
+        throw new WsTicketError('response-invalid');
+      }
+    } catch (error) {
+      if (signal.aborted || isAbortLike(error)) {
+        throw new WsTicketCancelledError();
+      }
+
+      if (error instanceof WsTicketError) {
+        throw error;
+      }
+
+      throw new WsTicketError('request-failed');
+    }
+  };
+}
+
+/**
+ * Create the ephemeral browser-side ticket flow. The client retains only the
+ * active Promise. The raw ticket exists briefly while the upgrade URL is
+ * assembled and is never copied to client state, storage, DOM, history, logs,
+ * fixtures, reports, or error text.
+ */
+export function createWsTicketClient<Connection>(
+  options: WsTicketClientOptions<Connection>
+): WsTicketClient<Connection> {
+  let activeAttempt: Promise<Connection> | undefined;
+
+  const startAttempt = (callerSignal?: AbortSignal): Promise<Connection> => {
+    if (activeAttempt) {
+      return activeAttempt;
+    }
+
+    const attempt = runAttempt(options, callerSignal).finally(() => {
+      if (activeAttempt === attempt) {
+        activeAttempt = undefined;
+      }
+    });
+
+    activeAttempt = attempt;
+    return attempt;
+  };
+
+  return {
+    open: startAttempt,
+    retry: startAttempt
+  };
+}
+
+async function runAttempt<Connection>(
+  options: WsTicketClientOptions<Connection>,
+  callerSignal?: AbortSignal
+): Promise<Connection> {
+  const origin = resolveOrigin(options.origin);
+  const controller = new AbortController();
+  const unlinkAbort = linkAbort(callerSignal, controller);
+
+  try {
+    throwIfAborted(callerSignal);
+
+    const response = await requestTicket(options.request, controller.signal);
+    throwIfAborted(callerSignal);
+    const ticket = parseTicketResponse(response);
+    const upgradeUrl = createUpgradeUrl(origin, ticket);
+
+    // The URL is handed directly to the connector and is not stored on the
+    // client. Connector implementations must honor the supplied signal.
+    throwIfAborted(callerSignal);
+    const connection = await upgradeTicket(options.connect, upgradeUrl, controller.signal);
+    throwIfAborted(callerSignal);
+    return connection;
+  } catch (error) {
+    if (callerSignal?.aborted || controller.signal.aborted || isAbortLike(error)) {
+      throw new WsTicketCancelledError();
+    }
+
+    if (error instanceof WsTicketError) {
+      throw error;
+    }
+
+    throw new WsTicketError('upgrade-failed');
+  } finally {
+    unlinkAbort();
+  }
+}
+
+async function requestTicket(
+  request: WsTicketRequestBoundary,
+  signal: AbortSignal
+): Promise<unknown> {
+  try {
+    return await awaitWithAbort(
+      Promise.resolve(
+        request({
+          method: 'POST',
+          path: WS_TICKET_PATH,
+          credentials: 'same-origin',
+          signal
+        })
+      ),
+      signal
+    );
+  } catch (error) {
+    if (signal.aborted || isAbortLike(error)) {
+      throw new WsTicketCancelledError();
+    }
+
+    if (error instanceof WsTicketError) {
+      throw error;
+    }
+
+    throw new WsTicketError('request-failed');
+  }
+}
+
+async function upgradeTicket<Connection>(
+  connect: WsTicketUpgradeBoundary<Connection>,
+  upgradeUrl: URL,
+  signal: AbortSignal
+): Promise<Connection> {
+  try {
+    return await awaitWithAbort(Promise.resolve(connect(upgradeUrl, signal)), signal);
+  } catch (error) {
+    if (signal.aborted || isAbortLike(error)) {
+      throw new WsTicketCancelledError();
+    }
+
+    if (error instanceof WsTicketError) {
+      throw error;
+    }
+
+    throw new WsTicketError('upgrade-failed');
+  }
+}
+
+function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new WsTicketCancelledError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = (): void => {
+      signal.removeEventListener('abort', onAbort);
+    };
+
+    const settle = (callback: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      callback();
+    };
+
+    const onAbort = (): void => {
+      settle(() => reject(new WsTicketCancelledError()));
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => settle(() => resolve(value)),
+      (error: unknown) => settle(() => reject(error))
+    );
+  });
+}
+
+function parseTicketResponse(value: unknown): string {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new WsTicketError('response-invalid');
+  }
+
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  const ticket = record.ticket;
+
+  if (
+    keys.length !== 1 ||
+    keys[0] !== 'ticket' ||
+    typeof ticket !== 'string' ||
+    ticket.length === 0 ||
+    ticket.length > MAX_WS_TICKET_LENGTH ||
+    !/^[A-Za-z0-9_-]+$/.test(ticket)
+  ) {
+    throw new WsTicketError('response-invalid');
+  }
+
+  return ticket;
+}
+
+function resolveOrigin(input?: string | URL): URL {
+  const candidate = input ?? (typeof location === 'undefined' ? undefined : location.origin);
+
+  if (!candidate) {
+    throw new WsTicketError('origin-unavailable');
+  }
+
+  try {
+    const parsed = new URL(candidate.toString());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('unsupported-origin');
+    }
+    return new URL(parsed.origin);
+  } catch {
+    throw new WsTicketError('origin-unavailable');
+  }
+}
+
+function createUpgradeUrl(origin: URL, ticket: string): URL {
+  const url = new URL(CHAT_WEBSOCKET_PATH, origin);
+  url.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.search = '';
+  url.hash = '';
+  url.searchParams.set('ticket', ticket);
+  return url;
+}
+
+function linkAbort(signal: AbortSignal | undefined, controller: AbortController): () => void {
+  if (!signal) {
+    return () => undefined;
+  }
+
+  const onAbort = (): void => {
+    // Do not forward signal.reason: callers could put credential-shaped data
+    // there, and the reason is not needed to preserve cancellation semantics.
+    controller.abort();
+  };
+
+  if (signal.aborted) {
+    controller.abort();
+    return () => undefined;
+  }
+
+  signal.addEventListener('abort', onAbort, { once: true });
+  return () => signal.removeEventListener('abort', onAbort);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new WsTicketCancelledError();
+  }
+}
+
+function isAbortLike(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('name' in error)) {
+    return false;
+  }
+
+  const name = (error as { name?: unknown }).name;
+  return name === 'AbortError' || name === 'CanceledError';
+}
+
+function normalizeStatus(status: number | undefined): number | undefined {
+  return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+    ? status
+    : undefined;
+}
