@@ -12,7 +12,7 @@ persist a transcript.
 - WebSocket route: `WS /api/ws`
 - Upgrade mode: same-origin, one fresh ticket in an ephemeral `ticket` query
 - Source event envelope: one text JSON-RPC object per WebSocket message
-- Synthetic evidence only: no live deployment, proxy, provider, or Hermes call
+- Evidence scopes: deterministic `fixture_only` tests and the pinned `official_image` browser lane
 
 The caller injects two boundaries:
 
@@ -26,12 +26,21 @@ retain a ticket, or reuse a ticket after the factory call. Every explicit
 automatic.
 
 The W-05 ticket client remains the owner of the authenticated
-`POST /api/auth/ws-ticket` boundary. This file only consumes its injected fresh
-ticket provider. W-05 issue [#119](https://github.com/kaygdotorg/hermternal/issues/119)
-and PR [#271](https://github.com/kaygdotorg/hermternal/pull/271) are integrated
-in `dev` at merge commit `965da31ba433c95c99ce85ef85f0485fa44e42e6`.
-This branch still provides a typed, injected seam rather than live production
-authentication or a browser-to-Hermes integration claim.
+`POST /api/auth/ws-ticket` boundary. `browser-chat.ts` composes that client with
+this transport for the pinned official Hermes image. It gives the real upgrade
+URL directly to the browser `WebSocket` constructor, then gives JSON-RPC only a
+fixed consumed marker. The ticket is not copied into controller state, browser
+history, callbacks, diagnostics, or retained evidence. W-05 issue
+[#119](https://github.com/kaygdotorg/hermternal/issues/119) and PR
+[#271](https://github.com/kaygdotorg/hermternal/pull/271) are integrated in
+`dev` at merge commit `965da31ba433c95c99ce85ef85f0485fa44e42e6`.
+
+The `official_image` evidence scope binds the immutable upstream image reference
+to the reviewed route manifest, source review, and proxy proof. The behavioral
+gate accepts only the bounded server-first `gateway.ready` event already parsed
+by this transport. This composition enables the browser lane; it does not claim
+end-to-end compatibility until the full Playwright journey passes against that
+exact official image.
 
 ## Deterministic W-07 fixture IDs
 
@@ -78,11 +87,11 @@ After `gateway.ready`, the transport invokes two injected, non-network gates in
 order:
 
 1. deployment attestation against `dashboard-v0.0.1`, the pinned Hermes SHA,
-   the synthetic deployment identity, the reviewed route-manifest revision and
+   the scoped deployment identity, the reviewed route-manifest revision and
    digest, the source-review artifact, and the reviewed proxy proof;
 2. the non-destructive behavioral probe.
 
-The typed evidence record binds the complete synthetic proof boundary:
+The typed evidence record binds the complete proof boundary:
 `deployment.identity`, `deployment.trustChannel`, `deployment.scope`,
 `routeManifest.path`, `routeManifest.revision`, `routeManifest.sha256`,
 `sourceReview.path`, `sourceReview.sha256`, `proxyProof.path`, and

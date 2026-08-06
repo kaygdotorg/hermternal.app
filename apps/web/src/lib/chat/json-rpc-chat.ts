@@ -112,7 +112,7 @@ export type JsonRpcWebSocketFactory = (
 export interface JsonRpcDeploymentEvidence {
   readonly identity: string;
   readonly trustChannel: string;
-  readonly scope: "fixture_only";
+  readonly scope: "fixture_only" | "official_image";
 }
 
 export interface JsonRpcArtifactEvidence {
@@ -2098,7 +2098,8 @@ function isCompleteCompatibilityEvidence(
     typeof deployment === "object" &&
     isBoundedEvidenceText(deployment.identity) &&
     isBoundedEvidenceText(deployment.trustChannel) &&
-    deployment.scope === "fixture_only" &&
+    (deployment.scope === "fixture_only" ||
+      deployment.scope === "official_image") &&
     routeManifest !== null &&
     typeof routeManifest === "object" &&
     routeManifest.revision === DASHBOARD_CONTRACT &&
