@@ -39,6 +39,16 @@ A limit violation or non-zero production build fails closed. The CLI emits one b
 
 All inputs are repository source, static assets, and synthetic prototype data. The evidence contains no credentials, cookies, tokens, user data, transcripts, live hosts, network traces, or provider data.
 
+The checked-in local observation benchmarks source commit
+`8b114f9c340c7dfc4044f006a2812ff1cff880a7` on an Apple M2 Max with Bun
+1.3.14, Node 26.7.0, and Vite 8.2.0. Cold p50/p95/p99 were
+`3215.628/4191.691/5221.844 ms`. Warm p50/p95/p99 were
+`3522.922/4489.742/4770.475 ms`. All 61 generated outputs, including the
+excluded warm-up, had artifact digest
+`191dd9cd25a6546bb53270be04cbd8fe8a7f2ad3aa9130804abd20ddf6de92be`.
+These values are evidence from one local run only. They do not establish a
+regression threshold or approved budget.
+
 ## Run and verify
 
 Install the pinned web dependencies once from `apps/web/`:
