@@ -22,15 +22,14 @@ function repositoryRootArgument(): string | undefined {
   return repositoryRoot;
 }
 
-const repoRoot = resolve(repositoryRootArgument() ?? process.cwd());
-
 try {
+  const repoRoot = resolve(repositoryRootArgument() ?? process.cwd());
   const report = await runParity(repoRoot);
-  console.log(JSON.stringify(report));
+  process.stdout.write(`${JSON.stringify(report)}\n`);
 } catch (error) {
   const failure = error instanceof ContractInputError
     ? { code: error.code, message: error.message }
     : { code: "unexpected_failure", message: "parity check failed without a contract error" };
-  console.error(JSON.stringify({ ok: false, error: failure }));
+  process.stderr.write(`${JSON.stringify({ ok: false, error: failure })}\n`);
   process.exitCode = 1;
 }

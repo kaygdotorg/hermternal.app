@@ -22,7 +22,9 @@ The offline runner checks representative semantic outcomes for:
 The registry remains authoritative for readiness. A `pending` row is reported as
 `blocked`; it is never promoted to a successful parity result. The report uses
 semantic outcomes rather than platform-specific wire bytes, and it returns a
-bounded JSON object suitable for CI logs.
+bounded JSON object suitable for CI logs. The CLI accepts only an optional
+`--repo-root <path>` pair; unknown options, positional values, and duplicate
+roots return bounded JSON errors instead of guessing.
 
 ## TypeScript 7 and tool compatibility
 

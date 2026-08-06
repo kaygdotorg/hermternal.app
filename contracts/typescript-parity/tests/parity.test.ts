@@ -30,6 +30,22 @@ async function writeRawRegistry(contents: string): Promise<string> {
   return temporaryRoot;
 }
 
+function runCli(...args: string[]): { exitCode: number; stdout: string; stderr: string } {
+  const completed = Bun.spawnSync(
+    ["bun", join(repoRoot, "contracts/typescript-parity/src/cli.ts"), ...args],
+    {
+      cwd: join(repoRoot, "contracts/typescript-parity"),
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  return {
+    exitCode: completed.exitCode,
+    stdout: new TextDecoder().decode(completed.stdout),
+    stderr: new TextDecoder().decode(completed.stderr),
+  };
+}
+
 describe("C-20 TypeScript contract parity", () => {
   it("proves shared semantic outcomes for representative contract families offline", async () => {
     const report = await runParity(repoRoot);
@@ -103,6 +119,24 @@ describe("C-20 TypeScript contract parity", () => {
   it("has no network-capable calls in the parity implementation", async () => {
     const source = await Bun.file(resolve(import.meta.dir, "../src/parity.ts")).text();
     expect(() => assertNoNetworkImports(source)).not.toThrow();
+  });
+
+  it("returns bounded JSON errors for unknown or positional CLI input", () => {
+    const unknown = runCli("--unknown");
+    expect(unknown.exitCode).not.toBe(0);
+    expect(unknown.stdout).toBe("");
+    expect(JSON.parse(unknown.stderr)).toEqual({
+      ok: false,
+      error: { code: "unknown_input", message: "parity CLI accepts only --repo-root" },
+    });
+
+    const positional = runCli("unexpected");
+    expect(positional.exitCode).not.toBe(0);
+    expect(positional.stdout).toBe("");
+    expect(JSON.parse(positional.stderr)).toEqual({
+      ok: false,
+      error: { code: "malformed_input", message: "parity CLI accepts only --repo-root" },
+    });
   });
 
   it("exposes a typed rejection assertion for regression tests", () => {
