@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -127,16 +129,22 @@ class RegistryTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
-    def _run(self, *args: str, optimized: bool = False) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self,
+        *args: str,
+        optimized: bool = False,
+        repo_root: Path = validate.REPO_ROOT,
+    ) -> subprocess.CompletedProcess[str]:
         command = [sys.executable]
         if optimized:
             command.append("-O")
-        command.extend([str(validate.INDEX_PATH.parent / "validator" / "validate.py"), *args])
+        script = repo_root / "contracts/fixtures/validator/validate.py"
+        command.extend([str(script), *args])
         environment = dict(os.environ)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         return subprocess.run(
             command,
-            cwd=validate.REPO_ROOT,
+            cwd=repo_root,
             env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -144,6 +152,55 @@ class CliTests(unittest.TestCase):
             text=True,
             check=False,
         )
+
+    def _copy_fixture_repo(self) -> Path:
+        temporary = Path(tempfile.mkdtemp(prefix="fixture-validator-cli-"))
+        self.addCleanup(shutil.rmtree, temporary, ignore_errors=True)
+        shutil.copytree(
+            validate.REPO_ROOT / "contracts/fixtures",
+            temporary / "contracts/fixtures",
+        )
+        return temporary
+
+    def _rebind_copy(self, repo_root: Path) -> tuple[dict[str, object], dict[str, object]]:
+        """Refresh only integrity records in an isolated synthetic copy."""
+        fixtures_root = repo_root / "contracts/fixtures"
+        index_path = fixtures_root / "index.json"
+        baseline_path = fixtures_root / "validator/validation-baseline.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+
+        for fixture in index["fixture_roots"]:
+            for record in fixture["files"]:
+                artifact = fixtures_root / record["path"]
+                if artifact.is_file():
+                    data = artifact.read_bytes()
+                    record["size_bytes"] = len(data)
+                    record["sha256"] = hashlib.sha256(data).hexdigest()
+        index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+
+        total = 0
+        for record in baseline["artifact_manifest"]:
+            artifact = repo_root / record["path"]
+            data = artifact.read_bytes()
+            record["size_bytes"] = len(data)
+            record["sha256"] = hashlib.sha256(data).hexdigest()
+            total += len(data)
+        baseline["artifact_size_bytes"] = total
+        baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        return index, baseline
+
+    def _assert_blocked_in_both_modes(self, repo_root: Path, *args: str) -> None:
+        for optimized in (False, True):
+            completed = self._run(*args, optimized=optimized, repo_root=repo_root)
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.stderr, "")
+            self.assertEqual(len(completed.stdout.splitlines()), 1)
+            self.assertLessEqual(len(completed.stdout.strip()), validate.MAX_ERROR_LENGTH)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["live_claim"])
+            self.assertEqual(payload["evidence_status"], "blocked")
 
     def test_normal_and_optimized_success_have_same_boundary(self) -> None:
         normal = self._run()
@@ -154,6 +211,39 @@ class CliTests(unittest.TestCase):
         self.assertFalse(json.loads(normal.stdout)["compatible"])
         self.assertEqual(normal.stderr, "")
         self.assertEqual(optimized.stderr, "")
+
+    def test_alternate_modified_baseline_is_rejected_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        alternate = repo_root / "contracts/fixtures/validator/alternate-baseline.json"
+        baseline = json.loads((repo_root / "contracts/fixtures/validator/validation-baseline.json").read_text())
+        baseline["notes"] = "forged alternate evidence"
+        alternate.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        self._assert_blocked_in_both_modes(repo_root, "--baseline", str(alternate))
+
+    def test_registered_python_sensitive_value_is_rejected_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        python_artifact = repo_root / "contracts/fixtures/connection-restoration/validate.py"
+        python_artifact.write_text(
+            python_artifact.read_text(encoding="utf-8")
+            + '\nFORGED_RETAINED_VALUE = "Bearer unredacted-secret-value-123456"\n',
+            encoding="utf-8",
+        )
+        self._rebind_copy(repo_root)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_ready_coverage_cannot_reference_pending_root_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        index_path = repo_root / "contracts/fixtures/index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        provider = next(item for item in index["fixture_roots"] if item["id"] == "provider-discovery")
+        shutil.rmtree(repo_root / "contracts/fixtures/provider-discovery")
+        provider["path"] = "pending-provider-discovery"
+        provider["status"] = "pending"
+        provider["validator"] = None
+        provider["files"] = []
+        index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+        self._rebind_copy(repo_root)
+        self._assert_blocked_in_both_modes(repo_root)
 
     def test_unknown_flag_is_one_bounded_redacted_line(self) -> None:
         normal = self._run("--unknown-flag=synthetic-secret-value")

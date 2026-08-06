@@ -13,11 +13,14 @@ and Swift.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
+import io
 import json
 import math
 import re
 import statistics
+import tokenize
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -374,7 +377,15 @@ def _normalize_key(key: str) -> str:
     return re.sub(r"[-.:/\s]+", "_", separated).casefold()
 
 
-def _is_placeholder(value: str) -> bool:
+def _is_explicit_synthetic_marker(value: str) -> bool:
+    lowered = value.casefold()
+    return (
+        any(marker in lowered for marker in ("synthetic", "fixture", "example", "placeholder", "hidden", "audit", "nested", "signature-value"))
+        or re.fullmatch(r"(?:akia)?(?:x|z|0){8,}", lowered) is not None
+    )
+
+
+def _is_placeholder(value: str, *, allow_synthetic_markers: bool = False) -> bool:
     lowered = value.casefold()
     return (
         value.startswith("<")
@@ -383,6 +394,7 @@ def _is_placeholder(value: str) -> bool:
         or "request." in lowered
         or "source." in lowered
         or lowered.endswith((".password", ".token", ".ticket", ".cookie"))
+        or (allow_synthetic_markers and _is_explicit_synthetic_marker(value))
     )
 
 
@@ -410,7 +422,7 @@ def _validate_sensitive_marker(value: Any, *, key: str = "") -> None:
     raise ValidationError()
 
 
-def _validate_url_hosts(value: str) -> None:
+def _validate_url_hosts(value: str, *, allow_synthetic_markers: bool = False) -> None:
     for match in URL_PATTERN.finditer(value):
         try:
             parsed = urlsplit(match.group(0))
@@ -419,10 +431,18 @@ def _validate_url_hosts(value: str) -> None:
             raise ValidationError() from exc
         if not host:
             continue
-        lowered = host.casefold().rstrip(".`'\"),]}>;:!? ")
+        lowered = host.casefold().replace("\\.", ".").rstrip(".`'\"),]}>;:!? ")
         if lowered.startswith("<") and lowered.endswith(">"):
             continue
-        require(lowered.endswith(".test") or lowered.endswith(".invalid") or lowered in ALLOWED_URL_HOSTS, "live URL host is not allowed")
+        require(
+            lowered.endswith(".test")
+            or lowered.endswith(".invalid")
+            or lowered.endswith(".example")
+            or lowered.endswith(".example.com")
+            or lowered in ALLOWED_URL_HOSTS
+            or (allow_synthetic_markers and lowered in {"host", "localhost"}),
+            "live URL host is not allowed",
+        )
 
 
 def _validate_text_value(
@@ -430,12 +450,28 @@ def _validate_text_value(
     *,
     allow_nul: bool = False,
     check_assignments: bool = True,
+    allow_synthetic_markers: bool = False,
 ) -> None:
     if not allow_nul:
         require("\x00" not in value, "text contains an embedded NUL")
-    require(PRIVATE_KEY_PATTERN.search(value) is None, "private key material is not allowed")
-    require(AWS_KEY_PATTERN.search(value) is None, "provider key material is not allowed")
-    require(PROVIDER_TOKEN_PATTERN.search(value) is None, "provider token material is not allowed")
+    private_key = PRIVATE_KEY_PATTERN.search(value)
+    require(
+        private_key is None
+        or (allow_synthetic_markers and _is_explicit_synthetic_marker(value)),
+        "private key material is not allowed",
+    )
+    provider_key = AWS_KEY_PATTERN.search(value)
+    require(
+        provider_key is None
+        or (allow_synthetic_markers and _is_placeholder(provider_key.group(0), allow_synthetic_markers=True)),
+        "provider key material is not allowed",
+    )
+    provider_token = PROVIDER_TOKEN_PATTERN.search(value)
+    require(
+        provider_token is None
+        or (allow_synthetic_markers and _is_placeholder(provider_token.group(0), allow_synthetic_markers=True)),
+        "provider token material is not allowed",
+    )
     patterns = (BEARER_VALUE_PATTERN, BASIC_VALUE_PATTERN, JWT_PATTERN)
     if check_assignments:
         patterns += (ASSIGNMENT_SECRET_PATTERN,)
@@ -444,8 +480,11 @@ def _validate_text_value(
         if match is None:
             continue
         candidate = match.group(1) if match.lastindex else match.group(0)
-        require(_is_placeholder(candidate), "credential-shaped value is not allowed")
-    _validate_url_hosts(value)
+        require(
+            _is_placeholder(candidate, allow_synthetic_markers=allow_synthetic_markers),
+            "credential-shaped value is not allowed",
+        )
+    _validate_url_hosts(value, allow_synthetic_markers=allow_synthetic_markers)
 
 
 def _validate_redaction_tree(value: Any) -> None:
@@ -476,6 +515,63 @@ def _validate_text_file(path: Path) -> None:
         raise ValidationError() from exc
     require(len(text) <= MAX_ARTIFACT_BYTES, "text artifact is too large")
     _validate_text_value(text, check_assignments=False)
+
+
+def _validate_python_file(path: Path) -> None:
+    """Scan Python source while allowing explicit negative-test markers.
+
+    Fixture tests intentionally contain credential-shaped inputs to prove that
+    their domain validators reject them. Parse source literals instead of
+    scanning detector regex definitions as if they were retained credentials;
+    unmarked bearer, provider, key, JWT, and URL values still fail closed.
+    """
+    data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES)
+    try:
+        text = data.decode("utf-8")
+        tree = ast.parse(text, filename=path.as_posix())
+    except (UnicodeError, SyntaxError) as exc:
+        raise ValidationError() from exc
+    require(len(text) <= MAX_ARTIFACT_BYTES, "text artifact is too large")
+
+    regex_literals: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "compile" or not isinstance(node.func.value, ast.Name) or node.func.value.id not in {"re", "regex"}:
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and type(child.value) is str:
+                regex_literals.add(id(child))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or type(node.value) not in {str, bytes} or id(node) in regex_literals:
+            continue
+        value = node.value
+        if type(value) is bytes:
+            try:
+                value = value.decode("utf-8")
+            except UnicodeError:
+                # Domain fixtures may carry intentionally invalid binary inputs;
+                # text credential checks cannot interpret those bytes.
+                continue
+        _validate_text_value(
+            value,
+            allow_nul=True,
+            check_assignments=False,
+            allow_synthetic_markers=True,
+        )
+    # Comments document detector rules and may contain source-shaped examples;
+    # scan them too, but permit only the same explicit synthetic markers.
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type == tokenize.COMMENT:
+                _validate_text_value(
+                    token.string,
+                    check_assignments=False,
+                    allow_synthetic_markers=True,
+                )
+    except tokenize.TokenError as exc:
+        raise ValidationError() from exc
 
 
 def _safe_relative_path(value: Any, *, allow_directory: bool = False) -> str:
@@ -591,6 +687,8 @@ def _validate_manifest_file(
         document = load_json(actual, require_object=False, limit=MAX_ARTIFACT_BYTES, reject_nul=False)
         _validate_redaction_tree(document)
         _reject_live_claims(document)
+    elif actual.suffix.casefold() == ".py":
+        _validate_python_file(actual)
     elif actual.suffix.casefold() in {".md", ".txt"}:
         _validate_text_file(actual)
     return path
@@ -635,10 +733,10 @@ def _validate_fixture_roots(
     state_ids: tuple[str, ...],
     coverage_ids: set[str],
     fixtures_root: Path,
-) -> tuple[set[str], set[str]]:
+) -> tuple[dict[str, str], set[str]]:
     roots = document["fixture_roots"]
     require(type(roots) is list and bool(roots), "fixture roots are missing")
-    seen_ids: set[str] = set()
+    seen_ids: dict[str, str] = {}
     seen_paths: set[str] = set()
     owned_files: set[str] = set()
     total_bytes = [0]
@@ -649,7 +747,7 @@ def _validate_fixture_roots(
         require(identifier > previous_id, "fixture roots must be sorted and unique")
         previous_id = identifier
         require(identifier not in seen_ids, "fixture id is duplicated")
-        seen_ids.add(identifier)
+        seen_ids[identifier] = item["status"]
         path = _safe_relative_path(item["path"], allow_directory=True)
         require(path not in seen_paths, "fixture path is duplicated")
         seen_paths.add(path)
@@ -687,11 +785,14 @@ def _validate_fixture_roots(
     return seen_ids, owned_files
 
 
-def _validate_coverage(document: dict[str, Any], fixture_ids: set[str], state_ids: tuple[str, ...]) -> tuple[set[str], set[str]]:
+def _validate_coverage(
+    document: dict[str, Any],
+    fixture_statuses: dict[str, str],
+    state_ids: tuple[str, ...],
+) -> tuple[set[str], set[str]]:
     coverage = document["coverage"]
     require(type(coverage) is list and bool(coverage), "coverage inventory is missing")
     seen: set[str] = set()
-    ready: set[str] = set()
     previous = ""
     fixture_to_coverage: set[str] = set()
     for index, raw in enumerate(coverage):
@@ -703,7 +804,7 @@ def _validate_coverage(document: dict[str, Any], fixture_ids: set[str], state_id
         seen.add(identifier)
         status = item["status"]
         require(status in {"ready", "pending", "empty", "failure", "cancelled", "unknown"}, "coverage status is invalid")
-        references = _validate_string_list(item["fixture_ids"], fixture_ids, nonempty=False)
+        references = _validate_string_list(item["fixture_ids"], set(fixture_statuses), nonempty=False)
         require(tuple(sorted(references)) == references, "coverage fixture ids must be sorted")
         fixture_to_coverage.update(references)
         platforms = _validate_string_list(item["platforms"], PLATFORMS)
@@ -714,8 +815,10 @@ def _validate_coverage(document: dict[str, Any], fixture_ids: set[str], state_id
         _validate_text_value(item["notes"])
         if status == "ready":
             require(bool(references), "ready coverage must cite a fixture")
-            ready.add(identifier)
-            require(all(reference in fixture_ids for reference in references), "coverage cites an unknown fixture")
+            require(
+                all(fixture_statuses.get(reference) == "ready" for reference in references),
+                "ready coverage cites a pending or missing fixture",
+            )
     require(fixture_to_coverage, "fixture roots are not connected to coverage")
     return seen, fixture_to_coverage
 
@@ -762,14 +865,14 @@ def _validate_index_document(document: dict[str, Any], repo_root: Path) -> tuple
     require(benchmark["build_mode"] == "N/A - no production or release executable", "benchmark build mode changed")
     _safe_child(fixtures_root, benchmark_path)
 
-    fixture_ids, owned_files = _validate_fixture_roots(
+    fixture_statuses, owned_files = _validate_fixture_roots(
         document,
         state_ids,
         set(item["id"] for item in document["coverage"]),
         fixtures_root,
     )
-    coverage_ids, referenced_fixtures = _validate_coverage(document, fixture_ids, state_ids)
-    require(referenced_fixtures == fixture_ids, "every fixture root must be covered exactly at least once")
+    coverage_ids, referenced_fixtures = _validate_coverage(document, fixture_statuses, state_ids)
+    require(referenced_fixtures == set(fixture_statuses), "every fixture root must be covered exactly at least once")
     require(document["evidence_status"] == ("complete" if not any(item["status"] != "ready" for item in document["coverage"]) else "partial"), "evidence status does not reflect pending coverage")
     if document["evidence_status"] == "complete":
         require(not any(item["status"] != "ready" for item in document["coverage"]), "complete index contains blocked coverage")
@@ -785,7 +888,7 @@ def _validate_index_document(document: dict[str, Any], repo_root: Path) -> tuple
             continue
         all_owned_candidates.add(relative)
     require(all_owned_candidates == owned_files, "unindexed fixture artifact exists")
-    return len(fixture_ids), len(coverage_ids)
+    return len(fixture_statuses), len(coverage_ids)
 
 
 def _validate_distribution(samples: list[Any], distribution: dict[str, Any]) -> None:
@@ -819,7 +922,25 @@ def _validate_distribution(samples: list[Any], distribution: dict[str, Any]) -> 
     require(values[0] <= values[1] <= values[2] <= values[3], "benchmark distribution is incoherent")
 
 
-def _validate_baseline(document: dict[str, Any], repo_root: Path, baseline_path: Path) -> None:
+def _indexed_baseline_path(index: dict[str, Any], repo_root: Path) -> Path:
+    """Resolve the one baseline path that the registry is allowed to consume."""
+    benchmark = index.get("benchmark")
+    require(type(benchmark) is dict, "benchmark metadata is missing")
+    benchmark_path = _safe_relative_path(benchmark.get("path"))
+    require(benchmark_path == "validator/validation-baseline.json", "benchmark path changed")
+    fixtures_root = (repo_root / "contracts/fixtures").resolve()
+    return _safe_child(fixtures_root, benchmark_path)
+
+
+def _validate_baseline(
+    document: dict[str, Any],
+    repo_root: Path,
+    baseline_path: Path,
+    *,
+    canonical_baseline_path: Path | None = None,
+) -> None:
+    canonical = (canonical_baseline_path or (repo_root / "contracts/fixtures/validator/validation-baseline.json")).resolve()
+    require(baseline_path.resolve() == canonical, "baseline path is not canonical")
     strict_keys(document, BASELINE_KEYS, "baseline")
     require(document["schema"] == BASELINE_SCHEMA, "baseline schema changed")
     require(document["fixture_schema"] == INDEX_SCHEMA, "baseline fixture schema changed")
@@ -871,7 +992,13 @@ def validate_baseline_document(
     baseline_path: Path = BASELINE_PATH,
 ) -> None:
     """Validate observed benchmark evidence without inventing a threshold."""
-    _validate_baseline(baseline, repo_root.resolve(), baseline_path.resolve())
+    root = repo_root.resolve()
+    _validate_baseline(
+        baseline,
+        root,
+        baseline_path.resolve(),
+        canonical_baseline_path=(root / "contracts/fixtures/validator/validation-baseline.json"),
+    )
 
 
 def validate_all(
@@ -883,8 +1010,15 @@ def validate_all(
     baseline_path: Path = BASELINE_PATH,
 ) -> tuple[int, int]:
     _validate_schema_document(schema)
-    counts = _validate_index_document(index, repo_root.resolve())
-    _validate_baseline(baseline, repo_root.resolve(), baseline_path.resolve())
+    root = repo_root.resolve()
+    counts = _validate_index_document(index, root)
+    canonical_baseline_path = _indexed_baseline_path(index, root)
+    _validate_baseline(
+        baseline,
+        root,
+        baseline_path.resolve(),
+        canonical_baseline_path=canonical_baseline_path,
+    )
     return counts
 
 
@@ -924,15 +1058,19 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
         repo_root = args.repo_root.resolve()
         index = load_json(args.index.resolve(), limit=MAX_JSON_BYTES)
+        canonical_baseline_path = _indexed_baseline_path(index, repo_root)
+        # A caller-selected copy must never replace the checked-in evidence named
+        # by the registry, even when that copy is schema-valid and redacted.
+        require(args.baseline.resolve() == canonical_baseline_path, "baseline path is not canonical")
         schema = load_json(args.schema.resolve(), limit=MAX_JSON_BYTES)
-        baseline = load_json(args.baseline.resolve(), limit=MAX_JSON_BYTES)
+        baseline = load_json(canonical_baseline_path, limit=MAX_JSON_BYTES)
         require(type(index) is dict and type(schema) is dict and type(baseline) is dict, "registry documents must be objects")
         fixture_count, coverage_count = validate_all(
             index,
             schema,
             baseline,
             repo_root=repo_root,
-            baseline_path=args.baseline.resolve(),
+            baseline_path=canonical_baseline_path,
         )
     except ArgumentParseError:
         emit_failure("fixture_validator_cli_invalid")

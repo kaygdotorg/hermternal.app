@@ -168,6 +168,59 @@
       ]
     },
     {
+      "id": "connection-restoration",
+      "path": "connection-restoration",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "failure",
+        "pending",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "connection-restoration"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "connection-restoration/README.md",
+          "sha256": "db1b594257ee756d746e6771ccc5bd7877255c5b86759bb1510c70ecd5b6499e",
+          "size_bytes": 6686
+        },
+        {
+          "path": "connection-restoration/cases.json",
+          "sha256": "91b43223a17ebaf309f0f57b32f804dc9bab28af4d6860cae33dae9a7bb03935",
+          "size_bytes": 68422
+        },
+        {
+          "path": "connection-restoration/test_validate.py",
+          "sha256": "7c0350ae46a29879db092cd6476f70926ab69546b9806689d7f9406b5ab84627",
+          "size_bytes": 17710
+        },
+        {
+          "path": "connection-restoration/validate.py",
+          "sha256": "42dbaa3c1b2332cd67a990732a4e18170d361387a4db2552c427f12d38fe3181",
+          "size_bytes": 52948
+        },
+        {
+          "path": "connection-restoration/validation-baseline.json",
+          "sha256": "9f9b31e78de72149da2db5f634e7ac03467cb419d6dac7f67bdb862b4bc8a73b",
+          "size_bytes": 2601
+        }
+      ]
+    },
+    {
       "id": "deep-link-grammar",
       "path": "deep-link-grammar",
       "status": "ready",
@@ -358,6 +411,59 @@
           "path": "deployment-security/ws-ticket/validate.py",
           "sha256": "0e0d074ae7b9939482acd3e85e3fb52e12c56230a1a9db824318e24bf4367b8d",
           "size_bytes": 55327
+        }
+      ]
+    },
+    {
+      "id": "image-attachment-lifecycle",
+      "path": "image-attachment-lifecycle",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "empty",
+        "failure",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "image-attachment-lifecycle"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "image-attachment-lifecycle/README.md",
+          "sha256": "3ae61028fad8a039be12bad4f29261e578a2e399736e8e43ddb9e01f02fbc2b4",
+          "size_bytes": 7536
+        },
+        {
+          "path": "image-attachment-lifecycle/baseline.json",
+          "sha256": "1ea90ce6ce43a74ac813dc62dfc97282d6b7e469dfaa119af48bde1310bc5420",
+          "size_bytes": 2252
+        },
+        {
+          "path": "image-attachment-lifecycle/cases.json",
+          "sha256": "2fb48a66e94c20d2133dd387746946643f16061b702566acaf4633fb55a7cd7f",
+          "size_bytes": 24084
+        },
+        {
+          "path": "image-attachment-lifecycle/test_validate.py",
+          "sha256": "3f3190e582b02d69d2ab0314f7bce19666acf136edce0b4f20b745762deff025",
+          "size_bytes": 23584
+        },
+        {
+          "path": "image-attachment-lifecycle/validate.py",
+          "sha256": "bae60b594962f8a48e1914a9ab2162b8e07819247fcdaae58b501090358ff5ce",
+          "size_bytes": 55704
         }
       ]
     },
@@ -958,7 +1064,9 @@
     {
       "id": "connection-restoration",
       "status": "pending",
-      "fixture_ids": [],
+      "fixture_ids": [
+        "connection-restoration"
+      ],
       "platforms": [
         "web",
         "ios",
@@ -973,7 +1081,7 @@
         "cancelled",
         "unknown"
       ],
-      "notes": "C-05 state-model evidence exists, but the aggregate chat restoration fixture is pending."
+      "notes": "C-05 artifacts are indexed and internally validated; coverage remains pending until the C-05 dependency gate is complete."
     },
     {
       "id": "deployment-attestation",
@@ -992,6 +1100,27 @@
         "failure"
       ],
       "notes": "Attestation fixtures record match and mismatch observations without a live claim."
+    },
+    {
+      "id": "image-attachment-lifecycle",
+      "status": "ready",
+      "fixture_ids": [
+        "image-attachment-lifecycle"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "C-14 image lifecycle artifacts are synthetic-only and internally validated without image bytes or upload claims."
     },
     {
       "id": "images-only-attachments",

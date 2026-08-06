@@ -32,15 +32,23 @@ wire-neutral shape. Each ready fixture root lists every checked-in artifact,
 its byte count, and its SHA-256 digest. The aggregate validator also rejects
 unsafe paths, duplicate JSON keys, non-finite numbers, oversized input,
 malformed UTF-8, credential-shaped values, live claims, symlinks, and unindexed
-artifacts. Domain validators remain authoritative for case semantics; the
-aggregate layer does not run them and makes no network request.
+artifacts. Registered Python artifacts are parsed and their retained string
+literals and comments are scanned as well; detector regex definitions and
+explicit negative-test markers are not treated as retained credentials. Domain validators
+remain authoritative for case semantics; the aggregate layer does not run them
+and makes no network request.
 
-A registry can be structurally valid while coverage remains `partial`. A
-`pending`, `empty`, `failure`, `cancelled`, or `unknown` coverage row is never
-promoted to successful evidence. The checked-in index keeps the C-05 connection
-restoration and C-08 stream-dependent units pending until their fixtures exist.
-`live_claim` is always `false`; a passing validator proves only synthetic
-artifact integrity and registry consistency.
+The `--baseline` input is bound to the exact canonical path named by the
+registry (`validator/validation-baseline.json`); a schema-valid copy cannot
+replace the checked-in benchmark evidence. Ready coverage may reference only
+ready fixture roots with real manifests. A registry can be structurally valid
+while coverage remains `partial`. A `pending`, `empty`, `failure`, `cancelled`,
+or `unknown` coverage row is never promoted to successful evidence. The
+checked-in index now inventories the C-05 connection-restoration and C-14 image
+attachment lifecycle artifacts, while C-05 coverage and C-08 stream-dependent
+coverage remain pending until their dependency gates complete. `live_claim` is
+always `false`; a passing validator proves only synthetic artifact integrity and
+registry consistency.
 
 The validator emits one bounded semantic JSON line. Failures do not echo
 arguments, paths, keys, values, secrets, or tracebacks. Normal and optimized
