@@ -35,8 +35,8 @@ PREFIX = "/hermes"
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py")
 # Evidence is pinned after the fixture is reviewed; a copied baseline cannot
 # self-rebind its digest to a mutated README, manifest, or validator.
-EXPECTED_ARTIFACT_BYTES = 109063
-EXPECTED_ARTIFACT_SHA256 = "1191a77a5ddf8cdf8e8c10af509cbd09a26734392952bc1437769d1d163ad927"
+EXPECTED_ARTIFACT_BYTES = 114002
+EXPECTED_ARTIFACT_SHA256 = "9922058f6d4a963088204d2d8cad53822cb4c88aa775748076d8183efb384cd0"
 
 MAX_JSON_BYTES = 512 * 1024
 MAX_JSON_DEPTH = 64
@@ -70,6 +70,9 @@ SENSITIVE_NORMALIZED_KEYS = frozenset(
         "clientsecret",
         "cookie",
         "cookievalue",
+        "setcookie",
+        "host",
+        "hostname",
         "sessionid",
         "ticketid",
         "csrftoken",
@@ -81,6 +84,8 @@ SENSITIVE_ASSIGNMENT_NAMES = (
     r"(?:password|token|secret|authorization|api[_\-. ]*key|"
     r"client[_\-. ]*secret|bearer|"
     r"cookie(?:[_\-. ]*(?:value|id))?|"
+    r"set[_\-. ]*cookie|"
+    r"host(?:[_\-. ]*name)?|"
     r"ticket(?:[_\-. ]*id)?|"
     r"csrf(?:[_\-. ]*token)?|"
     r"session(?:[_\-. ]*(?:cookie|token|value|id))?|"
@@ -91,14 +96,114 @@ SENSITIVE_ASSIGNMENT_NAMES = (
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     rf"(?<![A-Za-z0-9])(?P<key>(?P<quote>[\"']?)(?P<name>{SENSITIVE_ASSIGNMENT_NAMES})"
     rf"(?P=quote)\s*[:=]\s*)"
-    rf"(?P<value>(?:Bearer\s+)?(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,}}\]]+))",
+    rf"(?P<value>(?:(?:Bearer|Basic)\s+)?(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,}}\]]+))",
     re.IGNORECASE,
 )
-SECRET_VALUE_PATTERNS = (
-    re.compile(r"\b(?:ghp|github_pat|sk_live|AKIA)[A-Za-z0-9_-]+\b", re.IGNORECASE),
-    re.compile(r"\bBearer\s+[^\s,}\]]+", re.IGNORECASE),
-    re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----", re.IGNORECASE),
-    re.compile(r"\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+
+# Retained-output redaction is deliberately lexical.  It does not decode,
+# resolve, or read anything; it only rejects material that could put a URL,
+# credential, path, filename, host, or encoded payload into diagnostics.  The
+# structural fields below are independently frozen by the contract validator,
+# so their route syntax and evidence hashes are not mistaken for user data.
+REDACTION_STRUCTURAL_FIELDS = frozenset(
+    {
+        "schema",
+        "pinned_source_sha",
+        "source_contract_path",
+        "validator",
+        "fixture",
+        "command",
+        "path",
+        "files",
+        "sha256",
+    }
+)
+REDACTION_STRUCTURAL_EXEMPT_PATTERNS = frozenset(
+    {
+        "base64",
+        "absolute_path",
+        "windows_path",
+        "relative_path",
+        "filename",
+        "hostname",
+        "email",
+        "ip_address",
+    }
+)
+RETAINED_VALUE_PATTERNS = (
+    ("url", re.compile(r"\b(?:https?|wss?|ftp)://[^\s<>\"']+", re.IGNORECASE)),
+    ("data_url", re.compile(r"(?<![A-Za-z0-9])data:[^\s<>\"']+", re.IGNORECASE)),
+    ("basic_auth", re.compile(r"\bBasic\s+[A-Za-z0-9+/=_-]+", re.IGNORECASE)),
+    ("cookie_header", re.compile(r"\b(?:Cookie|Set-Cookie)\s*:\s*[^\r\n]+", re.IGNORECASE)),
+    ("secret", re.compile(r"\b(?:ghp|github_pat|sk_live|AKIA)[A-Za-z0-9_-]+\b", re.IGNORECASE)),
+    ("bearer", re.compile(r"\bBearer\s+[^\s,}\]]+", re.IGNORECASE)),
+    ("private_key", re.compile(r"-----BEGIN [A-Z0-9 ]+ PRIVATE KEY-----", re.IGNORECASE)),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
+    (
+        "base64",
+        re.compile(
+            r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{8,}={1,2}(?![A-Za-z0-9+/=])"
+            r"|(?<![A-Za-z0-9+/])(?=[A-Za-z0-9+/]{12,}(?![A-Za-z0-9+/]))"
+            r"(?:(?=[A-Za-z0-9+/]*[0-9+/])|(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z]))"
+            r"(?![0-9A-Fa-f]{12,}(?![A-Za-z0-9+/]))[A-Za-z0-9+/]{12,}(?![A-Za-z0-9+/])"
+        ),
+    ),
+    (
+        "absolute_path",
+        re.compile(r"(?<![A-Za-z0-9])/(?:[^\s<>\"']+/)+[^\s<>\"']+"),
+    ),
+    (
+        "windows_path",
+        re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)[^\s<>\"']+"),
+    ),
+    (
+        "relative_path",
+        re.compile(
+            r"(?<![A-Za-z0-9])(?:\.{0,2}[\\/])?"
+            r"(?:[A-Za-z0-9._-]+[\\/])+[A-Za-z0-9._-]+"
+            r"(?:\.[A-Za-z0-9_-]{1,16})?(?![A-Za-z0-9])"
+        ),
+    ),
+    (
+        "filename",
+        re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z0-9_-]+\.)+[A-Za-z][A-Za-z0-9_-]{0,15}(?![A-Za-z0-9])"),
+    ),
+    (
+        "hostname",
+        re.compile(
+            r"(?<![A-Za-z0-9._-])"
+            r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+            r"[A-Za-z]{2,63}(?::[0-9]{1,5})?"
+            r"(?![A-Za-z0-9._/-])",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "email",
+        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\b", re.IGNORECASE),
+    ),
+    (
+        "ip_address",
+        re.compile(
+            r"(?<![A-Za-z0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]{1,5})?"
+            r"(?![A-Za-z0-9._/-])"
+        ),
+    ),
+)
+# Keep the old name available for callers while routing every check through
+# the expanded retained-output policy.
+SECRET_VALUE_PATTERNS = tuple(pattern for _, pattern in RETAINED_VALUE_PATTERNS)
+README_REDACTION_PATTERN_NAMES = frozenset(
+    {
+        "url",
+        "data_url",
+        "basic_auth",
+        "cookie_header",
+        "secret",
+        "bearer",
+        "private_key",
+        "jwt",
+    }
 )
 
 BASELINE_COMMANDS = {
@@ -130,14 +235,15 @@ class ValidationError(ValueError):
 
 
 def compact_error(message: object) -> str:
-    """Return one bounded diagnostic without exposing credential-shaped text."""
+    """Return one bounded semantic diagnostic without retained user material."""
 
     redacted = str(message)
-    for pattern in SECRET_VALUE_PATTERNS:
+    for _, pattern in RETAINED_VALUE_PATTERNS:
         redacted = pattern.sub("[REDACTED]", redacted)
 
     def redact_assignment(match: re.Match[str]) -> str:
-        return f"{match.group('key')}[REDACTED]"
+        del match
+        return "[REDACTED]"
 
     redacted = SENSITIVE_ASSIGNMENT_RE.sub(redact_assignment, redacted)
     if len(redacted) > MAX_ERROR_OUTPUT:
@@ -224,7 +330,7 @@ def validate_json_tree(value: Any, label: str = "fixture", depth: int = 0) -> in
                 raise FixtureJSONError(f"{label}: object keys must be text")
             if len(key) > MAX_STRING_LENGTH:
                 raise FixtureJSONError(f"{label}: object key is too long")
-            nodes += validate_json_tree(child, f"{label}.{key}", depth + 1)
+            nodes += validate_json_tree(child, f"{label}.<field>", depth + 1)
             if nodes > MAX_JSON_NODES:
                 raise FixtureJSONError(f"{label}: JSON node count exceeds the bounded limit")
         return nodes
@@ -233,7 +339,7 @@ def validate_json_tree(value: Any, label: str = "fixture", depth: int = 0) -> in
             raise FixtureJSONError(f"{label}: array is too long")
         nodes = 1
         for index, child in enumerate(value):
-            nodes += validate_json_tree(child, f"{label}[{index}]", depth + 1)
+            nodes += validate_json_tree(child, f"{label}[]", depth + 1)
             if nodes > MAX_JSON_NODES:
                 raise FixtureJSONError(f"{label}: JSON node count exceeds the bounded limit")
         return nodes
@@ -287,42 +393,57 @@ def _normalize_sensitive_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", key.casefold())
 
 
-def _walk_redaction(value: Any, path: str = "$") -> None:
+def _pattern_is_exempt(pattern_name: str, field_name: str | None) -> bool:
+    return (
+        field_name in REDACTION_STRUCTURAL_FIELDS
+        and pattern_name in REDACTION_STRUCTURAL_EXEMPT_PATTERNS
+    )
+
+
+def _check_retained_text(value: str, path: str, field_name: str | None = None) -> None:
+    for pattern_name, pattern in RETAINED_VALUE_PATTERNS:
+        if _pattern_is_exempt(pattern_name, field_name):
+            continue
+        require(pattern.search(value) is None, f"retained sensitive value at {path}")
+    require(SENSITIVE_ASSIGNMENT_RE.search(value) is None, f"retained sensitive value at {path}")
+
+
+def _walk_redaction(value: Any, path: str = "$", *, field_name: str | None = None) -> None:
+    """Walk untrusted retained data using fixed paths, never raw object keys."""
+
     if type(value) is dict:
         for key, child in value.items():
+            _check_retained_text(key, f"{path}.<field-name>")
             normalized = _normalize_sensitive_key(key)
-            require(normalized not in SENSITIVE_NORMALIZED_KEYS, f"sensitive fixture field at {path}")
-            _walk_redaction(child, f"{path}.{key}")
+            require(normalized not in SENSITIVE_NORMALIZED_KEYS, f"sensitive fixture field at {path}.<field>")
+            _walk_redaction(child, f"{path}.<field>", field_name=key)
         return
     if type(value) is list:
-        for index, child in enumerate(value):
-            _walk_redaction(child, f"{path}[{index}]")
+        for child in value:
+            _walk_redaction(child, f"{path}[]", field_name=field_name)
         return
     if type(value) is str:
-        for pattern in SECRET_VALUE_PATTERNS:
-            require(pattern.search(value) is None, f"secret-shaped fixture value at {path}")
-        require(SENSITIVE_ASSIGNMENT_RE.search(value) is None, f"secret-shaped fixture value at {path}")
-        require("://" not in value, f"live URL or host at {path}")
+        _check_retained_text(value, path, field_name)
 
 
 def validate_redaction(value: Any) -> None:
-    """Reject raw credential, cookie, token, host, and live URL material."""
+    """Reject raw credentials, URLs, encoded payloads, paths, hosts, and filenames."""
 
     _walk_redaction(value)
 
 
 def validate_readme_redaction(root: Path = ROOT) -> None:
-    """Apply the same no-live-data rule to the human-readable contract."""
+    """Apply the retained credential and live-endpoint rule to the README."""
 
     try:
         text = (root / "README.md").read_text(encoding="utf-8")
     except OSError as exc:
         raise ValidationError("README.md is unavailable") from exc
     require(len(text) <= MAX_JSON_BYTES, "README.md exceeds the bounded input limit")
-    for pattern in SECRET_VALUE_PATTERNS:
-        require(pattern.search(text) is None, "README.md contains secret-shaped text")
+    for pattern_name, pattern in RETAINED_VALUE_PATTERNS:
+        if pattern_name in README_REDACTION_PATTERN_NAMES:
+            require(pattern.search(text) is None, "README.md contains retained sensitive text")
     require(SENSITIVE_ASSIGNMENT_RE.search(text) is None, "README.md contains credential-shaped text")
-    require("://" not in text, "README.md contains a live URL or host")
 
 
 def _strict_keys(value: Any, expected: tuple[str, ...], label: str) -> dict[str, Any]:

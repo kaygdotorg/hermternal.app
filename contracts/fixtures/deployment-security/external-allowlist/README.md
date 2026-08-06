@@ -143,6 +143,23 @@ of executable assertions, so normal and optimized runs enforce the same rules.
 Failures are one bounded JSON line with exit status `2`. The CLI does not emit
 tracebacks, usage text, untrusted argument values, or request material.
 
+### Retained-output redaction
+
+The retained-output scanner rejects data URLs, padded and unpadded Base64-like
+runs (including embedded runs), absolute POSIX and Windows paths, relative
+paths, filenames, hostnames, email or IPv4 host-shaped values, and Basic,
+Cookie, Bearer, and sensitive-assignment payloads. It scans both values and
+object keys. Diagnostic locations use fixed semantic labels such as
+`$.<field>` and `$[]`; attacker-controlled keys never become error paths.
+
+The manifest's frozen route paths, source-contract path, artifact filenames and
+hashes, and validator command strings are structural syntax. Those fields are
+independently checked against the closed contract and are exempt only from the
+heuristics that would classify their syntax as a retained user path, filename,
+host, or encoded payload. Credential and URL checks still apply. Normal and
+optimized real-CLI regressions exercise every retained-data class and require
+the same bounded semantic failure in both modes.
+
 Run from the repository root:
 
 ```sh
@@ -151,10 +168,10 @@ python3 -O contracts/fixtures/deployment-security/external-allowlist/validate.py
 python3 contracts/fixtures/deployment-security/external-allowlist/test_validate.py
 python3 -O contracts/fixtures/deployment-security/external-allowlist/test_validate.py
 python3 -m unittest discover \
-  -s contracts/fixtures/deployment-security/external-allowlist \
+  -s "$PWD/contracts/fixtures/deployment-security/external-allowlist" \
   -p 'test_*.py'
 python3 -O -m unittest discover \
-  -s contracts/fixtures/deployment-security/external-allowlist \
+  -s "$PWD/contracts/fixtures/deployment-security/external-allowlist" \
   -p 'test_*.py'
 python3 -m py_compile \
   contracts/fixtures/deployment-security/external-allowlist/validate.py \

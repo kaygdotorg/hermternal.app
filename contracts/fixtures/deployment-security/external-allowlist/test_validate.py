@@ -66,6 +66,26 @@ class ExternalAllowlistTests(unittest.TestCase):
                 self.assertLessEqual(len(payload["error"]["message"]), validate.MAX_ERROR_OUTPUT)
                 self.assertNotIn("Traceback", completed.stdout + completed.stderr)
 
+    def _assert_cli_redaction_failure(self, document: dict[str, object], markers: tuple[str, ...]) -> None:
+        content = json.dumps(document, separators=(",", ":")).encode()
+        outputs: list[str] = []
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                completed = self._run_cli(content, optimized=optimized)
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stderr, "")
+                lines = [line for line in completed.stdout.splitlines() if line.strip()]
+                self.assertEqual(len(lines), 1)
+                payload = json.loads(lines[0])
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                self.assertLessEqual(len(payload["error"]["message"]), validate.MAX_ERROR_OUTPUT)
+                self.assertNotIn("Traceback", completed.stdout)
+                for marker in markers:
+                    self.assertNotIn(marker, completed.stdout)
+                outputs.append(completed.stdout)
+        self.assertEqual(outputs[0], outputs[1])
+
     def test_checked_in_manifest_has_expected_order_and_case_count(self) -> None:
         self.assertEqual(tuple(self.cases), validate.EXPECTED_CASE_IDS)
         self.assertEqual(len(self.cases), 71)
@@ -278,7 +298,7 @@ class ExternalAllowlistTests(unittest.TestCase):
         widened_route["external_routes"][0]["path"] = "/hermes/*"
         self._assert_cli_failure(json.dumps(widened_route).encode())
 
-    def test_redaction_rejects_credential_aliases_even_with_synthetic_values(self) -> None:
+    def test_redaction_rejects_retained_output_classes_even_with_synthetic_values(self) -> None:
         messages = (
             "X-API-Key: synthetic",
             "password=synthetic",
@@ -287,11 +307,69 @@ class ExternalAllowlistTests(unittest.TestCase):
             "session-token=synthetic",
             "api-key=synthetic",
             "secret: synthetic",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "embedded padded AQIDBAUGBwgJ== value",
+            "embedded unpadded AQIDBAUGBwgJ value",
+            "artifact at /Users/alice/private/report.txt",
+            r"artifact at C:\\Users\\Alice\\private\\report.txt",
+            "artifact at ../local/report.txt",
+            "uploaded filename report.txt",
+            "artifact for evil.example.com",
+            "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+            "Cookie: session=synthetic-cookie-value",
+            "Bearer synthetic-bearer-value",
         )
         for message in messages:
             with self.subTest(message=message):
                 with self.assertRaises(validate.ValidationError):
                     validate.validate_redaction({"message": message})
+
+    def test_real_cli_redacts_retained_output_in_normal_and_optimized_modes(self) -> None:
+        markers = (
+            "data:image/png;base64,iVBORw0KGgo=",
+            "AQIDBAUGBwgJ==",
+            "AQIDBAUGBwgJ",
+            "/Users/alice/private/report.txt",
+            r"C:\\Users\\Alice\\private\\report.txt",
+            "../local/report.txt",
+            "report.txt",
+            "evil.example.com",
+            "QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+            "synthetic-cookie-value",
+            "synthetic-bearer-value",
+        )
+        values = (
+            "data:image/png;base64,iVBORw0KGgo=",
+            "embedded padded AQIDBAUGBwgJ== value",
+            "embedded unpadded AQIDBAUGBwgJ value",
+            "artifact at /Users/alice/private/report.txt",
+            r"artifact at C:\\Users\\Alice\\private\\report.txt",
+            "artifact at ../local/report.txt",
+            "uploaded filename report.txt",
+            "artifact for evil.example.com",
+            "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+            "Cookie: session=synthetic-cookie-value",
+            "Bearer synthetic-bearer-value",
+        )
+        for value in values:
+            with self.subTest(value=value):
+                mutated = copy.deepcopy(self.document)
+                mutated["cases"][0]["description"] = value
+                self._assert_cli_redaction_failure(mutated, tuple(marker for marker in markers if marker in value))
+
+        hostile_keys = (
+            "data:image/png;base64,iVBORw0KGgo=",
+            "AQIDBAUGBwgJ==",
+            "/Users/alice/private/report.txt",
+            r"C:\\Users\\Alice\\private\\report.txt",
+            "report.txt",
+            "evil.example.com",
+        )
+        for hostile_key in hostile_keys:
+            with self.subTest(hostile_key=hostile_key):
+                mutated = copy.deepcopy(self.document)
+                mutated["cases"][0]["request"][hostile_key] = "synthetic"
+                self._assert_cli_redaction_failure(mutated, (hostile_key,))
 
     def test_direct_requests_share_manifest_redaction_boundary(self) -> None:
         base = {
@@ -310,11 +388,34 @@ class ExternalAllowlistTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.evaluate_request(dict(base, path="https://synthetic.invalid/hermes/api/sessions"))
 
-    def test_error_compaction_redacts_secret_shapes_and_caps_output(self) -> None:
-        message = "Authorization: Bearer ghp_example_secret " + "x" * 500
+    def test_error_compaction_redacts_retained_shapes_and_caps_output(self) -> None:
+        markers = (
+            "data:image/png;base64,iVBORw0KGgo=",
+            "AQIDBAUGBwgJ==",
+            "AQIDBAUGBwgJ",
+            "/Users/alice/private/report.txt",
+            r"C:\\Users\\Alice\\private\\report.txt",
+            "../local/report.txt",
+            "report.txt",
+            "evil.example.com",
+            "QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+            "synthetic-cookie-value",
+            "synthetic-bearer-value",
+            "ghp_example_secret",
+        )
+        message = (
+            "data:image/png;base64,iVBORw0KGgo= embedded padded AQIDBAUGBwgJ== "
+            "embedded unpadded AQIDBAUGBwgJ artifact /Users/alice/private/report.txt "
+            r"C:\\Users\\Alice\\private\\report.txt ../local/report.txt report.txt "
+            "evil.example.com Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ== "
+            "Cookie: session=synthetic-cookie-value Bearer synthetic-bearer-value "
+            "Authorization: Bearer ghp_example_secret "
+            + "x" * 500
+        )
         compacted = validate.compact_error(message)
-        self.assertNotIn("ghp_example_secret", compacted)
-        self.assertNotIn("Bearer ghp_example_secret", compacted)
+        for marker in markers:
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, compacted)
         self.assertLessEqual(len(compacted), validate.MAX_ERROR_OUTPUT)
 
     def test_invalid_cli_arguments_are_controlled_and_do_not_echo_values(self) -> None:
