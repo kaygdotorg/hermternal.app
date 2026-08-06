@@ -1,0 +1,680 @@
+{
+  "schema": "hermternal.deployment-security.pty-local-adapter.v1",
+  "operation": "DEP-10M",
+  "contract": "dashboard-v0.0.1",
+  "pinned_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "surface": "web-only",
+  "proof_mode": "offline-synthetic-byte-adapter",
+  "synthetic_only": true,
+  "network_access": false,
+  "redaction": {
+    "synthetic_only": true,
+    "raw_bytes_only_in_explicit_inputs": true,
+    "raw_pty_bytes_logged": false,
+    "action_payloads_replayed": false,
+    "contains_credentials": false,
+    "contains_live_data": false,
+    "contains_public_hosts": false
+  },
+  "constants": {
+    "route": "WS /api/pty",
+    "resize_prefix_hex": "1b5b524553495a453a",
+    "resize_suffix_hex": "5d",
+    "min_cols": 1,
+    "max_cols": 2000,
+    "min_rows": 1,
+    "max_rows": 1000,
+    "replay_capacity_bytes": 1048576,
+    "detach_retention_seconds": 1800,
+    "replacement_close_code": 4409,
+    "process_exit_close_code": 4410,
+    "clean_disconnect_close_code": 1000
+  },
+  "evidence": {
+    "accessibility": {
+      "status": "not-applicable",
+      "reason": "Protocol-only fixture; no UI nodes or interaction code changed.",
+      "preservation_reference": "contracts/state-models/terminal.md"
+    },
+    "security": {
+      "status": "pass",
+      "synthetic_only": true,
+      "live_integration": false,
+      "real_pty": false,
+      "raw_pty_bytes_logged": false,
+      "action_payloads_replayed": false,
+      "unsupported_hosts_blocked": true
+    },
+    "benchmark": {
+      "status": "baseline-only",
+      "artifact": "validation-baseline.json",
+      "approved_budget": null,
+      "normal_samples": 30,
+      "optimized_samples": 30,
+      "threshold": null
+    }
+  },
+  "cases": [
+    {
+      "id": "upgrade-success",
+      "kind": "upgrade",
+      "input": {
+        "host_class": "supported-synthetic",
+        "route": "WS /api/pty",
+        "events": [
+          {
+            "name": "request.received",
+            "host_class": "supported-synthetic",
+            "route": "WS /api/pty"
+          },
+          {
+            "name": "upgrade.accepted",
+            "route": "WS /api/pty",
+            "transport": "binary"
+          },
+          {
+            "name": "byte-adapter.ready",
+            "mode": "local-byte-adapter"
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "socket_accepted": true,
+        "adapter_mode": "local-byte-adapter",
+        "process_spawned": false,
+        "binary_transport": true
+      }
+    },
+    {
+      "id": "byte-preservation",
+      "kind": "byte-preservation",
+      "input": {
+        "frames": [
+          {
+            "frame_ref": "synthetic-frame-utf8-a",
+            "frame_hex": "f0",
+            "wire_type": "binary"
+          },
+          {
+            "frame_ref": "synthetic-frame-utf8-b",
+            "frame_hex": "9f9880",
+            "wire_type": "binary"
+          },
+          {
+            "frame_ref": "synthetic-frame-incomplete",
+            "frame_hex": "e282",
+            "wire_type": "binary"
+          },
+          {
+            "frame_ref": "synthetic-frame-invalid",
+            "frame_hex": "c328",
+            "wire_type": "binary"
+          }
+        ]
+      },
+      "expected": {
+        "joined_hex": "f09f9880e282c328",
+        "frame_boundaries_preserved": true,
+        "utf8_decode": false,
+        "reencode": false,
+        "raw_bytes_logged": false
+      }
+    },
+    {
+      "id": "resize-bounds",
+      "kind": "resize-bounds",
+      "input": {
+        "samples": [
+          {
+            "cols": 1,
+            "rows": 1,
+            "effective_cols": 1,
+            "effective_rows": 1,
+            "control_hex": "1b5b524553495a453a313b315d"
+          },
+          {
+            "cols": 2000,
+            "rows": 1000,
+            "effective_cols": 2000,
+            "effective_rows": 1000,
+            "control_hex": "1b5b524553495a453a323030303b313030305d"
+          },
+          {
+            "cols": -1,
+            "rows": 24,
+            "effective_cols": 1,
+            "effective_rows": 24,
+            "control_hex": "1b5b524553495a453a313b32345d"
+          },
+          {
+            "cols": 0,
+            "rows": 0,
+            "effective_cols": 1,
+            "effective_rows": 1,
+            "control_hex": "1b5b524553495a453a313b315d"
+          },
+          {
+            "cols": 80,
+            "rows": -1,
+            "effective_cols": 80,
+            "effective_rows": 1,
+            "control_hex": "1b5b524553495a453a38303b315d"
+          },
+          {
+            "cols": 2001,
+            "rows": 24,
+            "effective_cols": 2000,
+            "effective_rows": 24,
+            "control_hex": "1b5b524553495a453a323030303b32345d"
+          },
+          {
+            "cols": 80,
+            "rows": 1001,
+            "effective_cols": 80,
+            "effective_rows": 1000,
+            "control_hex": "1b5b524553495a453a38303b313030305d"
+          },
+          {
+            "cols": 2001,
+            "rows": 1001,
+            "effective_cols": 2000,
+            "effective_rows": 1000,
+            "control_hex": "1b5b524553495a453a323030303b313030305d"
+          }
+        ],
+        "framing": {
+          "prefix_hex": "1b5b524553495a453a",
+          "suffix_hex": "5d"
+        }
+      },
+      "expected": {
+        "control_is_single_binary_message": true,
+        "written_to_pty": false
+      }
+    },
+    {
+      "id": "resize-rejection",
+      "kind": "resize-rejection",
+      "input": {
+        "candidates": [
+          {
+            "cols": 1000.5,
+            "rows": 24,
+            "invalid_field": "cols",
+            "wire_shape": "fractional-number",
+            "frame_text": "ESC [RESIZE:1000.5;24]",
+            "expected": "rejected"
+          },
+          {
+            "cols": true,
+            "rows": 24,
+            "invalid_field": "cols",
+            "wire_shape": "boolean-dimension",
+            "frame_text": "ESC [RESIZE:true;24]",
+            "expected": "rejected"
+          },
+          {
+            "cols": "1001",
+            "rows": 24,
+            "invalid_field": "cols",
+            "wire_shape": "string-dimension",
+            "frame_text": "ESC [RESIZE:1001;24]",
+            "expected": "rejected"
+          },
+          {
+            "cols": null,
+            "rows": 24,
+            "invalid_field": "cols",
+            "wire_shape": "null-dimension",
+            "frame_text": "ESC [RESIZE:null;24]",
+            "expected": "rejected"
+          },
+          {
+            "cols": "NaN",
+            "rows": 24,
+            "invalid_field": "cols",
+            "wire_shape": "non-finite-token",
+            "frame_text": "ESC [RESIZE:NaN;24]",
+            "expected": "rejected"
+          },
+          {
+            "cols": 80,
+            "rows": 24,
+            "invalid_field": "frame",
+            "wire_shape": "malformed-frame",
+            "frame_text": "ESC [RESIZE:80;24",
+            "expected": "rejected"
+          },
+          {
+            "cols": 80,
+            "rows": 24.25,
+            "invalid_field": "rows",
+            "wire_shape": "fractional-number-rows",
+            "frame_text": "ESC [RESIZE:80;24.25]",
+            "expected": "rejected"
+          },
+          {
+            "cols": 80,
+            "rows": "Infinity",
+            "invalid_field": "rows",
+            "wire_shape": "non-finite-token-rows",
+            "frame_text": "ESC [RESIZE:80;Infinity]",
+            "expected": "rejected"
+          }
+        ]
+      },
+      "expected": {
+        "all_rejected_before_binary_send": true,
+        "accepted_count": 0
+      }
+    },
+    {
+      "id": "attach-reattach",
+      "kind": "attach-reattach",
+      "input": {
+        "handle_ref": "synthetic-handle-reattach",
+        "session_ref": "synthetic-session-reattach",
+        "process_ref": "synthetic-process-reattach",
+        "first_socket_ref": "synthetic-socket-reattach-a",
+        "second_socket_ref": "synthetic-socket-reattach-b",
+        "events": [
+          {
+            "name": "socket.accept",
+            "socket_ref": "synthetic-socket-reattach-a"
+          },
+          {
+            "name": "session.attach",
+            "handle_ref": "synthetic-handle-reattach",
+            "session_ref": "synthetic-session-reattach",
+            "process_ref": "synthetic-process-reattach",
+            "socket_ref": "synthetic-socket-reattach-a"
+          },
+          {
+            "name": "socket.disconnect",
+            "socket_ref": "synthetic-socket-reattach-a"
+          },
+          {
+            "name": "registry.retain",
+            "handle_ref": "synthetic-handle-reattach",
+            "session_ref": "synthetic-session-reattach",
+            "process_ref": "synthetic-process-reattach"
+          },
+          {
+            "name": "socket.accept",
+            "socket_ref": "synthetic-socket-reattach-b"
+          },
+          {
+            "name": "session.reattach",
+            "handle_ref": "synthetic-handle-reattach",
+            "session_ref": "synthetic-session-reattach",
+            "process_ref": "synthetic-process-reattach",
+            "socket_ref": "synthetic-socket-reattach-b"
+          },
+          {
+            "name": "registry.reuse",
+            "handle_ref": "synthetic-handle-reattach",
+            "session_ref": "synthetic-session-reattach",
+            "process_ref": "synthetic-process-reattach",
+            "socket_ref": "synthetic-socket-reattach-b"
+          },
+          {
+            "name": "client.close",
+            "handle_ref": "synthetic-handle-reattach",
+            "session_ref": "synthetic-session-reattach",
+            "process_ref": "synthetic-process-reattach",
+            "socket_ref": "synthetic-socket-reattach-b",
+            "close_code": 1000
+          },
+          {
+            "name": "registry.detach",
+            "handle_ref": "synthetic-handle-reattach",
+            "session_ref": "synthetic-session-reattach",
+            "process_ref": "synthetic-process-reattach",
+            "socket_ref": "synthetic-socket-reattach-b"
+          }
+        ]
+      },
+      "expected": {
+        "state_sequence": [
+          "attached",
+          "detached",
+          "reattached",
+          "detached"
+        ],
+        "spawn_count": 1,
+        "reattach_count": 1,
+        "identity_preserved": true,
+        "process_terminated": false,
+        "registry_reused": true
+      }
+    },
+    {
+      "id": "retained-output-race",
+      "kind": "retained-output-race",
+      "input": {
+        "capacity_bytes": 1048576,
+        "segments": [
+          {
+            "segment_ref": "synthetic-output-old",
+            "role": "evicted-prefix",
+            "byte_hex": "4f4c44",
+            "repeat": 4
+          },
+          {
+            "segment_ref": "synthetic-output-new",
+            "role": "retained-tail",
+            "byte_hex": "4e",
+            "repeat": 1048576
+          }
+        ],
+        "retained_frame_ref": "synthetic-output-replay",
+        "live_frame_ref": "synthetic-output-live",
+        "retained_hex": "52",
+        "live_hex": "4c",
+        "separator_hex": "",
+        "orders": [
+          {
+            "order_id": "synthetic-order-retained-first",
+            "order": "retained-first",
+            "frame_refs": [
+              "synthetic-output-replay",
+              "synthetic-output-live"
+            ],
+            "rendered_hex": "524c"
+          },
+          {
+            "order_id": "synthetic-order-live-first",
+            "order": "live-first",
+            "frame_refs": [
+              "synthetic-output-live",
+              "synthetic-output-replay"
+            ],
+            "rendered_hex": "4c52"
+          }
+        ]
+      },
+      "expected": {
+        "retained_bytes": 1048576,
+        "retained_segment_ref": "synthetic-output-new",
+        "evicted_segment_ref": "synthetic-output-old",
+        "replay_refs": [
+          "synthetic-output-new"
+        ],
+        "older_output_may_be_missing": true,
+        "exact_capacity_valid": true,
+        "allowed_orders": [
+          "retained-first",
+          "live-first"
+        ],
+        "client_order": "receive-order",
+        "replay_separator": "none",
+        "frame_boundaries_preserved": true
+      }
+    },
+    {
+      "id": "expiry",
+      "kind": "expiry",
+      "input": {
+        "handle_ref": "synthetic-handle-expiry",
+        "session_ref": "synthetic-session-expiry",
+        "process_ref": "synthetic-process-expiry",
+        "detached_state": "detached",
+        "probes": [
+          {
+            "elapsed_seconds": 1799,
+            "outcome": "reattach-allowed"
+          },
+          {
+            "elapsed_seconds": 1800,
+            "outcome": "reattach-allowed"
+          },
+          {
+            "elapsed_seconds": 1801,
+            "outcome": "reattach-expired"
+          }
+        ]
+      },
+      "expected": {
+        "retention_seconds": 1800,
+        "predicate": "elapsed <= retention_seconds",
+        "expired_only_after": 1800,
+        "process_reaped_on_expiry": true
+      }
+    },
+    {
+      "id": "no-input-replay",
+      "kind": "no-input-replay",
+      "input": {
+        "actions": [
+          {
+            "kind": "input",
+            "action_ref": "synthetic-action-input"
+          },
+          {
+            "kind": "resize",
+            "action_ref": "synthetic-action-resize"
+          },
+          {
+            "kind": "prompt",
+            "action_ref": "synthetic-action-prompt"
+          },
+          {
+            "kind": "tool",
+            "action_ref": "synthetic-action-tool"
+          }
+        ],
+        "output_inventory": [
+          {
+            "output_ref": "synthetic-output-prompt",
+            "role": "prompt-output",
+            "byte_hex": "70726f6d70742d6f7574707574"
+          },
+          {
+            "output_ref": "synthetic-output-tool",
+            "role": "tool-output",
+            "byte_hex": "746f6f6c2d6f7574707574"
+          }
+        ],
+        "retained_output_refs": [
+          "synthetic-output-prompt",
+          "synthetic-output-tool"
+        ],
+        "replay_refs": [
+          "synthetic-output-prompt",
+          "synthetic-output-tool"
+        ],
+        "replayed_action_refs": []
+      },
+      "expected": {
+        "non_replayable_kinds": [
+          "input",
+          "resize",
+          "prompt",
+          "tool"
+        ],
+        "replayed_action_refs": [],
+        "retained_action_refs": [],
+        "retained_output_refs": [
+          "synthetic-output-prompt",
+          "synthetic-output-tool"
+        ],
+        "replay_refs": [
+          "synthetic-output-prompt",
+          "synthetic-output-tool"
+        ]
+      }
+    },
+    {
+      "id": "no-pty-byte-logging",
+      "kind": "no-pty-byte-logging",
+      "input": {
+        "frames": [
+          {
+            "frame_ref": "synthetic-log-frame-a",
+            "byte_hex": "00ff"
+          },
+          {
+            "frame_ref": "synthetic-log-frame-b",
+            "byte_hex": "1b5b"
+          }
+        ],
+        "actions": [
+          {
+            "kind": "input",
+            "action_ref": "synthetic-action-input"
+          },
+          {
+            "kind": "resize",
+            "action_ref": "synthetic-action-resize"
+          },
+          {
+            "kind": "prompt",
+            "action_ref": "synthetic-action-prompt"
+          },
+          {
+            "kind": "tool",
+            "action_ref": "synthetic-action-tool"
+          }
+        ],
+        "logs": [
+          {
+            "event": "pty.output",
+            "frame_ref": "synthetic-log-frame-a",
+            "action_ref": null,
+            "byte_payload_hex": null,
+            "action_payload_hex": null
+          },
+          {
+            "event": "user.input",
+            "frame_ref": null,
+            "action_ref": "synthetic-action-input",
+            "byte_payload_hex": null,
+            "action_payload_hex": null
+          },
+          {
+            "event": "terminal.resize",
+            "frame_ref": null,
+            "action_ref": "synthetic-action-resize",
+            "byte_payload_hex": null,
+            "action_payload_hex": null
+          },
+          {
+            "event": "prompt.submit",
+            "frame_ref": null,
+            "action_ref": "synthetic-action-prompt",
+            "byte_payload_hex": null,
+            "action_payload_hex": null
+          },
+          {
+            "event": "tool.action",
+            "frame_ref": null,
+            "action_ref": "synthetic-action-tool",
+            "byte_payload_hex": null,
+            "action_payload_hex": null
+          }
+        ],
+        "retained_records": [
+          {
+            "record_ref": "synthetic-record-output",
+            "event": "pty.output",
+            "frame_ref": "synthetic-log-frame-a",
+            "action_ref": null,
+            "byte_payload_hex": null,
+            "action_payload_hex": null
+          },
+          {
+            "record_ref": "synthetic-record-input",
+            "event": "user.input",
+            "frame_ref": null,
+            "action_ref": "synthetic-action-input",
+            "byte_payload_hex": null,
+            "action_payload_hex": null
+          }
+        ]
+      },
+      "expected": {
+        "pty_bytes_logged": false,
+        "action_payloads_logged": false,
+        "raw_payload_fields": [
+          "byte_payload_hex",
+          "action_payload_hex"
+        ],
+        "event_order": [
+          "pty.output",
+          "user.input",
+          "terminal.resize",
+          "prompt.submit",
+          "tool.action"
+        ]
+      }
+    },
+    {
+      "id": "close-codes",
+      "kind": "close-codes",
+      "input": {
+        "events": [
+          {
+            "name": "old_socket_close",
+            "socket_ref": "synthetic-socket-old",
+            "close_code": 4409
+          },
+          {
+            "name": "replacement_assign",
+            "socket_ref": "synthetic-socket-new"
+          },
+          {
+            "name": "stale_cleanup",
+            "socket_ref": "synthetic-socket-old",
+            "result": "ignored"
+          },
+          {
+            "name": "process_exit_close",
+            "socket_ref": "synthetic-socket-dead",
+            "close_code": 4410
+          },
+          {
+            "name": "legacy_disconnect_close",
+            "socket_ref": "synthetic-socket-legacy",
+            "close_code": 1000
+          }
+        ]
+      },
+      "expected": {
+        "replacement_close_code": 4409,
+        "process_exit_close_code": 4410,
+        "clean_disconnect_close_code": 1000,
+        "close_before_assignment": true,
+        "stale_cleanup": "ignored",
+        "dead_process_retry": false
+      }
+    },
+    {
+      "id": "unsupported-host",
+      "kind": "unsupported-host",
+      "input": {
+        "host_class": "unsupported-synthetic",
+        "route": "WS /api/pty",
+        "events": [
+          {
+            "name": "request.received",
+            "host_class": "unsupported-synthetic",
+            "route": "WS /api/pty"
+          },
+          {
+            "name": "host.rejected",
+            "reason": "unsupported-host"
+          }
+        ]
+      },
+      "expected": {
+        "status": "rejected",
+        "reason": "unsupported-host",
+        "upgrade_attempted": false,
+        "socket_accepted": false,
+        "adapter_ready": false,
+        "process_spawned": false
+      }
+    }
+  ]
+}
