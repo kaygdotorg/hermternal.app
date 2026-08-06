@@ -43,6 +43,10 @@ const ERROR_MESSAGES: Record<BrowserAuthErrorCode, string> = {
   'logout-unverified': 'Logout could not be verified.'
 };
 
+export function browserAuthErrorMessage(code: BrowserAuthErrorCode): string {
+  return ERROR_MESSAGES[code];
+}
+
 export class BrowserAuthError extends Error {
   readonly code: BrowserAuthErrorCode;
   readonly status?: number;
@@ -266,7 +270,11 @@ function validatePasswordInput(input: PasswordLoginInput): PasswordLoginInput {
   ) {
     throw new BrowserAuthError('invalid-input');
   }
-  return { provider: input.provider, username: input.username, password: input.password };
+  return {
+    provider: input.provider,
+    username: input.username,
+    password: input.password
+  };
 }
 
 function containsForbiddenControl(value: string): boolean {
