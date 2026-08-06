@@ -698,7 +698,7 @@ def _validate_redaction(value: Any, path: str = "$") -> None:
 
 
 def _capture_snapshot(repo_root: Path, snapshot_commit: str | None = None) -> CapturedSnapshot:
-    """Bind canonical record, validator, and evidence to one HEAD snapshot."""
+    """Bind canonical record and validator identity to one HEAD snapshot."""
     root = repo_root.resolve(strict=False)
     if snapshot_commit is None:
         commit_oid = _git_commit_oid(root, "HEAD")
@@ -807,7 +807,12 @@ def validate_record(
     verify_git: bool = True,
     snapshot: CapturedSnapshot | None = None,
 ) -> int:
-    """Validate evidence against pinned Git objects and one captured snapshot."""
+    """Validate evidence against pinned historical and integration Git objects.
+
+    The optional captured snapshot proves only the executing canonical record and
+    validator identity. Later legitimate fixture edits must not rebind the
+    artifact digest recorded for the pinned integration snapshot.
+    """
     _validate_json_tree(record)
     _validate_shape(record)
     _validate_redaction(record)
@@ -817,10 +822,6 @@ def validate_record(
         historical_count = _validate_artifacts(repo_root, record, historical_oid, "historical")
         integration_count = _validate_artifacts(repo_root, record, integration_oid, "pinned integration")
         require(integration_count == historical_count, "historical and pinned integration artifact counts differ")
-        if snapshot is not None:
-            captured_count = _validate_artifacts(repo_root, record, snapshot.commit, "captured")
-            require(captured_count == integration_count, "pinned integration and captured artifact counts differ")
-            return captured_count
         return integration_count
     return len(record["artifacts"]["files"])
 
