@@ -16,8 +16,10 @@ run Hermes, contact a provider, contact a proxy, or claim compatibility.
   `0671593b42235d4fbad2f7f3e04255c9f51b257d` and tree
   `16fac2e9d6aa64dd2631b9f4b445146c115acfb0`; the `dev` ref value is
   provenance metadata, not a mutable ref claim;
-- the ordered, source-audit artifact inventory verified against the historical,
-  integration, and executing-validator snapshots;
+- the ordered, source-audit artifact inventory verified against the historical
+  and pinned integration snapshots; and
+- the canonical record and validator identity captured from the executing
+  snapshot, without treating later fixture edits as new artifact evidence;
 - raw normal and optimized validator-duration samples with distributions and
   `threshold: null`; and
 - an explicitly blocked status with `compatible: false` and `live_run: false`.
@@ -29,8 +31,11 @@ snapshot, reads the canonical record and validator bytes from that commit, and
 compares both working-tree files byte-for-byte. It then validates the recorded
 integration commit and tree exactly and reads every integration artifact from
 that commit. It does not consult a mutable `origin/dev` ref, so advancing that
-ref does not change or invalidate this historical snapshot. A refresh must
-record a new explicit commit and rerun the immutable checks.
+ref does not change or invalidate this historical snapshot. The executing
+`HEAD` snapshot binds only the canonical record and validator bytes; artifact
+bytes remain bound to the historical and pinned integration commits. A later
+legitimate fixture edit therefore cannot rebind the recorded digest. A refresh
+must record a new explicit commit and rerun the immutable checks.
 
 The merged PR list uses the fixture's canonical recorded order (`#221`,
 `#216`, `#218`, `#219`, `#220`); issue #41 does not prescribe an order. Artifact
@@ -103,8 +108,9 @@ PYTHONPYCACHEPREFIX=/tmp/hermternal-pycache python3 -m py_compile \
 
 The validator is offline and uses only the Python standard library plus the
 local Git object database. A passing run proves only the canonical committed
-record and validator bytes, the historical reviewed commit, the pinned
-integration snapshot, containment rules, and artifact bytes. Its JSON output
+record and validator identity from the captured `HEAD`, the historical reviewed
+commit, the pinned integration snapshot, containment rules, and artifact bytes
+read from those pinned evidence commits. Its JSON output
 names the `historical_reviewed_commit`, `integration_snapshot_commit`,
 `integration_snapshot_tree`, `captured_snapshot_tree`, exact record and
 validator blobs, and `verified_commit_kind: captured_snapshot`. It does not

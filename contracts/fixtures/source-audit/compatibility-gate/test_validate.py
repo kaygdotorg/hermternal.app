@@ -116,6 +116,22 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         finally:
             RECORD_PATH.write_bytes(original)
 
+    def test_working_tree_validator_replacement_cannot_authorize_success(self) -> None:
+        validator_path = Path(validate.__file__)
+        original = validator_path.read_bytes()
+        try:
+            validator_path.write_bytes(original + b"\n# synthetic validator replacement\n")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = validate.main(["--repo-root", str(REPO_ROOT), "--record", str(RECORD_PATH)])
+            self.assertEqual(code, 1)
+            result = json.loads(output.getvalue())
+            self.assertFalse(result["ok"])
+            self.assertIsNone(result["verified_commit"])
+            self.assertEqual(result["errors"], ["executing validator does not match committed snapshot"])
+        finally:
+            validator_path.write_bytes(original)
+
     def test_alternate_record_is_never_attested(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             alternate = Path(directory) / "attacker-record.json"
@@ -158,6 +174,38 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         with mock.patch.object(validate, "_git_commit_oid", side_effect=moved_ref):
             artifact_count = validate.validate_record(self.record, REPO_ROOT, verify_git=True, snapshot=snapshot)
         self.assertEqual(artifact_count, len(validate.ARTIFACT_PATHS))
+
+    def test_captured_snapshot_does_not_rebind_pinned_artifact_digest(self) -> None:
+        snapshot = validate._capture_snapshot(REPO_ROOT)
+        integration_commit = self.record["integration_dev"]["head"]
+        captured_readme = validate._git_blob(
+            REPO_ROOT,
+            snapshot.commit,
+            "contracts/fixtures/source-audit/oauth-browser/README.md",
+        )
+        pinned_readme = validate._git_blob(
+            REPO_ROOT,
+            integration_commit,
+            "contracts/fixtures/source-audit/oauth-browser/README.md",
+        )
+        self.assertIsNotNone(captured_readme)
+        self.assertIsNotNone(pinned_readme)
+        self.assertNotEqual(captured_readme, pinned_readme)
+
+        with mock.patch.object(validate, "_validate_artifacts", wraps=validate._validate_artifacts) as validate_artifacts:
+            artifact_count = validate.validate_record(
+                self.record,
+                REPO_ROOT,
+                verify_git=True,
+                snapshot=snapshot,
+            )
+        self.assertEqual(artifact_count, len(validate.ARTIFACT_PATHS))
+        evidence_commits = [call.args[2] for call in validate_artifacts.call_args_list]
+        self.assertEqual(
+            evidence_commits,
+            [self.record["merged_dev"]["head"], integration_commit],
+        )
+        self.assertNotIn(snapshot.commit, evidence_commits)
 
     def test_malformed_missing_or_wrong_pinned_snapshot_fails_closed(self) -> None:
         malformed = copy.deepcopy(self.record)
@@ -491,6 +539,12 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
         size["artifacts"]["files"][0]["size_bytes"] += 1
         self.assert_rejected(size, verify_git=True)
 
+    def test_captured_snapshot_cannot_bypass_pinned_artifact_digest(self) -> None:
+        mutated = copy.deepcopy(self.record)
+        mutated["artifacts"]["files"][10]["sha256"] = "0" * 64
+        snapshot = validate._capture_snapshot(REPO_ROOT)
+        self.assert_rejected(mutated, verify_git=True, snapshot=snapshot)
+
     def test_merged_dev_identity_mutations_are_rejected(self) -> None:
         for field in ("head", "tree"):
             with self.subTest(field=field):
@@ -515,6 +569,10 @@ class CompatibilityGateValidatorTests(unittest.TestCase):
             "`merged_dev`, the immutable historical review",
             "`integration_dev` is one explicitly recorded immutable snapshot",
             "advancing that ref does not change or invalidate this historical snapshot",
+            "artifact inventory verified against the historical and pinned integration snapshots",
+            "canonical record and validator identity captured from the executing snapshot",
+            "artifact bytes remain bound to the historical and pinned integration commits",
+            "later legitimate fixture edit therefore cannot rebind the recorded digest",
             "one complete `git cat-file --batch` response",
             "## Accessibility",
             "Accessibility verification is N/A for this operation because it produces no UI",
