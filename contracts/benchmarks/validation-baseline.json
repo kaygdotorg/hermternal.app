@@ -5,7 +5,7 @@
     "commit_sha": "f707fdcfb781907c7e80e353aeb86a0575d3ad71",
     "fixture_id": "shared-benchmark-validator",
     "fixture_version": "1.0.0",
-    "fixture_sha256": "854f5bb2a583b6ab16ae1d0f33200832f3bb178a633e8f6c0e5596a67e0fd113",
+    "fixture_sha256": "cafd3009688c9a1adace242ec3a087b74fda313fcf1921762c82fc8fca2aa283",
     "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e"
   },
   "metric": {
@@ -41,7 +41,39 @@
       "optimization": "normal",
       "command": "python3 contracts/benchmarks/validate.py --skip-baseline",
       "repetitions": 30,
-      "raw_samples": [39.637, 39.591, 39.396, 40.456, 42.128, 40.609, 38.153, 39.903, 37.893, 39.380, 38.371, 40.232, 39.826, 39.299, 38.531, 39.126, 39.829, 39.004, 38.571, 39.157, 38.445, 42.389, 38.378, 41.722, 40.649, 39.892, 41.276, 39.344, 39.392, 39.741],
+      "raw_samples": [
+        39.637,
+        39.591,
+        39.396,
+        40.456,
+        42.128,
+        40.609,
+        38.153,
+        39.903,
+        37.893,
+        39.38,
+        38.371,
+        40.232,
+        39.826,
+        39.299,
+        38.531,
+        39.126,
+        39.829,
+        39.004,
+        38.571,
+        39.157,
+        38.445,
+        42.389,
+        38.378,
+        41.722,
+        40.649,
+        39.892,
+        41.276,
+        39.344,
+        39.392,
+        39.741
+      ],
+      "sample_provenance_sha256": "cac442cef17cfc5f5a3b995561b8ba944309b374a4525a1fa36eafd4648d5702",
       "distribution": {
         "min": 37.893,
         "p50": 39.494,
@@ -67,10 +99,42 @@
       "optimization": "optimized",
       "command": "python3 -O contracts/benchmarks/validate.py --skip-baseline",
       "repetitions": 30,
-      "raw_samples": [38.870, 39.444, 38.992, 36.354, 36.222, 35.289, 34.878, 37.205, 38.245, 38.637, 38.496, 38.981, 37.525, 38.807, 39.806, 37.932, 40.119, 36.048, 36.299, 36.593, 36.238, 38.207, 39.254, 37.710, 38.977, 38.155, 39.021, 39.750, 38.937, 39.043],
+      "raw_samples": [
+        38.87,
+        39.444,
+        38.992,
+        36.354,
+        36.222,
+        35.289,
+        34.878,
+        37.205,
+        38.245,
+        38.637,
+        38.496,
+        38.981,
+        37.525,
+        38.807,
+        39.806,
+        37.932,
+        40.119,
+        36.048,
+        36.299,
+        36.593,
+        36.238,
+        38.207,
+        39.254,
+        37.71,
+        38.977,
+        38.155,
+        39.021,
+        39.75,
+        38.937,
+        39.043
+      ],
+      "sample_provenance_sha256": "d384a566ea71693e1968a73432208f5c501b37438d82599ed49bf9577f338a5a",
       "distribution": {
         "min": 34.878,
-        "p50": 38.370,
+        "p50": 38.37,
         "p95": 39.781,
         "p99": 40.028,
         "max": 40.119,
@@ -81,26 +145,41 @@
   "artifacts": [
     {
       "path": "README.md",
-      "bytes": 5581,
-      "sha256": "3137f166f7fe4051b810ca9175be06249069cfd3c8dabb8426c590b82e1079d9"
+      "bytes": 6562,
+      "sha256": "67003f1691655811e9e9c2151713abae057a1bd7ff3175cf06f5d506497ff995"
     },
     {
       "path": "benchmark-evidence.json",
-      "bytes": 5207,
-      "sha256": "854f5bb2a583b6ab16ae1d0f33200832f3bb178a633e8f6c0e5596a67e0fd113"
+      "bytes": 6446,
+      "sha256": "aa652867dc336467ab07873964f54a9d5000cfb01b1d55756091be2e8797a6eb"
     },
     {
       "path": "validate.py",
-      "bytes": 25393,
-      "sha256": "3cb93a0d6943c2ff98db5e9b69d89c5687fe761e1cf5756843232991ce2619c9"
+      "bytes": 35755,
+      "sha256": "e0dd2d72085fc9efd722435fd1c4ebe25a9d11bdbfeb34d52ca8e16f461e98ca"
     },
     {
       "path": "test_validate.py",
-      "bytes": 12439,
-      "sha256": "d3d33b7823dd410a3cd958a5941b8df7f912dcc49bc56f7ce2dc8ccfffa6a96b"
+      "bytes": 17484,
+      "sha256": "5553c1a1887b342734350cb7c309e06e3a0381433c1f5d98a2234f0d9c3219f1"
+    },
+    {
+      "path": "sample-provenance.json",
+      "bytes": 2304,
+      "sha256": "cafd3009688c9a1adace242ec3a087b74fda313fcf1921762c82fc8fca2aa283"
+    },
+    {
+      "path": "synthetic/workload.json",
+      "bytes": 4042,
+      "sha256": "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"
+    },
+    {
+      "path": "synthetic/trace.json",
+      "bytes": 409,
+      "sha256": "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"
     }
   ],
-  "artifact_manifest_sha256": "08a7c382bbafa90b6a077927c0758d587b08fb3e8e0b1e4a85609e903e470d8d",
+  "artifact_manifest_sha256": "f7897ce674b581fcbf12fd06399d4e3d19015ca324e404f18c05b2f68e43e1b6",
   "redaction": {
     "policy": "semantic_only",
     "synthetic_only": true,

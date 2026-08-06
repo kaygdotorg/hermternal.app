@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -39,15 +40,28 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         *,
         optimized: bool = False,
         extra: tuple[str, ...] = ("--skip-baseline",),
+        baseline_raw: bytes | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        with tempfile.NamedTemporaryFile(suffix=".json") as handle:
-            handle.write(raw)
-            handle.flush()
-            command = [sys.executable]
-            if optimized:
-                command.append("-O")
-            command.extend([str(FIXTURE_DIR / "validate.py"), "--evidence", handle.name, *extra])
-            return subprocess.run(command, check=False, capture_output=True, text=True)
+        with tempfile.NamedTemporaryFile(suffix=".json") as evidence_handle:
+            evidence_handle.write(raw)
+            evidence_handle.flush()
+            baseline_handle = None
+            try:
+                arguments = list(extra)
+                if baseline_raw is not None:
+                    arguments = [argument for argument in arguments if argument != "--skip-baseline"]
+                    baseline_handle = tempfile.NamedTemporaryFile(suffix=".json")
+                    baseline_handle.write(baseline_raw)
+                    baseline_handle.flush()
+                    arguments.extend(("--baseline", baseline_handle.name))
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.extend([str(FIXTURE_DIR / "validate.py"), "--evidence", evidence_handle.name, *arguments])
+                return subprocess.run(command, check=False, capture_output=True, text=True)
+            finally:
+                if baseline_handle is not None:
+                    baseline_handle.close()
 
     def _run_document(self, document: object, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
         return self._run_cli(json.dumps(document, separators=(",", ":")).encode(), optimized=optimized)
@@ -56,10 +70,16 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.validate_evidence(document)
 
-    def _assert_cli_failure(self, raw: bytes, secret: str | None = None) -> None:
+    def _assert_cli_failure(
+        self,
+        raw: bytes,
+        secret: str | None = None,
+        *,
+        baseline_raw: bytes | None = None,
+    ) -> None:
         for optimized in (False, True):
             with self.subTest(optimized=optimized):
-                completed = self._run_cli(raw, optimized=optimized)
+                completed = self._run_cli(raw, optimized=optimized, extra=() if baseline_raw is not None else ("--skip-baseline",), baseline_raw=baseline_raw)
                 self.assertEqual(completed.returncode, 2)
                 self.assertEqual(completed.stderr, "")
                 lines = [line for line in completed.stdout.splitlines() if line.strip()]
@@ -71,6 +91,15 @@ class BenchmarkEvidenceTests(unittest.TestCase):
                 self.assertNotIn("Traceback", completed.stdout + completed.stderr)
                 if secret is not None:
                     self.assertNotIn(secret, completed.stdout + completed.stderr)
+
+    def _assert_cli_document_failure(self, document: object, secret: str | None = None) -> None:
+        self._assert_cli_failure(json.dumps(document, separators=(",", ":")).encode(), secret)
+
+    @staticmethod
+    def _recompute_run(run: dict[str, object]) -> None:
+        expected = validate.expected_distribution(run["raw_samples"])
+        run["distribution"] = {key: float(value) for key, value in expected.items()}
+        run["sample_provenance_sha256"] = validate.sample_provenance_digest(run)
 
     def test_checked_in_format_has_all_platform_and_state_examples(self) -> None:
         self.assertEqual(self.document["schema"], validate.SCHEMA)
@@ -177,6 +206,90 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         traversal = copy.deepcopy(self.document)
         traversal["artifacts"][0]["path"] = "../outside.json"
         self._assert_rejected(traversal)
+
+    def test_canonical_identity_and_forged_samples_fail_in_both_cli_modes(self) -> None:
+        mutations: tuple[tuple[str, object, str | None], ...] = (
+            (
+                "environment identity",
+                lambda document: document["runs"][0]["environment"].__setitem__("platform", "attacker-platform"),
+                None,
+            ),
+            (
+                "source commit identity",
+                lambda document: document["revision"].__setitem__("commit_sha", "0" * 40),
+                None,
+            ),
+            (
+                "fixture identity",
+                lambda document: document["revision"].__setitem__("fixture_id", "attacker-fixture"),
+                None,
+            ),
+            (
+                "fixture digest identity",
+                lambda document: document["revision"].__setitem__("fixture_sha256", "0" * 64),
+                None,
+            ),
+            (
+                "permitted artifact set",
+                lambda document: (
+                    document.__setitem__(
+                        "artifacts",
+                        [{
+                            "path": "validation-baseline.json",
+                            "bytes": validate.BASELINE_PATH.stat().st_size,
+                            "sha256": hashlib.sha256(validate.BASELINE_PATH.read_bytes()).hexdigest(),
+                        }],
+                    ),
+                    document.__setitem__("artifact_manifest_sha256", validate.artifact_manifest_digest(document["artifacts"])),
+                ),
+                None,
+            ),
+        )
+        for label, mutate, secret in mutations:
+            candidate = copy.deepcopy(self.document)
+            mutate(candidate)
+            with self.subTest(mutation=label):
+                self._assert_cli_document_failure(candidate, secret)
+
+        forged = copy.deepcopy(self.document)
+        forged_run = forged["runs"][0]
+        forged_run["raw_samples"][0] = 1.0
+        self._recompute_run(forged_run)
+        self._assert_cli_document_failure(forged)
+
+        baseline = validate.load_json(validate.BASELINE_PATH)
+        forged_baseline = copy.deepcopy(baseline)
+        forged_baseline_run = forged_baseline["runs"][0]
+        forged_baseline_run["raw_samples"][0] = 1.0
+        self._recompute_run(forged_baseline_run)
+        self._assert_cli_failure(
+            validate.EVIDENCE_PATH.read_bytes(),
+            baseline_raw=json.dumps(forged_baseline, separators=(",", ":")).encode(),
+        )
+
+    def test_redaction_boundary_rejects_hosts_ips_bearer_and_api_key_in_both_cli_modes(self) -> None:
+        values = (
+            ("bare hostname", "evil.xyz", None),
+            ("multi-label hostname", "evil.co.uk", None),
+            ("IPv4 address", "127.0.0.1", None),
+            ("localhost", "localhost", None),
+            ("bearer secret", "Bearer raw-secret", "raw-secret"),
+            ("API key assignment", "api_key=raw-secret", "raw-secret"),
+        )
+        for label, value, secret in values:
+            candidate = copy.deepcopy(self.document)
+            candidate["runs"][0]["command"] = value
+            with self.subTest(mutation=label):
+                self._assert_cli_document_failure(candidate, secret)
+
+    def test_missing_recorded_artifact_fails_in_both_cli_modes(self) -> None:
+        missing = validate.ROOT / "synthetic" / "trace.json"
+        backup = missing.with_suffix(".json.missing-during-test")
+        missing.replace(backup)
+        try:
+            self._assert_cli_failure(validate.EVIDENCE_PATH.read_bytes())
+        finally:
+            backup.replace(missing)
 
     def test_threshold_and_budget_cannot_become_unreviewed_limits(self) -> None:
         for key in ("threshold", "budget"):

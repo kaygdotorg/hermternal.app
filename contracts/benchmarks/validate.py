@@ -3,9 +3,9 @@
 
 The format is the hand-off boundary for later web and Apple harnesses.  This
 module intentionally uses only the Python standard library: it reads local JSON,
-recomputes the recorded distribution, verifies artifact fingerprints, and emits
-bounded diagnostics.  It never starts Hermes, opens a socket, runs a browser,
-or contacts a service.
+recomputes the recorded distribution, verifies the reviewed artifact set and
+sample provenance, and emits bounded diagnostics.  It never starts Hermes, opens
+a socket, runs a browser, or contacts a service.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ EVIDENCE_PATH = ROOT / "benchmark-evidence.json"
 BASELINE_PATH = ROOT / "validation-baseline.json"
 
 SCHEMA = "hermternal.benchmark-evidence.v1"
+EVIDENCE_ID = "shared-format-example"
 BASELINE_EVIDENCE_ID = "validator-baseline"
 PINNED_HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 ERROR_CODE = "benchmark_evidence_validation_error"
@@ -80,7 +81,19 @@ RUN_KEYS = (
     "command",
     "repetitions",
     "raw_samples",
+    "sample_provenance_sha256",
     "distribution",
+)
+PROVENANCE_INPUT_KEYS = (
+    "id",
+    "platform",
+    "environment",
+    "state",
+    "build_mode",
+    "optimization",
+    "command",
+    "repetitions",
+    "raw_samples",
 )
 ENVIRONMENT_KEYS = (
     "platform",
@@ -117,16 +130,22 @@ ARTIFACT_PATH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\Z")
 
 SENSITIVE_KEY_PARTS = frozenset(
     {
+        "accesskey",
+        "apikey",
         "authorization",
         "bearer",
+        "clientsecret",
         "cookie",
         "credential",
         "csrf",
         "email",
+        "host",
         "hostname",
+        "ipaddress",
         "nonce",
         "password",
         "pkce",
+        "privateaddress",
         "privatekey",
         "secret",
         "session",
@@ -135,22 +154,174 @@ SENSITIVE_KEY_PARTS = frozenset(
         "transcript",
         "userdata",
         "useremail",
+        "xapikey",
     }
 )
 SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?:authorization|bearer|cookie|credential|csrf|nonce|password|pkce|secret|session|ticket|token)"
-    r"\s*(?:[:=]|is)\s*[^\s,;]+"
+    r"(?i)(?<![A-Za-z0-9])(?:authorization|bearer|cookie|credential|csrf|nonce|password|pkce|secret|session|ticket|token|"
+    r"api[_ .-]*key|x-api-key|client[_ .-]*secret)"
+    r"\s*(?:[:=]|is)\s*[^\s,;}\]]+"
 )
-PRIVATE_KEY_RE = re.compile(r"(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----")
+BEARER_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:authorization\s*:\s*)?Bearer\s+[^\s,;}\]]+"
+)
+PRIVATE_KEY_RE = re.compile(r"(?i)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 EMAIL_RE = re.compile(r"(?i)\b[^\s@]+@[^\s@]+\.[A-Za-z]{2,}\b")
 ABSOLUTE_PATH_RE = re.compile(r"(?:^|[\s=(])(?:/|[A-Za-z]:[\\/])")
+URL_RE = re.compile(r"(?i)\b(?:https?|wss?)://[^\s,;}\]]+")
 HOSTNAME_RE = re.compile(
-    r"(?i)(?:https?://|wss?://|\b[a-z0-9-]+\.(?:com|dev|internal|io|local|net|org|test)(?::[0-9]+)?(?:/|\b))"
+    r"(?i)(?<![A-Za-z0-9._/-])(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})"
+    r"(?::[0-9]{1,5})?(?![A-Za-z0-9._-])"
 )
+IPV4_RE = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])")
+IPV6_RE = re.compile(r"(?i)(?<![0-9a-f:])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![0-9a-f:])")
 
 BASELINE_COMMANDS = {
     "normal": "python3 contracts/benchmarks/validate.py --skip-baseline",
     "optimized": "python3 -O contracts/benchmarks/validate.py --skip-baseline",
+}
+
+# These review anchors deliberately live in validator code rather than in the
+# mutable evidence records.  A record may restate an identity, but it cannot
+# redefine the source, environment, fixture bytes, run inventory, or artifact
+# path set that this validator is willing to review.
+EXPECTED_REVISIONS = {
+    EVIDENCE_ID: {
+        "commit_sha": "ca7fa38aa115bb0c0905d6b6f0630300aea5dfb4",
+        "fixture_id": "shared-synthetic-workload",
+        "fixture_version": "1.0.0",
+        "fixture_sha256": "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404",
+        "hermes_source_sha": PINNED_HERMES_SHA,
+    },
+    BASELINE_EVIDENCE_ID: {
+        "commit_sha": "f707fdcfb781907c7e80e353aeb86a0575d3ad71",
+        "fixture_id": "shared-benchmark-validator",
+        "fixture_version": "1.0.0",
+        "fixture_sha256": "cafd3009688c9a1adace242ec3a087b74fda313fcf1921762c82fc8fca2aa283",
+        "hermes_source_sha": PINNED_HERMES_SHA,
+    },
+}
+EXPECTED_FIXTURE_PATHS = {
+    EVIDENCE_ID: "synthetic/workload.json",
+    BASELINE_EVIDENCE_ID: "sample-provenance.json",
+}
+EXPECTED_FIXTURE_SCHEMAS = {
+    EVIDENCE_ID: "hermternal.benchmark-fixture.v1",
+    BASELINE_EVIDENCE_ID: "hermternal.benchmark-sample-provenance.v1",
+}
+EXPECTED_ARTIFACT_PATHS = {
+    EVIDENCE_ID: ("synthetic/workload.json", "synthetic/trace.json"),
+    BASELINE_EVIDENCE_ID: (
+        "README.md",
+        "benchmark-evidence.json",
+        "validate.py",
+        "test_validate.py",
+        "sample-provenance.json",
+        "synthetic/workload.json",
+        "synthetic/trace.json",
+    ),
+}
+EXPECTED_RUN_METADATA = {
+    EVIDENCE_ID: {
+        "web-cold-production": {
+            "platform": "web",
+            "environment": {
+                "platform": "synthetic-web",
+                "os": "synthetic-os-1",
+                "architecture": "synthetic-arm64",
+                "device": "synthetic-desktop",
+                "runtime": "synthetic-browser-runtime",
+                "browser": "synthetic-browser",
+            },
+            "state": "cold",
+            "build_mode": "production",
+            "optimization": "not_applicable",
+            "command": "synthetic web cold workload",
+            "repetitions": 30,
+        },
+        "web-warm-production": {
+            "platform": "web",
+            "environment": {
+                "platform": "synthetic-web",
+                "os": "synthetic-os-1",
+                "architecture": "synthetic-arm64",
+                "device": "synthetic-desktop",
+                "runtime": "synthetic-browser-runtime",
+                "browser": "synthetic-browser",
+            },
+            "state": "warm",
+            "build_mode": "production",
+            "optimization": "not_applicable",
+            "command": "synthetic web warm workload",
+            "repetitions": 30,
+        },
+        "ios-cold-release": {
+            "platform": "ios",
+            "environment": {
+                "platform": "synthetic-ios",
+                "os": "synthetic-os-1",
+                "architecture": "synthetic-arm64",
+                "device": "synthetic-phone",
+                "runtime": "synthetic-swift-runtime",
+                "browser": "not_applicable",
+            },
+            "state": "cold",
+            "build_mode": "release",
+            "optimization": "not_applicable",
+            "command": "synthetic iOS cold workload",
+            "repetitions": 30,
+        },
+        "ios-warm-release": {
+            "platform": "ios",
+            "environment": {
+                "platform": "synthetic-ios",
+                "os": "synthetic-os-1",
+                "architecture": "synthetic-arm64",
+                "device": "synthetic-phone",
+                "runtime": "synthetic-swift-runtime",
+                "browser": "not_applicable",
+            },
+            "state": "warm",
+            "build_mode": "release",
+            "optimization": "not_applicable",
+            "command": "synthetic iOS warm workload",
+            "repetitions": 30,
+        },
+    },
+    BASELINE_EVIDENCE_ID: {
+        "validator-normal-cold": {
+            "platform": "shared",
+            "environment": {
+                "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+                "os": "Darwin-25.5.0",
+                "architecture": "arm64",
+                "device": "local-synthetic-runner",
+                "runtime": "Python-3.14.6",
+                "browser": "not_applicable",
+            },
+            "state": "cold",
+            "build_mode": "not_applicable",
+            "optimization": "normal",
+            "command": BASELINE_COMMANDS["normal"],
+            "repetitions": 30,
+        },
+        "validator-optimized-cold": {
+            "platform": "shared",
+            "environment": {
+                "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+                "os": "Darwin-25.5.0",
+                "architecture": "arm64",
+                "device": "local-synthetic-runner",
+                "runtime": "Python-3.14.6",
+                "browser": "not_applicable",
+            },
+            "state": "cold",
+            "build_mode": "not_applicable",
+            "optimization": "optimized",
+            "command": BASELINE_COMMANDS["optimized"],
+            "repetitions": 30,
+        },
+    },
 }
 
 
@@ -282,13 +453,22 @@ def _finite_decimal(value: Any, label: str, *, positive: bool = False) -> Decima
     return number
 
 
-def _safe_marker(value: Any, label: str) -> str:
-    text = _text(value, label)
+def _reject_sensitive_text(text: str, label: str, *, allow_relative_artifact_path: bool = False) -> None:
     require(SENSITIVE_ASSIGNMENT_RE.search(text) is None, f"{label} contains sensitive material")
+    require(BEARER_RE.search(text) is None, f"{label} contains a bearer value")
     require(PRIVATE_KEY_RE.search(text) is None, f"{label} contains key material")
     require(EMAIL_RE.search(text) is None, f"{label} contains an email address")
     require(ABSOLUTE_PATH_RE.search(text) is None, f"{label} contains an absolute path")
-    require(HOSTNAME_RE.search(text) is None, f"{label} contains a host or URL")
+    if not allow_relative_artifact_path:
+        require(URL_RE.search(text) is None, f"{label} contains a URL")
+        require(HOSTNAME_RE.search(text) is None, f"{label} contains a host")
+        require(IPV4_RE.search(text) is None, f"{label} contains an IPv4 address")
+        require(IPV6_RE.search(text) is None, f"{label} contains an IPv6 address")
+
+
+def _safe_marker(value: Any, label: str) -> str:
+    text = _text(value, label)
+    _reject_sensitive_text(text, label)
     return text
 
 
@@ -308,16 +488,16 @@ def _walk_redaction(value: Any, path: str = "$") -> None:
                 normalized not in SENSITIVE_KEY_PARTS,
                 f"{path}: sensitive field is not allowed",
             )
-            _walk_redaction(child, f"{path}.<field>")
+            _walk_redaction(child, f"{path}.{key}")
     elif isinstance(value, list):
-        for child in value:
-            _walk_redaction(child, f"{path}[]")
+        for index, child in enumerate(value):
+            _walk_redaction(child, f"{path}[{index}]")
     elif type(value) is str:
-        require(SENSITIVE_ASSIGNMENT_RE.search(value) is None, f"{path}: sensitive value is not allowed")
-        require(PRIVATE_KEY_RE.search(value) is None, f"{path}: key material is not allowed")
-        require(EMAIL_RE.search(value) is None, f"{path}: email value is not allowed")
-        require(ABSOLUTE_PATH_RE.search(value) is None, f"{path}: absolute path is not allowed")
-        require(HOSTNAME_RE.search(value) is None, f"{path}: host or URL is not allowed")
+        _reject_sensitive_text(
+            value,
+            path,
+            allow_relative_artifact_path=path.startswith("$.artifacts[") and path.endswith(".path"),
+        )
 
 
 def validate_redaction(value: Any) -> None:
@@ -328,13 +508,18 @@ def validate_redaction(value: Any) -> None:
         require(not _bool(redaction[key], f"redaction.{key}"), f"redaction.{key} must remain false")
 
 
-def _validate_revision(value: Any) -> None:
+def _validate_revision(value: Any, evidence_id: str) -> None:
     revision = _strict_keys(value, REVISION_KEYS, "revision")
-    _text(revision["commit_sha"], "revision.commit_sha", pattern=COMMIT_RE)
-    _text(revision["fixture_id"], "revision.fixture_id", pattern=IDENTIFIER_RE)
-    _text(revision["fixture_version"], "revision.fixture_version", pattern=VERSION_RE)
-    _text(revision["fixture_sha256"], "revision.fixture_sha256", pattern=SHA256_RE)
-    require(revision["hermes_source_sha"] == PINNED_HERMES_SHA, "revision.hermes_source_sha changed")
+    expected = EXPECTED_REVISIONS[evidence_id]
+    for key, pattern in (
+        ("commit_sha", COMMIT_RE),
+        ("fixture_id", IDENTIFIER_RE),
+        ("fixture_version", VERSION_RE),
+        ("fixture_sha256", SHA256_RE),
+        ("hermes_source_sha", COMMIT_RE),
+    ):
+        _text(revision[key], f"revision.{key}", pattern=pattern)
+        require(revision[key] == expected[key], f"revision.{key} is not the reviewed identity")
 
 
 def _validate_metric(value: Any) -> None:
@@ -417,10 +602,28 @@ def _validate_distribution(value: Any, samples: list[Any], label: str) -> None:
     )
 
 
-def _validate_run(value: Any, index: int) -> dict[str, Any]:
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def _provenance_input(run: dict[str, Any]) -> dict[str, Any]:
+    return {key: run[key] for key in PROVENANCE_INPUT_KEYS}
+
+
+def sample_provenance_digest(run: dict[str, Any]) -> str:
+    """Hash the exact command, identity, and raw samples used for one run."""
+
+    return hashlib.sha256(_canonical_json_bytes(_provenance_input(run))).hexdigest()
+
+
+def _validate_run(value: Any, index: int, evidence_id: str) -> dict[str, Any]:
     label = f"runs[{index}]"
     run = _strict_keys(value, RUN_KEYS, label)
-    _text(run["id"], f"{label}.id", pattern=IDENTIFIER_RE)
+    run_id = _text(run["id"], f"{label}.id", pattern=IDENTIFIER_RE)
+    expected = EXPECTED_RUN_METADATA[evidence_id].get(run_id)
+    require(expected is not None, f"{label}.id is not a reviewed run")
+    for key in ("platform", "environment", "state", "build_mode", "optimization", "command", "repetitions"):
+        require(run[key] == expected[key], f"{label}.{key} is not the reviewed identity")
     _text(run["platform"], f"{label}.platform")
     require(run["platform"] in PLATFORMS, f"{label}.platform is unsupported")
     _validate_environment(run["environment"], f"{label}.environment")
@@ -444,6 +647,7 @@ def _validate_run(value: Any, index: int) -> dict[str, Any]:
     require(len(run["raw_samples"]) <= MAX_REPETITIONS, f"{label}.raw_samples is too long")
     for sample_index, sample in enumerate(run["raw_samples"]):
         _finite_decimal(sample, f"{label}.raw_samples[{sample_index}]", positive=True)
+    _text(run["sample_provenance_sha256"], f"{label}.sample_provenance_sha256", pattern=SHA256_RE)
     _validate_distribution(run["distribution"], run["raw_samples"], f"{label}.distribution")
     return run
 
@@ -451,7 +655,7 @@ def _validate_run(value: Any, index: int) -> dict[str, Any]:
 def artifact_manifest_digest(artifacts: list[dict[str, Any]]) -> str:
     """Hash only stable artifact metadata, not JSON whitespace or file paths."""
 
-    payload = json.dumps(artifacts, ensure_ascii=True, separators=(",", ":"))
+    payload = json.dumps(artifacts, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -488,15 +692,55 @@ def _validate_local_artifacts(artifacts: list[dict[str, Any]], root: Path) -> No
         require(hashlib.sha256(raw).hexdigest() == artifact["sha256"], "recorded artifact hash changed")
 
 
+def _validate_provenance_fixture(record: dict[str, Any], root: Path) -> None:
+    """Bind samples to reviewed fixture bytes before trusting distributions.
+
+    Recomputing a quantile proves only arithmetic coherence.  Comparing the
+    complete run payload with an immutable, hashed fixture also proves that the
+    samples came from the reviewed command and environment claim.
+    """
+
+    evidence_id = record["evidence_id"]
+    fixture_path = (root / EXPECTED_FIXTURE_PATHS[evidence_id]).resolve()
+    require(root.resolve() in fixture_path.parents, "fixture path escapes the benchmark directory")
+    try:
+        fixture_bytes = fixture_path.read_bytes()
+    except OSError:
+        raise ValidationError("sample provenance fixture could not be read") from None
+    require(
+        hashlib.sha256(fixture_bytes).hexdigest() == record["revision"]["fixture_sha256"],
+        "sample provenance fixture digest changed",
+    )
+    fixture = load_json(fixture_path)
+    _walk_redaction(fixture)
+    fixture = _strict_keys(fixture, ("schema", "evidence_id", "fixture_id", "fixture_version", "runs"), "sample provenance")
+    require(fixture["schema"] == EXPECTED_FIXTURE_SCHEMAS[evidence_id], "sample provenance schema changed")
+    require(fixture["evidence_id"] == evidence_id, "sample provenance evidence identity changed")
+    require(fixture["fixture_id"] == record["revision"]["fixture_id"], "sample provenance fixture identity changed")
+    require(fixture["fixture_version"] == record["revision"]["fixture_version"], "sample provenance fixture version changed")
+    require(type(fixture["runs"]) is list, "sample provenance runs must be an array")
+    for item in fixture["runs"]:
+        require(type(item) is dict, "sample provenance run must be an object")
+    expected_ids = tuple(EXPECTED_RUN_METADATA[evidence_id])
+    require(tuple(item.get("id") for item in fixture["runs"]) == expected_ids, "sample provenance run inventory changed")
+    for index, (fixture_run, record_run) in enumerate(zip(fixture["runs"], record["runs"])):
+        provenance = _strict_keys(fixture_run, PROVENANCE_INPUT_KEYS, f"sample provenance.runs[{index}]")
+        require(provenance == _provenance_input(record_run), f"sample provenance.runs[{index}] does not match evidence")
+        require(
+            record_run["sample_provenance_sha256"] == sample_provenance_digest(provenance),
+            f"runs[{index}].sample_provenance_sha256 does not match provenance",
+        )
+
+
 def validate_evidence(
     value: Any,
     label: str = "evidence",
     *,
     root: Path = ROOT,
-    verify_artifacts: bool = False,
-    expected_id: str | None = None,
+    verify_artifacts: bool = True,
+    expected_id: str | None = EVIDENCE_ID,
 ) -> dict[str, Any]:
-    """Validate one portable evidence record and optionally its local files."""
+    """Validate one reviewed evidence record and its local provenance files."""
 
     validate_json_tree(value, label)
     require(type(value) is dict, f"{label} must be an object")
@@ -504,19 +748,26 @@ def validate_evidence(
     record = _strict_keys(value, ROOT_KEYS, label)
     require(record["schema"] == SCHEMA, f"{label}.schema changed")
     evidence_id = _text(record["evidence_id"], f"{label}.evidence_id", pattern=IDENTIFIER_RE)
+    require(evidence_id in EXPECTED_REVISIONS, f"{label}.evidence_id is not a reviewed identity")
     if expected_id is not None:
-        require(evidence_id == expected_id, f"{label}.evidence_id is not the expected baseline")
-    _validate_revision(record["revision"])
+        require(evidence_id == expected_id, f"{label}.evidence_id is not the expected identity")
+    _validate_revision(record["revision"], evidence_id)
     _validate_metric(record["metric"])
     _validate_method(record["method"])
     require(type(record["runs"]) is list, f"{label}.runs must be an array")
-    require(0 < len(record["runs"]) <= MAX_RUNS, f"{label}.runs has an invalid length")
+    expected_run_ids = tuple(EXPECTED_RUN_METADATA[evidence_id])
+    require(tuple(item.get("id") if type(item) is dict else None for item in record["runs"]) == expected_run_ids, f"{label}.runs inventory changed")
+    require(len(record["runs"]) == len(expected_run_ids), f"{label}.runs has an invalid count")
     seen_runs: set[str] = set()
     for index, item in enumerate(record["runs"]):
-        run = _validate_run(item, index)
+        run = _validate_run(item, index, evidence_id)
         require(run["id"] not in seen_runs, f"{label}.runs[{index}].id is duplicated")
         seen_runs.add(run["id"])
     artifacts = _validate_artifacts(record["artifacts"], f"{label}.artifacts")
+    require(
+        tuple(artifact["path"] for artifact in artifacts) == EXPECTED_ARTIFACT_PATHS[evidence_id],
+        f"{label}.artifacts are not the reviewed set",
+    )
     require(
         record["artifact_manifest_sha256"] == artifact_manifest_digest(artifacts),
         f"{label}.artifact_manifest_sha256 does not match artifacts",
@@ -524,6 +775,7 @@ def validate_evidence(
     validate_redaction(record["redaction"])
     require(record["threshold"] is None, f"{label}.threshold must remain null until review")
     require(record["budget"] is None, f"{label}.budget must remain null until review")
+    _validate_provenance_fixture(record, root)
     if verify_artifacts:
         _validate_local_artifacts(artifacts, root)
     return record
@@ -557,11 +809,8 @@ def validate_baseline(value: Any, root: Path = ROOT) -> dict[str, Any]:
 
 def _redacted_error(message: object) -> str:
     text = str(message)
-    text = SENSITIVE_ASSIGNMENT_RE.sub("<redacted>", text)
-    text = PRIVATE_KEY_RE.sub("<redacted>", text)
-    text = EMAIL_RE.sub("<redacted>", text)
-    text = ABSOLUTE_PATH_RE.sub("<redacted>", text)
-    text = HOSTNAME_RE.sub("<redacted>", text)
+    for pattern in (BEARER_RE, SENSITIVE_ASSIGNMENT_RE, PRIVATE_KEY_RE, EMAIL_RE, ABSOLUTE_PATH_RE, URL_RE, HOSTNAME_RE, IPV4_RE, IPV6_RE):
+        text = pattern.sub("<redacted>", text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > MAX_ERROR_OUTPUT:
         return text[: MAX_ERROR_OUTPUT - 3] + "..."

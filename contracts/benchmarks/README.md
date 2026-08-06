@@ -12,18 +12,23 @@ synthetic observations that prove the format and statistical method.
 ## Contract
 
 `benchmark-evidence.json` is a four-run example. It covers web and iOS cold and
-warm states. The same record shape is used for every later harness run:
+warm states. `synthetic/workload.json` is the reviewed fixture for those runs;
+`synthetic/trace.json` is the matching synthetic trace artifact. The same record
+shape is used for every later harness run:
 
-- `revision` records the source commit, fixture ID and version, fixture digest,
-  and the pinned Hermes source SHA;
+- `revision` records the reviewed source commit, fixture ID and version, fixture
+  digest, and the pinned Hermes source SHA;
 - `metric` records the metric name, unit, and clock. Duration uses a monotonic
   clock and milliseconds;
 - `method` freezes the percentile and rounding rules;
-- every `runs` entry records the platform, sanitized environment, cold or warm
-  state, production or release build mode, normal or optimized execution mode,
-  exact command, raw samples, repetition count, and distribution;
-- `artifacts` records relative artifact paths, byte counts, and SHA-256 hashes.
-  `artifact_manifest_sha256` hashes the ordered metadata list;
+- every `runs` entry records the platform, reviewed sanitized environment, cold
+  or warm state, production or release build mode, normal or optimized execution
+  mode, exact command, raw samples, repetition count, a sample-provenance
+  digest, and distribution;
+- `artifacts` records the exact permitted relative artifact paths, byte counts,
+  and SHA-256 hashes. `artifact_manifest_sha256` hashes the ordered metadata
+  list, and the validator rejects any path inventory other than the reviewed
+  set;
 - `redaction` records the semantic-only, synthetic-only boundary; and
 - `threshold` and `budget` are required to remain `null` until a later review
   approves a performance budget.
@@ -49,7 +54,9 @@ three-decimal rounding. The validator recomputes every value from
 `raw_samples`. A p99 value is therefore defined for a 30-sample run, but it is
 an observed percentile, not a confidence interval or a performance promise.
 The repetition minimum makes later harness records comparable; it does not
-approve a product threshold.
+approve a product threshold. A distribution is not accepted on arithmetic
+coherence alone: each run's command, environment, repetitions, and raw samples
+must exactly match its hashed provenance fixture.
 
 Web uses `build_mode: "production"`; iOS, iPadOS, and macOS use
 `build_mode: "release"`. Shared validator measurements use
@@ -63,16 +70,20 @@ interpreter validation run cannot be confused with a client build mode.
 keys, non-finite numbers, oversized integers, malformed UTF-8, control
 characters, excessive nesting or node counts, unknown keys, reordered closed
 schemas, wrong scalar types, invalid platform/build/state combinations,
-repeated run IDs, sample-count drift, distribution drift, invalid artifact
-paths or hashes, non-null thresholds or budgets, and secret-shaped values.
-Explicit exceptions are used instead of executable `assert` statements, so
-normal and optimized Python runs retain the same checks.
+repeated or unreviewed run IDs, source/environment/fixture identity drift,
+sample-count drift, forged samples without matching provenance bytes,
+distribution drift, missing or unreviewed artifact paths, invalid artifact
+hashes, non-null thresholds or budgets, and secret-shaped values. Hostnames,
+IPv4/IPv6 addresses, `localhost`, URLs, bearer values, and API-key assignments
+are outside the redaction boundary. Explicit exceptions are used instead of
+executable `assert` statements, so normal and optimized Python runs retain the
+same checks.
 
 Every CLI failure emits one bounded JSON object with exit status `2`, no
 traceback, no argparse usage text, and no unredacted attacker-controlled path,
-key, or value. Diagnostics redact credential-shaped assignments, key markers,
-email addresses, absolute paths, and hosts or URLs before applying the output
-cap.
+key, or value. Diagnostics redact credential-shaped assignments, bearer values, key markers,
+email addresses, absolute paths, hosts, IP addresses, and URLs before applying
+the output cap.
 
 The artifact is non-UI. Accessibility verification is **N/A** because it has
 no focus order, semantic control, screen-reader or VoiceOver surface, Switch
@@ -102,12 +113,15 @@ python3 -m py_compile \
 `validation-baseline.json` is itself a record in the same format. It contains
 30 fresh subprocess samples for normal and optimized validator execution,
 including the exact commands, sanitized environment, source commit, fixture
-version, raw samples, recomputed distribution, local artifact byte counts and
-SHA-256 hashes, and a null threshold and budget. The baseline excludes itself
-from its local artifact manifest to avoid a self-hash cycle. A later source or
-documentation change must regenerate the observed samples and fingerprints; the
+version, raw samples, recomputed distribution, sample-provenance digests, local
+artifact byte counts and SHA-256 hashes, and a null threshold and budget.
+`sample-provenance.json` is the checked-in canonical source for those two raw
+sample sets. The baseline excludes itself from its local artifact manifest to
+avoid a self-hash cycle, but includes the provenance fixture and every other
+permitted benchmark artifact. A later source or documentation change must
+regenerate the observed samples, provenance fixture, and fingerprints; the
 measurements remain evidence, not a budget.
 
 All values are synthetic or sanitized. No credentials, cookies, tickets,
-tokens, hostnames, transcripts, provider data, user data, or live Hermes traces
-belong in this directory.
+tokens, hostnames, IP addresses, URLs, transcripts, provider data, user data,
+or live Hermes traces belong in this directory.
