@@ -3,7 +3,7 @@
   import Icon from '$lib/workspace/Icon.svelte';
   import Pill from '$lib/workspace/Pill.svelte';
   import ProviderCard from './ProviderCard.svelte';
-  import { DEFAULT_PROVIDERS } from './fixtures';
+  import { DEFAULT_PROVIDERS, validateAuthProviders } from './fixtures';
   import type { AuthAction, AuthActionHandler, AuthProvider, AuthViewState } from './types';
   import type { Appearance } from '$lib/workspace/types';
 
@@ -13,34 +13,37 @@
   export let onAction: AuthActionHandler = () => {};
 
   let passwordVisible = false;
-  let previousState = state;
+  let previousState: AuthViewState = state;
+  $: validatedProviders = validateAuthProviders(providers);
+  $: effectiveState = validatedProviders ? state : 'provider-unavailable';
+  $: safeProviders = validatedProviders ?? [];
   let submissionLocked = false;
   let formResetKey = 0;
   let stateHeading: HTMLElement | undefined;
   let usernameInput: HTMLInputElement | undefined;
 
-  $: if (state !== previousState) {
+  $: if (effectiveState !== previousState) {
     resetPasswordEntry();
-    previousState = state;
+    previousState = effectiveState;
     void focusEnteredState();
   }
-  $: isProviderState = state === 'provider-selection' || state === 'discovery-pending';
-  $: isPasswordState = state === 'password' || state === 'password-submitting';
-  $: panelClass = isProviderState ? 'provider-panel' : state === 'session-expired' ? 'session-panel' : 'narrow-panel';
+  $: isProviderState = effectiveState === 'provider-selection' || effectiveState === 'discovery-pending';
+  $: isPasswordState = effectiveState === 'password' || effectiveState === 'password-submitting';
+  $: panelClass = isProviderState ? 'provider-panel' : effectiveState === 'session-expired' ? 'session-panel' : 'narrow-panel';
   $: politeAnnouncement =
-    state === 'password-submitting'
+    effectiveState === 'password-submitting'
       ? 'Signing in. The synthetic form is disabled while the local state completes.'
-      : state === 'callback'
+      : effectiveState === 'callback'
         ? 'Completing sign-in in a mocked local callback state.'
-        : state === 'discovery-retry'
+        : effectiveState === 'discovery-retry'
           ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
           : '';
   $: assertiveAnnouncement =
-    state === 'failure'
+    effectiveState === 'failure'
       ? 'Sign-in did not complete. Try again or choose another provider.'
-      : state === 'session-expired'
+      : effectiveState === 'session-expired'
         ? 'Session expired. Sign in again or discard the local draft fixture.'
-        : state === 'provider-unavailable'
+        : effectiveState === 'provider-unavailable'
           ? 'Provider discovery stopped. No sign-in method is available.'
           : '';
 
@@ -51,17 +54,17 @@
   }
 
   async function focusEnteredState(): Promise<void> {
-    const enteredState = state;
+    const enteredState = effectiveState;
     await tick();
     await new Promise<void>((resolve) => {
       if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
       else setTimeout(resolve, 0);
     });
-    if (state !== enteredState) return;
+    if (effectiveState !== enteredState) return;
     // Focus waits until the activating click finishes. Otherwise a pointer-down
     // transition can focus the new task before the browser restores focus to
     // the provider button that was just removed.
-    if (state === 'password') usernameInput?.focus();
+    if (effectiveState === 'password') usernameInput?.focus();
     else stateHeading?.focus();
   }
 
@@ -81,7 +84,7 @@
 
   function handlePasswordSubmit(event: SubmitEvent): void {
     event.preventDefault();
-    if (state === 'password-submitting' || submissionLocked) return;
+    if (effectiveState === 'password-submitting' || submissionLocked) return;
 
     const form = event.currentTarget as HTMLFormElement;
     if (!form.checkValidity()) return;
@@ -97,7 +100,7 @@
   aria-label="Hermternal authentication preview"
   class="auth-preview"
   data-appearance={appearance}
-  data-state={state}
+  data-state={effectiveState}
   data-testid="auth-preview"
 >
   <div aria-hidden="true" class="mobile-status-bar">
@@ -116,7 +119,7 @@
 
   <div class="auth-frame">
     <div class="auth-panel {panelClass}">
-      {#if state === 'provider-selection'}
+      {#if effectiveState === 'provider-selection'}
         <header class="panel-heading">
           <p class="eyebrow">HERMTERNAL</p>
           <h1 bind:this={stateHeading} tabindex="-1">Connect to Hermes</h1>
@@ -126,7 +129,7 @@
         </header>
 
         <div class="provider-list" aria-label="Available sign-in providers">
-          {#each providers as provider (provider.id)}
+          {#each safeProviders as provider (provider.id)}
             <ProviderCard {provider} onAction={handleAction} />
           {/each}
         </div>
@@ -135,7 +138,7 @@
           <span aria-hidden="true" class="note-dot"></span>Synthetic fixture only · provider choices are local
           presentation data; no discovery request is made.
         </p>
-      {:else if state === 'discovery-pending'}
+      {:else if effectiveState === 'discovery-pending'}
         <header class="panel-heading">
           <p class="eyebrow">PROVIDER DISCOVERY · PENDING</p>
           <h1 bind:this={stateHeading} tabindex="-1">Discovering sign-in methods</h1>
@@ -146,7 +149,7 @@
         </header>
 
         <div class="provider-list" aria-label="Provider discovery in progress" aria-busy="true">
-          {#each providers as provider (provider.id)}
+          {#each safeProviders as provider (provider.id)}
             <ProviderCard disabled pending {provider} onAction={handleAction} />
           {/each}
         </div>
@@ -157,12 +160,12 @@
         </p>
       {:else if isPasswordState}
         <header class="panel-heading">
-          <p class="eyebrow">BASIC AUTH PROVIDER{state === 'password-submitting' ? ' · SUBMITTING' : ''}</p>
+          <p class="eyebrow">BASIC AUTH PROVIDER{effectiveState === 'password-submitting' ? ' · SUBMITTING' : ''}</p>
           <h1 bind:this={stateHeading} tabindex="-1">
-            {state === 'password-submitting' ? 'Signing in to Hermes' : 'Sign in to Hermes'}
+            {effectiveState === 'password-submitting' ? 'Signing in to Hermes' : 'Sign in to Hermes'}
           </h1>
           <p>
-            {state === 'password-submitting'
+            {effectiveState === 'password-submitting'
               ? 'Static submitting state only · the synthetic values were cleared and no request was made.'
               : 'Enter synthetic fixture values to review the sign-in state. Nothing is sent or retained by this prototype.'}
           </p>
@@ -170,20 +173,25 @@
 
         {#key formResetKey}
           <form
-            aria-busy={state === 'password-submitting'}
+            aria-busy={effectiveState === 'password-submitting'}
             aria-label="Hermes password sign in"
+            autocomplete="off"
             class="password-form"
+            data-form-type="other"
             onsubmit={handlePasswordSubmit}
           >
             <label class="field-label" for="auth-username">Username</label>
             <input
               id="auth-username"
-              autocomplete="username"
-              disabled={state === 'password-submitting'}
-              name="username"
+              autocomplete="off"
+              data-1p-ignore
+              data-lpignore="true"
+              disabled={effectiveState === 'password-submitting'}
+              name="synthetic-username-fixture"
+              placeholder="Synthetic username"
               required
               bind:this={usernameInput}
-              value="alex"
+              value=""
             />
 
             <div class="password-label-row">
@@ -191,7 +199,7 @@
               <button
                 aria-label={passwordVisible ? 'Hide password' : 'Show password'}
                 class="show-password"
-                disabled={state === 'password-submitting'}
+                disabled={effectiveState === 'password-submitting'}
                 type="button"
                 onclick={() => handleAction({ type: 'toggle-password-visibility' })}
                 >{passwordVisible ? 'Hide' : 'Show'}</button
@@ -200,8 +208,11 @@
             <input
               id="auth-password"
               autocomplete="off"
-              disabled={state === 'password-submitting'}
-              name="password"
+              data-1p-ignore
+              data-lpignore="true"
+              disabled={effectiveState === 'password-submitting'}
+              name="synthetic-password-fixture"
+              placeholder="Synthetic password"
               required
               type={passwordVisible ? 'text' : 'password'}
               value=""
@@ -209,25 +220,25 @@
 
             <div class="auth-action">
               <Pill
-                ariaLabel={state === 'password-submitting' ? 'Signing in' : 'Sign in'}
+                ariaLabel={effectiveState === 'password-submitting' ? 'Signing in' : 'Sign in'}
                 buttonType="submit"
-                disabled={state === 'password-submitting'}
-                label={state === 'password-submitting' ? 'Signing in…' : 'Sign in'}
+                disabled={effectiveState === 'password-submitting'}
+                label={effectiveState === 'password-submitting' ? 'Signing in…' : 'Sign in'}
                 variant="action"
               />
             </div>
             <Pill
-              label={state === 'password-submitting' ? 'Cancel sign-in' : 'Back to providers'}
+              label={effectiveState === 'password-submitting' ? 'Cancel sign-in' : 'Back to providers'}
               variant="ghost"
               onActivate={() => handleAction({ type: 'back-to-providers' })}
             />
           </form>
         {/key}
 
-        {#if state === 'password-submitting'}
+        {#if effectiveState === 'password-submitting'}
           <p class="interaction-note">Static mocked state · 44px targets · focus order is fields → sign in → cancel.</p>
         {/if}
-      {:else if state === 'callback'}
+      {:else if effectiveState === 'callback'}
         <div class="callback-progress" aria-hidden="true"><span></span></div>
         <div class="callback-message">
           <h1 bind:this={stateHeading} tabindex="-1">Completing sign-in</h1>
@@ -242,7 +253,7 @@
           variant="ghost"
           onActivate={() => handleAction({ type: 'cancel-callback' })}
         />
-      {:else if state === 'session-expired'}
+      {:else if effectiveState === 'session-expired'}
         <div class="session-icon" aria-hidden="true"><Icon name="refresh" size={20} /></div>
         <div class="session-copy">
           <h1 bind:this={stateHeading} tabindex="-1">Session expired</h1>
@@ -259,59 +270,59 @@
           <span aria-hidden="true" class="note-dot"></span>Prototype-only state · no draft or prompt was persisted after
           expiry.
         </p>
-      {:else if state === 'failure' || state === 'discovery-retry' || state === 'provider-unavailable'}
+      {:else if effectiveState === 'failure' || effectiveState === 'discovery-retry' || effectiveState === 'provider-unavailable'}
         <div class="failure-icon" aria-hidden="true">
-          <Icon name={state === 'discovery-retry' ? 'refresh' : 'warning'} size={20} />
+          <Icon name={effectiveState === 'discovery-retry' ? 'refresh' : 'warning'} size={20} />
         </div>
         <div class="failure-heading">
           <h1 bind:this={stateHeading} tabindex="-1">
-            {state === 'failure'
+            {effectiveState === 'failure'
               ? 'Sign-in did not complete'
-              : state === 'discovery-retry'
+              : effectiveState === 'discovery-retry'
                 ? 'Retry provider discovery'
                 : 'Provider discovery stopped'}
           </h1>
           <p>
-            {state === 'failure'
+            {effectiveState === 'failure'
               ? 'Synthetic failure state only. No request was made, no session was created, and no credential was retained.'
-              : state === 'discovery-retry'
+              : effectiveState === 'discovery-retry'
                 ? 'Synthetic retry state only. A fresh local action is required before the preview can continue.'
                 : 'No usable fixture provider list is available. The preview fails closed and exposes no invented sign-in method.'}
           </p>
         </div>
         <div class="failure-detail">
           <strong
-            >{state === 'failure'
+            >{effectiveState === 'failure'
               ? 'Synthetic sign-in failure'
-              : state === 'discovery-retry'
+              : effectiveState === 'discovery-retry'
                 ? 'Ready to retry locally'
                 : 'provider_unavailable'}</strong
           >
           <p>
-            {state === 'failure'
+            {effectiveState === 'failure'
               ? 'Choose another local fixture state. Error details do not include credentials.'
-              : state === 'discovery-retry'
+              : effectiveState === 'discovery-retry'
                 ? 'Retry is represented locally; duplicate submits stay blocked until the fixture state changes.'
                 : 'Empty or malformed fixture data is rejected before sign-in actions are exposed.'}
           </p>
         </div>
         <div class="failure-actions">
           <Pill
-            label={state === 'failure' ? 'Try again' : 'Retry discovery'}
+            label={effectiveState === 'failure' ? 'Try again' : 'Retry discovery'}
             icon="refresh"
             variant="action"
-            onActivate={() => handleAction({ type: state === 'failure' ? 'retry-authentication' : 'retry-discovery' })}
+            onActivate={() => handleAction({ type: effectiveState === 'failure' ? 'retry-authentication' : 'retry-discovery' })}
           />
           <Pill
-            label={state === 'failure' ? 'Choose provider' : 'Back to sign-in'}
+            label={effectiveState === 'failure' ? 'Choose provider' : 'Back to sign-in'}
             variant="ghost"
-            onActivate={() => handleAction({ type: state === 'failure' ? 'choose-provider-again' : 'back-to-sign-in' })}
+            onActivate={() => handleAction({ type: effectiveState === 'failure' ? 'choose-provider-again' : 'back-to-sign-in' })}
           />
         </div>
         <p class="metadata">
-          {state === 'failure'
+          {effectiveState === 'failure'
             ? 'Synthetic fixture · safe to retry'
-            : state === 'discovery-retry'
+            : effectiveState === 'discovery-retry'
               ? 'Synthetic fixture · user initiated · safe to cancel'
               : 'Synthetic fixture · empty + malformed · no credentials'}
         </p>

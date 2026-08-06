@@ -1,7 +1,7 @@
 <script lang="ts">
   import AuthPreview from '$lib/auth-ui/AuthPreview.svelte';
   import WorkspacePreview from '$lib/workspace/WorkspacePreview.svelte';
-  import type { AuthAction, AuthViewState } from '$lib/auth-ui/types';
+  import { authStateForProviderKind, type AuthAction, type AuthViewState } from '$lib/auth-ui/types';
   import type { Appearance, WorkspaceAction, WorkspaceRuntimeState } from '$lib/workspace/types';
 
   const runtimeStates: WorkspaceRuntimeState[] = [
@@ -53,7 +53,9 @@
     // Provider selection is deterministic presentation state: password opens
     // the local form, while OAuth advances only to the mocked callback screen.
     if (action.type === 'choose-provider') {
-      authState = action.providerKind === 'password' ? 'password' : 'callback';
+      // Runtime-shaped provider data is untrusted. Only the two reviewed kinds
+      // may advance; missing or future values fail closed instead of assuming OAuth.
+      authState = authStateForProviderKind(action.providerKind);
       return;
     }
 

@@ -270,8 +270,18 @@ test('password preview submits only a credential-free local fixture action', asy
   await page.goto(previewUrl('/ui-preview'));
   await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
 
-  await page.getByLabel('Username').fill('sam');
-  await page.getByRole('textbox', { name: 'Password' }).fill('browser-only-fixture');
+  const fixtureForm = page.getByRole('form', { name: 'Hermes password sign in' });
+  const username = page.getByLabel('Username');
+  const password = page.getByRole('textbox', { name: 'Password' });
+  await expect(fixtureForm).toHaveAttribute('autocomplete', 'off');
+  await expect(fixtureForm).toHaveAttribute('data-form-type', 'other');
+  await expect(username).toHaveAttribute('name', 'synthetic-username-fixture');
+  await expect(username).toHaveAttribute('autocomplete', 'off');
+  await expect(password).toHaveAttribute('name', 'synthetic-password-fixture');
+  await expect(password).toHaveAttribute('autocomplete', 'off');
+
+  await username.fill('sam');
+  await password.fill('browser-only-fixture');
   await page.getByRole('button', { name: 'Sign in' }).click();
 
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting');
@@ -369,6 +379,38 @@ test('visible UI controls keep the shared 44px effective target', async ({ page 
     );
 
     expect(undersizedControls).toEqual([]);
+  }
+});
+
+test('narrow reduced-transparency mode computes fully opaque materials without blur or saturation', async ({ page }) => {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-transparency', value: 'reduce' }]
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+  expect(await page.evaluate(() => matchMedia('(prefers-reduced-transparency: reduce)').matches)).toBe(true);
+  const materials = await page.locator('.workspace-preview').evaluate((preview) => {
+    const styleFor = (selector: string) => {
+      const element = preview.querySelector(selector);
+      if (!element) throw new Error(`Missing reduced-transparency fixture: ${selector}`);
+      const style = getComputedStyle(element);
+      return { backdropFilter: style.backdropFilter, backgroundColor: style.backgroundColor };
+    };
+    return {
+      mobilePill: styleFor('.mobile-toolbar > .pill'),
+      titleIsland: styleFor('.mobile-title-island'),
+      conversationPanel: styleFor('.conversation-panel'),
+      composer: styleFor('.composer')
+    };
+  });
+
+  for (const material of Object.values(materials)) {
+    expect(material.backdropFilter).toBe('none');
+    expect(material.backgroundColor).toMatch(/^rgb\(/);
+    expect(material.backgroundColor).not.toMatch(/^rgba\(/);
   }
 });
 

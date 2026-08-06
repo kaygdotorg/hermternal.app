@@ -13,6 +13,13 @@ export type AuthViewState =
 
 export type AuthProviderKind = 'oauth' | 'password';
 
+/** Unknown deployment kinds must stop at the unavailable state, never inherit a known provider path. */
+export function authStateForProviderKind(value: unknown): AuthViewState {
+  if (value === 'password') return 'password';
+  if (value === 'oauth') return 'callback';
+  return 'provider-unavailable';
+}
+
 export interface AuthProvider {
   id: string;
   name: string;

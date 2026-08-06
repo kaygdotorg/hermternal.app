@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
 import AuthPreview from './AuthPreview.svelte';
+import { DEFAULT_PROVIDERS } from './fixtures';
 
 describe('AuthPreview', () => {
   it('renders provider selection without exposing search or deep-link controls', () => {
@@ -12,6 +13,39 @@ describe('AuthPreview', () => {
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
     expect(screen.queryByText(/deep link/i)).not.toBeInTheDocument();
     expect(screen.getByText(/no discovery request is made/i)).toBeInTheDocument();
+  });
+
+  it.each([
+    ['empty', []],
+    ['duplicate IDs', [DEFAULT_PROVIDERS[0], { ...DEFAULT_PROVIDERS[1], id: DEFAULT_PROVIDERS[0].id }]],
+    ['missing kind', [{ ...DEFAULT_PROVIDERS[0], kind: undefined }]],
+    ['future kind', [{ ...DEFAULT_PROVIDERS[0], kind: 'device-code' }]],
+    ['malformed entry', [null]]
+  ])('fails closed when provider fixtures contain %s', async (_label, providers) => {
+    render(AuthPreview, { state: 'provider-selection', providers: providers as never });
+
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
+    expect(screen.getByRole('alert')).toHaveTextContent('No sign-in method is available');
+    expect(screen.queryByRole('button', { name: 'Nous' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Hermes password' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Provider discovery stopped' })).toHaveFocus());
+  });
+
+  it('marks the synthetic password form so password managers do not treat it as reusable credentials', () => {
+    render(AuthPreview, { state: 'password' });
+
+    const form = screen.getByRole('form', { name: 'Hermes password sign in' });
+    const username = screen.getByLabelText('Username');
+    const password = screen.getByLabelText('Password');
+    expect(form).toHaveAttribute('autocomplete', 'off');
+    expect(form).toHaveAttribute('data-form-type', 'other');
+    for (const field of [username, password]) {
+      expect(field).toHaveAttribute('autocomplete', 'off');
+      expect(field).toHaveAttribute('data-1p-ignore');
+      expect(field).toHaveAttribute('data-lpignore', 'true');
+      expect(field.getAttribute('name')).toMatch(/^synthetic-/);
+    }
+    expect(username).toHaveValue('');
   });
 
   it('submits a credential-free fixture action once and resets the form immediately', async () => {

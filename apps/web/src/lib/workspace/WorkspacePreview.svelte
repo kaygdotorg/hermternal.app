@@ -761,11 +761,31 @@
       --composer-surface: var(--surface);
     }
 
+    /* Reduced transparency is a computed-material contract, not just a token
+       swap: every frosted mobile surface becomes opaque and removes filtering. */
+    .conversation-panel,
+    .mobile-title-island,
+    .mobile-toolbar > :global(.pill),
+    .title-edit-dimmer,
+    .state-layer.compatibility-layer {
+      background: var(--surface);
+    }
+
+    .title-edit-dimmer {
+      background: var(--canvas);
+    }
+
+    .centered-title-editor input {
+      color: var(--ink);
+      text-shadow: none;
+    }
+
     .workspace-preview :global(.session-list),
     .workspace-preview :global(.inspector),
     .workspace-preview :global(.composer),
     .mobile-toolbar,
     .mobile-title-island,
+    .mobile-toolbar > :global(.pill),
     .title-edit-dimmer,
     .state-layer.compatibility-layer {
       backdrop-filter: none;

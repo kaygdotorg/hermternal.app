@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { describe, expect, it } from 'vitest';
+import { authStateForProviderKind } from '$lib/auth-ui/types';
 import PreviewPage from './+page.svelte';
 
 describe('ui preview route', () => {
@@ -18,6 +19,13 @@ describe('ui preview route', () => {
       expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'failure');
     });
   });
+
+  it.each([undefined, null, '', 'device-code', 'oauth-v2']) (
+    'fails closed for an unknown provider kind: %s',
+    (providerKind) => {
+      expect(authStateForProviderKind(providerKind)).toBe('provider-unavailable');
+    }
+  );
 
   it('routes provider choices deterministically without a network or credential payload', async () => {
     render(PreviewPage);

@@ -19,8 +19,8 @@ The planned chat surface has one profile, provider-neutral discovery, session re
 
 ## Presentation packages
 
-- `src/lib/auth-ui/` owns typed authentication view states, synthetic provider fixtures, provider cards, credential-free form actions, deliberate focus transfer, and live-region semantics.
-- `src/lib/workspace/` owns the shared pill primitive, runtime-state fixtures, compatibility gates, timeline, composer, session navigation, artifact inspector, and responsive narrow workspace chrome.
+- `src/lib/auth-ui/` owns typed authentication view states, fail-closed validation of synthetic provider arrays, provider cards, password-manager-resistant fixture fields, credential-free form actions, deliberate focus transfer, and live-region semantics. Empty, duplicate, malformed, missing-kind, and future-kind provider data resolves to the unavailable state.
+- `src/lib/workspace/` owns the shared pill primitive, runtime-state fixtures, compatibility gates, timeline, composer, session navigation, artifact inspector, and responsive narrow workspace chrome. Its reduced-transparency fallback uses fully opaque computed materials and removes blur and saturation rather than only changing token declarations.
 - `src/routes/ui-preview/` composes both packages and exposes local selectors for state and appearance. It records only action type names as visible test evidence.
 - `src/lib/transport/` remains the independent W-01 mock transport for the root scaffold. The presentation packages do not import it and do not create a hidden production transport path.
 
