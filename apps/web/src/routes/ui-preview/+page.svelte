@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import AuthPreview from '$lib/auth-ui/AuthPreview.svelte';
+  import { discoverProviders } from '$lib/auth-ui/provider-discovery';
+  import { DEFAULT_PROVIDERS } from '$lib/auth-ui/fixtures';
   import WorkspacePreview from '$lib/workspace/WorkspacePreview.svelte';
-  import type { AuthAction, AuthViewState } from '$lib/auth-ui/types';
+  import type { AuthAction, AuthDiscoveryMode, AuthViewState, AuthProvider } from '$lib/auth-ui/types';
   import type { Appearance, WorkspaceAction, WorkspaceRuntimeState } from '$lib/workspace/types';
 
   const runtimeStates: WorkspaceRuntimeState[] = [
@@ -24,15 +27,25 @@
     'session-expired',
     'discovery-pending',
     'discovery-retry',
+    'discovery-empty',
+    'discovery-malformed',
+    'discovery-aborted',
     'provider-unavailable',
     'password-submitting'
   ];
 
+  const liveDiscoveryConfigured = import.meta.env.VITE_HERMES_LIVE_AUTH_DISCOVERY === 'true';
+
   let appearance: Appearance = 'light';
   let runtimeState: WorkspaceRuntimeState = 'stopped';
   let authState: AuthViewState = 'provider-selection';
+  let discoveryMode: AuthDiscoveryMode = 'fixture';
+  let providers: AuthProvider[] = DEFAULT_PROVIDERS;
   let lastRuntimeAction = 'No runtime action yet';
   let lastAuthAction = 'No authentication action yet';
+  let discoveryAbortController: AbortController | undefined;
+  let discoveryAttempt = 0;
+  let discoveryActive = false;
 
   function formatState(value: string): string {
     return value
@@ -41,12 +54,63 @@
       .join(' ');
   }
 
+  function isLiveDiscoveryRequested(): boolean {
+    return new URLSearchParams(window.location.search).get('authDiscovery') === 'live';
+  }
+
+  function startProviderDiscovery(): void {
+    discoveryAbortController?.abort();
+    const controller = new AbortController();
+    const attempt = discoveryAttempt + 1;
+    discoveryAttempt = attempt;
+    discoveryAbortController = controller;
+    providers = [];
+    authState = 'discovery-pending';
+
+    void discoverProviders({ signal: controller.signal })
+      .then((result) => {
+        if (!discoveryActive || attempt !== discoveryAttempt || controller.signal.aborted) return;
+        providers = result.providers;
+        authState = result.providers.length === 0 ? 'discovery-empty' : 'provider-selection';
+      })
+      .catch((error: unknown) => {
+        if (!discoveryActive || attempt !== discoveryAttempt || controller.signal.aborted) return;
+        const code = error instanceof Error && 'code' in error ? String(error.code) : 'network';
+        providers = [];
+        if (code === 'aborted') authState = 'discovery-aborted';
+        else if (code === 'malformed-json' || code === 'invalid-response' || code === 'body-too-large')
+          authState = 'discovery-malformed';
+        else authState = 'provider-unavailable';
+      });
+  }
+
+  function stopProviderDiscovery(): void {
+    discoveryActive = false;
+    discoveryAttempt += 1;
+    discoveryAbortController?.abort();
+    discoveryAbortController = undefined;
+  }
+
   function handleRuntimeAction(action: WorkspaceAction): void {
     lastRuntimeAction = action.type;
   }
 
   function handleAuthAction(action: AuthAction): void {
     lastAuthAction = action.type;
+
+    if (action.type === 'retry-discovery' && discoveryMode === 'live') {
+      startProviderDiscovery();
+      return;
+    }
+
+    if (action.type === 'cancel-discovery' && discoveryMode === 'live') {
+      discoveryAttempt += 1;
+      discoveryAbortController?.abort();
+      discoveryAbortController = undefined;
+      providers = [];
+      authState = 'discovery-aborted';
+      return;
+    }
 
     if (
       action.type === 'back-to-providers' ||
@@ -63,6 +127,24 @@
     if (action.type === 'submit-password-fixture') authState = 'password-submitting';
     if (action.type === 'sign-in-again') authState = 'provider-selection';
   }
+
+  onMount(() => {
+    const liveRequested = isLiveDiscoveryRequested();
+    if (!liveRequested) return;
+
+    discoveryMode = 'live';
+    discoveryActive = true;
+    if (!liveDiscoveryConfigured) {
+      // Live mode is fail-closed when not explicitly enabled at build time.
+      providers = [];
+      authState = 'provider-unavailable';
+      lastAuthAction = 'live-discovery-disabled';
+      return stopProviderDiscovery;
+    }
+
+    startProviderDiscovery();
+    return stopProviderDiscovery;
+  });
 </script>
 
 <svelte:head>
@@ -79,8 +161,9 @@
       <p class="eyebrow">HERMTERNAL · UI PREVIEW</p>
       <h1 id="preview-title">Runtime and authentication states</h1>
       <p class="intro">
-        Static presentation surfaces with synthetic fixtures only. Nothing on this page calls Hermes, stores
-        credentials, mirrors transcripts, or exposes search and deep links.
+        {discoveryMode === 'live'
+          ? 'Opt-in provider discovery uses only the same-origin GET /api/auth/providers boundary. Credentials, transcripts, search, and deep links remain out of scope.'
+          : 'Static presentation surfaces with synthetic fixtures only. Nothing on this page calls Hermes, stores credentials, mirrors transcripts, or exposes search and deep links.'}
       </p>
     </div>
 
@@ -134,7 +217,7 @@
     </div>
     <p class="section-note">{lastAuthAction}</p>
     <div class="auth-stage">
-      <AuthPreview {appearance} state={authState} onAction={handleAuthAction} />
+      <AuthPreview {appearance} {discoveryMode} {providers} state={authState} onAction={handleAuthAction} />
     </div>
   </section>
 

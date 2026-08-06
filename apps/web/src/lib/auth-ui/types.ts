@@ -8,10 +8,14 @@ export type AuthViewState =
   | 'session-expired'
   | 'discovery-pending'
   | 'discovery-retry'
+  | 'discovery-empty'
+  | 'discovery-malformed'
+  | 'discovery-aborted'
   | 'provider-unavailable'
   | 'password-submitting';
 
 export type AuthProviderKind = 'oauth' | 'password';
+export type AuthDiscoveryMode = 'fixture' | 'live';
 
 export interface AuthProvider {
   id: string;
@@ -30,6 +34,7 @@ export type AuthAction =
   | { type: 'retry-authentication' }
   | { type: 'choose-provider-again' }
   | { type: 'retry-discovery' }
+  | { type: 'cancel-discovery' }
   | { type: 'back-to-sign-in' }
   | { type: 'sign-in-again' }
   | { type: 'discard-draft' };
@@ -40,5 +45,6 @@ export interface AuthPreviewProps {
   appearance?: Appearance;
   state?: AuthViewState;
   providers?: AuthProvider[];
+  discoveryMode?: AuthDiscoveryMode;
   onAction?: AuthActionHandler;
 }

@@ -63,4 +63,47 @@ describe('AuthPreview', () => {
 
     expect(onAction).toHaveBeenCalledWith({ type: 'retry-authentication' });
   });
+
+  it('renders live success, pending, empty, malformed, unavailable, aborted, and retry states truthfully', () => {
+    const liveProviders = [
+      {
+        id: 'codex',
+        name: 'Codex',
+        monogram: 'C',
+        kind: 'oauth' as const,
+        description: 'OAuth provider · same-origin browser boundary'
+      }
+    ];
+    const live = render(AuthPreview, {
+      discoveryMode: 'live',
+      providers: liveProviders,
+      state: 'provider-selection'
+    });
+    expect(screen.getByText(/live same-origin discovery/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Codex' })).toBeInTheDocument();
+    live.unmount();
+
+    const pendingAction = vi.fn();
+    const pending = render(AuthPreview, { discoveryMode: 'live', state: 'discovery-pending', onAction: pendingAction });
+    expect(screen.getByText(/same-origin GET \/api\/auth\/providers request is pending/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Nous, loading' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel discovery' }));
+    expect(pendingAction).toHaveBeenCalledWith({ type: 'cancel-discovery' });
+    pending.unmount();
+
+    const states = [
+      ['discovery-empty', 'No sign-in methods available'],
+      ['discovery-malformed', 'Provider discovery returned incompatible data'],
+      ['provider-unavailable', 'Provider discovery stopped'],
+      ['discovery-aborted', 'Provider discovery was cancelled'],
+      ['discovery-retry', 'Retry provider discovery']
+    ] as const;
+
+    for (const [state, heading] of states) {
+      const view = render(AuthPreview, { discoveryMode: 'live', state });
+      expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Retry discovery' })).toBeInTheDocument();
+      view.unmount();
+    }
+  });
 });
