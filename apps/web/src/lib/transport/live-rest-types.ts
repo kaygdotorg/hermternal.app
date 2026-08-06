@@ -1,4 +1,18 @@
+import type { StrictJsonValue } from './strict-json';
+
 export type NullableString = string | null;
+
+/**
+ * Lossless bounded JSON content from the pinned message projection. The root
+ * may be null, text, a list, or a dictionary; nested values remain the
+ * parser's bounded JSON values so multimodal and tool payloads are not
+ * flattened or string-coerced.
+ */
+export type LiveMessageContent =
+  | null
+  | string
+  | StrictJsonValue[]
+  | { [key: string]: StrictJsonValue };
 
 export interface LiveProvider {
   name: string;
@@ -16,7 +30,7 @@ export interface AuthIdentity {
   displayName: NullableString;
   organizationId: NullableString;
   provider: string;
-  expiresAt: NullableString;
+  expiresAt: number | null;
 }
 
 export interface LiveSession {
@@ -50,9 +64,9 @@ export interface SessionList {
 export type LiveMessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
 export interface LiveMessage {
-  id: string;
+  id: number;
   role: LiveMessageRole;
-  content: string;
+  content: LiveMessageContent;
 }
 
 export interface SessionMessages {

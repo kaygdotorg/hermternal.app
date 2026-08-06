@@ -37,7 +37,8 @@ export const LIVE_AUTH_IDENTITY_FIXTURE: AuthIdentity = Object.freeze({
   displayName: 'Synthetic User',
   organizationId: null,
   provider: 'synthetic-provider',
-  expiresAt: null
+  // Synthetic Unix seconds prove the source-backed numeric representation.
+  expiresAt: 1_767_225_600
 });
 
 export const LIVE_SESSION_FIXTURE: LiveSession = Object.freeze({
@@ -69,7 +70,7 @@ export const LIVE_SESSION_LIST_FIXTURE: SessionList = Object.freeze({
 });
 
 export const LIVE_MESSAGE_FIXTURE: LiveMessage = Object.freeze({
-  id: 'synthetic-message-0001',
+  id: 1,
   role: 'user',
   content: 'Synthetic redacted message'
 });

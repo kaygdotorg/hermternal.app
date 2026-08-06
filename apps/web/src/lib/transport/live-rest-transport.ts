@@ -2,6 +2,7 @@ import { parseStrictJson, StrictJsonError, type StrictJsonValue } from './strict
 import type {
   AuthIdentity,
   LiveMessage,
+  LiveMessageContent,
   LiveProvider,
   LiveSession,
   MessageListOptions,
@@ -21,6 +22,12 @@ const MAX_MESSAGE_COUNT = 500;
 const MAX_ID_LENGTH = 128;
 const MAX_TEXT_LENGTH = 8_192;
 const MAX_SHORT_TEXT_LENGTH = 512;
+// These are client representation budgets for source-defined REST values, not
+// invented upstream schema claims. They keep numeric identity and expiry
+// values lossless for the reviewed dashboard horizon without accepting
+// unbounded JSON integers.
+const MAX_MESSAGE_ID = 1_000_000_000;
+const MAX_UNIX_SECONDS = 4_294_967_295;
 const API_ROOT = '/api';
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._~-]{0,126}[A-Za-z0-9])?$/u;
@@ -145,7 +152,12 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
         abortPromise
       ]);
 
-      if (response.redirected || response.type === 'opaqueredirect' || response.type === 'opaque') {
+      if (
+        response.redirected ||
+        (response.status >= 300 && response.status < 400) ||
+        response.type === 'opaqueredirect' ||
+        response.type === 'opaque'
+      ) {
         throw new LiveRestError('redirect');
       }
 
@@ -307,10 +319,12 @@ function hasJsonContentType(response: Response): boolean {
 }
 
 function declaredBodyLength(response: Response): number | undefined {
-  const contentLength = response.headers.get('content-length')?.trim();
-  if (!contentLength) {
+  const rawContentLength = response.headers.get('content-length');
+  if (rawContentLength === null) {
     return undefined;
   }
+
+  const contentLength = rawContentLength.trim();
   if (!/^\d+$/u.test(contentLength)) {
     throw new LiveRestError('invalid-response');
   }
@@ -319,11 +333,6 @@ function declaredBodyLength(response: Response): number | undefined {
     throw new LiveRestError('invalid-response');
   }
   return parsed;
-}
-
-function declaredBodyExceedsLimit(response: Response, maxBodyBytes: number): boolean {
-  const length = declaredBodyLength(response);
-  return length !== undefined && length > maxBodyBytes;
 }
 
 function buildPaginationQuery(
@@ -420,7 +429,16 @@ async function readBoundedBody(
   abortPromise: Promise<never>,
   abortError: () => LiveRestError | undefined
 ): Promise<string> {
-  if (declaredBodyExceedsLimit(response, maxBodyBytes)) {
+  let declaredLength: number | undefined;
+  try {
+    declaredLength = declaredBodyLength(response);
+  } catch (error) {
+    await cancelResponseBody(response);
+    throw error;
+  }
+
+  if (declaredLength !== undefined && declaredLength > maxBodyBytes) {
+    await cancelResponseBody(response);
     throw new LiveRestError('body-too-large');
   }
 
@@ -428,27 +446,43 @@ async function readBoundedBody(
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;
+    let cancelReader = false;
 
     try {
       while (true) {
         const result = await Promise.race([reader.read(), abortPromise]);
         if (result.done) {
+          if (declaredLength !== undefined && total !== declaredLength) {
+            throw new LiveRestError('invalid-response');
+          }
           break;
         }
 
         const value = result.value as Uint8Array | undefined;
-        if (!value || typeof value.byteLength !== 'number') {
+        if (!value || !Number.isSafeInteger(value.byteLength) || value.byteLength < 0) {
           throw new LiveRestError('malformed-json');
         }
 
-        const chunk = Uint8Array.from(value);
-        total += chunk.byteLength;
-        if (total > maxBodyBytes) {
+        // Check the stream's advertised chunk size before copying it. This is
+        // the allocation boundary: one oversized chunk must be rejected and
+        // cancelled without first materializing an attacker-sized copy.
+        const remainingBodyBytes = maxBodyBytes - total;
+        if (value.byteLength > remainingBodyBytes) {
           throw new LiveRestError('body-too-large');
         }
+        if (declaredLength !== undefined && value.byteLength > declaredLength - total) {
+          throw new LiveRestError('invalid-response');
+        }
+
+        const chunk = Uint8Array.from(value);
+        if (chunk.byteLength !== value.byteLength) {
+          throw new LiveRestError('malformed-json');
+        }
+        total += chunk.byteLength;
         chunks.push(chunk);
       }
     } catch (error) {
+      cancelReader = true;
       if (error instanceof LiveRestError) {
         throw error;
       }
@@ -458,6 +492,14 @@ async function readBoundedBody(
       }
       throw new LiveRestError('network');
     } finally {
+      if (cancelReader) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The response is already failing closed; cancellation errors are
+          // deliberately not exposed as network diagnostics.
+        }
+      }
       reader.releaseLock();
     }
 
@@ -473,23 +515,23 @@ async function readBoundedBody(
 
   // A null-body Response has no stream to meter. Require a valid declared
   // length before calling arrayBuffer so the fallback cannot allocate an
-  // unbounded body; the returned bytes are checked again for lying metadata.
-  const declaredLength = declaredBodyLength(response);
+  // unbounded body; the returned bytes are checked for both short and long
+  // metadata mismatches before decoding.
   if (declaredLength === undefined) {
     throw new LiveRestError('invalid-response');
-  }
-  if (declaredLength > maxBodyBytes) {
-    throw new LiveRestError('body-too-large');
   }
 
   try {
     const buffer = await Promise.race([response.arrayBuffer(), abortPromise]);
-    if (!buffer || typeof buffer.byteLength !== 'number') {
+    if (!buffer || !Number.isSafeInteger(buffer.byteLength) || buffer.byteLength < 0) {
       throw new LiveRestError('malformed-json');
     }
     const view = new Uint8Array(buffer);
-    if (view.byteLength > maxBodyBytes || view.byteLength > declaredLength) {
+    if (view.byteLength > maxBodyBytes) {
       throw new LiveRestError('body-too-large');
+    }
+    if (view.byteLength !== declaredLength) {
+      throw new LiveRestError('invalid-response');
     }
     return decodeUtf8(Uint8Array.from(view));
   } catch (error) {
@@ -509,6 +551,24 @@ function decodeUtf8(bytes: Uint8Array): string {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch {
     throw new LiveRestError('malformed-json');
+  }
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  if (!response.body) {
+    return;
+  }
+
+  try {
+    const reader = response.body.getReader();
+    try {
+      await reader.cancel();
+    } finally {
+      reader.releaseLock();
+    }
+  } catch {
+    // The response is already failing closed; cancellation errors are not
+    // exposed as network diagnostics.
   }
 }
 
@@ -576,7 +636,7 @@ function validateAuthIdentity(value: StrictJsonValue): AuthIdentity {
     displayName: requireNullableString(object.display_name, MAX_SHORT_TEXT_LENGTH),
     organizationId: requireNullableString(object.org_id, MAX_SHORT_TEXT_LENGTH),
     provider: requireString(object.provider, MAX_SHORT_TEXT_LENGTH),
-    expiresAt: requireNullableString(object.expires_at, MAX_SHORT_TEXT_LENGTH)
+    expiresAt: requireNullableBoundedInteger(object.expires_at, 0, MAX_UNIX_SECONDS)
   };
 }
 
@@ -673,9 +733,9 @@ function validateMessage(value: StrictJsonValue): LiveMessage {
   }
 
   return {
-    id: requireString(object.id, MAX_ID_LENGTH),
+    id: requireBoundedInteger(object.id, 0, MAX_MESSAGE_ID),
     role,
-    content: requireString(object.content, MAX_TEXT_LENGTH)
+    content: requireMessageContent(object.content)
   };
 }
 
@@ -718,6 +778,32 @@ function requireNullableString(value: StrictJsonValue, maxLength: number): strin
     return null;
   }
   return requireString(value, maxLength);
+}
+
+function requireNullableBoundedInteger(value: StrictJsonValue, min: number, max: number): number | null {
+  if (value === null) {
+    return null;
+  }
+  return requireBoundedInteger(value, min, max);
+}
+
+function requireMessageContent(value: StrictJsonValue): LiveMessageContent {
+  if (value === null) {
+    return null;
+  }
+  if (typeof value === 'string') {
+    if (value.length > MAX_TEXT_LENGTH) {
+      throw new LiveRestError('invalid-response');
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value === 'object') {
+    return value;
+  }
+  throw new LiveRestError('invalid-response');
 }
 
 function requireSessionId(value: string): string {
@@ -772,7 +858,7 @@ function messageFor(code: LiveRestErrorCode, status?: number): string {
     case 'malformed-json':
       return 'The REST response was not valid bounded JSON.';
     case 'invalid-response':
-      return 'The REST response did not match the reviewed schema.';
+      return 'The REST response did not match the reviewed bounded projection.';
     case 'invalid-url':
       return 'The REST transport rejected a non-same-origin API URL.';
     case 'invalid-session-id':

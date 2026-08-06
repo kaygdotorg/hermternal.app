@@ -35,7 +35,9 @@ export class StrictJsonError extends Error {
  * Parses an already bounded UTF-8 response without JSON.parse's duplicate-key
  * ambiguity. Route projections require reviewed fields and ignore bounded
  * additive fields after this parser returns; keeping those checks separate lets
- * every route share the same depth, node, string, and number limits.
+ * every route share the same depth, node, string, and number limits. Structured
+ * arrays and dictionaries remain intact for the reviewed message projection;
+ * this parser does not flatten, coerce, or log their nested values.
  */
 export function parseStrictJson(text: string, limits: StrictJsonLimits = {}): StrictJsonValue {
   const parser = new JsonParser({

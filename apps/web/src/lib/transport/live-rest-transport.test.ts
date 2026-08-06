@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createLiveRestTransport,
   LiveRestError,
@@ -45,6 +45,58 @@ function nullBodyResponse(
     response: result,
     get arrayBufferCalls() {
       return arrayBufferCalls;
+    }
+  };
+}
+
+function pendingBodyResponse(
+  headers: Record<string, string> = { 'content-type': 'application/json' }
+): { response: Response; get cancelCalls(): number } {
+  let cancelCalls = 0;
+  const body = {
+    getReader() {
+      return {
+        read: () => new Promise<ReadableStreamReadResult<Uint8Array>>(() => undefined),
+        cancel: async () => {
+          cancelCalls += 1;
+        },
+        releaseLock: () => undefined
+      };
+    }
+  } as unknown as ReadableStream<Uint8Array>;
+  const result = new Response(null, { status: 200, headers });
+  Object.defineProperty(result, 'body', { configurable: true, value: body });
+  return {
+    response: result,
+    get cancelCalls() {
+      return cancelCalls;
+    }
+  };
+}
+
+function scriptedBodyResponse(
+  reads: Array<ReadableStreamReadResult<Uint8Array>>,
+  headers: Record<string, string> = { 'content-type': 'application/json' }
+): { response: Response; get cancelCalls(): number } {
+  let index = 0;
+  let cancelCalls = 0;
+  const body = {
+    getReader() {
+      return {
+        read: async () => reads[index++] ?? { done: true, value: undefined },
+        cancel: async () => {
+          cancelCalls += 1;
+        },
+        releaseLock: () => undefined
+      };
+    }
+  } as unknown as ReadableStream<Uint8Array>;
+  const result = new Response(null, { status: 200, headers });
+  Object.defineProperty(result, 'body', { configurable: true, value: body });
+  return {
+    response: result,
+    get cancelCalls() {
+      return cancelCalls;
     }
   };
 }
@@ -152,7 +204,7 @@ function rawSessionMessagesWithCount(sessionId: string, count: number, content =
   return JSON.stringify({
     session_id: sessionId,
     messages: Array.from({ length: count }, (_, index) => ({
-      id: `synthetic-message-${String(index + 1).padStart(4, '0')}`,
+      id: index + 1,
       role: 'assistant',
       content
     })),
@@ -183,6 +235,9 @@ describe('strict JSON parser', () => {
     expect(() => parseStrictJson('{"value":"\\u0000"}')).toThrow(StrictJsonError);
     expect(() => parseStrictJson('[[[[0]]]]', { maxDepth: 2 })).toThrow(StrictJsonError);
     expect(() => parseStrictJson('[0,1,2]', { maxNodes: 2 })).toThrow(StrictJsonError);
+    expect(() => parseStrictJson(JSON.stringify({ content: Array.from({ length: 501 }, () => null) }))).toThrow(
+      StrictJsonError
+    );
   });
 });
 
@@ -257,7 +312,7 @@ describe('createLiveRestTransport', () => {
       limit: 500
     });
     expect(messages.messages).toHaveLength(500);
-    expect(messages.messages.at(-1)?.id).toBe('synthetic-message-0500');
+    expect(messages.messages.at(-1)?.id).toBe(500);
     expect(messages.pagination.returned).toBe(500);
   });
 
@@ -275,6 +330,40 @@ describe('createLiveRestTransport', () => {
       LIVE_SESSION_MESSAGES_FIXTURE.sessionId
     );
     expect(messages.messages[0]?.content).toBe('line 1\nline 2\tindented\rreset');
+  });
+
+  it('projects numeric expiry, numeric IDs, null content, and structured tool content', async () => {
+    const auth = JSON.parse(rawAuthIdentity()) as Record<string, unknown>;
+    auth.expires_at = 1_767_225_600;
+    const messages = {
+      session_id: LIVE_SESSION_MESSAGES_FIXTURE.sessionId,
+      messages: [
+        { id: 7, role: 'assistant', content: null },
+        {
+          id: 8,
+          role: 'tool',
+          content: [
+            { type: 'tool_use', name: 'synthetic_tool', input: { query: 'redacted' } },
+            { type: 'tool_result', content: { ok: true, items: [1, 2] } }
+          ]
+        },
+        {
+          id: 9,
+          role: 'assistant',
+          content: { type: 'multimodal', parts: [{ type: 'text', text: 'synthetic' }] }
+        }
+      ],
+      pagination: { limit: null, offset: 0, returned: 3 }
+    };
+    const fixture = fetchSequence(response(JSON.stringify(auth)), response(JSON.stringify(messages)));
+    const transport = createLiveRestTransport({ fetch: fixture.fetch });
+
+    await expect(transport.getAuthState()).resolves.toMatchObject({ expiresAt: 1_767_225_600 });
+    await expect(transport.getSessionMessages(LIVE_SESSION_MESSAGES_FIXTURE.sessionId)).resolves.toEqual({
+      sessionId: LIVE_SESSION_MESSAGES_FIXTURE.sessionId,
+      messages: messages.messages,
+      pagination: messages.pagination
+    });
   });
 
   it('ignores bounded additive fields across providers, auth, sessions, and messages', async () => {
@@ -396,6 +485,33 @@ describe('createLiveRestTransport', () => {
         LIVE_SESSION_FIXTURE.id
       )
     ).rejects.toMatchObject({ code: 'invalid-response' });
+
+    for (const expiresAt of ['1767225600', -1, 4_294_967_296, 1.5]) {
+      const invalidAuth = JSON.parse(rawAuthIdentity()) as Record<string, unknown>;
+      invalidAuth.expires_at = expiresAt;
+      await expect(
+        createLiveRestTransport({ fetch: fetchSequence(response(JSON.stringify(invalidAuth))).fetch }).getAuthState()
+      ).rejects.toMatchObject({ code: 'invalid-response' });
+    }
+
+    for (const [id, content] of [
+      ['8', 'Synthetic message'],
+      [1.5, 'Synthetic message'],
+      [-1, 'Synthetic message'],
+      [1_000_000_001, 'Synthetic message'],
+      [1, true]
+    ] as const) {
+      const invalidMessages = {
+        session_id: LIVE_SESSION_MESSAGES_FIXTURE.sessionId,
+        messages: [{ id, role: 'assistant', content }],
+        pagination: { limit: null, offset: 0, returned: 1 }
+      };
+      await expect(
+        createLiveRestTransport({ fetch: fetchSequence(response(JSON.stringify(invalidMessages))).fetch }).getSessionMessages(
+          LIVE_SESSION_FIXTURE.id
+        )
+      ).rejects.toMatchObject({ code: 'invalid-response' });
+    }
   });
 
   it('fails closed on duplicate JSON keys, mismatched pagination, and returned ID mismatches', async () => {
@@ -439,6 +555,30 @@ describe('createLiveRestTransport', () => {
       createLiveRestTransport({ fetch: oversized.fetch, maxBodyBytes: 4 }).getProviders()
     ).rejects.toMatchObject({ code: 'body-too-large' });
 
+    const oversizedChunk = scriptedBodyResponse([{ done: false, value: new Uint8Array(5) }]);
+    const fromSpy = vi.spyOn(Uint8Array, 'from');
+    await expect(
+      createLiveRestTransport({
+        fetch: fetchSequence(oversizedChunk.response).fetch,
+        maxBodyBytes: 4
+      }).getProviders()
+    ).rejects.toMatchObject({ code: 'body-too-large' });
+    expect(fromSpy).not.toHaveBeenCalled();
+    expect(oversizedChunk.cancelCalls).toBe(1);
+    fromSpy.mockRestore();
+
+    const declaredOversized = scriptedBodyResponse([{ done: false, value: new Uint8Array(1) }], {
+      'content-type': 'application/json',
+      'content-length': '5'
+    });
+    await expect(
+      createLiveRestTransport({
+        fetch: fetchSequence(declaredOversized.response).fetch,
+        maxBodyBytes: 4
+      }).getProviders()
+    ).rejects.toMatchObject({ code: 'body-too-large' });
+    expect(declaredOversized.cancelCalls).toBe(1);
+
     const missingContentType = fetchSequence(
       response(new TextEncoder().encode(rawProviderDiscovery()), 200, {})
     );
@@ -479,12 +619,59 @@ describe('createLiveRestTransport', () => {
     ).rejects.toMatchObject({ code: 'invalid-response' });
     expect(nullBodyWithoutLength.arrayBufferCalls).toBe(0);
 
+    const providerBytes = new TextEncoder().encode(rawProviderDiscovery());
+    const shortStream = scriptedBodyResponse(
+      [
+        { done: false, value: providerBytes },
+        { done: true, value: undefined }
+      ],
+      {
+        'content-type': 'application/json',
+        'content-length': String(providerBytes.byteLength + 1)
+      }
+    );
+    await expect(
+      createLiveRestTransport({ fetch: fetchSequence(shortStream.response).fetch }).getProviders()
+    ).rejects.toMatchObject({ code: 'invalid-response' });
+
+    const longStream = scriptedBodyResponse([{ done: false, value: providerBytes }], {
+      'content-type': 'application/json',
+      'content-length': String(providerBytes.byteLength - 1)
+    });
+    await expect(
+      createLiveRestTransport({ fetch: fetchSequence(longStream.response).fetch }).getProviders()
+    ).rejects.toMatchObject({ code: 'invalid-response' });
+    expect(longStream.cancelCalls).toBe(1);
+
+    const shortNullBody = nullBodyResponse(providerBytes, {
+      'content-type': 'application/json',
+      'content-length': String(providerBytes.byteLength + 1)
+    });
+    await expect(
+      createLiveRestTransport({ fetch: fetchSequence(shortNullBody.response).fetch }).getProviders()
+    ).rejects.toMatchObject({ code: 'invalid-response' });
+    expect(shortNullBody.arrayBufferCalls).toBe(1);
+
+    const longNullBody = nullBodyResponse(providerBytes, {
+      'content-type': 'application/json',
+      'content-length': String(providerBytes.byteLength - 1)
+    });
+    await expect(
+      createLiveRestTransport({ fetch: fetchSequence(longNullBody.response).fetch }).getProviders()
+    ).rejects.toMatchObject({ code: 'invalid-response' });
+    expect(longNullBody.arrayBufferCalls).toBe(1);
+
     const redirectedResponse = response(rawProviderDiscovery());
     Object.defineProperty(redirectedResponse, 'redirected', { value: true });
     const redirected = fetchSequence(redirectedResponse);
     await expect(createLiveRestTransport({ fetch: redirected.fetch }).getProviders()).rejects.toMatchObject({
       code: 'redirect'
     });
+
+    const semanticRedirect = fetchSequence(response(rawProviderDiscovery(), 302));
+    await expect(
+      createLiveRestTransport({ fetch: semanticRedirect.fetch }).getProviders()
+    ).rejects.toMatchObject({ code: 'redirect' });
 
     const unavailable = fetchSequence(
       response('{"detail":"no auth providers registered","future_detail":true}', 503)
@@ -530,6 +717,17 @@ describe('createLiveRestTransport', () => {
     const aborted = abortTransport.getProviders(controller.signal);
     controller.abort();
     await expect(aborted).rejects.toMatchObject({ code: 'aborted' });
+
+    const pendingBody = pendingBodyResponse();
+    const bodyController = new AbortController();
+    const bodyAbortTransport = createLiveRestTransport({
+      fetch: fetchSequence(pendingBody.response).fetch
+    });
+    const bodyAbort = bodyAbortTransport.getProviders(bodyController.signal);
+    await Promise.resolve();
+    bodyController.abort();
+    await expect(bodyAbort).rejects.toMatchObject({ code: 'aborted' });
+    expect(pendingBody.cancelCalls).toBe(1);
 
     const earlyController = new AbortController();
     earlyController.abort();
