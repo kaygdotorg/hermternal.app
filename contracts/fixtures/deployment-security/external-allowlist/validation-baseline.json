@@ -1,0 +1,112 @@
+{
+  "schema": "hermternal.deployment-security.external-allowlist-baseline.v1",
+  "validator": "contracts/fixtures/deployment-security/external-allowlist/validate.py",
+  "fixture": "contracts/fixtures/deployment-security/external-allowlist/cases.json",
+  "metric": "validator_duration_ms",
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "runs": [
+    {
+      "mode": "normal",
+      "command": "python3 contracts/fixtures/deployment-security/external-allowlist/validate.py",
+      "repetitions": 30,
+      "distribution": {
+        "min_ms": 123.791,
+        "p50_ms": 128.409,
+        "p95_ms": 130.486,
+        "p99_ms": 130.736,
+        "max_ms": 130.775,
+        "mean_ms": 128.056
+      },
+      "trace": [
+        126.85,
+        127.584,
+        124.519,
+        126.745,
+        125.75,
+        130.642,
+        128.485,
+        126.083,
+        127.274,
+        129.487,
+        125.408,
+        128.923,
+        128.056,
+        126.085,
+        127.763,
+        130.775,
+        129.347,
+        127.549,
+        123.791,
+        127.785,
+        130.047,
+        129.018,
+        128.519,
+        129.46,
+        128.616,
+        129.88,
+        130.296,
+        128.332,
+        129.961,
+        128.64
+      ]
+    },
+    {
+      "mode": "optimized",
+      "command": "python3 -O contracts/fixtures/deployment-security/external-allowlist/validate.py",
+      "repetitions": 30,
+      "distribution": {
+        "min_ms": 126.917,
+        "p50_ms": 131.768,
+        "p95_ms": 135.476,
+        "p99_ms": 136.014,
+        "max_ms": 136.188,
+        "mean_ms": 132.007
+      },
+      "trace": [
+        130.791,
+        126.917,
+        131.629,
+        131.28,
+        132.589,
+        132.961,
+        132.848,
+        128.07,
+        135.286,
+        129.936,
+        129.834,
+        135.589,
+        136.188,
+        128.619,
+        135.338,
+        129.359,
+        135.208,
+        131.63,
+        134.296,
+        132.996,
+        133.374,
+        131.525,
+        130.24,
+        131.595,
+        131.39,
+        132.659,
+        131.906,
+        131.34,
+        132.366,
+        132.466
+      ]
+    }
+  ],
+  "artifact": {
+    "files": [
+      "README.md",
+      "cases.json",
+      "validate.py"
+    ],
+    "bytes": 126891,
+    "sha256": "ea7df5493dc36471d43c63dbbad72fd3b7cb04327e019dd1ec47904d19b5536e"
+  },
+  "threshold": null
+}
