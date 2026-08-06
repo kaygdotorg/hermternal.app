@@ -51,13 +51,26 @@ describe('WorkspacePreview', () => {
   });
 
   it('keeps approval and clarification actions enabled only in the ready state', async () => {
-    const states = ['ready', 'streaming', 'stopped', 'offline', 'reconnecting', 'loading', 'retryable-error', 'permanent-error'] as const;
+    const states = [
+      'ready',
+      'streaming',
+      'stopped',
+      'offline',
+      'reconnecting',
+      'loading',
+      'retryable-error',
+      'permanent-error'
+    ] as const;
 
     for (const state of states) {
       const onAction = vi.fn();
       const view = render(WorkspacePreview, { state, onAction });
-      const approval = screen.queryByRole('button', { name: state === 'ready' ? 'Allow once' : /Allow once, unavailable/ });
-      const clarification = screen.queryByRole('button', { name: state === 'ready' ? 'Include transfers' : /Include transfers, unavailable/ });
+      const approval = screen.queryByRole('button', {
+        name: state === 'ready' ? 'Allow once' : /Allow once, unavailable/
+      });
+      const clarification = screen.queryByRole('button', {
+        name: state === 'ready' ? 'Include transfers' : /Include transfers, unavailable/
+      });
 
       if (state === 'ready') {
         expect(approval).toBeEnabled();
@@ -65,7 +78,11 @@ describe('WorkspacePreview', () => {
         fireEvent.click(approval!);
         fireEvent.click(clarification!);
         expect(onAction).toHaveBeenCalledWith({ type: 'approve-tool', itemId: 'approval-1' });
-        expect(onAction).toHaveBeenCalledWith({ type: 'answer-clarification', itemId: 'clarification-1', answer: 'Include transfers' });
+        expect(onAction).toHaveBeenCalledWith({
+          type: 'answer-clarification',
+          itemId: 'clarification-1',
+          answer: 'Include transfers'
+        });
       } else {
         if (approval) {
           await waitFor(() => expect(approval).toBeDisabled());

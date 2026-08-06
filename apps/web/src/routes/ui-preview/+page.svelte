@@ -48,7 +48,11 @@
   function handleAuthAction(action: AuthAction): void {
     lastAuthAction = action.type;
 
-    if (action.type === 'back-to-providers' || action.type === 'choose-provider-again' || action.type === 'back-to-sign-in') {
+    if (
+      action.type === 'back-to-providers' ||
+      action.type === 'choose-provider-again' ||
+      action.type === 'back-to-sign-in'
+    ) {
       authState = 'provider-selection';
     }
 
@@ -63,7 +67,10 @@
 
 <svelte:head>
   <title>Hermternal UI preview</title>
-  <meta name="description" content="Static, transport-independent Runtime and Authentication UI states for Hermternal." />
+  <meta
+    name="description"
+    content="Static, transport-independent Runtime and Authentication UI states for Hermternal."
+  />
 </svelte:head>
 
 <main aria-labelledby="preview-title" class="preview-page" data-appearance={appearance}>
@@ -71,7 +78,10 @@
     <div class="heading-copy">
       <p class="eyebrow">HERMTERNAL · UI PREVIEW</p>
       <h1 id="preview-title">Runtime and authentication states</h1>
-      <p class="intro">Static presentation surfaces with synthetic fixtures only. Nothing on this page calls Hermes, stores credentials, mirrors transcripts, or exposes search and deep links.</p>
+      <p class="intro">
+        Static presentation surfaces with synthetic fixtures only. Nothing on this page calls Hermes, stores
+        credentials, mirrors transcripts, or exposes search and deep links.
+      </p>
     </div>
 
     <div class="page-controls" aria-label="Preview controls">
@@ -103,7 +113,7 @@
     </div>
     <p class="section-note">{lastRuntimeAction}</p>
     <div class="runtime-stage">
-      <WorkspacePreview appearance={appearance} state={runtimeState} onAction={handleRuntimeAction} />
+      <WorkspacePreview {appearance} state={runtimeState} onAction={handleRuntimeAction} />
     </div>
   </section>
 
@@ -124,7 +134,7 @@
     </div>
     <p class="section-note">{lastAuthAction}</p>
     <div class="auth-stage">
-      <AuthPreview appearance={appearance} state={authState} onAction={handleAuthAction} />
+      <AuthPreview {appearance} state={authState} onAction={handleAuthAction} />
     </div>
   </section>
 

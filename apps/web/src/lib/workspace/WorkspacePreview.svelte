@@ -29,7 +29,12 @@
   let localModel = model;
 
   $: timeline = timelineForState(state);
-  $: composerDisabled = state === 'loading' || state === 'offline' || state === 'reconnecting' || state === 'retryable-error' || state === 'permanent-error';
+  $: composerDisabled =
+    state === 'loading' ||
+    state === 'offline' ||
+    state === 'reconnecting' ||
+    state === 'retryable-error' ||
+    state === 'permanent-error';
 
   function handleAction(action: WorkspaceAction): void {
     if (action.type === 'toggle-inspector') inspectorVisible = !inspectorVisible;
@@ -51,14 +56,20 @@
   data-testid="runtime-preview"
 >
   <div class="mobile-toolbar">
-    <Pill ariaLabel="Open conversations" icon="menu" label="Conversations" variant="ghost" onActivate={() => (mobileSidebarOpen = !mobileSidebarOpen)} />
+    <Pill
+      ariaLabel="Open conversations"
+      icon="menu"
+      label="Conversations"
+      variant="ghost"
+      onActivate={() => (mobileSidebarOpen = !mobileSidebarOpen)}
+    />
     <span class="mobile-title">{localTitle}</span>
     <Pill ariaLabel="Open workspace options" icon="menu" iconOnly label="Workspace options" variant="ghost" />
   </div>
 
   <div class:inspector-hidden={!inspectorVisible} class="workspace-grid">
     <aside class:open={mobileSidebarOpen} class="sidebar">
-      <SessionList activeSessionId={activeSessionId} sessions={sessions} onAction={handleAction} />
+      <SessionList {activeSessionId} {sessions} onAction={handleAction} />
     </aside>
 
     <div class="conversation-panel">
@@ -68,7 +79,7 @@
         <Timeline items={timeline} runtimeState={state} onAction={handleAction} />
 
         <div class:empty-layer={state === 'empty'} class:visible={state !== 'ready'} class="state-layer">
-          <StateBanner state={state} onAction={handleAction} />
+          <StateBanner {state} onAction={handleAction} />
         </div>
 
         <Composer

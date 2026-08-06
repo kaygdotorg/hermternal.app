@@ -24,13 +24,13 @@
 <div class:expanded class:pending class="provider-card" data-provider-id={provider.id}>
   <Pill
     ariaLabel={`${provider.name}${pending ? ', loading' : ''}`}
-    description={description}
+    {description}
     disabled={disabled || pending}
-    expanded={expanded}
+    {expanded}
     fullWidth
     label={provider.name}
     monogram={provider.monogram}
-    trailingIcon={trailingIcon}
+    {trailingIcon}
     variant="neutral"
     onActivate={() => onAction({ type: 'choose-provider', providerId: provider.id })}
   />

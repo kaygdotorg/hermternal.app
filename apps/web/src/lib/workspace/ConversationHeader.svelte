@@ -87,7 +87,13 @@
       toggleable
       variant="selected"
     />
-    <Pill ariaLabel="Open terminal mode" icon="terminal" label="Terminal" title="Terminal mode is deferred in this preview" variant="ghost" />
+    <Pill
+      ariaLabel="Open terminal mode"
+      icon="terminal"
+      label="Terminal"
+      title="Terminal mode is deferred in this preview"
+      variant="ghost"
+    />
   </div>
 
   <Pill ariaLabel="Workspace options" icon="menu" iconOnly label="Workspace options" variant="ghost" />

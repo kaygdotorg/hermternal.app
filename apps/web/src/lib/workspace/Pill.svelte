@@ -322,7 +322,11 @@
 
   @media (prefers-reduced-motion: reduce) {
     .pill {
-      transition: background-color 0ms, border-color 0ms, color 0ms, box-shadow 0ms;
+      transition:
+        background-color 0ms,
+        border-color 0ms,
+        color 0ms,
+        box-shadow 0ms;
       transform: none;
     }
 

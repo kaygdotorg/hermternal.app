@@ -14,19 +14,22 @@ const approval: TimelineItem = {
 };
 
 describe('Timeline', () => {
-  it.each(['stopped', 'offline', 'reconnecting'] as WorkspaceRuntimeState[])('gates approval actions while %s', (runtimeState) => {
-    const onAction = vi.fn();
-    render(Timeline, { items: [approval], runtimeState, onAction });
+  it.each(['stopped', 'offline', 'reconnecting'] as WorkspaceRuntimeState[])(
+    'gates approval actions while %s',
+    (runtimeState) => {
+      const onAction = vi.fn();
+      render(Timeline, { items: [approval], runtimeState, onAction });
 
-    const allow = screen.getByRole('button', { name: 'Allow once, unavailable' });
-    const reject = screen.getByRole('button', { name: 'Not now, unavailable' });
-    expect(allow).toBeDisabled();
-    expect(reject).toBeDisabled();
-    fireEvent.click(allow);
-    fireEvent.click(reject);
-    expect(onAction).not.toHaveBeenCalled();
-    expect(screen.getByRole('status')).toHaveTextContent(/unavailable/i);
-  });
+      const allow = screen.getByRole('button', { name: 'Allow once, unavailable' });
+      const reject = screen.getByRole('button', { name: 'Not now, unavailable' });
+      expect(allow).toBeDisabled();
+      expect(reject).toBeDisabled();
+      fireEvent.click(allow);
+      fireEvent.click(reject);
+      expect(onAction).not.toHaveBeenCalled();
+      expect(screen.getByRole('status')).toHaveTextContent(/unavailable/i);
+    }
+  );
 
   it('never mounts caller-provided image sources in the local preview', () => {
     const sources = ['https://example.com/image.png', '/same-origin.png', 'data:image/png;base64,ZmFrZQ=='];

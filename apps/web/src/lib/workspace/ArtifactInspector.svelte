@@ -25,11 +25,12 @@
     if (key !== 'ArrowRight' && key !== 'ArrowLeft' && key !== 'Home' && key !== 'End') return;
 
     event.preventDefault();
-    const nextIndex = key === 'Home'
-      ? 0
-      : key === 'End'
-        ? tabs.length - 1
-        : (index + (key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    const nextIndex =
+      key === 'Home'
+        ? 0
+        : key === 'End'
+          ? tabs.length - 1
+          : (index + (key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
     activeTab = tabs[nextIndex].id;
     await tick();
     tabButtons[nextIndex]?.focus();
@@ -42,7 +43,14 @@
       <p class="eyebrow">Workspace</p>
       <h2>Artifact inspector</h2>
     </div>
-    <Pill ariaLabel="Close workspace inspector" icon="close" iconOnly label="Close inspector" variant="ghost" onActivate={() => onAction({ type: 'toggle-inspector' })} />
+    <Pill
+      ariaLabel="Close workspace inspector"
+      icon="close"
+      iconOnly
+      label="Close inspector"
+      variant="ghost"
+      onActivate={() => onAction({ type: 'toggle-inspector' })}
+    />
   </header>
 
   <div aria-label="Inspector sections" aria-orientation="horizontal" class="inspector-tabs" role="tablist">
@@ -79,7 +87,14 @@
         <h3 id="artifact-heading">EMEA logistics map</h3>
         <p>Generated · mock · just now</p>
       </div>
-      <Pill ariaLabel="Undo artifact action" icon="refresh" iconOnly label="Undo" title="Undo is deferred in this preview" variant="ghost" />
+      <Pill
+        ariaLabel="Undo artifact action"
+        icon="refresh"
+        iconOnly
+        label="Undo"
+        title="Undo is deferred in this preview"
+        variant="ghost"
+      />
     </header>
 
     <figure class="artifact-preview" aria-labelledby="artifact-caption">
@@ -94,8 +109,22 @@
     </figure>
 
     <div class="artifact-actions">
-      <Pill ariaLabel="Open artifact preview" disabled icon="arrow-up" label="Open" title="Artifact preview is presentation-only" variant="ghost" />
-      <Pill ariaLabel="Download artifact preview" icon="arrow-down" iconOnly label="Download" title="Download is deferred in this preview" variant="ghost" />
+      <Pill
+        ariaLabel="Open artifact preview"
+        disabled
+        icon="arrow-up"
+        label="Open"
+        title="Artifact preview is presentation-only"
+        variant="ghost"
+      />
+      <Pill
+        ariaLabel="Download artifact preview"
+        icon="arrow-down"
+        iconOnly
+        label="Download"
+        title="Download is deferred in this preview"
+        variant="ghost"
+      />
     </div>
   </div>
 
@@ -294,10 +323,22 @@
     background: var(--signal);
   }
 
-  .bar-one { height: 48%; opacity: 0.55; }
-  .bar-two { height: 72%; opacity: 0.72; }
-  .bar-three { height: 88%; opacity: 0.9; }
-  .bar-four { height: 62%; opacity: 0.66; }
+  .bar-one {
+    height: 48%;
+    opacity: 0.55;
+  }
+  .bar-two {
+    height: 72%;
+    opacity: 0.72;
+  }
+  .bar-three {
+    height: 88%;
+    opacity: 0.9;
+  }
+  .bar-four {
+    height: 62%;
+    opacity: 0.66;
+  }
 
   .thumbnail-note {
     margin: 0;

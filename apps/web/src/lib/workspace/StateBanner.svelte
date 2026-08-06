@@ -16,7 +16,13 @@
         <span>Input stays available</span>
       </div>
     </div>
-    <Pill ariaLabel="Stop response" icon="stop" label="Stop response" variant="danger" onActivate={() => onAction({ type: 'stop' })} />
+    <Pill
+      ariaLabel="Stop response"
+      icon="stop"
+      label="Stop response"
+      variant="danger"
+      onActivate={() => onAction({ type: 'stop' })}
+    />
   </div>
 {:else if state === 'stopped'}
   <div aria-live="polite" class="state-banner stopped-banner" data-testid="stopped-state" role="status">
@@ -57,7 +63,12 @@
         <span>Drafts stay on this device. Sending is paused.</span>
       </div>
     </div>
-    <Pill label="Check connection" icon="refresh" variant="action" onActivate={() => onAction({ type: 'check-connection' })} />
+    <Pill
+      label="Check connection"
+      icon="refresh"
+      variant="action"
+      onActivate={() => onAction({ type: 'check-connection' })}
+    />
   </div>
 {:else if state === 'reconnecting'}
   <div aria-live="polite" class="state-card reconnect-state" data-testid="reconnect-state" role="status">
@@ -92,7 +103,12 @@
       <small>Focus order: status → Back to sessions → Dismiss. No automatic recovery.</small>
     </div>
     <div class="state-actions">
-      <Pill label="Back to sessions" icon="arrow-left" variant="action" onActivate={() => onAction({ type: 'back-to-sessions' })} />
+      <Pill
+        label="Back to sessions"
+        icon="arrow-left"
+        variant="action"
+        onActivate={() => onAction({ type: 'back-to-sessions' })}
+      />
       <Pill label="Dismiss" variant="ghost" onActivate={() => onAction({ type: 'dismiss' })} />
     </div>
   </div>
@@ -251,12 +267,21 @@
   }
 
   @keyframes state-pulse {
-    0%, 100% { opacity: 0.35; transform: scale(0.85); }
-    50% { opacity: 1; transform: scale(1); }
+    0%,
+    100% {
+      opacity: 0.35;
+      transform: scale(0.85);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1);
+    }
   }
 
   @keyframes spinner {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   @media (max-width: 620px) {

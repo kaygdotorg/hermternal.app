@@ -81,7 +81,18 @@ export const DEFAULT_TIMELINE: TimelineItem[] = [
   }
 ];
 
-export function timelineForState(state: 'ready' | 'streaming' | 'stopped' | 'loading' | 'empty' | 'offline' | 'reconnecting' | 'retryable-error' | 'permanent-error'): TimelineItem[] {
+export function timelineForState(
+  state:
+    | 'ready'
+    | 'streaming'
+    | 'stopped'
+    | 'loading'
+    | 'empty'
+    | 'offline'
+    | 'reconnecting'
+    | 'retryable-error'
+    | 'permanent-error'
+): TimelineItem[] {
   if (state === 'loading') {
     return [{ kind: 'loading', id: 'loading-1', label: 'Restoring session' }];
   }

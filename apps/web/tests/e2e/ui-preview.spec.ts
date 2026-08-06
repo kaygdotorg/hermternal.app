@@ -60,14 +60,10 @@ test.beforeAll(async () => {
   const port = await reservePort();
   uiPreviewOrigin = `http://127.0.0.1:${port}`;
   previewDiagnostics = '';
-  const serverProcess = spawn(
-    'bun',
-    ['run', 'preview', '--', '--host', '127.0.0.1', '--port', String(port)],
-    {
-      cwd: process.cwd(),
-      stdio: ['ignore', 'pipe', 'pipe']
-    }
-  );
+  const serverProcess = spawn('bun', ['run', 'preview', '--', '--host', '127.0.0.1', '--port', String(port)], {
+    cwd: process.cwd(),
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
   previewProcess = serverProcess;
 
   const collectDiagnostics = (chunk: Buffer): void => {
@@ -153,7 +149,9 @@ test('narrow absolute surfaces stay contained and Send activates the local actio
   expect(workspaceBox).not.toBeNull();
   expect(sidebarBox).not.toBeNull();
   expect(Math.abs((sidebarBox?.y ?? 0) - ((workspaceBox?.y ?? 0) + 64))).toBeLessThanOrEqual(1);
-  expect((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0)).toBeLessThanOrEqual((workspaceBox?.x ?? 0) + (workspaceBox?.width ?? 0) + 1);
+  expect((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0)).toBeLessThanOrEqual(
+    (workspaceBox?.x ?? 0) + (workspaceBox?.width ?? 0) + 1
+  );
 
   const composer = page.getByRole('textbox', { name: 'Message Hermes' });
   await composer.fill('Pointer fixture');

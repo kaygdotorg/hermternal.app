@@ -9,13 +9,14 @@
   export let onAction: WorkspaceActionHandler = () => {};
 
   $: timelineActionsDisabled = runtimeState !== 'ready';
-  $: approvalDisabledReason = runtimeState === 'stopped'
-    ? 'Approval is unavailable after the response stopped.'
-    : runtimeState === 'offline'
-      ? 'Approval is unavailable while offline.'
-      : runtimeState === 'reconnecting'
-        ? 'Approval is unavailable while reconnecting.'
-        : 'Timeline actions are unavailable while this response is in progress.';
+  $: approvalDisabledReason =
+    runtimeState === 'stopped'
+      ? 'Approval is unavailable after the response stopped.'
+      : runtimeState === 'offline'
+        ? 'Approval is unavailable while offline.'
+        : runtimeState === 'reconnecting'
+          ? 'Approval is unavailable while reconnecting.'
+          : 'Timeline actions are unavailable while this response is in progress.';
 
   function toolIcon(status: 'completed' | 'running' | 'pending' | 'failed'): IconName {
     if (status === 'completed') return 'check';
@@ -125,8 +126,8 @@
               disabled={timelineActionsDisabled}
               title={timelineActionsDisabled ? approvalDisabledReason : undefined}
               type="button"
-              onclick={() => answerClarification(item.id, option)}
-            >{option}</button>
+              onclick={() => answerClarification(item.id, option)}>{option}</button
+            >
           {/each}
         </div>
         {#if timelineActionsDisabled}
@@ -579,16 +580,27 @@
   }
 
   @keyframes streaming-dot {
-    0%, 100% { opacity: 0.35; transform: scale(0.8); }
-    50% { opacity: 1; transform: scale(1); }
+    0%,
+    100% {
+      opacity: 0.35;
+      transform: scale(0.8);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1);
+    }
   }
 
   @keyframes caret-blink {
-    50% { opacity: 0; }
+    50% {
+      opacity: 0;
+    }
   }
 
   @keyframes spinner {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   @media (max-width: 620px) {

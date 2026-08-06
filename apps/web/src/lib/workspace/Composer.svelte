@@ -52,8 +52,8 @@
     <textarea
       aria-label="Message Hermes"
       bind:value={draft}
-      disabled={disabled}
-      placeholder={placeholder}
+      {disabled}
+      {placeholder}
       rows="1"
       oninput={handleDraftInput}
       onkeydown={handleKeydown}
@@ -63,26 +63,55 @@
 
   <div class="composer-controls">
     <div class="composer-left">
-      <Pill ariaLabel="Add an attachment" icon="paperclip" iconOnly label="Add attachment" variant="ghost" disabled={disabled} onActivate={() => onAction({ type: 'attach' })} />
-      <Pill ariaLabel="Open security policy" icon="shield" label="Security policy" variant="ghost" disabled={disabled} onActivate={() => onAction({ type: 'set-policy' })} />
+      <Pill
+        ariaLabel="Add an attachment"
+        icon="paperclip"
+        iconOnly
+        label="Add attachment"
+        variant="ghost"
+        {disabled}
+        onActivate={() => onAction({ type: 'attach' })}
+      />
+      <Pill
+        ariaLabel="Open security policy"
+        icon="shield"
+        label="Security policy"
+        variant="ghost"
+        {disabled}
+        onActivate={() => onAction({ type: 'set-policy' })}
+      />
     </div>
 
     <div class="composer-right">
-      <Pill ariaLabel="Context usage 62 percent" icon="spark" label="62%" variant="ghost" disabled={disabled} />
+      <Pill ariaLabel="Context usage 62 percent" icon="spark" label="62%" variant="ghost" {disabled} />
       <label class="model-control">
         <span class="sr-only">Model</span>
         <Icon name="spark" size={14} />
-        <select aria-label="Model" bind:value={selectedModel} disabled={disabled} onchange={handleModelChange}>
+        <select aria-label="Model" bind:value={selectedModel} {disabled} onchange={handleModelChange}>
           <option>Atlas · balanced</option>
           <option>Atlas · fast</option>
           <option>Atlas · precise</option>
         </select>
       </label>
-      <Pill ariaLabel="Record a voice message" icon="mic" iconOnly label="Voice message" variant="ghost" disabled={disabled} />
+      <Pill ariaLabel="Record a voice message" icon="mic" iconOnly label="Voice message" variant="ghost" {disabled} />
       {#if isStreaming}
-        <Pill ariaLabel="Stop response" icon="stop" label="Stop" variant="danger" onActivate={() => onAction({ type: 'stop' })} />
+        <Pill
+          ariaLabel="Stop response"
+          icon="stop"
+          label="Stop"
+          variant="danger"
+          onActivate={() => onAction({ type: 'stop' })}
+        />
       {:else}
-        <Pill ariaLabel="Send message" icon="send" iconOnly label="Send message" variant="action" disabled={disabled || !draft.trim()} onActivate={sendMessage} />
+        <Pill
+          ariaLabel="Send message"
+          icon="send"
+          iconOnly
+          label="Send message"
+          variant="action"
+          disabled={disabled || !draft.trim()}
+          onActivate={sendMessage}
+        />
       {/if}
     </div>
   </div>
