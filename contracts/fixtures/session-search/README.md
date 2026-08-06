@@ -8,16 +8,18 @@ transcript mirror.
 
 ## Contract boundary
 
-The contract consumes, but does not modify, the C-01 route allowlist and C-07
-session-persistence fixtures. `cases.json` pins their reviewed artifact digests,
-and the validator hashes the actual repository files before semantic success.
+The contract consumes, but does not modify, the C-01 route allowlist, C-05
+connection-restoration, and C-07 session-persistence fixtures. `cases.json` pins
+their reviewed semantic artifact digests, and the validator hashes the actual
+repository files before semantic success.
 It also pins Hermes revision
 `f5be9236e00ddf2f2a412697f267078fc4ee068e` and records the narrow source
 observations used here:
 
 - the authenticated `GET /api/sessions/search` route exists;
-- a missing or Unicode-whitespace-only query returns an empty result;
-- the upstream session-ID helper strips and lowercases its query, then ranks
+- a missing or source-side `strip()`-empty query returns an empty result;
+- the upstream session-ID helper blob `756884b3f29f16ca38c065b802b397803a6bc0e0`
+  strips and lowercases its query, then ranks
   exact, prefix, and substring matches;
 - the source bounds its helper limit; and
 - the source route does not define a total result order or cursor contract.
@@ -42,20 +44,26 @@ Two language-neutral modes are defined:
   synthetic searchable metadata. It applies no language, locale, stemming, or
   tokenization rule. Redacted metadata is never searchable.
 
-Queries are limited to 256 UTF-8 bytes. A whitespace-only query may contain
-source-backed strip whitespace; other control characters are rejected. Page
-sizes must be JSON integers from 1 through 50; booleans are rejected.
+Queries are limited to 256 UTF-8 bytes. Empty classification accepts exactly
+the 25 code points in the Unicode `White_Space` property: U+0009–U+000D,
+U+0020, U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028–U+2029, U+202F,
+U+205F, and U+3000. It does not inherit Python's broader `str.strip()` set.
+Other C0 controls, including U+001C–U+001F, and DEL are rejected. Page sizes
+must be JSON integers from 1 through 50; booleans are rejected.
 Results are ordered by descending synthetic `updated_ms`, then ascending ASCII
 `session_id`. The response exposes only `session_id`, never title text, message
 content, scores, counts, snippets, or transcript data.
 
-The cursor is a non-semantic integrity token. It exposes no session identifier,
-timestamp, query digest, or row marker. Its integrity calculation binds the
-preserved query, mode, canonical digest of the actual catalog, and last returned
-row. A forged token or a token used with another query, mode, or catalog fails
-with the same fixed `invalid_cursor` result. No caller-supplied snapshot label
-is trusted. No total count is exposed. Repeating the same request against the
-same catalog produces byte-identical output.
+The cursor is a non-semantic server-issued token. It exposes no session
+identifier, timestamp, query digest, or row marker. The server injects an
+authorization-scoped secret and retains an issuance registry outside caller
+JSON. The token binds principal scope, preserved query, mode, the canonical
+caller-visible projection, and the last returned row. A caller-created token,
+a token from another principal or server scope, or a token used with another
+query, mode, or visible projection fails with fixed `invalid_cursor`. Changes
+to unavailable, deleted, or unauthorized rows do not affect the visible
+projection and cannot become a cursor oracle. No caller-supplied snapshot label
+or secret is trusted. No total count is exposed.
 
 ## Privacy and recovery
 
@@ -66,17 +74,25 @@ failure and malformed requests use fixed controlled error codes and do not
 include raw queries, identifiers, paths, payloads, existence details, or
 sensitive values.
 
-An interruption known to occur before a response advances no cursor and returns
-an integrity-bound prior-request proof for an explicit retry of that same read.
-An unknown response enters delivery uncertainty. The caller must provide both
-the bound prior-request proof and a reconciliation proof for the same actual
-catalog before retrying. String retry labels, forged evidence, catalog drift,
-and automatic retry are rejected. Search never creates, modifies, deletes,
-resumes, or prompts a session.
+C-05 permits retries only for approved idempotent reads after its restore
+barrier; this fixture binds the reviewed C-05 cases artifact. Session search is
+narrowed to a side-effect-free read with no outward submission identity. Every
+request carries an opaque request ID and positive generation. Server-issued
+evidence binds the authorization principal, request ID, generation, complete
+request, no-outward-submission class, and visible projection.
+
+An interruption known before response returns a prior-request proof for that
+same read. An unknown response enters delivery uncertainty and its proof cannot
+be used alone: the same server scope must issue a reconciliation proof before
+retry. Replays are explicitly allowed only for the identical side-effect-free
+read binding; they cannot duplicate an outward action because this operation has
+none. Cross-principal, cross-generation, forged, unissued, and visible-catalog-
+drift evidence is rejected. Search never creates, modifies, deletes, resumes,
+or prompts a session.
 
 ## Files and immutable evidence
 
-- `cases.json` is the canonical closed document with 45 semantic cases.
+- `cases.json` is the canonical closed document with 48 semantic cases.
 - `validate.py` is a standard-library-only strict loader, validator, and reducer.
 - `test_validate.py` covers semantics, adversarial JSON, redaction, binding, and
   normal/optimized parity.
@@ -85,8 +101,9 @@ resumes, or prompts a session.
 
 The loader opens each caller-selected artifact once without following a final
 symlink, requires a regular file, checks its declared size before allocation,
-streams within the byte bound, and rejects descriptor mutation or pathname
-replacement. The same immutable byte buffer is size-checked, parsed, and hashed.
+streams within the byte bound, and compares device, inode, mode, size, mtime,
+and ctime before and after reading. It also rejects pathname replacement. The
+same immutable byte buffer is size-checked, parsed, and hashed.
 It rejects duplicate keys, invalid UTF-8 (including lone surrogates), non-finite
 numbers, numeric overflow, oversized integers, and byte, string, object, array,
 node, and depth violations. Bounds traversal is iterative. Exact numeric fields

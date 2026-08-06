@@ -6,23 +6,23 @@
   "artifact_files": [
     {
       "path": "README.md",
-      "sha256": "532e5b1891c69ec57174c083be0eb75863b58da9f472c517c169f1e8523d46da",
-      "size_bytes": 6641
+      "sha256": "c1fa9d6665a8112d5e1f3c81487dfd8b3971f363174f90033734fd2e33beafcd",
+      "size_bytes": 7759
     },
     {
       "path": "cases.json",
-      "sha256": "54f304014a697a7a92f5a4c071db1a6c7ef83d516957e68809368f0beb027489",
-      "size_bytes": 82842
+      "sha256": "bc9dc83c18c9eb2055ef54b789f781822b6836b51427225f47fd00d88b912a2d",
+      "size_bytes": 95236
     },
     {
       "path": "validate.py",
-      "sha256": "ee13f107f34a4b90f220da18fbd0e3cebf17a483e89c13d2899a13e04673713d",
-      "size_bytes": 28804
+      "sha256": "06aea1097ced3a57786e4e95c60bd43ad0837b96f5ba0c5e7a24a0c8455bee3f",
+      "size_bytes": 34247
     },
     {
       "path": "test_validate.py",
-      "sha256": "ce2fa6e2a40d09d6d015d73e6f9dcd4cbceb4421a2c18310b9e023940d3f760e",
-      "size_bytes": 12975
+      "sha256": "1456e0436244c56016ec04fe101cde717db1596caf27e2a5e9a8ce2037822671",
+      "size_bytes": 16443
     },
     {
       "path": "baseline-evidence.json",
@@ -30,7 +30,7 @@
       "size_bytes": 1510
     }
   ],
-  "artifact_bytes": 132772,
+  "artifact_bytes": 155195,
   "environment": {
     "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
     "python": "3.14.6"

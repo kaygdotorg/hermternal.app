@@ -12,6 +12,11 @@
       "use": "exact opaque identity and no transcript mirror boundary"
     },
     {
+      "path": "contracts/fixtures/connection-restoration/cases.json",
+      "sha256": "91b43223a17ebaf309f0f57b32f804dc9bab28af4d6860cae33dae9a7bb03935",
+      "use": "C-05 restore barrier, idempotent read retry, and delivery uncertainty boundary"
+    },
+    {
       "path": "contracts/fixtures/route-allowlist/route_allowlist.json",
       "sha256": "0d0e9b3d54eefd15abea8fd6869e4e7a95908c9bf057441979e980490bad4e69",
       "use": "approved authenticated GET /api/sessions/search surface"
@@ -20,6 +25,18 @@
       "path": "contracts/fixtures/route-allowlist/source_audit.json",
       "sha256": "65a26cdea086d28ee90cc7e22d81c3e48715ea28a89f1bedb9f70c4a050aa78d",
       "use": "pinned source path and search route anchor"
+    }
+  ],
+  "source_blobs": [
+    {
+      "path": "hermes_cli/web_routers/sessions.py",
+      "git_blob_sha": "c692d7b21e1ace3d5a9828c67caf2ee4aa561c4d",
+      "sha256": "f8debdab79430829245352ebdb7f50603c3a42c11d4609eb3287c35b9a2bf0ba"
+    },
+    {
+      "path": "hermes_state_search.py",
+      "git_blob_sha": "756884b3f29f16ca38c065b802b397803a6bc0e0",
+      "sha256": "6f23d6194826f29e6f521e59db68060e83e29c47121707caeab198a69099c2c9"
     }
   ],
   "source_observations": [
@@ -41,6 +58,8 @@
       "id": "upstream-id-ranking",
       "path": "hermes_state_search.py",
       "anchor": "def search_sessions_by_id(",
+      "git_blob_sha": "756884b3f29f16ca38c065b802b397803a6bc0e0",
+      "sha256": "6f23d6194826f29e6f521e59db68060e83e29c47121707caeab198a69099c2c9",
       "observation": "The pinned helper strips and lowercases its query, then ranks exact, prefix, and substring session-id matches.",
       "contract_relevance": "Hermternal intentionally narrows exact_id to complete case-sensitive equality; this is client policy, not an upstream claim."
     },
@@ -48,14 +67,18 @@
       "id": "bounded-source-limit",
       "path": "hermes_cli/web_routers/sessions.py",
       "anchor": "safe_limit = max(1, min(int(limit or 20), 100))",
+      "git_blob_sha": "c692d7b21e1ace3d5a9828c67caf2ee4aa561c4d",
+      "sha256": "f8debdab79430829245352ebdb7f50603c3a42c11d4609eb3287c35b9a2bf0ba",
       "observation": "The pinned route bounds its helper limit but defines no cursor.",
       "contract_relevance": "Hermternal accepts explicit integer page sizes and defines a narrower integrity-bound cursor."
     },
     {
       "id": "no-source-total-order",
       "path": "hermes_cli/web_routers/sessions.py",
-      "anchor": "results = list(seen.values())[:safe_limit]",
-      "observation": "The pinned route combines helper insertion order without an explicit total ordering or tie-breaker.",
+      "anchor": "return {\"results\": list(seen.values())}",
+      "git_blob_sha": "c692d7b21e1ace3d5a9828c67caf2ee4aa561c4d",
+      "sha256": "f8debdab79430829245352ebdb7f50603c3a42c11d4609eb3287c35b9a2bf0ba",
+      "observation": "The pinned route returns combined helper insertion order without an explicit total ordering or tie-breaker.",
       "contract_relevance": "Hermternal applies deterministic ordering before pagination as client policy."
     }
   ],
@@ -65,11 +88,12 @@
         "exact_id",
         "literal_text"
       ],
-      "empty": "missing_or_unicode_strip_empty_returns_empty",
+      "empty": "missing_or_only_unicode_white_space_returns_empty",
+      "white_space_scalars": "Unicode_White_Space_25_code_points",
       "normalization": "none_after_empty_classification",
       "literal_matching": "case_sensitive_unicode_scalar_subsequence",
       "maximum_utf8_bytes": 256,
-      "controls": "rejected_except_strip_empty_whitespace"
+      "controls": "all_other_c0_and_del_rejected"
     },
     "identity": {
       "session_id": "full_opaque_ascii_segment",
@@ -84,9 +108,10 @@
     },
     "pagination": {
       "page_size": "integer_1_through_50",
-      "cursor": "nonsemantic_integrity_token_bound_to_query_mode_catalog_and_last_row",
+      "cursor": "server_issued_nonsemantic_token_bound_to_principal_query_mode_visible_projection_and_last_row",
       "total_count": "not_exposed",
-      "catalog_change": "invalid_cursor"
+      "visible_catalog_change": "invalid_cursor",
+      "hidden_catalog_change": "no_effect"
     },
     "privacy": {
       "unavailable_deleted_unauthorized": "same_absent_result_without_disclosure",
@@ -97,10 +122,22 @@
       "local_transcript_mirror": false
     },
     "recovery": {
-      "interrupted_before_response": "integrity_bound_prior_request_proof_required",
-      "unknown_response": "prior_request_and_reconciliation_proofs_required",
+      "operation_class": "side_effect_free_read_with_no_outward_submission",
+      "request_binding": [
+        "principal_scope",
+        "request_id",
+        "generation",
+        "query",
+        "mode",
+        "limit",
+        "cursor",
+        "visible_projection"
+      ],
+      "interrupted_before_response": "server_issued_prior_request_proof_required",
+      "unknown_response": "server_issued_prior_and_reconciliation_proofs_required",
+      "proof_replay": "allowed_only_for_same_side_effect_free_read_binding",
       "automatic_retry": false,
-      "repeatability": "same_catalog_query_mode_limit_cursor_same_bytes"
+      "repeatability": "same_visible_projection_request_and_server_scope_same_bytes"
     },
     "boundary": {
       "synthetic_only": true,
@@ -112,7 +149,10 @@
   "cases": [
     {
       "id": "missing-query",
+      "server_scenario": "fresh",
       "request": {
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -172,8 +212,11 @@
     },
     {
       "id": "empty-query",
+      "server_scenario": "fresh",
       "request": {
         "query": "",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -233,8 +276,11 @@
     },
     {
       "id": "whitespace-only-query",
+      "server_scenario": "fresh",
       "request": {
         "query": " \t\n",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -293,9 +339,146 @@
       "notes": "Synthetic canonical session-search decision."
     },
     {
+      "id": "non-whitespace-control-u001c",
+      "server_scenario": "fresh",
+      "request": {
+        "query": "\u001c",
+        "request_id": "request-search-0001",
+        "generation": 1,
+        "mode": "literal_text",
+        "limit": 20,
+        "cursor": null,
+        "backend": "available",
+        "interruption": "none",
+        "prior_request_proof": null,
+        "reconciliation_proof": null
+      },
+      "catalog": [
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "error",
+        "results": [],
+        "next_cursor": null,
+        "error": {
+          "code": "invalid_query",
+          "message": "Search unavailable"
+        },
+        "recovery": "correct_request",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
+      "id": "non-whitespace-control-u001f",
+      "server_scenario": "fresh",
+      "request": {
+        "query": "\u001f",
+        "request_id": "request-search-0001",
+        "generation": 1,
+        "mode": "literal_text",
+        "limit": 20,
+        "cursor": null,
+        "backend": "available",
+        "interruption": "none",
+        "prior_request_proof": null,
+        "reconciliation_proof": null
+      },
+      "catalog": [
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "error",
+        "results": [],
+        "next_cursor": null,
+        "error": {
+          "code": "invalid_query",
+          "message": "Search unavailable"
+        },
+        "recovery": "correct_request",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
       "id": "no-result",
+      "server_scenario": "fresh",
       "request": {
         "query": "absent",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -355,8 +538,11 @@
     },
     {
       "id": "exact-opaque-id",
+      "server_scenario": "fresh",
       "request": {
         "query": "session-alpha-0000000000000001",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
@@ -420,8 +606,11 @@
     },
     {
       "id": "exact-id-prefix-rejected",
+      "server_scenario": "fresh",
       "request": {
         "query": "session-alpha-000000000000000",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
@@ -481,8 +670,11 @@
     },
     {
       "id": "exact-id-case-sensitive",
+      "server_scenario": "fresh",
       "request": {
         "query": "SESSION-ALPHA-0000000000000001",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
@@ -542,8 +734,11 @@
     },
     {
       "id": "exact-id-leading-space-not-trimmed",
+      "server_scenario": "fresh",
       "request": {
         "query": " session-alpha-0000000000000001",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
@@ -603,8 +798,11 @@
     },
     {
       "id": "literal-subsequence-distinguishes-substring",
+      "server_scenario": "fresh",
       "request": {
         "query": "pa",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -671,8 +869,11 @@
     },
     {
       "id": "literal-case-sensitive",
+      "server_scenario": "fresh",
       "request": {
         "query": "Atlas",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -736,8 +937,11 @@
     },
     {
       "id": "unicode-literal-language-neutral",
+      "server_scenario": "fresh",
       "request": {
         "query": "\u6771\u4eac",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -801,8 +1005,11 @@
     },
     {
       "id": "newest-first-order",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -869,8 +1076,11 @@
     },
     {
       "id": "session-id-tie-break",
+      "server_scenario": "fresh",
       "request": {
         "query": "PA",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -919,8 +1129,11 @@
     },
     {
       "id": "input-order-independent",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -987,8 +1200,11 @@
     },
     {
       "id": "first-page-with-cursor",
+      "server_scenario": "cursor",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 1,
         "cursor": null,
@@ -1042,7 +1258,7 @@
             "session_id": "session-alpha-0000000000000001"
           }
         ],
-        "next_cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
+        "next_cursor": "c1.-ooOJU-fcfMBIxvSpn5sPG2oedqJxOR0MBYQbPKh7To",
         "error": null,
         "recovery": "none",
         "recovery_proof": null,
@@ -1052,11 +1268,14 @@
     },
     {
       "id": "second-page-from-cursor",
+      "server_scenario": "cursor",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 1,
-        "cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
+        "cursor": "c1.-ooOJU-fcfMBIxvSpn5sPG2oedqJxOR0MBYQbPKh7To",
         "backend": "available",
         "interruption": "none",
         "prior_request_proof": null,
@@ -1117,11 +1336,14 @@
     },
     {
       "id": "cursor-query-mismatch",
+      "server_scenario": "cursor",
       "request": {
         "query": "atlas",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 1,
-        "cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
+        "cursor": "c1.-ooOJU-fcfMBIxvSpn5sPG2oedqJxOR0MBYQbPKh7To",
         "backend": "available",
         "interruption": "none",
         "prior_request_proof": null,
@@ -1181,11 +1403,14 @@
     },
     {
       "id": "cursor-mode-mismatch",
+      "server_scenario": "cursor",
       "request": {
         "query": "session-alpha-0000000000000001",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "exact_id",
         "limit": 1,
-        "cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
+        "cursor": "c1.-ooOJU-fcfMBIxvSpn5sPG2oedqJxOR0MBYQbPKh7To",
         "backend": "available",
         "interruption": "none",
         "prior_request_proof": null,
@@ -1244,12 +1469,15 @@
       "notes": "Synthetic canonical session-search decision."
     },
     {
-      "id": "cursor-catalog-drift",
+      "id": "cursor-visible-catalog-drift",
+      "server_scenario": "cursor",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 1,
-        "cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
+        "cursor": "c1.-ooOJU-fcfMBIxvSpn5sPG2oedqJxOR0MBYQbPKh7To",
         "backend": "available",
         "interruption": "none",
         "prior_request_proof": null,
@@ -1317,9 +1545,89 @@
       "notes": "Synthetic canonical session-search decision."
     },
     {
-      "id": "cursor-forgery",
+      "id": "cursor-hidden-catalog-drift",
+      "server_scenario": "cursor",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
+        "mode": "literal_text",
+        "limit": 1,
+        "cursor": "c1.-ooOJU-fcfMBIxvSpn5sPG2oedqJxOR0MBYQbPKh7To",
+        "backend": "available",
+        "interruption": "none",
+        "prior_request_proof": null,
+        "reconciliation_proof": null
+      },
+      "catalog": [
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-hidden-extra-000000000006",
+          "title_key": "project",
+          "updated_ms": 500,
+          "available": true,
+          "deleted": false,
+          "authorized": false,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "results",
+        "results": [
+          {
+            "session_id": "session-beta-0000000000000002"
+          }
+        ],
+        "next_cursor": null,
+        "error": null,
+        "recovery": "none",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
+      "id": "cursor-forgery",
+      "server_scenario": "fresh",
+      "request": {
+        "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": "c1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -1382,8 +1690,11 @@
     },
     {
       "id": "malformed-cursor",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": "bad",
@@ -1446,8 +1757,11 @@
     },
     {
       "id": "lone-surrogate-cursor",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": "\ud800",
@@ -1510,8 +1824,11 @@
     },
     {
       "id": "zero-page-size",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 0,
         "cursor": null,
@@ -1574,8 +1891,11 @@
     },
     {
       "id": "oversized-page-size",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 51,
         "cursor": null,
@@ -1638,8 +1958,11 @@
     },
     {
       "id": "boolean-page-size",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": true,
         "cursor": null,
@@ -1702,8 +2025,11 @@
     },
     {
       "id": "malformed-query-control",
+      "server_scenario": "fresh",
       "request": {
         "query": "atlas\u0000",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -1766,8 +2092,11 @@
     },
     {
       "id": "lone-surrogate-query",
+      "server_scenario": "fresh",
       "request": {
         "query": "\ud800",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -1830,8 +2159,11 @@
     },
     {
       "id": "oversized-query",
+      "server_scenario": "fresh",
       "request": {
         "query": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -1894,8 +2226,11 @@
     },
     {
       "id": "invalid-mode",
+      "server_scenario": "fresh",
       "request": {
         "query": "atlas",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "folded_text",
         "limit": 20,
         "cursor": null,
@@ -1958,8 +2293,11 @@
     },
     {
       "id": "duplicate-session-id",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -2004,8 +2342,11 @@
     },
     {
       "id": "deleted-session-nondisclosure",
+      "server_scenario": "fresh",
       "request": {
         "query": "session-hidden-0000000000000005",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
@@ -2038,8 +2379,11 @@
     },
     {
       "id": "unauthorized-session-nondisclosure",
+      "server_scenario": "fresh",
       "request": {
         "query": "session-hidden-0000000000000005",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
@@ -2072,8 +2416,11 @@
     },
     {
       "id": "unavailable-session-nondisclosure",
+      "server_scenario": "fresh",
       "request": {
         "query": "session-hidden-0000000000000005",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
@@ -2106,8 +2453,11 @@
     },
     {
       "id": "mixed-hidden-visible",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -2171,8 +2521,11 @@
     },
     {
       "id": "redacted-metadata-not-searchable",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -2205,8 +2558,11 @@
     },
     {
       "id": "redacted-exact-id-only",
+      "server_scenario": "fresh",
       "request": {
         "query": "session-hidden-0000000000000005",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
@@ -2243,8 +2599,11 @@
     },
     {
       "id": "backend-unavailable",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -2307,8 +2666,11 @@
     },
     {
       "id": "interrupted-before-response",
+      "server_scenario": "before",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -2364,21 +2726,24 @@
           "message": "Search unavailable"
         },
         "recovery": "same_request_retry",
-        "recovery_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
+        "recovery_proof": "r1.5qOQiUOxKaSmH5oPri_pSm-lUimg35mEZwgSDVjsUqI",
         "transcript_mirror": false
       },
       "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "interrupted-safe-retry",
+      "server_scenario": "before",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
         "backend": "available",
         "interruption": "none",
-        "prior_request_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
+        "prior_request_proof": "r1.5qOQiUOxKaSmH5oPri_pSm-lUimg35mEZwgSDVjsUqI",
         "reconciliation_proof": null
       },
       "catalog": [
@@ -2439,8 +2804,11 @@
     },
     {
       "id": "interrupted-forged-proof",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -2503,8 +2871,11 @@
     },
     {
       "id": "unknown-response",
+      "server_scenario": "unknown",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
@@ -2560,22 +2931,25 @@
           "message": "Search unavailable"
         },
         "recovery": "reconcile_then_same_request",
-        "recovery_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
+        "recovery_proof": "r1.E6TqnUF1M5z6VVZKIoBuN6526P98ffxdHtkiTM0JRgE",
         "transcript_mirror": false
       },
       "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "unknown-response-prior-only-blocked",
+      "server_scenario": "unknown",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
         "backend": "available",
         "interruption": "none",
-        "prior_request_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
-        "reconciliation_proof": "r1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "prior_request_proof": "r1.E6TqnUF1M5z6VVZKIoBuN6526P98ffxdHtkiTM0JRgE",
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -2623,7 +2997,7 @@
           "code": "retry_blocked",
           "message": "Search unavailable"
         },
-        "recovery": "restart_search",
+        "recovery": "reconcile_then_same_request",
         "recovery_proof": null,
         "transcript_mirror": false
       },
@@ -2631,15 +3005,18 @@
     },
     {
       "id": "unknown-response-reconciled-retry",
+      "server_scenario": "reconciled",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
         "backend": "available",
         "interruption": "none",
-        "prior_request_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
-        "reconciliation_proof": "r1.NXUUflh-Dn6TTANJhRnWatw7wwrhiZJCYjO9krHMLNU"
+        "prior_request_proof": "r1.-DbnCklxOLMkLVTWW_GvPxG7Yz0_xPoK3ZL9mmNW-Lk",
+        "reconciliation_proof": "r1.dI6hUWMHRKxXqpBp6s0gEJr2Js-PicA3QtfGdbHzROk"
       },
       "catalog": [
         {
@@ -2698,16 +3075,19 @@
       "notes": "Synthetic canonical session-search decision."
     },
     {
-      "id": "reconciliation-catalog-drift",
+      "id": "reconciliation-visible-catalog-drift",
+      "server_scenario": "reconciled",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
         "backend": "available",
         "interruption": "none",
-        "prior_request_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
-        "reconciliation_proof": "r1.NXUUflh-Dn6TTANJhRnWatw7wwrhiZJCYjO9krHMLNU"
+        "prior_request_proof": "r1.-DbnCklxOLMkLVTWW_GvPxG7Yz0_xPoK3ZL9mmNW-Lk",
+        "reconciliation_proof": "r1.dI6hUWMHRKxXqpBp6s0gEJr2Js-PicA3QtfGdbHzROk"
       },
       "catalog": [
         {
@@ -2772,8 +3152,11 @@
     },
     {
       "id": "stable-repeatability",
+      "server_scenario": "fresh",
       "request": {
         "query": "project",
+        "request_id": "request-search-0001",
+        "generation": 1,
         "mode": "literal_text",
         "limit": 2,
         "cursor": null,
