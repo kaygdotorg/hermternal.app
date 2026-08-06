@@ -12,10 +12,12 @@ from __future__ import annotations
 import os
 import pathlib
 import re
+import selectors
 import signal
 import stat
 import subprocess
 import sys
+import time
 
 
 ERROR_LINE = '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n'
@@ -129,6 +131,9 @@ def _kill(process: subprocess.Popen[bytes]) -> None:
 
 
 def _git(root: pathlib.Path, arguments: list[str], limit: int) -> bytes:
+    """Read fixed-Git stdout incrementally so the limit is a hard bound."""
+    if limit <= 0:
+        _fail()
     try:
         if not _plain_path(TRUSTED_GIT_EXECUTABLE):
             _fail()
@@ -152,14 +157,48 @@ def _git(root: pathlib.Path, arguments: list[str], limit: int) -> bytes:
         )
     except (OSError, ValueError):
         _fail()
+
+    selector = selectors.DefaultSelector()
+    output = bytearray()
     try:
-        output, _ = process.communicate(timeout=2)
-    except (OSError, subprocess.TimeoutExpired):
-        _kill(process)
-        _fail()
-    if process.returncode != 0 or len(output) > limit:
-        _fail()
-    return output
+        if process.stdout is None:
+            _kill(process)
+            _fail()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + 2
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill(process)
+                _fail()
+            events = selector.select(remaining)
+            if not events:
+                continue
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                except OSError:
+                    _kill(process)
+                    _fail()
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                output.extend(chunk)
+                if len(output) > limit:
+                    _kill(process)
+                    _fail()
+        try:
+            returncode = process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            _kill(process)
+            _fail()
+        if returncode != 0:
+            _fail()
+        return bytes(output)
+    finally:
+        selector.close()
+        if process.stdout is not None:
+            process.stdout.close()
 
 
 def _reject_repository_metadata(root: pathlib.Path) -> None:

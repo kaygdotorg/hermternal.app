@@ -11,7 +11,7 @@ text, read a transcript, or claim live compatibility.
 - Dashboard contract: `dashboard-v0.0.1`
 - Reviewed Hermes source: `f5be9236e00ddf2f2a412697f267078fc4ee068e`
 - External expected revision: supplied by review/CI as `HERMTERNAL_C06_EXPECTED_COMMIT`
-- Non-release audit tag: `hermternal-c06-uncertain-delivery-final-anchor`
+- Non-release audit tag: `hermternal-c06-uncertain-delivery-bounded-output-anchor`
 - Canonical inputs: `cases.json`
 - Validator: `validate.py`
 - Regression tests: `test_validate.py`
@@ -29,10 +29,13 @@ external expectation fails closed.
 Every supported validator launch uses a trusted two-stage Python isolated
 preflight. The first `python3 -I -B` (or `-I -B -O`) command checks the
 checkout path, linked-worktree metadata, external-gitdir boundary, and Git
-alternates before any checkout-owned source is read. It then supplies the
-reviewed `preflight.py` blob to a second isolated interpreter. That preflight
-checks the exact expected-commit bytes and only then executes the verified
-`validate.py` source from memory. Isolated mode also removes the fixture
+alternates before any checkout-owned source is read. It then reads the reviewed
+`preflight.py` blob incrementally through a fixed `/usr/bin/git` child, with a
+hard byte limit, two-second deadline, and process-group cleanup. No shell pipe
+or `communicate()` call can buffer the blob first. The reviewed preflight applies
+the same incremental bound and cleanup to every later Git-tree read, then checks
+the exact expected-commit bytes and executes the verified `validate.py` source
+from memory. Isolated mode also removes the fixture
 directory from `sys.path`, so untracked `selectors.py` or `subprocess.py`
 files cannot run before the checks. The exact normal and optimized commands
 are recorded in `validation-baseline.json` and reproduced below. Direct
@@ -144,8 +147,8 @@ git fetch --tags --unshallow 2>/dev/null || git fetch --tags
 # Run the exact `optimized.command` from validation-baseline.json.
 # Both commands first execute the isolated path/metadata guard, then feed
 # the reviewed preflight blob through an isolated interpreter.
-git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-final-anchor
-git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-final-anchor^{commit}
+git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-bounded-output-anchor
+git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-bounded-output-anchor^{commit}
 ```
 
 The audit tag is an annotated, non-release consistency marker. It must be
@@ -181,9 +184,10 @@ proof, compatibility failure, unknown interactive events, strict JSON, bounded
 redaction, canonical artifact rebinding, forged benchmark evidence, gateway,
 transport, draft, initial-state, state-identity, event-correlation, trusted
 preflight, symlinked-validator, ancestor-alias, external-gitdir, isolated-import,
-and unexpected-sibling-module mutations.
-Oversized files, long keys, directories, and FIFOs fail through the same
-bounded error path without opening unbounded or special-file streams.
+unexpected-sibling-module, oversized launcher-blob, and oversized preflight
+Git-tree mutations in normal and optimized modes. Oversized files, long keys,
+directories, and FIFOs fail through the same bounded error path without opening
+unbounded or special-file streams.
 
 `validation-baseline.json` records 30 raw subprocess samples for each normal
 and optimized command, with min/mean/median/p95/max distributions and the

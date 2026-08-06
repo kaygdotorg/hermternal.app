@@ -44,20 +44,20 @@ HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 # tag is only a secondary consistency marker. The validator source digest masks
 # only self-referential binding literals, so changing validation logic still
 # fails.
-TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-final-anchor"
+TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-bounded-output-anchor"
 CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "chat.md")
 CANONICAL_FIXTURE_NAMES = frozenset(("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json"))
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_BOUND_SHA256 = {
-    "README.md": "1ef9daff8bd9d6b260489966cba522088d76c6d08f0e263514e83f5d362a726d",
+    "README.md": "aab203ace3009f3ad97da210bc76df395f5d7ba85690a46ce235db6dd47ed709",
     "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
-    "preflight.py": "03ae31cced667f4dea1f1e4b3358e2be20cd1e4484c47c649ef60882af886c3c",
-    "validate.py": "e6bbc18ab945c0dd636a2615f6bdb947b0a9c857487a4009c7b37a5579192b27",
-    "test_validate.py": "d19840026d9d913e9943bd333baaf07551950fba95d555ff083ba6a523871a93",
+    "preflight.py": "803eef20b8d91a1edafc300f241258e50a99d46d3d4a6ee34bbbdc7aebe15b07",
+    "validate.py": "9569c364bea45441501e161912a67c4752c167e88b4198c81cc287c7dd0576ff",
+    "test_validate.py": "51d9126a43a216bd8d784c9b4a9531af3e825dcb177259afd61123d4991309c0",
     "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
 }
-EXPECTED_BASELINE_SHA256 = "909458b24e7694ada8f1a4e7ce9a2c0d4d47d6d5ce228fee9871d5f7eebfb3e0"
+EXPECTED_BASELINE_SHA256 = "1cfde6d0c8f3d888af4df945d6c03f441826001c708a904fa95aec94077212a5"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -257,8 +257,26 @@ MAX_GIT_STATUS_BYTES = 64 * 1024
 BENCHMARK_REPETITIONS = 30
 EXPECTED_COMMIT_ENV = "HERMTERNAL_C06_EXPECTED_COMMIT"
 TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
-TRUSTED_PREFLIGHT_CODE = '''import json,os,pathlib,sys
+TRUSTED_LAUNCHER_CODE = '''import json,os,pathlib,selectors,signal,stat,subprocess,sys,time
 E=json.dumps({"error":{"code":"contract","message":"uncertain delivery fixture rejected"}},separators=(",",":"))+chr(10)
+P=None;S=None
+# The reviewed preflight must be size-bounded before Python receives or compiles it.
+def fail():
+ if P is not None:
+  try: os.killpg(P.pid,signal.SIGKILL)
+  except BaseException: pass
+  try: P.kill()
+  except BaseException: pass
+  try: P.wait(timeout=1)
+  except BaseException: pass
+ if S is not None:
+  try: S.close()
+  except BaseException: pass
+ for stream in (() if P is None else (P.stdout,P.stderr)):
+  if stream is not None:
+   try: stream.close()
+   except BaseException: pass
+ sys.stderr.write(E);raise SystemExit(1)
 try:
  r=pathlib.Path.cwd();p=pathlib.Path(sys.argv[1]);p=r/p if not p.is_absolute() else p;g=r/".git"
  bad=lambda x:(not x.is_absolute() or x.is_symlink() or x.resolve()!=x)
@@ -270,30 +288,46 @@ try:
   gd=gd if gd.is_absolute() else r/gd;c=gd.parent.parent
   metadata_ok=(not bad(gd) and gd.parent==c/"worktrees" and c.name==".git" and not bad(c) and r.resolve().is_relative_to(c.parent.resolve()) and (gd/"commondir").is_file() and (gd/"gitdir").is_file() and not any((c/x).is_symlink() for x in ("objects","refs","config")) and not any((c/x).exists() or (c/x).is_symlink() for x in q))
  else: metadata_ok=False
- ok=(not bad(r) and p==r/pathlib.Path("contracts/fixtures/uncertain-delivery/validate.py") and not bad(p) and metadata_ok and not any((g/x).exists() or (g/x).is_symlink() for x in q) and (not w or (not bad(pathlib.Path(w)) and pathlib.Path(w)==r)))
+ expected=os.environ.get("HERMTERNAL_C06_EXPECTED_COMMIT")
+ ok=(not bad(r) and p==r/pathlib.Path("contracts/fixtures/uncertain-delivery/validate.py") and not bad(p) and metadata_ok and not any((g/x).exists() or (g/x).is_symlink() for x in q) and (not w or (not bad(pathlib.Path(w)) and pathlib.Path(w)==r)) and isinstance(expected,str) and len(expected)==40 and all(x in "0123456789abcdef" for x in expected))
+ if not ok: fail()
+ env=os.environ.copy()
+ for name in list(env):
+  if name.startswith("GIT_"): env.pop(name,None)
+ env.update({"GIT_CONFIG_NOSYSTEM":"1","GIT_CONFIG_GLOBAL":os.devnull,"GIT_CONFIG_SYSTEM":os.devnull,"GIT_CONFIG_COUNT":"0","GIT_OPTIONAL_LOCKS":"0","GIT_TERMINAL_PROMPT":"0","GIT_NO_LAZY_FETCH":"1","GIT_NO_REPLACE_OBJECTS":"1"})
+ git=pathlib.Path("/usr/bin/git");meta=git.stat()
+ if bad(git) or not stat.S_ISREG(meta.st_mode) or not meta.st_mode&0o111: fail()
+ P=subprocess.Popen([str(git),"--no-replace-objects","--no-lazy-fetch","-C",str(r),"show",expected+":contracts/fixtures/uncertain-delivery/preflight.py"],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=True)
+ if P.stdout is None or P.stderr is None: fail()
+ S=selectors.DefaultSelector();S.register(P.stdout,selectors.EVENT_READ,"stdout");S.register(P.stderr,selectors.EVENT_READ,"stderr")
+ out=bytearray();err=bytearray();deadline=time.monotonic()+2
+ while S.get_map():
+  remaining=deadline-time.monotonic()
+  if remaining<=0: fail()
+  events=S.select(remaining)
+  if not events: continue
+  for key,event in events:
+   chunk=os.read(key.fileobj.fileno(),8192)
+   if not chunk: S.unregister(key.fileobj);continue
+   target=out if key.data=="stdout" else err;target.extend(chunk)
+   if len(out)>525312 or len(err)>4096: fail()
+ returncode=P.wait(timeout=1)
+ if returncode!=0 or err: fail()
+ S.close();S=None;P.stdout.close();P.stderr.close();source=bytes(out)
+except SystemExit:
+ raise
 except BaseException:
- ok=False
-if not ok:
- sys.stderr.write(E);raise SystemExit(1)
+ fail()
+namespace={"__name__":"__main__","__file__":str(p),"__package__":None,"__cached__":None}
+exec(compile(source,str(p.parent/"preflight.py"),"exec",optimize=sys.flags.optimize),namespace,namespace)
 '''
-TRUSTED_PREFLIGHT_GIT = (
-    "/usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "
-    "GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 GIT_OPTIONAL_LOCKS=0 "
-    "GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 "
-    "/usr/bin/git --no-replace-objects --no-lazy-fetch -C . show "
-    '\"$HERMTERNAL_C06_EXPECTED_COMMIT:contracts/fixtures/uncertain-delivery/preflight.py\" 2>/dev/null'
-)
 TRUSTED_PREFLIGHT_NORMAL = (
-    "python3 -I -B -c '" + TRUSTED_PREFLIGHT_CODE + "' "
-    "contracts/fixtures/uncertain-delivery/validate.py && "
-    + TRUSTED_PREFLIGHT_GIT
-    + " | python3 -I -B - contracts/fixtures/uncertain-delivery/validate.py"
+    "python3 -I -B -c '" + TRUSTED_LAUNCHER_CODE + "' "
+    "contracts/fixtures/uncertain-delivery/validate.py"
 )
 TRUSTED_PREFLIGHT_OPTIMIZED = (
-    "python3 -I -B -O -c '" + TRUSTED_PREFLIGHT_CODE + "' "
-    "contracts/fixtures/uncertain-delivery/validate.py && "
-    + TRUSTED_PREFLIGHT_GIT
-    + " | python3 -I -B -O - contracts/fixtures/uncertain-delivery/validate.py"
+    "python3 -I -B -O -c '" + TRUSTED_LAUNCHER_CODE + "' "
+    "contracts/fixtures/uncertain-delivery/validate.py"
 )
 APPROVED_COMMANDS = {
     "normal": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> " + TRUSTED_PREFLIGHT_NORMAL,
