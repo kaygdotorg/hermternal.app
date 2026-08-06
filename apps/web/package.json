@@ -15,7 +15,7 @@
     "test:e2e": "playwright test",
     "test:a11y": "playwright test tests/e2e/accessibility.spec.ts",
     "test:no-network": "bun run test && playwright test tests/e2e/no-network.spec.ts",
-    "test:static": "bun run build && node tests/static/assert-static-build.mjs && node tests/static/assert-static-routes.mjs",
+    "test:static": "bun run build && node tests/static/assert-static-build.mjs && node tests/static/assert-css-tokens.mjs && node tests/static/assert-static-routes.mjs",
     "prepare": "svelte-kit sync"
   },
   "devDependencies": {

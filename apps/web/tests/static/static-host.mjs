@@ -1,72 +1,30 @@
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { cwd } from 'node:process';
+import {
+  CLIENT_ROUTE_PATTERN,
+  isReservedPath,
+  isSupportedClientRoute,
+  parseRawRequestTarget,
+  RESERVED_PATH_PREFIXES,
+  SERVICE_WORKER_SCRIPT_PATH
+} from '../../src/lib/static-route-grammar.mjs';
 
-export const CLIENT_ROUTE_PATTERN = /^\/v1\/c\/[A-Za-z0-9._~-]{16,}(?:\/m\/[A-Za-z0-9._~-]{16,})?$/;
-export const RESERVED_PATH_PREFIXES = Object.freeze(['/api', '/hermes', '/auth', '/ws', '/pty']);
+export { CLIENT_ROUTE_PATTERN, parseRawRequestTarget, RESERVED_PATH_PREFIXES };
 
 const STATIC_FILE_PATHS = Object.freeze([
   '/manifest.webmanifest',
   '/icon.svg',
-  '/service-worker.js'
+  SERVICE_WORKER_SCRIPT_PATH
 ]);
 
-function hasInvalidRawTargetCharacter(value) {
-  for (const character of value) {
-    const code = character.codePointAt(0);
-    if (code === undefined || code < 0x20 || (code >= 0x7f && code <= 0x9f) || code > 0x7e) {
-      return true;
-    }
-  }
-  return false;
-}
-
 /**
- * Inspect the HTTP origin-form target before any WHATWG URL parsing. The
- * production deployment must apply the same lexical boundary: decoding or
- * normalising first could turn a reserved traversal into a valid client route.
+ * @param {string} buildDirectory
+ * @param {string} pathname
+ * @returns {string | undefined}
  */
-export function parseRawRequestTarget(rawTarget) {
-  if (
-    typeof rawTarget !== 'string' ||
-    rawTarget.length === 0 ||
-    !rawTarget.startsWith('/') ||
-    hasInvalidRawTargetCharacter(rawTarget)
-  ) {
-    return undefined;
-  }
-
-  const fragmentIndex = rawTarget.indexOf('#');
-  if (fragmentIndex !== -1) {
-    return undefined;
-  }
-
-  const queryIndex = rawTarget.indexOf('?');
-  const pathname = queryIndex === -1 ? rawTarget : rawTarget.slice(0, queryIndex);
-  if (
-    pathname.length === 0 ||
-    pathname.includes('%') ||
-    pathname.includes('\\') ||
-    pathname.includes('//') ||
-    pathname.split('/').some((segment) => segment === '.' || segment === '..')
-  ) {
-    return undefined;
-  }
-
-  return Object.freeze({
-    pathname,
-    hasQuery: queryIndex !== -1
-  });
-}
-
-export function isReservedPath(pathname) {
-  return RESERVED_PATH_PREFIXES.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
-  );
-}
-
 function safeBuildPath(buildDirectory, pathname) {
   const relativePath = pathname.replace(/^\/+/, '');
   const candidate = resolve(buildDirectory, relativePath);
@@ -80,6 +38,11 @@ function safeBuildPath(buildDirectory, pathname) {
  * available for synthetic scenario selection; canonical private client routes
  * and static assets are query/fragment-free and fail closed on any mutation.
  */
+/**
+ * @param {string} rawTarget
+ * @param {string} [buildDirectory]
+ * @returns {string | undefined}
+ */
 export function resolveStaticPath(rawTarget, buildDirectory = resolve(cwd(), 'build')) {
   const target = parseRawRequestTarget(rawTarget);
   if (!target || (target.hasQuery && target.pathname !== '/')) {
@@ -90,7 +53,7 @@ export function resolveStaticPath(rawTarget, buildDirectory = resolve(cwd(), 'bu
   if (isReservedPath(pathname)) {
     return undefined;
   }
-  if (CLIENT_ROUTE_PATTERN.test(pathname)) {
+  if (isSupportedClientRoute(pathname)) {
     return join(buildDirectory, '200.html');
   }
   if (pathname === '/') {
@@ -105,8 +68,9 @@ export function resolveStaticPath(rawTarget, buildDirectory = resolve(cwd(), 'bu
   return undefined;
 }
 
+/** @param {string} pathname @returns {string} */
 function contentTypeFor(pathname) {
-  if (pathname === '/' || CLIENT_ROUTE_PATTERN.test(pathname) || pathname.endsWith('.html')) {
+  if (pathname === '/' || isSupportedClientRoute(pathname) || pathname.endsWith('.html')) {
     return 'text/html; charset=utf-8';
   }
   if (pathname.endsWith('.js')) return 'text/javascript; charset=utf-8';
@@ -118,11 +82,16 @@ function contentTypeFor(pathname) {
   return 'application/octet-stream';
 }
 
+/**
+ * @param {string} [buildDirectory]
+ * @returns {import('node:http').Server}
+ */
 export function createStaticHost(buildDirectory = resolve(cwd(), 'build')) {
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       response.statusCode = 405;
       response.setHeader('allow', 'GET, HEAD');
+      response.setHeader('content-type', 'text/plain; charset=utf-8');
       response.end('method not allowed');
       return;
     }
@@ -137,12 +106,19 @@ export function createStaticHost(buildDirectory = resolve(cwd(), 'build')) {
     }
 
     try {
+      const fileInfo = await stat(filePath);
+      if (!fileInfo.isFile()) {
+        response.statusCode = 404;
+        response.end('not found');
+        return;
+      }
+
       const body = await readFile(filePath);
       response.statusCode = 200;
       response.setHeader('content-type', contentTypeFor(parsedTarget.pathname));
       response.setHeader(
         'x-hermternal-static-source',
-        CLIENT_ROUTE_PATTERN.test(parsedTarget.pathname)
+        isSupportedClientRoute(parsedTarget.pathname)
           ? 'client-route'
           : parsedTarget.pathname === '/200.html'
             ? 'fallback-file'
@@ -155,18 +131,38 @@ export function createStaticHost(buildDirectory = resolve(cwd(), 'build')) {
       } else {
         response.end(body);
       }
-    } catch (error) {
-      response.statusCode = 500;
-      response.end(String(error));
+    } catch {
+      // Missing or non-regular files are indistinguishable from unknown paths;
+      // never expose filesystem errors or absolute build paths to the client.
+      response.statusCode = 404;
+      response.end('not found');
     }
   });
+
+  server.on('connect', (_request, socket) => {
+    socket.end(
+      'HTTP/1.1 405 Method Not Allowed\r\n' +
+        'Allow: GET, HEAD\r\n' +
+        'Content-Type: text/plain; charset=utf-8\r\n' +
+        'Content-Length: 18\r\n' +
+        'Connection: close\r\n' +
+        '\r\n' +
+        'method not allowed'
+    );
+  });
+
+  return server;
 }
 
+/**
+ * @param {{buildDirectory?: string, port?: number}} [options]
+ * @returns {Promise<import('node:http').Server>}
+ */
 export async function startStaticHost({ buildDirectory = resolve(cwd(), 'build'), port = 4173 } = {}) {
   const server = createStaticHost(buildDirectory);
   await new Promise((resolveServer, reject) => {
     server.once('error', reject);
-    server.listen(port, '127.0.0.1', resolveServer);
+    server.listen({ port, host: '127.0.0.1' }, () => resolveServer(undefined));
   });
   return server;
 }

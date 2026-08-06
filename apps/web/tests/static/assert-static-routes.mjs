@@ -1,4 +1,5 @@
 import { request as httpRequest } from 'node:http';
+import { connect as netConnect } from 'node:net';
 import { startStaticHost, RESERVED_PATH_PREFIXES } from './static-host.mjs';
 
 function rawHttpRequest(port, rawTarget, method = 'GET') {
@@ -25,6 +26,33 @@ function rawHttpRequest(port, rawTarget, method = 'GET') {
     );
     request.once('error', reject);
     request.end();
+  });
+}
+
+function rawConnectRequest(port, rawTarget) {
+  return new Promise((resolve, reject) => {
+    const socket = netConnect({ host: '127.0.0.1', port });
+    const chunks = [];
+    socket.once('error', reject);
+    socket.once('connect', () => {
+      socket.end(
+        `CONNECT ${rawTarget} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`
+      );
+    });
+    socket.on('data', (chunk) => chunks.push(chunk));
+    socket.once('end', () => {
+      const rawResponse = Buffer.concat(chunks).toString('utf8');
+      const [headerBlock, body = ''] = rawResponse.split('\r\n\r\n');
+      const headerLines = headerBlock.split('\r\n');
+      const status = Number(headerLines[0]?.split(' ')[1] ?? 0);
+      const headers = Object.fromEntries(
+        headerLines.slice(1).map((line) => {
+          const separator = line.indexOf(':');
+          return [line.slice(0, separator).toLowerCase(), line.slice(separator + 1).trim()];
+        })
+      );
+      resolve({ status, headers, body });
+    });
   });
 }
 
@@ -75,6 +103,7 @@ const deniedRoutes = [
   ...canonicalMutationRoutes,
   ...lexicalMutationRoutes
 ];
+const missingAssetRoutes = ['/_app/missing-asset.js', '/_app/'];
 
 try {
   for (const rawTarget of shellRoutes) {
@@ -112,11 +141,23 @@ try {
     }
   }
 
-  for (const rawTarget of deniedRoutes) {
+  const connect = await rawConnectRequest(address.port, '/v1/c/abcdefghijklmnop');
+  if (
+    connect.status !== 405 ||
+    connect.headers.allow !== 'GET, HEAD' ||
+    connect.headers['content-length'] !== '18' ||
+    connect.body !== 'method not allowed'
+  ) {
+    throw new Error(
+      `Expected CONNECT to close with a bounded 405 response and Allow header, got ${JSON.stringify(connect)}.`
+    );
+  }
+
+  for (const rawTarget of [...deniedRoutes, ...missingAssetRoutes]) {
     const result = await rawHttpRequest(address.port, rawTarget);
-    if (result.status !== 404 || result.body.includes('/_app/')) {
+    if (result.status !== 404 || result.body !== 'not found') {
       throw new Error(
-        `Expected raw denied or unknown target ${JSON.stringify(rawTarget)} to stay outside the shell, got ${result.status}.`
+        `Expected raw denied or missing target ${JSON.stringify(rawTarget)} to return generic 404, got ${result.status}.`
       );
     }
   }
@@ -125,5 +166,5 @@ try {
 }
 
 console.log(
-  'static route evidence: raw lexical checks, canonical query/fragment denial, GET/HEAD methods, 200.html, and service-worker.js pass'
+  'static route evidence: shared grammar, raw lexical checks, canonical mutation denial, generic asset 404s, GET/HEAD/CONNECT methods, 200.html, and service-worker.js pass'
 );

@@ -26,23 +26,38 @@ function isAllowedShellRequest(method: string, url: URL, expectedOrigin: string)
 }
 
 async function installAndControlWorker(page: Page): Promise<void> {
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker?.controller), undefined, {
+    timeout: 10_000
+  });
+
   const installation = await page.evaluate(async () => {
-    const registration = await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
-    await registration.update();
     const ready = await navigator.serviceWorker.ready;
+    await ready.update();
+    const cacheName = (await caches.keys()).find((name) =>
+      name.startsWith('hermternal-prototype-assets-')
+    );
+    const cachedFallback = cacheName
+      ? Boolean(await caches.open(cacheName).then((cache) => cache.match('/200.html')))
+      : false;
     return {
       activeState: ready.active?.state ?? null,
       scriptURL: ready.active?.scriptURL ?? null,
-      controlledBeforeReload: Boolean(navigator.serviceWorker.controller)
+      scope: ready.scope,
+      controlledBeforeReload: Boolean(navigator.serviceWorker.controller),
+      cacheName,
+      cachedFallback
     };
   });
 
   expect(installation.activeState).toBe('activated');
   expect(installation.scriptURL).toContain('/service-worker.js');
+  expect(installation.scope).toMatch(/\/$/);
   expect(installation.controlledBeforeReload).toBe(true);
+  expect(installation.cacheName).toMatch(/^hermternal-prototype-assets-/);
+  expect(installation.cachedFallback).toBe(true);
 
-  // Re-navigation verifies control survives a normal document lifecycle; the
-  // host must have served /200.html during the prior install.
+  // Reload verifies update checks and control survive the normal document
+  // lifecycle; the startup layout owns registration rather than this test.
   await page.reload();
   await expect(page.getByTestId('status-success')).toBeVisible();
 
@@ -52,9 +67,6 @@ async function installAndControlWorker(page: Page): Promise<void> {
   }));
   expect(control.controlled).toBe(true);
   expect(control.controllerScriptURL).toContain('/service-worker.js');
-
-  const cacheNames = await page.evaluate(() => caches.keys());
-  expect(cacheNames.some((name) => name.startsWith('hermternal-prototype-assets-'))).toBe(true);
 }
 
 test('the shell uses an active worker and makes no unexpected cross-origin or same-origin requests', async ({
@@ -83,24 +95,28 @@ test('the shell uses an active worker and makes no unexpected cross-origin or sa
     await route.abort();
   });
 
-  await page.goto('/');
+  // The query is an allowed root fixture selector, not a live route.
+  await page.goto('/?scenario=success');
   await expect(page.getByTestId('status-success')).toBeVisible();
   expect(unexpectedRequests).toEqual([]);
 
   await installAndControlWorker(page);
 
-  // This navigation must be answered by the worker's cached 200.html route.
-  // If installation or control failed, page routing sees the direct private
-  // request and aborts it instead of allowing a false-positive host fallback.
-  // The scaffold has no catch-all UI route yet, so this is static/worker
-  // evidence rather than a claim that a future chat screen renders here.
-  const deepLinkResponse = await page.goto(canonicalClientRoute);
-  expect(deepLinkResponse?.status()).toBe(200);
-  expect(await deepLinkResponse?.headerValue('x-hermternal-static-source')).toBe('fallback-file');
-  const deepLinkControl = await page.evaluate(() => ({
-    controlled: Boolean(navigator.serviceWorker.controller)
-  }));
-  expect(deepLinkControl.controlled).toBe(true);
+  // True offline navigation must be answered by the worker's cached 200.html
+  // route. If startup registration or control failed, this navigation fails
+  // instead of creating a false-positive host fallback.
+  await page.context().setOffline(true);
+  try {
+    const deepLinkResponse = await page.goto(canonicalClientRoute);
+    expect(deepLinkResponse?.status()).toBe(200);
+    expect(await deepLinkResponse?.headerValue('x-hermternal-static-source')).toBe('fallback-file');
+    const deepLinkControl = await page.evaluate(() => ({
+      controlled: Boolean(navigator.serviceWorker.controller)
+    }));
+    expect(deepLinkControl.controlled).toBe(true);
+  } finally {
+    await page.context().setOffline(false);
+  }
   expect(unexpectedRequests).toEqual([]);
 
   probing = true;

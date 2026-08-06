@@ -15,8 +15,8 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     (async () => {
       await runtime.install();
-      // The prototype proof registers this worker in a fresh browser context;
-      // skip waiting so the generated worker can become active immediately.
+      // Production startup owns registration; skip waiting so a newly built
+      // worker can become active without making the static shell wait.
       await self.skipWaiting();
     })()
   );

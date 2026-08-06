@@ -112,8 +112,8 @@
     </div>
     <p>
       This client is a static SvelteKit SPA with deterministic mock transport. Runtime and
-      authentication screens are intentionally withheld while the Paper and proof gates remain
-      open.
+      authentication screens are intentionally withheld while their separate implementation and
+      proof gates remain open.
     </p>
 
     <dl class="boundary-list">
