@@ -32,7 +32,8 @@
     monogram={provider.monogram}
     {trailingIcon}
     variant="neutral"
-    onActivate={() => onAction({ type: 'choose-provider', providerId: provider.id })}
+    onActivate={() =>
+      onAction({ type: 'choose-provider', providerId: provider.id, providerKind: provider.kind })}
   />
 </div>
 

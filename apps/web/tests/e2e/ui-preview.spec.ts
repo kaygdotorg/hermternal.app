@@ -159,6 +159,75 @@ test('narrow absolute surfaces stay contained and Send activates the local actio
   await expect(page.locator('.section-note').first()).toHaveText('send');
 });
 
+test('provider choices route to deterministic local password and callback states', async ({ page }) => {
+  await page.goto(previewUrl('/ui-preview'));
+
+  await page.getByRole('button', { name: 'Nous' }).click();
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'callback');
+  await expect(page.getByRole('heading', { name: 'Completing sign-in' })).toBeFocused();
+
+  await page.getByRole('button', { name: 'Cancel and return to providers' }).click();
+  await page.getByRole('button', { name: 'Hermes password' }).click();
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
+  await expect(page.getByLabel('Username')).toBeFocused();
+});
+
+test('approved compatibility gates remain fail-closed in desktop light and narrow dark layouts', async ({ page }) => {
+  for (const fixture of [
+    {
+      state: 'compatibility-check-failed',
+      heading: 'Compatibility check failed',
+      appearance: 'light',
+      viewport: { width: 1440, height: 900 }
+    },
+    {
+      state: 'unsupported-version',
+      heading: 'Unsupported Hermes revision',
+      appearance: 'dark',
+      viewport: { width: 390, height: 844 }
+    }
+  ]) {
+    await page.setViewportSize(fixture.viewport);
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Appearance' }).selectOption(fixture.appearance);
+    await page.getByRole('combobox', { name: 'Runtime state' }).selectOption(fixture.state);
+
+    await expect(page.getByRole('heading', { name: fixture.heading })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Message Hermes' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Allow once, unavailable' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Retry compatibility check' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Return to sign-in' })).toBeVisible();
+
+    const overflow = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth
+    }));
+    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+  }
+});
+
+test('narrow title editing uses the compound island, separate workspace action, dimmer, and represented keyboard', async ({
+  page
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+  const island = page.locator('.mobile-title-island');
+  await expect(island.getByRole('button', { name: 'Open conversations' })).toBeVisible();
+  await expect(island.getByRole('button', { name: 'Edit conversation title' })).toBeVisible();
+  await expect(island.getByRole('button', { name: 'Open workspace' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Open workspace' })).toBeVisible();
+
+  await island.getByRole('button', { name: 'Edit conversation title' }).click();
+  await expect(page.getByTestId('mobile-title-editor')).toBeVisible();
+  await expect(page.getByTestId('represented-mobile-keyboard')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Conversation title' })).toBeFocused();
+  expect(await page.locator('.title-edit-dimmer').evaluate((node) => getComputedStyle(node).backdropFilter)).toContain(
+    'blur'
+  );
+});
+
 test('password preview submits only a credential-free local fixture action', async ({ page }) => {
   await page.goto(previewUrl('/ui-preview'));
   await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
@@ -173,11 +242,43 @@ test('password preview submits only a credential-free local fixture action', asy
   await expect(page.getByText(/sent only to the configured/i)).not.toBeVisible();
 });
 
-test('UI preview has no axe violations', async ({ page }) => {
-  await page.goto(previewUrl('/ui-preview'));
+test('UI preview state branches have no axe violations in light, dark, desktop, and narrow layouts', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  for (const fixture of [
+    {
+      runtime: 'compatibility-check-failed',
+      auth: 'password-submitting',
+      appearance: 'light',
+      viewport: { width: 1440, height: 900 }
+    },
+    {
+      runtime: 'unsupported-version',
+      auth: 'failure',
+      appearance: 'dark',
+      viewport: { width: 390, height: 844 }
+    },
+    {
+      runtime: 'ready',
+      auth: 'session-expired',
+      appearance: 'light',
+      viewport: { width: 768, height: 1024 }
+    },
+    {
+      runtime: 'offline',
+      auth: 'discovery-retry',
+      appearance: 'dark',
+      viewport: { width: 640, height: 900 }
+    }
+  ]) {
+    await page.setViewportSize(fixture.viewport);
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Runtime state' }).selectOption(fixture.runtime);
+    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption(fixture.auth);
+    await page.getByRole('combobox', { name: 'Appearance' }).selectOption(fixture.appearance);
 
-  const results = await new AxeBuilder({ page }).analyze();
-  expect(results.violations).toEqual([]);
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(results.violations, JSON.stringify(fixture)).toEqual([]);
+  }
 });
 
 test('records production preview timing without a threshold', async ({ page }) => {
@@ -233,7 +334,7 @@ test('visible UI controls keep the shared 44px effective target', async ({ page 
   }
 });
 
-test('UI preview stays local and accessible at 200% zoom with reduced motion', async ({ page }) => {
+test('UI preview stays local at the 200% browser-zoom reflow equivalent with reduced motion', async ({ page }) => {
   const unexpectedRequests: string[] = [];
   const expectedOrigin = uiPreviewOrigin;
 
@@ -247,12 +348,20 @@ test('UI preview stays local and accessible at 200% zoom with reduced motion', a
     await route.continue();
   });
   await page.emulateMedia({ reducedMotion: 'reduce' });
+  // Chromium exposes no stable cross-platform Ctrl-plus API. A real 640 CSS-pixel
+  // layout viewport reproduces a 1280px desktop viewport at 200% browser zoom
+  // without relying on the non-standard CSS zoom property.
+  await page.setViewportSize({ width: 640, height: 900 });
   await page.goto(previewUrl('/ui-preview'));
-  await page.evaluate(() => {
-    document.documentElement.style.zoom = '2';
-  });
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('compatibility-check-failed');
+  await page.getByRole('button', { name: 'Nous' }).click();
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'callback');
+  await page.getByRole('button', { name: 'Cancel and return to providers' }).click();
+  await page.getByRole('button', { name: 'Hermes password' }).click();
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
 
   await expect(page.getByRole('heading', { name: 'Runtime and authentication states' })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.clientWidth)).toBe(640);
   expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
   const hasReducedTransparencyFallback = await page.evaluate(() =>
     Array.from(document.styleSheets).some((styleSheet) => {

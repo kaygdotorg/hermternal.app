@@ -59,7 +59,9 @@ describe('WorkspacePreview', () => {
       'reconnecting',
       'loading',
       'retryable-error',
-      'permanent-error'
+      'permanent-error',
+      'compatibility-check-failed',
+      'unsupported-version'
     ] as const;
 
     for (const state of states) {
@@ -115,14 +117,57 @@ describe('WorkspacePreview', () => {
     expect(workspaceOptions).toBeDisabled();
     fireEvent.click(workspaceOptions);
 
-    const mobileWorkspaceOptions = screen.getByRole('button', { name: 'Open workspace options', hidden: true });
-    expect(mobileWorkspaceOptions).toBeDisabled();
-    fireEvent.click(mobileWorkspaceOptions);
-
     expect(screen.getByRole('button', { name: 'Start a new chat' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Add an attachment' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Open security policy' })).toBeEnabled();
     expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it('renders both fail-closed compatibility gates with recovery actions and disabled input', () => {
+    for (const state of ['compatibility-check-failed', 'unsupported-version'] as const) {
+      const onAction = vi.fn();
+      const view = render(WorkspacePreview, { state, onAction });
+
+      expect(
+        screen.getByRole('heading', {
+          name: state === 'compatibility-check-failed' ? 'Compatibility check failed' : 'Unsupported Hermes revision'
+        })
+      ).toBeInTheDocument();
+      expect(screen.getByRole('alert')).toHaveAttribute('aria-live', 'assertive');
+      expect(screen.getByRole('textbox', { name: 'Message Hermes' })).toBeDisabled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry compatibility check' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Return to sign-in' }));
+      expect(onAction).toHaveBeenCalledWith({ type: 'retry-compatibility-check' });
+      expect(onAction).toHaveBeenCalledWith({ type: 'return-to-sign-in' });
+
+      view.unmount();
+    }
+  });
+
+  it('exposes the approved narrow compound island, separate workspace action, and represented title editor', async () => {
+    const onAction = vi.fn();
+    render(WorkspacePreview, { state: 'ready', onAction });
+
+    const preview = screen.getByTestId('runtime-preview');
+    const island = preview.querySelector('.mobile-title-island');
+    const conversations = island?.querySelector<HTMLButtonElement>('[aria-label="Open conversations"]');
+    const mobileTitle = island?.querySelector<HTMLButtonElement>('[aria-label="Edit conversation title"]');
+    const workspace = preview.querySelector<HTMLButtonElement>('[aria-label="Open workspace"]');
+    expect(conversations).toBeInTheDocument();
+    expect(mobileTitle).toBeInTheDocument();
+    expect(workspace).toBeInTheDocument();
+    expect(island).not.toContainElement(workspace);
+
+    await fireEvent.click(workspace!);
+    expect(preview.querySelector('aside[aria-label="Workspace"]')).toBeInTheDocument();
+    expect(onAction).toHaveBeenCalledWith({ type: 'open-workspace' });
+
+    await fireEvent.click(mobileTitle!);
+    const editor = await screen.findByTestId('mobile-title-editor');
+    expect(editor.querySelector('.title-edit-dimmer')).toBeInTheDocument();
+    expect(screen.getByTestId('represented-mobile-keyboard')).toBeInTheDocument();
+    await waitFor(() => expect(editor.querySelector('[aria-label="Conversation title"]')).toHaveFocus());
   });
 
   it('uses a two-column grid when the inspector is hidden', async () => {

@@ -33,6 +33,19 @@ describe('Pill', () => {
     expect(onActivate).toHaveBeenCalledTimes(2);
   });
 
+  it('clears pointer suppression on leave so the next Enter activation is accepted', () => {
+    const onActivate = vi.fn();
+    render(Pill, { label: 'Open', onActivate });
+
+    const button = screen.getByRole('button', { name: 'Open' });
+    fireEvent.pointerDown(button, { button: 0, pointerType: 'mouse' });
+    fireEvent.pointerLeave(button, { pointerType: 'mouse' });
+    fireEvent.keyDown(button, { key: 'Enter' });
+    fireEvent.click(button);
+
+    expect(onActivate).toHaveBeenCalledTimes(2);
+  });
+
   it('only exposes pressed and expanded semantics for opted-in controls', () => {
     render(Pill, {
       ariaControls: 'provider-panel',

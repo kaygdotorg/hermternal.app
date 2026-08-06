@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import ArtifactInspector from './ArtifactInspector.svelte';
   import Composer from './Composer.svelte';
   import ConversationHeader from './ConversationHeader.svelte';
+  import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
   import SessionList from './SessionList.svelte';
   import StateBanner from './StateBanner.svelte';
@@ -25,6 +27,11 @@
 
   let inspectorVisible = true;
   let mobileSidebarOpen = false;
+  let mobileWorkspaceOpen = false;
+  let mobileTitleEditing = false;
+  let mobileTitleDraft = title;
+  let mobileTitleInput: HTMLInputElement | undefined;
+  let mobileTitleTrigger: HTMLButtonElement | undefined;
   let localTitle = title;
   let localModel = model;
 
@@ -34,7 +41,55 @@
     state === 'offline' ||
     state === 'reconnecting' ||
     state === 'retryable-error' ||
-    state === 'permanent-error';
+    state === 'permanent-error' ||
+    state === 'compatibility-check-failed' ||
+    state === 'unsupported-version';
+  $: compatibilityBlocked = state === 'compatibility-check-failed' || state === 'unsupported-version';
+
+  async function afterActivationFrame(): Promise<void> {
+    await tick();
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 0);
+    });
+  }
+
+  async function startMobileTitleEditing(): Promise<void> {
+    mobileTitleDraft = localTitle;
+    mobileTitleEditing = true;
+    await afterActivationFrame();
+    if (!mobileTitleEditing) return;
+    // Defer focus until the title pill's compatibility click completes so the
+    // browser cannot return focus to the control hidden behind the modal layer.
+    mobileTitleInput?.focus();
+    mobileTitleInput?.select();
+  }
+
+  async function closeMobileTitleEditing(commit: boolean): Promise<void> {
+    if (commit) {
+      const nextTitle = mobileTitleDraft.trim();
+      if (nextTitle && nextTitle !== localTitle) handleAction({ type: 'edit-title', title: nextTitle });
+    }
+    mobileTitleEditing = false;
+    await afterActivationFrame();
+    mobileTitleTrigger?.focus();
+  }
+
+  function handleMobileTitleKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void closeMobileTitleEditing(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      void closeMobileTitleEditing(false);
+    }
+  }
+
+  function toggleMobileWorkspace(): void {
+    mobileWorkspaceOpen = !mobileWorkspaceOpen;
+    mobileSidebarOpen = false;
+    onAction({ type: 'open-workspace' });
+  }
 
   function handleAction(action: WorkspaceAction): void {
     if (action.type === 'toggle-inspector') inspectorVisible = !inspectorVisible;
@@ -55,19 +110,40 @@
   data-state={state}
   data-testid="runtime-preview"
 >
-  <div class="mobile-toolbar">
+  <div class="mobile-toolbar" inert={mobileTitleEditing}>
+    <div class="mobile-title-island" aria-label="Navigation and conversation">
+      <Pill
+        ariaLabel="Open conversations"
+        icon="menu"
+        iconOnly
+        label="Conversations"
+        variant="ghost"
+        onActivate={() => {
+          mobileSidebarOpen = !mobileSidebarOpen;
+          mobileWorkspaceOpen = false;
+        }}
+      />
+      <Pill
+        ariaLabel="Edit conversation title"
+        bind:element={mobileTitleTrigger}
+        label={localTitle}
+        variant="ghost"
+        onActivate={startMobileTitleEditing}
+      />
+    </div>
     <Pill
-      ariaLabel="Open conversations"
-      icon="menu"
-      label="Conversations"
-      variant="ghost"
-      onActivate={() => (mobileSidebarOpen = !mobileSidebarOpen)}
+      ariaLabel="Open workspace"
+      expandable
+      expanded={mobileWorkspaceOpen}
+      icon="workspace"
+      iconOnly
+      label="Workspace"
+      variant="neutral"
+      onActivate={toggleMobileWorkspace}
     />
-    <span class="mobile-title">{localTitle}</span>
-    <Pill ariaLabel="Open workspace options" icon="menu" iconOnly label="Workspace options" variant="ghost" />
   </div>
 
-  <div class:inspector-hidden={!inspectorVisible} class="workspace-grid">
+  <div class:inspector-hidden={!inspectorVisible} class="workspace-grid" inert={mobileTitleEditing}>
     <aside class:open={mobileSidebarOpen} class="sidebar">
       <SessionList {activeSessionId} {sessions} onAction={handleAction} />
     </aside>
@@ -78,7 +154,12 @@
       <div class="conversation-body">
         <Timeline items={timeline} runtimeState={state} onAction={handleAction} />
 
-        <div class:empty-layer={state === 'empty'} class:visible={state !== 'ready'} class="state-layer">
+        <div
+          class:compatibility-layer={compatibilityBlocked}
+          class:empty-layer={state === 'empty'}
+          class:visible={state !== 'ready'}
+          class="state-layer"
+        >
           <StateBanner {state} onAction={handleAction} />
         </div>
 
@@ -95,6 +176,49 @@
       <ArtifactInspector onAction={handleAction} />
     {/if}
   </div>
+
+  {#if mobileWorkspaceOpen}
+    <aside aria-label="Workspace" class="mobile-workspace-drawer" inert={mobileTitleEditing}>
+      <ArtifactInspector onAction={handleAction} />
+    </aside>
+  {/if}
+
+  {#if mobileTitleEditing}
+    <div
+      aria-label="Edit conversation title"
+      aria-modal="true"
+      class="mobile-title-edit-layer"
+      data-testid="mobile-title-editor"
+      role="dialog"
+    >
+      <button
+        aria-label="Cancel title editing"
+        class="title-edit-dimmer"
+        type="button"
+        onclick={() => closeMobileTitleEditing(false)}
+      ></button>
+      <div class="centered-title-editor">
+        <label class="sr-only" for="mobile-conversation-title">Conversation title</label>
+        <input
+          id="mobile-conversation-title"
+          aria-label="Conversation title"
+          bind:this={mobileTitleInput}
+          bind:value={mobileTitleDraft}
+          maxlength="72"
+          onkeydown={handleMobileTitleKeydown}
+        />
+      </div>
+      <div aria-hidden="true" class="mobile-keyboard" data-testid="represented-mobile-keyboard">
+        <div class="keyboard-suggestions"><span>Quarterly</span><span>analysis</span><span>planning</span></div>
+        {#each ['QWERTYUIOP', 'ASDFGHJKL', 'ZXCVBNM'] as row}
+          <div class="keyboard-row">
+            {#each row.split('') as key}<span class="keyboard-key">{key}</span>{/each}
+          </div>
+        {/each}
+        <div class="keyboard-row keyboard-actions"><span>123</span><span>space</span><span>done</span></div>
+      </div>
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -112,6 +236,14 @@
     --danger: #d94a4a;
     --focus: #2348c7;
     --action-ink: #040b1e;
+    --gate-action: var(--color-gate-light-action);
+    --gate-action-ink: var(--color-gate-light-action-ink);
+    --gate-state-surface: var(--color-gate-light-state-surface);
+    --gate-state-ink: var(--color-gate-light-state-ink);
+    --gate-focus: var(--color-gate-light-focus);
+    --gate-error-surface: var(--color-gate-light-error-surface);
+    --gate-error-ink: var(--color-gate-light-error-ink);
+    --gate-error-border: var(--color-gate-light-error-border);
     --chrome-surface: #f8fafdd1;
     --chrome-line: #3641521a;
     --chrome-shadow: #1f263429 0 22px 60px, #1f263414 0 2px 8px;
@@ -148,6 +280,14 @@
     --danger: #f06a6a;
     --focus: #c2ccff;
     --action-ink: #10151e;
+    --gate-action: var(--color-gate-dark-action);
+    --gate-action-ink: var(--color-gate-dark-action-ink);
+    --gate-state-surface: var(--color-gate-dark-state-surface);
+    --gate-state-ink: var(--color-gate-dark-state-ink);
+    --gate-focus: var(--color-gate-dark-focus);
+    --gate-error-surface: var(--color-gate-dark-error-surface);
+    --gate-error-ink: var(--color-gate-dark-error-ink);
+    --gate-error-border: var(--color-gate-dark-error-border);
     --chrome-surface: #171c24d9;
     --chrome-line: #a7b0bf26;
     --chrome-shadow: #00000059 0 22px 60px, #0000003d 0 2px 8px;
@@ -169,6 +309,14 @@
       --danger: #f06a6a;
       --focus: #c2ccff;
       --action-ink: #10151e;
+      --gate-action: var(--color-gate-dark-action);
+      --gate-action-ink: var(--color-gate-dark-action-ink);
+      --gate-state-surface: var(--color-gate-dark-state-surface);
+      --gate-state-ink: var(--color-gate-dark-state-ink);
+      --gate-focus: var(--color-gate-dark-focus);
+      --gate-error-surface: var(--color-gate-dark-error-surface);
+      --gate-error-ink: var(--color-gate-dark-error-ink);
+      --gate-error-border: var(--color-gate-dark-error-border);
       --chrome-surface: #171c24d9;
       --chrome-line: #a7b0bf26;
       --chrome-shadow: #00000059 0 22px 60px, #0000003d 0 2px 8px;
@@ -250,8 +398,28 @@
     max-width: 400px;
   }
 
-  .mobile-toolbar {
+  .mobile-toolbar,
+  .mobile-workspace-drawer,
+  .mobile-title-edit-layer {
     display: none;
+  }
+
+  .state-layer.compatibility-layer {
+    top: 0;
+    bottom: 0;
+    align-items: center;
+    padding: 24px;
+    background: color-mix(in srgb, var(--canvas) 58%, transparent);
+    backdrop-filter: blur(8px) saturate(115%);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   @media (max-width: 1320px) {
@@ -277,33 +445,77 @@
     }
 
     .mobile-toolbar {
+      box-sizing: border-box;
       display: flex;
-      min-height: 56px;
+      width: 100%;
+      min-height: 64px;
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      padding: 8px 12px;
-      border-bottom: 1px solid var(--line-soft);
-      background: color-mix(in srgb, var(--surface) 82%, transparent);
+      padding: 10px 16px;
+    }
+
+    .mobile-title-island {
+      box-sizing: border-box;
+      display: flex;
+      width: 198px;
+      height: 44px;
+      align-items: center;
+      padding: 0;
+      border: 1px solid var(--chrome-line);
+      border-radius: var(--radius-pill);
+      background: var(--composer-surface);
+      box-shadow: 0 6px 14px color-mix(in srgb, var(--ink) 8%, transparent);
       backdrop-filter: blur(18px) saturate(150%);
     }
 
-    .mobile-title {
+    .mobile-title-island :global(.pill) {
+      height: 44px;
+      min-height: 44px;
+      border: 0;
+      background: transparent;
+      box-shadow: none;
+    }
+
+    .mobile-title-island :global(.pill:first-child) {
+      width: 44px;
+      flex: 0 0 44px;
+      padding: 8px;
+    }
+
+    .mobile-title-island :global(.pill:last-child) {
+      width: 154px;
       min-width: 0;
-      flex: 1 1 auto;
-      overflow: hidden;
-      color: var(--ink);
-      font-size: 14px;
-      font-weight: 600;
-      line-height: 18px;
-      text-align: center;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      flex: 0 0 154px;
+      padding-inline: 11px;
+    }
+
+    .mobile-title-island :global(.pill:last-child .icon-slot) {
+      display: none;
+    }
+
+    .mobile-title-island :global(.pill:last-child .pill-label) {
+      font-size: 15px;
+      line-height: 20px;
+    }
+
+    .mobile-toolbar > :global(.pill) {
+      width: 44px;
+      height: 44px;
+      padding: 8px;
+      border-color: var(--chrome-line);
+      background: var(--composer-surface);
+      box-shadow: 0 6px 14px color-mix(in srgb, var(--ink) 8%, transparent);
+      backdrop-filter: blur(18px) saturate(150%);
+    }
+
+    .conversation-panel :global(.conversation-header) {
+      display: none;
     }
 
     .workspace-grid {
       display: block;
-      min-height: calc(100dvh - 56px);
+      min-height: calc(100dvh - 64px);
       padding: 8px;
     }
 
@@ -324,6 +536,154 @@
 
     .sidebar.open {
       display: block;
+    }
+
+    .mobile-workspace-drawer {
+      position: absolute;
+      top: 64px;
+      right: 8px;
+      z-index: 8;
+      display: block;
+      width: min(320px, calc(100% - 16px));
+      max-height: calc(100dvh - 80px);
+      overflow: auto;
+      contain: layout paint;
+    }
+
+    .mobile-workspace-drawer :global(.inspector) {
+      display: flex;
+      min-height: 560px;
+    }
+
+    .mobile-title-edit-layer {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: block;
+      min-height: 844px;
+    }
+
+    .title-edit-dimmer {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      padding: 0;
+      border: 0;
+      background: #0d11175c;
+      backdrop-filter: blur(14px) saturate(120%);
+    }
+
+    .centered-title-editor {
+      position: absolute;
+      top: 218px;
+      right: 24px;
+      left: 24px;
+      display: flex;
+      height: 112px;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .centered-title-editor input {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 8px;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: #fff;
+      font: inherit;
+      font-size: 28px;
+      font-weight: 600;
+      line-height: 34px;
+      text-align: center;
+      text-shadow: 0 2px 18px #0d111747;
+    }
+
+    .mobile-keyboard {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      box-sizing: border-box;
+      display: flex;
+      height: 298px;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 6px 8px;
+      border-top: 1px solid #ffffff94;
+      background: #cdd1d8f5;
+      box-shadow: 0 -12px 32px #0d11172e;
+    }
+
+    .keyboard-suggestions,
+    .keyboard-row {
+      display: flex;
+      height: 44px;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .keyboard-suggestions {
+      height: 36px;
+      gap: 20px;
+      color: #3c424c;
+      font-size: 14px;
+      line-height: 18px;
+    }
+
+    .keyboard-key,
+    .keyboard-actions span {
+      display: inline-flex;
+      height: 44px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 5px;
+      background: #fff;
+      color: #111318;
+      box-shadow: 0 1px 1px #00000038;
+    }
+
+    .keyboard-key {
+      width: 32px;
+      font-size: 20px;
+      line-height: 24px;
+    }
+
+    .keyboard-actions {
+      gap: 8px;
+    }
+
+    .keyboard-actions span:first-child,
+    .keyboard-actions span:last-child {
+      width: 92px;
+    }
+
+    .keyboard-actions span:nth-child(2) {
+      width: 172px;
+    }
+
+    .keyboard-actions span:last-child {
+      background: var(--signal);
+      color: #fff;
+      font-weight: 600;
+    }
+
+    .workspace-preview[data-appearance='dark'] .title-edit-dimmer {
+      background: #04070b9e;
+      backdrop-filter: blur(12px) saturate(110%);
+    }
+
+    .workspace-preview[data-appearance='dark'] .mobile-keyboard {
+      border-top-color: #f4f6fa1a;
+      background: #181d25fa;
+      box-shadow: 0 -12px 34px #00000057;
+    }
+
+    .workspace-preview[data-appearance='dark'] .keyboard-suggestions {
+      color: #d7dce5;
     }
 
     .conversation-panel {
@@ -350,7 +710,7 @@
     }
 
     .mobile-toolbar {
-      padding-inline: 8px;
+      padding-inline: 16px;
     }
   }
 
@@ -363,7 +723,10 @@
     .workspace-preview :global(.session-list),
     .workspace-preview :global(.inspector),
     .workspace-preview :global(.composer),
-    .mobile-toolbar {
+    .mobile-toolbar,
+    .mobile-title-island,
+    .title-edit-dimmer,
+    .state-layer.compatibility-layer {
       backdrop-filter: none;
     }
   }

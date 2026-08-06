@@ -16,7 +16,9 @@
         ? 'Approval is unavailable while offline.'
         : runtimeState === 'reconnecting'
           ? 'Approval is unavailable while reconnecting.'
-          : 'Timeline actions are unavailable while this response is in progress.';
+          : runtimeState === 'compatibility-check-failed' || runtimeState === 'unsupported-version'
+            ? 'Timeline actions are unavailable until compatibility is verified.'
+            : 'Timeline actions are unavailable while this response is in progress.';
 
   function toolIcon(status: 'completed' | 'running' | 'pending' | 'failed'): IconName {
     if (status === 'completed') return 'check';
@@ -418,6 +420,12 @@
     flex-wrap: wrap;
     gap: 8px;
     padding-left: 36px;
+  }
+
+  .approval-actions :global(.pill.ghost) {
+    /* The warm approval surface lowers muted-text contrast, so the secondary
+       action uses the normal ink token while preserving its ghost material. */
+    color: var(--ink);
   }
 
   .approval-gate {

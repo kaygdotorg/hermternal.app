@@ -1,4 +1,4 @@
-import type { ImageAttachment, SessionSummary, TimelineItem } from './types';
+import type { ImageAttachment, SessionSummary, TimelineItem, WorkspaceRuntimeState } from './types';
 
 /**
  * These fixtures make the UI reviewable without a transport, credential, or
@@ -81,18 +81,7 @@ export const DEFAULT_TIMELINE: TimelineItem[] = [
   }
 ];
 
-export function timelineForState(
-  state:
-    | 'ready'
-    | 'streaming'
-    | 'stopped'
-    | 'loading'
-    | 'empty'
-    | 'offline'
-    | 'reconnecting'
-    | 'retryable-error'
-    | 'permanent-error'
-): TimelineItem[] {
+export function timelineForState(state: WorkspaceRuntimeState): TimelineItem[] {
   if (state === 'loading') {
     return [{ kind: 'loading', id: 'loading-1', label: 'Restoring session' }];
   }
@@ -146,6 +135,12 @@ export function timelineForState(
         detail: 'No prompt was resent. Return to sessions to continue safely.'
       }
     ];
+  }
+
+  if (state === 'compatibility-check-failed' || state === 'unsupported-version') {
+    // The approved gate keeps synthetic session context visible behind its
+    // blocking layer. Actions are disabled by the runtime state, not removed.
+    return DEFAULT_TIMELINE;
   }
 
   return DEFAULT_TIMELINE;

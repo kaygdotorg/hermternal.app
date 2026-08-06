@@ -81,6 +81,71 @@
     </div>
     <Pill label="Cancel" variant="ghost" onActivate={() => onAction({ type: 'cancel-reconnect' })} />
   </div>
+{:else if state === 'compatibility-check-failed' || state === 'unsupported-version'}
+  <section
+    aria-labelledby="compatibility-gate-title"
+    aria-live="assertive"
+    class="compatibility-gate"
+    data-testid={`${state}-state`}
+    role="alert"
+  >
+    <header class="gate-header">
+      <span aria-hidden="true" class="gate-icon"><Icon name="warning" size={18} /></span>
+      <div>
+        <p>Compatibility gate · blocked</p>
+        <h2 id="compatibility-gate-title">
+          {state === 'compatibility-check-failed' ? 'Compatibility check failed' : 'Unsupported Hermes revision'}
+        </h2>
+      </div>
+    </header>
+
+    <p class="gate-message">
+      {state === 'compatibility-check-failed'
+        ? 'The deployment did not provide the attestation or behavioral proof required for dashboard-v0.0.1.'
+        : 'This deployment is running a Hermes revision that Hermternal has not reviewed for dashboard-v0.0.1.'}
+    </p>
+
+    <div class="gate-boundary">
+      <strong>{state === 'compatibility-check-failed' ? 'Fail-closed recovery' : 'Safe boundary'}</strong>
+      <span>
+        {state === 'compatibility-check-failed'
+          ? 'Hermternal will not guess routes, downgrade behavior, or resend an uncertain prompt. Nothing was sent.'
+          : 'Chat is paused. No prompts, tickets, credentials, or session changes will be sent.'}
+      </span>
+    </div>
+
+    <div class="gate-evidence-group">
+      <p class="evidence-heading">Safe details</p>
+      <dl class="gate-evidence">
+        {#if state === 'compatibility-check-failed'}
+          <div><dt>Deployment attestation</dt><dd class="danger-value">Missing or mismatched</dd></div>
+          <div><dt>Behavioral probe</dt><dd class="danger-value">Failed</dd></div>
+          <div><dt>Route manifest</dt><dd>Not verified</dd></div>
+        {:else}
+          <div><dt>Expected contract</dt><dd>dashboard-v0.0.1</dd></div>
+          <div><dt>Pinned source</dt><dd>f5be9236…068e</dd></div>
+          <div><dt>Deployment attestation</dt><dd class="danger-value">Not verified</dd></div>
+        {/if}
+      </dl>
+    </div>
+
+    <div class="gate-actions">
+      <Pill
+        fullWidth
+        label="Retry compatibility check"
+        variant="action"
+        onActivate={() => onAction({ type: 'retry-compatibility-check' })}
+      />
+      <Pill
+        fullWidth
+        label="Return to sign-in"
+        variant="ghost"
+        onActivate={() => onAction({ type: 'return-to-sign-in' })}
+      />
+    </div>
+
+    <p class="gate-note">Mocked fixture only · synthetic evidence · no live compatibility request</p>
+  </section>
 {:else if state === 'retryable-error'}
   <div aria-live="assertive" class="state-card error-state" data-testid="retryable-error-state" role="alert">
     <span aria-hidden="true" class="state-icon"><Icon name="refresh" size={18} /></span>
@@ -126,6 +191,164 @@
     border-radius: var(--radius-popover);
     background: var(--surface);
     box-shadow: 0 12px 34px color-mix(in srgb, var(--ink) 10%, transparent);
+  }
+
+  .compatibility-gate {
+    --signal: var(--gate-action);
+    --action-ink: var(--gate-action-ink);
+    --focus: var(--gate-focus);
+    box-sizing: border-box;
+    display: flex;
+    width: min(660px, 100%);
+    flex-direction: column;
+    gap: 14px;
+    padding: 24px;
+    border: 1px solid color-mix(in srgb, var(--gate-error-border) 60%, var(--line));
+    border-radius: var(--radius-popover);
+    background: var(--surface);
+    box-shadow: 0 18px 50px color-mix(in srgb, var(--ink) 16%, transparent);
+  }
+
+  .gate-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .gate-icon {
+    display: inline-flex;
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--gate-error-surface);
+    color: var(--gate-error-ink);
+  }
+
+  .gate-header > div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .gate-header p,
+  .gate-note,
+  .evidence-heading {
+    margin: 0;
+    color: var(--gate-error-ink);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    line-height: 16px;
+    text-transform: uppercase;
+  }
+
+  .gate-header h2 {
+    margin: 0;
+    color: var(--ink);
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 26px;
+  }
+
+  .gate-message {
+    margin: 0;
+    color: var(--ink);
+    font-size: 15px;
+    line-height: 22px;
+  }
+
+  .gate-boundary {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 12px 14px;
+    border: 1px solid var(--gate-error-border);
+    border-radius: var(--radius-input);
+    background: var(--gate-error-surface);
+    box-shadow: inset 3px 0 0 var(--gate-error-border);
+  }
+
+  .gate-boundary strong,
+  .gate-boundary span {
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  .gate-boundary strong,
+  .danger-value {
+    color: var(--gate-error-ink);
+  }
+
+  .gate-evidence-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 13px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-input);
+    background: color-mix(in srgb, var(--muted) 6%, var(--surface));
+  }
+
+  .gate-evidence {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+  }
+
+  .evidence-heading {
+    color: var(--muted);
+  }
+
+  .gate-evidence > div:not(.evidence-heading) {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .gate-evidence dt,
+  .gate-evidence dd {
+    margin: 0;
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  .gate-evidence dt {
+    color: var(--muted);
+  }
+
+  .gate-evidence dd {
+    color: var(--ink);
+    font-weight: 600;
+    text-align: right;
+  }
+
+  .gate-evidence dd.danger-value {
+    color: var(--gate-error-ink);
+  }
+
+  .gate-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .gate-actions :global(.pill) {
+    flex: 1 1 0;
+  }
+
+  .gate-actions :global(.pill.ghost) {
+    color: var(--ink);
+  }
+
+  .gate-note {
+    color: var(--muted);
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
   }
 
   .state-banner {
@@ -300,6 +523,20 @@
     .state-card {
       width: 100%;
       max-width: none;
+    }
+
+    .compatibility-gate {
+      width: 100%;
+      gap: 12px;
+      padding: 20px;
+    }
+
+    .gate-actions {
+      flex-direction: column;
+    }
+
+    .gate-evidence > div:not(.evidence-heading) {
+      align-items: flex-start;
     }
 
     .error-state,

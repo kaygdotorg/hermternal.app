@@ -92,6 +92,9 @@
     <path d="m12 4 8 15H4L12 4Z" />
     <path d="M12 9v4" />
     <path d="M12 16h.01" />
+  {:else if name === 'workspace'}
+    <rect height="14" rx="3" width="16" x="4" y="5" />
+    <path d="M14 5v14" />
   {/if}
 </svg>
 

@@ -52,6 +52,35 @@ describe('AuthPreview', () => {
     expect(JSON.stringify(onAction.mock.calls)).not.toContain('state-change-fixture');
   });
 
+  it('moves focus to each entered task and exposes state-specific live semantics', async () => {
+    const view = render(AuthPreview, { state: 'provider-selection' });
+
+    await view.rerender({ state: 'password' });
+    await waitFor(() => expect(screen.getByLabelText('Username')).toHaveFocus());
+
+    await view.rerender({ state: 'password-submitting' });
+    const submitting = screen.getByRole('status');
+    expect(submitting).toHaveAttribute('aria-live', 'polite');
+    expect(submitting).toHaveAttribute('aria-atomic', 'true');
+    expect(submitting).toHaveTextContent('Signing in');
+    expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('aria-busy', 'true');
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Signing in to Hermes' })).toHaveFocus());
+
+    await view.rerender({ state: 'failure' });
+    const failure = screen.getByRole('alert');
+    expect(failure).toHaveAttribute('aria-live', 'assertive');
+    expect(failure).toHaveTextContent('Sign-in did not complete');
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign-in did not complete' })).toHaveFocus());
+
+    await view.rerender({ state: 'session-expired' });
+    expect(screen.getByRole('alert')).toHaveTextContent('Session expired');
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Session expired' })).toHaveFocus());
+
+    await view.rerender({ state: 'discovery-retry' });
+    expect(screen.getByRole('status')).toHaveTextContent('Provider discovery can be retried');
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Retry provider discovery' })).toHaveFocus());
+  });
+
   it('disables provider controls during discovery and exposes retryable failure actions', () => {
     const pending = render(AuthPreview, { state: 'discovery-pending' });
     expect(screen.getByRole('button', { name: 'Nous, loading' })).toBeDisabled();

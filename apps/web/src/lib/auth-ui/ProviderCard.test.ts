@@ -24,7 +24,7 @@ describe('ProviderCard', () => {
     expect(button).toHaveFocus();
     button.click();
 
-    expect(onAction).toHaveBeenCalledWith({ type: 'choose-provider', providerId: 'nous' });
+    expect(onAction).toHaveBeenCalledWith({ type: 'choose-provider', providerId: 'nous', providerKind: 'oauth' });
   });
 
   it('fails closed while provider discovery is pending', () => {

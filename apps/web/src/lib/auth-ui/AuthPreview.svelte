@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from '$lib/workspace/Icon.svelte';
   import Pill from '$lib/workspace/Pill.svelte';
   import ProviderCard from './ProviderCard.svelte';
@@ -15,19 +16,53 @@
   let previousState = state;
   let submissionLocked = false;
   let formResetKey = 0;
+  let stateHeading: HTMLElement | undefined;
+  let usernameInput: HTMLInputElement | undefined;
 
   $: if (state !== previousState) {
     resetPasswordEntry();
     previousState = state;
+    void focusEnteredState();
   }
   $: isProviderState = state === 'provider-selection' || state === 'discovery-pending';
   $: isPasswordState = state === 'password' || state === 'password-submitting';
   $: panelClass = isProviderState ? 'provider-panel' : state === 'session-expired' ? 'session-panel' : 'narrow-panel';
+  $: politeAnnouncement =
+    state === 'password-submitting'
+      ? 'Signing in. The synthetic form is disabled while the local state completes.'
+      : state === 'callback'
+        ? 'Completing sign-in in a mocked local callback state.'
+        : state === 'discovery-retry'
+          ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
+          : '';
+  $: assertiveAnnouncement =
+    state === 'failure'
+      ? 'Sign-in did not complete. Try again or choose another provider.'
+      : state === 'session-expired'
+        ? 'Session expired. Sign in again or discard the local draft fixture.'
+        : state === 'provider-unavailable'
+          ? 'Provider discovery stopped. No sign-in method is available.'
+          : '';
 
   function resetPasswordEntry(): void {
     passwordVisible = false;
     submissionLocked = false;
     formResetKey += 1;
+  }
+
+  async function focusEnteredState(): Promise<void> {
+    const enteredState = state;
+    await tick();
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 0);
+    });
+    if (state !== enteredState) return;
+    // Focus waits until the activating click finishes. Otherwise a pointer-down
+    // transition can focus the new task before the browser restores focus to
+    // the provider button that was just removed.
+    if (state === 'password') usernameInput?.focus();
+    else stateHeading?.focus();
   }
 
   function handleAction(action: AuthAction): void {
@@ -72,12 +107,19 @@
     >
   </div>
 
+  {#if politeAnnouncement}
+    <p aria-atomic="true" aria-live="polite" class="sr-only" role="status">{politeAnnouncement}</p>
+  {/if}
+  {#if assertiveAnnouncement}
+    <p aria-atomic="true" aria-live="assertive" class="sr-only" role="alert">{assertiveAnnouncement}</p>
+  {/if}
+
   <div class="auth-frame">
     <div class="auth-panel {panelClass}">
       {#if state === 'provider-selection'}
         <header class="panel-heading">
           <p class="eyebrow">HERMTERNAL</p>
-          <h1>Connect to Hermes</h1>
+          <h1 bind:this={stateHeading} tabindex="-1">Connect to Hermes</h1>
           <p>
             Choose one synthetic sign-in method. This preview never stores reusable credentials or calls a provider.
           </p>
@@ -96,7 +138,7 @@
       {:else if state === 'discovery-pending'}
         <header class="panel-heading">
           <p class="eyebrow">PROVIDER DISCOVERY · PENDING</p>
-          <h1>Discovering sign-in methods</h1>
+          <h1 bind:this={stateHeading} tabindex="-1">Discovering sign-in methods</h1>
           <p>
             Static pending state only. No discovery request runs, and controls stay unavailable until the fixture state
             changes.
@@ -116,7 +158,9 @@
       {:else if isPasswordState}
         <header class="panel-heading">
           <p class="eyebrow">BASIC AUTH PROVIDER{state === 'password-submitting' ? ' · SUBMITTING' : ''}</p>
-          <h1>{state === 'password-submitting' ? 'Signing in to Hermes' : 'Sign in to Hermes'}</h1>
+          <h1 bind:this={stateHeading} tabindex="-1">
+            {state === 'password-submitting' ? 'Signing in to Hermes' : 'Sign in to Hermes'}
+          </h1>
           <p>
             {state === 'password-submitting'
               ? 'Static submitting state only · the synthetic values were cleared and no request was made.'
@@ -125,7 +169,12 @@
         </header>
 
         {#key formResetKey}
-          <form aria-label="Hermes password sign in" class="password-form" onsubmit={handlePasswordSubmit}>
+          <form
+            aria-busy={state === 'password-submitting'}
+            aria-label="Hermes password sign in"
+            class="password-form"
+            onsubmit={handlePasswordSubmit}
+          >
             <label class="field-label" for="auth-username">Username</label>
             <input
               id="auth-username"
@@ -133,6 +182,7 @@
               disabled={state === 'password-submitting'}
               name="username"
               required
+              bind:this={usernameInput}
               value="alex"
             />
 
@@ -180,7 +230,7 @@
       {:else if state === 'callback'}
         <div class="callback-progress" aria-hidden="true"><span></span></div>
         <div class="callback-message">
-          <h1>Completing sign-in</h1>
+          <h1 bind:this={stateHeading} tabindex="-1">Completing sign-in</h1>
           <p>Static callback state only. No provider response is read and no browser session is created.</p>
         </div>
         <div class="privacy-note">
@@ -195,7 +245,7 @@
       {:else if state === 'session-expired'}
         <div class="session-icon" aria-hidden="true"><Icon name="refresh" size={20} /></div>
         <div class="session-copy">
-          <h1>Session expired</h1>
+          <h1 bind:this={stateHeading} tabindex="-1">Session expired</h1>
           <p>
             Static expiry state only. This preview does not persist a draft; choose how to represent the next local
             state.
@@ -214,7 +264,7 @@
           <Icon name={state === 'discovery-retry' ? 'refresh' : 'warning'} size={20} />
         </div>
         <div class="failure-heading">
-          <h1>
+          <h1 bind:this={stateHeading} tabindex="-1">
             {state === 'failure'
               ? 'Sign-in did not complete'
               : state === 'discovery-retry'
@@ -277,9 +327,9 @@
     --ink: #16181d;
     --muted: #667080;
     --line: #d8dde5;
-    --signal: #3157c7;
+    --signal: var(--color-auth-signal);
     --success: #2da568;
-    --danger: #ab3838;
+    --danger: var(--color-auth-danger);
     --danger-surface: #fff1f2;
     --focus: #2348c7;
     --action-ink: #ffffff;
@@ -299,18 +349,31 @@
     text-rendering: optimizeLegibility;
   }
 
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  h1[tabindex='-1']:focus {
+    outline: none;
+  }
+
   .auth-preview[data-appearance='dark'] {
     --canvas: #0d1117;
     --surface: #171c24;
     --ink: #f4f6fa;
     --muted: #a7b0bf;
     --line: #343c49;
-    --signal: #6f88ff;
+    --signal: var(--color-auth-signal);
     --success: #4cc989;
     --danger: #f06a6a;
     --danger-surface: #351f26;
     --focus: #c2ccff;
-    --action-ink: #10151e;
+    --action-ink: var(--color-dark-ink);
   }
 
   .auth-frame {

@@ -19,6 +19,34 @@ describe('ui preview route', () => {
     });
   });
 
+  it('routes provider choices deterministically without a network or credential payload', async () => {
+    render(PreviewPage);
+
+    const oauth = screen.getByRole('button', { name: 'Nous' });
+    await fireEvent.pointerDown(oauth, { button: 0, pointerType: 'mouse' });
+    await fireEvent.click(oauth);
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'callback'));
+    expect(screen.getAllByText('choose-provider').length).toBeGreaterThan(0);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel and return to providers' }));
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection'));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Hermes password' }));
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password'));
+    expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toBeInTheDocument();
+  });
+
+  it('renders both approved compatibility gates from the runtime selector', async () => {
+    render(PreviewPage);
+    const runtimeSelect = screen.getByRole('combobox', { name: 'Runtime state' });
+
+    await fireEvent.change(runtimeSelect, { target: { value: 'compatibility-check-failed' } });
+    expect(await screen.findByRole('heading', { name: 'Compatibility check failed' })).toBeInTheDocument();
+
+    await fireEvent.change(runtimeSelect, { target: { value: 'unsupported-version' } });
+    expect(await screen.findByRole('heading', { name: 'Unsupported Hermes revision' })).toBeInTheDocument();
+  });
+
   it('returns to provider selection from callback cancellation and draft discard', async () => {
     render(PreviewPage);
 

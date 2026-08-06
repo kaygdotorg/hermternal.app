@@ -13,7 +13,9 @@
     'offline',
     'reconnecting',
     'retryable-error',
-    'permanent-error'
+    'permanent-error',
+    'compatibility-check-failed',
+    'unsupported-version'
   ];
 
   const authStates: AuthViewState[] = [
@@ -47,6 +49,13 @@
 
   function handleAuthAction(action: AuthAction): void {
     lastAuthAction = action.type;
+
+    // Provider selection is deterministic presentation state: password opens
+    // the local form, while OAuth advances only to the mocked callback screen.
+    if (action.type === 'choose-provider') {
+      authState = action.providerKind === 'password' ? 'password' : 'callback';
+      return;
+    }
 
     if (
       action.type === 'back-to-providers' ||

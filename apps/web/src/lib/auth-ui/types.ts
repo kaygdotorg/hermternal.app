@@ -22,7 +22,7 @@ export interface AuthProvider {
 }
 
 export type AuthAction =
-  | { type: 'choose-provider'; providerId: string }
+  | { type: 'choose-provider'; providerId: string; providerKind: AuthProviderKind }
   | { type: 'back-to-providers' }
   | { type: 'submit-password-fixture' }
   | { type: 'toggle-password-visibility' }

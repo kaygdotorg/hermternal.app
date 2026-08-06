@@ -9,7 +9,9 @@ export type WorkspaceRuntimeState =
   | 'offline'
   | 'reconnecting'
   | 'retryable-error'
-  | 'permanent-error';
+  | 'permanent-error'
+  | 'compatibility-check-failed'
+  | 'unsupported-version';
 
 export type ToolStatus = 'completed' | 'running' | 'pending' | 'failed';
 
@@ -128,6 +130,9 @@ export type WorkspaceAction =
   | { type: 'cancel-reconnect' }
   | { type: 'check-connection' }
   | { type: 'back-to-sessions' }
+  | { type: 'retry-compatibility-check' }
+  | { type: 'return-to-sign-in' }
+  | { type: 'open-workspace' }
   | { type: 'dismiss' }
   | { type: 'approve-tool'; itemId: string }
   | { type: 'reject-tool'; itemId: string }

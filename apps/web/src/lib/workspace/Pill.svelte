@@ -24,6 +24,7 @@
   export let disabled = false;
   export let buttonType: 'button' | 'submit' | 'reset' = 'button';
   export let onActivate: (() => void) | undefined = undefined;
+  export let element: HTMLButtonElement | undefined = undefined;
 
   let driftX = 0;
   let driftY = 0;
@@ -79,6 +80,13 @@
     pointerActivationHandled = false;
   }
 
+  function handlePointerLeave(): void {
+    // Leaving cancels this pointer sequence. A later keyboard-generated click
+    // must not be mistaken for the pointer compatibility click.
+    resetMotion();
+    pointerActivationHandled = false;
+  }
+
   function handleClick(): void {
     if (disabled || !onActivate) return;
     if (pointerActivationHandled) {
@@ -90,6 +98,7 @@
 </script>
 
 <button
+  bind:this={element}
   aria-controls={expandable ? ariaControls : undefined}
   aria-current={ariaCurrent}
   aria-expanded={expandable ? expanded : undefined}
@@ -107,7 +116,7 @@
   style={`--drift-x: ${driftX}px; --drift-y: ${driftY}px;`}
   onpointercancel={handlePointerCancel}
   onpointerdown={handlePointerDown}
-  onpointerleave={resetMotion}
+  onpointerleave={handlePointerLeave}
   onpointermove={handlePointerMove}
   onpointerup={handlePointerUp}
   onclick={handleClick}

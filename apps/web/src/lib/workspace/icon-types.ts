@@ -22,4 +22,5 @@ export type IconName =
   | 'terminal'
   | 'tool'
   | 'warning'
+  | 'workspace'
   | 'x';
