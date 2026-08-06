@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -180,6 +181,8 @@ class WsTicketValidatorTests(unittest.TestCase):
         embedded = (
             "prefix SGVsbG8=",
             "prefix SGVsbG8",
+            "prefix SGVsbG8=foo",
+            "prefix=SGVsbG8=foo",
             "(SGVsbG8=)",
             "payload abcdefgh",
             "payload 01234567",
@@ -203,10 +206,24 @@ class WsTicketValidatorTests(unittest.TestCase):
             with self.subTest(value=value):
                 validate._scan_redaction({"notes": value})
 
+    def test_short_recognized_authorization_forms_are_rejected(self) -> None:
+        values = (
+            "Authorization: Basic test1234",
+            "Authorization: Bearer x",
+            "Bearer qwertyui",
+            "Cookie: sid=qwertyui",
+        )
+        for value in values:
+            with self.subTest(value=value):
+                with self.assertRaises(validate.ContractError):
+                    validate._scan_redaction({"notes": value})
+
     def test_embedded_base64_and_source_fragments_fail_closed_in_normal_and_optimized_cli(self) -> None:
         candidates = (
             "prefix SGVsbG8=",
             "prefix SGVsbG8",
+            "prefix SGVsbG8=foo",
+            "prefix=SGVsbG8=foo",
             "(SGVsbG8=)",
             "payload abcdefgh",
             "payload 01234567",
@@ -216,6 +233,10 @@ class WsTicketValidatorTests(unittest.TestCase):
             "prefix 01234567",
             "unknown ticket: Abcdefgh…",
             "ticket fragment: Abcdefgh",
+            "Authorization: Basic test1234",
+            "Authorization: Bearer x",
+            "Bearer qwertyui",
+            "Cookie: sid=qwertyui",
         )
         for surface in ("history", "logs", "dom"):
             for value in candidates:
@@ -239,6 +260,44 @@ class WsTicketValidatorTests(unittest.TestCase):
         evidence["independent_forwarding_markers"].remove("reason=str(exc),")
         with self.assertRaises(validate.ContractError):
             validate._validate_fixture_shape(mutated)
+
+    def test_mutated_route_audit_cannot_authorize_source_evidence_in_both_modes(self) -> None:
+        copied_files = (
+            "contracts/fixtures/deployment-security/ws-ticket/README.md",
+            "contracts/fixtures/deployment-security/ws-ticket/probe-baseline.json",
+            "contracts/fixtures/deployment-security/ws-ticket/ticket-fixtures.json",
+            "contracts/fixtures/deployment-security/ws-ticket/test_validate.py",
+            "contracts/fixtures/deployment-security/ws-ticket/validate.py",
+            "contracts/fixtures/route-allowlist/source_audit.json",
+            "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
+            "contracts/fixtures/behavioral-probe/probe-fixtures.json",
+            "contracts/hermes-dashboard/manifest.md",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            isolated_root = Path(directory) / "repo"
+            for relative in copied_files:
+                source = REPO_ROOT / relative
+                target = isolated_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            route_audit = isolated_root / "contracts/fixtures/route-allowlist/source_audit.json"
+            original = route_audit.read_text(encoding="utf-8")
+            mutated = original.replace(
+                "Gated upgrades accept a fresh ticket or server-internal credential; the legacy query token is only for non-gated local mode, and audit logging identifies credential type without recording the raw ticket.",
+                "mutated source-audit claim",
+                1,
+            )
+            self.assertNotEqual(mutated, original)
+            route_audit.write_text(mutated, encoding="utf-8")
+            validator = isolated_root / "contracts/fixtures/deployment-security/ws-ticket/validate.py"
+            for optimized in (False, True):
+                command = [sys.executable] + (["-O"] if optimized else []) + [str(validator)]
+                completed = subprocess.run(command, cwd=isolated_root, capture_output=True, text=True, check=False)
+                self.assertEqual(completed.returncode, 1)
+                self.assertNotIn(str(isolated_root), completed.stdout)
+                payload = json.loads(completed.stdout)
+                self.assertFalse(payload["compatible"])
+                self.assertFalse(payload["live_run"])
 
     def test_uniform_fabricated_baseline_fails(self) -> None:
         fabricated = copy.deepcopy(self.baseline)

@@ -100,6 +100,11 @@ PINNED_FORWARDING_EXCERPT = (
     "                path=ws.url.path,",
 )
 PINNED_FORWARDING_EXCERPT_SHA256 = "08cac9ae776a9ca2a1950f5735d004eb73102815170e1f9e825928013f12c5f8"
+ROUTE_AUDIT_RELATIVE = "contracts/fixtures/route-allowlist/source_audit.json"
+# Do not canonicalize this artifact: every citation, URL, marker, and claim
+# participates in the source-evidence contract and must remain byte-identical.
+PINNED_ROUTE_AUDIT_SIZE_BYTES = 20165
+PINNED_ROUTE_AUDIT_SHA256 = "65a26cdea086d28ee90cc7e22d81c3e48715ea28a89f1bedb9f70c4a050aa78d"
 
 EXPECTED_SOURCE_EVIDENCE = [
     {
@@ -582,6 +587,17 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
 
 
+def _load_pinned_route_audit(path: Path) -> Any:
+    """Read route-audit evidence only after its full metadata bytes are pinned."""
+    try:
+        raw = path.read_bytes()
+    except (OSError, UnicodeError) as exc:
+        raise ContractError() from exc
+    require(len(raw) == PINNED_ROUTE_AUDIT_SIZE_BYTES)
+    require(hashlib.sha256(raw).hexdigest() == PINNED_ROUTE_AUDIT_SHA256)
+    return load_json(path)
+
+
 def _validate_source_evidence(value: Any) -> None:
     require(value == EXPECTED_SOURCE_EVIDENCE)
     require(tuple(item["id"] for item in value) == SOURCE_EVIDENCE_IDS)
@@ -609,7 +625,7 @@ def _validate_source_evidence(value: Any) -> None:
             claim_ids = [item.get("id") for item in review["claims"] if type(item) is dict]
             require(entry["claim_id"] in claim_ids)
         elif entry["kind"] == "source_audit_anchor":
-            audit = load_json(resolved)
+            audit = _load_pinned_route_audit(resolved)
             require(type(audit) is dict and audit.get("hermes_source_sha") == HERMES_SOURCE_SHA)
             citations = {item.get("id"): item for item in audit.get("source_citations", []) if type(item) is dict}
             require(tuple(entry["source_ids"]) == ("ticket-lifecycle", "websocket-auth"))
@@ -660,11 +676,18 @@ RETAINED_TEXT_KEYS = frozenset({
 
 
 BASE64_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9+/])([A-Za-z0-9+/]{7,}(?:={1,2})?)(?![A-Za-z0-9+/=])")
+# A padded token can be followed immediately by an alphanumeric suffix. Keep
+# this separate from the delimiter-bounded matcher so `SGVsbG8=foo` cannot
+# evade the retained-text boundary check.
+PADDED_BASE64_SUFFIX_PATTERN = re.compile(r"(?<![A-Za-z0-9+/])([A-Za-z0-9+/]{7,}={1,2})(?=[A-Za-z0-9+/])")
 BASE64_CONTEXT_PATTERN = re.compile(
     r"(?i)(?<![A-Za-z0-9_-])(?:base64|encoded|payload|token|fragment|credential|secret|value)\b\s*[:=]?\s*$"
 )
 SOURCE_TICKET_FRAGMENT_PATTERN = re.compile(
     r"(?i)(?<![A-Za-z0-9_-])(?:unknown\s+ticket|ticket\s+fragment|ticket)\s*[:=]\s*[A-Za-z0-9_-]{8}(?:…|\.{3})?(?![A-Za-z0-9_-])"
+)
+RECOGNIZED_AUTHORIZATION_PATTERN = re.compile(
+    r"(?i)(?:\bauthorization\s*:\s*(?:basic|bearer)\s+\S+|\bbearer\s+(?!(?:credential|credentials|fallback|value|values)\b)\S+|\bcookie\s*:\s*\S+)"
 )
 
 
@@ -714,6 +737,8 @@ def _scan_retained_text(value: str) -> None:
     require(not relative_path_pattern.search(value))
     require(not filename_pattern.search(value))
     require(not SOURCE_TICKET_FRAGMENT_PATTERN.search(value))
+    for match in PADDED_BASE64_SUFFIX_PATTERN.finditer(value):
+        require(not _is_base64_token(match.group(1)))
 
     stripped = value.strip()
     if not any(character.isspace() for character in stripped):
@@ -756,6 +781,7 @@ def _scan_redaction(value: Any, *, retained_text: bool = False) -> None:
         require(not jwt_pattern.fullmatch(value))
         require(not secret_pattern.search(value))
         if retained_text:
+            require(not RECOGNIZED_AUTHORIZATION_PATTERN.search(value))
             _scan_retained_text(value)
 
 

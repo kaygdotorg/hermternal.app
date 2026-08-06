@@ -41,7 +41,11 @@ record also checks the `ticket[:8]` ellipsis fragment in
 surface in `hermes_cli/web_server.py:14708-14716`. The source anchor independently
 pins the `except TicketInvalid as exc`, `reason=str(exc),`, and
 `path=ws.url.path,` lines with the reviewed source and blob hashes; it does not
-rely only on the route-audit marker list.
+rely only on the route-audit marker list. The consumed
+`contracts/fixtures/route-allowlist/source_audit.json` is also checked against
+its complete pinned byte size and SHA-256 before any claim, URL, or marker
+metadata can authorize the source evidence. A changed route-audit artifact
+fails closed even if its selected fields still look valid.
 
 ## Fixture inventory
 
@@ -78,6 +82,9 @@ punctuation-delimited paths, path-shaped filenames, embedded padded or unpadded
 base64-looking values, and source-shaped `unknown ticket: Abcdefgh…` fragments.
 Lowercase-only and digit-only candidates are rejected when their shape or nearby
 payload context makes them credential-like, while ordinary retained copy remains
+allowed. Recognized `Authorization: Basic ...`, `Authorization: Bearer ...`,
+`Bearer ...`, and `Cookie: ...` forms are rejected regardless of credential
+length; ordinary copy without a recognized credential/header form remains
 allowed. Controlled CLI failures are one JSON object, have a
 maximum length of 240 characters, do not echo input, and do not include a
 traceback.
