@@ -1,0 +1,111 @@
+import { expect, test } from '@playwright/test';
+
+const password = process.env.HERMES_TEST_PASSWORD;
+const username = process.env.HERMES_TEST_USERNAME ?? 'hermternal-test';
+const prompt = 'Reply with exactly: Hermternal live proof complete.';
+
+test.skip(!password, 'HERMES_TEST_PASSWORD is required for the authorized disposable lane.');
+
+test('browser UI reaches the official Hermes gateway through completion', async ({ page }) => {
+  const requests: string[] = [];
+  const sentMethods: string[] = [];
+  const receivedEvents: string[] = [];
+  let websocketUpgradeCount = 0;
+  let websocketQueryIsTicketOnly = false;
+
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/')) {
+      requests.push(`${request.method()} ${url.pathname}`);
+    }
+  });
+  page.on('websocket', (socket) => {
+    const url = new URL(socket.url());
+    websocketUpgradeCount += 1;
+    websocketQueryIsTicketOnly =
+      url.pathname === '/api/ws' &&
+      [...url.searchParams.keys()].length === 1 &&
+      url.searchParams.has('ticket');
+
+    socket.on('framesent', (frame) => {
+      const envelope = parseFrame(frame.payload);
+      if (envelope && typeof envelope.method === 'string') sentMethods.push(envelope.method);
+    });
+    socket.on('framereceived', (frame) => {
+      const envelope = parseFrame(frame.payload);
+      if (
+        envelope?.method === 'event' &&
+        isRecord(envelope.params) &&
+        typeof envelope.params.type === 'string'
+      ) {
+        receivedEvents.push(envelope.params.type);
+      }
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Username & Password' })).toBeVisible();
+  await page.getByRole('button', { name: 'Username & Password' }).click();
+  await page.getByLabel('Username').fill(username);
+  await page.locator('#auth-password').fill(password!);
+  await page.getByRole('form', { name: 'Hermes password sign in' }).evaluate((form) =>
+    (form as HTMLFormElement).requestSubmit()
+  );
+
+  const workspace = page.getByTestId('runtime-preview');
+  await expect(workspace).toBeVisible();
+  await expect(workspace).toHaveAttribute('data-state', /^(empty|ready)$/);
+
+  await expect.poll(() => receivedEvents.includes('gateway.ready')).toBe(true);
+  await expect.poll(() => sentMethods.includes('session.resume')).toBe(true);
+  expect(requests).toContain('GET /api/auth/me');
+  expect(requests).toContain('GET /api/auth/providers');
+  expect(requests).toContain('POST /auth/password-login');
+  expect(requests).toContain('GET /api/sessions');
+  expect(requests.some((entry) => entry.endsWith('/messages'))).toBe(true);
+  expect(requests).toContain('POST /api/auth/ws-ticket');
+  expect(websocketUpgradeCount).toBe(1);
+  expect(websocketQueryIsTicketOnly).toBe(true);
+
+  const credentialRetention = await page.evaluate((marker) => ({
+    dom: document.documentElement.outerHTML.includes(marker),
+    url: location.href.includes(marker),
+    localStorage: Object.values(localStorage).some((value) => value.includes(marker)),
+    sessionStorage: Object.values(sessionStorage).some((value) => value.includes(marker))
+  }), password!);
+  expect(credentialRetention).toEqual({
+    dom: false,
+    url: false,
+    localStorage: false,
+    sessionStorage: false
+  });
+
+  await page.getByLabel('Message Hermes').fill(prompt);
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect.poll(() => sentMethods.includes('prompt.submit')).toBe(true);
+  await expect.poll(() => receivedEvents.includes('message.delta'), { timeout: 90_000 }).toBe(true);
+  await expect.poll(() => receivedEvents.includes('message.complete'), { timeout: 90_000 }).toBe(true);
+  await expect(workspace).toHaveAttribute('data-state', /^(empty|ready)$/);
+  // Completion is transient. The controller must replace it from Hermes REST
+  // history instead of retaining a second local transcript copy.
+  await expect.poll(
+    () => requests.filter((entry) => entry.endsWith('/messages')).length,
+    { timeout: 30_000 }
+  ).toBeGreaterThanOrEqual(2);
+
+  expect(requests.filter((entry) => entry === 'POST /api/auth/ws-ticket')).toHaveLength(1);
+  expect(sentMethods.filter((method) => method === 'prompt.submit')).toHaveLength(1);
+});
+
+function parseFrame(payload: string | Buffer): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(typeof payload === 'string' ? payload : payload.toString('utf8'));
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}

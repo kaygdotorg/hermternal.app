@@ -1,3 +1,5 @@
+import { parseStrictJson } from "../transport/strict-json";
+
 export const WS_TICKET_PATH = "/api/auth/ws-ticket" as const;
 export const CHAT_WEBSOCKET_PATH = "/api/ws" as const;
 export const WS_TICKET_TTL_SECONDS = 30 as const;
@@ -200,14 +202,39 @@ async function readTicketResponse(
       throw new WsTicketError("response-invalid");
     }
 
-    const match =
-      /^[ \t\r\n]*\{[ \t\r\n]*"ticket"[ \t\r\n]*:[ \t\r\n]*"([A-Za-z0-9_-]{1,512})"[ \t\r\n]*\}[ \t\r\n]*$/.exec(
-        text,
-      );
-    if (!match?.[1]) {
+    let parsed: unknown;
+    try {
+      parsed = parseStrictJson(text, {
+        maxDepth: 2,
+        maxNodes: 8,
+        maxStringLength: MAX_WS_TICKET_LENGTH,
+        maxArrayLength: 1,
+        maxObjectKeys: 2,
+      });
+    } catch {
       throw new WsTicketError("response-invalid");
     }
-    return { ticket: match[1] };
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new WsTicketError("response-invalid");
+    }
+    const record = parsed as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const ticket = record.ticket;
+    if (
+      keys.length !== 2 ||
+      keys[0] !== "ticket" ||
+      keys[1] !== "ttl_seconds" ||
+      typeof ticket !== "string" ||
+      ticket.length === 0 ||
+      ticket.length > MAX_WS_TICKET_LENGTH ||
+      !/^[A-Za-z0-9_-]+$/.test(ticket) ||
+      record.ttl_seconds !== WS_TICKET_TTL_SECONDS
+    ) {
+      throw new WsTicketError("response-invalid");
+    }
+    // TTL is validated at the HTTP boundary, then discarded with other response
+    // metadata so the client seam retains only the one ephemeral ticket value.
+    return { ticket };
   } catch (error) {
     await reader.cancel().catch(() => undefined);
     if (signal.aborted || isAbortLike(error)) {

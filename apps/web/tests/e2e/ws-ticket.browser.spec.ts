@@ -50,7 +50,7 @@ test("real browser acquisition keeps the ticket only in the ephemeral upgrade UR
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ ticket }),
+      body: JSON.stringify({ ticket, ttl_seconds: 30 }),
     });
   });
 
@@ -141,7 +141,7 @@ test("real browser cancellation does not create an upgrade or an automatic retry
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ticket: opaqueTicket() }),
+        body: JSON.stringify({ ticket: opaqueTicket(), ttl_seconds: 30 }),
       });
     } catch {
       // The page may abort the request before the delayed synthetic response.
@@ -211,7 +211,7 @@ test("real browser retry is explicit and redacts an authentication response", as
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ ticket: freshTicket }),
+      body: JSON.stringify({ ticket: freshTicket, ttl_seconds: 30 }),
     });
   });
 

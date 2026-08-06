@@ -59,7 +59,7 @@ describe("createBrowserChatTransport", () => {
     const socket = new FakeWebSocket();
     const fetcher = vi.fn(
       async () =>
-        new Response('{"ticket":"fresh-ticket-1"}', {
+        new Response('{"ticket":"fresh-ticket-1","ttl_seconds":30}', {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
@@ -102,7 +102,7 @@ describe("createBrowserChatTransport", () => {
     const socket = new FakeWebSocket();
     const transport = createBrowserChatTransport({
       fetch: async () =>
-        new Response('{"ticket":"fresh-ticket-1"}', {
+        new Response('{"ticket":"fresh-ticket-1","ttl_seconds":30}', {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
@@ -133,7 +133,7 @@ describe("createBrowserChatTransport", () => {
     let ticket = 0;
     const fetcher = vi.fn(async () => {
       ticket += 1;
-      return new Response(`{"ticket":"fresh-ticket-${ticket}"}`, {
+      return new Response(`{"ticket":"fresh-ticket-${ticket}","ttl_seconds":30}`, {
         status: 200,
         headers: { "content-type": "application/json" },
       });

@@ -12,8 +12,11 @@ integration.
   `credentials: 'same-origin'`; JavaScript never reads or supplies a cookie,
   bearer value, password, refresh value, or authorization header.
 - Read at most 2 KiB of UTF-8 JSON, cancel an oversized or malformed stream, and
-  require the exact textual shape `{ "ticket": "<URL-safe value>" }`. Duplicate,
-  escaped, missing, or extra keys fail closed before upgrade.
+  require the official exact object shape `{ "ticket": "<URL-safe value>",
+  "ttl_seconds": 30 }`. The bounded duplicate-key-rejecting parser accepts either
+  key order. Missing, duplicate, extra, mistyped, or changed-TTL fields fail closed
+  before upgrade. The validated TTL is discarded before the ephemeral ticket is
+  handed to the client seam.
 - Derive the upgrade authority only from the browser's current `location.origin`.
   Caller input cannot replace the origin. Put the value only in the ephemeral
   `ws(s)://<current-origin>/api/ws?ticket=...` URL passed to the injected connector.
