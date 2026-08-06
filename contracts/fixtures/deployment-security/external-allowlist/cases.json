@@ -1,0 +1,677 @@
+{
+  "schema": "hermternal.deployment-security.external-allowlist.v1",
+  "operation": "DEP-02",
+  "contract": "dashboard-v0.0.1",
+  "pinned_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "source_audit_id": "route-allowlist-c01-f5be9236",
+  "source_contract_path": "contracts/fixtures/route-allowlist/route_allowlist.json",
+  "synthetic_only": true,
+  "network_access": false,
+  "proxy_neutral": true,
+  "prefix": "/hermes",
+  "policy": {
+    "default_decision": "deny",
+    "path_matching": "exact_raw_path_no_decode",
+    "encoded_paths": "deny",
+    "method_override": "deny",
+    "broad_wildcards": false,
+    "spa_fallback": "exact_list_only"
+  },
+  "redaction": {
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_hosts": false,
+    "contains_live_data": false,
+    "contains_raw_cookies": false,
+    "contains_tokens": false,
+    "contains_transcripts": false,
+    "contains_user_data": false
+  },
+  "static_routes": [
+    {
+      "id": "static-root-get",
+      "method": "GET",
+      "path": "/",
+      "surface": "static_shell",
+      "transport": "http",
+      "clients": ["browser"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "static-spa-shell"
+    },
+    {
+      "id": "static-root-head",
+      "method": "HEAD",
+      "path": "/",
+      "surface": "static_shell",
+      "transport": "http",
+      "clients": ["browser"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "static-spa-shell"
+    },
+    {
+      "id": "static-app",
+      "method": "GET",
+      "path": "/app",
+      "surface": "spa_deep_link",
+      "transport": "http",
+      "clients": ["browser"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "static-spa-shell"
+    },
+    {
+      "id": "static-app-chat",
+      "method": "GET",
+      "path": "/app/chat",
+      "surface": "spa_deep_link",
+      "transport": "http",
+      "clients": ["browser"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "static-spa-shell"
+    },
+    {
+      "id": "static-settings",
+      "method": "GET",
+      "path": "/settings",
+      "surface": "spa_deep_link",
+      "transport": "http",
+      "clients": ["browser"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "static-spa-shell"
+    },
+    {
+      "id": "static-signed-out",
+      "method": "GET",
+      "path": "/signed-out",
+      "surface": "spa_deep_link",
+      "transport": "http",
+      "clients": ["browser"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "static-spa-shell"
+    }
+  ],
+  "external_routes": [
+    {
+      "id": "hermes-login-get",
+      "method": "GET",
+      "path": "/hermes/login",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-providers-get",
+      "method": "GET",
+      "path": "/hermes/api/auth/providers",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-login-get",
+      "method": "GET",
+      "path": "/hermes/auth/login",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-callback-get",
+      "method": "GET",
+      "path": "/hermes/auth/callback",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-password-login-post",
+      "method": "POST",
+      "path": "/hermes/auth/password-login",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-logout-post",
+      "method": "POST",
+      "path": "/hermes/auth/logout",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["session"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-me-get",
+      "method": "GET",
+      "path": "/hermes/api/auth/me",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["session"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-ws-ticket-post",
+      "method": "POST",
+      "path": "/hermes/api/auth/ws-ticket",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["session"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-native-authorize-get",
+      "method": "GET",
+      "path": "/hermes/auth/native/authorize",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["native"],
+      "auth_modes": ["public"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-native-token-post",
+      "method": "POST",
+      "path": "/hermes/auth/native/token",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["native"],
+      "auth_modes": ["native_code_pkce"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-auth-native-refresh-post",
+      "method": "POST",
+      "path": "/hermes/auth/native/refresh",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["native"],
+      "auth_modes": ["native_refresh_material"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-auth-routes"
+    },
+    {
+      "id": "hermes-sessions-get",
+      "method": "GET",
+      "path": "/hermes/api/sessions",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["session"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-session-routes"
+    },
+    {
+      "id": "hermes-sessions-search-get",
+      "method": "GET",
+      "path": "/hermes/api/sessions/search",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["session"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-session-routes"
+    },
+    {
+      "id": "hermes-session-get",
+      "method": "GET",
+      "path": "/hermes/api/sessions/{session_id}",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["session"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-session-routes"
+    },
+    {
+      "id": "hermes-session-messages-get",
+      "method": "GET",
+      "path": "/hermes/api/sessions/{session_id}/messages",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["session"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-session-routes"
+    },
+    {
+      "id": "hermes-session-patch",
+      "method": "PATCH",
+      "path": "/hermes/api/sessions/{session_id}",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["session"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-session-routes"
+    },
+    {
+      "id": "hermes-image-upload-post",
+      "method": "POST",
+      "path": "/hermes/api/chat/image-upload",
+      "surface": "dashboard_rest",
+      "transport": "http",
+      "clients": ["browser", "native"],
+      "auth_modes": ["session"],
+      "host_requirement": "none",
+      "source_citation_id": "rest-image-upload"
+    },
+    {
+      "id": "hermes-chat-ws",
+      "method": "GET",
+      "path": "/hermes/api/ws",
+      "surface": "chat_websocket",
+      "transport": "websocket",
+      "clients": ["browser", "native"],
+      "auth_modes": ["fresh_ticket", "local_query_token"],
+      "host_requirement": "none",
+      "source_citation_id": "chat-websocket"
+    },
+    {
+      "id": "hermes-pty-ws",
+      "method": "GET",
+      "path": "/hermes/api/pty",
+      "surface": "pty_websocket",
+      "transport": "websocket",
+      "clients": ["browser"],
+      "auth_modes": ["fresh_ticket", "local_query_token"],
+      "host_requirement": "attested_posix_or_wsl",
+      "source_citation_id": "pty-websocket"
+    }
+  ],
+  "cases": [
+    {
+      "id": "static-root-get",
+      "description": "The public shell root is an exact browser GET.",
+      "request": {"method": "GET", "path": "/", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "static_route_allowed", "route_id": "static-root-get", "surface": "static_shell"}
+    },
+    {
+      "id": "static-root-head",
+      "description": "The public shell root permits the exact metadata request.",
+      "request": {"method": "HEAD", "path": "/", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "static_route_allowed", "route_id": "static-root-head", "surface": "static_shell"}
+    },
+    {
+      "id": "static-app",
+      "description": "The app deep link uses the finite SPA fallback list.",
+      "request": {"method": "GET", "path": "/app", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "static_route_allowed", "route_id": "static-app", "surface": "spa_deep_link"}
+    },
+    {
+      "id": "static-app-chat",
+      "description": "The chat deep link is separately named and reviewed.",
+      "request": {"method": "GET", "path": "/app/chat", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "static_route_allowed", "route_id": "static-app-chat", "surface": "spa_deep_link"}
+    },
+    {
+      "id": "static-settings",
+      "description": "The settings deep link is an exact public shell route.",
+      "request": {"method": "GET", "path": "/settings", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "static_route_allowed", "route_id": "static-settings", "surface": "spa_deep_link"}
+    },
+    {
+      "id": "static-signed-out",
+      "description": "The signed-out deep link is an exact public shell route.",
+      "request": {"method": "GET", "path": "/signed-out", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "static_route_allowed", "route_id": "static-signed-out", "surface": "spa_deep_link"}
+    },
+    {
+      "id": "external-login",
+      "description": "The browser login entry is exposed only under the external prefix.",
+      "request": {"method": "GET", "path": "/hermes/login", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-login-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-provider-discovery",
+      "description": "Provider discovery is an exact browser and native public route.",
+      "request": {"method": "GET", "path": "/hermes/api/auth/providers", "client": "native", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-providers-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-auth-login",
+      "description": "The browser provider login path keeps its reviewed method.",
+      "request": {"method": "GET", "path": "/hermes/auth/login", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-login-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-auth-callback",
+      "description": "The browser callback path is exact and public at the proxy boundary.",
+      "request": {"method": "GET", "path": "/hermes/auth/callback", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-callback-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-password-login",
+      "description": "Password-provider entry keeps the reviewed POST method.",
+      "request": {"method": "POST", "path": "/hermes/auth/password-login", "client": "native", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-password-login-post", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-logout",
+      "description": "Logout requires the symbolic protected session mode.",
+      "request": {"method": "POST", "path": "/hermes/auth/logout", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-logout-post", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-auth-me",
+      "description": "Session identity retrieval is exact for native clients too.",
+      "request": {"method": "GET", "path": "/hermes/api/auth/me", "client": "native", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-me-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-ws-ticket",
+      "description": "Ticket minting is a protected exact POST, represented symbolically.",
+      "request": {"method": "POST", "path": "/hermes/api/auth/ws-ticket", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-ws-ticket-post", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-native-authorize",
+      "description": "Native authorization is not widened to the browser client.",
+      "request": {"method": "GET", "path": "/hermes/auth/native/authorize", "client": "native", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-native-authorize-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-native-token",
+      "description": "Native token exchange uses a symbolic code and PKCE mode.",
+      "request": {"method": "POST", "path": "/hermes/auth/native/token", "client": "native", "transport": "http", "auth": "native_code_pkce", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-native-token-post", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-native-refresh",
+      "description": "Native refresh is represented by a symbolic material mode.",
+      "request": {"method": "POST", "path": "/hermes/auth/native/refresh", "client": "native", "transport": "http", "auth": "native_refresh_material", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-auth-native-refresh-post", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-sessions",
+      "description": "Session listing is protected and exact under the prefix.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-sessions-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-session-search",
+      "description": "Session search remains a distinct reviewed route.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions/search", "client": "native", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-sessions-search-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-session-get",
+      "description": "A conservative opaque session marker matches one path segment.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions/a7.session~2", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-session-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-session-messages",
+      "description": "Message retrieval is separate from the session resource.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions/a7.session~2/messages", "client": "native", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-session-messages-get", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-session-patch",
+      "description": "Session mutation keeps the reviewed PATCH method.",
+      "request": {"method": "PATCH", "path": "/hermes/api/sessions/s7", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-session-patch", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-image-upload",
+      "description": "The reviewed image upload is the only external upload route.",
+      "request": {"method": "POST", "path": "/hermes/api/chat/image-upload", "client": "native", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "dashboard_route_allowed", "route_id": "hermes-image-upload-post", "surface": "dashboard_rest"}
+    },
+    {
+      "id": "external-chat-websocket",
+      "description": "Chat upgrades use the exact path and a symbolic fresh ticket.",
+      "request": {"method": "GET", "path": "/hermes/api/ws", "client": "native", "transport": "websocket", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "websocket_route_allowed", "route_id": "hermes-chat-ws", "surface": "chat_websocket"}
+    },
+    {
+      "id": "external-pty-websocket",
+      "description": "PTY upgrades are browser-only and require the reviewed host class.",
+      "request": {"method": "GET", "path": "/hermes/api/pty", "client": "browser", "transport": "websocket", "auth": "local_query_token", "headers": {}, "query": {}},
+      "expected": {"decision": "allow", "reason": "websocket_route_allowed", "route_id": "hermes-pty-ws", "surface": "pty_websocket"}
+    },
+    {
+      "id": "deny-unprefixed-chat-websocket",
+      "description": "The unprefixed chat upgrade is not an external permission.",
+      "request": {"method": "GET", "path": "/api/ws", "client": "browser", "transport": "websocket", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "path_prefix_required", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-unprefixed-api-route",
+      "description": "The unprefixed session API is denied even with session context.",
+      "request": {"method": "GET", "path": "/api/sessions", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "path_prefix_required", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-broad-hermes-wildcard",
+      "description": "A wildcard path never becomes a proxy rule.",
+      "request": {"method": "GET", "path": "/hermes/*", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "wildcard_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-unknown-hermes-route",
+      "description": "An unknown prefixed path uses default deny.",
+      "request": {"method": "GET", "path": "/hermes/api/unknown", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "default_deny", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-login-method-mutation",
+      "description": "Login does not accept a method mutation.",
+      "request": {"method": "POST", "path": "/hermes/login", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "method_not_allowlisted", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-image-upload-method-mutation",
+      "description": "Image upload does not accept a read method.",
+      "request": {"method": "GET", "path": "/hermes/api/chat/image-upload", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "method_not_allowlisted", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-trailing-slash",
+      "description": "A trailing slash is not normalized into the WebSocket route.",
+      "request": {"method": "GET", "path": "/hermes/api/ws/", "client": "browser", "transport": "websocket", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "path_shape_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-duplicate-prefix",
+      "description": "Repeating the external prefix is denied rather than collapsed.",
+      "request": {"method": "GET", "path": "/hermes/hermes/api/ws", "client": "browser", "transport": "websocket", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "duplicate_prefix_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-encoded-slash",
+      "description": "Encoded separators are rejected before route matching.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions/a%2Fb", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "encoded_path_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-encoded-dot",
+      "description": "Encoded dot segments are rejected without decoding.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions/%2e%2e/auth/me", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "encoded_path_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-encoded-prefix",
+      "description": "An encoded prefix lookalike is not normalized into Hermes.",
+      "request": {"method": "GET", "path": "/%68ermes/api/ws", "client": "browser", "transport": "websocket", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "encoded_path_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-traversal",
+      "description": "Plain dot traversal is rejected before prefix routing.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions/../auth/me", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "path_traversal_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-pty-native-client",
+      "description": "Native clients cannot use the web-only PTY upgrade.",
+      "request": {"method": "GET", "path": "/hermes/api/pty", "client": "native", "transport": "websocket", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "client_not_allowlisted", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-login-native-client",
+      "description": "The browser login entry is not a native route.",
+      "request": {"method": "GET", "path": "/hermes/login", "client": "native", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "client_not_allowlisted", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-chat-wrong-transport",
+      "description": "The chat path does not authorize an HTTP request.",
+      "request": {"method": "GET", "path": "/hermes/api/ws", "client": "browser", "transport": "http", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "transport_not_allowlisted", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-session-without-auth",
+      "description": "A protected session route denies a public auth marker.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "auth_not_allowlisted", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-method-override-header",
+      "description": "The standard method override header is always denied.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions", "client": "browser", "transport": "http", "auth": "session", "headers": {"X-HTTP-Method-Override": "POST"}, "query": {}},
+      "expected": {"decision": "deny", "reason": "method_override_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-method-override-header-alias",
+      "description": "A shorter method override header is also denied.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions", "client": "browser", "transport": "http", "auth": "session", "headers": {"X-Method-Override": "POST"}, "query": {}},
+      "expected": {"decision": "deny", "reason": "method_override_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-method-override-query",
+      "description": "A query method override cannot mutate an exact route.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {"_method": "POST"}},
+      "expected": {"decision": "deny", "reason": "method_override_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-config-defaults",
+      "description": "Public configuration defaults are outside the external contract.",
+      "request": {"method": "GET", "path": "/hermes/api/config/defaults", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-dashboard-plugins",
+      "description": "Dashboard plugin management is not an external route.",
+      "request": {"method": "GET", "path": "/hermes/api/dashboard/plugins", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-gateway-restart",
+      "description": "Gateway restart remains denied despite its reviewed source presence.",
+      "request": {"method": "POST", "path": "/hermes/api/gateway/restart", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-files",
+      "description": "Filesystem access is not a proxy permission.",
+      "request": {"method": "GET", "path": "/hermes/api/files", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-ssh",
+      "description": "SSH ownership is outside the reviewed external surface.",
+      "request": {"method": "GET", "path": "/hermes/api/ssh/ownership", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-model-options",
+      "description": "The source REST model options path is not client or proxy approved.",
+      "request": {"method": "GET", "path": "/hermes/api/model/options", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-pub",
+      "description": "The source pub sidecar is not directly exposed.",
+      "request": {"method": "GET", "path": "/hermes/api/pub", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-events",
+      "description": "The source events sidecar is not directly exposed.",
+      "request": {"method": "GET", "path": "/hermes/api/events", "client": "browser", "transport": "websocket", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-console",
+      "description": "The source console sidecar is not directly exposed.",
+      "request": {"method": "GET", "path": "/hermes/api/console", "client": "browser", "transport": "websocket", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-admin-cron",
+      "description": "Cron firing is a management operation and remains denied.",
+      "request": {"method": "POST", "path": "/hermes/api/cron/fire", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-source-health",
+      "description": "Source public health and status bypasses are not external permissions.",
+      "request": {"method": "GET", "path": "/hermes/api/health", "client": "browser", "transport": "http", "auth": "public", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "management_route_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-broad-api-wildcard",
+      "description": "A broad API wildcard cannot be represented as an allowlist entry.",
+      "request": {"method": "GET", "path": "/hermes/api/*", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "wildcard_denied", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-session-extra-segment",
+      "description": "An extra session segment is not collapsed into a resource route.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions/a7/extra", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "default_deny", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-session-invalid-character",
+      "description": "A session marker with an unsafe character is not accepted.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions/a$b", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "default_deny", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-session-too-long",
+      "description": "A session marker beyond the bounded length is not accepted.",
+      "request": {"method": "GET", "path": "/hermes/api/sessions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "client": "browser", "transport": "http", "auth": "session", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "default_deny", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-chat-wrong-method",
+      "description": "The WebSocket upgrade uses GET only.",
+      "request": {"method": "HEAD", "path": "/hermes/api/ws", "client": "browser", "transport": "websocket", "auth": "fresh_ticket", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "method_not_allowlisted", "route_id": null, "surface": "none"}
+    },
+    {
+      "id": "deny-native-token-browser",
+      "description": "The native token exchange cannot be reached as a browser route.",
+      "request": {"method": "POST", "path": "/hermes/auth/native/token", "client": "browser", "transport": "http", "auth": "native_code_pkce", "headers": {}, "query": {}},
+      "expected": {"decision": "deny", "reason": "client_not_allowlisted", "route_id": null, "surface": "none"}
+    }
+  ]
+}
