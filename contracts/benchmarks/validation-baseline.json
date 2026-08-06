@@ -1,0 +1,115 @@
+{
+  "schema": "hermternal.benchmark-evidence.v1",
+  "evidence_id": "validator-baseline",
+  "revision": {
+    "commit_sha": "f707fdcfb781907c7e80e353aeb86a0575d3ad71",
+    "fixture_id": "shared-benchmark-validator",
+    "fixture_version": "1.0.0",
+    "fixture_sha256": "854f5bb2a583b6ab16ae1d0f33200832f3bb178a633e8f6c0e5596a67e0fd113",
+    "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e"
+  },
+  "metric": {
+    "name": "validator_duration",
+    "unit": "ms",
+    "clock": "monotonic"
+  },
+  "method": {
+    "percentile_method": "inclusive_linear_interpolation_r7",
+    "position_formula": "(n - 1) * q",
+    "rounding": "half_even_to_3_decimal_places",
+    "quantiles": {
+      "p50": 0.5,
+      "p95": 0.95,
+      "p99": 0.99
+    },
+    "minimum_repetitions": 30
+  },
+  "runs": [
+    {
+      "id": "validator-normal-cold",
+      "platform": "shared",
+      "environment": {
+        "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+        "os": "Darwin-25.5.0",
+        "architecture": "arm64",
+        "device": "local-synthetic-runner",
+        "runtime": "Python-3.14.6",
+        "browser": "not_applicable"
+      },
+      "state": "cold",
+      "build_mode": "not_applicable",
+      "optimization": "normal",
+      "command": "python3 contracts/benchmarks/validate.py --skip-baseline",
+      "repetitions": 30,
+      "raw_samples": [39.637, 39.591, 39.396, 40.456, 42.128, 40.609, 38.153, 39.903, 37.893, 39.380, 38.371, 40.232, 39.826, 39.299, 38.531, 39.126, 39.829, 39.004, 38.571, 39.157, 38.445, 42.389, 38.378, 41.722, 40.649, 39.892, 41.276, 39.344, 39.392, 39.741],
+      "distribution": {
+        "min": 37.893,
+        "p50": 39.494,
+        "p95": 41.945,
+        "p99": 42.313,
+        "max": 42.389,
+        "mean": 39.677
+      }
+    },
+    {
+      "id": "validator-optimized-cold",
+      "platform": "shared",
+      "environment": {
+        "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+        "os": "Darwin-25.5.0",
+        "architecture": "arm64",
+        "device": "local-synthetic-runner",
+        "runtime": "Python-3.14.6",
+        "browser": "not_applicable"
+      },
+      "state": "cold",
+      "build_mode": "not_applicable",
+      "optimization": "optimized",
+      "command": "python3 -O contracts/benchmarks/validate.py --skip-baseline",
+      "repetitions": 30,
+      "raw_samples": [38.870, 39.444, 38.992, 36.354, 36.222, 35.289, 34.878, 37.205, 38.245, 38.637, 38.496, 38.981, 37.525, 38.807, 39.806, 37.932, 40.119, 36.048, 36.299, 36.593, 36.238, 38.207, 39.254, 37.710, 38.977, 38.155, 39.021, 39.750, 38.937, 39.043],
+      "distribution": {
+        "min": 34.878,
+        "p50": 38.370,
+        "p95": 39.781,
+        "p99": 40.028,
+        "max": 40.119,
+        "mean": 38.001
+      }
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "README.md",
+      "bytes": 5581,
+      "sha256": "3137f166f7fe4051b810ca9175be06249069cfd3c8dabb8426c590b82e1079d9"
+    },
+    {
+      "path": "benchmark-evidence.json",
+      "bytes": 5207,
+      "sha256": "854f5bb2a583b6ab16ae1d0f33200832f3bb178a633e8f6c0e5596a67e0fd113"
+    },
+    {
+      "path": "validate.py",
+      "bytes": 25393,
+      "sha256": "3cb93a0d6943c2ff98db5e9b69d89c5687fe761e1cf5756843232991ce2619c9"
+    },
+    {
+      "path": "test_validate.py",
+      "bytes": 12439,
+      "sha256": "d3d33b7823dd410a3cd958a5941b8df7f912dcc49bc56f7ce2dc8ccfffa6a96b"
+    }
+  ],
+  "artifact_manifest_sha256": "08a7c382bbafa90b6a077927c0758d587b08fb3e8e0b1e4a85609e903e470d8d",
+  "redaction": {
+    "policy": "semantic_only",
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_tokens": false,
+    "contains_user_data": false,
+    "contains_live_hosts": false,
+    "contains_transcripts": false
+  },
+  "threshold": null,
+  "budget": null
+}
