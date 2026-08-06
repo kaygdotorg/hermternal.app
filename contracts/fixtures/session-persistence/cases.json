@@ -244,6 +244,7 @@
         "stored_session": null,
         "durable_row": false,
         "draft": "empty",
+        "persistence": "not_started",
         "prompt_in_flight": false,
         "history": "none",
         "session_creations": 1,
@@ -299,6 +300,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": false,
         "draft": "empty",
+        "persistence": "not_started",
         "prompt_in_flight": false,
         "history": "none",
         "session_creations": 1,
@@ -354,6 +356,7 @@
         "stored_session": null,
         "durable_row": false,
         "draft": "empty",
+        "persistence": "not_started",
         "prompt_in_flight": false,
         "history": "none",
         "session_creations": 1,
@@ -412,6 +415,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": false,
         "draft": "empty",
+        "persistence": "not_started",
         "prompt_in_flight": false,
         "history": "none",
         "session_creations": 1,
@@ -450,7 +454,7 @@
         "session.create.request",
         "session.create.accepted",
         "prompt.submit.request",
-        "session.persist.ok"
+        "session.persist.ok:session-marker-001:stored-session-marker-001"
       ],
       "expected": {
         "decision": "session_persisted",
@@ -474,6 +478,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -537,6 +542,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": false,
         "draft": "present",
+        "persistence": "failed",
         "prompt_in_flight": false,
         "history": "none",
         "session_creations": 1,
@@ -577,7 +583,7 @@
         "prompt.submit.request",
         "session.persist.failed",
         "session.persist.retry",
-        "session.persist.ok"
+        "session.persist.ok:session-marker-001:stored-session-marker-001"
       ],
       "expected": {
         "decision": "session_persisted",
@@ -607,6 +613,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -667,6 +674,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": false,
         "draft": "present",
+        "persistence": "pending",
         "prompt_in_flight": true,
         "history": "none",
         "session_creations": 1,
@@ -681,6 +689,165 @@
         "error_kind": null
       },
       "notes": "A second prompt is blocked while the first session write is pending."
+    },
+    {
+      "id": "prompt-without-session-identity-fails-closed",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "prompt.submit.request"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "empty",
+          "incompatible"
+        ],
+        "effects": [
+          "prompt_without_session_identity",
+          "no_new_session_fallback"
+        ],
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "persistence": "not_started",
+        "prompt_in_flight": false,
+        "history": "none",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "unknown",
+        "error_kind": "incompatible"
+      },
+      "notes": "A prompt cannot create durable state without a created live and stored identity."
+    },
+    {
+      "id": "persistence-ack-without-session-identity-fails-closed",
+      "initial_state": "pending_persist",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "connected",
+        "persistence": "pending",
+        "session_creations": 0,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.persist.ok:session-marker-001:stored-session-marker-001"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "pending_persist",
+          "incompatible"
+        ],
+        "effects": [
+          "persistence_identity_mismatch",
+          "no_new_session_fallback"
+        ],
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "present",
+        "persistence": "pending",
+        "prompt_in_flight": true,
+        "history": "none",
+        "session_creations": 0,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "unknown",
+        "error_kind": "incompatible"
+      },
+      "notes": "A persistence acknowledgement without runtime identity cannot promote to ready."
+    },
+    {
+      "id": "persistence-ack-with-mismatched-identity-fails-closed",
+      "initial_state": "pending_persist",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "connected",
+        "persistence": "pending",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.persist.ok:foreign-session-marker-009:stored-session-marker-001"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "pending_persist",
+          "incompatible"
+        ],
+        "effects": [
+          "persistence_identity_mismatch",
+          "no_new_session_fallback"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "present",
+        "persistence": "pending",
+        "prompt_in_flight": true,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "incompatible"
+      },
+      "notes": "Persistence evidence for another live session cannot promote this session."
     },
     {
       "id": "duplicate-persist-ack-is-ignored",
@@ -702,7 +869,7 @@
         "error_kind": null
       },
       "events": [
-        "session.persist.duplicate"
+        "session.persist.duplicate:session-marker-001:stored-session-marker-001"
       ],
       "expected": {
         "decision": "duplicate_persist_ack_ignored",
@@ -717,6 +884,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -771,6 +939,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -826,6 +995,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "empty",
         "session_creations": 1,
@@ -881,6 +1051,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -936,6 +1107,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -992,6 +1164,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -1044,6 +1217,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -1058,6 +1232,110 @@
         "error_kind": null
       },
       "notes": "Close detaches the live session but preserves the durable identity for resume."
+    },
+    {
+      "id": "turn-completed-active-turn",
+      "initial_state": "ready",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "connected",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "turn.completed"
+      ],
+      "expected": {
+        "decision": "turn_persisted",
+        "final_state": "ready",
+        "trace": [
+          "ready"
+        ],
+        "effects": [
+          "turn_persisted_once"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "persistence": "available",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "A completion is accepted only while the durable session has an active prompt turn."
+    },
+    {
+      "id": "stale-turn-completed-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "turn.completed"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "turn_completion_without_active_turn",
+          "no_new_session_fallback"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "persistence": "available",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "incompatible"
+      },
+      "notes": "A stale completion without an active prompt cannot mutate durable state."
     },
     {
       "id": "confirmed-interruption-preserves-draft",
@@ -1099,6 +1377,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -1151,6 +1430,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -1203,6 +1483,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -1258,6 +1539,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -1313,6 +1595,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "empty",
         "session_creations": 1,
@@ -1363,6 +1646,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": true,
         "history": "unknown",
         "session_creations": 1,
@@ -1415,6 +1699,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": true,
         "history": "unknown",
         "session_creations": 1,
@@ -1471,7 +1756,8 @@
         "selected_session": "session-marker-001",
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
-        "draft": "empty",
+        "draft": "present",
+        "persistence": "available",
         "prompt_in_flight": true,
         "history": "empty",
         "session_creations": 1,
@@ -1527,6 +1813,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -1579,6 +1866,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,
@@ -1634,6 +1922,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": false,
         "draft": "present",
+        "persistence": "pending",
         "prompt_in_flight": true,
         "history": "none",
         "session_creations": 1,
@@ -1648,6 +1937,165 @@
         "error_kind": "incompatible"
       },
       "notes": "Malformed storage evidence stops the operation without a fallback."
+    },
+    {
+      "id": "empty-close-without-durable-row-fails-closed",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.close.detach"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "empty",
+          "incompatible"
+        ],
+        "effects": [
+          "close_without_durable_session",
+          "no_new_session_fallback"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "empty",
+        "persistence": "not_started",
+        "prompt_in_flight": false,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "incompatible"
+      },
+      "notes": "An empty draft cannot claim a durable closed session."
+    },
+    {
+      "id": "pending-close-without-durable-row-fails-closed",
+      "initial_state": "pending_persist",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "connected",
+        "persistence": "pending",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.close.detach"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "pending_persist",
+          "incompatible"
+        ],
+        "effects": [
+          "close_without_durable_session",
+          "no_new_session_fallback"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "present",
+        "persistence": "pending",
+        "prompt_in_flight": true,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "incompatible"
+      },
+      "notes": "A pending first write cannot detach as a durable session."
+    },
+    {
+      "id": "failed-close-without-durable-row-fails-closed",
+      "initial_state": "failed",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "present",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "failed",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "present",
+        "error_kind": "storage"
+      },
+      "events": [
+        "session.close.detach"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "failed",
+          "incompatible"
+        ],
+        "effects": [
+          "close_without_durable_session",
+          "no_new_session_fallback"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "present",
+        "persistence": "failed",
+        "prompt_in_flight": false,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "incompatible"
+      },
+      "notes": "A failed first write cannot detach as a durable session."
     },
     {
       "id": "close-interrupted-session-does-not-reconnect",
@@ -1686,6 +2134,7 @@
         "stored_session": "stored-session-marker-001",
         "durable_row": true,
         "draft": "empty",
+        "persistence": "available",
         "prompt_in_flight": false,
         "history": "present",
         "session_creations": 1,

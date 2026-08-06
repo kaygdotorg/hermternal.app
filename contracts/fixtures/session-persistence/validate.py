@@ -64,9 +64,15 @@ APPROVED_BENCHMARK_COMMANDS = {
 # claim or a product performance budget.
 REVIEWED_BASELINE_PLATFORM = "macOS-26.5.2-arm64-arm-64bit-Mach-O"
 REVIEWED_BASELINE_PYTHON = "3.14.6"
-# The digest covers immutable benchmark identity, commands, and null threshold;
-# it deliberately excludes mutable timing samples and artifact hashes.
-BASELINE_CANONICAL_IDENTITY_SHA256 = "271f5efb69a77e484e554a61450973249bdd8a7bc3a1974261f06c630202ef6b"
+BASELINE_EVIDENCE_PATH = ROOT / "baseline-evidence.json"
+BASELINE_EVIDENCE_SCHEMA = "hermternal.session-persistence-baseline-evidence.v1"
+# The canonical evidence file is a reviewed trust anchor. The baseline must
+# reproduce its raw samples and derived distribution instead of merely agreeing
+# with an internally recomputed distribution.
+BASELINE_EVIDENCE_SHA256 = "6518b2b0c08dc4da2131585fce057cdf3af4acddbd5149aa08a94c738a7f7f94"
+# This digest covers immutable benchmark identity, raw samples, distributions,
+# commands, and the null threshold. Artifact hashes are checked separately.
+BASELINE_CANONICAL_IDENTITY_SHA256 = "55d55703c00d672ff59020988df2a50e8dd3bb4220167a097f62f4213ef11937"
 
 ROOT_KEYS = (
     "schema",
@@ -109,6 +115,7 @@ EXPECTED_KEYS = (
     "stored_session",
     "durable_row",
     "draft",
+    "persistence",
     "prompt_in_flight",
     "history",
     "session_creations",
@@ -156,6 +163,8 @@ BASELINE_KEYS = (
     "threshold",
 )
 BENCHMARK_KEYS = ("command", "samples_ms", "distribution")
+EVIDENCE_KEYS = ("schema", "normal", "optimized")
+EVIDENCE_BENCHMARK_KEYS = ("samples_ms", "distribution")
 DISTRIBUTION_KEYS = ("min", "p50", "p95", "max", "mean")
 ARTIFACT_KEYS = ("path", "sha256", "size_bytes")
 BASELINE_ARTIFACTS = (
@@ -163,6 +172,7 @@ BASELINE_ARTIFACTS = (
     "cases.json",
     "validate.py",
     "test_validate.py",
+    "baseline-evidence.json",
 )
 
 EXPECTED_STATES = [
@@ -468,11 +478,48 @@ def _baseline_identity_digest(baseline: dict[str, Any]) -> str:
         "build_mode": baseline["build_mode"],
         "environment": baseline["environment"],
         "repetitions": baseline["repetitions"],
+        "normal": baseline["normal"],
+        "optimized": baseline["optimized"],
         "normal_command": baseline["normal"]["command"],
         "optimized_command": baseline["optimized"]["command"],
+        "canonical_evidence_sha256": BASELINE_EVIDENCE_SHA256,
         "threshold": baseline["threshold"],
     }
     return hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
+
+
+def _load_canonical_baseline_evidence() -> dict[str, Any]:
+    try:
+        raw = BASELINE_EVIDENCE_PATH.read_bytes()
+    except OSError as exc:
+        raise ContractError("canonical baseline evidence unavailable") from exc
+    _require(
+        hashlib.sha256(raw).hexdigest() == BASELINE_EVIDENCE_SHA256,
+        "canonical baseline evidence changed",
+    )
+    value = _load_json(BASELINE_EVIDENCE_PATH, "canonical baseline evidence")
+    _strict_keys(value, EVIDENCE_KEYS, "canonical baseline evidence")
+    _require(value["schema"] == BASELINE_EVIDENCE_SCHEMA, "canonical baseline evidence schema changed")
+    for mode in ("normal", "optimized"):
+        _strict_keys(value[mode], EVIDENCE_BENCHMARK_KEYS, f"canonical baseline evidence.{mode}")
+        samples = _validate_samples(value[mode]["samples_ms"], f"canonical baseline evidence.{mode}")
+        _strict_keys(
+            value[mode]["distribution"],
+            DISTRIBUTION_KEYS,
+            f"canonical baseline evidence.{mode}.distribution",
+        )
+        _strict_equal(
+            value[mode]["distribution"],
+            _dist(samples),
+            f"canonical baseline evidence.{mode}.distribution",
+        )
+    return value
+
+
+def _normalize_redaction_key(key: str) -> str:
+    split_acronym = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    split_camel = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", split_acronym)
+    return re.sub(r"[^a-z0-9]+", "_", split_camel.lower()).strip("_")
 
 
 def _semantic_string_is_safe(value: str) -> bool:
@@ -481,17 +528,28 @@ def _semantic_string_is_safe(value: str) -> bool:
         return False
     if re.search(r"\b(?:https?|wss?)://", lowered):
         return False
-    if re.search(r"\b(?:host|hostname)\s*[:=]", lowered):
+    if re.search(r"\b(?:host|hostname|server|endpoint)\s*[:=]", lowered):
         return False
-    if re.search(r"\b(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:example|invalid))(?:\:\d+)?\b", lowered):
+    if re.search(r"\b(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:example|invalid|local|internal|test))(?:\:\d+)?\b", lowered):
+        return False
+    if re.search(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?!\d)", lowered):
         return False
     if re.search(r"\b(?:bearer|basic)\s+[a-z0-9._~+/=-]{8,}", lowered):
         return False
-    if re.search(r"(?:password|passwd|secret|cookie|ticket|token|authorization)\s*[=:]", lowered):
+    if re.search(
+        r"(?:[\"']?\b(?:access[_-]?token|api[_-]?key|client[_-]?secret|refresh[_-]?token|password|passwd|secret|cookie|ticket|token|authorization|prompt(?:[_-]?text)?|transcript(?:[_-]?text)?)[\"']?)\s*[:=]",
+        lowered,
+    ):
         return False
     if re.fullmatch(r"ey[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}", lowered):
         return False
-    if re.search(r"(?:^|[\s=])/(?:users|private|tmp|var|home|etc)(?:/|$)", lowered):
+    if re.search(r"(?:^|[\s=(\"'])/(?:users|private|tmp|var|home|etc|opt)(?:/|$)", lowered):
+        return False
+    if re.search(r"(?:^|[\s=(\"'])~[\\/]", value):
+        return False
+    if re.search(r"\b[A-Za-z]:[\\/]", value):
+        return False
+    if re.search(r"(?:^|[\s=(\"'])\\\\", value):
         return False
     return True
 
@@ -508,20 +566,25 @@ def _validate_redaction(value: Any, label: str = "document") -> None:
         "tickets",
         "token",
         "tokens",
+        "access_token",
+        "refresh_token",
         "secret",
         "secrets",
+        "client_secret",
         "authorization",
         "bearer",
-        "refresh_token",
         "api_key",
+        "prompt",
         "prompt_text",
+        "transcript",
         "transcript_text",
         "hostname",
+        "host",
         "user_data",
     }
     if type(value) is dict:
         for key, item in value.items():
-            normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+            normalized = _normalize_redaction_key(key)
             _require(normalized not in sensitive_keys, f"{label} contains a sensitive key")
             _validate_redaction(item, f"{label}.{key}")
     elif type(value) is list:
@@ -604,6 +667,17 @@ def _incompatible(runtime: dict[str, Any], effect: str) -> None:
     _effect(runtime, "no_new_session_fallback")
 
 
+def _parse_persist_identity_event(event: str) -> tuple[str | None, str | None, str | None]:
+    for kind in ("session.persist.ok", "session.persist.duplicate"):
+        prefix = kind + ":"
+        if event.startswith(prefix):
+            parts = event.split(":")
+            if len(parts) != 3 or not parts[1] or not parts[2]:
+                return kind, None, None
+            return kind, parts[1], parts[2]
+    return None, None, None
+
+
 def _transition(runtime: dict[str, Any], event: str) -> None:
     state = runtime["state"]
 
@@ -657,6 +731,9 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
 
     if event == "prompt.submit.request":
         if state in {"empty", "interrupted"} and not runtime["prompt_in_flight"]:
+            if not runtime["selected_session"] or not runtime["stored_session"]:
+                _incompatible(runtime, "prompt_without_session_identity")
+                return
             runtime["draft"] = "present"
             runtime["prompt_in_flight"] = True
             runtime["prompt_submissions"] += 1
@@ -688,25 +765,37 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
             _incompatible(runtime, "duplicate_prompt_without_active_delivery")
         return
 
-    if event in {"session.persist.ok", "session.persist.duplicate"}:
-        if state == "pending_persist":
-            runtime["durable_row"] = True
-            runtime["persistence"] = "available"
-            runtime["server_presence"] = "present"
-            runtime["history"] = "present"
-            runtime["prompt_in_flight"] = False
-            runtime["decision"] = (
-                "existing_row_reused" if event.endswith("duplicate") else "session_persisted"
+    persist_kind, persisted_selected, persisted_stored = _parse_persist_identity_event(event)
+    if persist_kind is not None:
+        if state in {"pending_persist", "ready"}:
+            identities_match = (
+                bool(runtime["selected_session"])
+                and bool(runtime["stored_session"])
+                and persisted_selected == runtime["selected_session"]
+                and persisted_stored == runtime["stored_session"]
             )
-            _set_state(runtime, "ready")
-            _effect(
-                runtime,
-                "duplicate_row_suppressed" if event.endswith("duplicate") else "session_row_persisted",
-            )
-            _effect(runtime, "prompt_not_automatically_repeated")
-        elif state == "ready":
-            runtime["decision"] = "duplicate_persist_ack_ignored"
-            _effect(runtime, "duplicate_persist_ack_ignored")
+            if not identities_match:
+                _incompatible(runtime, "persistence_identity_mismatch")
+            elif state == "pending_persist":
+                runtime["durable_row"] = True
+                runtime["persistence"] = "available"
+                runtime["server_presence"] = "present"
+                runtime["history"] = "present"
+                runtime["prompt_in_flight"] = False
+                runtime["decision"] = (
+                    "existing_row_reused" if persist_kind == "session.persist.duplicate" else "session_persisted"
+                )
+                _set_state(runtime, "ready")
+                _effect(
+                    runtime,
+                    "duplicate_row_suppressed"
+                    if persist_kind == "session.persist.duplicate"
+                    else "session_row_persisted",
+                )
+                _effect(runtime, "prompt_not_automatically_repeated")
+            else:
+                runtime["decision"] = "duplicate_persist_ack_ignored"
+                _effect(runtime, "duplicate_persist_ack_ignored")
         else:
             _incompatible(runtime, "persist_ack_in_wrong_state")
         return
@@ -745,14 +834,21 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
         return
 
     if event == "turn.completed":
-        if state == "ready" and runtime["durable_row"]:
+        if (
+            state == "ready"
+            and runtime["durable_row"]
+            and runtime["selected_session"]
+            and runtime["stored_session"]
+            and runtime["prompt_in_flight"]
+            and runtime["draft"] == "present"
+        ):
             runtime["draft"] = "empty"
             runtime["history"] = "present"
             runtime["prompt_in_flight"] = False
             runtime["decision"] = "turn_persisted"
             _effect(runtime, "turn_persisted_once")
         else:
-            _incompatible(runtime, "turn_completion_without_durable_session")
+            _incompatible(runtime, "turn_completion_without_active_turn")
         return
 
     if event == "session.interrupt.request":
@@ -817,6 +913,9 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
 
     if event == "session.close.detach":
         if state in {"empty", "ready", "interrupted", "delivery_uncertain", "failed", "pending_persist"}:
+            if not runtime["durable_row"] or not runtime["stored_session"]:
+                _incompatible(runtime, "close_without_durable_session")
+                return
             runtime["transport_closed"] = True
             runtime["selected_session"] = None
             runtime["decision"] = "session_detached"
@@ -940,7 +1039,9 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
 
     if event == "prompt.submit.after_empty_restore":
         if state == "ready" and runtime["history"] == "empty":
+            runtime["draft"] = "present"
             runtime["prompt_in_flight"] = True
+            runtime["persistence"] = "available"
             runtime["prompt_submissions"] += 1
             runtime["decision"] = "new_prompt_requires_user_action"
             _effect(runtime, "new_prompt_requires_explicit_user_action")
@@ -993,6 +1094,7 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
         "stored_session": runtime["stored_session"],
         "durable_row": runtime["durable_row"],
         "draft": runtime["draft"],
+        "persistence": runtime["persistence"],
         "prompt_in_flight": runtime["prompt_in_flight"],
         "history": runtime["history"],
         "session_creations": runtime["session_creations"],
@@ -1042,7 +1144,12 @@ def _case_definitions() -> list[tuple[str, str, dict[str, Any], tuple[str, ...],
             "first-prompt-persists-session",
             "empty",
             _context(),
-            ("session.create.request", "session.create.accepted", "prompt.submit.request", "session.persist.ok"),
+            (
+                "session.create.request",
+                "session.create.accepted",
+                "prompt.submit.request",
+                "session.persist.ok:session-marker-001:stored-session-marker-001",
+            ),
             "The first prompt creates the durable row before agent work is reported ready.",
         ),
         (
@@ -1062,7 +1169,7 @@ def _case_definitions() -> list[tuple[str, str, dict[str, Any], tuple[str, ...],
                 "prompt.submit.request",
                 "session.persist.failed",
                 "session.persist.retry",
-                "session.persist.ok",
+                "session.persist.ok:session-marker-001:stored-session-marker-001",
             ),
             "Only an explicit idempotent persistence retry can recover a known storage failure.",
         ),
@@ -1079,10 +1186,47 @@ def _case_definitions() -> list[tuple[str, str, dict[str, Any], tuple[str, ...],
             "A second prompt is blocked while the first session write is pending.",
         ),
         (
+            "prompt-without-session-identity-fails-closed",
+            "empty",
+            _context(),
+            ("prompt.submit.request",),
+            "A prompt cannot create durable state without a created live and stored identity.",
+        ),
+        (
+            "persistence-ack-without-session-identity-fails-closed",
+            "pending_persist",
+            _context(
+                draft="present",
+                prompt_in_flight=True,
+                persistence="pending",
+                prompt_submissions=1,
+                persist_attempts=1,
+            ),
+            ("session.persist.ok:session-marker-001:stored-session-marker-001",),
+            "A persistence acknowledgement without runtime identity cannot promote to ready.",
+        ),
+        (
+            "persistence-ack-with-mismatched-identity-fails-closed",
+            "pending_persist",
+            _context(
+                selected_session=SESSION_MARKER,
+                stored_session=STORED_SESSION_MARKER,
+                draft="present",
+                prompt_in_flight=True,
+                persistence="pending",
+                prompt_submissions=1,
+                persist_attempts=1,
+                server_presence="present",
+                session_creations=1,
+            ),
+            ("session.persist.ok:foreign-session-marker-009:stored-session-marker-001",),
+            "Persistence evidence for another live session cannot promote this session.",
+        ),
+        (
             "duplicate-persist-ack-is-ignored",
             "ready",
             _durable_context(prompt_in_flight=False),
-            ("session.persist.duplicate",),
+            ("session.persist.duplicate:session-marker-001:stored-session-marker-001",),
             "A stale persistence acknowledgement cannot create another row or turn.",
         ),
         (
@@ -1126,6 +1270,20 @@ def _case_definitions() -> list[tuple[str, str, dict[str, Any], tuple[str, ...],
             _durable_context(),
             ("session.close.detach",),
             "Close detaches the live session but preserves the durable identity for resume.",
+        ),
+        (
+            "turn-completed-active-turn",
+            "ready",
+            _durable_context(draft="present", prompt_in_flight=True),
+            ("turn.completed",),
+            "A completion is accepted only while the durable session has an active prompt turn.",
+        ),
+        (
+            "stale-turn-completed-fails-closed",
+            "ready",
+            _durable_context(),
+            ("turn.completed",),
+            "A stale completion without an active prompt cannot mutate durable state.",
         ),
         (
             "confirmed-interruption-preserves-draft",
@@ -1210,6 +1368,52 @@ def _case_definitions() -> list[tuple[str, str, dict[str, Any], tuple[str, ...],
             "Malformed storage evidence stops the operation without a fallback.",
         ),
         (
+            "empty-close-without-durable-row-fails-closed",
+            "empty",
+            _context(
+                selected_session=SESSION_MARKER,
+                stored_session=STORED_SESSION_MARKER,
+                server_presence="present",
+                session_creations=1,
+            ),
+            ("session.close.detach",),
+            "An empty draft cannot claim a durable closed session.",
+        ),
+        (
+            "pending-close-without-durable-row-fails-closed",
+            "pending_persist",
+            _context(
+                selected_session=SESSION_MARKER,
+                stored_session=STORED_SESSION_MARKER,
+                draft="present",
+                prompt_in_flight=True,
+                persistence="pending",
+                prompt_submissions=1,
+                persist_attempts=1,
+                server_presence="present",
+                session_creations=1,
+            ),
+            ("session.close.detach",),
+            "A pending first write cannot detach as a durable session.",
+        ),
+        (
+            "failed-close-without-durable-row-fails-closed",
+            "failed",
+            _context(
+                selected_session=SESSION_MARKER,
+                stored_session=STORED_SESSION_MARKER,
+                draft="present",
+                persistence="failed",
+                prompt_submissions=1,
+                persist_attempts=1,
+                server_presence="present",
+                session_creations=1,
+                error_kind="storage",
+            ),
+            ("session.close.detach",),
+            "A failed first write cannot detach as a durable session.",
+        ),
+        (
             "close-interrupted-session-does-not-reconnect",
             "interrupted",
             _durable_context(selected_session=SESSION_MARKER, transport="connected"),
@@ -1269,11 +1473,11 @@ def validate_document(document: dict[str, Any]) -> None:
     _require(document["hermes_source_sha"] == HERMES_SOURCE_SHA, "source revision changed")
     _require(type(document["synthetic_only"]) is bool and document["synthetic_only"], "fixture must remain synthetic")
     _require(document["surface"] == SURFACE, "surface changed")
+    _validate_redaction(document)
     _validate_source_observations(document)
     _validate_state_table(document)
     _strict_equal(document["invariants"], EXPECTED_INVARIANTS, "invariants")
     _strict_equal(document["redaction"], EXPECTED_REDACTION, "redaction")
-    _validate_redaction(document)
 
     cases = document["cases"]
     _require(type(cases) is list, "cases must be an array")
@@ -1330,6 +1534,7 @@ def _validate_baseline(baseline: dict[str, Any]) -> int:
     environment = _strict_keys(baseline["environment"], ("platform", "python"), "baseline.environment")
     _require(environment["platform"] == REVIEWED_BASELINE_PLATFORM, "baseline platform changed")
     _require(environment["python"] == REVIEWED_BASELINE_PYTHON, "baseline python changed")
+    evidence = _load_canonical_baseline_evidence()
 
     artifact_bytes = 0
     artifacts = baseline["artifact_files"]
@@ -1357,6 +1562,8 @@ def _validate_baseline(baseline: dict[str, Any]) -> int:
         samples = _validate_samples(benchmark["samples_ms"], f"baseline.{mode}")
         _strict_keys(benchmark["distribution"], DISTRIBUTION_KEYS, f"baseline.{mode}.distribution")
         _strict_equal(benchmark["distribution"], _dist(samples), f"baseline.{mode}.distribution")
+        _strict_equal(samples, evidence[mode]["samples_ms"], f"baseline.{mode}.samples_ms")
+        _strict_equal(benchmark["distribution"], evidence[mode]["distribution"], f"baseline.{mode}.distribution")
     _require(_baseline_identity_digest(baseline) == BASELINE_CANONICAL_IDENTITY_SHA256, "baseline canonical identity changed")
     _validate_redaction(baseline, "baseline")
     return artifact_bytes

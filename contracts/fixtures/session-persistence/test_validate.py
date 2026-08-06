@@ -88,7 +88,7 @@ print(json.dumps(results))
 
     def test_checked_in_document_and_baseline_validate(self) -> None:
         case_count, artifact_bytes = validate.validate_all(self.document, self.baseline)
-        self.assertEqual(case_count, 27)
+        self.assertEqual(case_count, 35)
         self.assertGreater(artifact_bytes, 0)
         self.assertEqual(len(self.document["states"]), 10)
         self.assertIsNone(self.baseline["threshold"])
@@ -102,7 +102,7 @@ print(json.dumps(results))
         self.assertEqual(normal.stdout, optimized.stdout)
         self.assertEqual(normal.stderr, "")
         self.assertEqual(optimized.stderr, "")
-        self.assertIn("states=10 cases=27", normal.stdout)
+        self.assertIn("states=10 cases=35", normal.stdout)
 
     def test_creation_and_lazy_persistence_boundaries(self) -> None:
         empty = self.cases["create-empty-draft"]["expected"]
@@ -121,6 +121,21 @@ print(json.dumps(results))
         self.assertEqual(duplicate["final_state"], "pending_persist")
         self.assertEqual(duplicate["prompt_submissions"], 1)
         self.assertIn("duplicate_prompt_blocked", duplicate["effects"])
+
+    def test_persistence_requires_matching_session_identity(self) -> None:
+        no_identity = self.cases["prompt-without-session-identity-fails-closed"]["expected"]
+        self.assertEqual(no_identity["final_state"], "incompatible")
+        self.assertIn("prompt_without_session_identity", no_identity["effects"])
+
+        missing_ack_identity = self.cases["persistence-ack-without-session-identity-fails-closed"]["expected"]
+        self.assertEqual(missing_ack_identity["final_state"], "incompatible")
+        self.assertFalse(missing_ack_identity["durable_row"])
+        self.assertIn("persistence_identity_mismatch", missing_ack_identity["effects"])
+
+        mismatched = self.cases["persistence-ack-with-mismatched-identity-fails-closed"]["expected"]
+        self.assertEqual(mismatched["final_state"], "incompatible")
+        self.assertFalse(mismatched["durable_row"])
+        self.assertIn("persistence_identity_mismatch", mismatched["effects"])
 
     def test_persistence_failure_requires_explicit_retry(self) -> None:
         failed = self.cases["persistence-failure-preserves-draft"]["expected"]
@@ -153,6 +168,24 @@ print(json.dumps(results))
         concurrent = self.cases["duplicate-resume-request-is-deduplicated"]["expected"]
         self.assertEqual(concurrent["resume_attempts"], 1)
         self.assertIn("duplicate_resume_request_blocked", concurrent["effects"])
+
+    def test_active_turn_and_empty_restore_invariants(self) -> None:
+        active = self.cases["turn-completed-active-turn"]["expected"]
+        self.assertEqual(active["final_state"], "ready")
+        self.assertEqual(active["draft"], "empty")
+        self.assertFalse(active["prompt_in_flight"])
+        self.assertIn("turn_persisted_once", active["effects"])
+
+        stale = self.cases["stale-turn-completed-fails-closed"]["expected"]
+        self.assertEqual(stale["final_state"], "incompatible")
+        self.assertIn("turn_completion_without_active_turn", stale["effects"])
+
+        empty_restore = self.cases["empty-restore-requires-explicit-new-prompt"]["expected"]
+        self.assertEqual(empty_restore["final_state"], "ready")
+        self.assertEqual(empty_restore["history"], "empty")
+        self.assertEqual(empty_restore["draft"], "present")
+        self.assertTrue(empty_restore["prompt_in_flight"])
+        self.assertEqual(empty_restore["persistence"], "available")
 
     def test_interruption_and_uncertain_delivery_never_auto_resend(self) -> None:
         interrupted = self.cases["confirmed-interruption-preserves-draft"]["expected"]
@@ -193,6 +226,14 @@ print(json.dumps(results))
                 self.assertEqual(malformed["final_state"], "incompatible")
                 self.assertTrue(malformed["transport_closed"])
 
+                stale = self.evaluate_case_subprocess("stale-turn-completed-fails-closed", optimized)
+                self.assertEqual(stale["final_state"], "incompatible")
+                self.assertIn("turn_completion_without_active_turn", stale["effects"])
+
+                missing_identity = self.evaluate_case_subprocess("prompt-without-session-identity-fails-closed", optimized)
+                self.assertEqual(missing_identity["final_state"], "incompatible")
+                self.assertIn("prompt_without_session_identity", missing_identity["effects"])
+
     def test_foreign_unknown_and_close_boundaries_fail_closed(self) -> None:
         for case_id in (
             "foreign-resume-fails-closed",
@@ -212,8 +253,24 @@ print(json.dumps(results))
         self.assertEqual(detached["stored_session"], "stored-session-marker-001")
         self.assertTrue(detached["transport_closed"])
 
-    def test_baseline_identity_rejects_forged_distribution_commands_and_environment(self) -> None:
+        for case_id in (
+            "empty-close-without-durable-row-fails-closed",
+            "pending-close-without-durable-row-fails-closed",
+            "failed-close-without-durable-row-fails-closed",
+        ):
+            with self.subTest(case_id=case_id):
+                result = self.cases[case_id]["expected"]
+                self.assertEqual(result["final_state"], "incompatible")
+                self.assertIn("close_without_durable_session", result["effects"])
+                self.assertFalse(result["durable_row"])
+
+    def test_baseline_identity_rejects_coordinated_samples_distributions_commands_and_environment(self) -> None:
         mutations: list[dict[str, object]] = []
+        forged = copy.deepcopy(self.baseline)
+        for mode in ("normal", "optimized"):
+            forged[mode]["samples_ms"] = [1.0] * validate.BASELINE_REPETITIONS
+            forged[mode]["distribution"] = validate._dist(forged[mode]["samples_ms"])
+        mutations.append(forged)
         forged = copy.deepcopy(self.baseline)
         forged["normal"]["distribution"]["mean"] += 1.0
         mutations.append(forged)
@@ -239,22 +296,61 @@ print(json.dumps(results))
                             {"error": {"code": "contract", "message": "session persistence fixture rejected"}},
                         )
 
-    def test_redaction_rejects_sensitive_values_in_both_modes(self) -> None:
+    def test_redaction_rejects_sensitive_values_and_camel_keys_in_both_modes(self) -> None:
         rejected = [
             "Bearer synthetic-token",
             "Basic c2VjcmV0",
             "host=internal.example",
             "hostname: internal.example",
             "https://synthetic.invalid",
+            "127.0.0.1:8080",
+            "server.local",
             "/Users/alice/private.txt",
+            "~/private.txt",
+            "C:\\Users\\alice\\private.txt",
+            "C:/Users/alice/private.txt",
+            "\\\\server\\share\\private.txt",
             "password=synthetic",
-            "token: synthetic",
+            "accessToken: synthetic",
+            "apiKey: synthetic",
+            "clientSecret: synthetic",
+            "prompt: synthetic",
+            "transcript: synthetic",
         ]
         accepted = ["gateway.ready", "session-marker-001", validate.HERMES_SOURCE_SHA]
+        rejected_keys = ["accessToken", "apiKey", "clientSecret", "prompt", "transcript"]
+        for key in rejected_keys:
+            with self.assertRaises(validate.ContractError):
+                validate._validate_redaction({key: "synthetic-marker"})
         for optimized in (False, True):
             with self.subTest(optimized=optimized):
                 self.assertEqual(self.redaction_probe_subprocess(rejected, optimized), [False] * len(rejected))
                 self.assertEqual(self.redaction_probe_subprocess(accepted, optimized), [True] * len(accepted))
+
+    def test_redaction_failures_run_through_real_validator_cli_in_both_modes(self) -> None:
+        mutations = (
+            "accessToken: synthetic-marker",
+            "127.0.0.1:8080",
+            "C:\\Users\\alice\\private.txt",
+            "\\\\server\\share\\private.txt",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, value in enumerate(mutations):
+                document = copy.deepcopy(self.document)
+                document["source_observations"][0]["observation"] = value
+                path = Path(directory) / f"redaction-{index}.json"
+                path.write_text(json.dumps(document), encoding="utf-8")
+                for optimized in (False, True):
+                    with self.subTest(index=index, optimized=optimized):
+                        result = self.run_cli(optimized, "--cases", str(path))
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(result.stderr, "")
+                        self.assertNotIn(value, result.stdout)
+                        self.assertNotIn(str(path), result.stdout)
+                        self.assertEqual(
+                            json.loads(result.stdout),
+                            {"error": {"code": "contract", "message": "session persistence fixture rejected"}},
+                        )
 
     def test_strict_json_rejects_duplicate_nonfinite_invalid_utf8_and_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

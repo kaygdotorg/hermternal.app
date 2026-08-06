@@ -1,43 +1,6 @@
 {
-  "schema": "hermternal.session-persistence-baseline.v1",
-  "validator": "contracts/fixtures/session-persistence/validate.py",
-  "command": "python3 contracts/fixtures/session-persistence/validate.py",
-  "build_mode": "N/A",
-  "artifact_files": [
-    {
-      "path": "README.md",
-      "sha256": "d0ca31e4ad744350f4d73e07dd892155fd13997a88cde6b9b82506d61e7ec4ab",
-      "size_bytes": 5006
-    },
-    {
-      "path": "cases.json",
-      "sha256": "59aec1f5b6eb83904f355df850b61379b737b64c6c214b47a909d0976acca6da",
-      "size_bytes": 68736
-    },
-    {
-      "path": "validate.py",
-      "sha256": "7c499ca54dad7af1f6421cf8f5a3f2af99627b3441ae900f612a32e25bfae288",
-      "size_bytes": 64783
-    },
-    {
-      "path": "test_validate.py",
-      "sha256": "b69bb1ce49022526657e28c017a1445c0352323d61d8826a388028f764310692",
-      "size_bytes": 20629
-    },
-    {
-      "path": "baseline-evidence.json",
-      "sha256": "6518b2b0c08dc4da2131585fce057cdf3af4acddbd5149aa08a94c738a7f7f94",
-      "size_bytes": 1458
-    }
-  ],
-  "artifact_bytes": 160612,
-  "environment": {
-    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
-    "python": "3.14.6"
-  },
-  "repetitions": 30,
+  "schema": "hermternal.session-persistence-baseline-evidence.v1",
   "normal": {
-    "command": "python3 contracts/fixtures/session-persistence/validate.py",
     "samples_ms": [
       47.742625,
       48.149958,
@@ -79,7 +42,6 @@
     }
   },
   "optimized": {
-    "command": "python3 -O contracts/fixtures/session-persistence/validate.py",
     "samples_ms": [
       45.249292,
       46.095917,
@@ -119,6 +81,5 @@
       "max": 49.044125,
       "mean": 47.296936
     }
-  },
-  "threshold": null
+  }
 }

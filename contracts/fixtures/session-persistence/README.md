@@ -13,6 +13,8 @@ The fixture defines deterministic behavior for:
 - reopen/resume of the same stored session and server-owned history;
 - explicit empty, interrupted, detached, and delivery-uncertain states;
 - duplicate create, prompt, persistence, and resume evidence;
+- identity-bound persistence acknowledgements and active-turn completion;
+- empty, pending, and failed close rejection without a durable row;
 - persistence, resume, malformed, foreign, and unknown-event failures;
 - fail-closed behavior with no silent new-session or automatic prompt fallback.
 
@@ -60,8 +62,14 @@ The important boundary is:
 3. A known persistence failure preserves the draft, clears transient running
    state, and requires an explicit retry.
 4. Resume reads the existing server session and restores its durable projection.
-5. A missing, foreign, interrupted, malformed, or unknown result fails closed.
-6. When prompt delivery is uncertain, restore source state before any user-led
+5. A persistence acknowledgement must carry the matching live and stored
+   session identities before the state can become `ready`.
+6. A completion must correspond to an active prompt turn; stale completion
+   evidence fails closed.
+7. A missing, foreign, interrupted, malformed, or unknown result fails closed.
+8. Empty, pending, or failed sessions without a durable row cannot claim a
+   resumable `closed` state.
+9. When prompt delivery is uncertain, restore source state before any user-led
    decision. Automatic prompt resubmission is forbidden.
 
 ## Commands and evidence
@@ -76,10 +84,12 @@ python3 -m unittest contracts/fixtures/session-persistence/test_validate.py
 
 `test_validate.py` invokes both approved validator commands as real subprocesses,
 then exercises strict JSON, redaction, baseline, and semantic regression paths.
-`validation-baseline.json` contains 30 measured normal samples and 30 measured
-`-O` samples from the approved commands, with min/p50/p95/max/mean distributions.
-The baseline is reproducibility evidence for the reviewed machine only;
-`threshold` is deliberately `null` and is not a performance budget.
+`baseline-evidence.json` is the checked-in canonical timing trust anchor. The
+validator pins its SHA-256 and requires `validation-baseline.json` to reproduce
+both raw sample arrays and their min/p50/p95/max/mean distributions. The
+baseline contains 30 measured normal samples and 30 measured `-O` samples from
+the approved commands. It is reproducibility evidence for the reviewed machine
+only; `threshold` is deliberately `null` and is not a performance budget.
 
 ## Applicability boundaries
 
