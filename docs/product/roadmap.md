@@ -11,6 +11,12 @@ This file is the local source of truth for the v0.0.1 GitHub roadmap. Each stabl
 
 Each issue owns one independently verifiable operation or artifact. Split an issue when separate parts can merge, fail, or be reviewed independently.
 
+## v0.0.1 scope correction
+
+Chat is the v0.0.1 release priority. User-facing deep-link UI and full-text session-search UI are deferred to v0.0.2 because both UIs need redesign. User-facing sharing remains deferred. The existing `C-07A`, `C-15`, and `C-16` search and deep-link contracts remain future compatibility references. Internal stable IDs and authentication callback routing remain allowed where v0.0.1 chat or sign-in needs them.
+
+The stable roadmap keys remain for contract traceability. Rows described as deferred to v0.0.2 are not v0.0.1 release work. Deferred UI rows MUST NOT be hard dependencies for v0.0.1 chat, authentication, accessibility, performance, or release-gate work.
+
 ## Milestones
 
 | Code | Milestone | Exit proof | Depends on |
@@ -92,8 +98,8 @@ Web-only `W` suffix operations publish the canonical web tokens and artboard man
 | `D-01` | [#72](https://github.com/kaygdotorg/hermternal/issues/72) | Add authentication and provider-selection boards. | `C-02`, `C-02A`, `C-03` |
 | `D-02` | [#73](https://github.com/kaygdotorg/hermternal/issues/73) | Add loading, empty, streaming, interruption, reconnect, offline, and failure boards. | `C-05`, `C-08`, `C-11` |
 | `D-03` | [#74](https://github.com/kaygdotorg/hermternal/issues/74) | Add unsupported-version and compatibility-failure boards. | `C-04`, `C-04A` |
-| `D-04` | [#75](https://github.com/kaygdotorg/hermternal/issues/75) | Add session search result boards. | `C-07A` |
-| `D-04A` | [#76](https://github.com/kaygdotorg/hermternal/issues/76) | Add deep-link result boards. | `C-16` |
+| `D-04` | [#75](https://github.com/kaygdotorg/hermternal/issues/75) | Defer user-facing session-search result boards to v0.0.2; keep `C-07A` as a future compatibility reference. | `C-07A` |
+| `D-04A` | [#76](https://github.com/kaygdotorg/hermternal/issues/76) | Defer user-facing deep-link result boards to v0.0.2; keep `C-16` as a future compatibility reference. | `C-16` |
 | `D-05` | [#77](https://github.com/kaygdotorg/hermternal/issues/77) | Add image attachment lifecycle boards. | `C-14` |
 | `D-06` | [#78](https://github.com/kaygdotorg/hermternal/issues/78) | Add approval and clarification outcome boards. | `C-10` |
 | `D-07` | [#79](https://github.com/kaygdotorg/hermternal/issues/79) | Add web Terminal lifecycle boards. | `C-17`, `C-18` |
@@ -103,10 +109,10 @@ Web-only `W` suffix operations publish the canonical web tokens and artboard man
 | `D-11` | [#83](https://github.com/kaygdotorg/hermternal/issues/83) | Add 200% zoom, localization-growth, and visible-focus boards. | `D-01`, `D-02` |
 | `D-12` | [#84](https://github.com/kaygdotorg/hermternal/issues/84) | Add Dynamic Type, VoiceOver, Switch Control, and hardware-keyboard boards. | `D-09`, `D-10` |
 | `D-13` | [#85](https://github.com/kaygdotorg/hermternal/issues/85) | Add increased-contrast, reduced-transparency, and reduced-motion boards. | `D-02` |
-| `D-14W` | [#205](https://github.com/kaygdotorg/hermternal/issues/205) | Publish web semantic state, breakpoint, typography, and motion tokens. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-11`, `D-13` |
-| `D-15W` | [#206](https://github.com/kaygdotorg/hermternal/issues/206) | Publish the web Paper artboard-to-implementation manifest. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-11`, `D-13`, `D-14W` |
-| `D-14` | [#86](https://github.com/kaygdotorg/hermternal/issues/86) | Publish shared semantic state, breakpoint, typography, and motion tokens after Apple design proof. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-09`, `D-10`, `D-11`, `D-12`, `D-13`, `D-14W` |
-| `D-15` | [#87](https://github.com/kaygdotorg/hermternal/issues/87) | Publish the shared Paper artboard-to-implementation manifest after Apple design proof. | `D-01`, `D-02`, `D-03`, `D-04`, `D-04A`, `D-05`, `D-06`, `D-07`, `D-08`, `D-09`, `D-10`, `D-11`, `D-12`, `D-13`, `D-14`, `D-15W` |
+| `D-14W` | [#205](https://github.com/kaygdotorg/hermternal/issues/205) | Publish web semantic state, breakpoint, typography, and motion tokens. | `D-01`, `D-02`, `D-03`, `D-05`, `D-06`, `D-07`, `D-08`, `D-11`, `D-13` |
+| `D-15W` | [#206](https://github.com/kaygdotorg/hermternal/issues/206) | Publish the web Paper artboard-to-implementation manifest. | `D-01`, `D-02`, `D-03`, `D-05`, `D-06`, `D-07`, `D-08`, `D-11`, `D-13`, `D-14W` |
+| `D-14` | [#86](https://github.com/kaygdotorg/hermternal/issues/86) | Publish shared semantic state, breakpoint, typography, and motion tokens after Apple design proof. | `D-01`, `D-02`, `D-03`, `D-05`, `D-06`, `D-07`, `D-08`, `D-09`, `D-10`, `D-11`, `D-12`, `D-13`, `D-14W` |
+| `D-15` | [#87](https://github.com/kaygdotorg/hermternal/issues/87) | Publish the shared Paper artboard-to-implementation manifest after Apple design proof. | `D-01`, `D-02`, `D-03`, `D-05`, `D-06`, `D-07`, `D-08`, `D-09`, `D-10`, `D-11`, `D-12`, `D-13`, `D-14`, `D-15W` |
 
 ## M3 — deployment and security proof
 
@@ -174,9 +180,9 @@ Web-only `W` suffix operations remove Swift and Apple benchmark prerequisites fr
 | `W-08` | [#122](https://github.com/kaygdotorg/hermternal/issues/122) | Implement reconnect and uncertain-delivery recovery. | `C-06`, `W-07` |
 | `W-09` | [#123](https://github.com/kaygdotorg/hermternal/issues/123) | Implement session list. | `C-07`, `W-06`, `W-08` |
 | `W-09A` | [#124](https://github.com/kaygdotorg/hermternal/issues/124) | Implement session restoration. | `C-07`, `W-06`, `W-08` |
-| `W-10` | [#125](https://github.com/kaygdotorg/hermternal/issues/125) | Implement full-text session search. | `C-07A`, `W-09`, `D-04` |
-| `W-10A` | [#126](https://github.com/kaygdotorg/hermternal/issues/126) | Implement session lineage resolution. | `C-07B`, `W-09`, `D-04` |
-| `W-11` | [#127](https://github.com/kaygdotorg/hermternal/issues/127) | Implement web deep-link parsing and direct-load restoration. | `C-16`, `W-09A`, `D-04A` |
+| `W-10` | [#125](https://github.com/kaygdotorg/hermternal/issues/125) | Defer user-facing full-text session search to v0.0.2; keep `C-07A` as a future compatibility reference. | `C-07A`, `W-09`, `D-04` |
+| `W-10A` | [#126](https://github.com/kaygdotorg/hermternal/issues/126) | Implement internal session lineage resolution and stable IDs needed by chat; do not add a user-facing search UI. | `C-07B`, `W-09` |
+| `W-11` | [#127](https://github.com/kaygdotorg/hermternal/issues/127) | Defer user-facing web deep-link UI to v0.0.2; keep parsing and direct-load rules as future compatibility references. | `C-16`, `W-09A`, `D-04A` |
 | `W-12` | [#128](https://github.com/kaygdotorg/hermternal/issues/128) | Implement prompt submission. | `C-08`, `W-07`, `D-02` |
 | `W-12A` | [#129](https://github.com/kaygdotorg/hermternal/issues/129) | Implement streamed message rendering. | `C-08`, `W-07`, `D-02` |
 | `W-13` | [#130](https://github.com/kaygdotorg/hermternal/issues/130) | Implement tool lifecycle rendering. | `C-09`, `W-12A` |
@@ -198,7 +204,7 @@ Web-only `W` suffix operations remove Swift and Apple benchmark prerequisites fr
 | `W-24` | [#146](https://github.com/kaygdotorg/hermternal/issues/146) | Add Paper visual-regression coverage for shipped web states. | `D-15W`, `W-20`, `W-23` |
 | `W-25` | [#147](https://github.com/kaygdotorg/hermternal/issues/147) | Enforce web regression budgets. | `B-08W`, `B-08AW`, `W-20`, `W-21`, `W-21A`, `W-21B`, `W-21C` |
 | `W-25A` | [#148](https://github.com/kaygdotorg/hermternal/issues/148) | Enforce PTY regression budgets. | `B-08W`, `B-08AW`, `W-22`, `W-22A`, `W-23` |
-| `W-26` | [#203](https://github.com/kaygdotorg/hermternal/issues/203) | Prove the fixture-driven web mock exit gate with no live network egress. | `C-20`, `D-15W`, `W-02`, `W-02A`, `W-10`, `W-10A`, `W-11`, `W-13`, `W-14`, `W-15`, `W-16`, `W-17`, `W-18`, `W-18A`, `W-19`, `W-24`, `W-25`, `W-25A` |
+| `W-26` | [#203](https://github.com/kaygdotorg/hermternal/issues/203) | Prove the fixture-driven web mock exit gate with no live network egress. | `C-20`, `D-15W`, `W-02`, `W-02A`, `W-10A`, `W-13`, `W-14`, `W-15`, `W-16`, `W-17`, `W-18`, `W-18A`, `W-19`, `W-24`, `W-25`, `W-25A` |
 
 ## M6 — Apple clients
 
@@ -213,8 +219,8 @@ Web-only `W` suffix operations remove Swift and Apple benchmark prerequisites fr
 | `A-06` | [#155](https://github.com/kaygdotorg/hermternal/issues/155) | Implement chat WebSocket ticket acquisition. | `C-03`, `A-04` |
 | `A-07` | [#156](https://github.com/kaygdotorg/hermternal/issues/156) | Implement native OAuth/OIDC when source-accepted and platform-proven; block unsupported or unproven transports. | `C-02`, `C-03`, `DEP-09`, `A-03`, `D-01`, `D-03` |
 | `A-08` | [#157](https://github.com/kaygdotorg/hermternal/issues/157) | Implement shared reconnect and uncertain-delivery recovery. | `C-06`, `A-02`, `A-02A`, `A-06` |
-| `A-09` | [#158](https://github.com/kaygdotorg/hermternal/issues/158) | Implement iOS session list and restoration. | `C-07`, `A-08`, `D-04` |
-| `A-09A` | [#159](https://github.com/kaygdotorg/hermternal/issues/159) | Implement iOS deep-link routing. | `C-16`, `A-09`, `D-04A` |
+| `A-09` | [#158](https://github.com/kaygdotorg/hermternal/issues/158) | Implement iOS session list and restoration. | `C-07`, `A-08` |
+| `A-09A` | [#159](https://github.com/kaygdotorg/hermternal/issues/159) | Defer user-facing iOS deep-link UI to v0.0.2; keep `C-16` as a future compatibility reference. | `C-16`, `A-09`, `D-04A` |
 | `A-10` | [#160](https://github.com/kaygdotorg/hermternal/issues/160) | Implement iOS prompt submission. | `C-08`, `A-09`, `D-02` |
 | `A-10A` | [#161](https://github.com/kaygdotorg/hermternal/issues/161) | Implement iOS streamed message rendering. | `C-08`, `A-09`, `D-02` |
 | `A-11` | [#162](https://github.com/kaygdotorg/hermternal/issues/162) | Implement iOS tool lifecycle rendering. | `C-09`, `A-10A` |
@@ -231,13 +237,13 @@ Web-only `W` suffix operations remove Swift and Apple benchmark prerequisites fr
 | `A-19` | [#173](https://github.com/kaygdotorg/hermternal/issues/173) | Implement macOS windows, sidebar, and navigation. | `D-10`, `A-09`, `A-10`, `A-10A` |
 | `A-20` | [#174](https://github.com/kaygdotorg/hermternal/issues/174) | Implement macOS menus and keyboard commands. | `D-10`, `D-12`, `A-19` |
 | `A-20A` | [#175](https://github.com/kaygdotorg/hermternal/issues/175) | Implement macOS focus behavior. | `D-10`, `D-12`, `A-19` |
-| `A-20B` | [#176](https://github.com/kaygdotorg/hermternal/issues/176) | Implement macOS deep-link routing. | `C-16`, `D-10`, `D-12`, `A-19` |
-| `A-21` | [#177](https://github.com/kaygdotorg/hermternal/issues/177) | Implement VoiceOver and Switch Control behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A`, `A-20B` |
-| `A-21A` | [#178](https://github.com/kaygdotorg/hermternal/issues/178) | Implement Dynamic Type behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A`, `A-20B` |
-| `A-21B` | [#179](https://github.com/kaygdotorg/hermternal/issues/179) | Implement contrast behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A`, `A-20B` |
-| `A-21C` | [#180](https://github.com/kaygdotorg/hermternal/issues/180) | Implement reduced-motion behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A`, `A-20B` |
+| `A-20B` | [#176](https://github.com/kaygdotorg/hermternal/issues/176) | Defer user-facing macOS deep-link UI to v0.0.2; keep `C-16` as a future compatibility reference. | `C-16`, `D-10`, `D-12`, `A-19` |
+| `A-21` | [#177](https://github.com/kaygdotorg/hermternal/issues/177) | Implement VoiceOver and Switch Control behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A` |
+| `A-21A` | [#178](https://github.com/kaygdotorg/hermternal/issues/178) | Implement Dynamic Type behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A` |
+| `A-21B` | [#179](https://github.com/kaygdotorg/hermternal/issues/179) | Implement contrast behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A` |
+| `A-21C` | [#180](https://github.com/kaygdotorg/hermternal/issues/180) | Implement reduced-motion behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A` |
 | `A-22` | [#181](https://github.com/kaygdotorg/hermternal/issues/181) | Enforce iOS and iPadOS regression budgets. | `B-08`, `B-08A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-21`, `A-21A`, `A-21B`, `A-21C` |
-| `A-22A` | [#182](https://github.com/kaygdotorg/hermternal/issues/182) | Enforce macOS regression budgets. | `B-08`, `B-08A`, `A-19`, `A-20`, `A-20A`, `A-20B`, `A-21`, `A-21A`, `A-21B`, `A-21C` |
+| `A-22A` | [#182](https://github.com/kaygdotorg/hermternal/issues/182) | Enforce macOS regression budgets. | `B-08`, `B-08A`, `A-19`, `A-20`, `A-20A`, `A-21`, `A-21A`, `A-21B`, `A-21C` |
 
 Apple clients do not implement `/api/pty`, direct SSH, Android, Windows, profile aggregation, or an unreviewed OAuth callback. They may implement a native OAuth/OIDC callback only when `DEP-09` proves source acceptance and platform support.
 
@@ -333,4 +339,4 @@ An issue is not atomic when it owns separate platform implementations, unrelated
 
 ## Exclusions
 
-Do not create v0.0.1 implementation issues for Dashboard administration, direct `~/.hermes` access, direct SSH, arbitrary file uploads, a local transcript mirror, profile aggregation, Apple Terminal, Android, Windows, production telemetry, signing, app-store submission, user-facing sharing, or an upstream Hermes callback extension.
+Do not create v0.0.1 implementation issues for Dashboard administration, direct `~/.hermes` access, direct SSH, arbitrary file uploads, a local transcript mirror, profile aggregation, Apple Terminal, Android, Windows, production telemetry, signing, app-store submission, user-facing deep-link UI, full-text session-search UI, user-facing sharing, or an upstream Hermes callback extension. Keep the existing deep-link and search contracts, internal stable IDs, and required authentication callback routing as compatibility or v0.0.1 chat/auth work where needed.

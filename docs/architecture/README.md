@@ -16,7 +16,17 @@ Share contracts, fixtures, state specifications, test scenarios, and semantic to
 
 ## Product boundary
 
-The web client owns chat and the full `/api/pty` Terminal. Apple clients own chat only. Both clients support one profile, provider-neutral discovery, images only, approvals and clarification, private deep links under `/v1/c/...`, and the source-correct active-session model switch. Normal deferred choices may apply on the next turn. A deferred expensive choice may need confirmation and resubmission after the turn. There is no transcript mirror. Sharing starts in `v0.0.2`. No client adds terminal-read, sudo, or secret operations.
+The web client owns chat and the full `/api/pty` Terminal. Apple clients own chat only. v0.0.1 is chat-first.
+
+Both clients support one profile, provider-neutral discovery, images only, approvals and clarification, and the source-correct active-session model switch.
+
+The private deep-link and session-search contracts remain future compatibility references. User-facing deep-link UI and full-text session-search UI are deferred to v0.0.2. Both UIs need redesign.
+
+Internal stable IDs and authentication callback routing remain allowed where chat or sign-in needs them.
+
+Normal deferred choices may apply on the next turn. A deferred expensive choice may need confirmation and resubmission after the turn.
+
+There is no transcript mirror. User-facing sharing remains deferred to v0.0.2. No client adds terminal-read, sudo, or secret operations.
 
 ## Transport and deployment boundary
 

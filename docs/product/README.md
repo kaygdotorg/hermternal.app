@@ -19,9 +19,11 @@ Deliver a focused chat client for the web and native Apple platforms:
 - session creation and restoration;
 - prompt submission, streaming, interruption, approvals, clarification, and clear recovery states;
 - images only for attachments; and
-- private deep links under `/v1/c/...`.
+- internal session restoration and stable IDs needed by chat.
 
-The web client also owns the full `/api/pty` Terminal. Terminal is not part of the Apple clients. The client does not add terminal-read, sudo, or secret operations. A transcript mirror is out of scope. Sharing starts in `v0.0.2`.
+The web client also owns the full `/api/pty` Terminal. Terminal is not part of the Apple clients. The client does not add terminal-read, sudo, or secret operations. A transcript mirror is out of scope.
+
+Chat is the v0.0.1 release priority. User-facing deep-link UI and full-text session-search UI are deferred to v0.0.2 because both UIs need redesign. The existing deep-link and search contracts remain future compatibility references. Authentication callback routing and internal stable IDs remain allowed where v0.0.1 chat or sign-in needs them. User-facing sharing remains deferred to v0.0.2.
 
 ## Interaction rules
 
