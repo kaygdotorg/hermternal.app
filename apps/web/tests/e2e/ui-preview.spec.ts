@@ -124,7 +124,10 @@ test('UI preview exposes local state controls and dark appearance', async ({ pag
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'failure');
   await expect(page.getByTestId('runtime-preview')).toHaveAttribute('data-appearance', 'dark');
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-appearance', 'dark');
-  await expect(page.getByText('Hermes is responding')).toBeVisible();
+  await expect(page.getByText('Synthetic preview response')).toBeVisible();
+  await expect(page.getByText('Local fixture playback · no live Hermes connection')).toBeVisible();
+  await expect(page.getByRole('article', { name: 'Synthetic preview response from a local fixture' })).toBeVisible();
+  await expect(page.getByText('Hermes is responding')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Sign-in did not complete' })).toBeVisible();
 });
 
@@ -172,7 +175,9 @@ test('provider choices route to deterministic local password and callback states
   await expect(page.getByLabel('Username')).toBeFocused();
 });
 
-test('approved compatibility gates remain fail-closed in desktop light and narrow dark layouts', async ({ page }) => {
+test('approved compatibility gates inert every underlying action for pointer, keyboard, and accessibility users', async ({
+  page
+}) => {
   for (const fixture of [
     {
       state: 'compatibility-check-failed',
@@ -192,11 +197,44 @@ test('approved compatibility gates remain fail-closed in desktop light and narro
     await page.getByRole('combobox', { name: 'Appearance' }).selectOption(fixture.appearance);
     await page.getByRole('combobox', { name: 'Runtime state' }).selectOption(fixture.state);
 
+    const preview = page.getByTestId('runtime-preview');
+    const underlay = page.getByTestId('workspace-underlay');
+    const retry = preview.getByRole('button', { name: 'Retry compatibility check' });
+    const returnToSignIn = preview.getByRole('button', { name: 'Return to sign-in' });
     await expect(page.getByRole('heading', { name: fixture.heading })).toBeVisible();
-    await expect(page.getByRole('textbox', { name: 'Message Hermes' })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Allow once, unavailable' })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Retry compatibility check' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Return to sign-in' })).toBeVisible();
+    await expect(underlay).toHaveAttribute('inert', '');
+    await expect(retry).toBeFocused();
+
+    // The workspace remains visibly recognizable behind the gate, but inert
+    // removes every descendant from keyboard, pointer, and accessibility APIs.
+    await expect(underlay.locator('.workspace-grid')).toBeVisible();
+    await expect(underlay.locator('[aria-label="Start a new chat"]')).toHaveCount(1);
+    await expect(underlay.getByRole('button')).toHaveCount(0);
+    await expect(underlay.getByRole('textbox')).toHaveCount(0);
+    await expect(preview.getByRole('button')).toHaveCount(2);
+
+    const blockedNewChat = underlay.locator('[aria-label="Start a new chat"]');
+    await blockedNewChat.dispatchEvent('pointerdown', { button: 0, pointerType: 'mouse' });
+    await blockedNewChat.evaluate((element: HTMLElement) => element.click());
+    await underlay
+      .locator('[aria-label="Edit conversation title"]')
+      .first()
+      .evaluate((element: HTMLElement) => element.click());
+    await expect(page.locator('.section-note').first()).toHaveText('No runtime action yet');
+    await expect(page.getByTestId('mobile-title-editor')).toHaveCount(0);
+
+    await underlay.locator('[aria-label="Start a new chat"]').evaluate((element: HTMLElement) => element.focus());
+    await expect(retry).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(returnToSignIn).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(retry).toBeFocused();
+
+    await retry.click();
+    await expect(page.locator('.section-note').first()).toHaveText('retry-compatibility-check');
+    await returnToSignIn.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.section-note').first()).toHaveText('return-to-sign-in');
 
     const overflow = await page.evaluate(() => ({
       clientWidth: document.documentElement.clientWidth,

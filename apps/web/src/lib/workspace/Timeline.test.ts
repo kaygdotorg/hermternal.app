@@ -31,6 +31,39 @@ describe('Timeline', () => {
     }
   );
 
+  it('labels fixture streaming visibly and accessibly as synthetic by default', () => {
+    const item: TimelineItem = {
+      kind: 'streaming',
+      id: 'streaming-test',
+      model: 'Atlas · balanced',
+      text: 'Synthetic partial response'
+    };
+
+    render(Timeline, { items: [item], runtimeState: 'streaming' });
+
+    expect(screen.getByText('Hermes fixture')).toBeVisible();
+    expect(screen.getByText('Synthetic preview')).toBeVisible();
+    expect(
+      screen.getByRole('article', { name: 'Synthetic preview response from a local fixture' })
+    ).toHaveAttribute('aria-live', 'polite');
+    expect(screen.queryByText('Responding')).not.toBeInTheDocument();
+  });
+
+  it('requires an explicit live-runtime source before exposing live status copy', () => {
+    const item: TimelineItem = {
+      kind: 'streaming',
+      id: 'live-streaming-test',
+      model: 'Atlas · balanced',
+      text: 'Live partial response'
+    };
+
+    render(Timeline, { dataSource: 'live-runtime', items: [item], runtimeState: 'streaming' });
+
+    expect(screen.getByText('Hermes')).toBeVisible();
+    expect(screen.getByText('Responding')).toBeVisible();
+    expect(screen.getByRole('article', { name: 'Live Hermes response' })).toHaveAttribute('aria-live', 'polite');
+  });
+
   it('never mounts caller-provided image sources in the local preview', () => {
     const sources = ['https://example.com/image.png', '/same-origin.png', 'data:image/png;base64,ZmFrZQ=='];
 

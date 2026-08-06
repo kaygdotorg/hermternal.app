@@ -2,10 +2,16 @@
   import Icon from './Icon.svelte';
   import type { IconName } from './icon-types';
   import Pill from './Pill.svelte';
-  import type { TimelineItem, WorkspaceActionHandler, WorkspaceRuntimeState } from './types';
+  import type {
+    TimelineItem,
+    WorkspaceActionHandler,
+    WorkspaceDataSource,
+    WorkspaceRuntimeState
+  } from './types';
 
   export let items: TimelineItem[] = [];
   export let runtimeState: WorkspaceRuntimeState = 'ready';
+  export let dataSource: WorkspaceDataSource = 'synthetic-preview';
   export let onAction: WorkspaceActionHandler = () => {};
 
   $: timelineActionsDisabled = runtimeState !== 'ready';
@@ -146,12 +152,20 @@
         <figcaption>{item.attachment.caption}</figcaption>
       </figure>
     {:else if item.kind === 'streaming'}
-      <article aria-live="polite" class="timeline-row streaming-card">
+      <article
+        aria-label={dataSource === 'live-runtime'
+          ? 'Live Hermes response'
+          : 'Synthetic preview response from a local fixture'}
+        aria-live="polite"
+        class="timeline-row streaming-card"
+      >
         <header class="assistant-header">
           <span aria-hidden="true" class="assistant-avatar">H</span>
-          <span class="assistant-name">Hermes</span>
+          <span class="assistant-name">{dataSource === 'live-runtime' ? 'Hermes' : 'Hermes fixture'}</span>
           <span class="assistant-model">{item.model}</span>
-          <span class="streaming-label"><span class="streaming-dot"></span>Responding</span>
+          <span class="streaming-label">
+            <span class="streaming-dot"></span>{dataSource === 'live-runtime' ? 'Responding' : 'Synthetic preview'}
+          </span>
         </header>
         <p class="assistant-copy">{item.text}<span aria-hidden="true" class="streaming-caret"></span></p>
       </article>

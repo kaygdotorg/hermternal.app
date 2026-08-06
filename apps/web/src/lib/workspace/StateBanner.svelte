@@ -1,10 +1,34 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
-  import type { WorkspaceActionHandler, WorkspaceRuntimeState } from './types';
+  import type { WorkspaceActionHandler, WorkspaceDataSource, WorkspaceRuntimeState } from './types';
 
   export let state: WorkspaceRuntimeState = 'ready';
+  export let dataSource: WorkspaceDataSource = 'synthetic-preview';
   export let onAction: WorkspaceActionHandler = () => {};
+
+  let recoveryAction: HTMLButtonElement | undefined;
+  let focusedGateState: WorkspaceRuntimeState | undefined;
+
+  async function focusGateRecovery(enteredState: WorkspaceRuntimeState): Promise<void> {
+    await tick();
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 0);
+    });
+    if (state === enteredState) recoveryAction?.focus();
+  }
+
+  $: if (
+    (state === 'compatibility-check-failed' || state === 'unsupported-version') &&
+    state !== focusedGateState
+  ) {
+    // Move focus out of the newly inert workspace and into the first recovery
+    // action. The alert remains visible and announced without becoming a tab stop.
+    focusedGateState = state;
+    void focusGateRecovery(state);
+  }
 </script>
 
 {#if state === 'streaming'}
@@ -12,8 +36,12 @@
     <div class="state-copy">
       <span aria-hidden="true" class="state-dot"></span>
       <div>
-        <strong>Hermes is responding</strong>
-        <span>Input stays available</span>
+        <strong>{dataSource === 'live-runtime' ? 'Hermes is responding' : 'Synthetic preview response'}</strong>
+        <span>
+          {dataSource === 'live-runtime'
+            ? 'Input stays available'
+            : 'Local fixture playback · no live Hermes connection'}
+        </span>
       </div>
     </div>
     <Pill
@@ -131,6 +159,7 @@
 
     <div class="gate-actions">
       <Pill
+        bind:element={recoveryAction}
         fullWidth
         label="Retry compatibility check"
         variant="action"

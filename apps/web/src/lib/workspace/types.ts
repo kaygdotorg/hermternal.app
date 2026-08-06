@@ -1,5 +1,8 @@
 export type Appearance = 'light' | 'dark';
 
+/** Presentation copy must name synthetic playback unless a future runtime explicitly opts into live status semantics. */
+export type WorkspaceDataSource = 'synthetic-preview' | 'live-runtime';
+
 export type WorkspaceRuntimeState =
   | 'ready'
   | 'streaming'

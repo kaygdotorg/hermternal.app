@@ -13,11 +13,13 @@
     Appearance,
     SessionSummary,
     WorkspaceAction,
+    WorkspaceDataSource,
     WorkspaceActionHandler,
     WorkspaceRuntimeState
   } from './types';
 
   export let appearance: Appearance = 'light';
+  export let dataSource: WorkspaceDataSource = 'synthetic-preview';
   export let state: WorkspaceRuntimeState = 'stopped';
   export let title = 'Quarterly analysis';
   export let model = 'Atlas · balanced';
@@ -45,6 +47,17 @@
     state === 'compatibility-check-failed' ||
     state === 'unsupported-version';
   $: compatibilityBlocked = state === 'compatibility-check-failed' || state === 'unsupported-version';
+  $: if (compatibilityBlocked) {
+    // A fail-closed gate dismisses transient drawers and editors before the
+    // underlay becomes inert, leaving only the two recovery actions available.
+    mobileSidebarOpen = false;
+    mobileWorkspaceOpen = false;
+    mobileTitleEditing = false;
+  }
+
+  function recoveryActionAllowed(action: WorkspaceAction): boolean {
+    return action.type === 'retry-compatibility-check' || action.type === 'return-to-sign-in';
+  }
 
   async function afterActivationFrame(): Promise<void> {
     await tick();
@@ -55,6 +68,7 @@
   }
 
   async function startMobileTitleEditing(): Promise<void> {
+    if (compatibilityBlocked) return;
     mobileTitleDraft = localTitle;
     mobileTitleEditing = true;
     await afterActivationFrame();
@@ -86,12 +100,16 @@
   }
 
   function toggleMobileWorkspace(): void {
+    if (compatibilityBlocked) return;
     mobileWorkspaceOpen = !mobileWorkspaceOpen;
     mobileSidebarOpen = false;
-    onAction({ type: 'open-workspace' });
+    handleAction({ type: 'open-workspace' });
   }
 
   function handleAction(action: WorkspaceAction): void {
+    // `inert` is the browser and accessibility boundary; this handler guard is
+    // the matching programmatic boundary for synthetic or forced DOM events.
+    if (compatibilityBlocked && !recoveryActionAllowed(action)) return;
     if (action.type === 'toggle-inspector') inspectorVisible = !inspectorVisible;
     if (action.type === 'select-session') {
       activeSessionId = action.sessionId;
@@ -110,7 +128,13 @@
   data-state={state}
   data-testid="runtime-preview"
 >
-  <div class="mobile-toolbar" inert={mobileTitleEditing}>
+  <div
+    aria-hidden={compatibilityBlocked ? 'true' : undefined}
+    class="workspace-underlay"
+    data-testid="workspace-underlay"
+    inert={compatibilityBlocked || mobileTitleEditing}
+  >
+    <div class="mobile-toolbar">
     <div class="mobile-title-island" aria-label="Navigation and conversation">
       <Pill
         ariaLabel="Open conversations"
@@ -143,7 +167,7 @@
     />
   </div>
 
-  <div class:inspector-hidden={!inspectorVisible} class="workspace-grid" inert={mobileTitleEditing}>
+    <div class:inspector-hidden={!inspectorVisible} class="workspace-grid">
     <aside class:open={mobileSidebarOpen} class="sidebar">
       <SessionList {activeSessionId} {sessions} onAction={handleAction} />
     </aside>
@@ -152,15 +176,16 @@
       <ConversationHeader model={localModel} title={localTitle} onAction={handleAction} />
 
       <div class="conversation-body">
-        <Timeline items={timeline} runtimeState={state} onAction={handleAction} />
+        <Timeline {dataSource} items={timeline} runtimeState={state} onAction={handleAction} />
 
         <div
-          class:compatibility-layer={compatibilityBlocked}
           class:empty-layer={state === 'empty'}
-          class:visible={state !== 'ready'}
+          class:visible={state !== 'ready' && !compatibilityBlocked}
           class="state-layer"
         >
-          <StateBanner {state} onAction={handleAction} />
+          {#if !compatibilityBlocked}
+            <StateBanner {dataSource} {state} onAction={handleAction} />
+          {/if}
         </div>
 
         <Composer
@@ -177,13 +202,20 @@
     {/if}
   </div>
 
-  {#if mobileWorkspaceOpen}
-    <aside aria-label="Workspace" class="mobile-workspace-drawer" inert={mobileTitleEditing}>
-      <ArtifactInspector onAction={handleAction} />
-    </aside>
+    {#if mobileWorkspaceOpen}
+      <aside aria-label="Workspace" class="mobile-workspace-drawer">
+        <ArtifactInspector onAction={handleAction} />
+      </aside>
+    {/if}
+  </div>
+
+  {#if compatibilityBlocked}
+    <div class="state-layer compatibility-layer visible" data-testid="compatibility-gate-layer">
+      <StateBanner {dataSource} {state} onAction={handleAction} />
+    </div>
   {/if}
 
-  {#if mobileTitleEditing}
+  {#if mobileTitleEditing && !compatibilityBlocked}
     <div
       aria-label="Edit conversation title"
       aria-modal="true"
@@ -325,6 +357,10 @@
     }
   }
 
+  .workspace-underlay {
+    display: contents;
+  }
+
   .workspace-grid {
     box-sizing: border-box;
     display: grid;
@@ -407,10 +443,15 @@
   .state-layer.compatibility-layer {
     top: 0;
     bottom: 0;
+    z-index: 12;
     align-items: center;
     padding: 24px;
     background: color-mix(in srgb, var(--canvas) 58%, transparent);
     backdrop-filter: blur(8px) saturate(115%);
+  }
+
+  .state-layer.compatibility-layer :global(.compatibility-gate) {
+    pointer-events: auto;
   }
 
   .sr-only {

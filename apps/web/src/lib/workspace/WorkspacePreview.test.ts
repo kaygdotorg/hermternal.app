@@ -123,10 +123,14 @@ describe('WorkspacePreview', () => {
     expect(onAction).not.toHaveBeenCalled();
   });
 
-  it('renders both fail-closed compatibility gates with recovery actions and disabled input', () => {
+  it('makes the complete workspace underlay inert and emits only compatibility recovery actions', async () => {
     for (const state of ['compatibility-check-failed', 'unsupported-version'] as const) {
       const onAction = vi.fn();
       const view = render(WorkspacePreview, { state, onAction });
+      const preview = screen.getByTestId('runtime-preview');
+      const underlay = screen.getByTestId('workspace-underlay');
+      const retry = screen.getByRole('button', { name: 'Retry compatibility check' });
+      const returnToSignIn = screen.getByRole('button', { name: 'Return to sign-in' });
 
       expect(
         screen.getByRole('heading', {
@@ -134,15 +138,54 @@ describe('WorkspacePreview', () => {
         })
       ).toBeInTheDocument();
       expect(screen.getByRole('alert')).toHaveAttribute('aria-live', 'assertive');
-      expect(screen.getByRole('textbox', { name: 'Message Hermes' })).toBeDisabled();
+      expect((underlay as HTMLElement & { inert: boolean }).inert).toBe(true);
+      expect(underlay).toHaveAttribute('aria-hidden', 'true');
+      expect(preview.querySelector<HTMLTextAreaElement>('[aria-label="Message Hermes"]')).toBeDisabled();
+      await waitFor(() => expect(retry).toHaveFocus());
 
-      fireEvent.click(screen.getByRole('button', { name: 'Retry compatibility check' }));
-      fireEvent.click(screen.getByRole('button', { name: 'Return to sign-in' }));
-      expect(onAction).toHaveBeenCalledWith({ type: 'retry-compatibility-check' });
-      expect(onAction).toHaveBeenCalledWith({ type: 'return-to-sign-in' });
+      const blockedControls = [
+        '[aria-label="Start a new chat"]',
+        '[aria-label="Open Product roadmap, unread"]',
+        '[aria-label="Edit conversation title"]',
+        '[aria-label="Open conversations"]',
+        '[aria-label="Open workspace"]',
+        '[aria-label="Close workspace inspector"]',
+        '[aria-label="Add an attachment"]'
+      ];
+      for (const selector of blockedControls) {
+        const control = underlay.querySelector<HTMLElement>(selector);
+        expect(control).toBeInTheDocument();
+        fireEvent.pointerDown(control!, { button: 0, pointerType: 'mouse' });
+        fireEvent.click(control!);
+      }
+      const composer = underlay.querySelector<HTMLTextAreaElement>('[aria-label="Message Hermes"]');
+      fireEvent.input(composer!, { target: { value: 'Blocked fixture input' } });
+      fireEvent.keyDown(composer!, { key: 'Enter', metaKey: true });
+
+      expect(screen.queryByRole('textbox', { name: 'Conversation title' })).not.toBeInTheDocument();
+      expect(onAction).not.toHaveBeenCalled();
+
+      fireEvent.pointerDown(retry, { button: 0, pointerType: 'mouse' });
+      fireEvent.click(retry);
+      fireEvent.keyDown(returnToSignIn, { key: 'Enter' });
+      fireEvent.click(returnToSignIn);
+      expect(onAction).toHaveBeenCalledTimes(2);
+      expect(onAction).toHaveBeenNthCalledWith(1, { type: 'retry-compatibility-check' });
+      expect(onAction).toHaveBeenNthCalledWith(2, { type: 'return-to-sign-in' });
 
       view.unmount();
     }
+  });
+
+  it('marks fixture streaming as synthetic in visible status and live-region copy', () => {
+    render(WorkspacePreview, { state: 'streaming' });
+
+    const status = screen.getByTestId('streaming-state');
+    expect(status).toHaveTextContent('Synthetic preview response');
+    expect(status).toHaveTextContent('no live Hermes connection');
+    expect(screen.getByText('Hermes fixture')).toBeVisible();
+    expect(screen.getByText('Synthetic preview')).toBeVisible();
+    expect(screen.queryByText('Hermes is responding')).not.toBeInTheDocument();
   });
 
   it('exposes the approved narrow compound island, separate workspace action, and represented title editor', async () => {
