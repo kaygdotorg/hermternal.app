@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>Hermternal prototype icon</title>
+  <rect width="64" height="64" rx="16" fill="#375a50"/>
+  <path d="M18 17h8v12h12V17h8v30h-8V37H26v10h-8V17Z" fill="#fff"/>
+</svg>
