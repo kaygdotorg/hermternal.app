@@ -24,6 +24,8 @@
   export let sessions: SessionSummary[] = DEFAULT_SESSIONS;
   export let timelineItems: TimelineItem[] | undefined = undefined;
   export let timelineEmptyLabel = 'No messages in this synthetic session.';
+  export let dataMode: 'fixture' | 'live' = 'fixture';
+  export let interactionEnabled = true;
   export let artifactInspectorEnabled = true;
   export let onAction: WorkspaceActionHandler = () => {};
 
@@ -37,6 +39,7 @@
   $: timeline = timelineItems ?? timelineForState(state);
   $: if (!artifactInspectorEnabled) inspectorVisible = false;
   $: composerDisabled =
+    !interactionEnabled ||
     state === 'loading' ||
     state === 'offline' ||
     state === 'reconnecting' ||
@@ -86,7 +89,7 @@
         <Timeline emptyLabel={timelineEmptyLabel} items={timeline} runtimeState={state} onAction={handleAction} />
 
         <div class:empty-layer={state === 'empty'} class:visible={state !== 'ready'} class="state-layer">
-          <StateBanner {state} onAction={handleAction} />
+          <StateBanner {dataMode} {state} onAction={handleAction} />
         </div>
 
         <Composer

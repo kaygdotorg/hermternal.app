@@ -149,15 +149,33 @@ describe('WorkspacePreview', () => {
     expect(screen.getByTestId('runtime-preview').querySelector('.workspace-grid')).toHaveClass('inspector-hidden');
   });
 
-  it('distinguishes a real empty live session from fixture timelines', () => {
+  it('distinguishes a real empty live session from fixture timelines and copy', () => {
     render(WorkspacePreview, {
       state: 'empty',
+      dataMode: 'live',
       artifactInspectorEnabled: false,
       timelineEmptyLabel: 'No messages in this chat yet.',
       timelineItems: []
     });
 
     expect(screen.getByText('No messages in this chat yet.')).toBeInTheDocument();
+    expect(screen.getByText('This Hermes session has no messages yet. Send a message to begin.')).toBeInTheDocument();
     expect(screen.queryByText('No messages in this synthetic session.')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Mocked fixture only/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Choose an action' })).not.toBeInTheDocument();
+  });
+
+  it('uses live recovery copy without claiming an unretained draft is safe', () => {
+    render(WorkspacePreview, {
+      state: 'retryable-error',
+      dataMode: 'live',
+      artifactInspectorEnabled: false,
+      timelineItems: []
+    });
+
+    expect(
+      screen.getByText('Reconnect and inspect Hermes history before sending again. No prompt was resent.')
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Your draft is safe/)).not.toBeInTheDocument();
   });
 });
