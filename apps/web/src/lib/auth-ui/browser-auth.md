@@ -14,4 +14,6 @@ Password login success is not enough to enable chat. The exact `GET /api/auth/me
 
 Hermes logout returns a redirect to its login page. The client requests that response with manual redirect handling and then probes `/api/auth/me`. A `401` proves logout. A still-valid identity returns `logout-failed`; an unavailable or malformed probe returns `logout-unverified`. This prevents an ambiguous POST result from being presented as confirmed logout.
 
-The current file is the transport boundary only. UI state wiring, local session-reference clearing, WebSocket shutdown, and the full browser-to-Hermes Playwright journey remain part of the same W-04/web integration stack and must be completed before the feature is merged.
+`browser-auth-session.ts` coordinates this boundary with the reviewed authentication state model. It verifies identity before provider discovery, rejects stale async completions by generation, suppresses duplicate password submission, and never copies a username or password into its observable snapshot. Logout and expiry call the supplied local invalidation hook before publishing any later state. The application uses that hook to close the active WebSocket and clear client-side session references.
+
+The current files provide the transport and lifecycle boundaries. The visual form binding, live workspace transport, and full browser-to-Hermes Playwright journey remain part of the same W-04/web integration stack and must be completed before the feature is merged.

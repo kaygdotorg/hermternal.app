@@ -1,0 +1,161 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { AuthIdentity } from '$lib/transport/live-rest-types';
+import { BrowserAuthError, type BrowserAuthClient } from './browser-auth';
+import { BrowserAuthSession } from './browser-auth-session';
+
+const identity: AuthIdentity = {
+  userId: 'user-1',
+  email: 'person@example.invalid',
+  displayName: 'Synthetic Person',
+  organizationId: 'org-1',
+  provider: 'basic',
+  expiresAt: 2_000_000_000
+};
+
+const passwordProvider = {
+  id: 'basic',
+  name: 'Hermes password',
+  monogram: 'H',
+  kind: 'password' as const,
+  description: 'Username and password supported'
+};
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+function client(overrides: Partial<BrowserAuthClient> = {}): BrowserAuthClient {
+  return {
+    verify: vi.fn(async () => identity),
+    loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
+    logout: vi.fn(async () => undefined),
+    ...overrides
+  };
+}
+
+describe('BrowserAuthSession', () => {
+  it('verifies identity before entering authenticated state', async () => {
+    const authClient = client();
+    const discoverProviders = vi.fn();
+    const session = new BrowserAuthSession({ client: authClient, discoverProviders, invalidateLocalSession: vi.fn() });
+
+    await session.initialize();
+
+    expect(authClient.verify).toHaveBeenCalledTimes(1);
+    expect(discoverProviders).not.toHaveBeenCalled();
+    expect(session.current).toEqual({ status: 'authenticated', identity, providers: [] });
+  });
+
+  it('discovers providers only after the identity probe rejects authentication', async () => {
+    const order: string[] = [];
+    const authClient = client({
+      verify: vi.fn(async () => {
+        order.push('verify');
+        throw new BrowserAuthError('identity-unverified', 401);
+      })
+    });
+    const discoverProviders = vi.fn(async () => {
+      order.push('discover');
+      return { providers: [passwordProvider] };
+    });
+    const session = new BrowserAuthSession({
+      client: authClient,
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+
+    await session.initialize();
+
+    expect(order).toEqual(['verify', 'discover']);
+    expect(session.current).toEqual({ status: 'signed_out', providers: [passwordProvider] });
+  });
+
+  it('keeps password values transient and suppresses a duplicate submission', async () => {
+    const pending = deferred<{ identity: AuthIdentity; next: '/' }>();
+    const loginWithPassword = vi.fn(() => pending.promise);
+    const authClient = client({ loginWithPassword });
+    const session = new BrowserAuthSession({
+      client: authClient,
+      discoverProviders: async () => ({ providers: [passwordProvider] }),
+      invalidateLocalSession: vi.fn()
+    });
+    await session.retryDiscovery();
+    session.chooseProvider('basic');
+
+    const first = session.loginWithPassword({ username: 'synthetic-user', password: 'transient-secret' });
+    const second = session.loginWithPassword({ username: 'duplicate', password: 'second-secret' });
+
+    expect(loginWithPassword).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(session.current)).not.toContain('transient-secret');
+    expect(JSON.stringify(session.current)).not.toContain('second-secret');
+    await second;
+    pending.resolve({ identity, next: '/' });
+    await first;
+    expect(session.current.status).toBe('authenticated');
+  });
+
+  it('invalidates local chat before logout and accepts only verified server logout', async () => {
+    const events: string[] = [];
+    const authClient = client({
+      logout: vi.fn(async () => {
+        events.push('server-logout');
+      })
+    });
+    const session = new BrowserAuthSession({
+      client: authClient,
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession: () => events.push('invalidate-local')
+    });
+    await session.initialize();
+
+    await session.logout();
+
+    expect(events).toEqual(['invalidate-local', 'server-logout']);
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it('closes local chat immediately on expiry and ignores stale authentication completion', async () => {
+    const pending = deferred<AuthIdentity>();
+    const invalidateLocalSession = vi.fn();
+    const session = new BrowserAuthSession({
+      client: client({ verify: vi.fn(() => pending.promise) }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession
+    });
+
+    const initialization = session.initialize();
+    session.expire();
+    pending.resolve(identity);
+    await initialization;
+
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(1);
+    expect(session.current).toEqual({ status: 'expired', providers: [] });
+  });
+
+  it('cancels superseded provider discovery without publishing its stale result', async () => {
+    const first = deferred<{ providers: (typeof passwordProvider)[] }>();
+    const discoverProviders = vi
+      .fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({ providers: [] });
+    const session = new BrowserAuthSession({
+      client: client(),
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+
+    const firstAttempt = session.retryDiscovery();
+    const secondAttempt = session.retryDiscovery();
+    await secondAttempt;
+    first.resolve({ providers: [passwordProvider] });
+    await firstAttempt;
+
+    expect(session.current).toEqual({ status: 'provider_unavailable', providers: [] });
+  });
+});
