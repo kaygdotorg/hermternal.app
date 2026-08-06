@@ -228,7 +228,7 @@ print(json.dumps(results))
                 self.assertEqual(self.cases[case_id]["expected"]["final_state"], state)
         self.assertIn("unknown_close_code_blocked", self.cases["unknown-close-fails-closed"]["expected"]["effects"])
 
-    def test_baseline_identity_rejects_forged_timings_and_commands_in_both_modes(self) -> None:
+    def test_baseline_identity_rejects_forged_timings_commands_and_environment_in_both_modes(self) -> None:
         mutations: list[tuple[str, dict[str, object]]] = []
         for mode, sample in (("normal", 1.0), ("normal", 999.0), ("optimized", 1.0), ("optimized", 999.0)):
             forged = copy.deepcopy(self.baseline)
@@ -243,6 +243,16 @@ print(json.dumps(results))
         forged = copy.deepcopy(self.baseline)
         forged["command"] = "python3 fabricated-validator.py"
         mutations.append(("top-level-command-replacement", forged))
+
+        environment_mutations = (
+            ("platform-rebinding", "synthetic-platform-rebind", self.baseline["environment"]["python"]),
+            ("python-rebinding", self.baseline["environment"]["platform"], "3.13.0"),
+            ("coordinated-environment-rebinding", "synthetic-platform-rebind", "3.13.0"),
+        )
+        for name, platform, python in environment_mutations:
+            forged = copy.deepcopy(self.baseline)
+            forged["environment"] = {"platform": platform, "python": python}
+            mutations.append((name, forged))
 
         with tempfile.TemporaryDirectory() as directory:
             for name, forged in mutations:

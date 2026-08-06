@@ -14,6 +14,8 @@ This directory is the focused C-05 proof for the Hermternal Dashboard connection
 
 The source SHA binds the planning contract to the reviewed manifest. It is not a dependency and this fixture does not verify a checkout or a deployment.
 
+The checked-in benchmark environment is also reviewed identity: `platform` is `macOS-26.5.2-arm64-arm-64bit-Mach-O` and `python` is `3.14.6`. `validate.py` pins those exact values in code and includes the complete `environment` object in its canonical baseline digest. Platform-only, Python-only, and coordinated platform/Python rebinding therefore fail in both normal and optimized CLI modes.
+
 ## What the fixture proves
 
 `cases.json` contains a closed 47-case inventory. Each case has an initial state and safe local context, an ordered synthetic event sequence, and an expected result. `validate.py` keeps the case inventory and semantics in code, then requires the checked-in JSON to match those definitions exactly. This prevents a mutated fixture from changing both its input and its claimed result together.
@@ -60,7 +62,7 @@ The focused unknown-event rule is intentional. The broader manifest permits igno
 
 The validator uses only Python’s standard library and a bounded JSON loader. It rejects duplicate object keys, `NaN`, `Infinity`, exponent overflow, oversized integers, invalid UTF-8, excessive nesting, oversized objects or arrays, oversized strings, and excessive node counts. Root and nested object key order is closed. Required fields use exact built-in types, so booleans are not accepted where integers are required.
 
-The baseline artifact hashes are checked against the focused directory, while the benchmark record and approved commands are additionally bound to an immutable canonical identity pinned in `validate.py`. Forged 1ms/999ms samples, recomputed distributions, and command replacement therefore fail in both normal and optimized modes.
+The baseline artifact hashes are checked against the focused directory, while the benchmark record, reviewed environment, and approved commands are additionally bound to an immutable canonical identity pinned in `validate.py`. Forged 1ms/999ms samples, recomputed distributions, command replacement, and coordinated environment rebinding therefore fail in both normal and optimized modes. This environment binding authenticates only the checked-in synthetic evidence; it does not claim portability or deployment compatibility.
 
 CLI failures are one redacted JSON line with a stable semantic message. Retained values reject URLs, paths, bare hostnames, host assignments, bearer/basic credentials, token-shaped values, and short base64-shaped values while allowing the fixture’s known semantic event vocabulary. They do not include tickets, prompts, credentials, host names, transcript content, or malformed payloads. The fixture is synthetic-only and its redaction metadata is checked as part of validation.
 

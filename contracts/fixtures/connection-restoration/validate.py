@@ -71,14 +71,18 @@ APPROVED_BENCHMARK_COMMANDS = {
     "normal": APPROVED_BASELINE_COMMAND,
     "optimized": "python3 -O contracts/fixtures/connection-restoration/validate.py",
 }
-# This digest pins the benchmark evidence and command identity in executable code;
-# mutable baseline JSON cannot replace the timing trace or command it claims to run.
-BASELINE_CANONICAL_IDENTITY_SHA256 = "ca242b5b4684b9c6b30c313c4b8e645715cc6a00c221df5e4aece3ff9c7d4eb0"
+# The benchmark is meaningful only for the reviewed interpreter/platform; keep
+# those exact identities in code so mutable baseline JSON cannot coordinate a
+# rebind of environment metadata with a forged timing trace.
+REVIEWED_BASELINE_PLATFORM = "macOS-26.5.2-arm64-arm-64bit-Mach-O"
+REVIEWED_BASELINE_PYTHON = "3.14.6"
+BASELINE_CANONICAL_IDENTITY_SHA256 = "a3ca673172f5aae0fba2ff247f970c171f3201ab43b523edb40067e983cc3ac2"
 BASELINE_IDENTITY_KEYS = (
     "schema",
     "validator",
     "command",
     "build_mode",
+    "environment",
     "repetitions",
     "normal",
     "optimized",
