@@ -27,11 +27,17 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
             shutil.copy2(ROOT / name, fixture_directory / name)
         return fixture_directory
 
-    def _run_copied_validator(self, fixture_directory: Path, optimize: bool) -> subprocess.CompletedProcess[str]:
+    def _run_copied_validator(
+        self,
+        fixture_directory: Path,
+        optimize: bool,
+        *arguments: str,
+    ) -> subprocess.CompletedProcess[str]:
         command = [sys.executable]
         if optimize:
             command.append("-O")
         command.append(str(fixture_directory / "validate.py"))
+        command.extend(arguments)
         return subprocess.run(command, capture_output=True, text=True, check=False)
 
     @staticmethod
@@ -127,7 +133,7 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
         self.assertNotIn(str(path), result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
-    def test_code_pinned_identity_rejects_coordinated_artifact_rebind(self) -> None:
+    def test_code_pinned_identity_rejects_coordinated_artifact_and_fixture_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture_directory = self._copy_fixture_directory(directory)
             readme_path = fixture_directory / "README.md"
@@ -139,9 +145,40 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
 
             for optimize in (False, True):
                 result = self._run_copied_validator(fixture_directory, optimize)
-                with self.subTest(optimize=optimize):
+                with self.subTest(attack="artifact", optimize=optimize):
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(result.stderr, "validation failed: fixture contract rejected\n")
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_directory = self._copy_fixture_directory(directory)
+            canonical_fixture = fixture_directory / "pty-detach-race-fixtures.json"
+            alternate_fixture = fixture_directory / "mutated-fixture.json"
+            contents = canonical_fixture.read_text(encoding="utf-8")
+            self.assertEqual(contents.count('"byte_hex": "4e"'), 1)
+            alternate_fixture.write_text(
+                contents.replace('"byte_hex": "4e"', '"byte_hex": "58"', 1),
+                encoding="utf-8",
+            )
+            baseline_path = fixture_directory / "validation-baseline.json"
+            for rebound in (False, True):
+                if rebound:
+                    self._rebind_baseline_artifact(
+                        baseline_path,
+                        "pty-detach-race-fixtures.json",
+                        alternate_fixture,
+                    )
+                for optimize in (False, True):
+                    result = self._run_copied_validator(
+                        fixture_directory,
+                        optimize,
+                        "--fixture",
+                        str(alternate_fixture),
+                        "--baseline",
+                        str(baseline_path),
+                    )
+                    with self.subTest(attack="alternate-fixture", rebound=rebound, optimize=optimize):
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(result.stderr, "validation failed: fixture contract rejected\n")
 
     def test_reviewed_identity_rejects_forged_normal_and_optimized_benchmarks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

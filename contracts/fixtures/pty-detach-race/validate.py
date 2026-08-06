@@ -48,7 +48,7 @@ ARTIFACT_NAMES = (
 # fixed identity-marker placeholder so this file can authenticate its own bytes;
 # changing executable code changes the normalized digest. Benchmark trace and
 # distribution digests are code-pinned and cannot be rebound through JSON.
-CANONICAL_SOURCE_SHA256 = "09cbbe84f29eadb4b11cc07601fade14d20629f4c09a3b0ea9ce1ab86557550d"
+CANONICAL_SOURCE_SHA256 = "32de2c3590036fd0277b7ef20c42633e63bda0baa613e3765594ef0818d58400"
 CANONICAL_BENCHMARK_IDENTITY = (
     (
         "normal",
@@ -62,13 +62,13 @@ CANONICAL_BENCHMARK_IDENTITY = (
     ),
 )
 CANONICAL_ARTIFACT_IDENTITY = (
-    ("README.md", 7136, "730b2920e74386310052316806e92fc1f40b63d23c4ba4d56cbd5075d2bc98f7"),
+    ("README.md", 7355, "7d83fbadcc32a7bea5e1e111384ea03988498ab4a597eb72f6b2664fb4d3d4d0"),
     (
         "pty-detach-race-fixtures.json",
         19319,
         "ee8211b672e5a78d1d069c1ca4df4155aecbce951058579e3a985cfb6de06227",
     ),
-    ("test_validate.py", 18561, "17fa699009ba344e3902d3f6016480c10de4c2965e4a209dda05b7a5da867d79"),
+    ("test_validate.py", 20275, "88f6f732f5d024beb5a668e7b34876b1c544212166eeee3f85adb2789d040223"),
 )
 CANONICAL_BASELINE_IDENTITY = {
     "schema_version": "pty-detach-race-baseline-v1",
@@ -1015,6 +1015,17 @@ def artifact_digest(path: Path) -> tuple[int, str]:
     return len(payload), hashlib.sha256(payload).hexdigest()
 
 
+def validate_fixture_identity(path: Path) -> None:
+    """Bind the bytes selected by --fixture to the reviewed canonical fixture."""
+
+    expected = {
+        name: (size_bytes, sha256)
+        for name, size_bytes, sha256 in CANONICAL_ARTIFACT_IDENTITY
+    }["pty-detach-race-fixtures.json"]
+    if artifact_digest(path) != expected:
+        fail("fixture_identity", "selected fixture does not match immutable reviewed identity")
+
+
 def canonical_json_digest(value: Any) -> str:
     """Hash a stable JSON representation for reviewed evidence identities."""
 
@@ -1161,6 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         source = source_identity()
+        validate_fixture_identity(args.fixture)
         data = load_fixture(args.fixture)
         summary = validate_contract(data)
         mutation_count = validate_mutations(data)

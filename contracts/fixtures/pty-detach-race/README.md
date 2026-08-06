@@ -60,8 +60,8 @@ boolean, string, null, non-finite, malformed-frame, and row variants.
   and code-pinned source/benchmark identity checks outside the baseline.
 - `test_validate.py` — normal and optimized-compatible regression tests for the
   canonical contract, meaningful malformed or drifted mutations, credential-shaped
-  duplicate keys, coordinated artifact/baseline rebinding, forged benchmarks, and
-  rebound validator source.
+  duplicate keys, coordinated artifact/baseline rebinding, alternate-fixture
+  rebinding, forged benchmarks, and rebound validator source.
 - `validation-baseline.json` — observation-only benchmark distributions with 30
   normal and 30 optimized samples plus exact owned-artifact sizes and digests.
 
@@ -80,10 +80,13 @@ python3 -m py_compile contracts/fixtures/pty-detach-race/validate.py contracts/f
 The CLI loads the checked-in baseline by default. Before running contract or
 mutation checks, it authenticates the executing `validate.py` bytes against a
 code-pinned normalized source digest whose identity marker is excluded to avoid a
-circular hash. It also binds both benchmark modes' sample traces and derived
-distributions to code-pinned reviewed SHA-256 identities. Owned artifact sizes,
-SHA-256 digests, and the manifest must match the immutable artifact identity;
-rewriting baseline metadata cannot rebind the evidence. The benchmark has
+circular hash. The bytes selected by `--fixture` must independently match the
+code-pinned canonical fixture identity; a copied or mutated alternate file cannot
+be authorized by changing baseline metadata. It also binds both benchmark modes'
+sample traces and derived distributions to code-pinned reviewed SHA-256
+identities. Owned artifact sizes, SHA-256 digests, and the manifest must match the
+immutable artifact identity; rewriting baseline metadata cannot rebind the
+evidence. The benchmark has
 `threshold: null`: timings are evidence, not an invented performance budget.
 `--baseline` is available for isolated mutation checks. Invalid arguments and
 unavailable or malformed inputs return fixed, bounded diagnostics and never echo
