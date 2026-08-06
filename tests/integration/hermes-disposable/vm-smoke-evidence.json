@@ -1,0 +1,90 @@
+{
+  "schema": "hermternal.integration.hermes-disposable-vm-evidence.v1",
+  "operation": "R-02A",
+  "synthetic_only": true,
+  "host": "[REDACTED_HOST]",
+  "account": "hermternal-test",
+  "source": {
+    "commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
+    "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc"
+  },
+  "image": {
+    "reference": "hermes-agent:hermternal-f5be9236",
+    "id": "c8dd2d7380d87e7ebdf7f603d63e7555e36e9445b982ca926d663b0101a3be18",
+    "repo_digest": "sha256:076b22d5d78d978d8b0dfd4cef84fb3cb0b817feea4003b6085777e7c5e7737a",
+    "entrypoint_preserved": true,
+    "compatibility_adapter_sha256": "4b37f4f6fcf00394f4292810772d96ed28141ff1ce44e24116f347347d977d03"
+  },
+  "executor": {
+    "name": "podman",
+    "version": "5.4.2",
+    "rootless": true,
+    "cgroup_manager": "systemd",
+    "cgroup_filesystem": "cgroup2fs",
+    "network_backend": "netavark",
+    "storage_driver": "overlay",
+    "compose_provider": "podman-compose",
+    "subuid": "165536:65536",
+    "subgid": "165536:65536"
+  },
+  "compatibility": {
+    "stock_dockerfile_build": "blocked_unsupported_copy_flags",
+    "podman_adapter_change": "replace_one_COPY_link_symbolic_chmod_with_COPY_plain_context",
+    "podman_adapter_runtime_content": "pinned_source_context_and_runtime_files_unchanged",
+    "stock_podman_compose_config": "pass",
+    "stock_podman_compose_start": "blocked_missing_podman_api_socket",
+    "docker_compose_lane": "config_only_pass",
+    "docker_compose_project": "hermes-disposable-docker-078ac20d"
+  },
+  "render": {
+    "project": "hermes-disposable-smoke-8c35d19d",
+    "network": "hermes-disposable-smoke-8c35d19d_internal",
+    "volume": "hermes-disposable-smoke-8c35d19d_data",
+    "lane": "no-provider",
+    "published_ports": false,
+    "host_profile_bind": false,
+    "host_network": false,
+    "internal_network": true,
+    "named_volume": true,
+    "restart": "no",
+    "cpu_limit": "0.50",
+    "memory_limit": "512m",
+    "pid_limit": 256,
+    "tmpfs": ["/tmp:size=64m,mode=1777", "/run:size=16m,mode=755"],
+    "shm_size": "64m",
+    "log_driver": "k8s-file",
+    "log_max_size": "1m",
+    "cap_drop": ["ALL"],
+    "no_new_privileges": true,
+    "provider_credentials": false
+  },
+  "runtime": {
+    "container_started": true,
+    "container_id": "256ae23d98556c013121926472915663f3e22db96435e3a8732732f0f1dc26f5",
+    "readiness": "failed",
+    "exit_code": 2,
+    "redacted_failure": "pinned s6 startup emitted bounded supervise-perms chown warnings and exited 2",
+    "model_turn": false,
+    "browser_auth": false,
+    "pty": false,
+    "public_ports": false
+  },
+  "inspection": {
+    "container_state_observed": "exited_2",
+    "ports": "none_observed",
+    "network_and_volume": "observed_before_teardown",
+    "resource_limits": "verified_from_native_compose_config",
+    "container_inspect_record": "not_retained_before_teardown"
+  },
+  "teardown": {
+    "command": ["down", "--volumes", "--remove-orphans"],
+    "status": 0,
+    "leftover_containers": 0,
+    "leftover_networks": 0,
+    "leftover_volumes": 0
+  },
+  "status": "blocked_readiness",
+  "threshold": null,
+  "redacted": true
+}

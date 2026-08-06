@@ -1,0 +1,112 @@
+{
+  "schema": "hermternal.integration.hermes-disposable-baseline.v1",
+  "validator": "tests/integration/hermes-disposable/validate.py",
+  "fixture": "tests/integration/hermes-disposable/cases.json",
+  "metric": "validator_duration_ms",
+  "environment": {
+    "platform": "local-standard-library",
+    "python": "python-3.14"
+  },
+  "runs": [
+    {
+      "mode": "normal",
+      "command": "python3 tests/integration/hermes-disposable/validate.py",
+      "repetitions": 30,
+      "distribution": {
+        "min_ms": 56.121,
+        "p50_ms": 59.122,
+        "p95_ms": 60.363,
+        "p99_ms": 61.24,
+        "max_ms": 61.56,
+        "mean_ms": 58.752
+      },
+      "trace": [
+        57.047,
+        59.485,
+        57.396,
+        60.457,
+        59.408,
+        56.881,
+        59.078,
+        59.752,
+        59.185,
+        57.099,
+        57.944,
+        59.166,
+        56.356,
+        57.904,
+        59.43,
+        57.863,
+        59.361,
+        60.249,
+        58.787,
+        61.56,
+        59.053,
+        57.259,
+        58.743,
+        59.45,
+        56.121,
+        60.049,
+        59.347,
+        58.233,
+        59.667,
+        60.221
+      ]
+    },
+    {
+      "mode": "optimized",
+      "command": "python3 -O tests/integration/hermes-disposable/validate.py",
+      "repetitions": 30,
+      "distribution": {
+        "min_ms": 57.995,
+        "p50_ms": 59.469,
+        "p95_ms": 60.803,
+        "p99_ms": 61.858,
+        "max_ms": 62.092,
+        "mean_ms": 59.398
+      },
+      "trace": [
+        57.996,
+        61.286,
+        59.629,
+        57.995,
+        60.17,
+        59.305,
+        58.242,
+        59.801,
+        59.55,
+        59.443,
+        60.208,
+        58.267,
+        60.146,
+        60.055,
+        59.814,
+        59.248,
+        59.495,
+        59.147,
+        60.061,
+        59.423,
+        58.247,
+        58.967,
+        58.425,
+        59.555,
+        60.212,
+        60.078,
+        58.468,
+        62.092,
+        58.562,
+        58.043
+      ]
+    }
+  ],
+  "artifact": {
+    "files": [
+      "README.md",
+      "cases.json",
+      "test_validate.py"
+    ],
+    "bytes": 34292,
+    "sha256": "46f4790ace4123902a7f049e421abc9d07fb23ab5ddeff35f2e0b3ed39e6815c"
+  },
+  "threshold": null
+}
