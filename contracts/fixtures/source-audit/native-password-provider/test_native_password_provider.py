@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,7 +24,7 @@ class NativePasswordProviderFixtureTests(unittest.TestCase):
         cases = validate.load_json("cases.json")
         validate.validate_source_provenance(audit)
         self.assertEqual(validate.validate_cases(cases), 33)
-        self.assertEqual(validate.validate_mutation_regressions(audit, cases), 15)
+        self.assertEqual(validate.validate_mutation_regressions(audit, cases), 18)
 
     def test_cli_reports_offline_success(self) -> None:
         result = subprocess.run(
@@ -64,6 +66,32 @@ class NativePasswordProviderFixtureTests(unittest.TestCase):
             )
         with self.assertRaises(validate.ValidationError):
             validate._scan_json([[]] * (validate.MAX_JSON_NODES + 1))
+
+    def test_deep_valid_json_fails_closed_without_recursion(self) -> None:
+        value: object = 0
+        for _ in range(2000):
+            value = [value]
+        with self.assertRaises(validate.ValidationError):
+            validate._scan_json(value)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("validate.py", "cases.json"):
+                shutil.copy2(validate.ROOT / name, root / name)
+            deep = "{\"nested\":" + ("[" * 2000) + "0" + ("]" * 2000) + "}"
+            (root / "source_audit.json").write_text(deep, encoding="utf-8")
+            for optimized in (False, True):
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.append(str(root / "validate.py"))
+                result = subprocess.run(command, check=False, capture_output=True, text=True)
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output.strip(), validate.SAFE_ERROR_MESSAGE)
+                self.assertNotIn("Traceback", output)
+                self.assertNotIn("RecursionError", output)
+                self.assertNotIn(str(root), output)
 
     def test_wrong_password_cannot_become_success(self) -> None:
         cases = validate.load_json("cases.json")
@@ -136,6 +164,63 @@ class NativePasswordProviderFixtureTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.validate_cases(mutated)
 
+    def test_nested_git_objects_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "checkout"
+            git_dir = root / ".git"
+            (git_dir / "objects" / "info").mkdir(parents=True)
+            (git_dir / "refs" / "tags").mkdir(parents=True)
+            for name in ("HEAD", "config", "index"):
+                (git_dir / name).write_text("synthetic", encoding="ascii")
+            outside = Path(temporary) / "outside-objects"
+            outside.mkdir()
+            (git_dir / "objects" / "pack").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(validate.ValidationError):
+                validate._reject_repository_local_alternates(root)
+            with self.assertRaises(validate.ValidationError):
+                validate.verify_source_root(validate.load_json("source_audit.json"), root)
+
+    def test_nested_git_refs_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "checkout"
+            git_dir = root / ".git"
+            (git_dir / "objects" / "info").mkdir(parents=True)
+            (git_dir / "refs").mkdir(parents=True)
+            for name in ("HEAD", "config", "index"):
+                (git_dir / name).write_text("synthetic", encoding="ascii")
+            outside = Path(temporary) / "outside-refs"
+            outside.mkdir()
+            (git_dir / "refs" / "tags").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(validate.ValidationError):
+                validate._reject_repository_local_alternates(root)
+            with self.assertRaises(validate.ValidationError):
+                validate.verify_source_root(validate.load_json("source_audit.json"), root)
+
+    def test_cli_rejects_nested_git_symlinks_in_both_modes(self) -> None:
+        for nested_path, outside_name in (("objects/pack", "outside-objects"), ("refs/tags", "outside-refs")):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "checkout"
+                git_dir = root / ".git"
+                (git_dir / "objects" / "info").mkdir(parents=True)
+                (git_dir / "refs").mkdir()
+                for name in ("HEAD", "config", "index"):
+                    (git_dir / name).write_text("synthetic", encoding="ascii")
+                outside = Path(temporary) / outside_name
+                outside.mkdir()
+                (git_dir / nested_path).parent.mkdir(parents=True, exist_ok=True)
+                (git_dir / nested_path).symlink_to(outside, target_is_directory=True)
+                for optimized in (False, True):
+                    command = [sys.executable]
+                    if optimized:
+                        command.append("-O")
+                    command.extend([str(Path(validate.__file__)), "--source-root", str(root)])
+                    result = subprocess.run(command, check=False, capture_output=True, text=True)
+                    output = result.stdout + result.stderr
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(output.strip(), validate.SAFE_ERROR_MESSAGE)
+                    self.assertNotIn("Traceback", output)
+                    self.assertNotIn(str(outside), output)
+
     def test_source_root_rejects_redirects_bare_and_child_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "checkout"
@@ -181,6 +266,43 @@ class NativePasswordProviderFixtureTests(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+    def test_retained_surfaces_reject_provider_ticket_and_authorization_values(self) -> None:
+        probes = (
+            "Provider unreachable: synthetic-provider-exception",
+            "unknown ticket: Abcdefgh…",
+            "ticket fragment: Abcdefgh",
+            "ticket: Abcdefgh",
+            "Authorization: Basic dGVzdC1jcmVk",
+            "Authorization: Bearer synthetic-bearer-value",
+        )
+        for probe in probes:
+            with self.assertRaises(validate.ValidationError):
+                validate.validate_untrusted_text(probe)
+        validate.validate_retained_artifacts()
+
+    def test_recomputed_baseline_cannot_bless_retained_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("README.md", "cases.json", "source_audit.json", "validate.py", "test_native_password_provider.py"):
+                shutil.copy2(validate.ROOT / name, root / name)
+            readme = root / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "\nProvider unreachable: synthetic-provider-exception\n", encoding="utf-8")
+            audit = json.loads((root / "source_audit.json").read_text(encoding="utf-8"))
+            total = 0
+            for item in audit["validation_baseline"]["artifacts"]:
+                raw = (root / item["path"]).read_bytes()
+                item["bytes"] = len(raw)
+                item["sha256"] = hashlib.sha256(raw).hexdigest()
+                total += len(raw)
+            audit["validation_baseline"]["artifact_bytes"] = total
+            original_root = validate.ROOT
+            validate.ROOT = root
+            try:
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_source_provenance(audit)
+            finally:
+                validate.ROOT = original_root
 
     def test_source_digest_and_marker_mutations_fail_closed(self) -> None:
         audit = validate.load_json("source_audit.json")

@@ -28,6 +28,11 @@ The pinned source records these facts:
   limits fail with 401, 404, 503, and 429 respectively; failures do not issue a
   session cookie. The provider label `basic` describes the password provider;
   it never selects an HTTP `Authorization: Basic` header.
+- The pinned provider-unreachable branch forwards provider exception text into
+  its 503 detail. This freezes a provider limitation; it does **not** claim that
+  Hermes sanitizes provider exception strings. Hermternal must independently
+  reject that text, bounded ticket fragments, and Authorization-shaped values
+  on every retained history, log, DOM, or equivalent fixture surface.
 - The shared cookie helper writes the access, refresh, and provider-hint cookies
   with `HttpOnly`, `SameSite=Lax`, the deployment `Path`, and `Secure` for HTTPS.
   Direct HTTPS uses `__Host-` names; a non-root prefix uses `__Secure-` names;
@@ -70,7 +75,7 @@ that must be proven by later native implementation work:
   reasons, provider-unreachable exception text, and history/log/DOM surfaces.
 
 The validator evaluates every row semantically and applies mutation regressions.
-It can optionally verify the five pinned source files from a local checkout:
+It can optionally verify the six pinned source files from a local checkout:
 
 ```text
 python3 contracts/fixtures/source-audit/native-password-provider/validate.py
@@ -83,11 +88,21 @@ python3 -m py_compile contracts/fixtures/source-audit/native-password-provider/v
 
 A Git source root must be the exact checkout top-level, use checkout-style
 metadata contained below that root, be non-bare and clean, have no alternates,
-replacement refs, lazy-fetch redirects, or linked metadata outside the root,
-and have `HEAD`, tree, complete immutable blobs, object types, and working bytes
-matching the pinned identities. It is then reported as `git_checkout_verified`.
-A source directory without Git metadata is reported as `content_only_snapshot`; it
-never claims checkout verification.
+replacement refs, lazy-fetch redirects, or linked metadata outside the root, and
+contain no symlink anywhere below `.git`, including nested `objects` and `refs`
+paths. It must have `HEAD`, tree, complete immutable blobs, object types, and
+working bytes matching the pinned identities. It is then reported as
+`git_checkout_verified`. A source directory without Git metadata is reported as
+`content_only_snapshot`; it never claims checkout verification.
+
+Strict JSON is bounded before parsing and scanned iteratively with a nesting
+limit. Deep but valid JSON therefore fails with the fixed
+`native password-provider audit validation failed` diagnostic instead of a
+Python recursion traceback. Retained-equivalent fixture artifacts are scanned
+for provider exception text, ticket values and fragments, Authorization-shaped
+values, credential-shaped values, and absolute paths. Their canonical bytes are
+also pinned in validator code, so changing a README or claim and recomputing
+only the self-authored baseline metadata cannot make the evidence validate.
 
 ## Safety, accessibility, and limits
 
@@ -107,8 +122,10 @@ contracts.
 
 The baseline in `source_audit.json` records normal and optimized validator
 samples, hashes and sizes for the independent fixture artifacts, and
-`threshold: null`. These are self-authored developer observations, not an
-authenticated performance gate or live compatibility proof.
+`threshold: null`. Canonical retained-artifact digests are pinned separately in
+validator code; baseline metadata cannot override them. These are self-authored
+developer observations, not an authenticated performance gate or live
+compatibility proof.
 
 This contract does not prove a Hermes process, an Apple implementation, provider
 identity, deployment identity, cryptographic signing, live cookie attributes at a

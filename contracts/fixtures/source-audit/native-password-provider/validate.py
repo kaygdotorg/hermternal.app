@@ -36,6 +36,7 @@ MAX_STRING_LENGTH = 16 * 1024
 MAX_ARRAY_LENGTH = 256
 MAX_OBJECT_KEYS = 64
 MAX_JSON_NODES = 4096
+MAX_JSON_DEPTH = 256
 MAX_INTEGER_BITS = 4096
 MAX_ERROR_MESSAGE_LENGTH = 512
 MAX_SOURCE_BLOB_BYTES = 16 * 1024 * 1024
@@ -274,6 +275,38 @@ _TICKET_FRAGMENT_RE = re.compile(
     r"(?i)\b(?:unknown ticket|ticket fragment)\s*[:=]\s*"
     r"[A-Za-z0-9_-]{8,}(?:…|\b)"
 )
+_PROVIDER_EXCEPTION_RE = re.compile(
+    r"(?i)\bprovider\s+unreachable\s*:\s*"
+    r"(?!\{[A-Za-z_][A-Za-z0-9_]*\})(?:\S+)"
+)
+_AUTHORIZATION_HEADER_RE = re.compile(
+    r"(?i)\bauthorization\s*:\s*"
+    r"(?:[A-Za-z][A-Za-z0-9_-]*\s+)?[A-Za-z0-9._~+/=-]{8,}"
+)
+_TICKET_VALUE_RE = re.compile(
+    r"(?i)\bticket\s*[:=]\s*[A-Za-z0-9_-]{8,}(?:…|\b)"
+)
+
+# These are the fixture's retained-equivalent surfaces. Their raw bytes are
+# additionally bound to code-pinned canonical digests so a caller cannot edit
+# a README, case, or audit claim and then recompute only self-authored metadata.
+RETAINED_ARTIFACT_PATHS = ("README.md", "cases.json", "source_audit.json")
+EXPECTED_CANONICAL_ARTIFACTS = {
+    "README.md": {"bytes": 7817, "sha256": "dd48adfdf5f29efa95e0c2e597ab135ef7dd756c946053ecc7d2ae8dc65c8b5b"},
+    "cases.json": {"bytes": 13939, "sha256": "961cb83fc91f32fdb4b969d47620b8ca9cbaa4a05bf4006b18239e2b7864ffcf"},
+    "source_audit.json": {"bytes": 8071, "sha256": "ac754edef22fc4f2eaee8e20c9c1fcc006e960b0283bbfdce888df0fc655c164"},
+    "test_native_password_provider.py": {"bytes": 16437, "sha256": "08ab58022f90cac2adfb457be02ef1811ecf57e469f74cbfc130fea3aa7aaffb"},
+}
+_RETAINED_TEXT_PATTERNS = (
+    _SCHEME_VALUE_RE,
+    _BASIC_HEADER_RE,
+    _COOKIE_HEADER_RE,
+    _AUTHORIZATION_HEADER_RE,
+    _PROVIDER_EXCEPTION_RE,
+    _TICKET_FRAGMENT_RE,
+    _TICKET_VALUE_RE,
+    _RAW_SECRET_PATH_RE,
+)
 
 
 def validate_untrusted_text(value: Any, *, identifier: bool = False) -> None:
@@ -285,8 +318,11 @@ def validate_untrusted_text(value: Any, *, identifier: bool = False) -> None:
     require(_SCHEME_VALUE_RE.search(value) is None, "credential-shaped text")
     require(_BASIC_HEADER_RE.search(value) is None, "credential-shaped text")
     require(_COOKIE_HEADER_RE.search(value) is None, "credential-shaped text")
+    require(_AUTHORIZATION_HEADER_RE.search(value) is None, "credential-shaped text")
     require(_NAMED_SECRET_RE.search(value) is None, "credential-shaped text")
+    require(_PROVIDER_EXCEPTION_RE.search(value) is None, "provider exception text")
     require(_TICKET_FRAGMENT_RE.search(value) is None, "ticket fragment")
+    require(_TICKET_VALUE_RE.search(value) is None, "ticket value")
     require(_RAW_SECRET_PATH_RE.search(value) is None, "absolute source path")
 
 
@@ -349,30 +385,35 @@ def _read_bounded_stream(stream: Any, label: str) -> bytes:
 
 
 def _scan_json(value: Any, path: str = "$", state: list[int] | None = None) -> None:
+    """Scan parsed JSON without using Python recursion on attacker depth."""
     if state is None:
         state = [0]
-    state[0] += 1
-    require(state[0] <= MAX_JSON_NODES, "strict JSON exceeds the node limit")
-    if isinstance(value, dict):
-        require(len(value) <= MAX_OBJECT_KEYS, f"{path}: object exceeds key limit")
-        for key, child in value.items():
-            require(type(key) is str, f"{path}: JSON object key must be a string")
-            require(len(key) <= MAX_STRING_LENGTH, f"{path}: object key is too long")
-            _scan_json(child, f"{path}.{key}", state)
-    elif isinstance(value, list):
-        require(len(value) <= MAX_ARRAY_LENGTH, f"{path}: array exceeds length limit")
-        for index, child in enumerate(value):
-            _scan_json(child, f"{path}[{index}]", state)
-    elif type(value) is str:
-        require(len(value) <= MAX_STRING_LENGTH, f"{path}: string is too long")
-    elif type(value) is int:
-        require(value.bit_length() <= MAX_INTEGER_BITS, f"{path}: integer exceeds bit limit")
-    elif type(value) is float:
-        require(math.isfinite(value), f"{path}: non-finite number is not allowed")
-    elif value is None or type(value) is bool:
-        return
-    else:
-        raise ValidationError(SAFE_ERROR_MESSAGE)
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        current, depth = stack.pop()
+        state[0] += 1
+        require(state[0] <= MAX_JSON_NODES, "strict JSON exceeds the node limit")
+        require(depth <= MAX_JSON_DEPTH, "strict JSON exceeds the nesting limit")
+        if isinstance(current, dict):
+            require(len(current) <= MAX_OBJECT_KEYS, "strict JSON object exceeds the key limit")
+            for key, child in reversed(list(current.items())):
+                require(type(key) is str, "strict JSON object key must be a string")
+                require(len(key) <= MAX_STRING_LENGTH, "strict JSON object key is too long")
+                stack.append((child, depth + 1))
+        elif isinstance(current, list):
+            require(len(current) <= MAX_ARRAY_LENGTH, "strict JSON array exceeds the length limit")
+            for child in reversed(current):
+                stack.append((child, depth + 1))
+        elif type(current) is str:
+            require(len(current) <= MAX_STRING_LENGTH, "strict JSON string is too long")
+        elif type(current) is int:
+            require(current.bit_length() <= MAX_INTEGER_BITS, "strict JSON integer exceeds the bit limit")
+        elif type(current) is float:
+            require(math.isfinite(current), "strict JSON number is not finite")
+        elif current is None or type(current) is bool:
+            continue
+        else:
+            raise ValidationError(SAFE_ERROR_MESSAGE)
 
 
 def load_json(name: str) -> dict[str, Any]:
@@ -387,7 +428,7 @@ def load_json(name: str) -> dict[str, Any]:
             parse_int=_bounded_int,
             parse_constant=_reject_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValidationError, ValueError) as exc:
         raise ValidationError(SAFE_ERROR_MESSAGE) from exc
     _scan_json(value)
     require(isinstance(value, dict), f"{name} must contain a JSON object")
@@ -472,6 +513,54 @@ def validate_baseline(audit: dict[str, Any]) -> None:
     require(baseline["artifact_bytes"] == total_bytes, "baseline artifact byte total is inconsistent")
 
 
+def _canonical_artifact_bytes(name: str, raw: bytes) -> bytes:
+    """Normalize only self-authored timing metadata before canonical hashing."""
+    if name != "source_audit.json":
+        return raw
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_int=_bounded_int,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValidationError, ValueError) as exc:
+        raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+    require(isinstance(value, dict), "canonical source audit must be an object")
+    value = copy.deepcopy(value)
+    # Baseline timings and raw artifact metadata are observations, not the
+    # immutable source/retention evidence. Ignore only that self-authored block.
+    value["validation_baseline"] = {"canonicalized": True}
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def validate_immutable_artifacts() -> None:
+    """Bind retained fixture artifacts to digests outside mutable JSON metadata."""
+    for name, expected in EXPECTED_CANONICAL_ARTIFACTS.items():
+        path = ROOT / name
+        require(path.is_file() and not path.is_symlink(), "canonical fixture artifact is missing")
+        try:
+            canonical = _canonical_artifact_bytes(name, path.read_bytes())
+        except OSError as exc:
+            raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+        require(len(canonical) == expected["bytes"], "canonical fixture artifact size changed")
+        require(hashlib.sha256(canonical).hexdigest() == expected["sha256"], "canonical fixture artifact digest changed")
+
+
+def validate_retained_artifacts() -> None:
+    """Reject provider, ticket, and authorization values on retained surfaces."""
+    for name in RETAINED_ARTIFACT_PATHS:
+        path = ROOT / name
+        require(path.is_file() and not path.is_symlink(), "retained fixture artifact is missing")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+        require("\x00" not in text, "retained artifact contains a control character")
+        for pattern in _RETAINED_TEXT_PATTERNS:
+            require(pattern.search(text) is None, "retained artifact contains sensitive text")
+
+
 def validate_source_provenance(audit: dict[str, Any]) -> None:
     exact_keys(audit, {"schema", "contract_version", "hermes_revision", "scope", "source_provenance", "source_evidence", "validation_baseline"}, set(), "source audit")
     require(audit["schema"] == "hermternal.source-audit.native-password-provider.v1", "unexpected audit schema")
@@ -530,6 +619,8 @@ def validate_source_provenance(audit: dict[str, Any]) -> None:
         parse_lines(record["lines"], f"source evidence {evidence_id}")
         validate_untrusted_text(record["claim"])
     require(seen == set(EXPECTED_EVIDENCE), "source evidence inventory changed")
+    validate_immutable_artifacts()
+    validate_retained_artifacts()
     validate_baseline(audit)
 
 
@@ -638,6 +729,31 @@ def _within(path: Path, root: Path) -> bool:
     return True
 
 
+def _reject_nested_git_symlinks(git_dir: Path, source_root: Path) -> None:
+    """Reject every symlink below local Git metadata, including objects/refs."""
+    pending = [git_dir]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                children = list(entries)
+        except OSError as exc:
+            raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+        for entry in children:
+            child = Path(entry.path)
+            require(not entry.is_symlink(), "nested Git metadata symlinks are not allowed")
+            try:
+                resolved = child.resolve(strict=False)
+            except OSError as exc:
+                raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+            require(_within(resolved, source_root), "nested Git metadata escapes source root")
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(child)
+            except OSError as exc:
+                raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+
+
 def _reject_repository_local_alternates(source_root: Path) -> Path:
     """Require checkout-style metadata rooted inside the supplied checkout."""
     marker = source_root / ".git"
@@ -660,6 +776,7 @@ def _reject_repository_local_alternates(source_root: Path) -> Path:
     refs = git_dir / "refs"
     require(objects.is_dir() and not objects.is_symlink(), "checkout objects are invalid")
     require(refs.is_dir() and not refs.is_symlink(), "checkout refs are invalid")
+    _reject_nested_git_symlinks(git_dir, source_root)
 
     # A linked worktree can redirect its common object/ref metadata outside
     # the supplied root. It is not an attested standalone checkout.
@@ -1133,6 +1250,24 @@ def validate_mutation_regressions(audit: dict[str, Any], cases: dict[str, Any]) 
     expect_rejected("credential-shaped source claim", lambda: validate_source_provenance(claim_mutation))
     mutations += 1
 
+    provider_claim_mutation = copy.deepcopy(audit)
+    provider_record = next(item for item in provider_claim_mutation["source_evidence"] if item["id"] == "password-provider-error-detail")
+    provider_record["claim"] = "Provider unreachable: synthetic-provider-exception"
+    expect_rejected("provider exception source claim", lambda: validate_source_provenance(provider_claim_mutation))
+    mutations += 1
+
+    ticket_claim_mutation = copy.deepcopy(audit)
+    ticket_record = next(item for item in ticket_claim_mutation["source_evidence"] if item["id"] == "ws-ticket-fragment-source")
+    ticket_record["claim"] = "unknown ticket: Abcdefgh…"
+    expect_rejected("ticket fragment source claim", lambda: validate_source_provenance(ticket_claim_mutation))
+    mutations += 1
+
+    authorization_claim_mutation = copy.deepcopy(audit)
+    authorization_record = next(item for item in authorization_claim_mutation["source_evidence"] if item["id"] == "password-login-body-auth-scheme")
+    authorization_record["claim"] = "Authorization: Basic dGVzdC1jcmVk"
+    expect_rejected("authorization source claim", lambda: validate_source_provenance(authorization_claim_mutation))
+    mutations += 1
+
     return mutations
 
 
@@ -1170,7 +1305,7 @@ def main(argv: list[str] | None = None) -> None:
             f"revision={REVISION} cases={case_count} mutations={mutation_count} "
             f"provenance={provenance} duration_ms={duration_ms:.3f} artifact_bytes={artifact_size()}"
         )
-    except (ValidationError, OSError, UnicodeError) as exc:
+    except (RecursionError, ValidationError, OSError, UnicodeError) as exc:
         raise SystemExit(_bounded_error_message(exc)) from exc
 
 
