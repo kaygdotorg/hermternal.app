@@ -350,6 +350,28 @@ class GatewayReadinessTests(unittest.TestCase):
                 self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
                 self.assertNotIn("f" * 64, drifted.stdout)
 
+    def test_cli_rejects_adapter_image_reference_and_missing_attestation_in_both_modes(self) -> None:
+        observed = image_inspect_payload(digest="sha256:" + "0" * 64)
+        observed["RepoTags"] = ["localhost/" + validate.IMAGE_REFERENCE]
+        observed["RepoDigests"] = [
+            "localhost/" + validate.IMAGE_REPOSITORY + "@sha256:" + "0" * 64
+        ]
+        observed["Config"] = {"Labels": {"com.buildah.version": "synthetic"}}
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                rejected = self._run_cli_with_temp_json(
+                    self.document,
+                    image_inspect=observed,
+                    optimized=optimized,
+                )
+                self.assertEqual(rejected.returncode, 2)
+                self.assertEqual(rejected.stderr, "")
+                payload = json.loads(rejected.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                self.assertNotIn("localhost/", rejected.stdout)
+                self.assertNotIn("0" * 64, rejected.stdout)
+
     def test_redaction_rejects_secrets_hosts_urls_and_host_paths(self) -> None:
         validate.validate_redaction({"internal": "/opt/data", "tmpfs": "/tmp:size=64m,mode=1777"})
         for value in (
