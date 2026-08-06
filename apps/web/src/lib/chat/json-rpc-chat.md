@@ -27,10 +27,11 @@ automatic.
 
 The W-05 ticket client remains the owner of the authenticated
 `POST /api/auth/ws-ticket` boundary. This file only consumes its injected fresh
-ticket provider. No production authentication or network integration is part of
-this planning-only prototype. W-05 issue [#119](https://github.com/kaygdotorg/hermternal/issues/119)
-and PR [#271](https://github.com/kaygdotorg/hermternal/pull/271) remain open, so
-this seam is not an integrated ticket proof.
+ticket provider. W-05 issue [#119](https://github.com/kaygdotorg/hermternal/issues/119)
+and PR [#271](https://github.com/kaygdotorg/hermternal/pull/271) are integrated
+in `dev` at merge commit `965da31ba433c95c99ce85ef85f0485fa44e42e6`.
+This branch still provides a typed, injected seam rather than live production
+authentication or a browser-to-Hermes integration claim.
 
 ## Deterministic W-07 fixture IDs
 

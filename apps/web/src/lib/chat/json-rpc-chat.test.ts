@@ -485,6 +485,28 @@ describe("createJsonRpcChatTransport", () => {
     }
   });
 
+  it("fails closed when an approval owner is malformed", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt(
+      "invalid approval owner fixture",
+    );
+    const requestId = emitPromptAccepted(socket);
+
+    emitEvent(
+      socket,
+      "approval.request",
+      { approval_id: "invalid/owner", state: "requested", approved: null },
+      { request_id: requestId },
+    );
+
+    await expect(request.completion).rejects.toMatchObject({
+      code: "uncertain-delivery",
+    });
+    expect(socket.closed?.code).toBe(1002);
+    expect(harness.transport.state.status).toBe("failed");
+  });
+
   it("derives blocking owners from source request_id when payloads omit local owner fields", async () => {
     const events: JsonRpcChatEvent[] = [];
     const harness = makeHarness();

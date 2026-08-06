@@ -1031,7 +1031,15 @@ export function createJsonRpcChatTransport(
       return;
     }
 
-    const event = createPublicEvent(envelope);
+    let event: JsonRpcChatEvent;
+    try {
+      // Interaction owner fields are untrusted protocol data. Validate them
+      // inside the fail-closed boundary before mutating operation state.
+      event = createPublicEvent(envelope);
+    } catch {
+      failContext(context, "protocol-violation", "protocol-error");
+      return;
+    }
     if (envelope.type === "approval.request") {
       try {
         validateApprovalState(envelope.payload);
