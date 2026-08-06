@@ -23,23 +23,24 @@ The runner clones `node_modules` once into a benchmark-owned dependency snapshot
 
 The complete build descendant tree runs inside an operating-system network boundary:
 
-- macOS uses Seatbelt through `/usr/bin/sandbox-exec` with `network*` denied;
-- Linux uses bubblewrap with a separate network namespace and a read-only host root;
-- unsupported or unavailable sandbox backends fail closed.
+- macOS launches the fixed `/usr/bin/sandbox-exec` path first, with `network*` denied;
+- Linux launches fixed `/usr/bin/bwrap` first, with a separate network and PID namespace plus a read-only host root;
+- only after that boundary exists does fixed `/usr/bin/python3 -I -S` import the reviewed supervisor helper;
+- unsupported or unavailable absolute sandbox and interpreter paths fail closed.
 
-The boundary is inherited by direct sockets and children even if they clear `NODE_OPTIONS`. Offline package-manager flags remain defense in depth; no JavaScript patch is the security boundary.
+The workload pins the supervisor and scanner SHA-256 identities. The runner verifies those local bytes and fixed executable identities before any measured build import or command runs. The boundary is inherited by direct sockets and children even if they clear `NODE_OPTIONS` or replace `PATH`. Offline package-manager flags remain defense in depth; no JavaScript patch is the security boundary.
 
-Each build starts in a detached process group. Timeout, output overflow, SIGINT, and SIGTERM terminate the whole group, wait a bounded grace period, escalate to `SIGKILL`, and bound pipe draining. Recorded build duration ends when the direct build process exits; descendant cleanup, pipe draining, artifact scanning, and hashing are excluded.
+A protected in-sandbox supervisor records the full descendant tree. Timeout, output overflow, SIGINT, and SIGTERM terminate tracked descendants even after a child calls `setsid()`, wait a bounded grace period, escalate to `SIGKILL`, and reap the tree before returning. The outer runner bounds pipe draining and uses one cleanup deadline. It registers each run root synchronously before publishing readiness and exits on a signal only after registered filesystem cleanup finishes. Recorded build duration comes from the supervisor at direct-child exit; descendant cleanup, pipe draining, artifact scanning, and hashing are excluded.
 
 The workload bounds repetitions, build timeout, Node heap, captured stdout and stderr, copied input bytes, artifact file count, and artifact bytes. macOS writes output to a quota-sized HFS+ sparse volume. Linux uses a quota-sized bubblewrap tmpfs. This enforces peak output capacity rather than relying on periodic or final-state sampling.
 
-Artifact scanning opens the workspace and every descendant relative to directory file descriptors with `O_NOFOLLOW`. It rejects root, intermediate, and file symlinks and compares validated and opened inodes before hashing. An external symlink target is never read or hashed.
+Artifact scanning opens the workspace and every descendant relative to directory file descriptors with `O_NOFOLLOW`. It rejects root, intermediate, and file symlinks and compares validated, opened, and final path identities. Each file is hashed over exactly one initial bounded extent, with reads limited to the remaining extent plus one rejection byte. Growth, shrinkage, same-size mutation, and path replacement all fail; reported bytes equal bytes actually hashed. An external symlink target is never read or hashed.
 
 A limit violation or non-zero build fails closed. The CLI emits one bounded JSON error without raw child output, paths, URLs, environment values, or attacker-controlled arguments. Raw build output is counted but not stored.
 
 ## Evidence
 
-`evidence/raw-trace.json` records every successful observation, the excluded warm-up, resource counts, complete B-01 provenance, environment metadata, build input identity, toolchain byte identity, sandbox mode, source commit, fixture digest, and applied limits. `evidence/benchmark-evidence.json` uses `hermternal.benchmark-evidence.v1`. It records raw cold and warm samples, recomputed distributions, sanitized environment metadata, immutable artifact anchors, redaction declarations, and null threshold and budget fields.
+`evidence/raw-trace.json` records every successful observation, the excluded warm-up, resource counts, complete B-01 provenance, environment metadata, build input identity, toolchain byte identity, sandbox mode, source commit, fixture digest, and applied limits. `evidence/benchmark-evidence.json` uses `hermternal.benchmark-evidence.v1`. It records raw cold and warm samples, recomputed distributions, sanitized environment metadata, and immutable anchors for the canonical workload, TypeScript runner, protected supervisor, stable artifact scanner, and raw trace. Threshold and budget remain null.
 
 The canonical B-01 validator at `contracts/benchmarks/validate.py` validates checked-in evidence in normal and optimized Python modes. It enforces bounded strict JSON parsing, duplicate-key rejection, non-finite and exponent-overflow rejection, exact ordered keys and types, redaction, provenance canonicalization, and code-pinned workload, trace, run, and artifact identities.
 

@@ -121,15 +121,16 @@ REDACTION_KEYS = (
     "contains_transcripts",
 )
 WEB_WORKLOAD_KEYS = (
-    "schema", "fixture_id", "fixture_version", "build", "repetitions", "limits", "network", "hermes_source_sha"
+    "schema", "fixture_id", "fixture_version", "build", "repetitions", "limits", "network", "launcher", "hermes_source_sha"
 )
 WEB_TRACE_KEYS = (
     "schema", "recorded_at_utc", "source_commit_sha", "fixture_sha256", "environment", "build_input", "toolchain",
     "network_mode", "limits", "warmup_excluded_from_distribution", "runs"
 )
 WEB_TOOLCHAIN_KEYS = (
-    "package_json", "bun_lock", "node_executable", "bun_executable", "python_executable", "sandbox_executable",
-    "dependencies", "vite", "sveltekit", "vite_svelte_plugin", "svelte", "typescript_native"
+    "package_json", "bun_lock", "benchmark_runner", "sandbox_runner", "artifact_scanner", "node_executable",
+    "bun_executable", "python_executable", "sandbox_executable", "dependencies", "vite", "sveltekit",
+    "vite_svelte_plugin", "svelte", "typescript_native"
 )
 WEB_FILE_IDENTITY_KEYS = ("bytes", "sha256")
 WEB_TREE_IDENTITY_KEYS = ("files", "symlinks", "bytes", "sha256")
@@ -261,7 +262,9 @@ EXPECTED_ARTIFACT_PATHS = {
         "synthetic/workload.json",
         "synthetic/trace.json",
     ),
-    WEB_PRODUCTION_BUILD_EVIDENCE_ID: ("workload.json", "evidence/raw-trace.json"),
+    WEB_PRODUCTION_BUILD_EVIDENCE_ID: (
+        "workload.json", "run.ts", "sandbox-runner.py", "artifact-scanner.py", "evidence/raw-trace.json"
+    ),
 }
 # These byte identities are a second, code-pinned review anchor.  Artifact
 # records may restate them, but cannot change the bytes that this validator
@@ -894,6 +897,11 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     require(limits == {"build_timeout_ms": 120000, "stdout_bytes": 131072, "stderr_bytes": 131072, "workspace_input_bytes": 16777216, "artifact_files": 2048, "artifact_bytes": 67108864, "node_heap_megabytes": 1024}, "web workload limits changed")
     network = _strict_keys(workload["network"], ("mode", "boundary"), "web workload.network")
     require(network == {"mode": "deny", "boundary": "os_sandbox"}, "web workload network boundary changed")
+    launcher = _strict_keys(workload["launcher"], ("supervisor_sha256", "scanner_sha256"), "web workload.launcher")
+    require(launcher == {
+        "supervisor_sha256": "f60e98a4a66baa2b4fce41b930e4768863522747d1d50f7ff09b80bef0e0a14c",
+        "scanner_sha256": "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb",
+    }, "web workload protected helper identities changed")
 
     trace = _load_reviewed_json(root, WEB_PRODUCTION_BUILD_EVIDENCE_ID, "evidence/raw-trace.json", "web trace")
     _walk_redaction(trace)
@@ -908,11 +916,11 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     _integer(build_input["bytes"], "web trace.build_input.bytes", minimum=1, maximum=16777216)
     _text(build_input["sha256"], "web trace.build_input.sha256", pattern=SHA256_RE)
     toolchain = _strict_keys(trace["toolchain"], WEB_TOOLCHAIN_KEYS, "web trace.toolchain")
-    for key in WEB_TOOLCHAIN_KEYS[:6]:
+    for key in WEB_TOOLCHAIN_KEYS[:9]:
         identity = _strict_keys(toolchain[key], WEB_FILE_IDENTITY_KEYS, f"web trace.toolchain.{key}")
         _integer(identity["bytes"], f"web trace.toolchain.{key}.bytes", minimum=1)
         _text(identity["sha256"], f"web trace.toolchain.{key}.sha256", pattern=SHA256_RE)
-    for key in WEB_TOOLCHAIN_KEYS[6:]:
+    for key in WEB_TOOLCHAIN_KEYS[9:]:
         identity = _strict_keys(toolchain[key], WEB_TREE_IDENTITY_KEYS, f"web trace.toolchain.{key}")
         _integer(identity["files"], f"web trace.toolchain.{key}.files", minimum=1)
         _integer(identity["symlinks"], f"web trace.toolchain.{key}.symlinks", minimum=0)

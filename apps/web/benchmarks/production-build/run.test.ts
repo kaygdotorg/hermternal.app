@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -10,8 +10,10 @@ import {
   measureArtifacts,
   mountArtifactQuota,
   parseArguments,
+  protectedRuntime,
   removeWorkspace,
   roundRationalHalfEven,
+  sandboxLauncher,
   terminateProcessGroup,
   validateWorkload,
   type Workload
@@ -23,7 +25,7 @@ async function workload(): Promise<Workload> {
   return validateWorkload(JSON.parse(await readFile(join(benchmarkRoot, 'workload.json'), 'utf8')));
 }
 
-async function sandboxNetworkAttempt(clearNodeOptions: boolean): Promise<number> {
+async function sandboxNetworkAttempt(clearNodeOptions: boolean, pathOverride?: string): Promise<number> {
   const root = await mkdtemp(join(tmpdir(), 'hermternal-sandbox-test-'));
   const workspace = join(root, 'workspace');
   const dependencyRoot = join(root, 'dependencies');
@@ -34,6 +36,7 @@ async function sandboxNetworkAttempt(clearNodeOptions: boolean): Promise<number>
     join(workspace, '.artifact-output'),
     join(workspace, '.home'),
     join(workspace, '.tmp'),
+    join(workspace, '.supervisor'),
     join(workspace, 'node_modules', '.vite-temp')
   ]) await mkdir(path, { recursive: true });
 
@@ -49,13 +52,15 @@ async function sandboxNetworkAttempt(clearNodeOptions: boolean): Promise<number>
     ? [process.execPath, '-e', `const {spawnSync}=require('node:child_process');const result=spawnSync(process.execPath,['-e',${JSON.stringify(socketAttempt)}],{env:{...process.env,NODE_OPTIONS:''}});process.exit(result.status??8);`]
     : [process.execPath, '-e', socketAttempt];
   try {
-    const child = Bun.spawn([
-      'python3', join(benchmarkRoot, 'sandbox-runner.py'),
-      '--workspace', workspace,
-      '--dependency-root', dependencyRoot,
-      '--artifact-bytes', '1048576',
-      '--', ...executed
-    ], { cwd: workspace, stdout: 'pipe', stderr: 'pipe' });
+    const candidate = await workload();
+    const runtime = await protectedRuntime(candidate);
+    const launcher = sandboxLauncher(runtime, workspace, dependencyRoot, 1048576, executed);
+    const child = Bun.spawn([launcher.command, ...launcher.args], {
+      cwd: workspace,
+      env: { ...process.env, ...(pathOverride ? { PATH: pathOverride } : {}) },
+      stdout: 'pipe',
+      stderr: 'pipe'
+    });
     return await child.exited;
   } finally {
     server.close();
@@ -129,6 +134,20 @@ describe('production-build benchmark contract', () => {
     expect(await sandboxNetworkAttempt(true)).toBe(0);
   });
 
+  test('enters the OS boundary before any PATH-selected Python shim can execute', async () => {
+    const shimRoot = await mkdtemp(join(tmpdir(), 'hermternal-python-shim-'));
+    const marker = join(shimRoot, 'executed');
+    const shim = join(shimRoot, 'python3');
+    try {
+      await writeFile(shim, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 91\n`);
+      await chmod(shim, 0o755);
+      expect(await sandboxNetworkAttempt(false, `${shimRoot}:/usr/bin:/bin`)).toBe(0);
+      expect(await Bun.file(marker).exists()).toBe(false);
+    } finally {
+      await rm(shimRoot, { recursive: true, force: true });
+    }
+  });
+
   test('OS sandbox keeps the dependency snapshot read-only', async () => {
     const root = await mkdtemp(join(tmpdir(), 'hermternal-dependency-test-'));
     const workspace = join(root, 'workspace');
@@ -139,18 +158,16 @@ describe('production-build benchmark contract', () => {
       join(workspace, '.artifact-output'),
       join(workspace, '.home'),
       join(workspace, '.tmp'),
+      join(workspace, '.supervisor'),
       join(workspace, 'node_modules', '.vite-temp')
     ]) await mkdir(path, { recursive: true });
     const target = join(dependencyRoot, 'mutation');
     try {
       const command = `const fs=require('node:fs');try{fs.writeFileSync(${JSON.stringify(target)},'changed');process.exit(9)}catch{process.exit(0)}`;
-      const child = Bun.spawn([
-        'python3', join(benchmarkRoot, 'sandbox-runner.py'),
-        '--workspace', workspace,
-        '--dependency-root', dependencyRoot,
-        '--artifact-bytes', '1048576',
-        '--', process.execPath, '-e', command
-      ], { cwd: workspace, stdout: 'pipe', stderr: 'pipe' });
+      const candidate = await workload();
+      const runtime = await protectedRuntime(candidate);
+      const launcher = sandboxLauncher(runtime, workspace, dependencyRoot, 1048576, [process.execPath, '-e', command]);
+      const child = Bun.spawn([launcher.command, ...launcher.args], { cwd: workspace, stdout: 'pipe', stderr: 'pipe' });
       expect(await child.exited).toBe(0);
       expect(await Bun.file(target).exists()).toBe(false);
     } finally {
@@ -167,6 +184,7 @@ describe('production-build benchmark contract', () => {
       join(workspace, '.svelte-kit'),
       join(workspace, '.home'),
       join(workspace, '.tmp'),
+      join(workspace, '.supervisor'),
       join(workspace, 'node_modules', '.vite-temp')
     ]) await mkdir(path, { recursive: true });
     const quotaBytes = 64 * 1024 * 1024;
@@ -174,13 +192,10 @@ describe('production-build benchmark contract', () => {
       await mountArtifactQuota(workspace, quotaBytes);
       const target = join(workspace, '.artifact-output', 'peak.bin');
       const command = `const fs=require('node:fs');const fd=fs.openSync(${JSON.stringify(target)},'w');try{const chunk=Buffer.alloc(1048576);for(let index=0;index<256;index+=1)fs.writeSync(fd,chunk);process.exit(9)}catch{process.exit(0)}finally{fs.closeSync(fd)}`;
-      const child = Bun.spawn([
-        'python3', join(benchmarkRoot, 'sandbox-runner.py'),
-        '--workspace', workspace,
-        '--dependency-root', dependencyRoot,
-        '--artifact-bytes', String(quotaBytes),
-        '--', process.execPath, '-e', command
-      ], { cwd: workspace, stdout: 'pipe', stderr: 'pipe' });
+      const candidate = await workload();
+      const runtime = await protectedRuntime(candidate);
+      const launcher = sandboxLauncher(runtime, workspace, dependencyRoot, quotaBytes, [process.execPath, '-e', command]);
+      const child = Bun.spawn([launcher.command, ...launcher.args], { cwd: workspace, stdout: 'pipe', stderr: 'pipe' });
       expect(await child.exited).toBe(0);
     } finally {
       await removeWorkspace(workspace);
@@ -206,6 +221,50 @@ describe('production-build benchmark contract', () => {
     }
   });
 
+  test('artifact scanner rejects growth, shrink, mutation, and path replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-artifact-stability-'));
+    const workspace = join(root, 'workspace');
+    const output = join(workspace, '.artifact-output', 'build');
+    const artifact = join(output, 'artifact.bin');
+    await mkdir(output, { recursive: true });
+    const mutations: Array<[string, () => Promise<void>]> = [
+      ['growth', () => writeFile(artifact, Buffer.from([9]), { flag: 'a' })],
+      ['shrink', () => truncate(artifact, 512 * 1024)],
+      ['same-size mutation', () => writeFile(artifact, Buffer.alloc(1024 * 1024, 8))],
+      ['path replacement', async () => {
+        await rename(artifact, join(output, 'replaced.bin'));
+        await writeFile(artifact, Buffer.alloc(1024 * 1024, 7));
+      }]
+    ];
+    try {
+      for (const [name, mutate] of mutations) {
+        await rm(output, { recursive: true, force: true });
+        await mkdir(output, { recursive: true });
+        await writeFile(artifact, Buffer.alloc(1024 * 1024, 7));
+        const ready = join(root, `scanner-ready-${name.replaceAll(' ', '-')}`);
+        const scanner = spawn('/usr/bin/python3', [
+          join(benchmarkRoot, 'artifact-scanner.py'),
+          '--workspace', workspace,
+          '--root', '.artifact-output/build',
+          '--max-files', '1',
+          '--max-bytes', String(2 * 1024 * 1024),
+          '--test-pause-ms', '500',
+          '--test-ready-file', ready
+        ], {
+          env: { ...process.env, HERMTERNAL_SCANNER_TEST_MODE: '1' },
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+        for (let attempt = 0; attempt < 100 && !(await Bun.file(ready).exists()); attempt += 1) await Bun.sleep(10);
+        expect(await Bun.file(ready).exists()).toBe(true);
+        await mutate();
+        const exitCode = await new Promise<number | null>((resolveExit) => scanner.once('exit', resolveExit));
+        expect(exitCode).toBe(2);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   test('process-group cleanup kills a descendant that ignores SIGTERM and holds pipes', async () => {
     const script = `const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:['ignore','inherit','inherit']});console.log(child.pid);setInterval(()=>{},1000);`;
     const child = spawn(process.execPath, ['-e', script], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -222,24 +281,76 @@ describe('production-build benchmark contract', () => {
     expect(() => process.kill(descendantPid, 0)).toThrow();
   });
 
-  test('SIGTERM removes the active dependency snapshot before exit', async () => {
-    const prefix = 'hermternal-web-benchmark-';
-    const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith(prefix)));
-    const child = Bun.spawn([process.execPath, join(benchmarkRoot, 'run.ts'), '--cold', '1', '--warm', '1'], {
-      cwd: resolve(benchmarkRoot, '../..'), stdout: 'pipe', stderr: 'pipe'
-    });
-    let created = false;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const current = (await readdir(tmpdir())).filter((name) => name.startsWith(prefix) && !before.has(name));
-      if (current.length > 0) { created = true; break; }
-      await Bun.sleep(20);
+  test('sandbox supervisor reaps a child that escapes with setsid', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-setsid-test-'));
+    const workspace = join(root, 'workspace');
+    const dependencyRoot = join(root, 'dependencies');
+    await mkdir(join(workspace, '.artifact-output'), { recursive: true });
+    await mkdir(join(workspace, '.supervisor'), { recursive: true });
+    await mkdir(dependencyRoot, { recursive: true });
+    const detachedScript = `const {spawn}=require('node:child_process');const escaped=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{detached:true,stdio:'ignore'});console.log(escaped.pid);setInterval(()=>{},1000);`;
+    try {
+      const candidate = await workload();
+      const runtime = await protectedRuntime(candidate);
+      const launcher = sandboxLauncher(runtime, workspace, dependencyRoot, 1048576, [runtime.nodePath, '-e', detachedScript]);
+      const child = spawn(launcher.command, launcher.args, {
+        cwd: workspace,
+        detached: true,
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      const escapedPid = await Promise.race([
+        new Promise<number>((resolve, reject) => {
+          child.stdout.once('data', (chunk) => resolve(Number(String(chunk).trim())));
+          child.once('error', reject);
+        }),
+        Bun.sleep(3000).then(() => { throw new Error('setsid child readiness timeout'); })
+      ]);
+      const supervisorExited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      await terminateProcessGroup(child, 1500);
+      await Promise.race([
+        supervisorExited,
+        Bun.sleep(3000).then(() => { throw new Error('sandbox supervisor survived cleanup'); })
+      ]);
+      expect(() => process.kill(escapedPid, 0)).toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
-    expect(created).toBe(true);
-    child.kill('SIGTERM');
-    expect(await child.exited).toBe(143);
-    const after = (await readdir(tmpdir())).filter((name) => name.startsWith(prefix) && !before.has(name));
-    expect(after).toEqual([]);
-  }, 30_000);
+  }, 10_000);
+
+  test('SIGTERM finishes registered cleanup before exit across repeated runs', async () => {
+    const prefix = 'hermternal-web-benchmark-';
+    for (let iteration = 0; iteration < 20; iteration += 1) {
+      const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith(prefix)));
+      const readinessFile = join(tmpdir(), `hermternal-benchmark-ready-${process.pid}-${iteration}`);
+      await rm(readinessFile, { force: true });
+      const child = spawn(process.execPath, [join(benchmarkRoot, 'run.ts'), '--cold', '1', '--warm', '1'], {
+        cwd: resolve(benchmarkRoot, '../..'),
+        env: { ...process.env, HERMTERNAL_BENCHMARK_READY_FILE: readinessFile },
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      await Promise.race([
+        (async () => {
+          for (let attempt = 0; attempt < 300; attempt += 1) {
+            if (await Bun.file(readinessFile).exists()) return;
+            if (child.exitCode !== null) throw new Error(`runner exited before readiness: ${child.exitCode}`);
+            await Bun.sleep(10);
+          }
+          throw new Error('runner readiness timeout');
+        })(),
+        new Promise<never>((_, reject) => child.once('error', reject))
+      ]);
+      child.kill('SIGTERM');
+      const exitCode = await Promise.race([
+        new Promise<number | null>((resolveExit) => child.once('exit', resolveExit)),
+        Bun.sleep(5000).then(() => { throw new Error('runner signal cleanup timeout'); })
+      ]);
+      expect(exitCode).toBe(143);
+      const after = (await readdir(tmpdir())).filter((name) => name.startsWith(prefix) && !before.has(name));
+      expect(after).toEqual([]);
+      await rm(readinessFile, { force: true });
+    }
+  }, 120_000);
 
   test('CLI failures are bounded JSON without attacker-controlled values', () => {
     const result = Bun.spawnSync([process.execPath, join(benchmarkRoot, 'run.ts'), '--unknown', 'sensitive-value'], {

@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
-import { copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { constants as fsConstants, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises';
 import { arch, cpus, platform, release, tmpdir, type } from 'node:os';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -15,6 +15,11 @@ const TRACE_PATH = join(EVIDENCE_DIRECTORY, 'raw-trace.json');
 const EVIDENCE_PATH = join(EVIDENCE_DIRECTORY, 'benchmark-evidence.json');
 const SANDBOX_RUNNER_PATH = join(BENCHMARK_ROOT, 'sandbox-runner.py');
 const ARTIFACT_SCANNER_PATH = join(BENCHMARK_ROOT, 'artifact-scanner.py');
+const SYSTEM_PYTHON_PATH = '/usr/bin/python3';
+const MACOS_SANDBOX_PATH = '/usr/bin/sandbox-exec';
+const LINUX_SANDBOX_PATH = '/usr/bin/bwrap';
+const SIGNAL_CLEANUP_DEADLINE_MS = 10_000;
+const MAX_WORKLOAD_BYTES = 16 * 1024;
 const MAX_ERROR_BYTES = 512;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const activeWorkspaces = new Set<string>();
@@ -46,6 +51,7 @@ export interface Workload {
     node_heap_megabytes: number;
   };
   network: { mode: string; boundary: string };
+  launcher: { supervisor_sha256: string; scanner_sha256: string };
   hermes_source_sha: string;
 }
 
@@ -101,21 +107,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function requirePlainJsonValue(value: unknown, code: string, depth = 0): void {
+function plainJsonSnapshot(value: unknown, code: string, depth = 0): unknown {
   if (depth > 16) throw new BenchmarkError(code);
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new BenchmarkError(code);
-    return;
+    return value;
   }
   if (typeof value !== 'object') throw new BenchmarkError(code);
-  const expectedPrototype = Array.isArray(value) ? Array.prototype : Object.prototype;
+  const array = Array.isArray(value);
+  const expectedPrototype = array ? Array.prototype : Object.prototype;
   if (Object.getPrototypeOf(value) !== expectedPrototype) throw new BenchmarkError(code);
-  for (const key of Reflect.ownKeys(value)) {
+  const keys = Reflect.ownKeys(value);
+  const copy: unknown[] | Record<string, unknown> = array ? [] : {};
+  for (const key of keys) {
     if (typeof key !== 'string') throw new BenchmarkError(code);
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (Array.isArray(value) && key === 'length') {
-      if (!descriptor || descriptor.enumerable || !descriptor.writable || descriptor.configurable || descriptor.value !== value.length) {
+    if (array && key === 'length') {
+      if (!descriptor || descriptor.enumerable || !descriptor.writable || descriptor.configurable || descriptor.value !== keys.length - 1) {
         throw new BenchmarkError(code);
       }
       continue;
@@ -123,8 +132,14 @@ function requirePlainJsonValue(value: unknown, code: string, depth = 0): void {
     if (!descriptor || !descriptor.enumerable || !descriptor.writable || !descriptor.configurable || !('value' in descriptor)) {
       throw new BenchmarkError(code);
     }
-    requirePlainJsonValue(descriptor.value, code, depth + 1);
+    Object.defineProperty(copy, key, {
+      value: plainJsonSnapshot(descriptor.value, code, depth + 1),
+      enumerable: true,
+      writable: false,
+      configurable: false
+    });
   }
+  return Object.freeze(copy);
 }
 
 function requireExactKeys(candidate: Record<string, unknown>, expected: string[], code: string): void {
@@ -137,20 +152,6 @@ function requireExactKeys(candidate: Record<string, unknown>, expected: string[]
   }
 }
 
-function immutableJsonCopy<T>(value: T): T {
-  if (value === null || typeof value !== 'object') return value;
-  const copy = Array.isArray(value) ? [] : {};
-  for (const key of Object.keys(value as object)) {
-    Object.defineProperty(copy, key, {
-      value: immutableJsonCopy((value as Record<string, unknown>)[key]),
-      enumerable: true,
-      writable: false,
-      configurable: false
-    });
-  }
-  return Object.freeze(copy) as T;
-}
-
 function requirePositiveInteger(value: unknown, code: string): number {
   if (!Number.isSafeInteger(value) || (value as number) <= 0) {
     throw new BenchmarkError(code);
@@ -158,8 +159,8 @@ function requirePositiveInteger(value: unknown, code: string): number {
   return value as number;
 }
 
-export function validateWorkload(candidate: unknown): Workload {
-  requirePlainJsonValue(candidate, 'workload_json_semantics_invalid');
+export function validateWorkload(untrusted: unknown): Workload {
+  const candidate = plainJsonSnapshot(untrusted, 'workload_json_semantics_invalid');
   if (!isRecord(candidate) || candidate.schema !== 'hermternal.web-production-build-workload.v1') {
     throw new BenchmarkError('workload_schema_invalid');
   }
@@ -167,10 +168,11 @@ export function validateWorkload(candidate: unknown): Workload {
   const repetitions = candidate.repetitions;
   const limits = candidate.limits;
   const network = candidate.network;
-  if (!isRecord(build) || !isRecord(repetitions) || !isRecord(limits) || !isRecord(network)) {
+  const launcher = candidate.launcher;
+  if (!isRecord(build) || !isRecord(repetitions) || !isRecord(limits) || !isRecord(network) || !isRecord(launcher)) {
     throw new BenchmarkError('workload_shape_invalid');
   }
-  requireExactKeys(candidate, ['schema', 'fixture_id', 'fixture_version', 'build', 'repetitions', 'limits', 'network', 'hermes_source_sha'], 'workload_keys_invalid');
+  requireExactKeys(candidate, ['schema', 'fixture_id', 'fixture_version', 'build', 'repetitions', 'limits', 'network', 'launcher', 'hermes_source_sha'], 'workload_keys_invalid');
   requireExactKeys(build, ['entrypoint', 'arguments', 'input_files', 'input_roots', 'output_root', 'version_name'], 'build_keys_invalid');
   requireExactKeys(repetitions, ['cold', 'warm', 'maximum'], 'repetition_keys_invalid');
   requireExactKeys(
@@ -179,6 +181,7 @@ export function validateWorkload(candidate: unknown): Workload {
     'limit_keys_invalid'
   );
   requireExactKeys(network, ['mode', 'boundary'], 'network_keys_invalid');
+  requireExactKeys(launcher, ['supervisor_sha256', 'scanner_sha256'], 'launcher_keys_invalid');
   const pathLists = [build.input_files, build.input_roots, build.arguments];
   if (
     candidate.fixture_id !== 'web-production-build' ||
@@ -193,6 +196,8 @@ export function validateWorkload(candidate: unknown): Workload {
     JSON.stringify(build.input_roots) !== JSON.stringify(['src', 'static']) ||
     network.mode !== 'deny' ||
     network.boundary !== 'os_sandbox' ||
+    typeof launcher.supervisor_sha256 !== 'string' || !SHA256_PATTERN.test(launcher.supervisor_sha256) ||
+    typeof launcher.scanner_sha256 !== 'string' || !SHA256_PATTERN.test(launcher.scanner_sha256) ||
     candidate.hermes_source_sha !== 'f5be9236e00ddf2f2a412697f267078fc4ee068e'
   ) {
     throw new BenchmarkError('workload_identity_invalid');
@@ -228,7 +233,7 @@ export function validateWorkload(candidate: unknown): Workload {
   ) {
     throw new BenchmarkError('resource_limit_invalid');
   }
-  return immutableJsonCopy(candidate) as unknown as Workload;
+  return candidate as unknown as Workload;
 }
 
 export function roundRationalHalfEven(numerator: number, denominator: number): number {
@@ -404,6 +409,7 @@ async function createWorkspace(workload: Workload, dependencySnapshot: string): 
     await mkdir(join(workspace, '.home'), { recursive: true });
     await mkdir(join(workspace, '.tmp'), { recursive: true });
     await mkdir(join(workspace, '.svelte-kit'), { recursive: true });
+    await mkdir(join(workspace, '.supervisor'), { recursive: true });
     await mountArtifactQuota(workspace, workload.limits.artifact_bytes);
     return workspace;
   } catch (error) {
@@ -417,10 +423,12 @@ export async function removeWorkspace(workspace: string): Promise<void> {
   if (quotaDevice) {
     // Detach by device: a full HFS+ volume may lose its mount point before
     // cleanup, but the attached disk must still be released before deletion.
-    spawnSync('/usr/bin/hdiutil', ['detach', '-quiet', '-force', quotaDevice], { stdio: 'ignore' });
+    spawnSync('/usr/bin/hdiutil', ['detach', '-quiet', '-force', quotaDevice], { stdio: 'ignore', timeout: 3000 });
     quotaDevices.delete(workspace);
   }
-  await rm(workspace, { recursive: true, force: true });
+  spawnSync('/bin/chmod', ['-R', 'u+w', workspace], { stdio: 'ignore', timeout: 1000 });
+  const removed = spawnSync('/bin/rm', ['-rf', workspace], { stdio: 'ignore', timeout: 3000 });
+  if (removed.status !== 0) throw new BenchmarkError('workspace_cleanup_failed');
   activeWorkspaces.delete(workspace);
 }
 
@@ -434,9 +442,7 @@ export async function measureArtifacts(
   if (!relativeRoot || relativeRoot.startsWith('../') || relativeRoot === '..') {
     throw new BenchmarkError('artifact_root_escape');
   }
-  const pythonPath = Bun.which('python3');
-  if (!pythonPath) throw new BenchmarkError('runtime_missing');
-  const scanned = spawnSync(pythonPath, [
+  const scanned = spawnSync(SYSTEM_PYTHON_PATH, [
     ARTIFACT_SCANNER_PATH,
     '--workspace', workspace,
     '--root', relativeRoot,
@@ -452,7 +458,7 @@ export async function measureArtifacts(
   } catch {
     throw new BenchmarkError('artifact_scan_failed');
   }
-  requirePlainJsonValue(result, 'artifact_scan_invalid');
+  result = plainJsonSnapshot(result, 'artifact_scan_invalid');
   const record = result as Record<string, unknown>;
   requireExactKeys(record, ['files', 'bytes', 'sha256'], 'artifact_scan_invalid');
   if (typeof record.files !== 'number' || !Number.isInteger(record.files) || record.files < 0 || record.files > limits.artifact_files ||
@@ -512,6 +518,103 @@ export async function terminateProcessGroup(child: ChildProcessWithoutNullStream
   }
 }
 
+export interface ProtectedRuntime {
+  nodePath: string;
+  pythonPath: string;
+  sandboxPath: string;
+}
+
+async function fixedExecutable(candidates: string[], code: string): Promise<string> {
+  for (const candidate of candidates) {
+    try {
+      const resolved = await realpath(candidate);
+      const metadata = await stat(resolved);
+      if (metadata.isFile() && (metadata.mode & 0o111) !== 0) return resolved;
+    } catch {}
+  }
+  throw new BenchmarkError(code);
+}
+
+export async function protectedRuntime(workload: Workload): Promise<ProtectedRuntime> {
+  const pythonPath = await fixedExecutable([SYSTEM_PYTHON_PATH], 'python_runtime_missing');
+  const sandboxPath = await fixedExecutable(
+    [platform() === 'darwin' ? MACOS_SANDBOX_PATH : LINUX_SANDBOX_PATH],
+    'sandbox_runtime_missing'
+  );
+  const nodePath = await fixedExecutable(
+    platform() === 'darwin'
+      ? ['/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node']
+      : ['/usr/bin/node', '/usr/local/bin/node'],
+    'node_runtime_missing'
+  );
+  const supervisor = await fileIdentity(SANDBOX_RUNNER_PATH);
+  const scanner = await fileIdentity(ARTIFACT_SCANNER_PATH);
+  if (supervisor.sha256 !== workload.launcher.supervisor_sha256 || scanner.sha256 !== workload.launcher.scanner_sha256) {
+    throw new BenchmarkError('protected_helper_identity_mismatch');
+  }
+  return { nodePath, pythonPath, sandboxPath };
+}
+
+export function sandboxLauncher(
+  runtime: ProtectedRuntime,
+  workspace: string,
+  dependencySnapshot: string,
+  artifactBytes: number,
+  command: string[]
+): { command: string; args: string[] } {
+  const canonicalWorkspace = realpathSync(workspace);
+  const canonicalDependencySnapshot = realpathSync(dependencySnapshot);
+  const resultPath = join(canonicalWorkspace, '.supervisor', 'result.json');
+  const supervised = [
+    runtime.pythonPath,
+    '-I',
+    '-S',
+    SANDBOX_RUNNER_PATH,
+    '--workspace',
+    canonicalWorkspace,
+    '--result',
+    resultPath,
+    '--',
+    ...command
+  ];
+  if (platform() === 'darwin') {
+    const writableRoots = [
+      '.svelte-kit', '.artifact-output', '.home', '.tmp', 'node_modules/.vite-temp', '.supervisor'
+    ].map((path) => join(canonicalWorkspace, path).replaceAll('"', ''));
+    const dependencyRoot = canonicalDependencySnapshot.replaceAll('"', '');
+    const profile = [
+      '(version 1)',
+      '(allow default)',
+      '(deny network*)',
+      '(deny file-write*)',
+      ...writableRoots.map((path) => `(allow file-write* (subpath "${path}"))`),
+      '(allow file-write* (literal "/dev/null"))',
+      `(deny file-write* (subpath "${dependencyRoot}"))`
+    ].join('');
+    return { command: runtime.sandboxPath, args: ['-p', profile, ...supervised] };
+  }
+  return {
+    command: runtime.sandboxPath,
+    args: [
+      '--die-with-parent',
+      '--unshare-net',
+      '--unshare-pid',
+      '--new-session',
+      '--ro-bind', '/', '/',
+      '--bind', join(canonicalWorkspace, '.svelte-kit'), join(canonicalWorkspace, '.svelte-kit'),
+      '--size', String(artifactBytes),
+      '--tmpfs', join(canonicalWorkspace, '.artifact-output'),
+      '--bind', join(canonicalWorkspace, '.home'), join(canonicalWorkspace, '.home'),
+      '--bind', join(canonicalWorkspace, '.tmp'), join(canonicalWorkspace, '.tmp'),
+      '--bind', join(canonicalWorkspace, 'node_modules', '.vite-temp'), join(canonicalWorkspace, 'node_modules', '.vite-temp'),
+      '--bind', join(canonicalWorkspace, '.supervisor'), join(canonicalWorkspace, '.supervisor'),
+      '--ro-bind', canonicalDependencySnapshot, canonicalDependencySnapshot,
+      '--',
+      ...supervised
+    ]
+  };
+}
+
 function benchmarkEnvironment(workspace: string, workload: Workload, nodePath: string): Record<string, string> {
   const executableDirectory = dirname(nodePath);
   return {
@@ -535,28 +638,17 @@ async function runBuild(
   workspace: string,
   dependencySnapshot: string,
   workload: Workload,
+  runtime: ProtectedRuntime,
   sequence: number
 ): Promise<BuildObservation> {
-  const nodePath = Bun.which('node');
-  const pythonPath = Bun.which('python3');
-  if (!nodePath || !pythonPath) throw new BenchmarkError('runtime_missing');
   const entrypoint = join(workspace, workload.build.entrypoint);
-  const executedCommand = [nodePath, entrypoint, ...workload.build.arguments];
-  const launcher = [
-    SANDBOX_RUNNER_PATH,
-    '--workspace',
-    workspace,
-    '--dependency-root',
-    dependencySnapshot,
-    '--artifact-bytes',
-    String(workload.limits.artifact_bytes),
-    '--',
-    ...executedCommand
-  ];
-  const start = performance.now();
-  const child = spawn(pythonPath, launcher, {
+  const executedCommand = [runtime.nodePath, entrypoint, ...workload.build.arguments];
+  // The first child is the fixed OS sandbox executable. Python startup and the
+  // reviewed supervisor helper therefore occur only after network denial exists.
+  const launcher = sandboxLauncher(runtime, workspace, dependencySnapshot, workload.limits.artifact_bytes, executedCommand);
+  const child = spawn(launcher.command, launcher.args, {
     cwd: workspace,
-    env: benchmarkEnvironment(workspace, workload, nodePath),
+    env: benchmarkEnvironment(workspace, workload, runtime.nodePath),
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -579,7 +671,6 @@ async function runBuild(
       child.once('error', () => reject(new BenchmarkError('production_build_spawn_failed')));
       child.once('exit', (code) => resolve(code ?? 128));
     });
-    const durationMs = Math.round((performance.now() - start) * 1000) / 1000;
     await terminateProcessGroup(child);
     const [stdoutBytes, stderrBytes] = await boundedWait(
       Promise.all([stdoutDrain, stderrDrain]),
@@ -589,6 +680,21 @@ async function runBuild(
     if (timedOut) throw new BenchmarkError('build_timeout');
     if (outputExceeded) throw new BenchmarkError('process_output_limit_exceeded');
     if (exitCode !== 0) throw new BenchmarkError('production_build_failed');
+    let supervisorResult: unknown;
+    try {
+      const resultBytes = await readFile(join(workspace, '.supervisor', 'result.json'));
+      if (resultBytes.byteLength > 256) throw new Error('oversized');
+      supervisorResult = JSON.parse(new TextDecoder().decode(resultBytes));
+    } catch {
+      throw new BenchmarkError('supervisor_result_invalid');
+    }
+    supervisorResult = plainJsonSnapshot(supervisorResult, 'supervisor_result_invalid');
+    const resultRecord = supervisorResult as Record<string, unknown>;
+    requireExactKeys(resultRecord, ['exit_code', 'duration_us'], 'supervisor_result_invalid');
+    if (resultRecord.exit_code !== 0 || !Number.isSafeInteger(resultRecord.duration_us) || (resultRecord.duration_us as number) <= 0) {
+      throw new BenchmarkError('supervisor_result_invalid');
+    }
+    const durationMs = (resultRecord.duration_us as number) / 1000;
     const outputPath = join(workspace, workload.build.output_root);
     const artifacts = await measureArtifacts(outputPath, workspace, workload.limits, true);
     if (!artifacts.sha256) throw new BenchmarkError('artifact_digest_missing');
@@ -611,12 +717,12 @@ async function runBuild(
   }
 }
 
-async function runCold(workload: Workload, dependencySnapshot: string, repetitions: number): Promise<BuildObservation[]> {
+async function runCold(workload: Workload, dependencySnapshot: string, runtime: ProtectedRuntime, repetitions: number): Promise<BuildObservation[]> {
   const observations: BuildObservation[] = [];
   for (let sequence = 1; sequence <= repetitions; sequence += 1) {
     const workspace = await createWorkspace(workload, dependencySnapshot);
     try {
-      observations.push(await runBuild(workspace, dependencySnapshot, workload, sequence));
+      observations.push(await runBuild(workspace, dependencySnapshot, workload, runtime, sequence));
     } finally {
       await removeWorkspace(workspace);
     }
@@ -627,14 +733,15 @@ async function runCold(workload: Workload, dependencySnapshot: string, repetitio
 async function runWarm(
   workload: Workload,
   dependencySnapshot: string,
+  runtime: ProtectedRuntime,
   repetitions: number
 ): Promise<{ warmup: BuildObservation; observations: BuildObservation[] }> {
   const workspace = await createWorkspace(workload, dependencySnapshot);
   try {
-    const warmup = await runBuild(workspace, dependencySnapshot, workload, 0);
+    const warmup = await runBuild(workspace, dependencySnapshot, workload, runtime, 0);
     const observations: BuildObservation[] = [];
     for (let sequence = 1; sequence <= repetitions; sequence += 1) {
-      observations.push(await runBuild(workspace, dependencySnapshot, workload, sequence));
+      observations.push(await runBuild(workspace, dependencySnapshot, workload, runtime, sequence));
     }
     return { warmup, observations };
   } finally {
@@ -653,7 +760,7 @@ function commandVersion(command: string, args: string[]): string {
 }
 
 function sourceCommit(): string {
-  const result = Bun.spawnSync(['git', '-C', resolve(APP_ROOT, '..', '..'), 'rev-parse', 'HEAD'], {
+  const result = Bun.spawnSync(['/usr/bin/git', '-C', resolve(APP_ROOT, '..', '..'), 'rev-parse', 'HEAD'], {
     stdout: 'pipe',
     stderr: 'ignore'
   });
@@ -719,18 +826,17 @@ async function fileIdentity(path: string): Promise<{ bytes: number; sha256: stri
   }
 }
 
-async function toolchainIdentity(dependencySnapshot: string): Promise<Record<string, unknown>> {
-  const nodePath = Bun.which('node');
-  const pythonPath = Bun.which('python3');
-  const sandboxPath = platform() === 'darwin' ? '/usr/bin/sandbox-exec' : Bun.which('bwrap');
-  if (!nodePath || !pythonPath || !sandboxPath) throw new BenchmarkError('sandbox_runtime_missing');
+async function toolchainIdentity(dependencySnapshot: string, runtime: ProtectedRuntime): Promise<Record<string, unknown>> {
   return {
     package_json: await fileIdentity(join(APP_ROOT, 'package.json')),
     bun_lock: await fileIdentity(join(APP_ROOT, 'bun.lock')),
-    node_executable: await fileIdentity(nodePath),
+    benchmark_runner: await fileIdentity(import.meta.path),
+    sandbox_runner: await fileIdentity(SANDBOX_RUNNER_PATH),
+    artifact_scanner: await fileIdentity(ARTIFACT_SCANNER_PATH),
+    node_executable: await fileIdentity(runtime.nodePath),
     bun_executable: await fileIdentity(process.execPath),
-    python_executable: await fileIdentity(pythonPath),
-    sandbox_executable: await fileIdentity(sandboxPath),
+    python_executable: await fileIdentity(runtime.pythonPath),
+    sandbox_executable: await fileIdentity(runtime.sandboxPath),
     dependencies: await treeIdentity(dependencySnapshot),
     vite: await treeIdentity(join(dependencySnapshot, 'vite')),
     sveltekit: await treeIdentity(join(dependencySnapshot, '@sveltejs', 'kit')),
@@ -768,14 +874,14 @@ function sampleProvenance(run: Record<string, unknown>): string {
 
 async function writeEvidenceFiles(
   workload: Workload,
+  runtime: ProtectedRuntime,
   toolchain: Record<string, unknown>,
   cold: BuildObservation[],
   warmup: BuildObservation,
   warm: BuildObservation[]
 ): Promise<void> {
   const workloadBytes = await readFile(WORKLOAD_PATH);
-  const nodePath = Bun.which('node');
-  if (!nodePath) throw new BenchmarkError('node_runtime_missing');
+  const nodePath = runtime.nodePath;
   const commitSha = sourceCommit();
   const input = await inputIdentity(workload);
   const artifactIdentities = [warmup, ...cold, ...warm].map((sample) => sample.artifact_sha256);
@@ -832,10 +938,17 @@ async function writeEvidenceFiles(
   await mkdir(EVIDENCE_DIRECTORY, { recursive: true });
   const traceBytes = canonicalBytes(trace);
   await writeFile(TRACE_PATH, traceBytes);
-  const artifacts = [
-    { path: 'workload.json', bytes: workloadBytes.byteLength, sha256: sha256(workloadBytes) },
-    { path: 'evidence/raw-trace.json', bytes: traceBytes.byteLength, sha256: sha256(traceBytes) }
-  ];
+  const artifacts = [];
+  for (const [path, absolutePath] of [
+    ['workload.json', WORKLOAD_PATH],
+    ['run.ts', import.meta.path],
+    ['sandbox-runner.py', SANDBOX_RUNNER_PATH],
+    ['artifact-scanner.py', ARTIFACT_SCANNER_PATH]
+  ] as const) {
+    const bytes = await readFile(absolutePath);
+    artifacts.push({ path, bytes: bytes.byteLength, sha256: sha256(bytes) });
+  }
+  artifacts.push({ path: 'evidence/raw-trace.json', bytes: traceBytes.byteLength, sha256: sha256(traceBytes) });
   const evidence = {
     schema: 'hermternal.benchmark-evidence.v1',
     evidence_id: 'web-production-build-baseline',
@@ -900,27 +1013,63 @@ async function writeEvidenceFiles(
 }
 
 async function loadWorkload(): Promise<Workload> {
+  let raw: Uint8Array;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(WORKLOAD_PATH, 'utf8'));
+    const handle = await open(WORKLOAD_PATH, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      const buffer = new Uint8Array(MAX_WORKLOAD_BYTES + 1);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
+      if (bytesRead > MAX_WORKLOAD_BYTES) throw new Error('oversized');
+      raw = buffer.slice(0, bytesRead);
+    } finally {
+      await handle.close();
+    }
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
   } catch {
     throw new BenchmarkError('workload_json_invalid');
   }
-  return validateWorkload(parsed);
+  const workload = validateWorkload(parsed);
+  const canonical = canonicalBytes(workload);
+  if (raw.byteLength !== canonical.byteLength || raw.some((byte, index) => byte !== canonical[index])) {
+    // Canonical equality also rejects duplicate keys because JSON.parse would
+    // collapse them before the exact byte comparison.
+    throw new BenchmarkError('workload_json_not_canonical');
+  }
+  return workload;
 }
 
 async function removeRunRoot(runRoot: string): Promise<void> {
-  spawnSync('chmod', ['-R', 'u+w', runRoot], { stdio: 'ignore' });
-  await rm(runRoot, { recursive: true, force: true });
+  spawnSync('/bin/chmod', ['-R', 'u+w', runRoot], { stdio: 'ignore', timeout: 1000 });
+  const removed = spawnSync('/bin/rm', ['-rf', runRoot], { stdio: 'ignore', timeout: 3000 });
+  if (removed.status !== 0) throw new BenchmarkError('run_root_cleanup_failed');
   activeRunRoots.delete(runRoot);
 }
 
 async function handleSignal(exitCode: number): Promise<void> {
   if (handlingSignal) return;
   handlingSignal = true;
-  if (activeChild) await terminateProcessGroup(activeChild);
-  await Promise.all([...activeWorkspaces].map((workspace) => removeWorkspace(workspace)));
-  await Promise.all([...activeRunRoots].map((runRoot) => removeRunRoot(runRoot)));
+  const cleanup = async () => {
+    if (activeChild) await terminateProcessGroup(activeChild, 1500);
+    for (const workspace of [...activeWorkspaces]) await removeWorkspace(workspace);
+    for (const runRoot of [...activeRunRoots]) await removeRunRoot(runRoot);
+  };
+  try {
+    await boundedWait(cleanup(), SIGNAL_CLEANUP_DEADLINE_MS, 'signal_cleanup_timeout');
+  } catch {
+    // Retry fixed-path filesystem cleanup synchronously before exit. The runner
+    // never reports signal completion while its registered roots still exist.
+    for (const workspace of [...activeWorkspaces]) {
+      spawnSync('/bin/chmod', ['-R', 'u+w', workspace], { stdio: 'ignore', timeout: 1000 });
+      spawnSync('/bin/rm', ['-rf', workspace], { stdio: 'ignore', timeout: 3000 });
+      activeWorkspaces.delete(workspace);
+    }
+    for (const runRoot of [...activeRunRoots]) {
+      spawnSync('/bin/chmod', ['-R', 'u+w', runRoot], { stdio: 'ignore', timeout: 1000 });
+      spawnSync('/bin/rm', ['-rf', runRoot], { stdio: 'ignore', timeout: 3000 });
+      activeRunRoots.delete(runRoot);
+    }
+  }
   process.exit(exitCode);
 }
 
@@ -929,18 +1078,29 @@ async function main(): Promise<void> {
   process.once('SIGTERM', () => void handleSignal(143));
   const workload = await loadWorkload();
   const options = parseArguments(process.argv.slice(2), workload);
-  const runRoot = await mkdtemp(join(tmpdir(), 'hermternal-web-benchmark-'));
+  // Synchronous creation and registration form one signal-free JavaScript turn;
+  // SIGINT/SIGTERM can no longer observe an unregistered on-disk run root.
+  const runRoot = mkdtempSync(join(tmpdir(), 'hermternal-web-benchmark-'));
   activeRunRoots.add(runRoot);
+  const readinessFile = process.env.HERMTERNAL_BENCHMARK_READY_FILE;
+  if (readinessFile) {
+    const readinessPath = resolve(readinessFile);
+    const readinessParent = realpathSync(dirname(readinessPath));
+    if (readinessParent === realpathSync(tmpdir()) && readinessPath.split(sep).at(-1)?.startsWith('hermternal-benchmark-ready-')) {
+      try { writeFileSync(readinessPath, 'ready\n', { flag: 'wx', mode: 0o600 }); } catch {}
+    }
+  }
   try {
     const dependencySnapshot = await cloneDependencySnapshot(runRoot);
-    const toolchain = await toolchainIdentity(dependencySnapshot);
-    const cold = await runCold(workload, dependencySnapshot, options.coldRepetitions);
-    const warmResult = await runWarm(workload, dependencySnapshot, options.warmRepetitions);
+    const runtime = await protectedRuntime(workload);
+    const toolchain = await toolchainIdentity(dependencySnapshot, runtime);
+    const cold = await runCold(workload, dependencySnapshot, runtime, options.coldRepetitions);
+    const warmResult = await runWarm(workload, dependencySnapshot, runtime, options.warmRepetitions);
     const artifactIdentities = [warmResult.warmup, ...cold, ...warmResult.observations].map((sample) => sample.artifact_sha256);
     if (new Set(artifactIdentities).size !== 1) throw new BenchmarkError('artifact_identity_drift');
-    const finalToolchain = await toolchainIdentity(dependencySnapshot);
+    const finalToolchain = await toolchainIdentity(dependencySnapshot, runtime);
     if (JSON.stringify(toolchain) !== JSON.stringify(finalToolchain)) throw new BenchmarkError('dependency_snapshot_mutated');
-    if (options.writeEvidence) await writeEvidenceFiles(workload, toolchain, cold, warmResult.warmup, warmResult.observations);
+    if (options.writeEvidence) await writeEvidenceFiles(workload, runtime, toolchain, cold, warmResult.warmup, warmResult.observations);
     const summary = {
       ok: true,
       cold: { repetitions: cold.length, distribution: distribution(cold.map((sample) => sample.duration_ms)) },

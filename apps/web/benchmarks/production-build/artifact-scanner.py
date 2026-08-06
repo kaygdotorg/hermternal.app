@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import stat
+import time
 from pathlib import PurePosixPath
 
 
@@ -35,7 +36,15 @@ def main() -> int:
     parser.add_argument("--root", required=True)
     parser.add_argument("--max-files", required=True, type=int)
     parser.add_argument("--max-bytes", required=True, type=int)
+    parser.add_argument("--test-pause-ms", type=int, default=0)
+    parser.add_argument("--test-ready-file")
     arguments = parser.parse_args()
+    if (arguments.test_pause_ms or arguments.test_ready_file) and (
+        os.environ.get("HERMTERNAL_SCANNER_TEST_MODE") != "1"
+        or not 1 <= arguments.test_pause_ms <= 1000
+        or not arguments.test_ready_file
+    ):
+        fail()
     root_parts = PurePosixPath(arguments.root).parts
     if not root_parts or arguments.root.startswith("/") or any(part in {"", ".", ".."} for part in root_parts):
         fail()
@@ -83,17 +92,44 @@ def main() -> int:
                     fail()
                 if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
                     fail()
+                if arguments.test_pause_ms:
+                    try:
+                        ready_fd = os.open(arguments.test_ready_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        os.close(ready_fd)
+                    except OSError:
+                        fail()
+                    time.sleep(arguments.test_pause_ms / 1000)
                 files += 1
-                byte_count += opened.st_size
-                if files > arguments.max_files or byte_count > arguments.max_bytes:
+                remaining_budget = arguments.max_bytes - byte_count
+                extent = opened.st_size
+                if files > arguments.max_files or extent < 0 or extent > remaining_budget:
                     fail()
                 digest = hashlib.sha256()
-                while True:
-                    chunk = os.read(file_fd, 65536)
+                hashed_bytes = 0
+                while hashed_bytes < extent:
+                    # Read only the reviewed stable extent. EOF before the extent
+                    # proves shrinkage; one bounded byte after it proves growth.
+                    chunk = os.read(file_fd, min(65536, extent - hashed_bytes))
                     if not chunk:
-                        break
+                        fail()
+                    hashed_bytes += len(chunk)
                     digest.update(chunk)
-                records.append({"path": relative, "bytes": opened.st_size, "sha256": digest.hexdigest()})
+                if os.read(file_fd, 1):
+                    fail()
+                try:
+                    final_opened = os.fstat(file_fd)
+                    final_path = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError:
+                    fail()
+                stable_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+                if any(getattr(opened, field) != getattr(final_opened, field) for field in stable_fields):
+                    fail()
+                if any(getattr(final_opened, field) != getattr(final_path, field) for field in stable_fields):
+                    fail()
+                if hashed_bytes != extent:
+                    fail()
+                byte_count += hashed_bytes
+                records.append({"path": relative, "bytes": hashed_bytes, "sha256": digest.hexdigest()})
 
         visit(root_fd, "")
         payload = json.dumps(records, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
