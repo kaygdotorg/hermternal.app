@@ -12,10 +12,16 @@ const PINNED_ROUTE_MANIFEST_SHA256 =
 const PINNED_FIXTURE_CANONICAL_SHA256 =
   '293756e6b2573f59b7747c38cc0cda0f6602236ed93aae442f0022ad850d40e7';
 const MAX_IDENTIFIER_LENGTH = 128;
-const MAX_STRING_LENGTH = 8_192;
+const MAX_STRING_UTF8_BYTES = 8_192;
+const MAX_TOTAL_STRING_UTF8_BYTES = 131_072;
+const MAX_EVIDENCE_UTF8_BYTES = 262_144;
+const MAX_CANONICAL_OUTPUT_UTF8_BYTES = 262_144;
 const MAX_JSON_DEPTH = 24;
 const MAX_EVIDENCE_JSON_NODES = 4_096;
 const MAX_FIXTURE_JSON_NODES = 32_768;
+const MAX_ARRAY_ITEMS = 500;
+const MAX_OBJECT_KEYS = 128;
+const MAX_NUMBER_TOKEN_LENGTH = 64;
 
 export type BehavioralProbeStateId =
   | 'pending'
@@ -95,8 +101,8 @@ interface FixtureContract {
 }
 
 const EVIDENCE_KEYS = [
-  'schema', 'fixtureSchema', 'contract', 'hermesSourceSha', 'routeManifestSha256',
-  'syntheticOnly', 'liveRun', 'state', 'caseResults', 'requirementResults'
+  'caseResults', 'contract', 'fixtureSchema', 'hermesSourceSha', 'liveRun',
+  'requirementResults', 'routeManifestSha256', 'schema', 'state', 'syntheticOnly'
 ] as const;
 const FIXTURE_KEYS = [
   'schema', 'contract', 'hermes_source_sha', 'route_manifest', 'route_manifest_sha256',
@@ -110,16 +116,19 @@ const STATE_IDS = new Set<BehavioralProbeStateId>([
 ]);
 
 /**
- * Evaluates one inert snapshot of checked-in synthetic evidence. Descriptor
- * validation happens before any value is trusted, so accessors cannot change a
- * state or inventory between validation and the final decision.
+ * Evaluates canonical JSON text only. Rejecting every object before parsing is
+ * the trust boundary: an attacker-controlled Proxy never reaches reflection,
+ * getters, iteration, or any other executable object hook on this thread.
  */
-export function evaluateBehavioralProbeGate(evidence: unknown): BehavioralProbeGateResult {
+export function evaluateBehavioralProbeGate(evidenceJson: unknown): BehavioralProbeGateResult {
+  if (typeof evidenceJson !== 'string' || evidenceJson.length > MAX_EVIDENCE_UTF8_BYTES) {
+    return incompatibleResult('incompatible-evidence');
+  }
   const contract = readFixtureContract(behavioralProbeFixture, CANONICAL_ROUTE_MANIFEST_BYTES);
   if (!contract) return incompatibleResult('fixture-contract-invalid');
 
   try {
-    const parsed = readEvidence(evidence, contract);
+    const parsed = readEvidence(parseCanonicalEvidenceJson(evidenceJson), contract);
     if (!parsed) return incompatibleResult('incompatible-evidence');
     const state = contract.states.get(parsed.state);
     if (!state || !isStateEvidenceConsistent(parsed, contract)) {
@@ -143,15 +152,13 @@ export function evaluateBehavioralProbeGate(evidence: unknown): BehavioralProbeG
   }
 }
 
-/** Builds deterministic test evidence; it never represents a live probe. */
-export function createBehavioralProbeFixtureEvidence(
-  state: BehavioralProbeStateId
-): BehavioralProbeEvidence {
+/** Builds canonical serialized test evidence; it never represents a live probe. */
+export function createBehavioralProbeFixtureEvidence(state: BehavioralProbeStateId): string {
   const contract = readFixtureContract(behavioralProbeFixture, CANONICAL_ROUTE_MANIFEST_BYTES);
   if (!contract) throw new Error('The behavioral-probe fixture contract is invalid.');
   const success = state === 'success';
   const failure = state === 'failure';
-  return {
+  const evidence: BehavioralProbeEvidence = {
     schema: EVIDENCE_SCHEMA,
     fixtureSchema: contract.schema,
     contract: contract.contract,
@@ -168,6 +175,7 @@ export function createBehavioralProbeFixtureEvidence(
       passed: success || (failure ? index !== 0 : false)
     }))
   };
+  return canonicalJson(evidence as unknown as BehavioralProbeJsonValue);
 }
 
 /** @internal Digest seam for canonical contract regression tests only. */
@@ -242,8 +250,7 @@ function readFixtureContract(fixtureInput: unknown, manifestBytes: string): Fixt
   }
 }
 
-function readEvidence(evidence: unknown, contract: FixtureContract): BehavioralProbeEvidence | null {
-  const snapshot = snapshotJson(evidence, MAX_EVIDENCE_JSON_NODES);
+function readEvidence(snapshot: BehavioralProbeJsonValue, contract: FixtureContract): BehavioralProbeEvidence | null {
   if (!isRecord(snapshot) || !hasExactDataKeys(snapshot, EVIDENCE_KEYS)) return null;
   const caseResults = snapshot.caseResults;
   const requirementResults = snapshot.requirementResults;
@@ -310,6 +317,186 @@ function incompatibleResult(reason: 'incompatible-evidence' | 'fixture-contract-
   };
 }
 
+function parseCanonicalEvidenceJson(input: string): BehavioralProbeJsonValue {
+  if (utf8Length(input, MAX_EVIDENCE_UTF8_BYTES) > MAX_EVIDENCE_UTF8_BYTES) {
+    throw new TypeError('invalid evidence');
+  }
+  let offset = 0;
+  let nodes = 0;
+  let totalStringBytes = 0;
+
+  function fail(): never {
+    throw new TypeError('invalid evidence');
+  }
+  function addNode(depth: number): void {
+    nodes += 1;
+    if (nodes > MAX_EVIDENCE_JSON_NODES || depth > MAX_JSON_DEPTH) fail();
+  }
+  function parseValue(depth: number): BehavioralProbeJsonValue {
+    addNode(depth);
+    const token = input[offset];
+    if (token === 'n' && input.slice(offset, offset + 4) === 'null') {
+      offset += 4;
+      return null;
+    }
+    if (token === 't' && input.slice(offset, offset + 4) === 'true') {
+      offset += 4;
+      return true;
+    }
+    if (token === 'f' && input.slice(offset, offset + 5) === 'false') {
+      offset += 5;
+      return false;
+    }
+    if (token === '"') return parseString();
+    if (token === '[') return parseArray(depth);
+    if (token === '{') return parseObject(depth);
+    return parseNumber();
+  }
+  function parseString(): string {
+    if (input[offset] !== '"') fail();
+    const start = offset;
+    offset += 1;
+    while (offset < input.length) {
+      const code = input.charCodeAt(offset);
+      if (code === 0x22) {
+        offset += 1;
+        let value: unknown;
+        try {
+          value = JSON.parse(input.slice(start, offset));
+        } catch {
+          fail();
+        }
+        if (typeof value !== 'string' || hasLoneSurrogate(value)) fail();
+        const bytes = utf8Length(value, MAX_STRING_UTF8_BYTES);
+        if (bytes > MAX_STRING_UTF8_BYTES) fail();
+        totalStringBytes += bytes;
+        if (totalStringBytes > MAX_TOTAL_STRING_UTF8_BYTES) fail();
+        return value;
+      }
+      if (code < 0x20) fail();
+      if (code === 0x5c) {
+        offset += 1;
+        const escape = input[offset];
+        if (escape === 'u') {
+          for (let index = 1; index <= 4; index += 1) {
+            if (!/[0-9a-fA-F]/u.test(input[offset + index] ?? '')) fail();
+          }
+          offset += 5;
+          continue;
+        }
+        if (!escape || !'"\\/bfnrt'.includes(escape)) fail();
+      }
+      offset += 1;
+    }
+    return fail();
+  }
+  function parseArray(depth: number): BehavioralProbeJsonValue[] {
+    offset += 1;
+    const result: BehavioralProbeJsonValue[] = [];
+    if (input[offset] === ']') {
+      offset += 1;
+      return Object.freeze(result) as unknown as BehavioralProbeJsonValue[];
+    }
+    while (true) {
+      if (result.length >= MAX_ARRAY_ITEMS) fail();
+      result.push(parseValue(depth + 1));
+      const separator = input[offset];
+      if (separator === ']') {
+        offset += 1;
+        return Object.freeze(result) as unknown as BehavioralProbeJsonValue[];
+      }
+      if (separator !== ',') fail();
+      offset += 1;
+    }
+  }
+  function parseObject(depth: number): { [key: string]: BehavioralProbeJsonValue } {
+    offset += 1;
+    const result: Record<string, BehavioralProbeJsonValue> = Object.create(null);
+    let previousKey: string | undefined;
+    let keyCount = 0;
+    if (input[offset] === '}') {
+      offset += 1;
+      return Object.freeze(result);
+    }
+    while (true) {
+      if (keyCount >= MAX_OBJECT_KEYS) fail();
+      const key = parseString();
+      if (previousKey !== undefined && key <= previousKey) fail();
+      previousKey = key;
+      if (input[offset] !== ':') fail();
+      offset += 1;
+      result[key] = parseValue(depth + 1);
+      keyCount += 1;
+      const separator = input[offset];
+      if (separator === '}') {
+        offset += 1;
+        return Object.freeze(result);
+      }
+      if (separator !== ',') fail();
+      offset += 1;
+    }
+  }
+  function parseNumber(): number {
+    const remainder = input.slice(offset);
+    const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/u.exec(remainder);
+    const token = match?.[0];
+    if (!token || token.length > MAX_NUMBER_TOKEN_LENGTH) fail();
+    offset += token.length;
+    const value = Number(token);
+    if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) fail();
+    if (JSON.stringify(value) !== token) fail();
+    return value;
+  }
+
+  const parsed = parseValue(0);
+  if (offset !== input.length) fail();
+  if (canonicalJson(parsed) !== input) fail();
+  return parsed;
+}
+
+function canonicalJson(value: BehavioralProbeJsonValue): string {
+  function serialize(candidate: BehavioralProbeJsonValue): string {
+    if (candidate === null || typeof candidate !== 'object') return JSON.stringify(candidate);
+    if (Array.isArray(candidate)) return `[${candidate.map(serialize).join(',')}]`;
+    return `{${Object.keys(candidate).sort().map((key) =>
+      `${JSON.stringify(key)}:${serialize(candidate[key]!)}`
+    ).join(',')}}`;
+  }
+  const result = serialize(value);
+  if (utf8Length(result, MAX_CANONICAL_OUTPUT_UTF8_BYTES) > MAX_CANONICAL_OUTPUT_UTF8_BYTES) {
+    throw new TypeError('invalid evidence');
+  }
+  return result;
+}
+
+function utf8Length(value: string, stopAfter: number): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length &&
+      value.charCodeAt(index + 1) >= 0xdc00 && value.charCodeAt(index + 1) <= 0xdfff) {
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+    if (bytes > stopAfter) return bytes;
+  }
+  return bytes;
+}
+
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) return true;
+  }
+  return false;
+}
+
 function snapshotJson(value: unknown, maxNodes: number): BehavioralProbeJsonValue {
   let nodes = 0;
   const active = new Set<object>();
@@ -324,7 +511,7 @@ function snapshotJson(value: unknown, maxNodes: number): BehavioralProbeJsonValu
       return candidate;
     }
     if (typeof candidate === 'string') {
-      if (candidate.length > MAX_STRING_LENGTH) throw new TypeError('invalid evidence');
+      if (utf8Length(candidate, MAX_STRING_UTF8_BYTES) > MAX_STRING_UTF8_BYTES) throw new TypeError('invalid evidence');
       return candidate;
     }
     if (typeof candidate !== 'object' || active.has(candidate)) throw new TypeError('invalid evidence');
@@ -338,7 +525,7 @@ function snapshotJson(value: unknown, maxNodes: number): BehavioralProbeJsonValu
         if (!lengthDescriptor || !('value' in lengthDescriptor) ||
             lengthDescriptor.enumerable !== false ||
             !Number.isSafeInteger(lengthDescriptor.value) ||
-            lengthDescriptor.value < 0 || lengthDescriptor.value > 500) {
+            lengthDescriptor.value < 0 || lengthDescriptor.value > MAX_ARRAY_ITEMS) {
           throw new TypeError('invalid evidence');
         }
         const length = lengthDescriptor.value;

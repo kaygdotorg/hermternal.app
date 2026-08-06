@@ -1,4 +1,5 @@
 import behavioralProbeFixture from '../../../../../../contracts/fixtures/behavioral-probe/probe-fixtures.json';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -21,8 +22,26 @@ const routeManifestBytes = readFileSync(
   'utf8'
 );
 
-function cloneEvidence(evidence: BehavioralProbeEvidence): BehavioralProbeEvidence {
-  return structuredClone(evidence);
+function parseEvidence(evidenceJson: string): BehavioralProbeEvidence {
+  return JSON.parse(evidenceJson) as BehavioralProbeEvidence;
+}
+
+function serializeEvidence(value: unknown): string {
+  const canonicalize = (candidate: unknown): unknown => {
+    if (candidate === null || typeof candidate !== 'object') return candidate;
+    if (Array.isArray(candidate)) return candidate.map(canonicalize);
+    return Object.fromEntries(
+      Object.keys(candidate as Record<string, unknown>).sort().map((key) => [
+        key,
+        canonicalize((candidate as Record<string, unknown>)[key])
+      ])
+    );
+  };
+  return JSON.stringify(canonicalize(value));
+}
+
+function cloneEvidence(evidenceJson: string): BehavioralProbeEvidence {
+  return structuredClone(parseEvidence(evidenceJson));
 }
 
 afterEach(() => {
@@ -31,10 +50,11 @@ afterEach(() => {
 
 describe('evaluateBehavioralProbeGate', () => {
   it('validates all 64 canonical cases but blocks a synthetic success from a live claim', () => {
-    const evidence = createBehavioralProbeFixtureEvidence('success');
+    const evidenceJson = createBehavioralProbeFixtureEvidence('success');
+    const evidence = parseEvidence(evidenceJson);
 
     expect(evidence.caseResults).toHaveLength(64);
-    expect(evaluateBehavioralProbeGate(evidence)).toEqual({
+    expect(evaluateBehavioralProbeGate(evidenceJson)).toEqual({
       status: 'blocked',
       state: 'success',
       evidenceState: 'synthetic_fixture_validated',
@@ -97,9 +117,9 @@ describe('evaluateBehavioralProbeGate', () => {
     ['live result', (evidence: BehavioralProbeEvidence) => ({ ...evidence, liveRun: true })],
     ['non-synthetic result', (evidence: BehavioralProbeEvidence) => ({ ...evidence, syntheticOnly: false })]
   ])('fails closed for a %s binding', (_label, mutate) => {
-    const evidence = mutate(createBehavioralProbeFixtureEvidence('success'));
+    const evidence = mutate(parseEvidence(createBehavioralProbeFixtureEvidence('success')));
 
-    expect(evaluateBehavioralProbeGate(evidence)).toEqual(incompatibleResult());
+    expect(evaluateBehavioralProbeGate(serializeEvidence(evidence))).toEqual(incompatibleResult());
   });
 
   it('fails closed when one canonical case result changes', () => {
@@ -113,11 +133,11 @@ describe('evaluateBehavioralProbeGate', () => {
       caseResults: [{ ...first, observed: { unexpected: 'allow' } }, ...evidence.caseResults.slice(1)]
     };
 
-    expect(evaluateBehavioralProbeGate(changed)).toEqual(incompatibleResult());
+    expect(evaluateBehavioralProbeGate(serializeEvidence(changed))).toEqual(incompatibleResult());
   });
 
   it('fails closed when a required case or requirement is missing or duplicated', () => {
-    const evidence = createBehavioralProbeFixtureEvidence('success');
+    const evidence = parseEvidence(createBehavioralProbeFixtureEvidence('success'));
     const missingCase = { ...evidence, caseResults: evidence.caseResults.slice(1) };
     const duplicateCase = {
       ...evidence,
@@ -128,15 +148,15 @@ describe('evaluateBehavioralProbeGate', () => {
       requirementResults: evidence.requirementResults.slice(1)
     };
 
-    expect(evaluateBehavioralProbeGate(missingCase)).toEqual(incompatibleResult());
-    expect(evaluateBehavioralProbeGate(duplicateCase)).toEqual(incompatibleResult());
-    expect(evaluateBehavioralProbeGate(missingRequirement)).toEqual(incompatibleResult());
+    expect(evaluateBehavioralProbeGate(serializeEvidence(missingCase))).toEqual(incompatibleResult());
+    expect(evaluateBehavioralProbeGate(serializeEvidence(duplicateCase))).toEqual(incompatibleResult());
+    expect(evaluateBehavioralProbeGate(serializeEvidence(missingRequirement))).toEqual(incompatibleResult());
   });
 
   it.each(['reverse', 'adjacent-swap', 'arbitrary-reorder'] as const)(
     'rejects %s ordering of both canonical evidence inventories',
     (mutation) => {
-      const canonical = createBehavioralProbeFixtureEvidence('success');
+      const canonical = parseEvidence(createBehavioralProbeFixtureEvidence('success'));
       const reorder = <T>(items: readonly T[]): T[] => {
         if (mutation === 'reverse') return [...items].reverse();
         if (mutation === 'adjacent-swap') {
@@ -147,19 +167,19 @@ describe('evaluateBehavioralProbeGate', () => {
         return [...items.slice(2), ...items.slice(0, 2)];
       };
 
-      expect(evaluateBehavioralProbeGate({
+      expect(evaluateBehavioralProbeGate(serializeEvidence({
         ...canonical,
         caseResults: reorder(canonical.caseResults)
-      })).toEqual(incompatibleResult());
-      expect(evaluateBehavioralProbeGate({
+      }))).toEqual(incompatibleResult());
+      expect(evaluateBehavioralProbeGate(serializeEvidence({
         ...canonical,
         requirementResults: reorder(canonical.requirementResults)
-      })).toEqual(incompatibleResult());
+      }))).toEqual(incompatibleResult());
     }
   );
 
   it('fails closed when success evidence has a false requirement', () => {
-    const evidence = createBehavioralProbeFixtureEvidence('success');
+    const evidence = parseEvidence(createBehavioralProbeFixtureEvidence('success'));
     const first = evidence.requirementResults[0];
     if (!first) {
       throw new Error('Expected the canonical requirement inventory.');
@@ -169,144 +189,128 @@ describe('evaluateBehavioralProbeGate', () => {
       requirementResults: [{ ...first, passed: false }, ...evidence.requirementResults.slice(1)]
     };
 
-    expect(evaluateBehavioralProbeGate(changed)).toEqual(incompatibleResult());
+    expect(evaluateBehavioralProbeGate(serializeEvidence(changed))).toEqual(incompatibleResult());
   });
 
-  it.each([null, {}, [], 'unknown', 7])('fails closed for malformed evidence %j', (evidence) => {
+  it.each([null, {}, [], 'unknown', 7, '', '{', 'null', '[]'])('fails closed with one fixed redacted result for malformed evidence %j', (evidence) => {
     expect(evaluateBehavioralProbeGate(evidence)).toEqual(incompatibleResult());
   });
 
   it('fails closed for an unknown state and additive top-level evidence', () => {
-    const evidence = createBehavioralProbeFixtureEvidence('pending');
+    const evidence = parseEvidence(createBehavioralProbeFixtureEvidence('pending'));
 
-    expect(evaluateBehavioralProbeGate({ ...evidence, state: 'future-state' })).toEqual(
+    expect(evaluateBehavioralProbeGate(serializeEvidence({ ...evidence, state: 'future-state' }))).toEqual(
       incompatibleResult()
     );
-    expect(evaluateBehavioralProbeGate({ ...evidence, unreviewed: true })).toEqual(
+    expect(evaluateBehavioralProbeGate(serializeEvidence({ ...evidence, unreviewed: true }))).toEqual(
       incompatibleResult()
     );
   });
 
-  it('rejects cyclic evidence without throwing or reflecting untrusted content', () => {
-    const evidence = cloneEvidence(createBehavioralProbeFixtureEvidence('pending')) as unknown as {
-      caseResults: unknown[];
-    };
-    const cyclic: Record<string, unknown> = { id: 'rest-browser-cookie-approved' };
-    cyclic.observed = cyclic;
-    evidence.caseResults = [cyclic];
-
-    const result = evaluateBehavioralProbeGate(evidence);
-
-    expect(result).toEqual(incompatibleResult());
-    expect(JSON.stringify(result)).not.toContain('rest-browser-cookie-approved');
-  });
-
-  it('fails closed when hostile object inspection throws', () => {
-    const hostile = new Proxy(
-      {},
-      {
-        getPrototypeOf() {
-          throw new Error('untrusted detail');
+  it.each(['getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor'] as const)(
+    'rejects a hostile Proxy before invoking its %s trap',
+    (trap) => {
+      let calls = 0;
+      const hostile = new Proxy({}, {
+        [trap]() {
+          calls += 1;
+          throw new Error('untrusted trap');
         }
-      }
-    );
+      });
 
-    expect(evaluateBehavioralProbeGate(hostile)).toEqual(incompatibleResult());
-  });
+      expect(evaluateBehavioralProbeGate(hostile)).toEqual(incompatibleResult());
+      expect(calls).toBe(0);
+    }
+  );
 
-  it('rejects a state getter that changes from pending to success without reading it', () => {
-    const evidence = createBehavioralProbeFixtureEvidence('pending') as unknown as Record<string, unknown>;
-    let reads = 0;
-    Object.defineProperty(evidence, 'state', {
-      enumerable: true,
-      configurable: true,
-      get() {
-        reads += 1;
-        return reads === 1 ? 'pending' : 'success';
-      }
-    });
+  it.each(['getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor'] as const)(
+    'terminates without invoking a non-returning %s trap in a subprocess',
+    (trap) => {
+      const script = `
+        import { evaluateBehavioralProbeGate } from './src/lib/compatibility/probe/behavioral-probe-gate.ts';
+        let calls = 0;
+        const hostile = new Proxy({}, { ${trap}() { calls += 1; while (true) {} } });
+        const result = evaluateBehavioralProbeGate(hostile);
+        console.log(JSON.stringify({ calls, result }));
+      `;
+      const child = spawnSync('bun', ['-e', script], {
+        cwd: resolve(repositoryRoot, 'apps/web'),
+        encoding: 'utf8',
+        timeout: 1_000
+      });
 
-    expect(evaluateBehavioralProbeGate(evidence)).toEqual(incompatibleResult());
-    expect(reads).toBe(0);
-  });
+      expect(child.error).toBeUndefined();
+      expect(child.status).toBe(0);
+      expect(JSON.parse(child.stdout)).toEqual({ calls: 0, result: incompatibleResult() });
+    },
+    2_000
+  );
 
-  it('accepts array proxies without property or method reads', () => {
-    const evidence = createBehavioralProbeFixtureEvidence('success');
-    let getCalls = 0;
-    const guarded = <T>(items: readonly T[]): readonly T[] => new Proxy([...items], {
-      get() {
-        getCalls += 1;
-        throw new Error('array property read');
-      }
-    });
-
-    const result = evaluateBehavioralProbeGate({
-      ...evidence,
-      caseResults: guarded(evidence.caseResults),
-      requirementResults: guarded(evidence.requirementResults)
-    });
-
-    expect(result).toMatchObject({
-      state: 'success',
-      fixtureValidated: true,
-      compatible: false,
-      liveRun: false
-    });
-    expect(getCalls).toBe(0);
-  });
-
-  it('ignores changing and nonfinite proxy length reads', () => {
-    const evidence = createBehavioralProbeFixtureEvidence('success');
-    let getCalls = 0;
-    const proxiedCases = new Proxy([...evidence.caseResults], {
-      get(_target, property) {
-        getCalls += 1;
-        if (property === 'length') return getCalls === 1 ? Number.POSITIVE_INFINITY : 0;
-        throw new Error('array method read');
-      }
-    });
-
-    expect(evaluateBehavioralProbeGate({ ...evidence, caseResults: proxiedCases })).toMatchObject({
-      state: 'success', fixtureValidated: true, compatible: false, liveRun: false
-    });
-    expect(getCalls).toBe(0);
-  });
-
-  it('rejects an own keys accessor without invoking it', () => {
-    const evidence = createBehavioralProbeFixtureEvidence('success');
-    const caseResults = [...evidence.caseResults];
-    let getterCalls = 0;
-    Object.defineProperty(caseResults, 'keys', {
-      enumerable: true,
-      configurable: true,
-      get() {
-        getterCalls += 1;
-        throw new Error('array method getter');
-      }
-    });
-
-    expect(evaluateBehavioralProbeGate({ ...evidence, caseResults })).toEqual(incompatibleResult());
-    expect(getterCalls).toBe(0);
-  });
-
-  it('returns in bounded time for oversized and adversarial array proxies', () => {
-    const evidence = createBehavioralProbeFixtureEvidence('success');
-    const oversized = new Array(501);
-    let getCalls = 0;
-    const proxy = new Proxy(oversized, {
-      get() {
-        getCalls += 1;
-        throw new Error('must not read proxy properties');
+  it('never invokes hanging, delayed, network, or storage Proxy side effects', () => {
+    const fetchMock = vi.fn();
+    const storageSetMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('localStorage', { setItem: storageSetMock });
+    let calls = 0;
+    const hostile = new Proxy({}, {
+      getOwnPropertyDescriptor() {
+        calls += 1;
+        fetchMock('synthetic');
+        storageSetMock('synthetic', 'synthetic');
+        const deadline = performance.now() + 300;
+        while (performance.now() < deadline) { /* would block if invoked */ }
+        return undefined;
+      },
+      ownKeys() {
+        calls += 1;
+        return [];
+      },
+      getPrototypeOf() {
+        calls += 1;
+        return null;
       }
     });
     const started = performance.now();
 
-    expect(evaluateBehavioralProbeGate({ ...evidence, caseResults: proxy })).toEqual(
-      incompatibleResult()
-    );
-    expect(performance.now() - started).toBeLessThan(250);
-    expect(getCalls).toBe(0);
-  }, 1_000);
+    expect(evaluateBehavioralProbeGate(hostile)).toEqual(incompatibleResult());
+    expect(performance.now() - started).toBeLessThan(50);
+    expect(calls).toBe(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(storageSetMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects getters and cyclic objects before reading or traversing them', () => {
+    let reads = 0;
+    const cyclic: Record<string, unknown> = {};
+    Object.defineProperty(cyclic, 'state', {
+      enumerable: true,
+      get() {
+        reads += 1;
+        return 'success';
+      }
+    });
+    cyclic.self = cyclic;
+
+    expect(evaluateBehavioralProbeGate(cyclic)).toEqual(incompatibleResult());
+    expect(reads).toBe(0);
+  });
+
+  it.each([
+    ['duplicate key', '{"a":1,"a":2}'],
+    ['noncanonical key order', '{"b":1,"a":2}'],
+    ['noncanonical whitespace', '{ "a":1}'],
+    ['noncanonical number', '{"a":1.0}'],
+    ['nonfinite number', '{"a":1e999}'],
+    ['unsafe integer', '{"a":9007199254740992}'],
+    ['lone surrogate', '{"a":"\\ud800"}'],
+    ['array bound', `[${Array.from({ length: 501 }, () => 'null').join(',')}]`],
+    ['object bound', `{${Array.from({ length: 129 }, (_, index) => `"k${String(index).padStart(3, '0')}":null`).join(',')}}`],
+    ['depth bound', `${'['.repeat(26)}null${']'.repeat(26)}`],
+    ['string bound', `{"a":"${'a'.repeat(8_193)}"}`],
+    ['total UTF-8 bound', 'a'.repeat(262_145)]
+  ])('rejects the serialized %s bound with the fixed result', (_label, evidenceJson) => {
+    expect(evaluateBehavioralProbeGate(evidenceJson)).toEqual(incompatibleResult());
+  });
 
   it.each(['top', 'case', 'requirement', 'case-array'])(
     'rejects symbol and non-enumerable additions at the %s evidence level',
