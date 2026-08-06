@@ -152,6 +152,60 @@ class GatewayReadinessTests(unittest.TestCase):
             "volumes": 0,
         })
 
+    def test_real_loader_rejects_boolean_cleanup_values_in_normal_and_optimized_modes(self) -> None:
+        """Exercise both checked-in evidence records through the real loader."""
+
+        script = """
+import sys
+from pathlib import Path
+
+fixture_dir = Path(sys.argv[1])
+sys.path.insert(0, str(fixture_dir))
+import validate
+
+cases = validate.load_json(validate.CASES_PATH)
+records = (
+    (validate.EVIDENCE_PATH, validate.validate_evidence_document),
+    (validate.RERUN_EVIDENCE_PATH, validate.validate_rerun_evidence_document),
+)
+for evidence_path, checker in records:
+    record = validate.load_json(evidence_path)
+    record["teardown_exit_code"] = True
+    try:
+        checker(record, cases)
+    except validate.ValidationError:
+        pass
+    else:
+        raise SystemExit(1)
+
+    record = validate.load_json(evidence_path)
+    record["observations"]["leftover_resources"]["containers"] = False
+    try:
+        checker(record, cases)
+    except validate.ValidationError:
+        pass
+    else:
+        raise SystemExit(1)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            script_path = Path(directory) / "check_evidence_types.py"
+            script_path.write_text(script, encoding="utf-8")
+            for optimized in (False, True):
+                with self.subTest(optimized=optimized):
+                    command = [sys.executable]
+                    if optimized:
+                        command.append("-O")
+                    command.extend([str(script_path), str(FIXTURE_DIR)])
+                    completed = subprocess.run(
+                        command,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    self.assertEqual(completed.stdout, "")
+                    self.assertEqual(completed.stderr, "")
+
     def test_every_checked_in_case_matches_the_independent_model(self) -> None:
         for case in self.document["cases"]:
             with self.subTest(case=case["id"]):

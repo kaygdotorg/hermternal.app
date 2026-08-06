@@ -1793,7 +1793,10 @@ def _validate_attempt_evidence_document(
     require(record["live_run"] is True, "live evidence must identify the live run")
     require(record["status"] == "blocked", "live evidence must remain blocked")
     require(record["classification"] == expected_classification, "live attempt classification changed")
-    require(record["teardown_exit_code"] == expected_teardown_exit, "live attempt teardown result changed")
+    # bool is an int subclass, so enforce the JSON evidence schema's exact
+    # built-in integer type before comparing cleanup semantics.
+    teardown_exit_code = _int(record["teardown_exit_code"], "evidence teardown exit code")
+    require(teardown_exit_code == expected_teardown_exit, "live attempt teardown result changed")
     require(record["correctness_executor"] == "rootless_podman", "evidence executor changed")
     require(record["ssh_target"] == SSH_TARGET, "evidence SSH boundary changed")
     validate_pinned_identity(record["pinned_identity"])
@@ -1813,6 +1816,10 @@ def _validate_attempt_evidence_document(
     require(observations["exit"] == "not_run", "container exit must not be claimed")
     require(observations["teardown"] == expected_teardown_observation, "live attempt teardown result changed")
     leftovers = strict_keys(observations["leftover_resources"], ("containers", "networks", "volumes"), "evidence leftovers")
+    # Validate every count before the aggregate comparison; otherwise JSON
+    # booleans would compare equal to the integer zero in Python.
+    for resource_name, count in leftovers.items():
+        _int(count, f"evidence leftovers.{resource_name}")
     require(leftovers == {"containers": 0, "networks": 0, "volumes": 0}, "cleanup must prove zero leftovers")
     _text(record["diagnostic"], "evidence diagnostic", max_length=MAX_ERROR_OUTPUT)
     require(type(record["limitations"]) is list, "evidence limitations must be an array")
