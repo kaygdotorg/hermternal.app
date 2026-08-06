@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -38,8 +39,23 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "duplicate.json"
             path.write_text('{"outer":{"value":1,"value":2}}', encoding="utf-8")
-            with self.assertRaisesRegex(validate.ValidationError, "duplicate JSON key"):
+            with self.assertRaisesRegex(validate.ValidationError, "duplicate JSON key rejected"):
                 validate.load_fixture(path)
+
+    def test_duplicate_key_diagnostics_redact_credential_shaped_names(self) -> None:
+        duplicate_keys = ("password", "authorization", "api_key", "client_secret")
+        for key in duplicate_keys:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "duplicate-credential-shaped.json"
+                path.write_text(
+                    '{"' + key + '":"first","' + key + '":"second"}',
+                    encoding="utf-8",
+                )
+                with self.subTest(key=key):
+                    with self.assertRaises(validate.ValidationError) as context:
+                        validate.load_fixture(path)
+                    self.assertEqual(str(context.exception), "document: duplicate JSON key rejected")
+                    self.assertNotIn(key, str(context.exception))
 
     def test_non_finite_json_extensions_and_overflow_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -88,6 +104,35 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
         self.assertEqual(result.stderr, "validation failed: fixture contract rejected\n")
         self.assertNotIn(str(path), result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_code_pinned_identity_rejects_coordinated_artifact_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_directory = Path(directory) / "pty-detach-race"
+            fixture_directory.mkdir()
+            for name in (*validate.ARTIFACT_NAMES, "validation-baseline.json"):
+                shutil.copy2(ROOT / name, fixture_directory / name)
+
+            readme_path = fixture_directory / "README.md"
+            readme_path.write_text(
+                readme_path.read_text(encoding="utf-8") + "\ncoordinated rebind candidate\n",
+                encoding="utf-8",
+            )
+            baseline_path = fixture_directory / "validation-baseline.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            size_bytes, sha256 = validate.artifact_digest(readme_path)
+            baseline["artifacts"]["README.md"].update(size_bytes=size_bytes, sha256=sha256)
+            baseline["manifest_sha256"] = validate.manifest_digest(baseline["artifacts"])
+            baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+
+            for optimize in (False, True):
+                command = [sys.executable]
+                if optimize:
+                    command.append("-O")
+                command.append(str(fixture_directory / "validate.py"))
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                with self.subTest(optimize=optimize):
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stderr, "validation failed: fixture contract rejected\n")
 
     def test_ttl_registry_and_explicit_close_contracts(self) -> None:
         ttl = validate._case(self.data, "detach-ttl")

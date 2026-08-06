@@ -4,8 +4,8 @@
   "artifacts": {
     "README.md": {
       "path": "contracts/fixtures/pty-detach-race/README.md",
-      "size_bytes": 6525,
-      "sha256": "9add9ec9725d4007147f442364f37f2ca6fe414f5010c652394fc376ecc6764b"
+      "size_bytes": 6780,
+      "sha256": "6892fe51d059b6145ba18b60e4b5bba0745c4954df50d182ea78bcbab1a6f938"
     },
     "pty-detach-race-fixtures.json": {
       "path": "contracts/fixtures/pty-detach-race/pty-detach-race-fixtures.json",
@@ -14,13 +14,13 @@
     },
     "validate.py": {
       "path": "contracts/fixtures/pty-detach-race/validate.py",
-      "size_bytes": 67591,
-      "sha256": "d309afbff243e4a588a13ad3d3c15d7befb303a9c5a4f65e6feb7474026184da"
+      "size_bytes": 70006,
+      "sha256": "ce3117561351682d32734b4e834ac9d8ff0f88b924767ac902169caef5c805f7"
     },
     "test_validate.py": {
       "path": "contracts/fixtures/pty-detach-race/test_validate.py",
-      "size_bytes": 12959,
-      "sha256": "b96a9b06250d45480b866e05f398ca2d7172bd86a0785a3abc5854c44b582cfa"
+      "size_bytes": 15497,
+      "sha256": "95b9f8977945821ccb6fb391bc4b2dfd43ae1e38d559dafee0c292e395d169ce"
     }
   },
   "benchmark": {
@@ -112,5 +112,5 @@
     },
     "threshold": null
   },
-  "manifest_sha256": "0a44a3d9aaab6878ba6c0d4c7c6af32c3614b8cb8275c8bb5092f64550441190"
+  "manifest_sha256": "18ae996234e881da40e0a95f9d31537614ee0ed4e972dc48d87c2b4ee46547ca"
 }

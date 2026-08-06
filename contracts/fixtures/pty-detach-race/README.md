@@ -55,10 +55,12 @@ boolean, string, null, non-finite, malformed-frame, and row variants.
 
 - `pty-detach-race-fixtures.json` — closed, redacted, language-neutral fixture data.
 - `validate.py` — standard-library-only validator with duplicate-key rejection,
-  non-finite rejection, exact built-in type checks, bounded traversal, controlled
-  diagnostics, executable mutation checks, and baseline integrity checks.
+  redacted reusable-loader diagnostics, non-finite rejection, exact built-in type
+  checks, bounded traversal, controlled CLI failures, executable mutation checks,
+  and code-pinned baseline integrity checks.
 - `test_validate.py` — normal and optimized-compatible regression tests for the
-  canonical contract and meaningful malformed or drifted mutations.
+  canonical contract, meaningful malformed or drifted mutations, credential-shaped
+  duplicate keys, and coordinated artifact/baseline rebinding.
 - `validation-baseline.json` — observation-only benchmark distributions with 30
   normal and 30 optimized samples plus exact owned-artifact sizes and digests.
 
@@ -75,19 +77,21 @@ python3 -m py_compile contracts/fixtures/pty-detach-race/validate.py contracts/f
 ```
 
 The CLI loads the checked-in baseline by default. It checks the closed baseline
-schema, 30-sample distributions, owned artifact sizes, SHA-256 digests, and the
-manifest digest. The benchmark has `threshold: null`: timings are evidence, not
-an invented performance budget. `--baseline` is available for isolated mutation
+schema against the immutable code-pinned artifact identity, 30-sample
+distributions, owned artifact sizes, SHA-256 digests, and a manifest derived from
+that identity. The benchmark has `threshold: null`: timings are evidence, not an
+invented performance budget. `--baseline` is available for isolated mutation
 checks. Invalid arguments and unavailable or malformed inputs return fixed,
-bounded diagnostics and never echo caller-controlled flags, paths, or fixture
-values.
+bounded diagnostics and never echo caller-controlled flags, paths, fixture values,
+or duplicate JSON key names.
 
 ## Redaction and limitations
 
 The JSON loader rejects duplicate keys at every object level, JSON `NaN`,
 `Infinity`, `-Infinity`, exponent-overflow non-finite numbers, unsupported value
 types, and nesting deeper than the bounded limit. Diagnostics are capped and
-never include raw fixture values. Synthetic references may not encode a payload
+never include raw fixture values or duplicate JSON key names. Synthetic
+references may not encode a payload
 as an even-length hexadecimal suffix. Raw bytes appear only in explicit input or
 output fixture fields, never in log payload fields.
 

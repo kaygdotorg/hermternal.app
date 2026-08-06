@@ -44,6 +44,30 @@ ARTIFACT_NAMES = (
     "validate.py",
     "test_validate.py",
 )
+# Pin every artifact except this source file in code. Embedding validate.py's
+# complete digest here would create a circular identity, so its current digest
+# is resolved from the copied validator while the other artifacts stay fixed.
+# The baseline must match this identity and its derived manifest; it cannot
+# redefine the evidence by rebinding its own artifact entries.
+CANONICAL_ARTIFACT_IDENTITY = (
+    ("README.md", 6780, "6892fe51d059b6145ba18b60e4b5bba0745c4954df50d182ea78bcbab1a6f938"),
+    (
+        "pty-detach-race-fixtures.json",
+        19319,
+        "ee8211b672e5a78d1d069c1ca4df4155aecbce951058579e3a985cfb6de06227",
+    ),
+    ("test_validate.py", 15497, "95b9f8977945821ccb6fb391bc4b2dfd43ae1e38d559dafee0c292e395d169ce"),
+)
+CANONICAL_BASELINE_IDENTITY = {
+    "schema_version": "pty-detach-race-baseline-v1",
+    "fixture_schema_version": "pty-detach-race-v1",
+    "artifact_paths": (
+        "contracts/fixtures/pty-detach-race/README.md",
+        "contracts/fixtures/pty-detach-race/pty-detach-race-fixtures.json",
+        "contracts/fixtures/pty-detach-race/validate.py",
+        "contracts/fixtures/pty-detach-race/test_validate.py",
+    ),
+}
 FORBIDDEN_TEXT = (
     "api_key",
     "api-key",
@@ -276,7 +300,10 @@ def reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            fail("document", f"duplicate JSON key {key!r}")
+            # Key names can carry credential-shaped data; the reusable loader
+            # must preserve the rejection without returning that attacker input.
+            del key
+            fail("document", "duplicate JSON key rejected")
         result[key] = value
     return result
 
@@ -981,6 +1008,29 @@ def manifest_digest(artifacts: dict[str, dict[str, Any]]) -> str:
     return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
 
+def canonical_artifact_metadata() -> dict[str, dict[str, Any]]:
+    """Resolve the immutable artifact identity used by baseline validation."""
+
+    pinned = {
+        name: {"size_bytes": size, "sha256": sha256}
+        for name, size, sha256 in CANONICAL_ARTIFACT_IDENTITY
+    }
+    metadata: dict[str, dict[str, Any]] = {}
+    for index, name in enumerate(ARTIFACT_NAMES):
+        if name == "validate.py":
+            size_bytes, sha256 = artifact_digest(ROOT / name)
+        else:
+            expected = pinned[name]
+            size_bytes = expected["size_bytes"]
+            sha256 = expected["sha256"]
+        metadata[name] = {
+            "path": CANONICAL_BASELINE_IDENTITY["artifact_paths"][index],
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+        }
+    return metadata
+
+
 def rounded(value: float) -> float:
     return round(value, 6)
 
@@ -1012,13 +1062,14 @@ def validate_distribution(run: dict[str, Any], path: str) -> None:
 
 def validate_baseline(baseline: Any) -> dict[str, Any]:
     root = exact_keys(baseline, {"schema_version", "fixture_schema_version", "artifacts", "benchmark", "manifest_sha256"}, "baseline")
-    expect_string(root["schema_version"], "baseline.schema_version", BASELINE_SCHEMA_VERSION)
-    expect_string(root["fixture_schema_version"], "baseline.fixture_schema_version", SCHEMA_VERSION)
+    expect_string(root["schema_version"], "baseline.schema_version", CANONICAL_BASELINE_IDENTITY["schema_version"])
+    expect_string(root["fixture_schema_version"], "baseline.fixture_schema_version", CANONICAL_BASELINE_IDENTITY["fixture_schema_version"])
     artifacts = exact_keys(root["artifacts"], set(ARTIFACT_NAMES), "baseline.artifacts")
-    resolved: dict[str, dict[str, Any]] = {}
+    canonical = canonical_artifact_metadata()
     for name in ARTIFACT_NAMES:
         item = exact_keys(artifacts[name], {"path", "size_bytes", "sha256"}, f"baseline.artifacts.{name}")
-        expect_string(item["path"], f"baseline.artifacts.{name}.path", f"contracts/fixtures/pty-detach-race/{name}")
+        expected = canonical[name]
+        expect_string(item["path"], f"baseline.artifacts.{name}.path", expected["path"])
         expect_int(item["size_bytes"], f"baseline.artifacts.{name}.size_bytes")
         expect_sha = expect_string(item["sha256"], f"baseline.artifacts.{name}.sha256")
         if not re.fullmatch(r"[0-9a-f]{64}", expect_sha):
@@ -1027,7 +1078,8 @@ def validate_baseline(baseline: Any) -> dict[str, Any]:
         actual_size, actual_sha = artifact_digest(path)
         if item["size_bytes"] != actual_size or item["sha256"] != actual_sha:
             fail(f"baseline.artifacts.{name}", "size or SHA-256 does not match the checked-in artifact")
-        resolved[name] = item
+        if item["size_bytes"] != expected["size_bytes"] or item["sha256"] != expected["sha256"]:
+            fail(f"baseline.artifacts.{name}", "does not match immutable canonical artifact identity")
     benchmark = exact_keys(root["benchmark"], {"normal", "optimized", "threshold"}, "baseline.benchmark")
     validate_distribution(benchmark["normal"], "baseline.benchmark.normal")
     validate_distribution(benchmark["optimized"], "baseline.benchmark.optimized")
@@ -1035,8 +1087,8 @@ def validate_baseline(baseline: Any) -> dict[str, Any]:
     expect_string(root["manifest_sha256"], "baseline.manifest_sha256")
     if not re.fullmatch(r"[0-9a-f]{64}", root["manifest_sha256"]):
         fail("baseline.manifest_sha256", "must be a lowercase SHA-256 digest")
-    if root["manifest_sha256"] != manifest_digest(resolved):
-        fail("baseline.manifest_sha256", "does not match the artifact manifest")
+    if root["manifest_sha256"] != manifest_digest(canonical):
+        fail("baseline.manifest_sha256", "does not match immutable canonical artifact manifest")
     return {"artifact_count": len(ARTIFACT_NAMES), "sample_count": 60}
 
 
