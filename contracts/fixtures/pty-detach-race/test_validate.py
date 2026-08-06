@@ -27,8 +27,8 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
         self.assertEqual(summary["case_count"], 12)
         self.assertEqual(summary["case_ids"], list(validate.EXPECTED_CASES))
         mutations = validate.mutation_inventory(self.data)
-        self.assertEqual(len(mutations), 45)
-        self.assertEqual(validate.validate_mutations(self.data), 45)
+        self.assertEqual(len(mutations), 59)
+        self.assertEqual(validate.validate_mutations(self.data), 59)
 
     def test_checked_in_baseline_matches_owned_artifacts(self) -> None:
         summary = validate.validate_baseline(validate.load_baseline(BASELINE_PATH))
@@ -69,7 +69,8 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
                 check=False,
             )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("maximum JSON nesting depth exceeded", result.stderr)
+        self.assertEqual(result.stderr, "validation failed: fixture contract rejected\n")
+        self.assertNotIn(str(path), result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
         oversized = copy.deepcopy(self.data)
@@ -84,9 +85,9 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
                 check=False,
             )
         self.assertNotEqual(result.returncode, 0)
-        self.assertLessEqual(len(result.stderr.rstrip("\n")), validate.MAX_ERROR_LENGTH)
+        self.assertEqual(result.stderr, "validation failed: fixture contract rejected\n")
+        self.assertNotIn(str(path), result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertIn(validate.ERROR_SUFFIX, result.stderr)
 
     def test_ttl_registry_and_explicit_close_contracts(self) -> None:
         ttl = validate._case(self.data, "detach-ttl")
@@ -161,8 +162,86 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
             with self.subTest(optimize=optimize):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("cases=12", result.stdout)
-                self.assertIn("mutation_checks=45", result.stdout)
+                self.assertIn("mutation_checks=59", result.stdout)
                 self.assertIn("benchmark_samples=60", result.stdout)
+
+    def test_replay_aliases_and_output_inventory_drift_are_rejected(self) -> None:
+        aliases = [
+            "synthetic-action-input",
+            "synthetic-action-resize",
+            "synthetic-action-prompt",
+            "synthetic-action-tool",
+        ]
+        for alias in aliases:
+            candidate = copy.deepcopy(self.data)
+            validate._case(candidate, "no-input-replay")["input"]["replay_refs"][0] = alias
+            with self.subTest(alias=alias):
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_contract(candidate)
+        candidate = copy.deepcopy(self.data)
+        validate._case(candidate, "no-input-replay")["input"]["output_inventory"][0]["output_ref"] = "synthetic-output-alias"
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_contract(candidate)
+
+    def test_logging_requires_each_category_and_non_null_canonical_refs(self) -> None:
+        mutations = {
+            "collapsed": lambda logs: [log.__setitem__("event", "pty.output") for log in logs[1:]],
+            "null-output": lambda logs: logs[0].__setitem__("frame_ref", None),
+            "null-action": lambda logs: logs[1].__setitem__("action_ref", None),
+            "output-alias": lambda logs: logs[0].__setitem__("frame_ref", "synthetic-output-alias"),
+            "action-alias": lambda logs: logs[1].__setitem__("action_ref", "synthetic-action-alias"),
+        }
+        for name, mutate in mutations.items():
+            candidate = copy.deepcopy(self.data)
+            mutate(validate._case(candidate, "no-byte-logging")["input"]["logs"])
+            with self.subTest(mutation=name):
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_contract(candidate)
+
+    def test_resize_boundary_and_rejection_coverage_is_unique(self) -> None:
+        mutations = []
+        candidate = copy.deepcopy(self.data)
+        bounds = validate._case(candidate, "resize-bounds")["input"]["samples"]
+        bounds[7] = copy.deepcopy(bounds[6])
+        mutations.append(("duplicate-boundary", candidate))
+        candidate = copy.deepcopy(self.data)
+        bounds = validate._case(candidate, "resize-bounds")["input"]["samples"]
+        bounds[3].update({"cols": 1, "rows": 2, "effective_cols": 1, "effective_rows": 2, "control_hex": "1b5b524553495a453a313b325d"})
+        mutations.append(("valid-boundary-drift", candidate))
+        candidate = copy.deepcopy(self.data)
+        candidates = validate._case(candidate, "resize-rejection")["input"]["candidates"]
+        candidates[6].update({"invalid_field": "cols", "wire_shape": "fractional-number"})
+        mutations.append(("duplicate-rejection-class", candidate))
+        candidate = copy.deepcopy(self.data)
+        validate._case(candidate, "resize-rejection")["input"]["candidates"].pop()
+        mutations.append(("missing-rejection-class", candidate))
+        for name, malformed in mutations:
+            with self.subTest(mutation=name):
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_contract(malformed)
+
+    def test_cli_failures_do_not_echo_caller_paths_or_flags(self) -> None:
+        missing = Path(tempfile.gettempdir()) / "caller-secret-shaped-path.json"
+        for optimize in (False, True):
+            command = [sys.executable]
+            if optimize:
+                command.append("-O")
+            command.extend([str(ROOT / "validate.py"), "--fixture", str(missing), "--baseline", str(BASELINE_PATH)])
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            with self.subTest(kind="missing", optimize=optimize):
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "validation failed: fixture input unavailable\n")
+                self.assertNotIn(str(missing), result.stderr)
+        for optimize in (False, True):
+            command = [sys.executable]
+            if optimize:
+                command.append("-O")
+            command.extend([str(ROOT / "validate.py"), "--unknown-secret-flag"])
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            with self.subTest(kind="unknown-flag", optimize=optimize):
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stderr, "validation failed: invalid command-line arguments\n")
+                self.assertNotIn("--unknown-secret-flag", result.stderr)
 
 
 if __name__ == "__main__":

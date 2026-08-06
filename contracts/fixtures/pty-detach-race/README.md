@@ -24,10 +24,32 @@ aggregate fixture index.
 | Active attachment | One handle has at most one active socket. Supersession sends `4409` to the old socket before replacement assignment; stale cleanup cannot detach the replacement. |
 | Explicit Close | Attach-mode Close detaches the socket and retains the session; it does not terminate the process. |
 | Host rejection | An unsupported host is rejected before socket acceptance or PTY spawn. |
-| Resize | Exact built-in integers are clamped to columns `1..2000` and rows `1..1000`, then framed as one binary `ESC [RESIZE:<cols>;<rows>]` message. Floats, booleans, strings, null, non-finite tokens, and malformed frames are rejected. |
+| Resize | Exact built-in integers are clamped to columns `1..2000` and rows `1..1000`, then framed as one binary `ESC [RESIZE:<cols>;<rows>]` message. The fixture freezes lower, upper, and out-of-range samples and eight unique malformed/type rejection classes. Floats, booleans, strings, null, non-finite tokens, and malformed frames are rejected. |
 | Reconnect | Reattach reuses the same handle, session, and process identity. Truncation may remove older output before the snapshot is sent. |
-| Action exclusion | Input, resize, prompt submission, and tool actions are never replayed. Prompt/tool output bytes may be retained as PTY output. |
-| Logging | Raw PTY bytes and action payloads are absent from logs and retained diagnostics; metadata-only references are allowed. |
+| Action exclusion | Input, resize, prompt submission, and tool actions are never replayed. The retained and replay reference lists must equal the canonical prompt-output and tool-output inventory; action references cannot be substituted. Prompt/tool output bytes may be retained as PTY output. |
+| Logging | Evidence contains exactly one `pty.output`, `user.input`, `terminal.resize`, `prompt.submit`, and `tool.action` record in that order. The output record has a non-null frame reference, each action record has its canonical non-null action reference, and every byte or action payload field is `null`. |
+
+## Closed evidence inventories
+
+`no-input-replay` binds `retained_output_refs` and `replay_refs` to these exact
+output records, including their byte provenance:
+
+- `synthetic-output-prompt` — `prompt-output` — `70726f6d70742d6f7574707574`
+- `synthetic-output-tool` — `tool-output` — `746f6f6c2d6f7574707574`
+
+The sensitive action inventory is also exact and ordered: `input` maps to
+`synthetic-action-input`, `resize` to `synthetic-action-resize`, `prompt` to
+`synthetic-action-prompt`, and `tool` to `synthetic-action-tool`. The logging
+frame inventory is fixed to `synthetic-output-log-a` (`00ff`) and
+`synthetic-output-log-b` (`1b5b`). No action or output-frame alias is accepted
+as retained, replayed, or logged evidence.
+
+The resize boundary set is fixed to lower, upper, and out-of-range tuples:
+`(1,1)->(1,1)`, `(2000,1000)->(2000,1000)`, `(-1,24)->(1,24)`,
+`(0,0)->(1,1)`, `(80,-1)->(80,1)`, `(2001,24)->(2000,24)`,
+`(80,1001)->(80,1000)`, and `(2001,1001)->(2000,1000)`. The rejection set
+covers each malformed/type class exactly once, including fractional,
+boolean, string, null, non-finite, malformed-frame, and row variants.
 
 ## Files
 
@@ -56,7 +78,9 @@ The CLI loads the checked-in baseline by default. It checks the closed baseline
 schema, 30-sample distributions, owned artifact sizes, SHA-256 digests, and the
 manifest digest. The benchmark has `threshold: null`: timings are evidence, not
 an invented performance budget. `--baseline` is available for isolated mutation
-checks.
+checks. Invalid arguments and unavailable or malformed inputs return fixed,
+bounded diagnostics and never echo caller-controlled flags, paths, or fixture
+values.
 
 ## Redaction and limitations
 

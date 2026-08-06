@@ -380,6 +380,7 @@
           {
             "cols": 1000.5,
             "rows": 24,
+            "invalid_field": "cols",
             "wire_shape": "fractional-number",
             "frame": "ESC [RESIZE:1000.5;24]",
             "expected": "rejected"
@@ -387,6 +388,7 @@
           {
             "cols": true,
             "rows": 24,
+            "invalid_field": "cols",
             "wire_shape": "boolean-dimension",
             "frame": "ESC [RESIZE:true;24]",
             "expected": "rejected"
@@ -394,6 +396,7 @@
           {
             "cols": "1001",
             "rows": 24,
+            "invalid_field": "cols",
             "wire_shape": "string-dimension",
             "frame": "ESC [RESIZE:1001;24]",
             "expected": "rejected"
@@ -401,6 +404,7 @@
           {
             "cols": null,
             "rows": 24,
+            "invalid_field": "cols",
             "wire_shape": "null-dimension",
             "frame": "ESC [RESIZE:null;24]",
             "expected": "rejected"
@@ -408,6 +412,7 @@
           {
             "cols": "NaN",
             "rows": 24,
+            "invalid_field": "cols",
             "wire_shape": "non-finite-token",
             "frame": "ESC [RESIZE:NaN;24]",
             "expected": "rejected"
@@ -415,6 +420,7 @@
           {
             "cols": 80,
             "rows": 24,
+            "invalid_field": "frame",
             "wire_shape": "malformed-frame",
             "frame": "ESC [RESIZE:80;24",
             "expected": "rejected"
@@ -422,6 +428,7 @@
           {
             "cols": 80,
             "rows": 24.25,
+            "invalid_field": "rows",
             "wire_shape": "fractional-number",
             "frame": "ESC [RESIZE:80;24.25]",
             "expected": "rejected"
@@ -429,6 +436,7 @@
           {
             "cols": 80,
             "rows": "Infinity",
+            "invalid_field": "rows",
             "wire_shape": "non-finite-token",
             "frame": "ESC [RESIZE:80;Infinity]",
             "expected": "rejected"
@@ -543,6 +551,18 @@
             "kind": "tool",
             "action_ref": "synthetic-action-tool",
             "payload_hex": "746f6f6c"
+          }
+        ],
+        "output_inventory": [
+          {
+            "output_ref": "synthetic-output-prompt",
+            "output_kind": "prompt-output",
+            "byte_hex": "70726f6d70742d6f7574707574"
+          },
+          {
+            "output_ref": "synthetic-output-tool",
+            "output_kind": "tool-output",
+            "byte_hex": "746f6f6c2d6f7574707574"
           }
         ],
         "retained_output_refs": [

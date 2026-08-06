@@ -72,6 +72,42 @@ EXPECTED_CASES = {
     "no-input-replay": "no-input-replay",
     "no-byte-logging": "no-byte-logging",
 }
+CANONICAL_OUTPUT_INVENTORY = (
+    ("synthetic-output-prompt", "prompt-output", "70726f6d70742d6f7574707574"),
+    ("synthetic-output-tool", "tool-output", "746f6f6c2d6f7574707574"),
+)
+RESIZE_BOUNDARY_SAMPLES = (
+    (1, 1, 1, 1),
+    (2000, 1000, 2000, 1000),
+    (-1, 24, 1, 24),
+    (0, 0, 1, 1),
+    (80, -1, 80, 1),
+    (2001, 24, 2000, 24),
+    (80, 1001, 80, 1000),
+    (2001, 1001, 2000, 1000),
+)
+RESIZE_REJECTION_CLASSES = (
+    ("cols", "fractional-number"),
+    ("cols", "boolean-dimension"),
+    ("cols", "string-dimension"),
+    ("cols", "null-dimension"),
+    ("cols", "non-finite-token"),
+    ("frame", "malformed-frame"),
+    ("rows", "fractional-number"),
+    ("rows", "non-finite-token"),
+)
+LOG_EVENT_ORDER = ("pty.output", "user.input", "terminal.resize", "prompt.submit", "tool.action")
+ACTION_KINDS = ("input", "resize", "prompt", "tool")
+CANONICAL_ACTION_INVENTORY = (
+    ("input", "synthetic-action-input"),
+    ("resize", "synthetic-action-resize"),
+    ("prompt", "synthetic-action-prompt"),
+    ("tool", "synthetic-action-tool"),
+)
+CANONICAL_LOG_FRAME_INVENTORY = (
+    ("synthetic-output-log-a", "00ff"),
+    ("synthetic-output-log-b", "1b5b"),
+)
 
 
 class ValidationError(ValueError):
@@ -79,6 +115,26 @@ class ValidationError(ValueError):
 
     def __init__(self, message: object) -> None:
         super().__init__(bound_error(str(message)))
+
+
+class CommandLineError(Exception):
+    """An argparse failure whose caller-controlled details stay private."""
+
+
+class ControlledArgumentParser(argparse.ArgumentParser):
+    """Parse only the supported options without printing paths or flags."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            add_help=False,
+            allow_abbrev=False,
+            argument_default=argparse.SUPPRESS,
+            usage=argparse.SUPPRESS,
+        )
+
+    def error(self, message: str) -> None:
+        del message
+        raise CommandLineError
 
 
 def bound_error(text: str) -> str:
@@ -506,14 +562,19 @@ def validate_resize_bounds(case: dict[str, Any], constants: dict[str, Any]) -> N
     if prefix != "1b5b524553495a453a" or suffix != "5d":
         fail(f"{path}.input.framing", "does not use the exact resize framing")
     samples = expect_list(input_value["samples"], f"{path}.input.samples")
-    if len(samples) != 8:
-        fail(f"{path}.input.samples", "must cover both bounds and integer clamping")
+    if len(samples) != len(RESIZE_BOUNDARY_SAMPLES):
+        fail(f"{path}.input.samples", "must contain the complete resize boundary set")
+    observed_boundaries: list[tuple[int, int, int, int]] = []
     for index, sample in enumerate(samples):
         item = exact_keys(sample, {"cols", "rows", "effective_cols", "effective_rows", "control_hex"}, f"{path}.input.samples[{index}]")
         cols = expect_int(item["cols"], f"{path}.input.samples[{index}].cols")
         rows = expect_int(item["rows"], f"{path}.input.samples[{index}].rows")
         effective_cols = expect_int(item["effective_cols"], f"{path}.input.samples[{index}].effective_cols")
         effective_rows = expect_int(item["effective_rows"], f"{path}.input.samples[{index}].effective_rows")
+        boundary = (cols, rows, effective_cols, effective_rows)
+        observed_boundaries.append(boundary)
+        if boundary != RESIZE_BOUNDARY_SAMPLES[index]:
+            fail(f"{path}.input.samples[{index}]", "required lower, upper, and out-of-range boundary drifted")
         if effective_cols != clamp(cols, constants["min_cols"], constants["max_cols"]):
             fail(f"{path}.input.samples[{index}].effective_cols", "does not apply integer column clamping")
         if effective_rows != clamp(rows, constants["min_rows"], constants["max_rows"]):
@@ -521,6 +582,8 @@ def validate_resize_bounds(case: dict[str, Any], constants: dict[str, Any]) -> N
         expected_hex = prefix + f"{effective_cols};{effective_rows}".encode().hex() + suffix
         if expect_hex(item["control_hex"], f"{path}.input.samples[{index}].control_hex") != expected_hex:
             fail(f"{path}.input.samples[{index}].control_hex", "does not match exact clamped resize framing")
+    if tuple(observed_boundaries) != RESIZE_BOUNDARY_SAMPLES or len(set(observed_boundaries)) != len(RESIZE_BOUNDARY_SAMPLES):
+        fail(f"{path}.input.samples", "resize boundary samples must be complete and unique")
     expect_bool(expected["control_is_single_binary_message"], f"{path}.expected.control_is_single_binary_message", True)
     expect_bool(expected["written_to_pty"], f"{path}.expected.written_to_pty", False)
 
@@ -530,14 +593,16 @@ def validate_resize_rejection(case: dict[str, Any]) -> None:
     input_value = exact_keys(case["input"], {"candidates"}, f"{path}.input")
     expected = exact_keys(case["expected"], {"all_rejected_before_binary_send", "accepted_count"}, f"{path}.expected")
     candidates = expect_list(input_value["candidates"], f"{path}.input.candidates")
-    if len(candidates) != 8:
-        fail(f"{path}.input.candidates", "must cover malformed dimensions and framing")
-    allowed_shapes = {"fractional-number", "boolean-dimension", "string-dimension", "null-dimension", "non-finite-token", "malformed-frame"}
+    if len(candidates) != len(RESIZE_REJECTION_CLASSES):
+        fail(f"{path}.input.candidates", "must cover every malformed dimension and framing class")
+    observed_classes: list[tuple[str, str]] = []
     for index, candidate in enumerate(candidates):
-        item = exact_keys(candidate, {"cols", "rows", "wire_shape", "frame", "expected"}, f"{path}.input.candidates[{index}]")
+        item = exact_keys(candidate, {"cols", "rows", "invalid_field", "wire_shape", "frame", "expected"}, f"{path}.input.candidates[{index}]")
+        invalid_field = expect_string(item["invalid_field"], f"{path}.input.candidates[{index}].invalid_field")
         shape = expect_string(item["wire_shape"], f"{path}.input.candidates[{index}].wire_shape")
-        if shape not in allowed_shapes:
-            fail(f"{path}.input.candidates[{index}].wire_shape", "unknown malformed resize shape")
+        observed_classes.append((invalid_field, shape))
+        if (invalid_field, shape) != RESIZE_REJECTION_CLASSES[index]:
+            fail(f"{path}.input.candidates[{index}]", "required malformed/type rejection class drifted or duplicated")
         for key in ("cols", "rows"):
             value = item[key]
             if value is not None and type(value) not in (str, bool, int, float):
@@ -546,6 +611,8 @@ def validate_resize_rejection(case: dict[str, Any]) -> None:
                 fail(f"{path}.input.candidates[{index}].{key}", "non-finite dimension is not allowed")
         expect_string(item["frame"], f"{path}.input.candidates[{index}].frame")
         expect_string(item["expected"], f"{path}.input.candidates[{index}].expected", "rejected")
+    if tuple(observed_classes) != RESIZE_REJECTION_CLASSES or len(set(observed_classes)) != len(RESIZE_REJECTION_CLASSES):
+        fail(f"{path}.input.candidates", "malformed/type rejection classes must be complete and unique")
     expect_bool(expected["all_rejected_before_binary_send"], f"{path}.expected.all_rejected_before_binary_send", True)
     expect_int(expected["accepted_count"], f"{path}.expected.accepted_count", 0)
 
@@ -624,10 +691,10 @@ def validate_reconnect_truncation(case: dict[str, Any], constants: dict[str, Any
 
 def validate_no_input_replay(case: dict[str, Any]) -> None:
     path = "cases.no-input-replay"
-    input_value = exact_keys(case["input"], {"actions", "retained_output_refs", "replay_refs", "replayed_action_refs"}, f"{path}.input")
+    input_value = exact_keys(case["input"], {"actions", "output_inventory", "retained_output_refs", "replay_refs", "replayed_action_refs"}, f"{path}.input")
     expected = exact_keys(case["expected"], {"non_replayable_kinds", "replayed_action_refs", "prompt_tool_output_allowed", "input_replay"}, f"{path}.expected")
     actions = expect_list(input_value["actions"], f"{path}.input.actions")
-    if len(actions) != 4:
+    if len(actions) != len(ACTION_KINDS):
         fail(f"{path}.input.actions", "must cover input, resize, prompt, and tool actions")
     kinds: list[str] = []
     action_refs: list[str] = []
@@ -635,22 +702,43 @@ def validate_no_input_replay(case: dict[str, Any]) -> None:
         item = exact_keys(action, {"kind", "action_ref", "payload_hex"}, f"{path}.input.actions[{index}]")
         kind = expect_string(item["kind"], f"{path}.input.actions[{index}].kind")
         kinds.append(kind)
-        action_refs.append(expect_ref(item["action_ref"], f"{path}.input.actions[{index}].action_ref"))
+        action_ref = expect_ref(item["action_ref"], f"{path}.input.actions[{index}].action_ref")
+        action_refs.append(action_ref)
+        expected_kind, expected_ref = CANONICAL_ACTION_INVENTORY[index]
+        if (kind, action_ref) != (expected_kind, expected_ref):
+            fail(f"{path}.input.actions[{index}]", "action inventory is not canonical")
         expect_hex(item["payload_hex"], f"{path}.input.actions[{index}].payload_hex")
-    if kinds != ["input", "resize", "prompt", "tool"]:
+    if tuple(kinds) != ACTION_KINDS:
         fail(f"{path}.input.actions", "action coverage must be input, resize, prompt, tool")
-    if len(set(action_refs)) != 4:
+    if len(set(action_refs)) != len(ACTION_KINDS):
         fail(f"{path}.input.actions", "action references must be unique")
-    retained = expect_list(input_value["retained_output_refs"], f"{path}.input.retained_output_refs")
-    replay = expect_list(input_value["replay_refs"], f"{path}.input.replay_refs")
-    retained_refs = check_refs_unique(retained, f"{path}.input.retained_output_refs")
-    replay_refs = expect_exact_list(replay, f"{path}.input.replay_refs", retained_refs)
-    if any("action" in ref for ref in retained_refs + replay_refs):
-        fail(f"{path}.input", "action references cannot be retained as output")
+
+    inventory = expect_list(input_value["output_inventory"], f"{path}.input.output_inventory")
+    if len(inventory) != len(CANONICAL_OUTPUT_INVENTORY):
+        fail(f"{path}.input.output_inventory", "must contain the complete canonical output inventory")
+    canonical_refs: list[str] = []
+    for index, output in enumerate(inventory):
+        item = exact_keys(output, {"output_ref", "output_kind", "byte_hex"}, f"{path}.input.output_inventory[{index}]")
+        output_ref = expect_ref(item["output_ref"], f"{path}.input.output_inventory[{index}].output_ref")
+        output_kind = expect_string(item["output_kind"], f"{path}.input.output_inventory[{index}].output_kind")
+        byte_hex = expect_hex(item["byte_hex"], f"{path}.input.output_inventory[{index}].byte_hex")
+        expected_ref, expected_kind, expected_hex = CANONICAL_OUTPUT_INVENTORY[index]
+        if (output_ref, output_kind, byte_hex) != (expected_ref, expected_kind, expected_hex):
+            fail(f"{path}.input.output_inventory[{index}]", "canonical output inventory changed")
+        canonical_refs.append(output_ref)
+
+    retained_refs = check_refs_unique(input_value["retained_output_refs"], f"{path}.input.retained_output_refs")
+    replay_refs = expect_exact_list(input_value["replay_refs"], f"{path}.input.replay_refs", retained_refs)
+    if retained_refs != canonical_refs or replay_refs != canonical_refs:
+        fail(f"{path}.input", "retained and replay refs must match canonical PTY output inventory")
+    if set(retained_refs) & set(action_refs):
+        fail(f"{path}.input", "input, resize, prompt, and tool action refs cannot be replayed as output")
+    if any(ref not in canonical_refs for ref in retained_refs + replay_refs):
+        fail(f"{path}.input", "replay refs must be canonical output refs")
     replayed = expect_list(input_value["replayed_action_refs"], f"{path}.input.replayed_action_refs")
     if replayed != []:
         fail(f"{path}.input.replayed_action_refs", "must be empty")
-    expect_exact_list(expected["non_replayable_kinds"], f"{path}.expected.non_replayable_kinds", ["input", "resize", "prompt", "tool"])
+    expect_exact_list(expected["non_replayable_kinds"], f"{path}.expected.non_replayable_kinds", list(ACTION_KINDS))
     expect_exact_list(expected["replayed_action_refs"], f"{path}.expected.replayed_action_refs", [])
     expect_bool(expected["prompt_tool_output_allowed"], f"{path}.expected.prompt_tool_output_allowed", True)
     expect_string(expected["input_replay"], f"{path}.expected.input_replay", "prohibited")
@@ -666,27 +754,51 @@ def validate_no_byte_logging(case: dict[str, Any]) -> None:
     frame_refs: list[str] = []
     for index, frame in enumerate(frames):
         item = exact_keys(frame, {"frame_ref", "frame_hex"}, f"{path}.input.frames[{index}]")
-        frame_refs.append(expect_ref(item["frame_ref"], f"{path}.input.frames[{index}].frame_ref"))
-        expect_hex(item["frame_hex"], f"{path}.input.frames[{index}].frame_hex")
-    if len(set(frame_refs)) != len(frame_refs):
-        fail(f"{path}.input.frames", "frame references must be unique")
+        frame_ref = expect_ref(item["frame_ref"], f"{path}.input.frames[{index}].frame_ref")
+        frame_hex = expect_hex(item["frame_hex"], f"{path}.input.frames[{index}].frame_hex")
+        if (frame_ref, frame_hex) != CANONICAL_LOG_FRAME_INVENTORY[index]:
+            fail(f"{path}.input.frames[{index}]", "canonical output frame inventory changed")
+        frame_refs.append(frame_ref)
+    if tuple(frame_refs) != tuple(ref for ref, _ in CANONICAL_LOG_FRAME_INVENTORY):
+        fail(f"{path}.input.frames", "frame references must be canonical and ordered")
     logs = expect_list(input_value["logs"], f"{path}.input.logs")
-    if len(logs) != 5:
-        fail(f"{path}.input.logs", "must cover output and every sensitive action category")
-    allowed_events = {"pty.output", "user.input", "terminal.resize", "prompt.submit", "tool.action"}
+    if len(logs) != len(LOG_EVENT_ORDER):
+        fail(f"{path}.input.logs", "must contain exactly output plus every sensitive action category")
     record_refs: list[str] = []
+    observed_events: list[str] = []
+    observed_action_refs: list[str] = []
+    action_refs_by_kind = dict(CANONICAL_ACTION_INVENTORY)
     for index, log in enumerate(logs):
         item = exact_keys(log, {"record_ref", "event", "frame_ref", "action_ref", "byte_payload_hex", "action_payload_hex"}, f"{path}.input.logs[{index}]")
         record_refs.append(expect_ref(item["record_ref"], f"{path}.input.logs[{index}].record_ref"))
         event = expect_string(item["event"], f"{path}.input.logs[{index}].event")
-        if event not in allowed_events:
+        observed_events.append(event)
+        if event not in LOG_EVENT_ORDER:
             fail(f"{path}.input.logs[{index}].event", "unknown diagnostic event")
-        if item["frame_ref"] is not None:
-            expect_ref(item["frame_ref"], f"{path}.input.logs[{index}].frame_ref")
-        if item["action_ref"] is not None:
-            expect_ref(item["action_ref"], f"{path}.input.logs[{index}].action_ref")
+        frame_ref = item["frame_ref"]
+        action_ref = item["action_ref"]
+        if event == "pty.output":
+            if frame_ref is None:
+                fail(f"{path}.input.logs[{index}].frame_ref", "output log must carry a canonical frame reference")
+            expect_ref(frame_ref, f"{path}.input.logs[{index}].frame_ref")
+            if frame_ref not in frame_refs:
+                fail(f"{path}.input.logs[{index}].frame_ref", "output log reference is not in the frame inventory")
+            expect_none(action_ref, f"{path}.input.logs[{index}].action_ref")
+        else:
+            expect_none(frame_ref, f"{path}.input.logs[{index}].frame_ref")
+            if action_ref is None:
+                fail(f"{path}.input.logs[{index}].action_ref", "sensitive action log must carry a canonical action reference")
+            action_ref = expect_ref(action_ref, f"{path}.input.logs[{index}].action_ref")
+            expected_kind = {"user.input": "input", "terminal.resize": "resize", "prompt.submit": "prompt", "tool.action": "tool"}[event]
+            if action_ref != action_refs_by_kind[expected_kind]:
+                fail(f"{path}.input.logs[{index}].action_ref", "action log reference is not canonical for its category")
+            observed_action_refs.append(action_ref)
         expect_none(item["byte_payload_hex"], f"{path}.input.logs[{index}].byte_payload_hex")
         expect_none(item["action_payload_hex"], f"{path}.input.logs[{index}].action_payload_hex")
+    if tuple(observed_events) != LOG_EVENT_ORDER or len(set(observed_events)) != len(LOG_EVENT_ORDER):
+        fail(f"{path}.input.logs", "logging evidence must include each category exactly once")
+    if set(observed_action_refs) != set(action_refs_by_kind.values()):
+        fail(f"{path}.input.logs", "logging evidence must reference every sensitive action exactly once")
     if len(set(record_refs)) != len(record_refs):
         fail(f"{path}.input.logs", "record references must be unique")
     records = expect_list(input_value["retained_records"], f"{path}.input.retained_records")
@@ -819,16 +931,30 @@ def mutation_inventory(data: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]
     add("resize-bool", lambda item: _case(item, "resize-bounds")["input"]["samples"][0].__setitem__("cols", True))
     add("resize-effective", lambda item: _case(item, "resize-bounds")["input"]["samples"][2].__setitem__("effective_cols", 2))
     add("resize-prefix", lambda item: _case(item, "resize-bounds")["input"]["framing"].__setitem__("prefix_hex", "00"))
+    add("resize-boundary-duplicate", lambda item: _case(item, "resize-bounds")["input"]["samples"].__setitem__(7, copy.deepcopy(_case(item, "resize-bounds")["input"]["samples"][6])))
+    add("resize-boundary-valid-drift", lambda item: _case(item, "resize-bounds")["input"]["samples"][3].update({"cols": 1, "rows": 2, "effective_cols": 1, "effective_rows": 2, "control_hex": "1b5b524553495a453a313b325d"}))
     add("resize-rejection-accepted", lambda item: _case(item, "resize-rejection")["expected"].__setitem__("accepted_count", 1))
     add("resize-rejection-kind", lambda item: _case(item, "resize-rejection")["input"]["candidates"][0].__setitem__("wire_shape", "integer"))
+    add("resize-rejection-duplicate-class", lambda item: _case(item, "resize-rejection")["input"]["candidates"][6].update({"invalid_field": "cols", "wire_shape": "fractional-number"}))
+    add("resize-rejection-missing-class", lambda item: _case(item, "resize-rejection")["input"]["candidates"].pop())
     add("reconnect-identity", lambda item: _case(item, "reconnect-truncation")["input"]["events"][7].__setitem__("process_ref", "synthetic-process-other"))
     add("reconnect-retained-size", lambda item: _case(item, "reconnect-truncation")["input"]["output_sizes"].__setitem__("retained_bytes", 4))
     add("reconnect-snapshot-old", lambda item: _case(item, "reconnect-truncation")["input"]["events"][8].__setitem__("segment_ref", "synthetic-output-old"))
     add("action-order", lambda item: _case(item, "no-input-replay")["input"]["actions"].reverse())
     add("action-replay", lambda item: _case(item, "no-input-replay")["input"].__setitem__("replayed_action_refs", ["synthetic-action-input"]))
     add("action-retained", lambda item: _case(item, "no-input-replay")["input"]["replay_refs"].append("synthetic-action-input"))
+    add("action-alias-input", lambda item: _case(item, "no-input-replay")["input"]["replay_refs"].__setitem__(0, "synthetic-action-input"))
+    add("action-alias-resize", lambda item: _case(item, "no-input-replay")["input"]["replay_refs"].__setitem__(0, "synthetic-action-resize"))
+    add("action-alias-prompt", lambda item: _case(item, "no-input-replay")["input"]["replay_refs"].__setitem__(0, "synthetic-action-prompt"))
+    add("action-alias-tool", lambda item: _case(item, "no-input-replay")["input"]["replay_refs"].__setitem__(0, "synthetic-action-tool"))
+    add("output-inventory-drift", lambda item: _case(item, "no-input-replay")["input"]["output_inventory"][0].__setitem__("output_ref", "synthetic-output-alias"))
     add("logging-byte-payload", lambda item: _case(item, "no-byte-logging")["input"]["logs"][0].__setitem__("byte_payload_hex", "00ff"))
     add("logging-action-payload", lambda item: _case(item, "no-byte-logging")["input"]["logs"][1].__setitem__("action_payload_hex", "696e707574"))
+    add("logging-collapsed-categories", lambda item: [log.__setitem__("event", "pty.output") for log in _case(item, "no-byte-logging")["input"]["logs"][1:]])
+    add("logging-null-output-ref", lambda item: _case(item, "no-byte-logging")["input"]["logs"][0].__setitem__("frame_ref", None))
+    add("logging-null-action-ref", lambda item: _case(item, "no-byte-logging")["input"]["logs"][1].__setitem__("action_ref", None))
+    add("logging-output-alias", lambda item: _case(item, "no-byte-logging")["input"]["logs"][0].__setitem__("frame_ref", "synthetic-output-alias"))
+    add("logging-action-alias", lambda item: _case(item, "no-byte-logging")["input"]["logs"][1].__setitem__("action_ref", "synthetic-action-alias"))
     add("logging-record-extra", lambda item: _case(item, "no-byte-logging")["input"]["retained_records"][0].update({"frame_hex": "00ff"}))
     add("logging-status", lambda item: _case(item, "no-byte-logging")["expected"].__setitem__("pty_bytes_logged", True))
     return mutations
@@ -915,17 +1041,27 @@ def validate_baseline(baseline: Any) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ControlledArgumentParser()
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except (CommandLineError, SystemExit):
+        print("validation failed: invalid command-line arguments", file=sys.stderr)
+        return 2
     try:
         data = load_fixture(args.fixture)
         summary = validate_contract(data)
         mutation_count = validate_mutations(data)
         baseline_summary = validate_baseline(load_baseline(args.baseline))
-    except (ValidationError, OSError, TypeError, RecursionError, ValueError) as exc:
-        print(bound_error(f"validation failed: {exc}"), file=sys.stderr)
+    except ValidationError:
+        print("validation failed: fixture contract rejected", file=sys.stderr)
+        return 1
+    except OSError:
+        print("validation failed: fixture input unavailable", file=sys.stderr)
+        return 1
+    except (TypeError, RecursionError, ValueError):
+        print("validation failed: malformed fixture", file=sys.stderr)
         return 1
     print(
         "validated "
