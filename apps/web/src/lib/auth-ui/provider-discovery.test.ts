@@ -47,14 +47,14 @@ describe('discoverProviders', () => {
       })
     );
     expect(result.providers.map((provider) => provider.id)).toEqual(['nous', 'hermes-password']);
-    expect(result.providers[0]?.kind).toBe('oauth');
+    expect(result.providers[0]?.kind).toBe('unavailable');
     expect(result.providers[1]?.kind).toBe('password');
   });
 
-  it('accepts an empty registry without inventing a fallback provider', async () => {
+  it('rejects a successful empty registry because the pinned no-provider shape is an exact 503', async () => {
     const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(jsonResponse('{"providers":[]}'));
 
-    await expect(discoverProviders({ fetch: fetcher })).resolves.toEqual({ providers: [] });
+    await expect(discoverProviders({ fetch: fetcher })).rejects.toMatchObject({ code: 'invalid-response' });
   });
 
   it('rejects malformed JSON and duplicate JSON keys', async () => {
@@ -67,7 +67,7 @@ describe('discoverProviders', () => {
     await expect(discoverProviders({ fetch: duplicate })).rejects.toMatchObject({ code: 'malformed-json' });
   });
 
-  it('rejects unsafe and duplicate provider identities', async () => {
+  it('rejects unsafe and duplicate provider identities without turning names into capability policy', async () => {
     const unsafe = vi
       .fn<ProviderDiscoveryFetch>()
       .mockResolvedValue(
@@ -83,6 +83,35 @@ describe('discoverProviders', () => {
         )
       );
     await expect(discoverProviders({ fetch: duplicate })).rejects.toMatchObject({ code: 'invalid-response' });
+
+    const providerNeutral = vi
+      .fn<ProviderDiscoveryFetch>()
+      .mockResolvedValue(
+        jsonResponse(
+          '{"providers":[{"name":"future-provider","display_name":"Future Provider","supports_password":false}]}'
+        )
+      );
+    await expect(discoverProviders({ fetch: providerNeutral })).resolves.toMatchObject({
+      providers: [{ id: 'future-provider', kind: 'unavailable' }]
+    });
+  });
+
+  it('rejects unknown envelope, provider-row, and 503 keys instead of silently widening the schema', async () => {
+    for (const body of [
+      '{"providers":[{"name":"nous","display_name":"Nous","supports_password":false}],"version":2}',
+      '{"providers":[{"name":"nous","display_name":"Nous","supports_password":false,"callback_url":"/auth/callback"}]}'
+    ]) {
+      const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(jsonResponse(body));
+      await expect(discoverProviders({ fetch: fetcher })).rejects.toMatchObject({ code: 'invalid-response' });
+    }
+
+    const widenedUnavailable = vi
+      .fn<ProviderDiscoveryFetch>()
+      .mockResolvedValue(jsonResponse('{"detail":"no auth providers registered","retry_after":1}', 503));
+    await expect(discoverProviders({ fetch: widenedUnavailable })).rejects.toMatchObject({
+      code: 'invalid-response',
+      status: 503
+    });
   });
 
   it('recognizes only the reviewed empty-registry 503 response', async () => {

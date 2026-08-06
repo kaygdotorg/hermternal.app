@@ -49,21 +49,25 @@
       ? 'Signing in. The synthetic form is disabled while the local state completes.'
       : effectiveState === 'callback'
         ? 'Completing sign-in in a mocked local callback state.'
-        : effectiveState === 'discovery-retry'
-          ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
-          : '';
+        : effectiveState === 'discovery-pending'
+          ? 'Discovering sign-in methods. Provider actions are unavailable while the request is pending.'
+          : effectiveState === 'discovery-retry'
+            ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
+            : '';
   $: assertiveAnnouncement =
     effectiveState === 'failure'
       ? 'Sign-in did not complete. Try again or choose another provider.'
       : effectiveState === 'session-expired'
         ? 'Session expired. Sign in again or discard the local draft fixture.'
-        : effectiveState === 'discovery-malformed'
-          ? 'Provider discovery returned incompatible data. No sign-in method is available.'
-          : effectiveState === 'discovery-aborted'
-            ? 'Provider discovery was cancelled. No sign-in method is available.'
-            : effectiveState === 'provider-unavailable'
-              ? 'Provider discovery stopped. No sign-in method is available.'
-              : '';
+        : effectiveState === 'discovery-empty'
+          ? 'Provider discovery returned an invalid empty registry. No sign-in method is available.'
+          : effectiveState === 'discovery-malformed'
+            ? 'Provider discovery returned incompatible data. No sign-in method is available.'
+            : effectiveState === 'discovery-aborted'
+              ? 'Provider discovery was cancelled. No sign-in method is available.'
+              : effectiveState === 'provider-unavailable'
+                ? 'Provider discovery stopped. No sign-in method is available.'
+                : '';
 
   function isProviderPanelState(value: AuthViewState): boolean {
     return (
@@ -271,15 +275,15 @@
       {:else if effectiveState === 'discovery-empty'}
         <div class="failure-icon" aria-hidden="true"><Icon name="warning" size={20} /></div>
         <div class="failure-heading">
-          <h1>No sign-in methods available</h1>
+          <h1 bind:this={stateHeading} tabindex="-1">No sign-in methods available</h1>
           <p>
-            The same-origin provider registry was valid but empty. The preview fails closed and exposes no invented
-            provider.
+            A successful empty provider registry is outside the pinned response contract. The preview fails closed and
+            exposes no invented provider.
           </p>
         </div>
         <div class="failure-detail">
-          <strong>empty_provider_registry</strong>
-          <p>Retry discovery after the local proxy or Hermes Dashboard reports an available provider.</p>
+          <strong>invalid_empty_provider_registry</strong>
+          <p>Retry discovery after Hermes reports the reviewed provider registry or exact unavailable response.</p>
         </div>
         <div class="failure-actions">
           <Pill

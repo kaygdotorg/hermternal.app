@@ -14,7 +14,7 @@ export type AuthViewState =
   | 'provider-unavailable'
   | 'password-submitting';
 
-export type AuthProviderKind = 'oauth' | 'password';
+export type AuthProviderKind = 'oauth' | 'password' | 'unavailable';
 export type AuthDiscoveryMode = 'fixture' | 'live';
 
 /** Unknown deployment kinds must stop at the unavailable state, never inherit a known provider path. */

@@ -1,7 +1,7 @@
 import type { AuthProvider, AuthProviderKind } from './types';
 
 function isProviderKind(value: unknown): value is AuthProviderKind {
-  return value === 'oauth' || value === 'password';
+  return value === 'oauth' || value === 'password' || value === 'unavailable';
 }
 
 /**

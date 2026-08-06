@@ -31,6 +31,24 @@ describe('AuthPreview', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Provider discovery stopped' })).toHaveFocus());
   });
 
+  it('renders a provider without reviewed browser capability as visible but unavailable', () => {
+    render(AuthPreview, {
+      state: 'provider-selection',
+      providers: [
+        {
+          id: 'provider-neutral',
+          name: 'Provider Neutral',
+          monogram: 'P',
+          kind: 'unavailable',
+          description: 'Provider reported without a reviewed browser sign-in capability'
+        }
+      ]
+    });
+
+    expect(screen.getByRole('button', { name: 'Provider Neutral, unavailable' })).toBeDisabled();
+    expect(screen.getByText(/without a reviewed browser sign-in capability/i)).toBeInTheDocument();
+  });
+
   it('marks the synthetic password form so password managers do not treat it as reusable credentials', () => {
     render(AuthPreview, { state: 'password' });
 
@@ -117,6 +135,21 @@ describe('AuthPreview', () => {
     await view.rerender({ state: 'session-expired' });
     expect(screen.getByRole('alert')).toHaveTextContent('Session expired');
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Session expired' })).toHaveFocus());
+
+    await view.rerender({ state: 'discovery-pending' });
+    expect(screen.getByRole('status')).toHaveTextContent('Discovering sign-in methods');
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Discovering sign-in methods' })).toHaveFocus());
+
+    for (const [state, heading, announcement] of [
+      ['discovery-empty', 'No sign-in methods available', 'invalid empty registry'],
+      ['discovery-malformed', 'Provider discovery returned incompatible data', 'incompatible data'],
+      ['discovery-aborted', 'Provider discovery was cancelled', 'was cancelled'],
+      ['provider-unavailable', 'Provider discovery stopped', 'No sign-in method is available']
+    ] as const) {
+      await view.rerender({ state });
+      expect(screen.getByRole('alert')).toHaveTextContent(announcement);
+      await waitFor(() => expect(screen.getByRole('heading', { name: heading })).toHaveFocus());
+    }
 
     await view.rerender({ state: 'discovery-retry' });
     expect(screen.getByRole('status')).toHaveTextContent('Provider discovery can be retried');

@@ -9,6 +9,7 @@
   export let pending = false;
   export let onAction: AuthActionHandler = () => {};
 
+  $: unavailable = provider.kind === 'unavailable';
   $: description = pending
     ? provider.kind === 'oauth'
       ? 'Checking provider manifest'
@@ -18,14 +19,14 @@
       : provider.description;
 
   let trailingIcon: IconName = 'arrow-right';
-  $: trailingIcon = pending ? 'clock' : expanded ? 'arrow-down' : 'arrow-right';
+  $: trailingIcon = pending ? 'clock' : unavailable ? 'warning' : expanded ? 'arrow-down' : 'arrow-right';
 </script>
 
 <div class:expanded class:pending class="provider-card" data-provider-id={provider.id}>
   <Pill
-    ariaLabel={`${provider.name}${pending ? ', loading' : ''}`}
+    ariaLabel={`${provider.name}${pending ? ', loading' : unavailable ? ', unavailable' : ''}`}
     {description}
-    disabled={disabled || pending}
+    disabled={disabled || pending || unavailable}
     {expanded}
     fullWidth
     label={provider.name}

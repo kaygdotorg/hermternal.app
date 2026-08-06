@@ -231,8 +231,13 @@
         <h2 id="auth-heading">Browser authentication boundary</h2>
       </div>
       <label class="state-control">
-        <span>Authentication state</span>
-        <select bind:value={authState} aria-label="Authentication state">
+        <span>{discoveryMode === 'live' ? 'Authentication state · live result' : 'Authentication state'}</span>
+        <select
+          bind:value={authState}
+          aria-label="Authentication state"
+          disabled={discoveryMode === 'live'}
+          title={discoveryMode === 'live' ? 'Live discovery state follows the same-origin response.' : undefined}
+        >
           {#each authStates as state}
             <option value={state}>{formatState(state)}</option>
           {/each}
@@ -371,6 +376,12 @@
   .back-link:focus-visible {
     outline: 3px solid color-mix(in srgb, var(--signal) 32%, transparent);
     outline-offset: 3px;
+  }
+
+  select:disabled {
+    color: var(--muted);
+    cursor: not-allowed;
+    opacity: 0.72;
   }
 
   .back-link {

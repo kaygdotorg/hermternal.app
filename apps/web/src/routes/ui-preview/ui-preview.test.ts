@@ -92,6 +92,7 @@ describe('ui preview route', () => {
       expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-discovery-mode', 'live');
       expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
     });
+    expect(screen.getByRole('combobox', { name: 'Authentication state' })).toBeDisabled();
     expect(screen.getByText('live-discovery-disabled')).toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Retry discovery' }));

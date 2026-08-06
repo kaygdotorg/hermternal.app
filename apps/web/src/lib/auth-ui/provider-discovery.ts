@@ -16,6 +16,9 @@ const MAX_JSON_ARRAY_LENGTH = 500;
 const MAX_JSON_OBJECT_KEYS = 64;
 const PROVIDER_NAME_FORBIDDEN_PATTERN = /[\s/\\\p{C}]/u;
 const PROVIDER_CONTROL_PATTERN = /\p{C}/u;
+const PROVIDER_ENVELOPE_KEYS = ['providers'] as const;
+const PROVIDER_ROW_KEYS = ['display_name', 'name', 'supports_password'] as const;
+const PROVIDER_UNAVAILABLE_KEYS = ['detail'] as const;
 
 export type ProviderDiscoveryErrorCode =
   | 'aborted'
@@ -156,7 +159,11 @@ async function classifyHttpResponse(
       return new ProviderDiscoveryError('malformed-json', response.status);
     }
 
-    if (isRecord(parsed) && Object.keys(parsed).length >= 1 && parsed.detail === 'no auth providers registered') {
+    if (
+      isRecord(parsed) &&
+      hasExactKeys(parsed, PROVIDER_UNAVAILABLE_KEYS) &&
+      parsed.detail === 'no auth providers registered'
+    ) {
       return new ProviderDiscoveryError('provider-unavailable', response.status);
     }
 
@@ -167,13 +174,21 @@ async function classifyHttpResponse(
 }
 
 function mapProviderEnvelope(value: unknown): AuthProvider[] {
-  if (!isRecord(value) || !Array.isArray(value.providers) || value.providers.length > MAX_PROVIDER_COUNT) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, PROVIDER_ENVELOPE_KEYS) ||
+    !Array.isArray(value.providers) ||
+    value.providers.length === 0 ||
+    value.providers.length > MAX_PROVIDER_COUNT
+  ) {
     throw new ProviderDiscoveryError('invalid-response');
   }
 
   const seen = new Set<string>();
   return value.providers.map((candidate) => {
-    if (!isRecord(candidate)) throw new ProviderDiscoveryError('invalid-response');
+    if (!isRecord(candidate) || !hasExactKeys(candidate, PROVIDER_ROW_KEYS)) {
+      throw new ProviderDiscoveryError('invalid-response');
+    }
 
     const name = candidate.name;
     const displayName = candidate.display_name;
@@ -198,10 +213,12 @@ function mapProviderEnvelope(value: unknown): AuthProvider[] {
       id: name,
       name: displayName,
       monogram: displayName.slice(0, 1).toUpperCase() || '?',
-      kind: supportsPassword ? 'password' : 'oauth',
+      // The pinned route exposes password capability only. A false value must
+      // not be relabeled as OAuth without a separate reviewed capability.
+      kind: supportsPassword ? 'password' : 'unavailable',
       description: supportsPassword
         ? 'Username and password supported'
-        : 'OAuth provider · same-origin browser boundary'
+        : 'Provider reported without a reviewed browser sign-in capability'
     } satisfies AuthProvider;
   });
 }
@@ -436,6 +453,11 @@ class BoundedJsonParser {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(record: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(record).sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
 }
 
 function messageFor(code: ProviderDiscoveryErrorCode): string {
