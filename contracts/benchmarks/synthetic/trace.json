@@ -1,0 +1,10 @@
+{
+  "schema": "hermternal.benchmark-trace.v1",
+  "fixture_id": "shared-synthetic-workload",
+  "events": [
+    {"run_id": "web-cold-production", "state": "cold", "sample_count": 30},
+    {"run_id": "web-warm-production", "state": "warm", "sample_count": 30},
+    {"run_id": "ios-cold-release", "state": "cold", "sample_count": 30},
+    {"run_id": "ios-warm-release", "state": "warm", "sample_count": 30}
+  ]
+}

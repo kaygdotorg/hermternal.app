@@ -54,7 +54,7 @@ See the focused plans for [product](docs/product/README.md), [protocol](docs/pro
 | Path | Purpose |
 | --- | --- |
 | `apps/` | Platform-owned client implementations. |
-| `contracts/` | Language-neutral Dashboard contracts, fixtures, state models, and design tokens. |
+| `contracts/` | Language-neutral Dashboard contracts, fixtures, state models, design tokens, and shared benchmark evidence. |
 | `docs/` | Product, architecture, protocol, security, and deployment decisions. |
 | `prototypes/` | Paper and coded prototype boundaries. |
 | `scripts/` | Future deterministic contract, token, and proof checks. |
