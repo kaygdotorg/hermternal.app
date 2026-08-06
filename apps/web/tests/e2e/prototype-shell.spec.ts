@@ -19,29 +19,63 @@ for (const viewport of [
   });
 }
 
-test('keyboard focus and activation remain available', async ({ page }) => {
+test('Tab and Space activate the focused action with an effective target and visible focus', async ({ page }) => {
   await page.goto('/');
   const action = page.getByRole('button', { name: 'Re-run mock check' });
 
-  await action.focus();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('Tab');
   await expect(action).toBeFocused();
-  await page.keyboard.press('Enter');
+  const metrics = await action.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return {
+      height: rect.height,
+      width: rect.width,
+      outlineStyle: style.outlineStyle,
+      outlineWidth: style.outlineWidth
+    };
+  });
+  expect(metrics.height).toBeGreaterThanOrEqual(44);
+  expect(metrics.width).toBeGreaterThanOrEqual(44);
+  expect(metrics.outlineStyle).not.toBe('none');
+  expect(metrics.outlineWidth).not.toBe('0px');
+
+  await page.keyboard.press('Space');
   await expect(page.getByTestId('status-success')).toBeVisible();
 });
 
-test('200% zoom simulation and reduced motion keep content accessible', async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: 'reduce' });
+test('200% browser zoom equivalent uses a real 640 CSS-pixel viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 720 });
   await page.goto('/');
-  await page.evaluate(() => {
-    document.documentElement.style.zoom = '2';
-  });
 
   await expect(page.getByRole('heading', { name: 'Prototype shell' })).toBeVisible();
-  expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
-
-  const overflow = await page.evaluate(() => ({
+  const viewportAndOverflow = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
     clientWidth: document.documentElement.clientWidth,
     scrollWidth: document.documentElement.scrollWidth
   }));
-  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+  expect(viewportAndOverflow.innerWidth).toBe(640);
+  expect(viewportAndOverflow.scrollWidth).toBeLessThanOrEqual(viewportAndOverflow.clientWidth + 1);
+});
+
+test('computed reduced-motion behavior disables action transition duration', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+
+  const motion = await page.getByRole('button', { name: 'Re-run mock check' }).evaluate((element) => ({
+    mediaMatches: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    transitionDuration: getComputedStyle(element).transitionDuration
+  }));
+  expect(motion.mediaMatches).toBe(true);
+  expect(motion.transitionDuration).toBe('0s');
+});
+
+test('pending cancellation is visible and safe in the browser shell', async ({ page }) => {
+  await page.goto('/?delayMs=short');
+  await expect(page.getByTestId('status-pending')).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel mock check' }).click();
+
+  await expect(page.getByTestId('status-cancelled')).toBeVisible();
+  await expect(page.getByTestId('fixture-id')).toHaveText('w01-cancelled-v1');
 });

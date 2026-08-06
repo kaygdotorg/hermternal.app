@@ -1,6 +1,8 @@
 export const MOCK_FIXTURE_IDS = Object.freeze({
+  cancelled: 'w01-cancelled-v1',
   empty: 'w01-empty-v1',
   failure: 'w01-failure-v1',
+  pending: 'w01-pending-v1',
   success: 'w01-success-v1'
 });
 

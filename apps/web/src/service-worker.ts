@@ -1,32 +1,27 @@
 /// <reference lib="webworker" />
 
 import { build, files, version } from '$service-worker';
+import { createServiceWorkerPolicy } from '$lib/service-worker-policy';
+import { createServiceWorkerRuntime } from '$lib/service-worker-runtime';
 
-const cacheName = `hermternal-prototype-${version}`;
-const precache = [...build, ...files];
+const policy = createServiceWorkerPolicy({ version, build, files });
+const runtime = createServiceWorkerRuntime(policy, {
+  cacheStorage: caches,
+  fetcher: (request) => fetch(request),
+  origin: self.location.origin
+});
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(cacheName).then((cache) => cache.addAll(precache)));
+  event.waitUntil(runtime.install());
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches
-      .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== cacheName).map((key) => caches.delete(key))))
-  );
+  event.waitUntil(runtime.activate());
 });
 
 self.addEventListener('fetch', (event) => {
-  const requestUrl = new URL(event.request.url);
-
-  // Only same-origin GETs belong to the static asset cache. The mock boundary
-  // never reaches this handler, so this cannot become a hidden API proxy.
-  if (requestUrl.origin !== self.location.origin || event.request.method !== 'GET') {
-    return;
-  }
-
-  event.respondWith(
-    caches.match(event.request).then((cached) => cached ?? fetch(event.request))
-  );
+  // The runtime returns without respondWith for every non-allowlisted request.
+  // That preserves browser handling for APIs, auth, WebSockets, PTY, and any
+  // unknown same-origin path instead of turning this worker into a proxy.
+  runtime.handleFetch(event);
 });

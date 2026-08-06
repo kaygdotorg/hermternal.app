@@ -12,6 +12,31 @@ export type MockWorkspaceState =
       detail: string;
     };
 
+export type MockCancellationReason = 'user' | 'retry' | 'unmount';
+
+export interface MockPendingState {
+  status: 'pending';
+  fixtureId: string;
+}
+
+export interface MockCancelledState {
+  status: 'cancelled';
+  fixtureId: string;
+  reason: MockCancellationReason;
+}
+
+export interface MockFailureState {
+  status: 'failure';
+  fixtureId: string;
+  message: string;
+}
+
+export type MockShellState =
+  | MockWorkspaceState
+  | MockPendingState
+  | MockCancelledState
+  | MockFailureState;
+
 export interface MockTransportOptions {
   delayMs?: number;
   scenario?: MockScenario;

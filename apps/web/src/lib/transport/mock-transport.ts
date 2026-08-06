@@ -10,6 +10,10 @@ export class MockTransportError extends Error {
   }
 }
 
+export function isMockAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
 function abortError(): Error {
   const error = new Error('The deterministic mock request was cancelled.');
   error.name = 'AbortError';

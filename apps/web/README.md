@@ -5,8 +5,8 @@
 This directory now contains the W-01 scaffold only. It is a planning, mock, and proof artifact:
 
 - Svelte 5 + SvelteKit 2 + Vite + Bun
-- `@sveltejs/adapter-static` with a client-only SPA fallback
-- a web app manifest and same-origin static-asset service worker
+- `@sveltejs/adapter-static` with a distinct `200.html` client-route fallback
+- a web app manifest and same-origin static-asset service worker with a closed allowlist
 - a prototype-labelled shell, not a Runtime or Authentication screen
 - deterministic in-memory fixtures with no live transport
 
@@ -19,6 +19,22 @@ The planned chat surface has one profile, provider-neutral discovery, session re
 Internal stable session and message IDs remain allowed. Required authentication callback routing also remains allowed.
 
 User-facing deep-link UI and full-text session-search UI are deferred to `v0.0.2`. Both UIs need redesign. The deep-link and search contracts remain future compatibility references. User-facing sharing is deferred to `v0.0.2`.
+
+## Static-host contract
+
+The generated static output contains `index.html` for `/` and a distinct `200.html` fallback for
+private Hermternal client routes. The supported direct-load route grammar is:
+
+- `/` and `/index.html` serve the root shell;
+- `/v1/c/<full-session-id>` and `/v1/c/<full-session-id>/m/<full-message-id>` rewrite to `200.html`,
+  where each opaque ID is at least 16 ASCII unreserved characters;
+- `/api`, `/hermes`, `/auth`, `/ws`, and `/pty` paths are reserved and never rewrite to `200.html`;
+- all other paths, including unknown nested routes, remain 404s.
+
+A static host must apply that order before serving a file. The production-build server proof in
+`tests/static/assert-static-routes.mjs` implements and tests this exact W-01 host contract. The
+scaffold does not claim that Vite preview or an arbitrary static host provides a general SPA rewrite.
+
 
 ## Run and verify
 
@@ -48,20 +64,25 @@ socket, read browser storage, use credentials, or mirror a transcript. Keep live
 and browser-auth integrations out of this package until their contracts and proof gates are
 explicitly approved.
 
-The page creates the success fixture in memory. The component still exposes pending, empty,
-failure, retry, and stale-result-safe states so test infrastructure can exercise the boundary
-without adding product features.
+The page creates the success fixture in memory. The component exposes pending, cancelled, empty,
+failure, retry, unmount, and stale-result-safe states. Cancellation retains the safe deterministic
+`w01-cancelled-v1` identity and is never presented as a transport failure.
 
 ## Regression foundations
 
-- Vitest + Testing Library cover the mock transport and prototype shell.
-- Playwright covers keyboard focus and activation, no-network requests, narrow and desktop widths,
-  200% zoom simulation, reduced motion, and static preview behavior.
-- Axe runs against the prototype shell and reports violations as test failures.
-- `tests/static/assert-static-build.mjs` verifies that the production output is static and contains
-  the manifest without a server directory.
+- Vitest + Testing Library cover mock transport cancellation, shell loading, pending-to-cancelled-to-
+  retry, failure/empty states, unmount aborts, and stale-result suppression.
+- Playwright covers Tab/Space activation, visible keyboard focus, effective target size, narrow and
+  desktop widths, a real 640 CSS-pixel viewport as the 200% browser-zoom equivalent, computed
+  reduced-motion behavior, and no-network requests.
+- Axe runs against success, empty, and failure states in both light and dark color schemes.
+- `tests/static/assert-static-build.mjs` and `tests/static/assert-static-routes.mjs` verify static
+  output, the distinct `200.html` fallback, the supported deep-link grammar, and reserved-path
+  denial without a server directory.
 - Semantic CSS tokens, reflow rules, focus styles, minimum action height, and reduced-motion rules
   provide the narrow/desktop, zoom, keyboard, and motion regression baseline.
+- `src/lib/service-worker-runtime.test.ts` directly proves foreign same-origin caches are not
+  deleted or read and reserved/API/auth/WS/PTy/unknown requests are not intercepted.
 
 These checks are scaffold evidence, not proof that a future Runtime or Authentication screen is
 ready to ship. No real provider, Hermes gateway, authentication provider, deployment, credential,

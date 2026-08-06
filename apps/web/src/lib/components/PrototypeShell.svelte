@@ -1,41 +1,94 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { MockTransportError } from '$lib/transport';
-  import type { MockTransport, MockWorkspaceState } from '$lib/transport';
+  import { onDestroy, onMount } from 'svelte';
+  import { MOCK_FIXTURE_IDS } from '$lib/transport/fixtures';
+  import { isMockAbortError, MockTransportError } from '$lib/transport/mock-transport';
+  import type { MockCancellationReason, MockShellState, MockTransport } from '$lib/transport/types';
 
   export let transport: MockTransport;
 
-  type ShellState = MockWorkspaceState | { status: 'pending' } | { status: 'failure'; message: string };
-
-  let state: ShellState = { status: 'pending' };
+  let state: MockShellState = {
+    status: 'pending',
+    fixtureId: MOCK_FIXTURE_IDS.pending
+  };
   let requestNumber = 0;
+  let activeController: AbortController | undefined;
+  let mounted = false;
+  let abortReason: MockCancellationReason = 'retry';
+
+  function cancelledState(reason: MockCancellationReason): MockShellState {
+    return {
+      status: 'cancelled',
+      fixtureId: MOCK_FIXTURE_IDS.cancelled,
+      reason
+    };
+  }
 
   async function loadMockState(): Promise<void> {
+    // Increment before aborting so an old transport completion cannot publish
+    // after a retry has established the next request's pending state.
     const currentRequest = ++requestNumber;
-    state = { status: 'pending' };
+    abortReason = 'retry';
+    activeController?.abort();
+    activeController = new AbortController();
+    const controller = activeController;
+    state = {
+      status: 'pending',
+      fixtureId: MOCK_FIXTURE_IDS.pending
+    };
 
     try {
-      const nextState = await transport.getWorkspace();
-      if (currentRequest === requestNumber) {
-        state = nextState;
+      const nextState = await transport.getWorkspace(controller.signal);
+      if (currentRequest !== requestNumber || !mounted) {
+        return;
       }
+      state = nextState;
     } catch (error) {
-      if (currentRequest !== requestNumber) {
+      if (currentRequest !== requestNumber || !mounted) {
         return;
       }
 
-      state = {
-        status: 'failure',
-        message:
-          error instanceof MockTransportError
-            ? error.message
-            : 'The mock boundary returned an unknown failure.'
-      };
+      if (isMockAbortError(error)) {
+        state = cancelledState(abortReason);
+      } else {
+        state = {
+          status: 'failure',
+          fixtureId: MOCK_FIXTURE_IDS.failure,
+          message:
+            error instanceof MockTransportError
+              ? error.message
+              : 'The mock boundary returned an unknown failure.'
+        };
+      }
+    } finally {
+      if (currentRequest === requestNumber) {
+        activeController = undefined;
+      }
     }
   }
 
+  function cancelMockState(): void {
+    if (!activeController || state.status !== 'pending') {
+      return;
+    }
+
+    abortReason = 'user';
+    requestNumber += 1;
+    activeController.abort();
+    activeController = undefined;
+    state = cancelledState('user');
+  }
+
   onMount(() => {
+    mounted = true;
     void loadMockState();
+  });
+
+  onDestroy(() => {
+    mounted = false;
+    abortReason = 'unmount';
+    requestNumber += 1;
+    activeController?.abort();
+    activeController = undefined;
   });
 </script>
 
@@ -88,6 +141,7 @@
     <div class="status-region" aria-live="polite" data-testid="mock-status">
       {#if state.status === 'pending'}
         <p class="status-message" data-testid="status-pending">Collecting deterministic mock evidence…</p>
+        <p class="status-detail">Pending fixture: {state.fixtureId}</p>
       {:else if state.status === 'success'}
         <p class="status-message" data-testid="status-success">Mock transport ready.</p>
         <p class="status-detail">{state.workspaceLabel} · {state.detail}</p>
@@ -96,14 +150,24 @@
         <p class="status-message" data-testid="status-empty">The fixture is empty.</p>
         <p class="status-detail">No synthetic workspace result is available.</p>
         <code data-testid="fixture-id">{state.fixtureId}</code>
+      {:else if state.status === 'cancelled'}
+        <p class="status-message" data-testid="status-cancelled">Mock request cancelled safely.</p>
+        <p class="status-detail">Cancellation reason: {state.reason}.</p>
+        <code data-testid="fixture-id">{state.fixtureId}</code>
       {:else}
         <p class="status-message" data-testid="status-failure">Mock evidence unavailable.</p>
         <p class="status-detail">{state.message}</p>
+        <code data-testid="fixture-id">{state.fixtureId}</code>
       {/if}
     </div>
 
+    {#if state.status === 'pending' && activeController}
+      <button class="action secondary-action" type="button" onclick={cancelMockState}>
+        Cancel mock check
+      </button>
+    {/if}
     <button class="action" type="button" onclick={loadMockState}>
-      Re-run mock check
+      {state.status === 'cancelled' ? 'Retry mock check' : 'Re-run mock check'}
     </button>
   </section>
 
