@@ -6,8 +6,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -127,6 +129,9 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate._validate_baseline(mutated, validate.REPO_ROOT, validate.BASELINE_PATH)
 
+    def test_canonical_baseline_anchor_matches_checked_in_content(self) -> None:
+        self.assertEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
+
 
 class CliTests(unittest.TestCase):
     def _run(
@@ -162,8 +167,13 @@ class CliTests(unittest.TestCase):
         )
         return temporary
 
-    def _rebind_copy(self, repo_root: Path) -> tuple[dict[str, object], dict[str, object]]:
-        """Refresh only integrity records in an isolated synthetic copy."""
+    def _rebind_copy(
+        self,
+        repo_root: Path,
+        *,
+        refresh_anchor: bool = False,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Refresh integrity records in an isolated synthetic copy."""
         fixtures_root = repo_root / "contracts/fixtures"
         index_path = fixtures_root / "index.json"
         baseline_path = fixtures_root / "validator/validation-baseline.json"
@@ -188,6 +198,20 @@ class CliTests(unittest.TestCase):
             total += len(data)
         baseline["artifact_size_bytes"] = total
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        if refresh_anchor:
+            validator_path = repo_root / "contracts/fixtures/validator/validate.py"
+            source = validator_path.read_text(encoding="utf-8")
+            old_anchor = f'BASELINE_CANONICAL_SHA256 = "{validate.BASELINE_CANONICAL_SHA256}"'
+            digest = validate._canonical_baseline_digest(baseline)
+            source = source.replace(old_anchor, f'BASELINE_CANONICAL_SHA256 = "{digest}"', 1)
+            validator_path.write_text(source, encoding="utf-8")
+            for record in baseline["artifact_manifest"]:
+                if record["path"] == validate.BASELINE_SELF_MANIFEST_PATH:
+                    data = validator_path.read_bytes()
+                    record["size_bytes"] = len(data)
+                    record["sha256"] = hashlib.sha256(data).hexdigest()
+            baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
+            baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
         return index, baseline
 
     def _assert_blocked_in_both_modes(self, repo_root: Path, *args: str) -> None:
@@ -201,6 +225,19 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertFalse(payload["live_claim"])
             self.assertEqual(payload["evidence_status"], "blocked")
+
+    @staticmethod
+    def _distribution(samples: list[float]) -> dict[str, float]:
+        ordered = sorted(samples)
+        p50 = ordered[min(len(ordered) - 1, max(0, math.ceil(0.50 * len(ordered)) - 1))]
+        p95 = ordered[min(len(ordered) - 1, max(0, math.ceil(0.95 * len(ordered)) - 1))]
+        return {
+            "min": min(samples),
+            "p50": p50,
+            "p95": p95,
+            "max": max(samples),
+            "mean": statistics.mean(samples),
+        }
 
     def test_normal_and_optimized_success_have_same_boundary(self) -> None:
         normal = self._run()
@@ -228,7 +265,49 @@ class CliTests(unittest.TestCase):
             + '\nFORGED_RETAINED_VALUE = "Bearer unredacted-secret-value-123456"\n',
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root)
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_registered_python_assignment_literal_and_comment_are_rejected_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        python_artifact = repo_root / "contracts/fixtures/connection-restoration/validate.py"
+        python_artifact.write_text(
+            python_artifact.read_text(encoding="utf-8")
+            + '\nFORGED_TICKET_LITERAL = "ticket=unredacted-secret-value-123456"\n'
+            + '# token=unredacted-comment-secret-123456\n',
+            encoding="utf-8",
+        )
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_registered_ws_and_wss_live_hosts_are_rejected_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        readme = repo_root / "contracts/fixtures/connection-restoration/README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8")
+            + "\nws://live.example.net and wss://live.example.net must never be retained.\n",
+            encoding="utf-8",
+        )
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_canonical_baseline_sample_distribution_manifest_replacement_is_rejected_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        baseline_path = repo_root / "contracts/fixtures/validator/validation-baseline.json"
+        artifact = repo_root / "contracts/fixtures/validator/test_validate.py"
+        artifact.write_text(artifact.read_text(encoding="utf-8") + "\n# coordinated evidence replacement marker\n", encoding="utf-8")
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        samples = list(baseline["normal"]["samples_ms"])
+        samples[0] += 1.0
+        baseline["normal"]["samples_ms"] = samples
+        baseline["normal"]["distribution_ms"] = self._distribution(samples)
+        for record in baseline["artifact_manifest"]:
+            if record["path"] == "contracts/fixtures/validator/test_validate.py":
+                data = artifact.read_bytes()
+                record["size_bytes"] = len(data)
+                record["sha256"] = hashlib.sha256(data).hexdigest()
+        baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
+        baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_ready_coverage_cannot_reference_pending_root_in_both_modes(self) -> None:
@@ -242,7 +321,7 @@ class CliTests(unittest.TestCase):
         provider["validator"] = None
         provider["files"] = []
         index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root)
+        self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_unknown_flag_is_one_bounded_redacted_line(self) -> None:

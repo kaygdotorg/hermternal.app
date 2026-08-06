@@ -31,16 +31,22 @@ TypeScript and Swift parity checks. [`schema.json`](schema.json) documents the
 wire-neutral shape. Each ready fixture root lists every checked-in artifact,
 its byte count, and its SHA-256 digest. The aggregate validator also rejects
 unsafe paths, duplicate JSON keys, non-finite numbers, oversized input,
-malformed UTF-8, credential-shaped values, live claims, symlinks, and unindexed
-artifacts. Registered Python artifacts are parsed and their retained string
-literals and comments are scanned as well; detector regex definitions and
-explicit negative-test markers are not treated as retained credentials. Domain validators
-remain authoritative for case semantics; the aggregate layer does not run them
-and makes no network request.
+malformed UTF-8, credential-shaped values, live claims, `http`/`https`/`ws`/`wss`
+live hosts, symlinks, and unindexed artifacts. Registered Python artifacts are
+parsed and their retained string literals and comments are scanned, including
+assignment-shaped `ticket=`, `cookie=`, `password=`, `secret=`, and `token=`
+values; detector regex definitions and explicit domain negative-test markers are
+not treated as retained credentials. Domain validators remain authoritative for
+case semantics; the aggregate layer does not run them and makes no network
+request.
 
 The `--baseline` input is bound to the exact canonical path named by the
-registry (`validator/validation-baseline.json`); a schema-valid copy cannot
-replace the checked-in benchmark evidence. Ready coverage may reference only
+registry (`validator/validation-baseline.json`). Its full canonical content is
+also checked against a reviewed SHA-256 trust anchor in the validator; only the
+validator's own manifest digest and derived byte total are normalized to avoid a
+self-referential cycle. A schema-valid copy or coordinated sample/distribution/
+manifest replacement cannot replace the checked-in benchmark evidence. Ready
+coverage may reference only
 ready fixture roots with real manifests. A registry can be structurally valid
 while coverage remains `partial`. A `pending`, `empty`, `failure`, `cancelled`,
 or `unknown` coverage row is never promoted to successful evidence. The

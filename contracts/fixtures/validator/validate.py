@@ -132,12 +132,17 @@ MAX_INTEGER_DIGITS = 100
 MAX_INTEGER = 10**MAX_INTEGER_DIGITS - 1
 MAX_ERROR_LENGTH = 240
 BASELINE_REPETITIONS = 30
+# This trust anchor authenticates the canonical observed baseline content. The
+# canonicalizer omits only this validator's own manifest digest and derived byte
+# total, which would otherwise create a self-referential hash cycle.
+BASELINE_SELF_MANIFEST_PATH = "contracts/fixtures/validator/validate.py"
+BASELINE_CANONICAL_SHA256 = "689573038e83e44214c9fa60101c163e64c60d7a4ec35f32f2ec51c0682d4408"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SAFE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SAFE_PATH = re.compile(r"^[A-Za-z0-9._/-]+$")
-URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+URL_PATTERN = re.compile(r"(?:https?|wss?)://[^\s\"'<>]+", re.IGNORECASE)
 PRIVATE_KEY_PATTERN = re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE)
 AWS_KEY_PATTERN = re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.IGNORECASE)
 PROVIDER_TOKEN_PATTERN = re.compile(r"\b(?:ghp|github_pat|glpat|sk|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b", re.IGNORECASE)
@@ -230,6 +235,18 @@ ALLOWED_URL_HOSTS = frozenset({
     "hermternal.invalid",
     "json-schema.org",
     "synthetic.invalid",
+})
+# These exact values are source-level negative-test vocabulary already present
+# in domain validators. They are not accepted in JSON evidence or free text.
+STRUCTURAL_SENSITIVE_MARKERS = frozenset({
+    "abcdefgh",
+    "abcdefghijkl",
+    "never-echo",
+    "rawcookie",
+    "rawticket",
+    "session=secret",
+    "sid=qwertyui",
+    "super-secret-value",
 })
 
 SAFE_ERROR_MESSAGE = "fixture registry input rejected"
@@ -380,7 +397,8 @@ def _normalize_key(key: str) -> str:
 def _is_explicit_synthetic_marker(value: str) -> bool:
     lowered = value.casefold()
     return (
-        any(marker in lowered for marker in ("synthetic", "fixture", "example", "placeholder", "hidden", "audit", "nested", "signature-value"))
+        lowered in STRUCTURAL_SENSITIVE_MARKERS
+        or any(marker in lowered for marker in ("synthetic", "fixture", "example", "placeholder", "hidden", "audit", "nested", "signature-value"))
         or re.fullmatch(r"(?:akia)?(?:x|z|0){8,}", lowered) is not None
     )
 
@@ -557,7 +575,7 @@ def _validate_python_file(path: Path) -> None:
         _validate_text_value(
             value,
             allow_nul=True,
-            check_assignments=False,
+            check_assignments=True,
             allow_synthetic_markers=True,
         )
     # Comments document detector rules and may contain source-shaped examples;
@@ -567,7 +585,7 @@ def _validate_python_file(path: Path) -> None:
             if token.type == tokenize.COMMENT:
                 _validate_text_value(
                     token.string,
-                    check_assignments=False,
+                    check_assignments=True,
                     allow_synthetic_markers=True,
                 )
     except tokenize.TokenError as exc:
@@ -932,6 +950,24 @@ def _indexed_baseline_path(index: dict[str, Any], repo_root: Path) -> Path:
     return _safe_child(fixtures_root, benchmark_path)
 
 
+def _canonical_baseline_digest(document: dict[str, Any]) -> str:
+    """Hash baseline evidence without recursing through this validator's digest."""
+    normalized = dict(document)
+    manifest: list[dict[str, Any]] = []
+    self_size = 0
+    for raw in document["artifact_manifest"]:
+        record = dict(raw)
+        if record.get("path") == BASELINE_SELF_MANIFEST_PATH:
+            self_size = record["size_bytes"]
+            record["sha256"] = "self-validator-sha256"
+            record["size_bytes"] = 0
+        manifest.append(record)
+    normalized["artifact_manifest"] = manifest
+    normalized["artifact_size_bytes"] = document["artifact_size_bytes"] - self_size
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _validate_baseline(
     document: dict[str, Any],
     repo_root: Path,
@@ -974,6 +1010,7 @@ def _validate_baseline(
         _validate_distribution(measurement["samples_ms"], measurement["distribution_ms"])
     require(type(document["notes"]) is str and 0 < len(document["notes"]) <= 512, "baseline notes are missing")
     _validate_text_value(document["notes"])
+    require(_canonical_baseline_digest(document) == BASELINE_CANONICAL_SHA256, "baseline canonical content changed")
 
 
 def validate_schema_document(schema: dict[str, Any]) -> None:
