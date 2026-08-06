@@ -45,18 +45,19 @@ HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 # only self-referential binding literals, so changing validation logic still
 # fails.
 TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-final-anchor"
-CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "validate.py", "test_validate.py", "chat.md")
-CANONICAL_FIXTURE_NAMES = frozenset(("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json"))
+CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "chat.md")
+CANONICAL_FIXTURE_NAMES = frozenset(("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json"))
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_BOUND_SHA256 = {
-    "README.md": "3c6c0ca5e3e0f3087721df9bce7f1e611a0ca86a92bbf315e0b571be5bbb0927",
+    "README.md": "a75d4382b8f7b1c35df58e9261a2f536534309def344ef7c2841dac0697387cd",
     "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
-    "validate.py": "a6175d243142488e2931d623fc31f9832781519be8b9c9ae86331677a92648c7",
-    "test_validate.py": "4675c2676806b8b180eded4bc2f57b871007c51d9837a8b17419dc2b14903a41",
+    "preflight.py": "03ae31cced667f4dea1f1e4b3358e2be20cd1e4484c47c649ef60882af886c3c",
+    "validate.py": "5475771bd612a0426dc03bf8739ddf9e8a088dc405a83d701184c2fd70b58804",
+    "test_validate.py": "7f41eeb68b373868904d5363cf7b06170b1ecc607f9f0a9cc4853ef3d6e05ce2",
     "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
 }
-EXPECTED_BASELINE_SHA256 = "c941123f5f6d0fb579c4b3cbbc733e9bad2fd299ea216cc42a7d86deeba4550a"
+EXPECTED_BASELINE_SHA256 = "db027c96f0b9b5e14ead95c3880786a1355844193daa5f023077179dd4e8cbed"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -256,9 +257,47 @@ MAX_GIT_STATUS_BYTES = 64 * 1024
 BENCHMARK_REPETITIONS = 30
 EXPECTED_COMMIT_ENV = "HERMTERNAL_C06_EXPECTED_COMMIT"
 TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
+TRUSTED_PREFLIGHT_CODE = '''import json,os,pathlib,sys
+E=json.dumps({"error":{"code":"contract","message":"uncertain delivery fixture rejected"}},separators=(",",":"))+chr(10)
+try:
+ r=pathlib.Path.cwd();p=pathlib.Path(sys.argv[1]);p=r/p if not p.is_absolute() else p;g=r/".git"
+ bad=lambda x:(not x.is_absolute() or x.is_symlink() or x.resolve()!=x)
+ q=("objects/info/alternates","objects/info/http-alternates","info/grafts","shallow");w=os.environ.get("PWD")
+ if g.is_dir():
+  metadata_ok=not bad(g) and not (g/"commondir").exists() and not (g/"commondir").is_symlink()
+ elif g.is_file() and not bad(g) and g.stat().st_size<=4096:
+  line=g.read_text(encoding="ascii").splitlines();gd=pathlib.Path(line[0][7:].strip()) if len(line)==1 and line[0].startswith("gitdir:") else pathlib.Path("/")
+  gd=gd if gd.is_absolute() else r/gd;c=gd.parent.parent
+  metadata_ok=(not bad(gd) and gd.parent==c/"worktrees" and c.name==".git" and not bad(c) and r.resolve().is_relative_to(c.parent.resolve()) and (gd/"commondir").is_file() and (gd/"gitdir").is_file() and not any((c/x).is_symlink() for x in ("objects","refs","config")) and not any((c/x).exists() or (c/x).is_symlink() for x in q))
+ else: metadata_ok=False
+ ok=(not bad(r) and p==r/pathlib.Path("contracts/fixtures/uncertain-delivery/validate.py") and not bad(p) and metadata_ok and not any((g/x).exists() or (g/x).is_symlink() for x in q) and (not w or (not bad(pathlib.Path(w)) and pathlib.Path(w)==r)))
+except BaseException:
+ ok=False
+if not ok:
+ sys.stderr.write(E);raise SystemExit(1)
+'''
+TRUSTED_PREFLIGHT_GIT = (
+    "/usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "
+    "GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 GIT_OPTIONAL_LOCKS=0 "
+    "GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 "
+    "/usr/bin/git --no-replace-objects --no-lazy-fetch -C . show "
+    '\"$HERMTERNAL_C06_EXPECTED_COMMIT:contracts/fixtures/uncertain-delivery/preflight.py\" 2>/dev/null'
+)
+TRUSTED_PREFLIGHT_NORMAL = (
+    "python3 -I -B -c '" + TRUSTED_PREFLIGHT_CODE + "' "
+    "contracts/fixtures/uncertain-delivery/validate.py && "
+    + TRUSTED_PREFLIGHT_GIT
+    + " | python3 -I -B - contracts/fixtures/uncertain-delivery/validate.py"
+)
+TRUSTED_PREFLIGHT_OPTIMIZED = (
+    "python3 -I -B -O -c '" + TRUSTED_PREFLIGHT_CODE + "' "
+    "contracts/fixtures/uncertain-delivery/validate.py && "
+    + TRUSTED_PREFLIGHT_GIT
+    + " | python3 -I -B -O - contracts/fixtures/uncertain-delivery/validate.py"
+)
 APPROVED_COMMANDS = {
-    "normal": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I contracts/fixtures/uncertain-delivery/validate.py",
-    "optimized": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I -O contracts/fixtures/uncertain-delivery/validate.py",
+    "normal": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> " + TRUSTED_PREFLIGHT_NORMAL,
+    "optimized": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> " + TRUSTED_PREFLIGHT_OPTIMIZED,
 }
 
 SYNTHETIC_REF = re.compile(r"^(?:session|request)-marker-[0-9]{3}$")
@@ -809,34 +848,49 @@ def _require_exact_trusted_file(path: Path, trusted_path: Path, code: str) -> No
 
 
 def _git_metadata_dirs(root: Path) -> tuple[Path, Path] | None:
+    """Accept a clone or a Git-managed linked worktree, not arbitrary redirection."""
     marker = root / ".git"
     try:
         if marker.is_symlink():
             return None
         if marker.is_dir():
             git_dir = marker.resolve()
-        elif marker.is_file():
-            raw = _bounded_read_file(marker, 4096, "canonical_binding").decode("ascii")
-            line = raw.splitlines()[0]
-            if not line.startswith("gitdir:"):
+            if git_dir != marker or not git_dir.is_dir():
                 return None
-            git_dir = (root / line[7:].strip()).resolve()
-        else:
+            # A commondir file on a normal clone would redirect metadata outside
+            # the checkout; linked worktrees are handled by the branch below.
+            if (git_dir / "commondir").exists() or (git_dir / "commondir").is_symlink():
+                return None
+            return git_dir, git_dir
+        if not marker.is_file():
             return None
-        if not git_dir.is_dir():
+        raw = _bounded_read_file(marker, 4096, "canonical_binding").decode("ascii")
+        lines = raw.splitlines()
+        if len(lines) != 1 or not lines[0].startswith("gitdir:"):
+            return None
+        git_dir = Path(lines[0][7:].strip())
+        if not git_dir.is_absolute():
+            git_dir = root / git_dir
+        git_dir = git_dir.resolve()
+        common_dir = (git_dir.parent.parent).resolve()
+        if not git_dir.is_dir() or git_dir.parent != common_dir / "worktrees":
             return None
         commondir_file = git_dir / "commondir"
-        if commondir_file.exists() or commondir_file.is_symlink():
-            if commondir_file.is_symlink() or not commondir_file.is_file():
-                return None
-            relative = _bounded_read_file(commondir_file, 4096, "canonical_binding").decode("ascii").strip()
-            common_dir = (git_dir / relative).resolve()
-        else:
-            common_dir = git_dir
-        if not common_dir.is_dir():
+        if commondir_file.is_symlink() or not commondir_file.is_file():
+            return None
+        relative = _bounded_read_file(commondir_file, 4096, "canonical_binding").decode("ascii").strip()
+        if (git_dir / relative).resolve() != common_dir:
+            return None
+        linked_marker = git_dir / "gitdir"
+        if linked_marker.is_symlink() or not linked_marker.is_file():
+            return None
+        linked_path = Path(_bounded_read_file(linked_marker, 4096, "canonical_binding").decode("ascii").strip()).resolve()
+        if linked_path != marker.resolve():
+            return None
+        if not common_dir.is_dir() or common_dir.is_symlink():
             return None
         return git_dir, common_dir
-    except (ContractError, OSError, UnicodeError, IndexError, ValueError):
+    except (ContractError, OSError, UnicodeError, IndexError, RuntimeError, ValueError):
         return None
 
 
@@ -864,6 +918,15 @@ def _reject_repository_metadata(root: Path) -> None:
         ):
             path = metadata_dir / relative
             if path.is_symlink():
+                _fail("canonical_binding")
+        for relative in (
+            Path("objects/info/alternates"),
+            Path("objects/info/http-alternates"),
+            Path("info/grafts"),
+            Path("shallow"),
+        ):
+            path = metadata_dir / relative
+            if path.exists() or path.is_symlink():
                 _fail("canonical_binding")
         for relative in (Path("config"), Path("config.worktree")):
             path = metadata_dir / relative
@@ -933,11 +996,26 @@ def _reject_repository_metadata(root: Path) -> None:
         _fail("canonical_binding")
 
 
+def _reject_path_aliases(root: Path) -> None:
+    """Reject symlinked checkout paths before canonical evidence is trusted."""
+    try:
+        if not root.is_absolute() or root.is_symlink() or root.resolve() != root:
+            _fail("canonical_binding")
+        pwd = os.environ.get("PWD")
+        if pwd:
+            lexical = Path(pwd)
+            if not lexical.is_absolute() or lexical.is_symlink() or lexical.resolve() != root or lexical.resolve() != lexical:
+                _fail("canonical_binding")
+    except (OSError, RuntimeError, ValueError):
+        _fail("canonical_binding")
+
+
 def _require_clean_bound_worktree(root: Path) -> None:
+    _reject_path_aliases(root)
     root = root.resolve()
     paths = [
         str(CANONICAL_FIXTURE_RELATIVE / name)
-        for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json")
+        for name in ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json")
     ] + [str(CANONICAL_CHAT_RELATIVE)]
     expected = _external_expected_commit()
     if expected is None:
@@ -967,6 +1045,7 @@ def _require_clean_bound_worktree(root: Path) -> None:
     expected_paths = {
         "README.md": CANONICAL_FIXTURE_RELATIVE / "README.md",
         "cases.json": CANONICAL_FIXTURE_RELATIVE / "cases.json",
+        "preflight.py": CANONICAL_FIXTURE_RELATIVE / "preflight.py",
         "validate.py": CANONICAL_FIXTURE_RELATIVE / "validate.py",
         "test_validate.py": CANONICAL_FIXTURE_RELATIVE / "test_validate.py",
         "validation-baseline.json": CANONICAL_FIXTURE_RELATIVE / "validation-baseline.json",

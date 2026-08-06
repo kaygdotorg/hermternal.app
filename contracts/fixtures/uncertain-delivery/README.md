@@ -26,13 +26,18 @@ later unchanged commit, but its canonical bytes and clean worktree must match
 that external revision exactly. Missing, malformed, unavailable, or mismatched
 external expectation fails closed.
 
-Every supported validator launch uses Python isolated mode: `python3 -I` for
-normal execution and `python3 -I -O` for optimized execution. Isolated mode
-removes the fixture directory from `sys.path` before `validate.py` imports
-standard-library modules such as `selectors` and `subprocess`; the validator's
-shebang applies the same mode to direct executable launches. A non-isolated
-`python3 validate.py` invocation is unsupported because a sibling `.py` file
-could execute before trust checks.
+Every supported validator launch uses a trusted two-stage Python isolated
+preflight. The first `python3 -I -B` (or `-I -B -O`) command checks the
+checkout path, linked-worktree metadata, external-gitdir boundary, and Git
+alternates before any checkout-owned source is read. It then supplies the
+reviewed `preflight.py` blob to a second isolated interpreter. That preflight
+checks the exact expected-commit bytes and only then executes the verified
+`validate.py` source from memory. Isolated mode also removes the fixture
+directory from `sys.path`, so untracked `selectors.py` or `subprocess.py`
+files cannot run before the checks. The exact normal and optimized commands
+are recorded in `validation-baseline.json` and reproduced below. Direct
+`python3 validate.py` and direct executable/shebang launches are unsupported:
+they do not provide the trusted preflight.
 
 The annotated tag is a non-release audit/availability marker only. It is not a
 signature, release tag, or trust root. A protected repository owner must publish
@@ -40,10 +45,10 @@ it without force-retagging and keep its target equal to the externally supplied
 reviewed commit. A force-retagged, forged, missing, `--no-tags`, shallow, or
 partial clone fails closed. The executing source and caller-supplied cases and
 baseline paths must be repository-owned. The fixture directory must contain
-only its five declared files; unexpected or special-file siblings, including
-`selectors.py` or `subprocess.py`, fail closed. The validator-source digest masks
-only its own digest literals; it does not mask code, schema, reducer, or
-redaction changes.
+only its six declared files, including the reviewed `preflight.py`; unexpected
+or special-file siblings, including `selectors.py` or `subprocess.py`, fail
+closed. The validator-source digest masks only its own digest literals; it does
+not mask code, schema, reducer, or redaction changes.
 
 The source observations are limited to the pinned `gateway.ready`,
 `WebSocketDisconnect`, `prompt.submit`, and `session.resume` anchors. They bind
@@ -118,8 +123,8 @@ details, or tracebacks. Regular-file stat bounds run before every JSON or
 artifact read, so oversized files and special paths fail without an unbounded
 read or FIFO/device block.
 
-The checked-in case, baseline, executing-source, README, regression tests,
-chat-contract, and artifact files are bound to repository-owned canonical paths
+The checked-in case, baseline, trusted preflight, executing-source, README,
+regression tests, chat-contract, and artifact files are bound to repository-owned canonical paths
 and hard-coded digests. The authoritative trust input is the externally
 supplied `HERMTERNAL_C06_EXPECTED_COMMIT`; it is checked as an exact commit
 object and its canonical tree bytes are compared with the checkout. This is
@@ -135,8 +140,10 @@ not discovered from a mutable branch):
 git clone <repository-url> <checkout>
 cd <checkout>
 git fetch --tags --unshallow 2>/dev/null || git fetch --tags
-HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I contracts/fixtures/uncertain-delivery/validate.py
-HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I -O contracts/fixtures/uncertain-delivery/validate.py
+# Run the exact `normal.command` from validation-baseline.json.
+# Run the exact `optimized.command` from validation-baseline.json.
+# Both commands first execute the isolated path/metadata guard, then feed
+# the reviewed preflight blob through an isolated interpreter.
 git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-final-anchor
 git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-final-anchor^{commit}
 ```
@@ -150,8 +157,9 @@ retires the old marker only after consumers have migrated; existing markers are
 never silently moved. Tags are not signatures and do not replace the external
 expected-object control. The validator also freezes state meanings, terminal
 flags, action order, case order, and baseline key/type/order rules. Copying or
-coordinately rebinding a mutated case, baseline, source, README, tests, or chat
-contract therefore fails closed instead of replacing reviewed evidence.
+coordinately rebinding a mutated case, baseline, preflight, source, README,
+tests, or chat contract therefore fails closed instead of replacing reviewed
+evidence.
 
 ## Reproduce the proof
 
@@ -159,11 +167,10 @@ Run from the repository root:
 
 ```text
 export HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit>
-python3 -I contracts/fixtures/uncertain-delivery/validate.py
-python3 -I -O contracts/fixtures/uncertain-delivery/validate.py
+# Execute normal.command and optimized.command from validation-baseline.json.
 python3 -I -B -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
 python3 -I -B -O -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
-PYTHONPYCACHEPREFIX=/tmp/hermternal-c06-pycache python3 -I -B -m py_compile contracts/fixtures/uncertain-delivery/validate.py contracts/fixtures/uncertain-delivery/test_validate.py
+PYTHONPYCACHEPREFIX=/tmp/hermternal-c06-pycache python3 -I -B -m py_compile contracts/fixtures/uncertain-delivery/preflight.py contracts/fixtures/uncertain-delivery/validate.py contracts/fixtures/uncertain-delivery/test_validate.py
 ```
 
 The focused tests execute the real validator CLI in both normal and optimized
@@ -172,7 +179,9 @@ timeout, WebSocket close, app suspension, process loss, restore, explicit
 resend, duplicate prevention, interruption, cancellation, sign-out, pending
 proof, compatibility failure, unknown interactive events, strict JSON, bounded
 redaction, canonical artifact rebinding, forged benchmark evidence, gateway,
-transport, draft, initial-state, state-identity, and event-correlation, isolated-import, and unexpected-sibling-module mutations.
+transport, draft, initial-state, state-identity, event-correlation, trusted
+preflight, symlinked-validator, ancestor-alias, external-gitdir, isolated-import,
+and unexpected-sibling-module mutations.
 Oversized files, long keys, directories, and FIFOs fail through the same
 bounded error path without opening unbounded or special-file streams.
 

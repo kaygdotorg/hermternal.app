@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,12 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         environment[validate.EXPECTED_COMMIT_ENV] = self.reviewed_commit
         return environment
 
+    def _repository_for_validator(self, validator: Path) -> Path:
+        for candidate in (validator.parent, *validator.parents):
+            if (candidate / ".git").exists():
+                return candidate
+        return REPOSITORY_ROOT
+
     def run_cli(
         self,
         optimized: bool = False,
@@ -47,18 +54,36 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         environment: dict[str, str] | None = None,
         validator: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        command = [sys.executable, "-I", "-B"]
-        if optimized:
-            command.append("-O")
-        command.extend([str(validator or (ROOT / "validate.py")), *arguments])
+        target = validator or (ROOT / "validate.py")
+        working_directory = cwd or self._repository_for_validator(target)
+        flags = "-I -B -O" if optimized else "-I -B"
+        python = shlex.quote(sys.executable)
+        guard = shlex.quote(validate.TRUSTED_PREFLIGHT_CODE)
+        target_argument = shlex.quote(str(target))
+        git_blob = (
+            "/usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "
+            "GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 GIT_OPTIONAL_LOCKS=0 "
+            "GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 "
+            "/usr/bin/git --no-replace-objects --no-lazy-fetch -C . show "
+            '"$HERMTERNAL_C06_EXPECTED_COMMIT:contracts/fixtures/uncertain-delivery/preflight.py" 2>/dev/null'
+        )
+        command = (
+            f"{python} {flags} -c {guard} {target_argument} && {git_blob} | "
+            f"{python} {flags} - {target_argument}"
+        )
+        command += " " + " ".join(shlex.quote(argument) for argument in arguments)
+        child_environment = dict(environment if environment is not None else self.canonical_environment())
+        child_environment["PWD"] = str(working_directory)
         return subprocess.run(
             command,
+            shell=True,
+            executable="/bin/sh",
             capture_output=True,
             text=True,
             check=False,
-            cwd=cwd,
+            cwd=working_directory,
             timeout=timeout,
-            env=environment if environment is not None else self.canonical_environment(),
+            env=child_environment,
         )
 
     def assert_cli_success_both_modes(self) -> None:
@@ -87,13 +112,13 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         return path
 
     def assert_validator_failure(self, validator_path: Path, environment: dict[str, str]) -> None:
+        repository = self._repository_for_validator(validator_path)
         for optimized in (False, True):
-            result = subprocess.run(
-                [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(validator_path)],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=environment,
+            result = self.run_cli(
+                optimized,
+                cwd=repository,
+                environment=environment,
+                validator=validator_path,
             )
             with self.subTest(optimized=optimized, validator=str(validator_path)):
                 self.assertEqual(result.returncode, 1)
@@ -277,16 +302,10 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 )
                 try:
                     for optimized in (False, True):
-                        command = [sys.executable, "-I", "-B"]
-                        if optimized:
-                            command.append("-O")
-                        command.append(str(ROOT / "validate.py"))
-                        result = subprocess.run(
-                            command,
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                            env=environment,
+                        result = self.run_cli(
+                            optimized,
+                            environment=environment,
+                            validator=ROOT / "validate.py",
                         )
                         with self.subTest(module=module_name, optimized=optimized):
                             self.assertEqual(result.returncode, 1)
@@ -295,6 +314,75 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                             self.assertFalse(marker.exists())
                 finally:
                     sibling.unlink(missing_ok=True)
+
+    def test_trusted_preflight_rejects_symlinks_aliases_and_redirects(self) -> None:
+        """No checkout-owned validator code runs before the trusted preflight."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            clone = base / "preflight-clone"
+            copied = subprocess.run(
+                ["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(clone)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(copied.returncode, 0, copied.stderr)
+            environment = self.canonical_environment()
+
+            marker = base / "symlink-executed"
+            validator_path = clone / "contracts/fixtures/uncertain-delivery/validate.py"
+            validator_path.unlink()
+            malicious = base / "malicious-validator.py"
+            malicious.write_text(
+                f"open({str(marker)!r}, 'w', encoding='utf-8').write('executed')\n",
+                encoding="utf-8",
+            )
+            validator_path.symlink_to(malicious)
+            self.assert_validator_failure(validator_path, environment)
+            self.assertFalse(marker.exists())
+
+            alias = base / "ancestor-alias"
+            alias.symlink_to(clone, target_is_directory=True)
+            aliased_validator = alias / "contracts/fixtures/uncertain-delivery/validate.py"
+            for optimized in (False, True):
+                result = self.run_cli(
+                    optimized,
+                    cwd=alias,
+                    environment=environment,
+                    validator=aliased_validator,
+                )
+                with self.subTest(kind="ancestor-alias", optimized=optimized):
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n')
+                    self.assertNotIn("Traceback", result.stderr)
+
+            redirected = base / "external-gitdir"
+            clone_result = subprocess.run(
+                ["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(redirected)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(clone_result.returncode, 0, clone_result.stderr)
+            shutil.rmtree(redirected / ".git")
+            external_gitdir = base / "external-metadata"
+            external_gitdir.mkdir()
+            (redirected / ".git").write_text(f"gitdir: {external_gitdir / 'gitdir'}\n", encoding="utf-8")
+            self.assert_validator_failure(redirected / "contracts/fixtures/uncertain-delivery/validate.py", environment)
+
+            alternates = base / "alternates-clone"
+            clone_result = subprocess.run(
+                ["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(alternates)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(clone_result.returncode, 0, clone_result.stderr)
+            alternates_path = alternates / ".git/objects/info/alternates"
+            alternates_path.parent.mkdir(parents=True, exist_ok=True)
+            alternates_path.write_text(str(base / "outside-objects") + "\n", encoding="utf-8")
+            self.assert_validator_failure(alternates / "contracts/fixtures/uncertain-delivery/validate.py", environment)
 
     def test_real_cli_rejects_long_keys_and_special_paths_without_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -530,7 +618,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             root = Path(directory)
             copied = root / "uncertain-delivery"
             copied.mkdir()
-            for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json"):
+            for name in ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json"):
                 shutil.copy2(ROOT / name, copied / name)
             copied_chat = root / "chat.md"
             shutil.copy2(CHAT_PATH, copied_chat)
@@ -551,11 +639,11 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             mutated_cases["cases"][0]["notes"] = "changed-but-schema-valid"
             (copied / "cases.json").write_text(json.dumps(mutated_cases), encoding="utf-8")
             for optimized in (False, True):
-                command = [sys.executable, "-I", "-B"]
-                if optimized:
-                    command.append("-O")
-                command.append(str(copied / "validate.py"))
-                result = subprocess.run(command, capture_output=True, text=True, check=False, env=self.canonical_environment())
+                result = self.run_cli(
+                    optimized,
+                    environment=self.canonical_environment(),
+                    validator=copied / "validate.py",
+                )
                 with self.subTest(kind="cases", optimized=optimized):
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(result.stdout, "")
@@ -565,11 +653,11 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             validator_path = copied / "validate.py"
             validator_path.write_text(validator_path.read_text(encoding="utf-8") + "\n# synthetic source mutation\n", encoding="utf-8")
             for optimized in (False, True):
-                command = [sys.executable, "-I", "-B"]
-                if optimized:
-                    command.append("-O")
-                command.append(str(validator_path))
-                result = subprocess.run(command, capture_output=True, text=True, check=False, env=self.canonical_environment())
+                result = self.run_cli(
+                    optimized,
+                    environment=self.canonical_environment(),
+                    validator=validator_path,
+                )
                 with self.subTest(kind="source", optimized=optimized):
                     self.assertEqual(result.returncode, 1)
                     self.assertNotIn("Traceback", result.stderr)
@@ -594,7 +682,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             self.assertEqual(checkout.returncode, 0, checkout.stderr)
             copied_fixture = copied_repo / "contracts" / "fixtures" / "uncertain-delivery"
             copied_chat = copied_repo / "contracts" / "state-models" / "chat.md"
-            for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json"):
+            for name in ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json"):
                 shutil.copy2(ROOT / name, copied_fixture / name)
             shutil.copy2(CHAT_PATH, copied_chat)
 
@@ -608,7 +696,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             validator_path = copied_fixture / "validate.py"
             validator_text = validator_path.read_text(encoding="utf-8") + "\n# committed rebound validator\n"
             validator_path.write_text(validator_text, encoding="utf-8")
-            for name in ("README.md", "cases.json", "test_validate.py", "chat.md"):
+            for name in ("README.md", "cases.json", "preflight.py", "test_validate.py", "chat.md"):
                 path = validate._artifact_path(copied_fixture, name)
                 digest = validate._sha256_bytes(path.read_bytes())
                 old_digest = validate.EXPECTED_BOUND_SHA256[name]
@@ -672,11 +760,12 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             self.assertEqual(anchor, validate._trusted_anchor_commit(REPOSITORY_ROOT))
 
             for optimized in (False, True):
-                command = [sys.executable, "-I", "-B"]
-                if optimized:
-                    command.append("-O")
-                command.append(str(copied_fixture / "validate.py"))
-                result = subprocess.run(command, capture_output=True, text=True, check=False, env=self.canonical_environment())
+                result = self.run_cli(
+                    optimized,
+                    cwd=copied_repo,
+                    environment=self.canonical_environment(),
+                    validator=copied_fixture / "validate.py",
+                )
                 with self.subTest(optimized=optimized):
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(result.stdout, "")
@@ -703,7 +792,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             self.assertEqual(checkout.returncode, 0, checkout.stderr)
             copied_fixture = copied_repo / "contracts" / "fixtures" / "uncertain-delivery"
             copied_chat = copied_repo / "contracts" / "state-models" / "chat.md"
-            for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json"):
+            for name in ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json"):
                 shutil.copy2(ROOT / name, copied_fixture / name)
             shutil.copy2(CHAT_PATH, copied_chat)
 
@@ -717,7 +806,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             validator_path = copied_fixture / "validate.py"
             validator_text = validator_path.read_text(encoding="utf-8") + "\n# committed sibling rebound validator\n"
             validator_path.write_text(validator_text, encoding="utf-8")
-            for name in ("README.md", "cases.json", "test_validate.py", "chat.md"):
+            for name in ("README.md", "cases.json", "preflight.py", "test_validate.py", "chat.md"):
                 path = validate._artifact_path(copied_fixture, name)
                 digest = validate._sha256_bytes(path.read_bytes())
                 old_digest = validate.EXPECTED_BOUND_SHA256[name]
@@ -781,12 +870,11 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             self.assertEqual(anchor, validate._trusted_anchor_commit(REPOSITORY_ROOT))
 
             for optimized in (False, True):
-                result = subprocess.run(
-                    [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(copied_fixture / "validate.py")],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    env=self.canonical_environment(),
+                result = self.run_cli(
+                    optimized,
+                    cwd=copied_repo,
+                    environment=self.canonical_environment(),
+                    validator=copied_fixture / "validate.py",
                 )
                 with self.subTest(optimized=optimized):
                     self.assertEqual(result.returncode, 1)
@@ -930,12 +1018,11 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 self.assertEqual(clone.returncode, 0, clone.stderr)
                 environment = self.canonical_environment()
                 for optimized in (False, True):
-                    result = subprocess.run(
-                        [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(clone_path / "contracts/fixtures/uncertain-delivery/validate.py")],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        env=environment,
+                    result = self.run_cli(
+                        optimized,
+                        cwd=clone_path,
+                        environment=environment,
+                        validator=clone_path / "contracts/fixtures/uncertain-delivery/validate.py",
                     )
                     with self.subTest(label=label, optimized=optimized):
                         if succeeds:
@@ -979,12 +1066,11 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             environment = self.canonical_environment()
             validator_path = repository / "contracts/fixtures/uncertain-delivery/validate.py"
             for optimized in (False, True):
-                result = subprocess.run(
-                    [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(validator_path)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    env=environment,
+                result = self.run_cli(
+                    optimized,
+                    cwd=repository,
+                    environment=environment,
+                    validator=validator_path,
                 )
                 with self.subTest(commit="merge", optimized=optimized):
                     self.assertEqual(result.returncode, 0, result.stderr)
@@ -992,12 +1078,11 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             git("add", "later-unchanged-marker.txt")
             git("-c", "user.name=synthetic", "-c", "user.email=synthetic@example.invalid", "commit", "-m", "later unchanged")
             for optimized in (False, True):
-                result = subprocess.run(
-                    [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(validator_path)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    env=environment,
+                result = self.run_cli(
+                    optimized,
+                    cwd=repository,
+                    environment=environment,
+                    validator=validator_path,
                 )
                 with self.subTest(commit="later", optimized=optimized):
                     self.assertEqual(result.returncode, 0, result.stderr)
@@ -1029,7 +1114,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             self.assertEqual(checkout.returncode, 0, checkout.stderr)
             copied_fixture = copied_repo / "contracts" / "fixtures" / "uncertain-delivery"
             copied_chat = copied_repo / "contracts" / "state-models" / "chat.md"
-            for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json"):
+            for name in ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json"):
                 shutil.copy2(ROOT / name, copied_fixture / name)
             shutil.copy2(CHAT_PATH, copied_chat)
 
@@ -1045,7 +1130,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 'if False and result != case["expected"]:',
             )
             validator_path.write_text(validator_text, encoding="utf-8")
-            for name in ("README.md", "cases.json", "test_validate.py", "chat.md"):
+            for name in ("README.md", "cases.json", "preflight.py", "test_validate.py", "chat.md"):
                 path = validate._artifact_path(copied_fixture, name)
                 digest = validate._sha256_bytes(path.read_bytes())
                 old_digest = validate.EXPECTED_BOUND_SHA256[name]

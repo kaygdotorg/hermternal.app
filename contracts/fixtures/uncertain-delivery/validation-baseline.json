@@ -15,29 +15,33 @@
   "threshold": null,
   "artifacts": {
     "README.md": {
-      "bytes": 11367,
-      "sha256": "3c6c0ca5e3e0f3087721df9bce7f1e611a0ca86a92bbf315e0b571be5bbb0927"
+      "bytes": 11922,
+      "sha256": "a75d4382b8f7b1c35df58e9261a2f536534309def344ef7c2841dac0697387cd"
     },
     "cases.json": {
       "bytes": 57544,
       "sha256": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337"
     },
+    "preflight.py": {
+      "bytes": 10283,
+      "sha256": "03ae31cced667f4dea1f1e4b3358e2be20cd1e4484c47c649ef60882af886c3c"
+    },
     "validate.py": {
-      "bytes": 82719,
-      "sha256": "a6175d243142488e2931d623fc31f9832781519be8b9c9ae86331677a92648c7"
+      "bytes": 87238,
+      "sha256": "5475771bd612a0426dc03bf8739ddf9e8a088dc405a83d701184c2fd70b58804"
     },
     "test_validate.py": {
-      "bytes": 65606,
-      "sha256": "4675c2676806b8b180eded4bc2f57b871007c51d9837a8b17419dc2b14903a41"
+      "bytes": 69595,
+      "sha256": "7f41eeb68b373868904d5363cf7b06170b1ecc607f9f0a9cc4853ef3d6e05ce2"
     },
     "chat.md": {
       "bytes": 12056,
       "sha256": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252"
     }
   },
-  "artifact_manifest_sha256": "3e965c176e1ea8689a6cef1dcc984c059be4ed51745b3ce4fd8df4130c811e60",
+  "artifact_manifest_sha256": "d0824e494c53ef09a2c90713d9120c98dfdb814225a6a9a0a630d5da28726aa8",
   "normal": {
-    "command": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I contracts/fixtures/uncertain-delivery/validate.py",
+    "command": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I -B -c 'import json,os,pathlib,sys\nE=json.dumps({\"error\":{\"code\":\"contract\",\"message\":\"uncertain delivery fixture rejected\"}},separators=(\",\",\":\"))+chr(10)\ntry:\n r=pathlib.Path.cwd();p=pathlib.Path(sys.argv[1]);p=r/p if not p.is_absolute() else p;g=r/\".git\"\n bad=lambda x:(not x.is_absolute() or x.is_symlink() or x.resolve()!=x)\n q=(\"objects/info/alternates\",\"objects/info/http-alternates\",\"info/grafts\",\"shallow\");w=os.environ.get(\"PWD\")\n if g.is_dir():\n  metadata_ok=not bad(g) and not (g/\"commondir\").exists() and not (g/\"commondir\").is_symlink()\n elif g.is_file() and not bad(g) and g.stat().st_size<=4096:\n  line=g.read_text(encoding=\"ascii\").splitlines();gd=pathlib.Path(line[0][7:].strip()) if len(line)==1 and line[0].startswith(\"gitdir:\") else pathlib.Path(\"/\")\n  gd=gd if gd.is_absolute() else r/gd;c=gd.parent.parent\n  metadata_ok=(not bad(gd) and gd.parent==c/\"worktrees\" and c.name==\".git\" and not bad(c) and r.resolve().is_relative_to(c.parent.resolve()) and (gd/\"commondir\").is_file() and (gd/\"gitdir\").is_file() and not any((c/x).is_symlink() for x in (\"objects\",\"refs\",\"config\")) and not any((c/x).exists() or (c/x).is_symlink() for x in q))\n else: metadata_ok=False\n ok=(not bad(r) and p==r/pathlib.Path(\"contracts/fixtures/uncertain-delivery/validate.py\") and not bad(p) and metadata_ok and not any((g/x).exists() or (g/x).is_symlink() for x in q) and (not w or (not bad(pathlib.Path(w)) and pathlib.Path(w)==r)))\nexcept BaseException:\n ok=False\nif not ok:\n sys.stderr.write(E);raise SystemExit(1)\n' contracts/fixtures/uncertain-delivery/validate.py && /usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git --no-replace-objects --no-lazy-fetch -C . show \"$HERMTERNAL_C06_EXPECTED_COMMIT:contracts/fixtures/uncertain-delivery/preflight.py\" 2>/dev/null | python3 -I -B - contracts/fixtures/uncertain-delivery/validate.py",
     "repetitions": 30,
     "samples_ms": [
       550.228708,
@@ -81,7 +85,7 @@
     }
   },
   "optimized": {
-    "command": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I -O contracts/fixtures/uncertain-delivery/validate.py",
+    "command": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I -B -O -c 'import json,os,pathlib,sys\nE=json.dumps({\"error\":{\"code\":\"contract\",\"message\":\"uncertain delivery fixture rejected\"}},separators=(\",\",\":\"))+chr(10)\ntry:\n r=pathlib.Path.cwd();p=pathlib.Path(sys.argv[1]);p=r/p if not p.is_absolute() else p;g=r/\".git\"\n bad=lambda x:(not x.is_absolute() or x.is_symlink() or x.resolve()!=x)\n q=(\"objects/info/alternates\",\"objects/info/http-alternates\",\"info/grafts\",\"shallow\");w=os.environ.get(\"PWD\")\n if g.is_dir():\n  metadata_ok=not bad(g) and not (g/\"commondir\").exists() and not (g/\"commondir\").is_symlink()\n elif g.is_file() and not bad(g) and g.stat().st_size<=4096:\n  line=g.read_text(encoding=\"ascii\").splitlines();gd=pathlib.Path(line[0][7:].strip()) if len(line)==1 and line[0].startswith(\"gitdir:\") else pathlib.Path(\"/\")\n  gd=gd if gd.is_absolute() else r/gd;c=gd.parent.parent\n  metadata_ok=(not bad(gd) and gd.parent==c/\"worktrees\" and c.name==\".git\" and not bad(c) and r.resolve().is_relative_to(c.parent.resolve()) and (gd/\"commondir\").is_file() and (gd/\"gitdir\").is_file() and not any((c/x).is_symlink() for x in (\"objects\",\"refs\",\"config\")) and not any((c/x).exists() or (c/x).is_symlink() for x in q))\n else: metadata_ok=False\n ok=(not bad(r) and p==r/pathlib.Path(\"contracts/fixtures/uncertain-delivery/validate.py\") and not bad(p) and metadata_ok and not any((g/x).exists() or (g/x).is_symlink() for x in q) and (not w or (not bad(pathlib.Path(w)) and pathlib.Path(w)==r)))\nexcept BaseException:\n ok=False\nif not ok:\n sys.stderr.write(E);raise SystemExit(1)\n' contracts/fixtures/uncertain-delivery/validate.py && /usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git --no-replace-objects --no-lazy-fetch -C . show \"$HERMTERNAL_C06_EXPECTED_COMMIT:contracts/fixtures/uncertain-delivery/preflight.py\" 2>/dev/null | python3 -I -B -O - contracts/fixtures/uncertain-delivery/validate.py",
     "repetitions": 30,
     "samples_ms": [
       1049.457125,
