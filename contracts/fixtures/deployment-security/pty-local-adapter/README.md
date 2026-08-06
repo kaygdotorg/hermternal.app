@@ -16,15 +16,18 @@ or import it.
 
 - accept a supported synthetic upgrade into a binary local byte adapter without
   spawning a process;
-- preserve binary frame bytes, frame order, and frame boundaries without UTF-8
-  decoding or re-encoding, including a split code point, an incomplete fragment,
-  and an invalid fragment;
+- preserve the independently anchored binary frame bytes, frame order, and frame
+  boundaries without UTF-8 decoding or re-encoding, including a split code point,
+  an incomplete fragment, and an invalid fragment;
 - clamp integer resize dimensions to columns `1..2000` and rows `1..1000`, then
-  emit one exact binary `ESC [RESIZE:<cols>;<rows>]` control message;
+  emit one exact binary `ESC [RESIZE:<cols>;<rows>]` control message using the
+  independently anchored prefix and suffix bytes;
 - reject fractional, boolean, string, null, non-finite-token, and malformed
-  resize inputs before binary send;
-- attach and reattach the same handle, session, and process to a second socket
-  without a second spawn, while retaining the detached session;
+  resize inputs before binary send, with each candidate bound to the exact
+  `ESC [RESIZE:<cols>;<rows>]` grammar or its one-character malformed form;
+- attach and reattach the same, non-aliased handle, session, and process to a
+  distinct second socket without a second spawn, while retaining the detached
+  session;
 - retain only the newest `1 MiB` output segment and allow retained output and a
   live frame to race in either receive order without a separator;
 - allow detach at `1799` and `1800` seconds and expire only after `1800` seconds;
@@ -33,7 +36,9 @@ or import it.
 - keep PTY byte and action payload fields null in diagnostics and retained
   records;
 - send replacement close `4409`, dead-process close `4410`, and clean legacy
-  disconnect close `1000`; and
+  disconnect close `1000`; prove the legacy bridge-close, process terminate,
+  process reap, and reattach-prohibited timeline; and cover backend `1011`,
+  auth `4401`/`4408`, and host `4403`/`4404` errors; and
 - reject an unsupported host before upgrade, socket acceptance, adapter setup,
   or process spawn.
 
@@ -46,9 +51,11 @@ terminal rendering, accessibility, or live Hermes behavior.
 `validate.py` uses only the Python standard library. It rejects duplicate JSON
 object keys, non-finite numbers, oversized integers, malformed UTF-8, control
 characters, excessive JSON depth, excessive nodes, oversized strings, and
-unknown or reordered object keys. Exact scalar types are used, so booleans are
-not accepted as integer dimensions. Validation uses explicit exceptions rather
-than `assert`, so the same checks run under normal Python and `python3 -O`.
+unknown or reordered object keys. Immutable byte, resize, lifecycle, close-code,
+and error-code anchors prevent the fixture from passing after semantic drift.
+Exact scalar types are used, so booleans are not accepted as integer dimensions.
+Validation uses explicit exceptions rather than `assert`, so the same checks run
+under normal Python and `python3 -O`.
 
 Diagnostics are bounded to 240 characters and redact secret-shaped assignments,
 bearer-shaped values, private-key markers, and live URL markers before the cap
@@ -89,17 +96,19 @@ with and without `-O`, and check success and controlled failure output.
 ## Baseline evidence
 
 `validation-baseline.json` records 30 wall-clock validator samples for each
-build mode. It names the fixture, validator, metric, measured environment,
-exact command, repetitions, raw trace, and a deterministic distribution using
-inclusive linear interpolation for `p50`, `p95`, and `p99`. The artifact digest
-covers `README.md`, `cases.json`, and `validate.py` in path order.
+build mode. It names the fixture, validator, metric, canonical measured
+environment (`macOS-26.5.2-arm64-arm-64bit-Mach-O`, Python `3.14.6`), exact
+command, repetitions, raw trace, and a deterministic distribution using
+inclusive linear interpolation for `p50`, `p95`, and `p99`. Runs are ordered
+`normal` then `optimized`; the artifact digest covers `README.md`, `cases.json`,
+and `validate.py` in path order.
 
 `threshold` is `null`: issue `#209` has no reviewed performance budget. The
 trace is observation-only evidence, not a latency promise. The validator
-recomputes every distribution and checks the artifact digest and immutable
-source/artifact identity before accepting the baseline. Re-run both recorded
-commands for a new reviewed artifact; do not claim a performance threshold
-without a later decision.
+recomputes every distribution, checks the exact ordered mutation inventory, and
+checks the artifact digest plus immutable source/artifact identity before
+accepting the baseline. Re-run both recorded commands for a new reviewed
+artifact; do not claim a performance threshold without a later decision.
 
 ## Accessibility and security scope
 

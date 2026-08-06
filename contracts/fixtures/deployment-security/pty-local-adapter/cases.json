@@ -638,6 +638,53 @@
             "socket_ref": "synthetic-socket-legacy",
             "close_code": 1000
           }
+        ],
+        "legacy_events": [
+          {
+            "name": "bridge-close",
+            "socket_ref": "synthetic-socket-legacy",
+            "close_code": 1000
+          },
+          {
+            "name": "process-terminate",
+            "process_ref": "synthetic-process-legacy"
+          },
+          {
+            "name": "process-reap",
+            "process_ref": "synthetic-process-legacy"
+          },
+          {
+            "name": "reattach-prohibited",
+            "process_ref": "synthetic-process-legacy",
+            "result": "prohibited"
+          }
+        ],
+        "error_events": [
+          {
+            "name": "backend.failure",
+            "category": "backend",
+            "close_code": 1011
+          },
+          {
+            "name": "auth.required",
+            "category": "auth",
+            "close_code": 4401
+          },
+          {
+            "name": "host.forbidden",
+            "category": "host",
+            "close_code": 4403
+          },
+          {
+            "name": "host.not-found",
+            "category": "host",
+            "close_code": 4404
+          },
+          {
+            "name": "auth.expired",
+            "category": "auth",
+            "close_code": 4408
+          }
         ]
       },
       "expected": {
@@ -646,7 +693,18 @@
         "clean_disconnect_close_code": 1000,
         "close_before_assignment": true,
         "stale_cleanup": "ignored",
-        "dead_process_retry": false
+        "dead_process_retry": false,
+        "legacy_timeline": [
+          "bridge-close",
+          "process-terminate",
+          "process-reap",
+          "reattach-prohibited"
+        ],
+        "legacy_process_terminated": true,
+        "legacy_process_reaped": true,
+        "legacy_reattach": "prohibited",
+        "error_close_codes": [1011, 4401, 4403, 4404, 4408],
+        "error_categories": ["backend", "auth", "host", "host", "auth"]
       }
     },
     {

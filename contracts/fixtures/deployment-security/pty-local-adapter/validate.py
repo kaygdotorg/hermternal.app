@@ -48,16 +48,61 @@ MAX_ROWS = 1_000
 REPLACEMENT_CLOSE = 4_409
 PROCESS_EXIT_CLOSE = 4_410
 CLEAN_DISCONNECT_CLOSE = 1_000
+BACKEND_ERROR_CLOSE = 1_011
+AUTH_REQUIRED_CLOSE = 4_401
+HOST_FORBIDDEN_CLOSE = 4_403
+HOST_NOT_FOUND_CLOSE = 4_404
+AUTH_EXPIRED_CLOSE = 4_408
+RESIZE_PREFIX_HEX = "1b5b524553495a453a"
+RESIZE_SUFFIX_HEX = "5d"
+RESIZE_TEXT_GRAMMAR_RE = re.compile(r"^ESC \[RESIZE:[^;\]]+;[^\]]+\]$")
+BYTE_FRAME_ANCHORS = (
+    ("synthetic-frame-utf8-a", "f0"),
+    ("synthetic-frame-utf8-b", "9f9880"),
+    ("synthetic-frame-incomplete", "e282"),
+    ("synthetic-frame-invalid", "c328"),
+)
+BYTE_JOINED_HEX = "f09f9880e282c328"
+RESIZE_REJECTION_ANCHORS = (
+    ("fractional-number", "cols", 1000.5, 24, "ESC [RESIZE:1000.5;24]"),
+    ("boolean-dimension", "cols", True, 24, "ESC [RESIZE:true;24]"),
+    ("string-dimension", "cols", "1001", 24, "ESC [RESIZE:1001;24]"),
+    ("null-dimension", "cols", None, 24, "ESC [RESIZE:null;24]"),
+    ("non-finite-token", "cols", "NaN", 24, "ESC [RESIZE:NaN;24]"),
+    ("malformed-frame", "frame", 80, 24, "ESC [RESIZE:80;24"),
+    ("fractional-number-rows", "rows", 80, 24.25, "ESC [RESIZE:80;24.25]"),
+    ("non-finite-token-rows", "rows", 80, "Infinity", "ESC [RESIZE:80;Infinity]"),
+)
+ATTACH_IDENTITY_ANCHORS = (
+    "synthetic-handle-reattach",
+    "synthetic-session-reattach",
+    "synthetic-process-reattach",
+    "synthetic-socket-reattach-a",
+    "synthetic-socket-reattach-b",
+)
+BASELINE_CANONICAL_ENVIRONMENT = (
+    "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "3.14.6",
+)
+BASELINE_MODE_ORDER = ("normal", "optimized")
+LEGACY_TIMELINE = ("bridge-close", "process-terminate", "process-reap", "reattach-prohibited")
+ERROR_CLOSE_ANCHORS = (
+    ("backend.failure", "backend", BACKEND_ERROR_CLOSE),
+    ("auth.required", "auth", AUTH_REQUIRED_CLOSE),
+    ("host.forbidden", "host", HOST_FORBIDDEN_CLOSE),
+    ("host.not-found", "host", HOST_NOT_FOUND_CLOSE),
+    ("auth.expired", "auth", AUTH_EXPIRED_CLOSE),
+)
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py")
 
 # This marker is normalized before hashing so the source identity is not
 # circular.  The final reviewed digest is filled after the owned files settle.
-CANONICAL_SOURCE_SHA256 = "190d0553aefae2dfea22999e283f63b01a8d1a3c7515d661735b183052422f6c"
+CANONICAL_SOURCE_SHA256 = "4397e9ab7ca96d05e5b2756d9e2016680f6367c0c5f3c32a8093466a4d31cc73"
 # README and cases are pinned independently of the mutable benchmark.  The
 # validator source is authenticated by CANONICAL_SOURCE_SHA256 at runtime.
 CANONICAL_ARTIFACT_IDENTITY = (
-    ("README.md", 5520, "dbcd1ce2a8056bd964811418d14e4b6e27b7db5e89febcf5b4429a7ef7453ded"),
-    ("cases.json", 19381, "30109752328dc021989e4ade2bae03c3710e2204c78d84972f3c8aa138090dae"),
+    ("README.md", 6207, "c68a3766b5e5cfcdbc9483e23169fd977f992c6fae41f51235daec50e45c9fce"),
+    ("cases.json", 21035, "47f6dfb8c59b95a532b839e7c8bb80f17622c8bf96ebf156d075f1ada811a851"),
 )
 
 DUPLICATE_JSON_KEY_ERROR = "duplicate JSON object key"
@@ -280,6 +325,44 @@ LOG_FRAME_INVENTORY = (
     ("synthetic-log-frame-a", "00ff"),
     ("synthetic-log-frame-b", "1b5b"),
 )
+EXPECTED_MUTATION_IDS = (
+    "root-extra",
+    "schema-drift",
+    "redaction-live",
+    "benchmark-not-null",
+    "upgrade-no-binary",
+    "upgrade-spawn",
+    "byte-joined",
+    "byte-frame-anchor",
+    "byte-decode",
+    "resize-clamp",
+    "resize-prefix",
+    "resize-duplicate",
+    "resize-accepted",
+    "resize-kind",
+    "resize-frame-text",
+    "attach-spawn",
+    "attach-identity",
+    "attach-socket-alias",
+    "attach-resource-alias",
+    "attach-close",
+    "race-separator",
+    "race-tail-size",
+    "race-order",
+    "expiry-equality",
+    "expiry-float",
+    "replay-action",
+    "replay-output-alias",
+    "logging-byte",
+    "logging-action",
+    "logging-event",
+    "close-replacement",
+    "close-legacy-reap",
+    "close-error-code",
+    "close-process",
+    "unsupported-accept",
+    "unsupported-upgrade",
+)
 
 
 class FixtureJSONError(ValueError):
@@ -394,10 +477,12 @@ def expect_list(value: Any, path: str, length: int | None = None) -> list[Any]:
     return value
 
 
-def expect_hex(value: Any, path: str, *, nonempty: bool = False) -> str:
+def expect_hex(value: Any, path: str, expected: str | None = None, *, nonempty: bool = False) -> str:
     text = expect_string(value, path)
     if (nonempty and not text) or len(text) % 2 or HEX_RE.fullmatch(text) is None:
         raise ValidationError(f"{path}: must be lowercase hexadecimal with even length")
+    if expected is not None and text != expected:
+        raise ValidationError(f"{path}: value is not canonical")
     return text
 
 
@@ -582,8 +667,8 @@ def validate_evidence(root: dict[str, Any]) -> None:
 def validate_constants(root: dict[str, Any]) -> dict[str, Any]:
     constants = strict_keys(root["constants"], CONSTANT_KEYS, "constants")
     expect_string(constants["route"], "constants.route", ROUTE)
-    expect_hex(constants["resize_prefix_hex"], "constants.resize_prefix_hex", nonempty=True)
-    expect_hex(constants["resize_suffix_hex"], "constants.resize_suffix_hex", nonempty=True)
+    expect_hex(constants["resize_prefix_hex"], "constants.resize_prefix_hex", RESIZE_PREFIX_HEX)
+    expect_hex(constants["resize_suffix_hex"], "constants.resize_suffix_hex", RESIZE_SUFFIX_HEX)
     expected_ints = {
         "min_cols": MIN_COLS,
         "max_cols": MAX_COLS,
@@ -631,18 +716,18 @@ def validate_upgrade(case: dict[str, Any]) -> None:
 
 def validate_byte_preservation(case: dict[str, Any]) -> None:
     input_row = strict_keys(case["input"], ("frames",), "byte-preservation.input")
-    frames = expect_list(input_row["frames"], "byte-preservation.input.frames", 4)
+    frames = expect_list(input_row["frames"], "byte-preservation.input.frames", len(BYTE_FRAME_ANCHORS))
     joined = ""
-    refs: list[str] = []
     for index, frame in enumerate(frames):
         item = strict_keys(frame, ("frame_ref", "frame_hex", "wire_type"), f"byte-preservation.input.frames[{index}]")
-        refs.append(expect_ref(item["frame_ref"], f"byte-preservation.input.frames[{index}].frame_ref"))
-        joined += expect_hex(item["frame_hex"], f"byte-preservation.input.frames[{index}].frame_hex", nonempty=True)
+        frame_ref = expect_ref(item["frame_ref"], f"byte-preservation.input.frames[{index}].frame_ref")
+        frame_hex = expect_hex(item["frame_hex"], f"byte-preservation.input.frames[{index}].frame_hex", nonempty=True)
         expect_string(item["wire_type"], f"byte-preservation.input.frames[{index}].wire_type", "binary")
-    require(refs == ["synthetic-frame-utf8-a", "synthetic-frame-utf8-b", "synthetic-frame-incomplete", "synthetic-frame-invalid"], "byte-preservation frame inventory changed")
+        require((frame_ref, frame_hex) == BYTE_FRAME_ANCHORS[index], "byte-preservation frame anchor changed")
+        joined += frame_hex
+    require(joined == BYTE_JOINED_HEX, "byte-preservation joined byte anchor changed")
     expected = strict_keys(case["expected"], ("joined_hex", "frame_boundaries_preserved", "utf8_decode", "reencode", "raw_bytes_logged"), "byte-preservation.expected")
-    expect_hex(expected["joined_hex"], "byte-preservation.expected.joined_hex", nonempty=True)
-    require(expected["joined_hex"] == joined, "byte-preservation joined bytes changed")
+    expect_hex(expected["joined_hex"], "byte-preservation.expected.joined_hex", BYTE_JOINED_HEX)
     expect_bool(expected["frame_boundaries_preserved"], "byte-preservation.expected.frame_boundaries_preserved", True)
     expect_bool(expected["utf8_decode"], "byte-preservation.expected.utf8_decode", False)
     expect_bool(expected["reencode"], "byte-preservation.expected.reencode", False)
@@ -661,10 +746,10 @@ def validate_resize_bounds(case: dict[str, Any], constants: dict[str, Any]) -> N
     input_row = strict_keys(case["input"], ("samples", "framing"), "resize-bounds.input")
     samples = expect_list(input_row["samples"], "resize-bounds.input.samples", len(RESIZE_BOUNDARY_INPUTS))
     framing = strict_keys(input_row["framing"], ("prefix_hex", "suffix_hex"), "resize-bounds.input.framing")
-    expect_hex(framing["prefix_hex"], "resize-bounds.input.framing.prefix_hex", nonempty=True)
-    expect_hex(framing["suffix_hex"], "resize-bounds.input.framing.suffix_hex", nonempty=True)
-    require(framing["prefix_hex"] == constants["resize_prefix_hex"], "resize framing prefix changed")
-    require(framing["suffix_hex"] == constants["resize_suffix_hex"], "resize framing suffix changed")
+    expect_hex(framing["prefix_hex"], "resize-bounds.input.framing.prefix_hex", RESIZE_PREFIX_HEX)
+    expect_hex(framing["suffix_hex"], "resize-bounds.input.framing.suffix_hex", RESIZE_SUFFIX_HEX)
+    require(framing["prefix_hex"] == constants["resize_prefix_hex"] == RESIZE_PREFIX_HEX, "resize framing prefix changed")
+    require(framing["suffix_hex"] == constants["resize_suffix_hex"] == RESIZE_SUFFIX_HEX, "resize framing suffix changed")
     seen: set[tuple[int, int]] = set()
     for index, sample in enumerate(samples):
         item = strict_keys(sample, ("cols", "rows", "effective_cols", "effective_rows", "control_hex"), f"resize-bounds.input.samples[{index}]")
@@ -679,25 +764,46 @@ def validate_resize_bounds(case: dict[str, Any], constants: dict[str, Any]) -> N
         require(effective_cols == _clamp(cols, constants["min_cols"], constants["max_cols"]), "resize column clamp changed")
         require(effective_rows == _clamp(rows, constants["min_rows"], constants["max_rows"]), "resize row clamp changed")
         control = expect_hex(item["control_hex"], f"resize-bounds.input.samples[{index}].control_hex", nonempty=True)
-        require(control == _resize_control(framing["prefix_hex"], effective_cols, effective_rows, framing["suffix_hex"]), "resize control frame changed")
+        require(control == _resize_control(RESIZE_PREFIX_HEX, effective_cols, effective_rows, RESIZE_SUFFIX_HEX), "resize control frame changed")
     expected = strict_keys(case["expected"], ("control_is_single_binary_message", "written_to_pty"), "resize-bounds.expected")
     expect_bool(expected["control_is_single_binary_message"], "resize-bounds.expected.control_is_single_binary_message", True)
     expect_bool(expected["written_to_pty"], "resize-bounds.expected.written_to_pty", False)
 
 
+def _resize_text_value(value: Any) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "true" if value else "false"
+    return str(value)
+
+
+def _resize_frame_text(cols: Any, rows: Any) -> str:
+    return f"ESC [RESIZE:{_resize_text_value(cols)};{_resize_text_value(rows)}]"
+
+
 def validate_resize_rejection(case: dict[str, Any]) -> None:
     input_row = strict_keys(case["input"], ("candidates",), "resize-rejection.input")
-    candidates = expect_list(input_row["candidates"], "resize-rejection.input.candidates", len(RESIZE_REJECTION_SHAPES))
+    candidates = expect_list(input_row["candidates"], "resize-rejection.input.candidates", len(RESIZE_REJECTION_ANCHORS))
     seen: set[str] = set()
     for index, candidate in enumerate(candidates):
         item = strict_keys(candidate, ("cols", "rows", "invalid_field", "wire_shape", "frame_text", "expected"), f"resize-rejection.input.candidates[{index}]")
+        anchor_shape, anchor_field, anchor_cols, anchor_rows, anchor_text = RESIZE_REJECTION_ANCHORS[index]
         invalid_field = expect_string(item["invalid_field"], f"resize-rejection.input.candidates[{index}].invalid_field")
-        require(invalid_field in {"cols", "rows", "frame"}, "resize rejection field changed")
         shape = expect_string(item["wire_shape"], f"resize-rejection.input.candidates[{index}].wire_shape")
-        require(shape == RESIZE_REJECTION_SHAPES[index] and shape not in seen, "resize rejection inventory changed")
+        require(shape == anchor_shape and invalid_field == anchor_field and shape not in seen, "resize rejection inventory changed")
         seen.add(shape)
-        expect_string(item["frame_text"], f"resize-rejection.input.candidates[{index}].frame_text")
+        require(type(item["cols"]) is type(anchor_cols) and item["cols"] == anchor_cols, "resize rejection column anchor changed")
+        require(type(item["rows"]) is type(anchor_rows) and item["rows"] == anchor_rows, "resize rejection row anchor changed")
+        frame_text = expect_string(item["frame_text"], f"resize-rejection.input.candidates[{index}].frame_text")
         expect_string(item["expected"], f"resize-rejection.input.candidates[{index}].expected", "rejected")
+        require(frame_text == anchor_text, "resize rejection frame anchor changed")
+        if shape == "malformed-frame":
+            require(frame_text == _resize_frame_text(item["cols"], item["rows"])[:-1], "malformed resize frame grammar changed")
+            require(RESIZE_TEXT_GRAMMAR_RE.fullmatch(frame_text) is None, "malformed resize frame became valid")
+        else:
+            require(frame_text == _resize_frame_text(item["cols"], item["rows"]), "resize frame grammar changed")
+            require(RESIZE_TEXT_GRAMMAR_RE.fullmatch(frame_text) is not None, "resize frame grammar is invalid")
         if invalid_field != "frame":
             value = item[invalid_field]
             require(type(value) is not int or type(value) is bool, "resize rejection candidate became an integer")
@@ -726,6 +832,9 @@ def validate_attach_reattach(case: dict[str, Any]) -> None:
     process = expect_ref(input_row["process_ref"], "attach-reattach.input.process_ref")
     first_socket = expect_ref(input_row["first_socket_ref"], "attach-reattach.input.first_socket_ref")
     second_socket = expect_ref(input_row["second_socket_ref"], "attach-reattach.input.second_socket_ref")
+    require((handle, session, process, first_socket, second_socket) == ATTACH_IDENTITY_ANCHORS, "attach identity anchors changed")
+    require(len({handle, session, process}) == 3, "handle, session, and process identities must not alias")
+    require(first_socket != second_socket, "reattach must use a distinct second socket")
     events = expect_list(input_row["events"], "attach-reattach.input.events", 9)
     first = strict_keys(events[0], ("name", "socket_ref"), "attach-reattach.input.events[0]")
     expect_string(first["name"], "attach-reattach.input.events[0].name", "socket.accept")
@@ -919,7 +1028,7 @@ def validate_no_pty_byte_logging(case: dict[str, Any]) -> None:
 
 
 def validate_close_codes(case: dict[str, Any]) -> None:
-    input_row = strict_keys(case["input"], ("events",), "close-codes.input")
+    input_row = strict_keys(case["input"], ("events", "legacy_events", "error_events"), "close-codes.input")
     events = expect_list(input_row["events"], "close-codes.input.events", 5)
     first = strict_keys(events[0], ("name", "socket_ref", "close_code"), "close-codes.input.events[0]")
     expect_string(first["name"], "close-codes.input.events[0].name", "old_socket_close")
@@ -940,13 +1049,62 @@ def validate_close_codes(case: dict[str, Any]) -> None:
     expect_string(clean["name"], "close-codes.input.events[4].name", "legacy_disconnect_close")
     expect_ref(clean["socket_ref"], "close-codes.input.events[4].socket_ref")
     expect_int(clean["close_code"], "close-codes.input.events[4].close_code", CLEAN_DISCONNECT_CLOSE)
-    expected = strict_keys(case["expected"], ("replacement_close_code", "process_exit_close_code", "clean_disconnect_close_code", "close_before_assignment", "stale_cleanup", "dead_process_retry"), "close-codes.expected")
+
+    legacy_events = expect_list(input_row["legacy_events"], "close-codes.input.legacy_events", len(LEGACY_TIMELINE))
+    legacy_bridge = strict_keys(legacy_events[0], ("name", "socket_ref", "close_code"), "close-codes.input.legacy_events[0]")
+    expect_string(legacy_bridge["name"], "close-codes.input.legacy_events[0].name", "bridge-close")
+    expect_ref(legacy_bridge["socket_ref"], "close-codes.input.legacy_events[0].socket_ref")
+    expect_int(legacy_bridge["close_code"], "close-codes.input.legacy_events[0].close_code", CLEAN_DISCONNECT_CLOSE)
+    for index, expected_name in ((1, "process-terminate"), (2, "process-reap")):
+        item = strict_keys(legacy_events[index], ("name", "process_ref"), f"close-codes.input.legacy_events[{index}]")
+        expect_string(item["name"], f"close-codes.input.legacy_events[{index}].name", expected_name)
+        require(expect_ref(item["process_ref"], f"close-codes.input.legacy_events[{index}].process_ref") == "synthetic-process-legacy", "legacy process identity changed")
+    prohibited = strict_keys(legacy_events[3], ("name", "process_ref", "result"), "close-codes.input.legacy_events[3]")
+    expect_string(prohibited["name"], "close-codes.input.legacy_events[3].name", "reattach-prohibited")
+    require(expect_ref(prohibited["process_ref"], "close-codes.input.legacy_events[3].process_ref") == "synthetic-process-legacy", "legacy reattach process identity changed")
+    expect_string(prohibited["result"], "close-codes.input.legacy_events[3].result", "prohibited")
+    require([event["name"] for event in legacy_events] == list(LEGACY_TIMELINE), "legacy lifecycle timeline changed")
+
+    error_events = expect_list(input_row["error_events"], "close-codes.input.error_events", len(ERROR_CLOSE_ANCHORS))
+    for index, (expected_name, expected_category, expected_code) in enumerate(ERROR_CLOSE_ANCHORS):
+        item = strict_keys(error_events[index], ("name", "category", "close_code"), f"close-codes.input.error_events[{index}]")
+        expect_string(item["name"], f"close-codes.input.error_events[{index}].name", expected_name)
+        expect_string(item["category"], f"close-codes.input.error_events[{index}].category", expected_category)
+        expect_int(item["close_code"], f"close-codes.input.error_events[{index}].close_code", expected_code)
+
+    expected = strict_keys(
+        case["expected"],
+        (
+            "replacement_close_code",
+            "process_exit_close_code",
+            "clean_disconnect_close_code",
+            "close_before_assignment",
+            "stale_cleanup",
+            "dead_process_retry",
+            "legacy_timeline",
+            "legacy_process_terminated",
+            "legacy_process_reaped",
+            "legacy_reattach",
+            "error_close_codes",
+            "error_categories",
+        ),
+        "close-codes.expected",
+    )
     expect_int(expected["replacement_close_code"], "close-codes.expected.replacement_close_code", REPLACEMENT_CLOSE)
     expect_int(expected["process_exit_close_code"], "close-codes.expected.process_exit_close_code", PROCESS_EXIT_CLOSE)
     expect_int(expected["clean_disconnect_close_code"], "close-codes.expected.clean_disconnect_close_code", CLEAN_DISCONNECT_CLOSE)
     expect_bool(expected["close_before_assignment"], "close-codes.expected.close_before_assignment", True)
     expect_string(expected["stale_cleanup"], "close-codes.expected.stale_cleanup", "ignored")
     expect_bool(expected["dead_process_retry"], "close-codes.expected.dead_process_retry", False)
+    timeline = expect_list(expected["legacy_timeline"], "close-codes.expected.legacy_timeline", len(LEGACY_TIMELINE))
+    require(timeline == list(LEGACY_TIMELINE), "expected legacy lifecycle timeline changed")
+    expect_bool(expected["legacy_process_terminated"], "close-codes.expected.legacy_process_terminated", True)
+    expect_bool(expected["legacy_process_reaped"], "close-codes.expected.legacy_process_reaped", True)
+    expect_string(expected["legacy_reattach"], "close-codes.expected.legacy_reattach", "prohibited")
+    error_codes = expect_list(expected["error_close_codes"], "close-codes.expected.error_close_codes", len(ERROR_CLOSE_ANCHORS))
+    require(error_codes == [code for _, _, code in ERROR_CLOSE_ANCHORS], "expected error close codes changed")
+    error_categories = expect_list(expected["error_categories"], "close-codes.expected.error_categories", len(ERROR_CLOSE_ANCHORS))
+    require(error_categories == [category for _, category, _ in ERROR_CLOSE_ANCHORS], "expected error categories changed")
 
 
 def validate_unsupported_host(case: dict[str, Any]) -> None:
@@ -1037,13 +1195,18 @@ def mutation_inventory(document: dict[str, Any]) -> list[tuple[str, dict[str, An
     add("upgrade-no-binary", lambda item: _case(item, "upgrade-success")["expected"].__setitem__("binary_transport", False))
     add("upgrade-spawn", lambda item: _case(item, "upgrade-success")["expected"].__setitem__("process_spawned", True))
     add("byte-joined", lambda item: _case(item, "byte-preservation")["expected"].__setitem__("joined_hex", "00"))
+    add("byte-frame-anchor", lambda item: _case(item, "byte-preservation")["input"]["frames"][0].__setitem__("frame_hex", "00"))
     add("byte-decode", lambda item: _case(item, "byte-preservation")["expected"].__setitem__("utf8_decode", True))
     add("resize-clamp", lambda item: _case(item, "resize-bounds")["input"]["samples"][2].__setitem__("effective_cols", 2))
+    add("resize-prefix", lambda item: _case(item, "resize-bounds")["input"]["framing"].__setitem__("prefix_hex", "00"))
     add("resize-duplicate", lambda item: _case(item, "resize-bounds")["input"]["samples"].__setitem__(7, copy.deepcopy(_case(item, "resize-bounds")["input"]["samples"][6])))
     add("resize-accepted", lambda item: _case(item, "resize-rejection")["expected"].__setitem__("accepted_count", 1))
     add("resize-kind", lambda item: _case(item, "resize-rejection")["input"]["candidates"][0].__setitem__("wire_shape", "integer"))
+    add("resize-frame-text", lambda item: _case(item, "resize-rejection")["input"]["candidates"][0].__setitem__("frame_text", "ESC [RESIZE:999;24]"))
     add("attach-spawn", lambda item: _case(item, "attach-reattach")["expected"].__setitem__("spawn_count", 2))
     add("attach-identity", lambda item: _case(item, "attach-reattach")["input"]["events"][5].__setitem__("process_ref", "synthetic-process-other"))
+    add("attach-socket-alias", lambda item: _case(item, "attach-reattach")["input"].__setitem__("second_socket_ref", "synthetic-socket-reattach-a"))
+    add("attach-resource-alias", lambda item: _case(item, "attach-reattach")["input"].__setitem__("session_ref", "synthetic-handle-reattach"))
     add("attach-close", lambda item: _case(item, "attach-reattach")["input"]["events"][7].__setitem__("close_code", 1001))
     add("race-separator", lambda item: _case(item, "retained-output-race")["input"].__setitem__("separator_hex", "00"))
     add("race-tail-size", lambda item: _case(item, "retained-output-race")["expected"].__setitem__("retained_bytes", 1024))
@@ -1056,6 +1219,8 @@ def mutation_inventory(document: dict[str, Any]) -> list[tuple[str, dict[str, An
     add("logging-action", lambda item: _case(item, "no-pty-byte-logging")["input"]["logs"][1].__setitem__("action_payload_hex", "696e707574"))
     add("logging-event", lambda item: _case(item, "no-pty-byte-logging")["input"]["logs"][1].__setitem__("event", "pty.output"))
     add("close-replacement", lambda item: _case(item, "close-codes")["input"]["events"][0].__setitem__("close_code", CLEAN_DISCONNECT_CLOSE))
+    add("close-legacy-reap", lambda item: _case(item, "close-codes")["input"]["legacy_events"][3].__setitem__("result", "allowed"))
+    add("close-error-code", lambda item: _case(item, "close-codes")["input"]["error_events"][0].__setitem__("close_code", CLEAN_DISCONNECT_CLOSE))
     add("close-process", lambda item: _case(item, "close-codes")["expected"].__setitem__("process_exit_close_code", 1001))
     add("unsupported-accept", lambda item: _case(item, "unsupported-host")["expected"].__setitem__("socket_accepted", True))
     add("unsupported-upgrade", lambda item: _case(item, "unsupported-host")["expected"].__setitem__("upgrade_attempted", True))
@@ -1064,6 +1229,9 @@ def mutation_inventory(document: dict[str, Any]) -> list[tuple[str, dict[str, An
 
 def validate_mutations(document: dict[str, Any]) -> int:
     mutations = mutation_inventory(document)
+    mutation_ids = tuple(mutation_id for mutation_id, _ in mutations)
+    require(mutation_ids == EXPECTED_MUTATION_IDS, "mutation inventory IDs or order changed")
+    require(len(mutation_ids) == len(set(mutation_ids)), "mutation inventory IDs must be unique")
     for mutation_id, candidate in mutations:
         try:
             validate_cases_document(candidate)
@@ -1149,14 +1317,14 @@ def validate_baseline(baseline: Any, root: Path = ROOT) -> dict[str, Any]:
     expect_string(record["fixture"], "baseline.fixture", "contracts/fixtures/deployment-security/pty-local-adapter/cases.json")
     expect_string(record["metric"], "baseline.metric", "validator_duration_ms")
     environment = strict_keys(record["environment"], BASELINE_ENVIRONMENT_KEYS, "baseline.environment")
-    expect_string(environment["platform"], "baseline.environment.platform", max_length=160)
-    expect_string(environment["python"], "baseline.environment.python", max_length=64)
-    runs = expect_list(record["runs"], "baseline.runs", 2)
+    expect_string(environment["platform"], "baseline.environment.platform", BASELINE_CANONICAL_ENVIRONMENT[0])
+    expect_string(environment["python"], "baseline.environment.python", BASELINE_CANONICAL_ENVIRONMENT[1])
+    runs = expect_list(record["runs"], "baseline.runs", len(BASELINE_MODE_ORDER))
     seen_modes: set[str] = set()
     for index, raw_run in enumerate(runs):
         run = strict_keys(raw_run, BASELINE_RUN_KEYS, f"baseline.runs[{index}]")
-        mode = expect_string(run["mode"], f"baseline.runs[{index}].mode")
-        require(mode in {"normal", "optimized"} and mode not in seen_modes, "baseline modes are incomplete or duplicated")
+        mode = expect_string(run["mode"], f"baseline.runs[{index}].mode", BASELINE_MODE_ORDER[index])
+        require(mode not in seen_modes, "baseline modes are incomplete or duplicated")
         seen_modes.add(mode)
         expect_string(run["command"], f"baseline.runs[{index}].command", BASELINE_COMMANDS[mode], max_length=240)
         expect_int(run["repetitions"], f"baseline.runs[{index}].repetitions", MAX_BASELINE_TRACE)
