@@ -26,17 +26,28 @@ and `files: []`. Fixture-to-coverage linkage is canonical and bidirectional; the
 aggregate compatibility root must own the `compatibility-gate` row, so a pending
 gate cannot be bypassed by relinking it to unrelated coverage. A pending aggregate
 root returns bounded blocked compatibility evidence without attempting to load an
-unregistered artifact. The report uses semantic outcomes rather than
-platform-specific wire bytes, and its complete serialized UTF-8 form is capped at
-8 KiB for CI logs. The CLI accepts only an optional `--repo-root <path>` pair;
-unknown options, positional values, and duplicate roots return bounded JSON errors
-instead of guessing.
+unregistered artifact. Before TypeScript projects a ready fixture, it executes that
+root's checked-in Python validator against the same verified bytes. This preserves
+canonical nested types, ranges, text bounds, ordered fields and cases, and
+recomputed reducer outcomes instead of approximating them with key-set checks. The
+report uses semantic outcomes rather than platform-specific wire bytes. Its exact
+emitted UTF-8 line, including the final newline, is capped at 8 KiB for CI logs.
+The CLI accepts only an optional `--repo-root <path>` pair; unknown options,
+positional values, and duplicate roots return bounded JSON errors instead of
+guessing.
 
 Before representatives run, the checker validates the complete registry
 inventory. Every ready root must have the exact sorted file manifest, every
 registered digest and byte size must verify, and every non-metadata file under
 `contracts/fixtures` must be indexed. An unindexed artifact blocks parity before
-any representative can claim evidence.
+any representative can claim evidence. Before returning success, the checker also
+verifies the pinned `schema.json` and aggregate
+`validator/validation-baseline.json`. It checks the baseline's artifact manifest,
+commands, sample counts, and recomputed distributions, so these aggregate records
+cannot be skipped or silently replaced. Temporary tests that intentionally mutate
+registry bytes therefore remain useful for focused loaders, but a complete parity
+report correctly rejects those bytes unless the reviewed aggregate baseline also
+attests them.
 
 ## Input and output safety
 
@@ -47,8 +58,12 @@ repository root is canonicalized, so a replaced fixture directory cannot redirec
 the read through a symlink. Inventory enumeration also stays descriptor-rooted: it
 uses duplicated directory descriptors with `fdopendir`/`readdir`, opens every child
 with relative `openat`, and enforces 32-level, 512-directory, and 512-file budgets.
-All directory streams, duplicated handles, and native descriptors have checked
-cleanup paths. Descriptor and pathname device/inode/size identities are compared
+A tiny native wrapper clears `errno`, calls `readdir`, and captures the resulting
+`errno` in the same native call. `NULL` with a nonzero error is therefore rejected
+as an incomplete inventory instead of being mistaken for EOF, including after a
+valid prefix has already been enumerated. All directory streams, duplicated
+handles, and native descriptors have checked cleanup paths. Descriptor and pathname
+device/inode/size identities are compared
 before and after each bounded artifact read. Bytes are read by a killable
 subprocess that inherits only the already-secured nonblocking descriptor. Its
 one-second wall-clock deadline can interrupt a blocked
@@ -69,14 +84,27 @@ duplicate object keys and enforces limits on depth, nodes, array items, object
 keys, key length, and string length. Registry identifiers and paths use the
 canonical ASCII languages and lengths, registry numeric fields require lexical
 integer tokens, and state, evidence-status, redaction, parity, and benchmark
-metadata are retained and semantically checked. The compatibility record pins
-its canonical source and revision snapshots, merged PR sequence, artifact paths
-and manifest digest, benchmark commands and recomputed distributions, status,
-redaction, and blocker contracts before any evidence is projected. Report decisions and
+metadata are retained and semantically checked. Compatibility integer fields also
+require lexical JSON integers, so values such as PR number `221.0` are rejected
+rather than normalized to `221`. The compatibility record pins its canonical
+source and revision snapshots, merged PR sequence, artifact paths and manifest
+digest, benchmark commands and recomputed distributions, status, redaction, and
+blocker contracts before any evidence is projected. The checker reads every pinned
+artifact directly from the reviewed merged and integration Git revisions. When it
+runs against this repository, it also checks current `HEAD`, matching the normal
+and `-O` Python validator's captured-snapshot decision. Report decisions and
 compatibility fields are bounded. Contract error codes and messages normalize
 controls and lone surrogates, then enforce their limit against serialized UTF-8
 bytes rather than UTF-16 units. The CLI therefore emits one small JSON line on
 failure and rejects an oversized complete success report before writing stdout.
+
+Public runtime values are inert snapshots. Registry roots are module-authorized,
+deep-cloned, and recursively frozen before use; fabricated, copied, proxy-backed,
+hidden, symbol-keyed, or accessor-bearing caller values cannot become registry
+authority. Cases return separate frozen `raw` and `expected` graphs, representative
+IDs return a fresh frozen graph on every call, report and compatibility values are
+frozen, and the exported platform list is frozen at runtime. Mutating a returned
+registry digest therefore cannot authorize replacement fixture bytes.
 
 ## TypeScript 7 and tool compatibility
 

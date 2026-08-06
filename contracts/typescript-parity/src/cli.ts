@@ -5,6 +5,7 @@ import {
   MAX_ERROR_CODE_LENGTH,
   MAX_ERROR_MESSAGE_LENGTH,
   runParity,
+  serializeBoundedJsonLine,
 } from "./parity";
 
 function repositoryRootArgument(): string | undefined {
@@ -31,7 +32,7 @@ function repositoryRootArgument(): string | undefined {
 try {
   const repoRoot = resolve(repositoryRootArgument() ?? process.cwd());
   const report = await runParity(repoRoot);
-  process.stdout.write(`${JSON.stringify(report)}\n`);
+  process.stdout.write(serializeBoundedJsonLine(report));
 } catch (error) {
   const failure = error instanceof ContractInputError
     ? {

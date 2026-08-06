@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
-import { dlopen, FFIType, ptr, toArrayBuffer, type Pointer } from "bun:ffi";
-import { resolve, isAbsolute, join } from "node:path";
+import { lstat, mkdir, mkdtemp, open, realpath, rm, type FileHandle } from "node:fs/promises";
+import { cc, dlopen, FFIType, ptr, toArrayBuffer, type Pointer } from "bun:ffi";
+import { dirname, resolve, isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
+import { isProxy } from "node:util/types";
 
 export const HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e";
 export const CONTRACT = "dashboard-v0.0.1";
@@ -34,6 +36,7 @@ const MAX_INVENTORY_DEPTH = 32;
 const MAX_INVENTORY_DIRECTORIES = 512;
 const MAX_TOTAL_ARTIFACT_BYTES = 8 * 1024 * 1024;
 const MAX_READ_DURATION_MS = 1_000;
+const MAX_SUBPROCESS_DURATION_MS = 10_000;
 export const MAX_ERROR_CODE_LENGTH = 64;
 export const MAX_ERROR_MESSAGE_LENGTH = 240;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -47,6 +50,16 @@ const FILE_READ_FLAGS =
 const DUPLICATED_DESCRIPTOR_FLAGS = fsConstants.O_RDONLY | fsConstants.O_NONBLOCK;
 const FIXTURE_METADATA_FILES = new Set(["README.md", "index.json", "schema.json"]);
 const FIXTURE_VALIDATOR_DIRECTORY = "validator";
+const PINNED_SCHEMA = {
+  path: "schema.json",
+  sha256: "842830b13cc8d6f03d152b3ea4d615086082f44f95b6dcbcf65d763c9f81ca56",
+  sizeBytes: 8_799,
+} as const;
+const PINNED_VALIDATION_BASELINE = {
+  path: "validator/validation-baseline.json",
+  sha256: "f9e958b4886cf138cbb2de6a5f1ef32abee58305b8213ac1209c1837806082d4",
+  sizeBytes: 2_727,
+} as const;
 const NON_SUCCESS_COVERAGE_STATUSES = [
   "pending",
   "empty",
@@ -64,7 +77,7 @@ const EXPECTED_STATE_SEMANTICS: Readonly<Record<string, readonly string[]>> = {
   unknown: ["result_unavailable", "blocked", "no_duplicate_prompt_session_ticket_or_pty_input", "reread_source_state_before_retry"],
 };
 
-export const PLATFORMS = ["web", "ios", "ipados", "macos"] as const;
+export const PLATFORMS = Object.freeze(["web", "ios", "ipados", "macos"] as const);
 export type Platform = (typeof PLATFORMS)[number];
 export type Family =
   | "auth"
@@ -80,8 +93,62 @@ export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonRecord = { [key: string]: JsonValue };
 
+function immutableSnapshot<T>(value: T, seen = new Set<object>()): T {
+  if (value === null || typeof value !== "object") return value;
+  if (isProxy(value)) fail("malformed_input", "runtime evidence cannot contain a proxy");
+  if (seen.has(value)) fail("malformed_input", "runtime evidence cannot contain a cycle");
+  seen.add(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.some((key) => typeof key === "symbol")) {
+    fail("malformed_input", "runtime evidence cannot contain symbol keys");
+  }
+  if (Array.isArray(value)) {
+    const namedKeys = ownKeys.filter((key): key is string => typeof key === "string" && key !== "length");
+    if (
+      namedKeys.length !== value.length
+      || namedKeys.some((key, index) => key !== String(index))
+    ) {
+      fail("malformed_input", "runtime evidence arrays must be dense and canonical");
+    }
+    const result = value.map((_, index) => {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+        fail("malformed_input", "runtime evidence cannot contain array accessors");
+      }
+      return immutableSnapshot(descriptor.value, seen);
+    });
+    seen.delete(value);
+    return Object.freeze(result) as T;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== null && prototype !== Object.prototype) {
+    fail("malformed_input", "runtime evidence must use a plain object prototype");
+  }
+  const result = Object.create(null) as Record<string, unknown>;
+  for (const key of ownKeys as string[]) {
+    const descriptor = descriptors[key];
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+      fail("malformed_input", "runtime evidence cannot contain hidden keys or accessors");
+    }
+    result[key] = immutableSnapshot(descriptor.value, seen);
+  }
+  seen.delete(value);
+  return Object.freeze(result) as T;
+}
+
 function utf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+export function serializeBoundedJsonLine(value: unknown): string {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) fail("malformed_input", "parity report is not JSON serializable");
+  const line = `${serialized}\n`;
+  if (utf8Bytes(line) > MAX_REPORT_BYTES) {
+    fail("output_limit", "serialized parity report exceeds the bounded UTF-8 byte budget");
+  }
+  return line;
 }
 
 function sanitizeErrorText(value: string): string {
@@ -160,6 +227,9 @@ interface RegistryParity {
   readonly liveClaim: false;
 }
 
+const TRUSTED_REGISTRIES = new WeakSet<object>();
+const VALIDATED_FIXTURES = new Set<string>();
+
 export interface FixtureRegistry {
   readonly evidenceStatus: "partial" | "complete";
   readonly fixtureRoots: readonly FixtureRoot[];
@@ -216,6 +286,11 @@ export interface ParityReport {
   readonly cases: readonly ParityCaseResult[];
   readonly compatibility: CompatibilityRecord;
 }
+
+const CANONICAL_VALIDATOR_DEPENDENCIES: Readonly<Record<string, readonly string[]>> = {
+  "image-attachment-lifecycle": ["attachment-policy"],
+  "pty-contract": ["source-audit-pty-attach"],
+};
 
 const JSON_ARTIFACTS: Readonly<Record<string, string>> = {
   "deployment-security-browser-auth": "deployment-security/browser-auth/cases.json",
@@ -319,6 +394,11 @@ const PARITY_KEYS = ["status", "fixture_source", "platforms", "pty_policy", "mis
 const STATE_KEYS = ["id", "evidence_state", "gate_decision", "safe_state", "retry_policy"] as const;
 const REDACTION_KEYS = ["synthetic_only", "contains_credentials", "contains_cookies", "contains_bearer_values", "contains_ticket_values", "contains_raw_pty_bytes", "contains_transcripts", "contains_live_hosts", "contains_user_data", "failure_output"] as const;
 const BENCHMARK_KEYS = ["path", "threshold", "evidence_mode", "build_mode"] as const;
+const FIXTURE_SCHEMA_KEYS = ["$schema", "$id", "title", "type", "additionalProperties", "required", "properties", "$defs"] as const;
+const BASELINE_KEYS = ["schema", "fixture_schema", "validator", "synthetic_only", "build_mode", "threshold", "environment", "artifact_manifest", "artifact_size_bytes", "normal", "optimized", "notes"] as const;
+const BASELINE_ENVIRONMENT_KEYS = ["python", "implementation", "platform", "machine"] as const;
+const BASELINE_MEASUREMENT_KEYS = ["command", "repetitions", "samples_ms", "distribution_ms"] as const;
+const BASELINE_DISTRIBUTION_KEYS = ["min", "p50", "p95", "max", "mean"] as const;
 const COMPATIBILITY_RECORD_KEYS = ["schema", "operation", "contract", "source", "merged_dev", "integration_dev", "artifacts", "observations", "status", "redaction", "blockers"] as const;
 const COMPATIBILITY_SOURCE_KEYS = ["repository", "sha"] as const;
 const COMPATIBILITY_MERGED_KEYS = ["ref", "head", "tree", "merged_prs"] as const;
@@ -403,7 +483,7 @@ interface Representative {
   readonly caseIds: readonly string[];
 }
 
-const REPRESENTATIVES: readonly Representative[] = [
+const REPRESENTATIVES: readonly Representative[] = immutableSnapshot([
   {
     family: "auth",
     rootId: "deployment-security-browser-auth",
@@ -452,7 +532,7 @@ const REPRESENTATIVES: readonly Representative[] = [
     coverageId: "deployment-attestation",
     caseIds: ["valid_attestation_with_probe", "missing_attestation"],
   },
-];
+]);
 
 function fail(code: string, message: string): never {
   throw new ContractInputError(code, message);
@@ -595,6 +675,7 @@ interface JsonParserLimits {
   readonly maxNodes: number;
   readonly maxStringBytes?: number;
   readonly integerTokensOnly?: boolean;
+  readonly integerKeyNames?: ReadonlySet<string>;
 }
 
 const DEFAULT_JSON_LIMITS: JsonParserLimits = {
@@ -627,7 +708,7 @@ class BoundedJsonParser {
     return value;
   }
 
-  private parseValue(depth: number): JsonValue {
+  private parseValue(depth: number, integerTokenRequired = false): JsonValue {
     if (depth > this.limits.maxDepth) {
       fail("json_depth_limit", `${this.label} exceeds the bounded JSON depth`);
     }
@@ -644,7 +725,7 @@ class BoundedJsonParser {
     if (current === "f") return this.parseLiteral("false", false);
     if (current === "n") return this.parseLiteral("null", null);
     if (current === "-" || (current !== undefined && current >= "0" && current <= "9")) {
-      return this.parseNumber();
+      return this.parseNumber(integerTokenRequired);
     }
     fail("malformed_json", `${this.label} contains an invalid JSON value`);
   }
@@ -676,7 +757,7 @@ class BoundedJsonParser {
       if (!this.consume(":")) {
         fail("malformed_json", `${this.label} is missing an object separator`);
       }
-      result[key] = this.parseValue(depth + 1);
+      result[key] = this.parseValue(depth + 1, this.limits.integerKeyNames?.has(key) ?? false);
       this.skipWhitespace();
       if (this.consume("}")) return result;
       if (!this.consume(",")) {
@@ -771,17 +852,20 @@ class BoundedJsonParser {
     return value;
   }
 
-  private parseNumber(): number {
+  private parseNumber(integerTokenRequired: boolean): number {
     const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(this.text.slice(this.index));
     if (!match) {
       fail("malformed_json", `${this.label} contains an invalid JSON number`);
     }
     const token = match[0];
-    if (this.limits.integerTokensOnly && /[.eE]/.test(token)) {
+    if ((this.limits.integerTokensOnly || integerTokenRequired) && /[.eE]/.test(token)) {
       fail("malformed_input", `${this.label} requires lexical JSON integer tokens`);
     }
     this.index += token.length;
     const value = Number(token);
+    if (Object.is(value, -0)) {
+      fail("malformed_input", `${this.label} does not permit negative zero`);
+    }
     if (!Number.isFinite(value)) {
       fail("json_number_limit", `${this.label} contains an unrepresentable JSON number`);
     }
@@ -832,12 +916,19 @@ interface NativeFileApi {
   readonly close: (fileDescriptor: number) => number;
   readonly dup: (fileDescriptor: number) => number;
   readonly fdopendir: (fileDescriptor: number) => Pointer | null;
-  readonly readdir: (directory: Pointer) => Pointer | null;
   readonly closedir: (directory: Pointer) => number;
+}
+
+interface CheckedReaddirApi {
+  readonly hermternal_readdir_checked: (directory: Pointer, capturedErrno: number) => Pointer | null;
+  readonly hermternal_readdir_fault_after: (count: number) => void;
+  readonly hermternal_readdir_entry_count: () => number;
 }
 
 let nativeFileApi: NativeFileApi | undefined;
 let nativeFileLibrary: unknown;
+let checkedReaddirApi: CheckedReaddirApi | undefined;
+let checkedReaddirLibrary: unknown;
 
 function getNativeFileApi(): NativeFileApi {
   if (nativeFileApi) return nativeFileApi;
@@ -860,10 +951,6 @@ function getNativeFileApi(): NativeFileApi {
         args: [FFIType.int],
         returns: FFIType.ptr,
       },
-      readdir: {
-        args: [FFIType.ptr],
-        returns: FFIType.ptr,
-      },
       closedir: {
         args: [FFIType.ptr],
         returns: FFIType.int,
@@ -875,6 +962,45 @@ function getNativeFileApi(): NativeFileApi {
   } catch {
     fail("artifact_read_failed", "descriptor-first reader is unavailable");
   }
+}
+
+function getCheckedReaddirApi(): CheckedReaddirApi {
+  if (checkedReaddirApi) return checkedReaddirApi;
+  try {
+    const library = cc({
+      source: join(repoRootFromModule(import.meta.dir), "contracts/typescript-parity/src/readdir_errno.c"),
+      symbols: {
+        hermternal_readdir_checked: {
+          args: [FFIType.ptr, FFIType.ptr],
+          returns: FFIType.ptr,
+        },
+        hermternal_readdir_fault_after: {
+          args: [FFIType.int],
+          returns: FFIType.void,
+        },
+        hermternal_readdir_entry_count: {
+          args: [],
+          returns: FFIType.int,
+        },
+      },
+    });
+    checkedReaddirLibrary = library;
+    checkedReaddirApi = library.symbols as unknown as CheckedReaddirApi;
+    return checkedReaddirApi;
+  } catch {
+    fail("artifact_read_failed", "atomic directory reader is unavailable");
+  }
+}
+
+export function observedReaddirEntries(): number {
+  return getCheckedReaddirApi().hermternal_readdir_entry_count();
+}
+
+export function injectReaddirErrorAfter(validEntries: number): void {
+  if (!Number.isSafeInteger(validEntries) || validEntries < -1) {
+    fail("malformed_input", "readdir fault count must be a safe integer");
+  }
+  getCheckedReaddirApi().hermternal_readdir_fault_after(validEntries);
 }
 
 function nativeCString(value: string): number {
@@ -966,9 +1092,17 @@ function directoryEntryNames(directoryFd: number, label: string): readonly strin
     const names: string[] = [];
     const nameOffset = process.platform === "darwin" ? 21 : 19;
     const recordBytes = process.platform === "darwin" ? 1_048 : 280;
+    const capturedErrno = new Int32Array(1);
+    const checked = getCheckedReaddirApi();
     while (true) {
-      const entryPointer = api.readdir(directoryPointer);
-      if (!entryPointer) break;
+      capturedErrno[0] = 0;
+      const entryPointer = checked.hermternal_readdir_checked(directoryPointer, ptr(capturedErrno));
+      if (!entryPointer) {
+        if (capturedErrno[0] !== 0) {
+          fail("fixture_inventory_invalid", `${label} could not be fully enumerated`);
+        }
+        break;
+      }
       const bytes = new Uint8Array(toArrayBuffer(entryPointer, 0, recordBytes));
       let end = nameOffset;
       while (end < bytes.length && bytes[end] !== 0) end += 1;
@@ -1401,7 +1535,7 @@ export async function loadRegistry(repoRoot: string): Promise<FixtureRegistry> {
   if (metadata.evidenceStatus !== (hasBlockedCoverage ? "partial" : "complete")) {
     fail("incompatible_input", "fixture evidence status does not match coverage states");
   }
-  return {
+  const snapshot = immutableSnapshot<FixtureRegistry>({
     evidenceStatus: metadata.evidenceStatus,
     fixtureRoots,
     coverage,
@@ -1409,7 +1543,9 @@ export async function loadRegistry(repoRoot: string): Promise<FixtureRegistry> {
     states: metadata.states,
     redaction: metadata.redaction,
     benchmark: metadata.benchmark,
-  };
+  });
+  TRUSTED_REGISTRIES.add(snapshot as object);
+  return snapshot;
 }
 
 interface FixtureWalkOptions {
@@ -1503,6 +1639,90 @@ async function walkFixtureFiles(
 
 function sameStringList(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+async function validateAggregateArtifacts(repoRoot: string): Promise<void> {
+  const fixturesRoot = join(repoRoot, "contracts/fixtures");
+  const schema = exactRecord(
+    await readJson(join(fixturesRoot, PINNED_SCHEMA.path), "fixture schema", { registered: PINNED_SCHEMA }),
+    "fixture schema",
+    FIXTURE_SCHEMA_KEYS,
+  );
+  literal(schema.$schema, "https://json-schema.org/draft/2020-12/schema", "fixture schema dialect");
+  literal(schema.$id, "https://hermternal.invalid/schema/fixture-index.v1.json", "fixture schema ID");
+  literal(schema.title, "Hermternal language-neutral fixture index", "fixture schema title");
+  literal(schema.type, "object", "fixture schema root type");
+  if (boolean(schema.additionalProperties, "fixture schema additionalProperties") !== false) {
+    fail("incompatible_input", "fixture schema must reject additional properties");
+  }
+  if (!sameStringList(strings(schema.required, "fixture schema required"), REGISTRY_TOP_KEYS)) {
+    fail("incompatible_input", "fixture schema required fields changed");
+  }
+  exactRecord(schema.properties, "fixture schema properties", REGISTRY_TOP_KEYS);
+  exactRecord(schema.$defs, "fixture schema definitions", ["path", "sha256", "platforms", "file", "fixture", "coverage", "parity", "state", "redaction", "benchmark"]);
+
+  const baseline = exactRecord(
+    await readJson(join(fixturesRoot, PINNED_VALIDATION_BASELINE.path), "fixture validation baseline", {
+      registered: PINNED_VALIDATION_BASELINE,
+      parserLimits: {
+        ...DEFAULT_JSON_LIMITS,
+        integerKeyNames: new Set(["size_bytes", "artifact_size_bytes", "repetitions"]),
+      },
+    }),
+    "fixture validation baseline",
+    BASELINE_KEYS,
+  );
+  literal(baseline.schema, "hermternal.fixture-validator-baseline.v1", "baseline schema");
+  literal(baseline.fixture_schema, REGISTRY_SCHEMA, "baseline fixture schema");
+  literal(baseline.validator, "Python standard library only", "baseline validator");
+  if (boolean(baseline.synthetic_only, "baseline synthetic_only") !== true || baseline.threshold !== null) {
+    fail("incompatible_input", "baseline synthetic or threshold policy changed");
+  }
+  literal(baseline.build_mode, "N/A - no production or release executable", "baseline build mode");
+  const environment = exactRecord(baseline.environment, "baseline environment", BASELINE_ENVIRONMENT_KEYS);
+  for (const key of BASELINE_ENVIRONMENT_KEYS) {
+    const value = string(environment[key], `baseline environment.${key}`);
+    if (value.length > 128 || value.toLowerCase() === "pending") fail("incompatible_input", "baseline environment is incomplete");
+  }
+  let totalBytes = 0;
+  let previousPath = "";
+  for (const [index, raw] of array(baseline.artifact_manifest, "baseline artifact manifest").entries()) {
+    const file = exactRecord(raw, `baseline artifact manifest[${index}]`, REGISTRY_FILE_KEYS);
+    const path = safeRelativePath(string(file.path, `baseline artifact manifest[${index}].path`), `baseline artifact manifest[${index}].path`);
+    if (!path.startsWith("contracts/fixtures/") || path <= previousPath || path === "contracts/fixtures/validator/validation-baseline.json") {
+      fail("incompatible_input", "baseline artifact manifest path changed");
+    }
+    previousPath = path;
+    const registered = parseRegistryFile(file, `baseline artifact manifest[${index}]`);
+    await readBoundedBytes(join(repoRoot, path), `baseline artifact ${path}`, registered);
+    totalBytes += registered.sizeBytes;
+  }
+  if (number(baseline.artifact_size_bytes, "baseline artifact_size_bytes") !== totalBytes) {
+    fail("incompatible_input", "baseline artifact byte total is stale");
+  }
+  for (const mode of ["normal", "optimized"] as const) {
+    const measurement = exactRecord(baseline[mode], `baseline.${mode}`, BASELINE_MEASUREMENT_KEYS);
+    literal(measurement.command, mode === "normal" ? "python3 contracts/fixtures/validator/validate.py" : "python3 -O contracts/fixtures/validator/validate.py", `baseline.${mode}.command`);
+    if (number(measurement.repetitions, `baseline.${mode}.repetitions`) !== 30) fail("incompatible_input", "baseline repetitions changed");
+    const samples = array(measurement.samples_ms, `baseline.${mode}.samples_ms`).map((value, index) => finiteNumber(value, `baseline.${mode}.samples_ms[${index}]`));
+    if (samples.length !== 30 || samples.some((sample) => sample > 1_000_000)) fail("incompatible_input", "baseline samples changed");
+    const ordered = [...samples].sort((left, right) => left - right);
+    const percentile = (fraction: number): number => ordered[Math.min(ordered.length - 1, Math.max(0, Math.ceil(fraction * ordered.length) - 1))]!;
+    const expected = {
+      min: ordered[0]!,
+      p50: percentile(0.5),
+      p95: percentile(0.95),
+      max: ordered[ordered.length - 1]!,
+      mean: samples.reduce((sum, sample) => sum + sample, 0) / samples.length,
+    };
+    const distribution = exactRecord(measurement.distribution_ms, `baseline.${mode}.distribution_ms`, BASELINE_DISTRIBUTION_KEYS);
+    for (const key of BASELINE_DISTRIBUTION_KEYS) {
+      const actual = finiteNumber(distribution[key], `baseline.${mode}.distribution_ms.${key}`);
+      if (Math.abs(actual - expected[key]) >= 0.001) fail("incompatible_input", "baseline distribution changed");
+    }
+  }
+  const notes = string(baseline.notes, "baseline notes");
+  if (notes.length > 512) fail("incompatible_input", "baseline notes are too long");
 }
 
 // The Python aggregate validator treats the registry as an inventory, not merely a
@@ -1618,6 +1838,12 @@ function validateArtifactShape(rootId: string, artifact: JsonRecord): void {
   }
 }
 
+function assertTrustedRegistry(registry: FixtureRegistry): void {
+  if (typeof registry !== "object" || registry === null || !TRUSTED_REGISTRIES.has(registry as object)) {
+    fail("untrusted_registry", "registry must be an immutable snapshot returned by loadRegistry");
+  }
+}
+
 function rootById(registry: FixtureRegistry, rootId: string): FixtureRoot {
   const root = registry.fixtureRoots.find((entry) => entry.id === rootId);
   if (!root) {
@@ -1663,7 +1889,85 @@ function registeredArtifact(root: FixtureRoot): RegistryFile {
   return match;
 }
 
-async function loadArtifact(repoRoot: string, root: FixtureRoot): Promise<JsonRecord> {
+async function validateCanonicalFixture(
+  repoRoot: string,
+  root: FixtureRoot,
+  registry: FixtureRegistry,
+): Promise<void> {
+  if (root.validator === null) fail("fixture_inventory_invalid", "ready fixture root has no canonical validator");
+
+  // Verify every validator input before reusing a prior deterministic decision.
+  // Cross-root inputs are explicit so the private snapshot remains complete without
+  // silently copying unregistered candidate paths.
+  const snapshotRoots = [
+    root,
+    ...(CANONICAL_VALIDATOR_DEPENDENCIES[root.id] ?? []).map((rootId) => rootById(registry, rootId)),
+  ];
+  const verifiedFiles: Array<{ file: RegistryFile; bytes: Uint8Array }> = [];
+  for (const snapshotRoot of snapshotRoots) {
+    if (snapshotRoot.status !== "ready") {
+      fail("fixture_inventory_invalid", `fixture ${root.id} validator dependency is not ready`);
+    }
+    for (const file of snapshotRoot.files) {
+      verifiedFiles.push({
+        file,
+        bytes: await readBoundedBytes(
+          join(repoRoot, "contracts/fixtures", file.path),
+          `fixture artifact ${file.path}`,
+          file,
+        ),
+      });
+    }
+  }
+  const cacheKey = `${repoRoot}\0${root.id}\0${verifiedFiles.map(({ file }) => `${file.path}:${file.sha256}:${file.sizeBytes}`).join("\0")}`;
+  if (root.id !== "compatibility-attestation" && VALIDATED_FIXTURES.has(cacheKey)) return;
+
+  // Run Python over a private copy of the descriptor-verified bytes. A validator
+  // must never reopen a mutable candidate pathname after TypeScript has hashed it.
+  const snapshotRoot = await mkdtemp(join(tmpdir(), "hermternal-parity-validator-"));
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    for (const verified of verifiedFiles) {
+      const destination = join(snapshotRoot, "contracts/fixtures", verified.file.path);
+      await mkdir(dirname(destination), { recursive: true });
+      await Bun.write(destination, verified.bytes);
+    }
+    const validatorPath = join(snapshotRoot, "contracts/fixtures", root.path, root.validator);
+    const args = ["python3", validatorPath];
+    if (root.id === "compatibility-attestation") {
+      args.push("--repo-root", repoRootFromModule(import.meta.dir), "--worktree");
+    }
+    child = Bun.spawn(args, {
+      cwd: snapshotRoot,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        child?.kill("SIGKILL");
+        reject(new ContractInputError("validator_timeout", `fixture ${root.id} validator did not finish`));
+      }, MAX_SUBPROCESS_DURATION_MS);
+    });
+    const exitCode = await Promise.race([child.exited, timeout]);
+    if (exitCode !== 0) {
+      fail("incompatible_input", `fixture ${root.id} failed its canonical validator`);
+    }
+    if (root.id !== "compatibility-attestation") VALIDATED_FIXTURES.add(cacheKey);
+  } finally {
+    if (timer) clearTimeout(timer);
+    child?.kill("SIGKILL");
+    if (child) await child.exited;
+    await rm(snapshotRoot, { recursive: true, force: true });
+  }
+}
+
+async function loadArtifact(
+  repoRoot: string,
+  root: FixtureRoot,
+  registry: FixtureRegistry,
+): Promise<JsonRecord> {
   const compatibility = root.id === "source-audit-compatibility-gate";
   const artifact = record(
     await readJson(artifactPath(repoRoot, root), `fixture ${root.id}`, {
@@ -1674,16 +1978,19 @@ async function loadArtifact(repoRoot: string, root: FixtureRoot): Promise<JsonRe
             maxDepth: MAX_COMPATIBILITY_JSON_DEPTH,
             maxNodes: MAX_COMPATIBILITY_JSON_NODES,
             maxStringBytes: MAX_COMPATIBILITY_STRING_BYTES,
+            integerKeyNames: new Set(["number", "size_bytes", "artifact_size_bytes", "repetitions"]),
           }
         : DEFAULT_JSON_LIMITS,
     }),
     `fixture ${root.id}`,
   );
+  if (!compatibility) await validateCanonicalFixture(repoRoot, root, registry);
   validateArtifactShape(root.id, artifact);
   return artifact;
 }
 
 export async function loadCase(repoRoot: string, registry: FixtureRegistry, rootId: string, caseId: string): Promise<FixtureCase> {
+  assertTrustedRegistry(registry);
   if (!caseId || caseId.trim() !== caseId) {
     fail("malformed_input", "case ID must be a non-empty canonical string");
   }
@@ -1691,23 +1998,23 @@ export async function loadCase(repoRoot: string, registry: FixtureRegistry, root
   if (root.status !== "ready") {
     fail("coverage_pending", "pending fixture roots cannot provide parity evidence");
   }
-  const artifact = await loadArtifact(await canonicalRepositoryRoot(repoRoot), root);
+  const artifact = await loadArtifact(await canonicalRepositoryRoot(repoRoot), root, registry);
   const cases = array(artifact.cases, `fixture ${rootId}.cases`);
   const matches = cases.filter((entry) => isRecord(entry) && entry.id === caseId);
   if (matches.length !== 1) {
     fail("unknown_case", "representative case ID is absent or duplicated");
   }
   const raw = record(matches[0], `fixture ${rootId}.${caseId}`);
-  return {
+  return immutableSnapshot<FixtureCase>({
     id: string(raw.id, `fixture ${rootId}.${caseId}.id`),
-    expected: record(raw.expected, `fixture ${rootId}.${caseId}.expected`),
-    raw,
-  };
+    expected: immutableSnapshot(record(raw.expected, `fixture ${rootId}.${caseId}.expected`)),
+    raw: immutableSnapshot(raw),
+  });
 }
 
 function blockedCompatibilityRecord(status: string): CompatibilityRecord {
   const evidence = boundedOutputString(`blocked:${status}`, "compatibility blocked evidence");
-  return {
+  return immutableSnapshot({
     compatible: false,
     liveRun: false,
     deploymentAttestation: evidence,
@@ -1715,7 +2022,7 @@ function blockedCompatibilityRecord(status: string): CompatibilityRecord {
     proxyProof: evidence,
     parityEvidence: evidence,
     benchmarkEvidence: evidence,
-  };
+  });
 }
 
 function roundedBenchmarkValue(value: number): number {
@@ -1760,6 +2067,49 @@ function validateCompatibilityBenchmark(
     }
   }
   if (benchmark.threshold !== null) fail("incompatible_input", `${label} threshold must remain null`);
+}
+
+async function gitBlob(revision: string, path: string): Promise<Uint8Array> {
+  const trustedRoot = repoRootFromModule(import.meta.dir);
+  const child = Bun.spawn(["git", "-C", trustedRoot, "show", `${revision}:${path}`], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new ContractInputError("artifact_read_timeout", "pinned Git artifact read timed out"));
+    }, MAX_SUBPROCESS_DURATION_MS);
+  });
+  try {
+    const operation = Promise.all([new Response(child.stdout).arrayBuffer(), child.exited] as const);
+    const [buffer, exitCode] = await Promise.race([operation, timeout]);
+    if (exitCode !== 0 || buffer.byteLength > MAX_JSON_BYTES) {
+      fail("incompatible_input", "pinned Git artifact is unavailable or oversized");
+    }
+    return new Uint8Array(buffer);
+  } finally {
+    if (timer) clearTimeout(timer);
+    child.kill("SIGKILL");
+    await child.exited;
+  }
+}
+
+async function validateCompatibilityGitEvidence(repoRoot: string): Promise<void> {
+  const trustedRoot = await canonicalRepositoryRoot(repoRootFromModule(import.meta.dir));
+  const candidateRoot = await canonicalRepositoryRoot(repoRoot);
+  const revisions = [EXPECTED_COMPATIBILITY_MERGED_HEAD, EXPECTED_COMPATIBILITY_INTEGRATION_HEAD];
+  if (candidateRoot === trustedRoot) revisions.push("HEAD");
+  for (const revision of revisions) {
+    for (const expected of EXPECTED_COMPATIBILITY_ARTIFACTS) {
+      const bytes = await gitBlob(revision, expected.path);
+      if (bytes.byteLength !== expected.sizeBytes || sha256(bytes) !== expected.sha256) {
+        fail("incompatible_input", "compatibility Git artifact evidence changed");
+      }
+    }
+  }
 }
 
 function validateCompatibilityArtifact(artifact: JsonRecord): JsonRecord {
@@ -1858,6 +2208,7 @@ function validateCompatibilityArtifact(artifact: JsonRecord): JsonRecord {
 }
 
 export async function loadCompatibilityRecord(repoRoot: string, registry: FixtureRegistry): Promise<CompatibilityRecord> {
+  assertTrustedRegistry(registry);
   const root = rootById(registry, "source-audit-compatibility-gate");
   const canonicalCoverage = coverageById(registry, "compatibility-gate");
   if (
@@ -1876,9 +2227,10 @@ export async function loadCompatibilityRecord(repoRoot: string, registry: Fixtur
     return blockedCompatibilityRecord(blockedStatus);
   }
 
-  const artifact = await loadArtifact(await canonicalRepositoryRoot(repoRoot), root);
+  const artifact = await loadArtifact(await canonicalRepositoryRoot(repoRoot), root, registry);
   const status = validateCompatibilityArtifact(artifact);
-  return {
+  await validateCompatibilityGitEvidence(repoRoot);
+  return immutableSnapshot({
     compatible: false,
     liveRun: false,
     deploymentAttestation: boundedOutputString(status.deployment_attestation, "compatibility deployment attestation"),
@@ -1886,7 +2238,7 @@ export async function loadCompatibilityRecord(repoRoot: string, registry: Fixtur
     proxyProof: boundedOutputString(status.proxy_proof, "compatibility proxy proof"),
     parityEvidence: boundedOutputString(status.parity_evidence, "compatibility parity evidence"),
     benchmarkEvidence: boundedOutputString(status.benchmark_evidence, "compatibility benchmark evidence"),
-  };
+  });
 }
 
 function sorted(value: JsonValue): JsonValue {
@@ -1956,7 +2308,7 @@ async function runRepresentative(
         coverageId: representative.coverageId,
         caseId,
         status: "blocked",
-        platforms: coverage.platforms,
+        platforms: [...coverage.platforms],
       });
     }
     return results;
@@ -1981,7 +2333,7 @@ async function runRepresentative(
         coverageId: representative.coverageId,
         caseId,
         status: "proven",
-        platforms: coverage.platforms,
+        platforms: [...coverage.platforms],
         webDecision: web.decision,
         appleDecision: "blocked_platform",
       });
@@ -2039,10 +2391,9 @@ export async function runParity(repoRoot: string): Promise<ParityReport> {
     cases,
     compatibility,
   };
-  if (utf8Bytes(JSON.stringify(report)) > MAX_REPORT_BYTES) {
-    fail("output_limit", "serialized parity report exceeds the bounded UTF-8 byte budget");
-  }
-  return report;
+  serializeBoundedJsonLine(report);
+  await validateAggregateArtifacts(canonicalRoot);
+  return immutableSnapshot(report);
 }
 
 export function repoRootFromModule(moduleDirectory: string): string {
@@ -2056,7 +2407,7 @@ export function assertRejects(error: unknown, code: string): void {
 }
 
 export function representativeIds(): readonly Representative[] {
-  return REPRESENTATIVES;
+  return immutableSnapshot(REPRESENTATIVES);
 }
 
 export function assertNoNetworkImports(sourceText: string): void {

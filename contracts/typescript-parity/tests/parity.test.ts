@@ -8,15 +8,22 @@ import {
   assertRejects,
   atFdcwdForPlatform,
   boundedErrorText,
+  injectReaddirErrorAfter,
   loadCase,
+  loadCompatibilityRecord,
   loadRegistry,
   MAX_ERROR_MESSAGE_LENGTH,
   MAX_JSON_BYTES,
   MAX_JSON_DEPTH,
   MAX_REPORT_BYTES,
+  observedReaddirEntries,
+  PLATFORMS,
   readDescriptorBytes,
+  representativeIds,
   repoRootFromModule,
   runParity,
+  serializeBoundedJsonLine,
+  type FixtureRegistry,
 } from "../src/parity";
 
 const repoRoot = repoRootFromModule(import.meta.dir);
@@ -94,12 +101,23 @@ async function writeParityFixtureTree(): Promise<string> {
   const fixturesDirectory = join(temporaryRoot, "contracts/fixtures");
   await mkdir(fixturesDirectory, { recursive: true });
   const registry = await Bun.file(join(repoRoot, "contracts/fixtures/index.json")).json() as {
-    fixture_roots: Array<{ files: Array<{ path: string }> }>;
+    fixture_roots: Array<{ id: string; status: string; validator: string | null; files: Array<{ path: string }> }>;
+    coverage: Array<{ id: string; status: string }>;
   };
   await Bun.write(
     join(fixturesDirectory, "index.json"),
     await Bun.file(join(repoRoot, "contracts/fixtures/index.json")).arrayBuffer(),
   );
+  for (const metadataPath of [
+    "schema.json",
+    "validator/validation-baseline.json",
+    "validator/test_validate.py",
+    "validator/validate.py",
+  ]) {
+    const destination = join(fixturesDirectory, metadataPath);
+    await mkdir(dirname(destination), { recursive: true });
+    await Bun.write(destination, await Bun.file(join(repoRoot, "contracts/fixtures", metadataPath)).arrayBuffer());
+  }
   for (const root of registry.fixture_roots) {
     for (const file of root.files) {
       const destination = join(fixturesDirectory, file.path);
@@ -189,11 +207,25 @@ async function refreshManifest(root: string, artifact: string): Promise<void> {
   await Bun.write(indexPath, `${JSON.stringify(registry)}\n`);
 }
 
+function expectDeepFrozen(value: unknown, seen = new Set<object>()): void {
+  if (value === null || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  expect(Object.isFrozen(value)).toBe(true);
+  expect(Reflect.ownKeys(value).every((key) => typeof key === "string")).toBe(true);
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+    if (key !== "length") expect(descriptor.enumerable).toBe(true);
+    expect("get" in descriptor && descriptor.get !== undefined).toBe(false);
+    expect("set" in descriptor && descriptor.set !== undefined).toBe(false);
+    if ("value" in descriptor) expectDeepFrozen(descriptor.value, seen);
+  }
+}
+
 describe("C-20 TypeScript contract parity", () => {
   it("proves shared semantic outcomes for representative contract families offline", async () => {
     const temporaryRoot = await writeParityFixtureTree();
     try {
       const report = await runParity(temporaryRoot);
+      expectDeepFrozen(report);
       expect(report.ok).toBe(true);
       expect(report.contract).toBe("dashboard-v0.0.1");
       expect(report.hermesSourceSha).toBe("f5be9236e00ddf2f2a412697f267078fc4ee068e");
@@ -220,6 +252,139 @@ describe("C-20 TypeScript contract parity", () => {
     await expect(loadCase(repoRoot, registry, "deployment-security-browser-auth", "not-a-case")).rejects.toMatchObject({ code: "unknown_case" });
     await expect(loadCase(repoRoot, registry, "deployment-security-browser-auth", " login-success")).rejects.toMatchObject({ code: "malformed_input" });
   });
+
+  it("returns inert snapshots without caller aliases, accessors, or mutable platform state", async () => {
+    const registry = await loadRegistry(repoRoot);
+    expectDeepFrozen(registry);
+    expectDeepFrozen(PLATFORMS);
+    expect(() => (PLATFORMS as unknown as string[]).push("android")).toThrow();
+
+    const fixture = await loadCase(repoRoot, registry, "deployment-security-browser-auth", "login-success");
+    expectDeepFrozen(fixture);
+    expect(fixture.expected).not.toBe(fixture.raw.expected);
+    expect(fixture.expected as unknown).toEqual(fixture.raw.expected);
+    expect(() => { (fixture.expected as Record<string, unknown>).status = 599; }).toThrow();
+
+    const firstRepresentatives = representativeIds();
+    const secondRepresentatives = representativeIds();
+    expect(firstRepresentatives).not.toBe(secondRepresentatives);
+    expect(firstRepresentatives[0]).not.toBe(secondRepresentatives[0]);
+    expectDeepFrozen(firstRepresentatives);
+    expect(() => (firstRepresentatives[0]!.caseIds as string[]).push("poisoned")).toThrow();
+    expect(representativeIds()).toEqual(secondRepresentatives);
+
+    const copied = structuredClone(registry) as FixtureRegistry;
+    await expect(loadCase(repoRoot, copied, "deployment-security-browser-auth", "login-success"))
+      .rejects.toMatchObject({ code: "untrusted_registry" });
+
+    let getterCalls = 0;
+    const accessorRegistry = {} as FixtureRegistry;
+    Object.defineProperty(accessorRegistry, "fixtureRoots", {
+      enumerable: false,
+      get() { getterCalls += 1; return registry.fixtureRoots; },
+    });
+    await expect(loadCase(repoRoot, accessorRegistry, "deployment-security-browser-auth", "login-success"))
+      .rejects.toMatchObject({ code: "untrusted_registry" });
+    expect(getterCalls).toBe(0);
+
+    let proxyReads = 0;
+    const proxyRegistry = new Proxy({} as FixtureRegistry, {
+      get() { proxyReads += 1; return undefined; },
+    });
+    await expect(loadCase(repoRoot, proxyRegistry, "deployment-security-browser-auth", "login-success"))
+      .rejects.toMatchObject({ code: "untrusted_registry" });
+    expect(proxyReads).toBe(0);
+
+    const symbolRegistry = { [Symbol("hidden")]: true } as unknown as FixtureRegistry;
+    await expect(loadCase(repoRoot, symbolRegistry, "deployment-security-browser-auth", "login-success"))
+      .rejects.toMatchObject({ code: "untrusted_registry" });
+
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const trusted = await loadRegistry(temporaryRoot);
+      const root = trusted.fixtureRoots.find((entry) => entry.id === "deployment-security-browser-auth")!;
+      const registered = root.files.find((entry) => entry.path.endsWith("cases.json"))!;
+      expect(() => { (registered as { sha256: string }).sha256 = "0".repeat(64); }).toThrow();
+      const path = join(temporaryRoot, "contracts/fixtures/deployment-security/browser-auth/cases.json");
+      const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+      bytes[0] = bytes[0] === 0x20 ? 0x21 : 0x20;
+      await Bun.write(path, bytes);
+      await expect(loadCase(temporaryRoot, trusted, root.id, "login-success"))
+        .rejects.toMatchObject({ code: "artifact_hash_mismatch" });
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects the exact browser-auth nested canonical parity reproductions", async () => {
+    const artifact = "deployment-security/browser-auth/cases.json";
+    const mutations: Array<(record: Record<string, unknown>) => void> = [
+      (record) => {
+        const cases = record.cases as Array<Record<string, unknown>>;
+        (cases.find((entry) => entry.id === "login-success")!.expected as Record<string, unknown>).status = "302";
+      },
+      (record) => {
+        const cases = record.cases as Array<Record<string, unknown>>;
+        (cases.find((entry) => entry.id === "login-success")!.expected as Record<string, unknown>).diagnostic = "x".repeat(300);
+      },
+      (record) => {
+        const cases = record.cases as Array<Record<string, unknown>>;
+        (cases.find((entry) => entry.id === "login-success")!.expected as Record<string, unknown>).status = 9_007_199_254_740_993;
+      },
+      (record) => {
+        const cases = record.cases as Array<Record<string, unknown>>;
+        [cases[0], cases[1]] = [cases[1]!, cases[0]!];
+      },
+    ];
+
+    for (const mutate of mutations) {
+      const temporaryRoot = await writeParityFixtureTree();
+      try {
+        const path = join(temporaryRoot, "contracts/fixtures", artifact);
+        const record = await Bun.file(path).json() as Record<string, unknown>;
+        mutate(record);
+        await Bun.write(path, `${JSON.stringify(record)}\n`);
+        await refreshManifest(temporaryRoot, artifact);
+        const registry = await loadRegistry(temporaryRoot);
+        await expect(loadCase(temporaryRoot, registry, "deployment-security-browser-auth", "login-success"))
+          .rejects.toMatchObject({ code: "incompatible_input" });
+      } finally {
+        await rm(temporaryRoot, { recursive: true, force: true });
+      }
+    }
+  }, 30_000);
+
+  it("rejects compatibility PR numbers written as lexical floats", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const artifact = "source-audit/compatibility-gate/compatibility_record.json";
+      const path = join(temporaryRoot, "contracts/fixtures", artifact);
+      const source = await Bun.file(path).text();
+      expect(source).toContain('"number": 221');
+      await Bun.write(path, source.replace('"number": 221', '"number": 221.0'));
+      await refreshManifest(temporaryRoot, artifact);
+      const registry = await loadRegistry(temporaryRoot);
+      await expect(loadCompatibilityRecord(temporaryRoot, registry))
+        .rejects.toMatchObject({ code: "malformed_input" });
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("matches normal and optimized Python decisions for checked-in compatibility evidence", async () => {
+    const validator = join(repoRoot, "contracts/fixtures/source-audit/compatibility-gate/validate.py");
+    const record = join(repoRoot, "contracts/fixtures/source-audit/compatibility-gate/compatibility_record.json");
+    for (const args of [
+      ["python3", validator, "--repo-root", repoRoot, "--record", record],
+      ["python3", "-O", validator, "--repo-root", repoRoot, "--record", record],
+    ]) {
+      const result = Bun.spawnSync(args, { cwd: repoRoot, stdout: "pipe", stderr: "pipe" });
+      expect(result.exitCode).not.toBe(0);
+    }
+    const registry = await loadRegistry(repoRoot);
+    await expect(loadCompatibilityRecord(repoRoot, registry))
+      .rejects.toMatchObject({ code: "incompatible_input" });
+  }, 30_000);
 
   it("rejects malformed or incompatible registry input before reading fixtures", async () => {
     const malformedJsonRoot = await writeRawRegistry("{\n");
@@ -274,7 +439,7 @@ describe("C-20 TypeScript contract parity", () => {
     expect(() => assertNoNetworkImports(source)).not.toThrow();
   });
 
-  it("treats authoritative non-success coverage states as bounded blocked evidence", async () => {
+  it("parses non-success coverage states but rejects registry bytes outside the aggregate baseline", async () => {
     for (const status of ["empty", "failure", "cancelled", "unknown"] as const) {
       const temporaryRoot = await writeParityFixtureTree();
       try {
@@ -284,19 +449,16 @@ describe("C-20 TypeScript contract parity", () => {
           if (!row) throw new Error("image coverage row is missing");
           row.status = status;
         });
-        const report = await runParity(temporaryRoot);
-        const imageResults = report.cases.filter((entry) => entry.family === "image");
-        expect(report.blockedCoverageIds).toContain("image-attachment-lifecycle");
-        expect(imageResults.length).toBe(3);
-        expect(imageResults.every((entry) => entry.status === "blocked")).toBe(true);
-        expect(imageResults.every((entry) => entry.webDecision === undefined && entry.appleDecision === undefined)).toBe(true);
+        const registry = await loadRegistry(temporaryRoot);
+        expect(registry.coverage.find((entry) => entry.id === "image-attachment-lifecycle")?.status).toBe(status);
+        await expect(runParity(temporaryRoot)).rejects.toMatchObject({ code: "artifact_size_mismatch" });
       } finally {
         await rm(temporaryRoot, { recursive: true, force: true });
       }
     }
-  });
+  }, 30_000);
 
-  it("supports pending roots without validator or artifact claims", async () => {
+  it("keeps pending roots blocked while the aggregate baseline rejects unreviewed registry bytes", async () => {
     const temporaryRoot = await writeParityFixtureTree();
     try {
       const pendingRoot = join(temporaryRoot, "contracts/fixtures/provider-discovery");
@@ -313,15 +475,16 @@ describe("C-20 TypeScript contract parity", () => {
         if (!row) throw new Error("provider-discovery coverage row is missing");
         row.status = "pending";
       });
-      const report = await runParity(temporaryRoot);
-      expect(report.blockedCoverageIds).toContain("provider-discovery");
-      expect(report.readyCaseCount).toBe(11);
+      const registry = await loadRegistry(temporaryRoot);
+      await expect(loadCase(temporaryRoot, registry, "provider-discovery", "providers-present"))
+        .rejects.toMatchObject({ code: "coverage_pending" });
+      await expect(runParity(temporaryRoot)).rejects.toMatchObject({ code: "artifact_size_mismatch" });
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
-  it("returns bounded blocked compatibility evidence for a pending aggregate root", async () => {
+  it("returns bounded blocked compatibility evidence for a trusted pending aggregate root", async () => {
     const temporaryRoot = await writeParityFixtureTree();
     try {
       await rm(join(temporaryRoot, "contracts/fixtures/source-audit/compatibility-gate"), { recursive: true, force: true });
@@ -338,15 +501,8 @@ describe("C-20 TypeScript contract parity", () => {
         row.status = "pending";
       });
 
-      const result = runCli("--repo-root", temporaryRoot);
-      expect(result.exitCode).toBe(0);
-      expect(result.stderr).toBe("");
-      const report = JSON.parse(result.stdout) as {
-        blockedCoverageIds: string[];
-        compatibility: Record<string, unknown>;
-      };
-      expect(report.blockedCoverageIds).toContain("compatibility-gate");
-      expect(report.compatibility).toMatchObject({
+      const registry = await loadRegistry(temporaryRoot);
+      expect(await loadCompatibilityRecord(temporaryRoot, registry)).toEqual({
         compatible: false,
         liveRun: false,
         deploymentAttestation: "blocked:pending",
@@ -355,11 +511,11 @@ describe("C-20 TypeScript contract parity", () => {
         parityEvidence: "blocked:pending",
         benchmarkEvidence: "blocked:pending",
       });
-      expect(result.stdout).not.toContain("unregistered_artifact");
+      await expect(runParity(temporaryRoot)).rejects.toMatchObject({ code: "artifact_size_mismatch" });
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("rejects a parent-directory symlink replacement before reading its alternate tree", async () => {
     const temporaryRoot = await writeParityFixtureTree();
@@ -466,7 +622,7 @@ describe("C-20 TypeScript contract parity", () => {
     expect(incomplete.stdout).toBe("");
     expect(cliError(incomplete).code).toBe("fixture_inventory_invalid");
     expect(incomplete.stderr.length).toBeLessThan(1_024);
-  });
+  }, 30_000);
 
   it("rejects malformed, duplicate-key, deep, oversized, and unknown-field CLI input", async () => {
     const inputs: readonly [string, string, string][] = [
@@ -731,6 +887,12 @@ describe("C-20 TypeScript contract parity", () => {
       expect(bounded).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\ud800-\udfff]/);
     }
 
+    const baseBytes = new TextEncoder().encode(serializeBoundedJsonLine({ padding: "" })).byteLength;
+    const exact = serializeBoundedJsonLine({ padding: "x".repeat(MAX_REPORT_BYTES - baseBytes) });
+    expect(new TextEncoder().encode(exact).byteLength).toBe(8_192);
+    expect(() => serializeBoundedJsonLine({ padding: "x".repeat(MAX_REPORT_BYTES - baseBytes + 1) }))
+      .toThrow(expect.objectContaining({ code: "output_limit" }));
+
     const temporaryRoot = await writeParityFixtureTree();
     try {
       await mutateParityRegistry(temporaryRoot, (registry) => {
@@ -756,7 +918,40 @@ describe("C-20 TypeScript contract parity", () => {
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
+
+  it("validates the pinned aggregate schema and validation baseline", async () => {
+    for (const relativePath of ["schema.json", "validator/validation-baseline.json"]) {
+      const temporaryRoot = await writeParityFixtureTree();
+      try {
+        await rm(join(temporaryRoot, "contracts/fixtures", relativePath), { force: true });
+        await expect(runParity(temporaryRoot)).rejects.toMatchObject({
+          code: expect.stringMatching(/^(artifact_read_failed|unsafe_artifact)$/),
+        });
+      } finally {
+        await rm(temporaryRoot, { recursive: true, force: true });
+      }
+    }
+  }, 30_000);
+
+  it("fails closed when readdir reports EIO in either inventory pass", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      injectReaddirErrorAfter(0);
+      await expect(runParity(temporaryRoot)).rejects.toMatchObject({ code: "fixture_inventory_invalid" });
+
+      injectReaddirErrorAfter(-1);
+      await runParity(temporaryRoot);
+      const completeEntryCount = observedReaddirEntries();
+      expect(completeEntryCount).toBeGreaterThan(1);
+
+      injectReaddirErrorAfter(completeEntryCount - 1);
+      await expect(runParity(temporaryRoot)).rejects.toMatchObject({ code: "fixture_inventory_invalid" });
+    } finally {
+      injectReaddirErrorAfter(-1);
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("bounds descriptor-rooted inventory depth and rejects a symlinked root", async () => {
     const deepRoot = await writeParityFixtureTree();
