@@ -99,6 +99,14 @@
     }
   }
 
+  function toggleMobileSidebar(): void {
+    // Forced events can bypass native `inert`; guard local presentation state
+    // before any drawer mutation, matching the action-emission boundary below.
+    if (compatibilityBlocked) return;
+    mobileSidebarOpen = !mobileSidebarOpen;
+    mobileWorkspaceOpen = false;
+  }
+
   function toggleMobileWorkspace(): void {
     if (compatibilityBlocked) return;
     mobileWorkspaceOpen = !mobileWorkspaceOpen;
@@ -142,10 +150,7 @@
         iconOnly
         label="Conversations"
         variant="ghost"
-        onActivate={() => {
-          mobileSidebarOpen = !mobileSidebarOpen;
-          mobileWorkspaceOpen = false;
-        }}
+        onActivate={toggleMobileSidebar}
       />
       <Pill
         ariaLabel="Edit conversation title"

@@ -213,6 +213,8 @@ test('approved compatibility gates inert every underlying action for pointer, ke
     await expect(underlay.getByRole('textbox')).toHaveCount(0);
     await expect(preview.getByRole('button')).toHaveCount(2);
 
+    const sidebar = underlay.locator('.sidebar');
+    await expect(sidebar).not.toHaveClass(/open/);
     const blockedNewChat = underlay.locator('[aria-label="Start a new chat"]');
     await blockedNewChat.dispatchEvent('pointerdown', { button: 0, pointerType: 'mouse' });
     await blockedNewChat.evaluate((element: HTMLElement) => element.click());
@@ -220,8 +222,12 @@ test('approved compatibility gates inert every underlying action for pointer, ke
       .locator('[aria-label="Edit conversation title"]')
       .first()
       .evaluate((element: HTMLElement) => element.click());
+    await underlay
+      .locator('[aria-label="Open conversations"]')
+      .evaluate((element: HTMLElement) => element.click());
     await expect(page.locator('.section-note').first()).toHaveText('No runtime action yet');
     await expect(page.getByTestId('mobile-title-editor')).toHaveCount(0);
+    await expect(sidebar).not.toHaveClass(/open/);
 
     await underlay.locator('[aria-label="Start a new chat"]').evaluate((element: HTMLElement) => element.focus());
     await expect(retry).toBeFocused();
@@ -275,9 +281,12 @@ test('password preview submits only a credential-free local fixture action', asy
   const password = page.getByRole('textbox', { name: 'Password' });
   await expect(fixtureForm).toHaveAttribute('autocomplete', 'off');
   await expect(fixtureForm).toHaveAttribute('data-form-type', 'other');
-  await expect(username).toHaveAttribute('name', 'synthetic-username-fixture');
+  await expect(fixtureForm).toHaveAttribute('method', 'dialog');
+  await expect(username).not.toHaveAttribute('name', /.+/);
+  await expect(username).toHaveAttribute('data-fixture-field', 'username');
   await expect(username).toHaveAttribute('autocomplete', 'off');
-  await expect(password).toHaveAttribute('name', 'synthetic-password-fixture');
+  await expect(password).not.toHaveAttribute('name', /.+/);
+  await expect(password).toHaveAttribute('data-fixture-field', 'password');
   await expect(password).toHaveAttribute('autocomplete', 'off');
 
   await username.fill('sam');
@@ -288,6 +297,46 @@ test('password preview submits only a credential-free local fixture action', asy
   await expect(page.getByRole('textbox', { name: 'Password' })).toHaveValue('');
   await expect(page.locator('.section-note').nth(1)).toHaveText('submit-password-fixture');
   await expect(page.getByText(/sent only to the configured/i)).not.toBeVisible();
+});
+
+test('password form cannot navigate with credential values after script execution stops', async ({ page }) => {
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+  const originalUrl = page.url();
+  const navigationRequests: string[] = [];
+  page.on('request', (request) => {
+    if (request.isNavigationRequest()) navigationRequests.push(request.url());
+  });
+
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+  await page.getByLabel('Username').fill('url-history-username');
+  await page.getByRole('textbox', { name: 'Password' }).fill('url-history-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+
+  await expect(page).toHaveURL(originalUrl);
+  expect(page.url()).not.toContain('url-history-username');
+  expect(page.url()).not.toContain('url-history-password');
+  expect(navigationRequests).toEqual([]);
+});
+
+test('Pill consumes one pointer gesture across leave, re-entry, and compatibility click', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+  const workspace = page.getByRole('button', { name: 'Open workspace' });
+
+  await workspace.dispatchEvent('pointerdown', { button: 0, pointerType: 'mouse' });
+  await expect(workspace).toHaveAttribute('aria-expanded', 'true');
+  await workspace.dispatchEvent('pointerleave', { pointerType: 'mouse' });
+  await workspace.dispatchEvent('pointerenter', { pointerType: 'mouse' });
+  await workspace.dispatchEvent('pointerup', { button: 0, pointerType: 'mouse' });
+  await workspace.dispatchEvent('click', { detail: 1 });
+  await expect(workspace).toHaveAttribute('aria-expanded', 'true');
+
+  await workspace.focus();
+  await page.keyboard.press('Enter');
+  await expect(workspace).toHaveAttribute('aria-expanded', 'false');
 });
 
 test('UI preview state branches have no axe violations in light, dark, desktop, and narrow layouts', async ({ page }) => {

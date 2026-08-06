@@ -131,7 +131,9 @@ describe('WorkspacePreview', () => {
       const underlay = screen.getByTestId('workspace-underlay');
       const retry = screen.getByRole('button', { name: 'Retry compatibility check' });
       const returnToSignIn = screen.getByRole('button', { name: 'Return to sign-in' });
+      const sidebar = underlay.querySelector('.sidebar');
 
+      expect(sidebar).not.toHaveClass('open');
       expect(
         screen.getByRole('heading', {
           name: state === 'compatibility-check-failed' ? 'Compatibility check failed' : 'Unsupported Hermes revision'
@@ -156,8 +158,9 @@ describe('WorkspacePreview', () => {
         const control = underlay.querySelector<HTMLElement>(selector);
         expect(control).toBeInTheDocument();
         fireEvent.pointerDown(control!, { button: 0, pointerType: 'mouse' });
-        fireEvent.click(control!);
+        fireEvent.click(control!, { detail: 1 });
       }
+      expect(sidebar).not.toHaveClass('open');
       const composer = underlay.querySelector<HTMLTextAreaElement>('[aria-label="Message Hermes"]');
       fireEvent.input(composer!, { target: { value: 'Blocked fixture input' } });
       fireEvent.keyDown(composer!, { key: 'Enter', metaKey: true });
@@ -166,7 +169,7 @@ describe('WorkspacePreview', () => {
       expect(onAction).not.toHaveBeenCalled();
 
       fireEvent.pointerDown(retry, { button: 0, pointerType: 'mouse' });
-      fireEvent.click(retry);
+      fireEvent.click(retry, { detail: 1 });
       fireEvent.keyDown(returnToSignIn, { key: 'Enter' });
       fireEvent.click(returnToSignIn);
       expect(onAction).toHaveBeenCalledTimes(2);

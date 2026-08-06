@@ -68,31 +68,32 @@
 
   function handlePointerUp(): void {
     pressed = false;
-    if (pointerActivationHandled) {
-      setTimeout(() => {
-        pointerActivationHandled = false;
-      }, 0);
-    }
+    // Suppression stays armed until the compatibility click is observed. A
+    // leave/re-entry sequence may deliver that click after a later task.
   }
 
   function handlePointerCancel(): void {
     resetMotion();
-    pointerActivationHandled = false;
+    // Keep suppression armed in case a host synthesizes a compatibility click
+    // after cancellation. Keyboard and assistive clicks are distinguished below.
   }
 
   function handlePointerLeave(): void {
-    // Leaving cancels this pointer sequence. A later keyboard-generated click
-    // must not be mistaken for the pointer compatibility click.
+    // Motion resets on leave, but the pointer gesture remains consumed. If the
+    // pointer re-enters and produces its compatibility click, it must not emit a
+    // second action after the immediate pointer-down activation.
     resetMotion();
-    pointerActivationHandled = false;
   }
 
-  function handleClick(): void {
+  function handleClick(event: MouseEvent): void {
     if (disabled || !onActivate) return;
-    if (pointerActivationHandled) {
+    if (pointerActivationHandled && event.detail > 0) {
       pointerActivationHandled = false;
       return;
     }
+    // Keyboard and assistive activation use an untrusted/detail-zero click and
+    // remain available even after a pointer leaves or is cancelled.
+    pointerActivationHandled = false;
     onActivate();
   }
 </script>

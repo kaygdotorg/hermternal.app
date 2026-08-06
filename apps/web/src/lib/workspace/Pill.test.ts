@@ -25,7 +25,7 @@ describe('Pill', () => {
     fireEvent.pointerDown(button, { button: 0, pointerType: 'mouse' });
     expect(onActivate).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(button);
+    fireEvent.click(button, { detail: 1 });
     expect(onActivate).toHaveBeenCalledTimes(1);
 
     fireEvent.pointerCancel(button);
@@ -33,16 +33,34 @@ describe('Pill', () => {
     expect(onActivate).toHaveBeenCalledTimes(2);
   });
 
-  it('clears pointer suppression on leave so the next Enter activation is accepted', () => {
+  it('suppresses leave/re-entry compatibility clicks while retaining keyboard activation', () => {
     const onActivate = vi.fn();
     render(Pill, { label: 'Open', onActivate });
 
     const button = screen.getByRole('button', { name: 'Open' });
     fireEvent.pointerDown(button, { button: 0, pointerType: 'mouse' });
     fireEvent.pointerLeave(button, { pointerType: 'mouse' });
-    fireEvent.keyDown(button, { key: 'Enter' });
-    fireEvent.click(button);
+    fireEvent.pointerEnter(button, { pointerType: 'mouse' });
+    fireEvent.pointerUp(button, { button: 0, pointerType: 'mouse' });
+    fireEvent.click(button, { detail: 1 });
+    expect(onActivate).toHaveBeenCalledTimes(1);
 
+    fireEvent.keyDown(button, { key: 'Enter' });
+    fireEvent.click(button, { detail: 0 });
+    expect(onActivate).toHaveBeenCalledTimes(2);
+  });
+
+  it('suppresses a forced compatibility click after pointer cancellation', () => {
+    const onActivate = vi.fn();
+    render(Pill, { label: 'Retry', onActivate });
+
+    const button = screen.getByRole('button', { name: 'Retry' });
+    fireEvent.pointerDown(button, { button: 0, pointerType: 'mouse' });
+    fireEvent.pointerCancel(button, { pointerType: 'mouse' });
+    fireEvent.click(button, { detail: 1 });
+    expect(onActivate).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(button, { detail: 0 });
     expect(onActivate).toHaveBeenCalledTimes(2);
   });
 

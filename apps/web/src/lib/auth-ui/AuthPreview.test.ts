@@ -39,11 +39,13 @@ describe('AuthPreview', () => {
     const password = screen.getByLabelText('Password');
     expect(form).toHaveAttribute('autocomplete', 'off');
     expect(form).toHaveAttribute('data-form-type', 'other');
+    expect(form).toHaveAttribute('method', 'dialog');
     for (const field of [username, password]) {
       expect(field).toHaveAttribute('autocomplete', 'off');
       expect(field).toHaveAttribute('data-1p-ignore');
       expect(field).toHaveAttribute('data-lpignore', 'true');
-      expect(field.getAttribute('name')).toMatch(/^synthetic-/);
+      expect(field).not.toHaveAttribute('name');
+      expect(field).toHaveAttribute('data-fixture-field');
     }
     expect(username).toHaveValue('');
   });

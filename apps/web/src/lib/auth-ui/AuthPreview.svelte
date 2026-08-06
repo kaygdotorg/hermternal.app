@@ -172,12 +172,16 @@
         </header>
 
         {#key formResetKey}
+          <!-- `dialog` has no native navigation target outside a dialog. This
+               makes the unhydrated/default path inert while the submit event
+               remains available to the accessible local runtime handler. -->
           <form
             aria-busy={effectiveState === 'password-submitting'}
             aria-label="Hermes password sign in"
             autocomplete="off"
             class="password-form"
             data-form-type="other"
+            method="dialog"
             onsubmit={handlePasswordSubmit}
           >
             <label class="field-label" for="auth-username">Username</label>
@@ -186,8 +190,8 @@
               autocomplete="off"
               data-1p-ignore
               data-lpignore="true"
+              data-fixture-field="username"
               disabled={effectiveState === 'password-submitting'}
-              name="synthetic-username-fixture"
               placeholder="Synthetic username"
               required
               bind:this={usernameInput}
@@ -210,8 +214,8 @@
               autocomplete="off"
               data-1p-ignore
               data-lpignore="true"
+              data-fixture-field="password"
               disabled={effectiveState === 'password-submitting'}
-              name="synthetic-password-fixture"
               placeholder="Synthetic password"
               required
               type={passwordVisible ? 'text' : 'password'}
