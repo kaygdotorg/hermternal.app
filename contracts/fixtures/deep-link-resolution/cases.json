@@ -1,0 +1,645 @@
+{
+  "schema": "hermternal.deep-link-resolution.v1",
+  "operation": "C-16",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "network": false,
+  "pending_ttl_seconds": 300,
+  "dependencies": {
+    "deep-link-grammar/cases.json": {
+      "sha256": "91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96"
+    },
+    "deep-link-grammar/validate.py": {
+      "sha256": "c01cc7958ebd573fa336d72de551e9c4b45e27397c6a38f5012eff35edff314e"
+    },
+    "session-lineage/cases.json": {
+      "sha256": "ebd320005dea1623b691346ef6b2b38a60fb510c7b4ed16855c02e9d395540ea"
+    },
+    "session-lineage/validation-baseline.json": {
+      "sha256": "c62ffce8836f873c03143d2716b83e99db1843083bef82d5697cd5a613f88b3d"
+    }
+  },
+  "invariants": {
+    "exact_ids": "full opaque IDs are preserved without normalization",
+    "lookup": "authenticated Dashboard lookup only",
+    "latest_descendant": "selected descendant keeps exact root and parent lineage",
+    "authorization": "missing and denied share one session-not-found outcome",
+    "message_anchor": "focus exact message or open session with message-not-found fallback",
+    "pending_target": "memory only; clear on success, failure, expiry, cancellation, or logout",
+    "creation": false,
+    "sharing": false,
+    "local_transcript_mirror": false
+  },
+  "cases": [
+    {
+      "id": "authenticated-exact-root-direct-load",
+      "link": "https://synthetic.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "lookup_present",
+        "complete"
+      ],
+      "expected": {
+        "decision": "session_opened",
+        "final_state": "opened",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "session_open",
+          "opened"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "session_opened",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-root-0000000000000000000000000000000000000001",
+        "opened_session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "message_id": null,
+        "focus": "session",
+        "pending_target": false,
+        "lookup_attempts": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A direct authenticated load opens the exact root ID."
+    },
+    {
+      "id": "authenticated-message-anchor-focus",
+      "link": "https://synthetic.hermternal.test/v1/c/session-branch-0000000000000000000000000000000000000002/m/synthetic-message-anchor-00000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "lookup_present",
+        "message_present"
+      ],
+      "expected": {
+        "decision": "message_focused",
+        "final_state": "opened",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "session_open",
+          "opened"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "message_anchor_focused",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "message_id": "synthetic-message-anchor-00000000000000000000000000000001",
+        "focus": "message",
+        "pending_target": false,
+        "lookup_attempts": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "An exact message anchor focuses after the exact branch opens."
+    },
+    {
+      "id": "latest-descendant-preserves-lineage",
+      "link": "hermternal://open/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "latest_descendant",
+      "events": [
+        "receive",
+        "lookup_present",
+        "complete"
+      ],
+      "expected": {
+        "decision": "session_opened",
+        "final_state": "opened",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "session_open",
+          "opened"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "latest_descendant_selected",
+          "lineage_preserved",
+          "session_opened",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-root-0000000000000000000000000000000000000001",
+        "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "message_id": null,
+        "focus": "session",
+        "pending_target": false,
+        "lookup_attempts": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A root target may select its reviewed latest descendant and keep root and parent lineage."
+    },
+    {
+      "id": "unknown-session-safe-not-found",
+      "link": "https://synthetic.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "lookup_missing"
+      ],
+      "expected": {
+        "decision": "session_not_found",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "failed"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "authorization_safe_session_not_found",
+          "no_session_created",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-root-0000000000000000000000000000000000000001",
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "message_id": null,
+        "focus": "none",
+        "pending_target": false,
+        "lookup_attempts": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "An unknown exact ID returns the shared safe session-not-found result."
+    },
+    {
+      "id": "unauthorized-session-safe-not-found",
+      "link": "https://synthetic.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "lookup_denied"
+      ],
+      "expected": {
+        "decision": "session_not_found",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "failed"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "authorization_safe_session_not_found",
+          "no_session_created",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-root-0000000000000000000000000000000000000001",
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "message_id": null,
+        "focus": "none",
+        "pending_target": false,
+        "lookup_attempts": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A denied exact ID is indistinguishable from an unknown ID."
+    },
+    {
+      "id": "message-not-found-opens-session",
+      "link": "hermternal://open/v1/c/session-branch-0000000000000000000000000000000000000002/m/synthetic-message-anchor-00000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "lookup_present",
+        "message_missing"
+      ],
+      "expected": {
+        "decision": "message_not_found",
+        "final_state": "opened",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "session_open",
+          "opened"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "session_opened",
+          "message_not_found_fallback",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "message_id": "synthetic-message-anchor-00000000000000000000000000000001",
+        "focus": "session_start",
+        "pending_target": false,
+        "lookup_attempts": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A missing message opens the session and uses the stable message fallback."
+    },
+    {
+      "id": "pending-auth-resolves-and-clears",
+      "link": "https://synthetic.hermternal.test/v1/c/session-branch-0000000000000000000000000000000000000002",
+      "authenticated": false,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "authenticated",
+        "lookup_present",
+        "complete"
+      ],
+      "expected": {
+        "decision": "session_opened",
+        "final_state": "opened",
+        "state_trace": [
+          "idle",
+          "auth_pending",
+          "lookup_pending",
+          "session_open",
+          "opened"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "session_opened",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "message_id": null,
+        "focus": "session",
+        "pending_target": false,
+        "lookup_attempts": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "Only the validated target remains in memory during authentication and is cleared after success."
+    },
+    {
+      "id": "pending-target-expires",
+      "link": "https://synthetic.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": false,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "expire"
+      ],
+      "expected": {
+        "decision": "target_expired",
+        "final_state": "expired",
+        "state_trace": [
+          "idle",
+          "auth_pending",
+          "expired"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-root-0000000000000000000000000000000000000001",
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "message_id": null,
+        "focus": "none",
+        "pending_target": false,
+        "lookup_attempts": 0,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A pending target has a bounded lifetime and is cleared on expiry."
+    },
+    {
+      "id": "logout-clears-pending-target",
+      "link": "hermternal://open/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": false,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "logout"
+      ],
+      "expected": {
+        "decision": "signed_out",
+        "final_state": "signed_out",
+        "state_trace": [
+          "idle",
+          "auth_pending",
+          "signed_out"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-root-0000000000000000000000000000000000000001",
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "message_id": null,
+        "focus": "none",
+        "pending_target": false,
+        "lookup_attempts": 0,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "Logout clears pending target memory before any lookup."
+    },
+    {
+      "id": "direct-reload-idempotent-reopen",
+      "link": "https://synthetic.hermternal.test/v1/c/session-branch-0000000000000000000000000000000000000002",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "lookup_present",
+        "complete",
+        "reload",
+        "lookup_present",
+        "complete"
+      ],
+      "expected": {
+        "decision": "session_opened",
+        "final_state": "opened",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "session_open",
+          "opened",
+          "lookup_pending",
+          "session_open",
+          "opened"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "session_opened",
+          "pending_target_cleared",
+          "direct_reload",
+          "idempotent_reopen",
+          "exact_full_id_resolved",
+          "session_opened",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "message_id": null,
+        "focus": "session",
+        "pending_target": false,
+        "lookup_attempts": 2,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "Reload repeats the lookup but reopens one exact session without creation."
+    },
+    {
+      "id": "interrupted-lookup-recovers",
+      "link": "hermternal://open/v1/c/session-branch-0000000000000000000000000000000000000002",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "events": [
+        "receive",
+        "interrupt",
+        "recover",
+        "lookup_present",
+        "complete"
+      ],
+      "expected": {
+        "decision": "session_opened",
+        "final_state": "opened",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "interrupted",
+          "lookup_pending",
+          "session_open",
+          "opened"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "lookup_interrupted_safe_state",
+          "authenticated_lookup_retried_idempotently",
+          "exact_full_id_resolved",
+          "session_opened",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "message_id": null,
+        "focus": "session",
+        "pending_target": false,
+        "lookup_attempts": 2,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "An interrupted lookup retains one validated target and recovers idempotently."
+    },
+    {
+      "id": "invalid-private-https-origin",
+      "link": "https://other.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "events": [
+        "receive"
+      ],
+      "expected": {
+        "decision": "invalid_link",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "failed"
+        ],
+        "effects": [
+          "grammar_rejected_before_lookup",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "message_id": null,
+        "focus": "none",
+        "pending_target": false,
+        "lookup_attempts": 0,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A changed HTTPS origin fails at the frozen private grammar boundary."
+    },
+    {
+      "id": "invalid-hermternal-authority",
+      "link": "hermternal://share/v1/c/session-root-0000000000000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "events": [
+        "receive"
+      ],
+      "expected": {
+        "decision": "invalid_link",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "failed"
+        ],
+        "effects": [
+          "grammar_rejected_before_lookup",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "message_id": null,
+        "focus": "none",
+        "pending_target": false,
+        "lookup_attempts": 0,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "The native fallback accepts only the exact open authority and never a sharing route."
+    },
+    {
+      "id": "empty-no-target",
+      "link": null,
+      "authenticated": false,
+      "lookup_mode": "exact",
+      "events": [],
+      "expected": {
+        "decision": "pending",
+        "final_state": "idle",
+        "state_trace": [
+          "idle"
+        ],
+        "effects": [],
+        "requested_session_id": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "message_id": null,
+        "focus": "none",
+        "pending_target": false,
+        "lookup_attempts": 0,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "No target performs no lookup and creates no local state."
+    },
+    {
+      "id": "latest-descendant-message-focus",
+      "link": "https://synthetic.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001/m/synthetic-message-anchor-00000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "latest_descendant",
+      "events": [
+        "receive",
+        "lookup_present",
+        "message_present"
+      ],
+      "expected": {
+        "decision": "message_focused",
+        "final_state": "opened",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "session_open",
+          "opened"
+        ],
+        "effects": [
+          "validated_target_held_in_memory",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "latest_descendant_selected",
+          "lineage_preserved",
+          "message_anchor_focused",
+          "pending_target_cleared"
+        ],
+        "requested_session_id": "session-root-0000000000000000000000000000000000000001",
+        "opened_session_id": "session-branch-0000000000000000000000000000000000000002",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": "session-root-0000000000000000000000000000000000000001",
+        "message_id": "synthetic-message-anchor-00000000000000000000000000000001",
+        "focus": "message",
+        "pending_target": false,
+        "lookup_attempts": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A message anchor can focus in the selected latest descendant while preserving lineage."
+    }
+  ],
+  "redaction": {
+    "synthetic_only": true,
+    "raw_links_in_errors": false,
+    "raw_ids_in_errors": false,
+    "fixed_error": {
+      "error": {
+        "code": "contract",
+        "message": "deep-link resolution fixture rejected"
+      }
+    }
+  }
+}

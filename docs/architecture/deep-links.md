@@ -120,9 +120,15 @@ These diagnostics omit the configured origin, every ID, query, fragment, and
 invalid suffix. They are not hashes, shortened IDs, or reconstructible links.
 A diagnostic must never permit a lookup or reveal whether a session exists.
 
-## Resolution boundary
+## Resolution contract
 
-A later resolver MUST process a candidate in this order:
+The companion synthetic resolver proof is
+[`contracts/fixtures/deep-link-resolution/README.md`](../../contracts/fixtures/deep-link-resolution/README.md).
+It consumes the frozen grammar and session-lineage artifacts by exact SHA-256
+identity. It does not change them. It makes no network call and does not claim
+a live Hermes integration.
+
+A resolver MUST process a candidate in this order:
 
 1. Parse the URI without following redirects.
 2. Apply the scheme, authority, exact-origin, path, ID, version, and lexical
@@ -142,9 +148,25 @@ A later resolver MUST process a candidate in this order:
 
 A deep link MUST NOT create a session, select another server profile, read a
 filesystem or local `~/.hermes` directory, act as a bearer credential, or
-follow an external redirect. Opening the same valid link twice is idempotent:
-it targets the same full IDs and does not duplicate a session, prompt, or
-message.
+follow an external redirect. It MUST NOT create a sharing route or local
+transcript mirror. Opening the same valid link twice is idempotent: it targets
+the same full IDs and does not duplicate a session, prompt, or message.
+
+A valid target may wait for authentication in process memory for at most 300
+seconds. Success, failure, cancellation, expiry, and logout clear it. A direct
+load and reload use the same steps. An interrupted authenticated lookup may
+retry only the same validated target.
+
+A latest-descendant lookup keeps both identities. The requested session ID
+remains the exact ID from the link. The opened session ID may be the reviewed
+latest descendant. Its root and parent IDs MUST match the pinned lineage
+evidence. The resolver MUST NOT rewrite lineage or infer it from display IDs.
+
+Unknown and unauthorized sessions return the same `session_not_found` result.
+The result MUST NOT state whether the session exists. A missing message returns
+`message_not_found` after the resolved session opens. The client then focuses
+the session start or another stable session fallback. It does not create a
+replacement session.
 
 ## Platform boundary
 
@@ -162,16 +184,26 @@ raw links in shared persistence.
 
 ## Proof coverage and limits
 
-The synthetic fixture proof covers valid web/native session links, optional
-message anchors, exact origin and authority checks, wrong schemes and
-versions, wrong paths, traversal and normalisation, trailing forms, empty and
-short IDs, all lexical rejection classes, stable reason order, strict
-recursive JSON shape, mutation regressions, and non-reversible diagnostics.
+The grammar proof covers valid web and native forms, exact origin and
+authority checks, opaque full IDs, optional message anchors, stable failures,
+and non-reversible diagnostics.
 
-It does not resolve a session, test authentication, prove ownership, inspect
-Hermes, call a network, create universal-link entitlements, implement iOS,
-iPadOS, or macOS routing, or define unknown-session/message result boards.
-Those behaviors require the approved downstream fixtures and platform work.
+The resolver proof covers authenticated exact lookup, latest-descendant
+selection, lineage preservation, authorization-safe session-not-found results,
+message focus, message-not-found fallback, pending target cleanup, direct load,
+reload, idempotent reopen, interruption, recovery, and empty input. It also
+proves zero session creation, zero sharing, zero transcript mirroring, and zero
+network use for every synthetic trace.
+
+Both proofs use strict bounded JSON validation. They reject duplicate keys,
+non-finite values, overflow, wrong exact types, oversized strings or
+containers, excessive nodes, and excessive depth. The bound walk is iterative.
+Exact artifact identities and mutation tests stop coordinated drift or
+artifact rebinding. Errors use one fixed redacted payload.
+
+The proofs do not authenticate a user, prove ownership, inspect Hermes, call a
+network, create universal-link entitlements, or implement web, iOS, iPadOS, or
+macOS routing. Runtime clients and result boards remain later platform work.
 
 ## Non-UI accessibility evidence
 
