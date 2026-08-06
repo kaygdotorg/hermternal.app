@@ -44,19 +44,31 @@ ARTIFACT_NAMES = (
     "validate.py",
     "test_validate.py",
 )
-# Pin every artifact except this source file in code. Embedding validate.py's
-# complete digest here would create a circular identity, so its current digest
-# is resolved from the copied validator while the other artifacts stay fixed.
-# The baseline must match this identity and its derived manifest; it cannot
-# redefine the evidence by rebinding its own artifact entries.
+# Pin reviewed evidence outside the mutable baseline. The source digest uses a
+# fixed identity-marker placeholder so this file can authenticate its own bytes;
+# changing executable code changes the normalized digest. Benchmark trace and
+# distribution digests are code-pinned and cannot be rebound through JSON.
+CANONICAL_SOURCE_SHA256 = "09cbbe84f29eadb4b11cc07601fade14d20629f4c09a3b0ea9ce1ab86557550d"
+CANONICAL_BENCHMARK_IDENTITY = (
+    (
+        "normal",
+        "7472ce2fe8c2e5795e1e9df4abeeaa9dc535e2438e88f0225eeb45e4e2d2a1e3",
+        "9dc165ac98f282c93aca83a86159d4342da8efb3eee4ba8200d1b06965abf8dd",
+    ),
+    (
+        "optimized",
+        "8e658e4726fd786b78010fe6e2d9661568cc536426188130212a0ac94fd41b3e",
+        "2bf31014724bfc43ab80cfc90da2d06824c8d45fa91776e4218325fa1b0053e9",
+    ),
+)
 CANONICAL_ARTIFACT_IDENTITY = (
-    ("README.md", 6780, "6892fe51d059b6145ba18b60e4b5bba0745c4954df50d182ea78bcbab1a6f938"),
+    ("README.md", 7136, "730b2920e74386310052316806e92fc1f40b63d23c4ba4d56cbd5075d2bc98f7"),
     (
         "pty-detach-race-fixtures.json",
         19319,
         "ee8211b672e5a78d1d069c1ca4df4155aecbce951058579e3a985cfb6de06227",
     ),
-    ("test_validate.py", 15497, "95b9f8977945821ccb6fb391bc4b2dfd43ae1e38d559dafee0c292e395d169ce"),
+    ("test_validate.py", 18561, "17fa699009ba344e3902d3f6016480c10de4c2965e4a209dda05b7a5da867d79"),
 )
 CANONICAL_BASELINE_IDENTITY = {
     "schema_version": "pty-detach-race-baseline-v1",
@@ -1003,30 +1015,60 @@ def artifact_digest(path: Path) -> tuple[int, str]:
     return len(payload), hashlib.sha256(payload).hexdigest()
 
 
+def canonical_json_digest(value: Any) -> str:
+    """Hash a stable JSON representation for reviewed evidence identities."""
+
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def expect_sha256(value: Any, path: str) -> str:
+    digest = expect_string(value, path)
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        fail(path, "must be a lowercase SHA-256 digest")
+    return digest
+
+
 def manifest_digest(artifacts: dict[str, dict[str, Any]]) -> str:
     manifest = "".join(f"{name}:{artifacts[name]['size_bytes']}:{artifacts[name]['sha256']}\n" for name in ARTIFACT_NAMES)
     return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
 
-def canonical_artifact_metadata() -> dict[str, dict[str, Any]]:
+def source_identity() -> dict[str, Any]:
+    """Authenticate executable bytes without making the source hash circular."""
+
+    payload = (ROOT / "validate.py").read_bytes()
+    marker = re.compile(rb'(?m)^CANONICAL_SOURCE_SHA256 = "[0-9a-f]{64}"$')
+    normalized, replacements = marker.subn(
+        b'CANONICAL_SOURCE_SHA256 = "' + (b"0" * 64) + b'"',
+        payload,
+        count=1,
+    )
+    if replacements != 1:
+        fail("source_identity", "identity marker is missing or duplicated")
+    normalized_sha = hashlib.sha256(normalized).hexdigest()
+    if normalized_sha != CANONICAL_SOURCE_SHA256:
+        fail("source_identity", "executing validator does not match immutable reviewed identity")
+    return {"size_bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+
+
+def canonical_artifact_metadata(source: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     """Resolve the immutable artifact identity used by baseline validation."""
 
+    if source is None:
+        source = source_identity()
     pinned = {
         name: {"size_bytes": size, "sha256": sha256}
         for name, size, sha256 in CANONICAL_ARTIFACT_IDENTITY
     }
+    pinned["validate.py"] = source
     metadata: dict[str, dict[str, Any]] = {}
     for index, name in enumerate(ARTIFACT_NAMES):
-        if name == "validate.py":
-            size_bytes, sha256 = artifact_digest(ROOT / name)
-        else:
-            expected = pinned[name]
-            size_bytes = expected["size_bytes"]
-            sha256 = expected["sha256"]
+        expected = pinned[name]
         metadata[name] = {
             "path": CANONICAL_BASELINE_IDENTITY["artifact_paths"][index],
-            "size_bytes": size_bytes,
-            "sha256": sha256,
+            "size_bytes": expected["size_bytes"],
+            "sha256": expected["sha256"],
         }
     return metadata
 
@@ -1060,20 +1102,37 @@ def validate_distribution(run: dict[str, Any], path: str) -> None:
             fail(f"{path}.distribution.{key}", "does not match the recorded sample distribution")
 
 
-def validate_baseline(baseline: Any) -> dict[str, Any]:
+def validate_benchmark_identity(benchmark: dict[str, Any]) -> None:
+    """Bind both benchmark modes and their derived distributions to review."""
+
+    expected_by_mode = {
+        mode: {"samples_sha256": samples_sha, "distribution_sha256": distribution_sha}
+        for mode, samples_sha, distribution_sha in CANONICAL_BENCHMARK_IDENTITY
+    }
+    for mode in ("normal", "optimized"):
+        run = benchmark[mode]
+        validate_distribution(run, f"baseline.benchmark.{mode}")
+        expected = expected_by_mode[mode]
+        if canonical_json_digest(run["samples_ms"]) != expected["samples_sha256"]:
+            fail(f"baseline.benchmark.{mode}.samples_ms", "does not match immutable reviewed identity")
+        if canonical_json_digest(run["distribution"]) != expected["distribution_sha256"]:
+            fail(f"baseline.benchmark.{mode}.distribution", "does not match immutable reviewed identity")
+
+
+def validate_baseline(baseline: Any, source: dict[str, Any] | None = None) -> dict[str, Any]:
+    if source is None:
+        source = source_identity()
     root = exact_keys(baseline, {"schema_version", "fixture_schema_version", "artifacts", "benchmark", "manifest_sha256"}, "baseline")
     expect_string(root["schema_version"], "baseline.schema_version", CANONICAL_BASELINE_IDENTITY["schema_version"])
     expect_string(root["fixture_schema_version"], "baseline.fixture_schema_version", CANONICAL_BASELINE_IDENTITY["fixture_schema_version"])
     artifacts = exact_keys(root["artifacts"], set(ARTIFACT_NAMES), "baseline.artifacts")
-    canonical = canonical_artifact_metadata()
+    canonical = canonical_artifact_metadata(source)
     for name in ARTIFACT_NAMES:
         item = exact_keys(artifacts[name], {"path", "size_bytes", "sha256"}, f"baseline.artifacts.{name}")
         expected = canonical[name]
         expect_string(item["path"], f"baseline.artifacts.{name}.path", expected["path"])
         expect_int(item["size_bytes"], f"baseline.artifacts.{name}.size_bytes")
-        expect_sha = expect_string(item["sha256"], f"baseline.artifacts.{name}.sha256")
-        if not re.fullmatch(r"[0-9a-f]{64}", expect_sha):
-            fail(f"baseline.artifacts.{name}.sha256", "must be a lowercase SHA-256 digest")
+        expect_sha256(item["sha256"], f"baseline.artifacts.{name}.sha256")
         path = ROOT / name
         actual_size, actual_sha = artifact_digest(path)
         if item["size_bytes"] != actual_size or item["sha256"] != actual_sha:
@@ -1081,8 +1140,7 @@ def validate_baseline(baseline: Any) -> dict[str, Any]:
         if item["size_bytes"] != expected["size_bytes"] or item["sha256"] != expected["sha256"]:
             fail(f"baseline.artifacts.{name}", "does not match immutable canonical artifact identity")
     benchmark = exact_keys(root["benchmark"], {"normal", "optimized", "threshold"}, "baseline.benchmark")
-    validate_distribution(benchmark["normal"], "baseline.benchmark.normal")
-    validate_distribution(benchmark["optimized"], "baseline.benchmark.optimized")
+    validate_benchmark_identity(benchmark)
     expect_none(benchmark["threshold"], "baseline.benchmark.threshold")
     expect_string(root["manifest_sha256"], "baseline.manifest_sha256")
     if not re.fullmatch(r"[0-9a-f]{64}", root["manifest_sha256"]):
@@ -1102,10 +1160,11 @@ def main(argv: list[str] | None = None) -> int:
         print("validation failed: invalid command-line arguments", file=sys.stderr)
         return 2
     try:
+        source = source_identity()
         data = load_fixture(args.fixture)
         summary = validate_contract(data)
         mutation_count = validate_mutations(data)
-        baseline_summary = validate_baseline(load_baseline(args.baseline))
+        baseline_summary = validate_baseline(load_baseline(args.baseline), source)
     except ValidationError:
         print("validation failed: fixture contract rejected", file=sys.stderr)
         return 1

@@ -57,10 +57,11 @@ boolean, string, null, non-finite, malformed-frame, and row variants.
 - `validate.py` — standard-library-only validator with duplicate-key rejection,
   redacted reusable-loader diagnostics, non-finite rejection, exact built-in type
   checks, bounded traversal, controlled CLI failures, executable mutation checks,
-  and code-pinned baseline integrity checks.
+  and code-pinned source/benchmark identity checks outside the baseline.
 - `test_validate.py` — normal and optimized-compatible regression tests for the
   canonical contract, meaningful malformed or drifted mutations, credential-shaped
-  duplicate keys, and coordinated artifact/baseline rebinding.
+  duplicate keys, coordinated artifact/baseline rebinding, forged benchmarks, and
+  rebound validator source.
 - `validation-baseline.json` — observation-only benchmark distributions with 30
   normal and 30 optimized samples plus exact owned-artifact sizes and digests.
 
@@ -76,14 +77,17 @@ python3 -O -m unittest discover -s contracts/fixtures/pty-detach-race -p 'test_*
 python3 -m py_compile contracts/fixtures/pty-detach-race/validate.py contracts/fixtures/pty-detach-race/test_validate.py
 ```
 
-The CLI loads the checked-in baseline by default. It checks the closed baseline
-schema against the immutable code-pinned artifact identity, 30-sample
-distributions, owned artifact sizes, SHA-256 digests, and a manifest derived from
-that identity. The benchmark has `threshold: null`: timings are evidence, not an
-invented performance budget. `--baseline` is available for isolated mutation
-checks. Invalid arguments and unavailable or malformed inputs return fixed,
-bounded diagnostics and never echo caller-controlled flags, paths, fixture values,
-or duplicate JSON key names.
+The CLI loads the checked-in baseline by default. Before running contract or
+mutation checks, it authenticates the executing `validate.py` bytes against a
+code-pinned normalized source digest whose identity marker is excluded to avoid a
+circular hash. It also binds both benchmark modes' sample traces and derived
+distributions to code-pinned reviewed SHA-256 identities. Owned artifact sizes,
+SHA-256 digests, and the manifest must match the immutable artifact identity;
+rewriting baseline metadata cannot rebind the evidence. The benchmark has
+`threshold: null`: timings are evidence, not an invented performance budget.
+`--baseline` is available for isolated mutation checks. Invalid arguments and
+unavailable or malformed inputs return fixed, bounded diagnostics and never echo
+caller-controlled flags, paths, fixture values, or duplicate JSON key names.
 
 ## Redaction and limitations
 

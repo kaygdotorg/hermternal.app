@@ -20,6 +20,28 @@ BASELINE_PATH = ROOT / "validation-baseline.json"
 
 
 class PtyDetachRaceValidationTests(unittest.TestCase):
+    def _copy_fixture_directory(self, directory: str) -> Path:
+        fixture_directory = Path(directory) / "pty-detach-race"
+        fixture_directory.mkdir()
+        for name in (*validate.ARTIFACT_NAMES, "validation-baseline.json"):
+            shutil.copy2(ROOT / name, fixture_directory / name)
+        return fixture_directory
+
+    def _run_copied_validator(self, fixture_directory: Path, optimize: bool) -> subprocess.CompletedProcess[str]:
+        command = [sys.executable]
+        if optimize:
+            command.append("-O")
+        command.append(str(fixture_directory / "validate.py"))
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+
+    @staticmethod
+    def _rebind_baseline_artifact(baseline_path: Path, name: str, artifact_path: Path) -> None:
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        size_bytes, sha256 = validate.artifact_digest(artifact_path)
+        baseline["artifacts"][name].update(size_bytes=size_bytes, sha256=sha256)
+        baseline["manifest_sha256"] = validate.manifest_digest(baseline["artifacts"])
+        baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+
     def setUp(self) -> None:
         self.data = validate.load_fixture(FIXTURE_PATH)
 
@@ -107,32 +129,66 @@ class PtyDetachRaceValidationTests(unittest.TestCase):
 
     def test_code_pinned_identity_rejects_coordinated_artifact_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            fixture_directory = Path(directory) / "pty-detach-race"
-            fixture_directory.mkdir()
-            for name in (*validate.ARTIFACT_NAMES, "validation-baseline.json"):
-                shutil.copy2(ROOT / name, fixture_directory / name)
-
+            fixture_directory = self._copy_fixture_directory(directory)
             readme_path = fixture_directory / "README.md"
             readme_path.write_text(
                 readme_path.read_text(encoding="utf-8") + "\ncoordinated rebind candidate\n",
                 encoding="utf-8",
             )
-            baseline_path = fixture_directory / "validation-baseline.json"
-            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-            size_bytes, sha256 = validate.artifact_digest(readme_path)
-            baseline["artifacts"]["README.md"].update(size_bytes=size_bytes, sha256=sha256)
-            baseline["manifest_sha256"] = validate.manifest_digest(baseline["artifacts"])
-            baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+            self._rebind_baseline_artifact(fixture_directory / "validation-baseline.json", "README.md", readme_path)
 
             for optimize in (False, True):
-                command = [sys.executable]
-                if optimize:
-                    command.append("-O")
-                command.append(str(fixture_directory / "validate.py"))
-                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                result = self._run_copied_validator(fixture_directory, optimize)
                 with self.subTest(optimize=optimize):
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(result.stderr, "validation failed: fixture contract rejected\n")
+
+    def test_reviewed_identity_rejects_forged_normal_and_optimized_benchmarks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_directory = self._copy_fixture_directory(directory)
+            baseline_path = fixture_directory / "validation-baseline.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            forged_distribution = {
+                "count": 30,
+                "minimum_ms": 0.001,
+                "maximum_ms": 0.001,
+                "mean_ms": 0.001,
+                "median_ms": 0.001,
+                "p95_ms": 0.001,
+            }
+            for mode in ("normal", "optimized"):
+                baseline["benchmark"][mode]["samples_ms"] = [0.001] * 30
+                baseline["benchmark"][mode]["distribution"] = copy.deepcopy(forged_distribution)
+            baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+
+            for optimize in (False, True):
+                result = self._run_copied_validator(fixture_directory, optimize)
+                with self.subTest(optimize=optimize):
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stderr, "validation failed: fixture contract rejected\n")
+
+    def test_reviewed_identity_rejects_rebound_validator_source_in_both_modes(self) -> None:
+        attacks = {
+            "appended-comment": lambda path: path.write_text(
+                path.read_text(encoding="utf-8") + "\n# reviewed source rebind candidate\n",
+                encoding="utf-8",
+            ),
+            "mutation-count-zero": lambda path: path.write_text(
+                path.read_text(encoding="utf-8").replace("    return len(mutations)\n", "    return 0\n", 1),
+                encoding="utf-8",
+            ),
+        }
+        for attack, mutate in attacks.items():
+            with tempfile.TemporaryDirectory() as directory:
+                fixture_directory = self._copy_fixture_directory(directory)
+                validator_path = fixture_directory / "validate.py"
+                mutate(validator_path)
+                self._rebind_baseline_artifact(fixture_directory / "validation-baseline.json", "validate.py", validator_path)
+                for optimize in (False, True):
+                    result = self._run_copied_validator(fixture_directory, optimize)
+                    with self.subTest(attack=attack, optimize=optimize):
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(result.stderr, "validation failed: fixture contract rejected\n")
 
     def test_ttl_registry_and_explicit_close_contracts(self) -> None:
         ttl = validate._case(self.data, "detach-ttl")
