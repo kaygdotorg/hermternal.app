@@ -15,29 +15,29 @@
   "threshold": null,
   "artifacts": {
     "README.md": {
-      "bytes": 10633,
-      "sha256": "6032ac3dd3087872ae7353502d635a6274230d04ce18cef3bbc7a7941cf36376"
+      "bytes": 11367,
+      "sha256": "3c6c0ca5e3e0f3087721df9bce7f1e611a0ca86a92bbf315e0b571be5bbb0927"
     },
     "cases.json": {
       "bytes": 57544,
       "sha256": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337"
     },
     "validate.py": {
-      "bytes": 81934,
-      "sha256": "5879b1a45c61c950baa709f09a2d5251b3062e6880d04e9dac4b75233cc54a49"
+      "bytes": 82719,
+      "sha256": "a6175d243142488e2931d623fc31f9832781519be8b9c9ae86331677a92648c7"
     },
     "test_validate.py": {
-      "bytes": 63746,
-      "sha256": "c39c090df93f73836f580ab0442419fa33d9e8ec86ff79e499e562f1d5125185"
+      "bytes": 65606,
+      "sha256": "4675c2676806b8b180eded4bc2f57b871007c51d9837a8b17419dc2b14903a41"
     },
     "chat.md": {
       "bytes": 12056,
       "sha256": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252"
     }
   },
-  "artifact_manifest_sha256": "0c3faae100c7f001b69348a6492249c008b88cd3293b03f50febfe7702f59737",
+  "artifact_manifest_sha256": "3e965c176e1ea8689a6cef1dcc984c059be4ed51745b3ce4fd8df4130c811e60",
   "normal": {
-    "command": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 contracts/fixtures/uncertain-delivery/validate.py",
+    "command": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I contracts/fixtures/uncertain-delivery/validate.py",
     "repetitions": 30,
     "samples_ms": [
       550.228708,
@@ -81,7 +81,7 @@
     }
   },
   "optimized": {
-    "command": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -O contracts/fixtures/uncertain-delivery/validate.py",
+    "command": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I -O contracts/fixtures/uncertain-delivery/validate.py",
     "repetitions": 30,
     "samples_ms": [
       1049.457125,

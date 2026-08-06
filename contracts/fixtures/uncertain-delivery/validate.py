@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 """Validate the deterministic synthetic C-06 uncertain-delivery contract.
 
 This is an offline reducer, not a Hermes client.  It reads only checked-in
@@ -46,16 +46,17 @@ HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 # fails.
 TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-final-anchor"
 CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "validate.py", "test_validate.py", "chat.md")
+CANONICAL_FIXTURE_NAMES = frozenset(("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json"))
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_BOUND_SHA256 = {
-    "README.md": "6032ac3dd3087872ae7353502d635a6274230d04ce18cef3bbc7a7941cf36376",
+    "README.md": "3c6c0ca5e3e0f3087721df9bce7f1e611a0ca86a92bbf315e0b571be5bbb0927",
     "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
-    "validate.py": "5879b1a45c61c950baa709f09a2d5251b3062e6880d04e9dac4b75233cc54a49",
-    "test_validate.py": "c39c090df93f73836f580ab0442419fa33d9e8ec86ff79e499e562f1d5125185",
+    "validate.py": "a6175d243142488e2931d623fc31f9832781519be8b9c9ae86331677a92648c7",
+    "test_validate.py": "4675c2676806b8b180eded4bc2f57b871007c51d9837a8b17419dc2b14903a41",
     "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
 }
-EXPECTED_BASELINE_SHA256 = "21fc3964c0d9ab7470b32a1f480f607f52b8b78ec296fb75a8a7fc946dd56133"
+EXPECTED_BASELINE_SHA256 = "c941123f5f6d0fb579c4b3cbbc733e9bad2fd299ea216cc42a7d86deeba4550a"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -256,8 +257,8 @@ BENCHMARK_REPETITIONS = 30
 EXPECTED_COMMIT_ENV = "HERMTERNAL_C06_EXPECTED_COMMIT"
 TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
 APPROVED_COMMANDS = {
-    "normal": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 contracts/fixtures/uncertain-delivery/validate.py",
-    "optimized": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -O contracts/fixtures/uncertain-delivery/validate.py",
+    "normal": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I contracts/fixtures/uncertain-delivery/validate.py",
+    "optimized": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I -O contracts/fixtures/uncertain-delivery/validate.py",
 }
 
 SYNTHETIC_REF = re.compile(r"^(?:session|request)-marker-[0-9]{3}$")
@@ -774,6 +775,21 @@ def _artifact_path(fixture_dir: Path, name: str) -> Path:
     return fixture_dir / name
 
 
+def _reject_unexpected_fixture_entries(fixture_dir: Path) -> None:
+    """Reject sibling modules so path-scoped evidence cannot accept imports."""
+    if fixture_dir.is_symlink() or not fixture_dir.is_dir():
+        _fail("canonical_binding")
+    try:
+        entries = tuple(fixture_dir.iterdir())
+    except (OSError, ValueError):
+        _fail("canonical_binding")
+    if {entry.name for entry in entries} != CANONICAL_FIXTURE_NAMES:
+        _fail("canonical_binding")
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_file():
+            _fail("canonical_binding")
+
+
 def _artifact_digest(fixture_dir: Path, name: str) -> tuple[int, str]:
     path = _artifact_path(fixture_dir, name)
     if name == "validate.py":
@@ -947,6 +963,7 @@ def _require_clean_bound_worktree(root: Path) -> None:
     _reject_repository_metadata(root)
 
     fixture_dir = root / CANONICAL_FIXTURE_RELATIVE
+    _reject_unexpected_fixture_entries(fixture_dir)
     expected_paths = {
         "README.md": CANONICAL_FIXTURE_RELATIVE / "README.md",
         "cases.json": CANONICAL_FIXTURE_RELATIVE / "cases.json",

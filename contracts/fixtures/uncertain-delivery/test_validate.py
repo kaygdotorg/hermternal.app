@@ -47,7 +47,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         environment: dict[str, str] | None = None,
         validator: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        command = [sys.executable]
+        command = [sys.executable, "-I", "-B"]
         if optimized:
             command.append("-O")
         command.extend([str(validator or (ROOT / "validate.py")), *arguments])
@@ -89,7 +89,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
     def assert_validator_failure(self, validator_path: Path, environment: dict[str, str]) -> None:
         for optimized in (False, True):
             result = subprocess.run(
-                [sys.executable, *(["-O"] if optimized else []), str(validator_path)],
+                [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(validator_path)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -262,6 +262,39 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             cases_path = self.write_json(Path(directory), "cases.json", candidate)
             self.assert_cli_failure_both_modes("--cases", str(cases_path), forbidden=marker)
+
+    def test_isolated_cli_rejects_import_shadow_siblings_both_modes(self) -> None:
+        """Isolated normal/-O invocations cannot execute untracked fixture modules."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            environment = self.canonical_environment()
+            for module_name in ("selectors.py", "subprocess.py"):
+                sibling = ROOT / module_name
+                marker = base / f"{module_name}.executed"
+                sibling.write_text(
+                    f"open({str(marker)!r}, 'w', encoding='utf-8').write('shadowed')\n",
+                    encoding="utf-8",
+                )
+                try:
+                    for optimized in (False, True):
+                        command = [sys.executable, "-I", "-B"]
+                        if optimized:
+                            command.append("-O")
+                        command.append(str(ROOT / "validate.py"))
+                        result = subprocess.run(
+                            command,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            env=environment,
+                        )
+                        with self.subTest(module=module_name, optimized=optimized):
+                            self.assertEqual(result.returncode, 1)
+                            self.assertEqual(result.stdout, "")
+                            self.assertEqual(result.stderr, '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n')
+                            self.assertFalse(marker.exists())
+                finally:
+                    sibling.unlink(missing_ok=True)
 
     def test_real_cli_rejects_long_keys_and_special_paths_without_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -518,7 +551,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             mutated_cases["cases"][0]["notes"] = "changed-but-schema-valid"
             (copied / "cases.json").write_text(json.dumps(mutated_cases), encoding="utf-8")
             for optimized in (False, True):
-                command = [sys.executable]
+                command = [sys.executable, "-I", "-B"]
                 if optimized:
                     command.append("-O")
                 command.append(str(copied / "validate.py"))
@@ -532,7 +565,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             validator_path = copied / "validate.py"
             validator_path.write_text(validator_path.read_text(encoding="utf-8") + "\n# synthetic source mutation\n", encoding="utf-8")
             for optimized in (False, True):
-                command = [sys.executable]
+                command = [sys.executable, "-I", "-B"]
                 if optimized:
                     command.append("-O")
                 command.append(str(validator_path))
@@ -639,7 +672,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             self.assertEqual(anchor, validate._trusted_anchor_commit(REPOSITORY_ROOT))
 
             for optimized in (False, True):
-                command = [sys.executable]
+                command = [sys.executable, "-I", "-B"]
                 if optimized:
                     command.append("-O")
                 command.append(str(copied_fixture / "validate.py"))
@@ -749,7 +782,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
 
             for optimized in (False, True):
                 result = subprocess.run(
-                    [sys.executable, *(["-O"] if optimized else []), str(copied_fixture / "validate.py")],
+                    [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(copied_fixture / "validate.py")],
                     capture_output=True,
                     text=True,
                     check=False,
@@ -898,7 +931,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 environment = self.canonical_environment()
                 for optimized in (False, True):
                     result = subprocess.run(
-                        [sys.executable, *(["-O"] if optimized else []), str(clone_path / "contracts/fixtures/uncertain-delivery/validate.py")],
+                        [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(clone_path / "contracts/fixtures/uncertain-delivery/validate.py")],
                         capture_output=True,
                         text=True,
                         check=False,
@@ -947,7 +980,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             validator_path = repository / "contracts/fixtures/uncertain-delivery/validate.py"
             for optimized in (False, True):
                 result = subprocess.run(
-                    [sys.executable, *(["-O"] if optimized else []), str(validator_path)],
+                    [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(validator_path)],
                     capture_output=True,
                     text=True,
                     check=False,
@@ -960,7 +993,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             git("-c", "user.name=synthetic", "-c", "user.email=synthetic@example.invalid", "commit", "-m", "later unchanged")
             for optimized in (False, True):
                 result = subprocess.run(
-                    [sys.executable, *(["-O"] if optimized else []), str(validator_path)],
+                    [sys.executable, "-I", "-B", *(["-O"] if optimized else []), str(validator_path)],
                     capture_output=True,
                     text=True,
                     check=False,
@@ -1135,7 +1168,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
     def test_compile_in_both_modes_without_worktree_cache(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             for optimized in (False, True):
-                command = [sys.executable]
+                command = [sys.executable, "-I", "-B"]
                 if optimized:
                     command.append("-O")
                 command.extend(["-m", "py_compile", str(ROOT / "validate.py"), str(ROOT / "test_validate.py")])

@@ -26,14 +26,24 @@ later unchanged commit, but its canonical bytes and clean worktree must match
 that external revision exactly. Missing, malformed, unavailable, or mismatched
 external expectation fails closed.
 
+Every supported validator launch uses Python isolated mode: `python3 -I` for
+normal execution and `python3 -I -O` for optimized execution. Isolated mode
+removes the fixture directory from `sys.path` before `validate.py` imports
+standard-library modules such as `selectors` and `subprocess`; the validator's
+shebang applies the same mode to direct executable launches. A non-isolated
+`python3 validate.py` invocation is unsupported because a sibling `.py` file
+could execute before trust checks.
+
 The annotated tag is a non-release audit/availability marker only. It is not a
 signature, release tag, or trust root. A protected repository owner must publish
 it without force-retagging and keep its target equal to the externally supplied
 reviewed commit. A force-retagged, forged, missing, `--no-tags`, shallow, or
 partial clone fails closed. The executing source and caller-supplied cases and
-baseline paths must be repository-owned. The validator-source digest masks only
-its own digest literals; it does not mask code, schema, reducer, or redaction
-changes.
+baseline paths must be repository-owned. The fixture directory must contain
+only its five declared files; unexpected or special-file siblings, including
+`selectors.py` or `subprocess.py`, fail closed. The validator-source digest masks
+only its own digest literals; it does not mask code, schema, reducer, or
+redaction changes.
 
 The source observations are limited to the pinned `gateway.ready`,
 `WebSocketDisconnect`, `prompt.submit`, and `session.resume` anchors. They bind
@@ -125,8 +135,8 @@ not discovered from a mutable branch):
 git clone <repository-url> <checkout>
 cd <checkout>
 git fetch --tags --unshallow 2>/dev/null || git fetch --tags
-HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 contracts/fixtures/uncertain-delivery/validate.py
-HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -O contracts/fixtures/uncertain-delivery/validate.py
+HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I contracts/fixtures/uncertain-delivery/validate.py
+HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I -O contracts/fixtures/uncertain-delivery/validate.py
 git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-final-anchor
 git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-final-anchor^{commit}
 ```
@@ -149,11 +159,11 @@ Run from the repository root:
 
 ```text
 export HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit>
-python3 contracts/fixtures/uncertain-delivery/validate.py
-python3 -O contracts/fixtures/uncertain-delivery/validate.py
-python3 -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
-python3 -O -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
-PYTHONPYCACHEPREFIX=/tmp/hermternal-c06-pycache python3 -m py_compile contracts/fixtures/uncertain-delivery/validate.py contracts/fixtures/uncertain-delivery/test_validate.py
+python3 -I contracts/fixtures/uncertain-delivery/validate.py
+python3 -I -O contracts/fixtures/uncertain-delivery/validate.py
+python3 -I -B -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
+python3 -I -B -O -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
+PYTHONPYCACHEPREFIX=/tmp/hermternal-c06-pycache python3 -I -B -m py_compile contracts/fixtures/uncertain-delivery/validate.py contracts/fixtures/uncertain-delivery/test_validate.py
 ```
 
 The focused tests execute the real validator CLI in both normal and optimized
@@ -162,9 +172,9 @@ timeout, WebSocket close, app suspension, process loss, restore, explicit
 resend, duplicate prevention, interruption, cancellation, sign-out, pending
 proof, compatibility failure, unknown interactive events, strict JSON, bounded
 redaction, canonical artifact rebinding, forged benchmark evidence, gateway,
-transport, draft, initial-state, state-identity, and event-correlation
-mutations. Oversized files, long keys, directories, and FIFOs fail through the
-same bounded error path without opening unbounded or special-file streams.
+transport, draft, initial-state, state-identity, and event-correlation, isolated-import, and unexpected-sibling-module mutations.
+Oversized files, long keys, directories, and FIFOs fail through the same
+bounded error path without opening unbounded or special-file streams.
 
 `validation-baseline.json` records 30 raw subprocess samples for each normal
 and optimized command, with min/mean/median/p95/max distributions and the
