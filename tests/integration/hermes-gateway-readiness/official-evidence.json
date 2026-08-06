@@ -8,11 +8,34 @@
   "teardown_exit_code": 0,
   "correctness_executor": "rootless_podman",
   "ssh_target": "hermternal-test@hermternal-dev",
+  "executor": {
+    "account": "hermternal-test",
+    "ssh_target": "hermternal-test@hermternal-dev",
+    "rootless": true,
+    "podman_version": "5.4.2",
+    "cgroup_version": "v2",
+    "network_backend": "netavark",
+    "storage_driver": "overlay",
+    "compose_provider": "podman-compose",
+    "compose_version": "1.3.0",
+    "docker_host_cleared": true,
+    "hermes_provider_cleared": true
+  },
   "image": {
     "reference": "docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
-    "digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+    "repository": "docker.io/nousresearch/hermes-agent",
+    "tag": "v2026.8.3",
+    "requested_digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+    "pull_status": "passed",
+    "inspect_status": "passed",
     "image_id": "d5ff34e615e41748618093e19c125eece333de04a63f0febf5cead2d3a6e0e0d",
-    "repo_digest_count": 2,
+    "repo_tags": [],
+    "repo_digests": [
+      "docker.io/nousresearch/hermes-agent@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+      "docker.io/nousresearch/hermes-agent@sha256:c0cab4e3711bcb27a312be1b3776254fc06fd50d5f7a6b8017915fc7171cb39e"
+    ],
+    "repo_digest_verified": true,
+    "manifest_digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
     "revision_label": "3c27eb6234bf91b8ceee9e9071591b31e9b148cb",
     "entrypoint": [
       "/opt/hermes/docker/entrypoint-dispatch.sh"
@@ -26,9 +49,9 @@
     "run",
     "--no-supervise"
   ],
-  "command_support": "parser_option_present_readiness_candidate_requires_review",
+  "command_support": "official_image_runtime_command",
   "readiness_marker": "HERMES_BACKEND_READY port=",
-  "readiness_source_status": "headless_backend_path_only",
+  "readiness_source_status": "container_provenance_podman_logs",
   "capability_policy": {
     "status": "approved",
     "cap_drop": [
@@ -70,24 +93,39 @@
       "--remove-orphans"
     ]
   },
+  "cleanup_scope": {
+    "project": "hermes-gateway-readiness-smoke-34916c49",
+    "network": "hermes-gateway-readiness-smoke-34916c49_internal",
+    "volume": "hermes-gateway-readiness-smoke-34916c49_data"
+  },
   "observations": {
-    "compose_config": "passed",
+    "executor_preflight": "passed",
+    "image_pull": "passed",
     "image_identity": "passed",
+    "compose_config": "passed",
     "container_start": "started",
+    "runtime_inspection": "passed",
     "readiness": "timeout",
-    "exit": "observed",
-    "exit_code": 0,
+    "exit": "not_observed",
+    "exit_code": null,
     "teardown": "passed",
     "leftover_resources": {
       "containers": 0,
       "networks": 0,
       "volumes": 0
     },
+    "policy_inspection": "passed",
     "applied_policy": "failed"
   },
   "runtime_identity": {
+    "container_id": "2c5fb4ceeb7c29f675a11959ef41f7a6cf0aece657830861ef437ea21d8015d8",
     "status": "verified",
-    "pid": 121699,
+    "pid": 145617,
+    "state": {
+      "running": true,
+      "status": "running",
+      "exit_code": 0
+    },
     "path": "/opt/hermes/docker/entrypoint-dispatch.sh",
     "args": [
       "gateway",
@@ -98,19 +136,45 @@
       "/opt/hermes/docker/entrypoint-dispatch.sh"
     ],
     "policy": {
-      "cap_drop_all": false,
-      "cap_add_approved": false,
+      "cap_drop": [
+        "CAP_DAC_OVERRIDE",
+        "CAP_FOWNER",
+        "CAP_FSETID",
+        "CAP_KILL",
+        "CAP_NET_BIND_SERVICE",
+        "CAP_SETFCAP",
+        "CAP_SETPCAP",
+        "CAP_SYS_CHROOT"
+      ],
+      "cap_add": [],
+      "security_opt": [
+        "no-new-privileges"
+      ],
       "no_new_privileges": false,
       "published_ports": false,
       "host_network": false,
-      "named_volume_opt_data": true,
-      "cpu_quota": 500000000,
+      "named_volume_opt_data": true
+    },
+    "resources": {
+      "nano_cpus": 500000000,
       "memory_limit": 536870912,
-      "pids_limit": 2048
+      "pids_limit": 2048,
+      "shm_size": 67108864,
+      "tmpfs": {
+        "/run": "size=16m,mode=755,rw,rprivate,nosuid,nodev,tmpcopyup",
+        "/tmp": "size=64m,mode=1777,rw,rprivate,nosuid,nodev,tmpcopyup"
+      },
+      "restart_policy": "no",
+      "log_driver": "k8s-file"
+    },
+    "namespaces": {
+      "network": "bridge",
+      "ipc": "shareable",
+      "pid": "private"
     }
   },
-  "diagnostic": "no stdout readiness marker before 30s; bounded logs had no concrete upstream error; runtime policy inspection mismatched approved caps, no-new-privileges, and PID limit",
-  "log_tail": "hell-1234/chrome-headless-shell-linux64/chrome-headless-shell [stage2] Setup complete; starting user services [supervise-perms] chowned supervise/ trees for static s6-rc services reconcile: profile=default prior_state=None action=registered",
+  "diagnostic": "  + baoyu-infographic   + claude-design   + obsidian   + grounded-citations   + arxiv   + llm-wiki   + polymarket   + blogwatcher   + research-paper-writing   + openhue   + github-issues   + github-code-review   + github-auth   + codebas...",
+  "log_tail": "  + touchdesigner-mcp   + baoyu-infographic   + claude-design   + obsidian   + grounded-citations   + arxiv   + llm-wiki   + polymarket   + blogwatcher   + research-paper-writing   + openhue   + github-issues   + github-code-review   + g...",
   "limitations": [
     "official_upstream_image_only",
     "readiness_not_proven",

@@ -11,7 +11,7 @@ provider, a browser, a PTY, or a retained raw log.
 from __future__ import annotations
 
 import argparse
-import hashlib
+import getpass
 import json
 import math
 import os
@@ -23,54 +23,37 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parent
 CASES_PATH = ROOT / "cases.json"
-EVIDENCE_PATH = ROOT / "evidence.json"
-RERUN_EVIDENCE_PATH = ROOT / "rerun-evidence.json"
 OFFICIAL_EVIDENCE_PATH = ROOT / "official-evidence.json"
 SCHEMA = "hermternal.integration.hermes-gateway-readiness.v1"
-EVIDENCE_SCHEMA = "hermternal.integration.hermes-gateway-readiness.evidence.v1"
 OFFICIAL_EVIDENCE_SCHEMA = "hermternal.integration.hermes-gateway-readiness.official-evidence.v1"
 OPERATION = "R-02C"
 CONTRACT = "hermes-gateway-readiness-v1"
-PINNED_HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
-PINNED_HERMES_TREE = "886db5eb1150f819344d67fedc81aef0caab09ff"
-PINNED_DOCKERFILE_SHA256 = "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc"
-IMAGE_REPOSITORY = "hermes-agent"
-IMAGE_TAG = "hermternal-f5be9236"
-IMAGE_REFERENCE = f"{IMAGE_REPOSITORY}:{IMAGE_TAG}"
-IMAGE_SOURCE_LABEL = "org.opencontainers.image.source"
-IMAGE_REVISION_LABEL = "org.opencontainers.image.revision"
-IMAGE_DOCKERFILE_LABEL = "com.hermternal.dockerfile.sha256"
-IMAGE_SOURCE_URL = "https://github.com/NousResearch/hermes-agent"
-# This reviewed content binding is deterministic from the frozen source,
-# tree, Dockerfile, and image reference. It is used as the expected immutable
-# repository digest until the explicitly gated live image evidence is run.
-IMAGE_CONTENT_MANIFEST = (
-    "repository=NousResearch/hermes-agent\n"
-    f"source_commit={PINNED_HERMES_SHA}\n"
-    f"source_tree={PINNED_HERMES_TREE}\n"
-    f"dockerfile_sha256={PINNED_DOCKERFILE_SHA256}\n"
-    f"image_reference={IMAGE_REFERENCE}\n"
-)
-REVIEWED_IMAGE_CONTENT_SHA256 = "72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b"
-require_manifest_digest = hashlib.sha256(IMAGE_CONTENT_MANIFEST.encode("ascii")).hexdigest()
-if require_manifest_digest != REVIEWED_IMAGE_CONTENT_SHA256:
-    raise RuntimeError("reviewed image content manifest changed")
-PINNED_IMAGE_DIGEST = f"sha256:{REVIEWED_IMAGE_CONTENT_SHA256}"
 OFFICIAL_IMAGE_REPOSITORY = "docker.io/nousresearch/hermes-agent"
+OFFICIAL_IMAGE_TAG = "v2026.8.3"
 OFFICIAL_IMAGE_DIGEST = "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e"
-OFFICIAL_IMAGE_REFERENCE = f"{OFFICIAL_IMAGE_REPOSITORY}:v2026.8.3@{OFFICIAL_IMAGE_DIGEST}"
-OFFICIAL_IMAGE_ID = "d5ff34e615e41748618093e19c125eece333de04a63f0febf5cead2d3a6e0e0d"
+OFFICIAL_IMAGE_REFERENCE = f"{OFFICIAL_IMAGE_REPOSITORY}:{OFFICIAL_IMAGE_TAG}@{OFFICIAL_IMAGE_DIGEST}"
+OFFICIAL_IMAGE_REPO_DIGEST = f"{OFFICIAL_IMAGE_REPOSITORY}@{OFFICIAL_IMAGE_DIGEST}"
 OFFICIAL_IMAGE_REVISION = "3c27eb6234bf91b8ceee9e9071591b31e9b148cb"
-OFFICIAL_IMAGE_ENTRYPOINT = ["/opt/hermes/docker/entrypoint-dispatch.sh"]
-OFFICIAL_IMAGE_USER = "root"
-OFFICIAL_IMAGE_WORKING_DIR = "/opt/hermes"
+# The upstream image config carries the dispatch path and working directory.
+# Runtime inspect remains the authoritative proof of the applied PID 1 path.
+OFFICIAL_CONTAINER_WORKING_DIR = "/opt/hermes"
+OFFICIAL_RUNTIME_PATH = "/opt/hermes/docker/entrypoint-dispatch.sh"
+OFFICIAL_RUNTIME_ENTRYPOINT = [OFFICIAL_RUNTIME_PATH]
+OFFICIAL_IMAGE_CONFIG_ENTRYPOINT = OFFICIAL_RUNTIME_ENTRYPOINT
+OFFICIAL_IMAGE_CONFIG_CMD = None
+OFFICIAL_IMAGE_CONFIG_USER = "root"
+OFFICIAL_IMAGE_CONFIG_WORKING_DIR = OFFICIAL_CONTAINER_WORKING_DIR
+IMAGE_REVISION_LABEL = "org.opencontainers.image.revision"
+EXPECTED_PODMAN_VERSION = "5.4.2"
+EXPECTED_COMPOSE_PROVIDER = "podman-compose"
+EXPECTED_COMPOSE_VERSION = "1.3.0"
 EXECUTOR = "podman"
 COMPOSE = "compose"
 ROOTLESS_ACCOUNT = "hermternal-test"
@@ -189,42 +172,11 @@ ROOT_KEYS = (
 )
 IDENTITY_KEYS = (
     "repository",
-    "source_commit",
-    "source_tree",
-    "dockerfile_sha256",
-    "image_reference",
-    "image_digest",
+    "tag",
+    "digest",
+    "reference",
 )
 CASE_KEYS = ("id", "kind", "input", "expected", "notes")
-EVIDENCE_KEYS = (
-    "schema",
-    "operation",
-    "synthetic_only",
-    "live_run",
-    "status",
-    "classification",
-    "teardown_exit_code",
-    "correctness_executor",
-    "ssh_target",
-    "pinned_identity",
-    "command_candidate",
-    "command_support",
-    "readiness_marker",
-    "readiness_source_status",
-    "capability_policy",
-    "observations",
-    "diagnostic",
-    "limitations",
-)
-EVIDENCE_OBSERVATION_KEYS = (
-    "compose_config",
-    "image_identity",
-    "container_start",
-    "readiness",
-    "exit",
-    "teardown",
-    "leftover_resources",
-)
 OFFICIAL_EVIDENCE_KEYS = (
     "schema",
     "operation",
@@ -235,6 +187,7 @@ OFFICIAL_EVIDENCE_KEYS = (
     "teardown_exit_code",
     "correctness_executor",
     "ssh_target",
+    "executor",
     "image",
     "command_candidate",
     "command_support",
@@ -242,17 +195,39 @@ OFFICIAL_EVIDENCE_KEYS = (
     "readiness_source_status",
     "capability_policy",
     "isolation_policy",
+    "cleanup_scope",
     "observations",
     "runtime_identity",
     "diagnostic",
     "log_tail",
     "limitations",
 )
+OFFICIAL_CLEANUP_KEYS = ("project", "network", "volume")
+OFFICIAL_EXECUTOR_KEYS = (
+    "account",
+    "ssh_target",
+    "rootless",
+    "podman_version",
+    "cgroup_version",
+    "network_backend",
+    "storage_driver",
+    "compose_provider",
+    "compose_version",
+    "docker_host_cleared",
+    "hermes_provider_cleared",
+)
 OFFICIAL_IMAGE_KEYS = (
     "reference",
-    "digest",
+    "repository",
+    "tag",
+    "requested_digest",
+    "pull_status",
+    "inspect_status",
     "image_id",
-    "repo_digest_count",
+    "repo_tags",
+    "repo_digests",
+    "repo_digest_verified",
+    "manifest_digest",
     "revision_label",
     "entrypoint",
     "cmd",
@@ -260,27 +235,50 @@ OFFICIAL_IMAGE_KEYS = (
     "working_dir",
 )
 OFFICIAL_OBSERVATION_KEYS = (
-    "compose_config",
+    "executor_preflight",
+    "image_pull",
     "image_identity",
+    "compose_config",
     "container_start",
+    "runtime_inspection",
     "readiness",
     "exit",
     "exit_code",
     "teardown",
     "leftover_resources",
+    "policy_inspection",
     "applied_policy",
 )
-OFFICIAL_RUNTIME_KEYS = ("status", "pid", "path", "args", "entrypoint", "policy")
+OFFICIAL_RUNTIME_KEYS = (
+    "container_id",
+    "status",
+    "pid",
+    "state",
+    "path",
+    "args",
+    "entrypoint",
+    "policy",
+    "resources",
+    "namespaces",
+)
 OFFICIAL_RUNTIME_POLICY_KEYS = (
-    "cap_drop_all",
-    "cap_add_approved",
+    "cap_drop",
+    "cap_add",
+    "security_opt",
     "no_new_privileges",
     "published_ports",
     "host_network",
     "named_volume_opt_data",
-    "cpu_quota",
+)
+OFFICIAL_RUNTIME_NAMESPACE_KEYS = ("network", "ipc", "pid")
+OFFICIAL_RUNTIME_RESOURCE_KEYS = (
+    "nano_cpus",
     "memory_limit",
     "pids_limit",
+    "shm_size",
+    "tmpfs",
+    "restart_policy",
+    "log_driver",
 )
 
 EXPECTED_CASE_IDS = (
@@ -368,23 +366,19 @@ PINNED_CASE_CONTRACTS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
     ),
     "identity-exact": (
         {
-            "repository": "NousResearch/hermes-agent",
-            "source_commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
-            "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
-            "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
-            "image_reference": "hermes-agent:hermternal-f5be9236",
-            "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b",
+            "repository": OFFICIAL_IMAGE_REPOSITORY,
+            "tag": OFFICIAL_IMAGE_TAG,
+            "digest": OFFICIAL_IMAGE_DIGEST,
+            "reference": OFFICIAL_IMAGE_REFERENCE,
         },
         {"accepted": True, "reason": "pinned_identity"},
     ),
     "identity-drift-rejected": (
         {
-            "repository": "NousResearch/hermes-agent",
-            "source_commit": "0000000000000000000000000000000000000000",
-            "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
-            "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
-            "image_reference": "hermes-agent:hermternal-f5be9236",
-            "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b",
+            "repository": OFFICIAL_IMAGE_REPOSITORY,
+            "tag": OFFICIAL_IMAGE_TAG,
+            "digest": "sha256:" + "0" * 64,
+            "reference": OFFICIAL_IMAGE_REFERENCE,
         },
         {"accepted": False, "reason": "pinned_identity_mismatch"},
     ),
@@ -551,7 +545,7 @@ class RenderedProbe:
 
 @dataclass(frozen=True)
 class ProbeResult:
-    """Bounded public outcome from one live or synthetic command sequence."""
+    """Bounded public outcome and observed runtime facts from one operation."""
 
     status: str
     classification: str
@@ -561,6 +555,11 @@ class ProbeResult:
     teardown_exit_code: int | None
     leftovers: dict[str, int]
     diagnostic: str
+    executor: dict[str, Any] = field(default_factory=dict)
+    image: dict[str, Any] = field(default_factory=dict)
+    observations: dict[str, Any] = field(default_factory=dict)
+    runtime_identity: dict[str, Any] = field(default_factory=dict)
+    log_tail: str = ""
 
     def public(self) -> dict[str, Any]:
         return {
@@ -576,10 +575,20 @@ class ProbeResult:
         }
 
 
+def redact_readiness_markers(text: str) -> str:
+    """Keep readiness claims out of blocked diagnostics and log tails."""
+
+    return re.sub(
+        r"(?m)^HERMES_BACKEND_READY port=[1-9][0-9]{0,4}$",
+        "[REDACTED_READINESS_MARKER]",
+        text,
+    )
+
+
 def compact_error(message: object) -> str:
     """Redact untrusted diagnostics before applying the fixed output cap."""
 
-    redacted = str(message)
+    redacted = redact_readiness_markers(str(message))
     for pattern in SECRET_VALUE_PATTERNS:
         redacted = pattern.sub("[REDACTED]", redacted)
 
@@ -593,6 +602,9 @@ def compact_error(message: object) -> str:
         redacted,
         flags=re.IGNORECASE,
     )
+    # Evidence fields are single-line public summaries. Normalize newlines,
+    # tabs, ANSI controls, and other terminal bytes before the output cap.
+    redacted = CONTROL_RE.sub(" ", redacted)
     if len(redacted) > MAX_ERROR_OUTPUT:
         return f"{redacted[: MAX_ERROR_OUTPUT - 3]}..."
     return redacted
@@ -666,8 +678,13 @@ def scan_json_nesting(text: str) -> None:
         raise FixtureJSONError("malformed JSON structure")
 
 
-def validate_json_tree(value: Any, depth: int = 0) -> int:
-    """Apply recursive node, container, text, and finite-number limits."""
+def validate_json_tree(value: Any, depth: int = 0, *, allow_controls: bool = False) -> int:
+    """Apply recursive node, container, text, and finite-number limits.
+
+    Checked-in fixtures reject decoded control characters. Podman metadata can
+    legitimately contain multiline runtime-version strings, so bounded command
+    output may opt into those strings without weakening fixture validation.
+    """
 
     if depth > MAX_JSON_DEPTH:
         raise FixtureJSONError("JSON depth exceeds the bounded limit")
@@ -680,7 +697,7 @@ def validate_json_tree(value: Any, depth: int = 0) -> int:
                 raise FixtureJSONError("JSON object key must be text")
             if len(key) > MAX_STRING_LENGTH:
                 raise FixtureJSONError("JSON object key is too long")
-            nodes += validate_json_tree(child, depth + 1)
+            nodes += validate_json_tree(child, depth + 1, allow_controls=allow_controls)
             if nodes > MAX_JSON_NODES:
                 raise FixtureJSONError("JSON node count exceeds the bounded limit")
         return nodes
@@ -689,14 +706,14 @@ def validate_json_tree(value: Any, depth: int = 0) -> int:
             raise FixtureJSONError("JSON array is too long")
         nodes = 1
         for child in value:
-            nodes += validate_json_tree(child, depth + 1)
+            nodes += validate_json_tree(child, depth + 1, allow_controls=allow_controls)
             if nodes > MAX_JSON_NODES:
                 raise FixtureJSONError("JSON node count exceeds the bounded limit")
         return nodes
     if type(value) is str:
         if len(value) > MAX_STRING_LENGTH:
             raise FixtureJSONError("JSON string is too long")
-        if CONTROL_RE.search(value) is not None:
+        if not allow_controls and CONTROL_RE.search(value) is not None:
             raise FixtureJSONError("JSON control character is not allowed")
         return 1
     if type(value) is float:
@@ -735,6 +752,33 @@ def load_json_text(data: bytes | str, *, label: str = "fixture") -> Any:
     return value
 
 
+def load_command_json_text(data: bytes | str, *, label: str = "command JSON") -> Any:
+    """Decode bounded executor JSON while allowing multiline metadata strings."""
+
+    raw = data.encode("utf-8") if isinstance(data, str) else data
+    if len(raw) > MAX_COMMAND_OUTPUT:
+        raise FixtureJSONError(f"{label} exceeds the command output limit")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise FixtureJSONError(f"{label} is not UTF-8") from exc
+    scan_json_nesting(text)
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
+            parse_float=_reject_overflowing_json_float,
+            parse_int=_reject_oversized_json_integer,
+        )
+    except FixtureJSONError:
+        raise
+    except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
+        raise FixtureJSONError(f"{label} is malformed") from exc
+    validate_json_tree(value, allow_controls=True)
+    return value
+
+
 def load_json(path: Path) -> Any:
     """Read one bounded JSON fixture without echoing its path on failure."""
 
@@ -752,15 +796,16 @@ def _normalize_sensitive_key(key: str) -> str:
 
 ALLOWED_CONTAINER_PATHS = frozenset({
     "/opt/data",
-    OFFICIAL_IMAGE_WORKING_DIR,
-    OFFICIAL_IMAGE_ENTRYPOINT[0],
+    OFFICIAL_CONTAINER_WORKING_DIR,
+    OFFICIAL_RUNTIME_PATH,
 })
 ALLOWED_CONTAINER_PATH_PREFIXES = ("/tmp:size=", "/run:size=")
 ALLOWED_PUBLIC_IMAGE_VALUES = frozenset({
     OFFICIAL_IMAGE_REPOSITORY,
+    OFFICIAL_IMAGE_TAG,
     OFFICIAL_IMAGE_REFERENCE,
     OFFICIAL_IMAGE_DIGEST,
-    f"{OFFICIAL_IMAGE_REPOSITORY}@{OFFICIAL_IMAGE_DIGEST}",
+    OFFICIAL_IMAGE_REPO_DIGEST,
 })
 
 
@@ -779,9 +824,17 @@ def _walk_redaction(value: Any) -> None:
             _walk_redaction(child)
         return
     if type(value) is str:
-        if value == PINNED_IMAGE_DIGEST or value in ALLOWED_PUBLIC_IMAGE_VALUES:
+        if value in ALLOWED_PUBLIC_IMAGE_VALUES:
             return
-        if HEX40_RE.fullmatch(value) or HEX64_RE.fullmatch(value):
+        if re.fullmatch(r"docker\.io/nousresearch/hermes-agent(?::v2026\.8\.3)?@sha256:[0-9a-f]{64}", value):
+            return
+        if re.fullmatch(r"docker\.io/nousresearch/hermes-agent@sha256:[0-9a-f]{64}", value):
+            return
+        if (
+            HEX40_RE.fullmatch(value)
+            or HEX64_RE.fullmatch(value)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+        ):
             return
         if value in ALLOWED_CONTAINER_PATHS or value.startswith(ALLOWED_CONTAINER_PATH_PREFIXES):
             return
@@ -911,7 +964,7 @@ def _canonical_compose(
     lines = [
         "services:",
         "  gateway:",
-        f"    image: {_yaml_string(IMAGE_REFERENCE)}",
+        f"    image: {_yaml_string(OFFICIAL_IMAGE_REFERENCE)}",
         '    restart: "no"',
     ]
     if additions:
@@ -1015,7 +1068,10 @@ def validate_rendered_probe(result: RenderedProbe) -> None:
         "ports:",
     ):
         require(forbidden not in text, f"unsafe Compose field is present: {forbidden}")
-    require('    image: "hermes-agent:hermternal-f5be9236"' in text, "image reference changed")
+    require(
+        f'    image: "{OFFICIAL_IMAGE_REFERENCE}"' in text,
+        "official immutable image reference changed",
+    )
     require('    restart: "no"' in text, "restart policy must be no")
     require('      - "ALL"' in text, "all capabilities must be dropped")
     require('      - "no-new-privileges:true"' in text, "no-new-privileges is required")
@@ -1041,94 +1097,74 @@ def validate_rendered_probe(result: RenderedProbe) -> None:
 
 
 def validate_pinned_identity(identity: Mapping[str, Any]) -> None:
-    """Require the full source/tree/Dockerfile/image binding, not abbreviations."""
+    """Require the official registry, tag, digest, and canonical reference."""
 
-    record = strict_keys(dict(identity), IDENTITY_KEYS, "pinned identity")
-    require(record["repository"] == "NousResearch/hermes-agent", "Hermes repository changed")
-    require(record["source_commit"] == PINNED_HERMES_SHA, "Hermes source commit changed")
-    require(record["source_tree"] == PINNED_HERMES_TREE, "Hermes source tree changed")
-    require(record["dockerfile_sha256"] == PINNED_DOCKERFILE_SHA256, "Dockerfile identity changed")
-    require(record["image_reference"] == IMAGE_REFERENCE, "image reference changed")
-    require(record["image_digest"] == PINNED_IMAGE_DIGEST, "image digest changed")
-    require(HEX40_RE.fullmatch(record["source_commit"]) is not None, "source commit is not a full SHA")
-    require(HEX40_RE.fullmatch(record["source_tree"]) is not None, "source tree is not a full SHA")
-    require(HEX64_RE.fullmatch(record["dockerfile_sha256"]) is not None, "Dockerfile digest is invalid")
-    require(re.fullmatch(r"sha256:[0-9a-f]{64}", record["image_digest"]) is not None, "image digest is invalid")
+    record = strict_keys(dict(identity), IDENTITY_KEYS, "official image identity")
+    require(record["repository"] == OFFICIAL_IMAGE_REPOSITORY, "official repository changed")
+    require(record["tag"] == OFFICIAL_IMAGE_TAG, "official tag changed")
+    require(record["digest"] == OFFICIAL_IMAGE_DIGEST, "official digest changed")
+    require(record["reference"] == OFFICIAL_IMAGE_REFERENCE, "official image reference changed")
+    require(re.fullmatch(r"sha256:[0-9a-f]{64}", record["digest"]) is not None, "official digest is invalid")
 
 
 def validate_image_binding(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate a bounded Podman inspect record without retaining host details."""
+    """Validate the actual official Podman image pull/inspect binding."""
 
-    tags = record.get("RepoTags", record.get("repo_tags", record.get("Names", [])))
-    require(type(tags) is list, "image tags are not a list")
-    require(IMAGE_REFERENCE in tags, "image tag is not pinned")
+    require(type(record) is dict, "image inspect record is not an object")
+    tags = record.get("RepoTags", record.get("repo_tags", []))
+    require(type(tags) is list, "image RepoTags are not a list")
+    for tag in tags:
+        require(type(tag) is str, "image RepoTags contain a non-text value")
+        require(
+            tag == f"{OFFICIAL_IMAGE_REPOSITORY}:{OFFICIAL_IMAGE_TAG}",
+            "image RepoTags contain a non-official reference",
+        )
+    digests = record.get("RepoDigests", record.get("repo_digests", []))
+    require(type(digests) is list and digests, "image RepoDigests are missing")
+    for digest in digests:
+        require(
+            type(digest) is str
+            and re.fullmatch(r"docker\.io/nousresearch/hermes-agent@sha256:[0-9a-f]{64}", digest)
+            is not None,
+            "image RepoDigests contain an invalid repository binding",
+        )
+    require(OFFICIAL_IMAGE_REPO_DIGEST in digests, "official RepoDigest binding is absent")
+    manifest_digest = record.get("Digest", record.get("digest"))
+    require(manifest_digest == OFFICIAL_IMAGE_DIGEST, "image manifest digest changed")
     image_id = record.get("Id", record.get("id"))
     require(type(image_id) is str and IMAGE_ID_RE.fullmatch(image_id) is not None, "image id is invalid")
-    digests = record.get("RepoDigests", record.get("repo_digests", []))
-    require(type(digests) is list and digests, "image digest binding is missing")
-    for digest in digests:
-        require(type(digest) is str and re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", digest) is not None, "image digest is invalid")
-    expected_digest = f"{IMAGE_REPOSITORY}@{PINNED_IMAGE_DIGEST}"
-    require(digests == [expected_digest], "image digest is not the reviewed immutable content")
 
     config = record.get("Config", {})
     require(type(config) is dict, "image config is not an object")
     labels = config.get("Labels", record.get("labels"))
     require(type(labels) is dict, "image labels are not an object")
-    require(labels.get(IMAGE_SOURCE_LABEL) == IMAGE_SOURCE_URL, "image source label is not pinned")
-    require(labels.get(IMAGE_REVISION_LABEL) == PINNED_HERMES_SHA, "image source revision label is not pinned")
-    require(labels.get(IMAGE_DOCKERFILE_LABEL) == PINNED_DOCKERFILE_SHA256, "image Dockerfile label is not pinned")
+    require(labels.get(IMAGE_REVISION_LABEL) == OFFICIAL_IMAGE_REVISION, "official revision label is not pinned")
+    entrypoint = config.get("Entrypoint")
+    cmd = config.get("Cmd")
+    user = config.get("User")
+    working_dir = config.get("WorkingDir")
+    require(entrypoint == OFFICIAL_IMAGE_CONFIG_ENTRYPOINT, "official image entrypoint metadata changed")
+    require(cmd == OFFICIAL_IMAGE_CONFIG_CMD, "official image command metadata changed")
+    require(user == OFFICIAL_IMAGE_CONFIG_USER, "official image user changed")
+    require(working_dir == OFFICIAL_IMAGE_CONFIG_WORKING_DIR, "official image working directory changed")
     return {
-        "reference": IMAGE_REFERENCE,
-        "id": image_id,
-        "repo_digest_count": len(digests),
-        "source_label_verified": True,
-        "dockerfile_label_verified": True,
-        "digest_verified": True,
+        "reference": OFFICIAL_IMAGE_REFERENCE,
+        "repository": OFFICIAL_IMAGE_REPOSITORY,
+        "tag": OFFICIAL_IMAGE_TAG,
+        "requested_digest": OFFICIAL_IMAGE_DIGEST,
+        "pull_status": "passed",
+        "inspect_status": "passed",
+        "image_id": image_id.removeprefix("sha256:"),
+        "repo_tags": list(tags),
+        "repo_digests": list(digests),
+        "repo_digest_verified": True,
+        "manifest_digest": manifest_digest,
+        "revision_label": labels[IMAGE_REVISION_LABEL],
+        "entrypoint": entrypoint,
+        "cmd": cmd,
+        "user": user,
+        "working_dir": working_dir,
     }
-
-
-def collect_source_identity(source_root: Path) -> dict[str, Any]:
-    """Read only pinned source identity; never include the checkout path in evidence."""
-
-    require(isinstance(source_root, Path), "source root must be a Path")
-    dockerfile = source_root / "Dockerfile"
-    try:
-        dockerfile_digest = hashlib.sha256(dockerfile.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise ProbeError("pinned Dockerfile is unavailable") from exc
-
-    def git_value(*arguments: str) -> str:
-        try:
-            completed = subprocess.run(
-                ("git", "-C", str(source_root), *arguments),
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=_executor_environment(),
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise ProbeError("pinned source identity command failed") from exc
-        if completed.returncode != 0:
-            raise ProbeError("pinned source identity command was rejected")
-        value = completed.stdout.strip()
-        if not value or len(value) > 128:
-            raise ProbeError("pinned source identity output is invalid")
-        return value
-
-    identity = {
-        "repository": "NousResearch/hermes-agent",
-        "source_commit": git_value("rev-parse", "HEAD"),
-        "source_tree": git_value("rev-parse", "HEAD^{tree}"),
-        "dockerfile_sha256": dockerfile_digest,
-        "image_reference": IMAGE_REFERENCE,
-        # Carry the reviewed immutable content binding through source identity;
-        # the tag alone cannot prove that the executor saw the reviewed image.
-        "image_digest": PINNED_IMAGE_DIGEST,
-    }
-    validate_pinned_identity(identity)
-    return identity
 
 
 def parse_readiness_marker(line: str) -> int | None:
@@ -1217,8 +1253,99 @@ def _executor_environment() -> dict[str, str]:
     # ``podman compose`` delegates to an external provider.  Podman prefers a
     # Docker Compose plugin when both providers exist, which would violate the
     # rootless-Podman correctness boundary even if the argv still says podman.
-    environment["PODMAN_COMPOSE_PROVIDER"] = "podman-compose"
+    environment["PODMAN_COMPOSE_PROVIDER"] = EXPECTED_COMPOSE_PROVIDER
     return environment
+
+
+def _parse_json_rows(output: str, label: str) -> list[dict[str, Any]]:
+    """Parse bounded Podman JSON or JSON-lines output without retaining names."""
+
+    if not output.strip():
+        return []
+    try:
+        value = load_json_text(output.encode("utf-8"), label=label)
+        values = value if type(value) is list else [value]
+    except FixtureJSONError:
+        values = []
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            value = load_json_text(line.encode("utf-8"), label=label)
+            values.append(value)
+    require(all(type(value) is dict for value in values), f"{label} rows are not objects")
+    return values
+
+
+def _command_json(result: CommandResult, label: str) -> Any:
+    require(not result.timed_out and result.returncode == 0, f"{label} command failed")
+    return load_command_json_text(result.output.encode("utf-8"), label=label)
+
+
+def _podman_version(value: Any) -> str:
+    if type(value) is not dict:
+        raise ValidationError("Podman version output is not an object")
+    candidates = (
+        value.get("Version"),
+        (value.get("Client") or {}).get("Version") if type(value.get("Client")) is dict else None,
+        (value.get("Server") or {}).get("Version") if type(value.get("Server")) is dict else None,
+        (value.get("version") or {}).get("Version") if type(value.get("version")) is dict else None,
+    )
+    for candidate in candidates:
+        if type(candidate) is str and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", candidate):
+            return candidate
+    raise ValidationError("Podman version is missing")
+
+
+def _compose_version(output: str) -> str:
+    match = re.search(r"podman-compose version ([0-9]+\.[0-9]+\.[0-9]+)", output)
+    if match is None:
+        raise ValidationError("podman-compose version is missing")
+    return match.group(1)
+
+
+def validate_executor_info(info: Mapping[str, Any]) -> None:
+    """Require the actual rootless Podman boundary before image execution."""
+
+    record = strict_keys(dict(info), OFFICIAL_EXECUTOR_KEYS, "executor identity")
+    require(record["account"] == ROOTLESS_ACCOUNT, "rootless account changed")
+    require(record["rootless"] is True, "Podman is not rootless")
+    require(record["podman_version"] == EXPECTED_PODMAN_VERSION, "Podman version changed")
+    require(record["cgroup_version"] == "v2", "cgroup version changed")
+    require(record["network_backend"] == "netavark", "network backend changed")
+    require(record["storage_driver"] == "overlay", "storage driver changed")
+    require(record["compose_provider"] == EXPECTED_COMPOSE_PROVIDER, "compose provider changed")
+    require(record["compose_version"] == EXPECTED_COMPOSE_VERSION, "compose provider version changed")
+    require(record["docker_host_cleared"] is True, "DOCKER_HOST was not cleared")
+    require(record["hermes_provider_cleared"] is True, "HERMES_PROVIDER was not cleared")
+
+
+def _collect_executor_info(runner: Runner) -> dict[str, Any]:
+    """Collect and validate only bounded public executor facts."""
+
+    version_result = _call_runner(runner, (EXECUTOR, "version", "--format", "json"), 10)
+    info_result = _call_runner(runner, (EXECUTOR, "info", "--format", "json"), 10)
+    compose_result = _call_runner(runner, (EXECUTOR, COMPOSE, "version"), 10)
+    version = _podman_version(_command_json(version_result, "Podman version"))
+    info = _command_json(info_result, "Podman info")
+    require(type(info) is dict, "Podman info is not an object")
+    host = info.get("host") or {}
+    store = info.get("store") or {}
+    security = host.get("security") or {}
+    record = {
+        "account": getpass.getuser(),
+        "ssh_target": SSH_TARGET,
+        "rootless": security.get("rootless"),
+        "podman_version": version,
+        "cgroup_version": host.get("cgroupVersion"),
+        "network_backend": host.get("networkBackend"),
+        "storage_driver": store.get("graphDriverName"),
+        "compose_provider": EXPECTED_COMPOSE_PROVIDER,
+        "compose_version": _compose_version(compose_result.output + "\n" + compose_result.stderr),
+        "docker_host_cleared": "DOCKER_HOST" not in _executor_environment(),
+        "hermes_provider_cleared": "HERMES_PROVIDER" not in _executor_environment(),
+    }
+    validate_executor_info(record)
+    return record
 
 
 def _bounded_bytes(value: bytes) -> str:
@@ -1404,6 +1531,155 @@ def _image_inspect_from_value(value: Any) -> dict[str, Any]:
     return value
 
 
+def _container_id_from_listing(output: str) -> str:
+    rows = _parse_json_rows(output, "container listing")
+    require(len(rows) == 1, "project must have exactly one gateway container")
+    container_id = rows[0].get("Id", rows[0].get("ID"))
+    require(type(container_id) is str and re.fullmatch(r"[0-9a-f]{12,64}", container_id) is not None, "container id is invalid")
+    return container_id
+
+
+def _runtime_identity_from_row(row: Mapping[str, Any], container_id: str) -> dict[str, Any]:
+    state = row.get("State") or {}
+    config = row.get("Config") or {}
+    host = row.get("HostConfig") or {}
+    mounts = row.get("Mounts") or []
+    require(type(state) is dict, "container state is not an object")
+    require(type(config) is dict, "container config is not an object")
+    require(type(host) is dict, "container HostConfig is not an object")
+    require(type(mounts) is list, "container mounts are not an array")
+    cap_drop = list(host.get("CapDrop") or [])
+    cap_add = list(host.get("CapAdd") or [])
+    security_opt = list(host.get("SecurityOpt") or [])
+    port_bindings = host.get("PortBindings") or {}
+    restart = host.get("RestartPolicy") or {}
+    log_config = host.get("LogConfig") or {}
+    no_new_privileges = host.get("NoNewPrivileges")
+    if type(no_new_privileges) is not bool:
+        no_new_privileges = "no-new-privileges:true" in security_opt
+    named_volume = any(
+        type(mount) is dict
+        and mount.get("Type") == "volume"
+        and mount.get("Destination") == "/opt/data"
+        for mount in mounts
+    )
+    pid = state.get("Pid")
+    if type(pid) is not int or type(pid) is bool:
+        pid = None
+    exit_code = state.get("ExitCode")
+    if type(exit_code) is not int or type(exit_code) is bool:
+        exit_code = None
+    return {
+        "container_id": container_id,
+        "status": "verified",
+        "pid": pid,
+        "state": {
+            "running": state.get("Running"),
+            "status": state.get("Status"),
+            "exit_code": exit_code,
+        },
+        "path": row.get("Path"),
+        "args": list(row.get("Args") or []),
+        "entrypoint": config.get("Entrypoint"),
+        "policy": {
+            "cap_drop": cap_drop,
+            "cap_add": cap_add,
+            "security_opt": security_opt,
+            "no_new_privileges": no_new_privileges,
+            "published_ports": bool(port_bindings) or bool(host.get("PublishAllPorts")),
+            "host_network": host.get("NetworkMode") == "host",
+            "named_volume_opt_data": named_volume,
+        },
+        "resources": {
+            "nano_cpus": host.get("NanoCpus", host.get("NanoCPUs", host.get("CpuQuota"))),
+            "memory_limit": host.get("Memory"),
+            "pids_limit": host.get("PidsLimit"),
+            "shm_size": host.get("ShmSize"),
+            "tmpfs": host.get("Tmpfs"),
+            "restart_policy": restart.get("Name") if type(restart) is dict else restart,
+            "log_driver": log_config.get("Type") if type(log_config) is dict else log_config,
+        },
+        "namespaces": {
+            "network": host.get("NetworkMode"),
+            "ipc": host.get("IpcMode"),
+            "pid": host.get("PidMode"),
+        },
+    }
+
+
+def _inspect_container_by_id(container_id: str, runner: Runner) -> dict[str, Any]:
+    inspected = _call_runner(runner, (EXECUTOR, "inspect", "--format", "json", container_id), 5)
+    require(not inspected.timed_out and inspected.returncode == 0, "container inspect failed")
+    row = _image_inspect_from_output(inspected.output)
+    return _runtime_identity_from_row(row, container_id)
+
+
+def _inspect_runtime_container(
+    project: str,
+    runner: Runner,
+) -> dict[str, Any]:
+    listing = _call_runner(
+        runner,
+        (
+            EXECUTOR,
+            "ps",
+            "--no-trunc",
+            "-a",
+            "--filter",
+            f"label=io.podman.compose.project={project}",
+            "--format",
+            "json",
+        ),
+        5,
+    )
+    require(not listing.timed_out and listing.returncode == 0, "container listing failed")
+    container_id = _container_id_from_listing(listing.output)
+    return _inspect_container_by_id(container_id, runner)
+
+
+def _runtime_tmpfs_matches(value: Any) -> bool:
+    """Accept Podman's normalized tmpfs values while requiring reviewed sizes."""
+
+    required = {
+        "/tmp": "size=64m,mode=1777",
+        "/run": "size=16m,mode=755",
+    }
+    if type(value) is dict:
+        return all(
+            type(value.get(path)) is str and value[path].startswith(prefix)
+            for path, prefix in required.items()
+        )
+    if type(value) is list:
+        return all(f"{path}:{prefix}" in value for path, prefix in required.items())
+    return False
+
+
+def _runtime_policy_matches(runtime: Mapping[str, Any]) -> bool:
+    policy = runtime.get("policy")
+    resources = runtime.get("resources")
+    namespaces = runtime.get("namespaces")
+    if type(policy) is not dict or type(resources) is not dict or type(namespaces) is not dict:
+        return False
+    return (
+        policy.get("cap_drop") == ["ALL"]
+        and policy.get("cap_add") == list(APPROVED_CAPABILITIES)
+        and policy.get("no_new_privileges") is True
+        and policy.get("published_ports") is False
+        and policy.get("host_network") is False
+        and policy.get("named_volume_opt_data") is True
+        and resources.get("nano_cpus") == 500000000
+        and resources.get("memory_limit") == 536870912
+        and resources.get("pids_limit") == 256
+        and resources.get("shm_size") == 67108864
+        and _runtime_tmpfs_matches(resources.get("tmpfs"))
+        and resources.get("restart_policy") == "no"
+        and resources.get("log_driver") == "k8s-file"
+        and namespaces.get("network") != "host"
+        and namespaces.get("ipc") != "host"
+        and namespaces.get("pid") != "host"
+    )
+
+
 def _leftover_commands(project: str) -> tuple[tuple[str, ...], ...]:
     label = f"io.podman.compose.project={project}"
     return (
@@ -1428,19 +1704,41 @@ def _call_runner(runner: Runner, command: Sequence[str], timeout: float) -> Comm
     return result
 
 
-def _finalize_preflight_failure(
+def _empty_official_observations() -> dict[str, Any]:
+    return {
+        "executor_preflight": "not_run",
+        "image_pull": "not_run",
+        "image_identity": "not_run",
+        "compose_config": "not_run",
+        "container_start": "not_run",
+        "runtime_inspection": "not_run",
+        "readiness": "not_run",
+        "exit": "not_run",
+        "exit_code": None,
+        "teardown": "not_run",
+        "leftover_resources": {"containers": -1, "networks": -1, "volumes": -1},
+        "policy_inspection": "not_run",
+        "applied_policy": "not_verified",
+    }
+
+
+def _runtime_identity_matches(runtime: Mapping[str, Any]) -> bool:
+    return (
+        runtime.get("path") == OFFICIAL_RUNTIME_PATH
+        and runtime.get("args") == list(PROBE_COMMAND)
+        and (
+            runtime.get("entrypoint") is None
+            or runtime.get("entrypoint") == OFFICIAL_RUNTIME_ENTRYPOINT
+        )
+    )
+
+
+def _cleanup_probe(
     rendered: RenderedProbe,
     compose_path: Path,
-    *,
-    status: str,
-    classification: str,
-    exit_code: int | None,
-    timed_out: bool,
-    diagnostic: str,
     runner: Runner,
-) -> ProbeResult:
-    """Teardown and inspect even when config or image preflight blocks startup."""
-
+    diagnostic: str,
+) -> tuple[CommandResult, dict[str, int], str]:
     teardown_result = _call_runner(runner, teardown_command(rendered.project, compose_path), 20)
     leftovers: dict[str, int] = {}
     for resource_name, command in zip(("containers", "networks", "volumes"), _leftover_commands(rendered.project)):
@@ -1453,48 +1751,46 @@ def _finalize_preflight_failure(
         except (FixtureJSONError, ValidationError, ValueError, TypeError) as exc:
             leftovers[resource_name] = -1
             diagnostic = compact_error(exc)
-    if not zero_leftovers(leftovers):
-        status = "blocked"
-        classification = "cleanup_leftovers"
-    if teardown_result.returncode != 0 or teardown_result.timed_out:
-        status = "blocked"
-        classification = "cleanup_failed"
-    return ProbeResult(
-        status,
-        classification,
-        None,
-        exit_code,
-        timed_out,
-        teardown_result.returncode,
-        leftovers,
-        diagnostic,
-    )
+    return teardown_result, leftovers, diagnostic
 
 
 def run_probe(
     rendered: RenderedProbe,
     compose_path: Path,
     *,
-    identity: Mapping[str, Any],
     capability_policy: Mapping[str, Any] | None = None,
+    executor_info: Mapping[str, Any] | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     runner: Runner = lambda command, timeout: run_bounded(command, timeout=timeout),
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> ProbeResult:
-    """Run one bounded project, poll its marker, and tear down only that project."""
+    """Run only the official image and derive evidence from bounded commands."""
 
     policy = dict(CAPABILITY_POLICY if capability_policy is None else capability_policy)
     validate_capability_policy(policy)
-    validate_pinned_identity(identity)
     validate_rendered_probe(rendered)
     require(timeout_seconds > 0 and timeout_seconds <= 300, "probe timeout is outside the bounded range")
     require(poll_interval_seconds > 0 and poll_interval_seconds <= 5, "probe poll interval is outside the bounded range")
+    observations = _empty_official_observations()
+    executor: dict[str, Any] = {}
+    image: dict[str, Any] = {}
+    runtime: dict[str, Any] = {}
+    log_tail = ""
+    diagnostic = ""
+    status = "blocked"
+    classification = "executor_result_unknown"
+    readiness_port: int | None = None
+    exit_code: int | None = None
+    timed_out = False
+    teardown_result = CommandResult(None, "", False, "teardown not attempted")
+    leftovers = {"containers": -1, "networks": -1, "volumes": -1}
 
     if policy["status"] != "approved":
+        observations["executor_preflight"] = "not_run"
         return ProbeResult(
-            "blocked",
+            status,
             "capability_policy_pending",
             None,
             None,
@@ -1502,184 +1798,174 @@ def run_probe(
             None,
             {"containers": 0, "networks": 0, "volumes": 0},
             "issue 250 capability policy is not reviewed",
+            observations=observations,
         )
 
-    config_result = _call_runner(runner, compose_command(rendered.project, compose_path, "config"), 10)
-    if config_result.timed_out or config_result.returncode != 0:
-        return _finalize_preflight_failure(
-            rendered,
-            compose_path,
-            status="blocked",
-            classification="compose_config_failed",
-            exit_code=config_result.returncode,
-            timed_out=config_result.timed_out,
-            diagnostic=summarize_result(config_result),
-            runner=runner,
-        )
-
-    image_result = _call_runner(
-        runner,
-        (EXECUTOR, "image", "inspect", "--format", "json", IMAGE_REFERENCE),
-        10,
-    )
-    if image_result.timed_out or image_result.returncode != 0:
-        return _finalize_preflight_failure(
-            rendered,
-            compose_path,
-            status="blocked",
-            classification="image_identity_unavailable",
-            exit_code=image_result.returncode,
-            timed_out=image_result.timed_out,
-            diagnostic=summarize_result(image_result),
-            runner=runner,
-        )
     try:
-        validate_image_binding(_image_inspect_from_output(image_result.output))
-    except (FixtureJSONError, ValidationError) as exc:
-        return _finalize_preflight_failure(
-            rendered,
-            compose_path,
-            status="blocked",
-            classification="image_identity_mismatch",
-            exit_code=image_result.returncode,
-            timed_out=False,
-            diagnostic=compact_error(exc),
-            runner=runner,
-        )
-
-    readiness_port: int | None = None
-    exit_code: int | None = None
-    timed_out = False
-    status, classification = "blocked", "executor_result_unknown"
-    diagnostic = ""
-    # The cleanup result is initialized so even an exceptional start path can
-    # return a bounded outcome instead of losing the exact teardown proof.
-    teardown_result = CommandResult(None, "", False, "teardown not attempted")
-    try:
-        # Keep the up call inside the cleanup scope.  A runner timeout or
-        # partial exception after this point must still attempt exact teardown.
-        up_result = _call_runner(
-            runner,
-            compose_command(rendered.project, compose_path, "up", "--detach", "--no-build", "gateway"),
-            30,
-        )
-        started = up_result.returncode == 0 and not up_result.timed_out
-        diagnostic = summarize_result(up_result)
-        if not started:
-            timed_out = up_result.timed_out
-            status, classification = classify_probe(
-                readiness_port=None,
-                returncode=up_result.returncode,
-                timed_out=up_result.timed_out,
-            )
+        if executor_info is None:
+            executor = _collect_executor_info(runner)
         else:
-            deadline = clock() + timeout_seconds
-            classification = "timeout_waiting_for_readiness"
-            while True:
-                log_result = _call_runner(
-                    runner,
-                    compose_command(
-                        rendered.project,
-                        compose_path,
-                        "logs",
-                        "--no-color",
-                        "--no-log-prefix",
-                        "--tail",
-                        str(MAX_LOG_LINES),
-                        "gateway",
-                    ),
-                    5,
-                )
-                diagnostic = summarize_result(log_result)
-                # Only a successful log query can contribute stdout to the
-                # readiness parser.  In particular, stderr is diagnostic-only.
-                if log_result.timed_out:
-                    timed_out = True
-                    readiness_port = None
-                    status, classification = "blocked", "logs_timeout"
-                    break
-                if log_result.returncode != 0:
-                    readiness_port = None
-                    status, classification = "blocked", "logs_failed"
-                    break
+            executor = dict(executor_info)
+            validate_executor_info(executor)
+        observations["executor_preflight"] = "passed"
+
+        pull_result = _call_runner(
+            runner,
+            (EXECUTOR, "image", "pull", OFFICIAL_IMAGE_REFERENCE),
+            60,
+        )
+        if pull_result.timed_out or pull_result.returncode != 0:
+            classification = "image_pull_failed"
+            diagnostic = summarize_result(pull_result)
+        else:
+            observations["image_pull"] = "passed"
+            inspect_result = _call_runner(
+                runner,
+                (EXECUTOR, "image", "inspect", "--format", "json", OFFICIAL_IMAGE_REFERENCE),
+                10,
+            )
+            if inspect_result.timed_out or inspect_result.returncode != 0:
+                classification = "image_identity_unavailable"
+                diagnostic = summarize_result(inspect_result)
+            else:
                 try:
-                    readiness_port = parse_readiness_output(log_result.output)
-                except ProbeError as exc:
-                    readiness_port = None
-                    status, classification = "blocked", "invalid_readiness_output"
+                    image = validate_image_binding(_image_inspect_from_output(inspect_result.output))
+                except (FixtureJSONError, ValidationError) as exc:
+                    classification = "image_identity_mismatch"
                     diagnostic = compact_error(exc)
-                    break
-                state_result = _call_runner(
-                    runner,
-                    compose_command(
-                        rendered.project,
-                        compose_path,
-                        "ps",
-                        "--all",
-                        "--format",
-                        "json",
-                        "gateway",
-                    ),
-                    5,
-                )
-                if state_result.timed_out or state_result.returncode != 0:
-                    readiness_port = None
-                    timed_out = state_result.timed_out
-                    status = "blocked"
-                    classification = "container_state_timeout" if state_result.timed_out else "container_state_failed"
-                    diagnostic = summarize_result(state_result)
-                    break
-                running, observed_exit_code = _container_state(state_result.output)
-                if observed_exit_code is not None:
-                    exit_code = observed_exit_code
-                if readiness_port is not None:
-                    status, classification = classify_probe(
-                        readiness_port=readiness_port,
-                        returncode=exit_code,
-                        timed_out=False,
+                else:
+                    observations["image_identity"] = "passed"
+                    config_result = _call_runner(
+                        runner,
+                        compose_command(rendered.project, compose_path, "config"),
+                        10,
                     )
-                    break
-                if not running and exit_code is not None:
-                    status, classification = classify_probe(
-                        readiness_port=None,
-                        returncode=exit_code,
-                        timed_out=False,
-                    )
-                    break
-                remaining = deadline - clock()
-                if remaining <= 0:
-                    timed_out = True
-                    status, classification = classify_probe(
-                        readiness_port=None,
-                        returncode=exit_code,
-                        timed_out=True,
-                    )
-                    break
-                sleeper(min(poll_interval_seconds, remaining))
+                    if config_result.timed_out or config_result.returncode != 0:
+                        classification = "compose_config_failed"
+                        diagnostic = summarize_result(config_result)
+                    else:
+                        observations["compose_config"] = "passed"
+                        up_result = _call_runner(
+                            runner,
+                            compose_command(rendered.project, compose_path, "up", "--detach", "--no-build", "gateway"),
+                            30,
+                        )
+                        if up_result.timed_out or up_result.returncode != 0:
+                            classification = "start_failed"
+                            timed_out = up_result.timed_out
+                            diagnostic = summarize_result(up_result)
+                        else:
+                            observations["container_start"] = "started"
+                            try:
+                                runtime = _inspect_runtime_container(rendered.project, runner)
+                            except (FixtureJSONError, ValidationError, ProbeError) as exc:
+                                classification = "runtime_inspection_failed"
+                                diagnostic = compact_error(exc)
+                            else:
+                                observations["runtime_inspection"] = "passed"
+                                observations["policy_inspection"] = "passed"
+                                policy_matches = _runtime_policy_matches(runtime)
+                                observations["applied_policy"] = "passed" if policy_matches else "failed"
+                                if not _runtime_identity_matches(runtime):
+                                    classification = "runtime_identity_mismatch"
+                                else:
+                                    container_id = runtime["container_id"]
+                                    deadline = clock() + timeout_seconds
+                                    classification = "timeout_waiting_for_readiness"
+                                    while True:
+                                        log_result = _call_runner(
+                                            runner,
+                                            (EXECUTOR, "logs", "--tail", str(MAX_LOG_LINES), container_id),
+                                            5,
+                                        )
+                                        log_tail = summarize_output(log_result.output)
+                                        diagnostic = summarize_result(log_result)
+                                        if log_result.timed_out:
+                                            timed_out = True
+                                            classification = "logs_timeout"
+                                            break
+                                        if log_result.returncode != 0:
+                                            classification = "logs_failed"
+                                            break
+                                        try:
+                                            candidate_port = parse_readiness_output(log_result.output)
+                                        except ProbeError as exc:
+                                            classification = "invalid_readiness_output"
+                                            diagnostic = compact_error(exc)
+                                            break
+                                        try:
+                                            previous_pid = runtime.get("pid")
+                                            latest_runtime = _inspect_container_by_id(container_id, runner)
+                                            if type(previous_pid) is int and previous_pid > 0 and (latest_runtime.get("pid") or 0) <= 0:
+                                                latest_runtime["pid"] = previous_pid
+                                            runtime = latest_runtime
+                                        except (FixtureJSONError, ValidationError, ProbeError) as exc:
+                                            classification = "runtime_inspection_failed"
+                                            diagnostic = compact_error(exc)
+                                            break
+                                        observations["runtime_inspection"] = "passed"
+                                        observations["policy_inspection"] = "passed"
+                                        policy_matches = _runtime_policy_matches(runtime)
+                                        observations["applied_policy"] = "passed" if policy_matches else "failed"
+                                        state = runtime["state"]
+                                        running = state.get("running") is True or state.get("status") in {"running", "up"}
+                                        observed_exit = state.get("exit_code") if not running else None
+                                        exit_code = observed_exit
+                                        observations["exit_code"] = exit_code
+                                        if exit_code is not None:
+                                            observations["exit"] = "observed"
+                                        if candidate_port is not None:
+                                            if policy_matches and _runtime_identity_matches(runtime):
+                                                readiness_port = candidate_port
+                                                status, classification = "ready", "readiness_marker"
+                                                observations["readiness"] = "ready"
+                                            else:
+                                                classification = "policy_not_applied" if not policy_matches else "runtime_identity_mismatch"
+                                                observations["readiness"] = "blocked"
+                                            break
+                                        if not running and exit_code is not None:
+                                            classification = "policy_not_applied" if not policy_matches else classify_probe(
+                                                readiness_port=None,
+                                                returncode=exit_code,
+                                                timed_out=False,
+                                            )[1]
+                                            observations["readiness"] = "not_ready"
+                                            break
+                                        remaining = deadline - clock()
+                                        if remaining <= 0:
+                                            timed_out = True
+                                            classification = "policy_not_applied" if not policy_matches else "timeout_waiting_for_readiness"
+                                            observations["readiness"] = "timeout"
+                                            break
+                                        sleeper(min(poll_interval_seconds, remaining))
     except Exception as exc:
-        readiness_port = None
-        status, classification = "blocked", "executor_failure"
+        classification = classification if classification != "executor_result_unknown" else "executor_failure"
         diagnostic = compact_error(exc)
     finally:
-        teardown_result = _call_runner(runner, teardown_command(rendered.project, compose_path), 20)
+        teardown_result, leftovers, diagnostic = _cleanup_probe(
+            rendered,
+            compose_path,
+            runner,
+            diagnostic,
+        )
+        observations["teardown"] = "passed" if teardown_result.returncode == 0 and not teardown_result.timed_out else "failed"
+        observations["leftover_resources"] = dict(leftovers)
 
-    leftovers: dict[str, int] = {}
-    for resource_name, command in zip(("containers", "networks", "volumes"), _leftover_commands(rendered.project)):
-        listing = _call_runner(runner, command, 10)
-        if listing.returncode != 0 or listing.timed_out:
-            leftovers[resource_name] = -1
-            continue
-        try:
-            leftovers[resource_name] = parse_resource_listing(listing.output)
-        except (FixtureJSONError, ValidationError, ValueError, TypeError) as exc:
-            leftovers[resource_name] = -1
-            diagnostic = compact_error(exc)
     if not zero_leftovers(leftovers):
         status = "blocked"
         classification = "cleanup_leftovers"
     if teardown_result.returncode != 0 or teardown_result.timed_out:
         status = "blocked"
         classification = "cleanup_failed"
+    if status != "ready":
+        status = "blocked"
+        readiness_port = None
+    observations["exit_code"] = exit_code
+    if observations["container_start"] == "started" and observations["exit"] == "not_run":
+        # A running container at the deadline has no observed process exit;
+        # retain that distinction instead of treating Podman's default
+        # ExitCode=0 field as a termination event.
+        observations["exit"] = "not_observed"
     return ProbeResult(
         status,
         classification,
@@ -1688,7 +1974,12 @@ def run_probe(
         timed_out,
         teardown_result.returncode,
         leftovers,
-        diagnostic,
+        compact_error(diagnostic),
+        executor=executor,
+        image=image,
+        observations=observations,
+        runtime_identity=runtime,
+        log_tail=log_tail,
     )
 
 
@@ -1851,146 +2142,79 @@ def validate_cases_document(document: Any) -> None:
         strict_equal(expected, row["expected"], f"case {row['id']} outcome")
 
 
-def _validate_attempt_evidence_document(
-    evidence: Any,
-    cases_document: Mapping[str, Any],
-    *,
-    expected_classification: str,
-    expected_teardown_exit: int,
-    expected_teardown_observation: str,
-    expected_limitations: list[str],
-    label: str,
-) -> None:
-    """Validate one bounded live attempt without readiness overclaims."""
-
-    record = strict_keys(evidence, EVIDENCE_KEYS, label)
-    require(record["schema"] == EVIDENCE_SCHEMA, "evidence schema changed")
-    require(record["operation"] == OPERATION, "evidence operation changed")
-    require(record["synthetic_only"] is False, "live evidence must not be synthetic-only")
-    require(record["live_run"] is True, "live evidence must identify the live run")
-    require(record["status"] == "blocked", "live evidence must remain blocked")
-    require(record["classification"] == expected_classification, "live attempt classification changed")
-    # bool is an int subclass, so enforce the JSON evidence schema's exact
-    # built-in integer type before comparing cleanup semantics.
-    teardown_exit_code = _int(record["teardown_exit_code"], "evidence teardown exit code")
-    require(teardown_exit_code == expected_teardown_exit, "live attempt teardown result changed")
-    require(record["correctness_executor"] == "rootless_podman", "evidence executor changed")
-    require(record["ssh_target"] == SSH_TARGET, "evidence SSH boundary changed")
-    validate_pinned_identity(record["pinned_identity"])
-    require(record["command_candidate"] == list(PROBE_COMMAND), "candidate command changed")
-    require(
-        record["command_support"] == "parser_option_present_readiness_candidate_requires_review",
-        "candidate command support claim changed",
-    )
-    require(record["readiness_marker"] == READINESS_PREFIX, "readiness marker changed")
-    require(record["readiness_source_status"] == "headless_backend_path_only", "readiness source claim changed")
-    strict_equal(record["capability_policy"], cases_document["capability_policy"], "evidence capability policy")
-    observations = strict_keys(record["observations"], EVIDENCE_OBSERVATION_KEYS, "evidence observations")
-    require(observations["compose_config"] == "passed", "Compose config must be recorded as passed")
-    require(observations["image_identity"] == "failed", "image identity must be recorded as failed")
-    require(observations["container_start"] == "not_run", "container startup must not be claimed")
-    require(observations["readiness"] == "not_run", "readiness must not be claimed")
-    require(observations["exit"] == "not_run", "container exit must not be claimed")
-    require(observations["teardown"] == expected_teardown_observation, "live attempt teardown result changed")
-    leftovers = strict_keys(observations["leftover_resources"], ("containers", "networks", "volumes"), "evidence leftovers")
-    # Validate every count before the aggregate comparison; otherwise JSON
-    # booleans would compare equal to the integer zero in Python.
-    for resource_name, count in leftovers.items():
-        _int(count, f"evidence leftovers.{resource_name}")
-    require(leftovers == {"containers": 0, "networks": 0, "volumes": 0}, "cleanup must prove zero leftovers")
-    _text(record["diagnostic"], "evidence diagnostic", max_length=MAX_ERROR_OUTPUT)
-    require(type(record["limitations"]) is list, "evidence limitations must be an array")
-    require(record["limitations"] == expected_limitations, "evidence limitations changed")
-
-
-def validate_evidence_document(evidence: Any, cases_document: Mapping[str, Any]) -> None:
-    """Validate the first live attempt, including its cleanup failure."""
-
-    _validate_attempt_evidence_document(
-        evidence,
-        cases_document,
-        expected_classification="cleanup_failed",
-        expected_teardown_exit=1,
-        expected_teardown_observation="failed",
-        expected_limitations=[
-            "image_identity_mismatch",
-            "compose_provider_docker_precedence",
-            "teardown_command_failed",
-            "container_start_not_run",
-            "readiness_not_proven",
-            "no_provider_or_browser_auth",
-        ],
-        label="first-attempt evidence",
-    )
-
-
-def validate_rerun_evidence_document(evidence: Any, cases_document: Mapping[str, Any]) -> None:
-    """Validate the provider-pinned rerun without claiming startup or readiness."""
-
-    _validate_attempt_evidence_document(
-        evidence,
-        cases_document,
-        expected_classification="image_identity_mismatch",
-        expected_teardown_exit=0,
-        expected_teardown_observation="passed",
-        expected_limitations=[
-            "image_identity_mismatch",
-            "container_start_not_run",
-            "readiness_not_proven",
-            "no_provider_or_browser_auth",
-        ],
-        label="provider-pinned rerun evidence",
-    )
+def _validate_cleanup_scope(scope: Any) -> dict[str, str]:
+    record = strict_keys(scope, OFFICIAL_CLEANUP_KEYS, "official cleanup scope")
+    project = _text(record["project"], "cleanup project", max_length=64)
+    require(PROJECT_RE.fullmatch(project) is not None, "cleanup project is not canonical")
+    require(record["network"] == f"{project}_internal", "cleanup network is not project-bound")
+    require(record["volume"] == f"{project}_data", "cleanup volume is not project-bound")
+    return record
 
 
 def validate_official_evidence_document(
     evidence: Any,
     cases_document: Mapping[str, Any],
 ) -> None:
-    """Validate the official immutable-image attempt without a readiness overclaim."""
+    """Validate generated official evidence without accepting unexecuted claims."""
 
     record = strict_keys(evidence, OFFICIAL_EVIDENCE_KEYS, "official image evidence")
     require(record["schema"] == OFFICIAL_EVIDENCE_SCHEMA, "official evidence schema changed")
     require(record["operation"] == OPERATION, "official evidence operation changed")
     require(record["synthetic_only"] is False, "official evidence must not be synthetic-only")
     require(record["live_run"] is True, "official evidence must identify the live run")
-    require(record["status"] == "blocked", "official evidence must remain blocked")
-    require(record["classification"] == "policy_not_applied", "official evidence classification changed")
+    require(record["status"] in {"blocked", "ready"}, "official evidence status changed")
     require(_int(record["teardown_exit_code"], "official teardown exit code") == 0, "official teardown failed")
     require(record["correctness_executor"] == "rootless_podman", "official executor changed")
     require(record["ssh_target"] == SSH_TARGET, "official SSH boundary changed")
 
+    executor = strict_keys(record["executor"], OFFICIAL_EXECUTOR_KEYS, "official executor identity")
+    validate_executor_info(executor)
+    _validate_cleanup_scope(record["cleanup_scope"])
+
     image = strict_keys(record["image"], OFFICIAL_IMAGE_KEYS, "official image identity")
     require(image["reference"] == OFFICIAL_IMAGE_REFERENCE, "official image reference changed")
-    require(image["digest"] == OFFICIAL_IMAGE_DIGEST, "official image digest changed")
+    require(image["repository"] == OFFICIAL_IMAGE_REPOSITORY, "official image repository changed")
+    require(image["tag"] == OFFICIAL_IMAGE_TAG, "official image tag changed")
+    require(image["requested_digest"] == OFFICIAL_IMAGE_DIGEST, "official requested digest changed")
+    require(image["pull_status"] == "passed", "official image pull was not executed")
+    require(image["inspect_status"] == "passed", "official image inspect was not executed")
     require(type(image["image_id"]) is str and HEX64_RE.fullmatch(image["image_id"]) is not None, "official image id is invalid")
-    require(image["image_id"] == OFFICIAL_IMAGE_ID, "official image id changed")
-    require(_int(image["repo_digest_count"], "official repo digest count") == 2, "official repo digest count changed")
+    require(type(image["repo_tags"]) is list, "official RepoTags are not retained")
+    for tag in image["repo_tags"]:
+        require(tag == f"{OFFICIAL_IMAGE_REPOSITORY}:{OFFICIAL_IMAGE_TAG}", "official RepoTags drifted")
+    require(type(image["repo_digests"]) is list and image["repo_digests"], "official RepoDigests are not retained")
+    require(OFFICIAL_IMAGE_REPO_DIGEST in image["repo_digests"], "official RepoDigest binding is absent")
+    require(image["repo_digest_verified"] is True, "official RepoDigest was not verified")
+    require(image["manifest_digest"] == OFFICIAL_IMAGE_DIGEST, "official manifest digest changed")
     require(image["revision_label"] == OFFICIAL_IMAGE_REVISION, "official revision label changed")
-    strict_equal(image["entrypoint"], OFFICIAL_IMAGE_ENTRYPOINT, "official image entrypoint")
-    require(image["cmd"] is None, "official image command metadata changed")
-    require(image["user"] == OFFICIAL_IMAGE_USER, "official image user changed")
-    require(image["working_dir"] == OFFICIAL_IMAGE_WORKING_DIR, "official image working directory changed")
+    require(image["entrypoint"] == OFFICIAL_IMAGE_CONFIG_ENTRYPOINT, "official image entrypoint metadata changed")
+    require(image["cmd"] == OFFICIAL_IMAGE_CONFIG_CMD, "official image command metadata changed")
+    require(image["user"] == OFFICIAL_IMAGE_CONFIG_USER, "official image user changed")
+    require(image["working_dir"] == OFFICIAL_IMAGE_CONFIG_WORKING_DIR, "official image working directory changed")
 
     require(record["command_candidate"] == list(PROBE_COMMAND), "official command candidate changed")
-    require(
-        record["command_support"] == "parser_option_present_readiness_candidate_requires_review",
-        "official command support claim changed",
-    )
+    require(record["command_support"] == "official_image_runtime_command", "official command support claim changed")
     require(record["readiness_marker"] == READINESS_PREFIX, "official readiness marker changed")
-    require(record["readiness_source_status"] == "headless_backend_path_only", "official readiness source claim changed")
+    require(record["readiness_source_status"] == "container_provenance_podman_logs", "readiness source is not container-provenance logs")
     strict_equal(record["capability_policy"], cases_document["capability_policy"], "official capability policy")
     strict_equal(record["isolation_policy"], cases_document["isolation_policy"], "official isolation policy")
 
     observations = strict_keys(record["observations"], OFFICIAL_OBSERVATION_KEYS, "official observations")
-    require(observations["compose_config"] == "passed", "official Compose config must be recorded as passed")
-    require(observations["image_identity"] == "passed", "official image identity must be recorded as passed")
-    require(observations["container_start"] == "started", "official container start must be recorded")
-    require(observations["readiness"] == "timeout", "official readiness result changed")
-    require(observations["exit"] == "observed", "official exit observation changed")
-    require(_int(observations["exit_code"], "official container exit code") == 0, "official exit code changed")
+    require(observations["executor_preflight"] == "passed", "executor preflight was not executed")
+    require(observations["image_pull"] == "passed", "image pull was not executed")
+    require(observations["image_identity"] == "passed", "image identity was not verified")
+    require(observations["compose_config"] == "passed", "Compose config was not executed")
+    require(observations["container_start"] == "started", "container startup was not observed")
+    require(observations["runtime_inspection"] == "passed", "runtime inspect was not executed")
+    require(observations["policy_inspection"] == "passed", "applied policy was not inspected")
+    require(observations["readiness"] in {"timeout", "not_ready", "blocked", "ready"}, "official readiness result changed")
+    require(observations["exit"] in {"observed", "not_observed"}, "official exit observation changed")
+    if observations["exit"] == "observed":
+        require(observations["exit_code"] is not None, "observed exit lacks an exit code")
+    else:
+        require(observations["exit_code"] is None, "unobserved exit has an exit code")
     require(observations["teardown"] == "passed", "official teardown observation changed")
-    require(observations["applied_policy"] == "failed", "official policy application must remain blocked")
+    require(observations["applied_policy"] in {"passed", "failed"}, "official applied-policy result is not derived")
     leftovers = strict_keys(observations["leftover_resources"], ("containers", "networks", "volumes"), "official leftovers")
     for resource_name, count in leftovers.items():
         _int(count, f"official leftovers.{resource_name}")
@@ -1998,53 +2222,113 @@ def validate_official_evidence_document(
 
     runtime = strict_keys(record["runtime_identity"], OFFICIAL_RUNTIME_KEYS, "official runtime identity")
     require(runtime["status"] == "verified", "official runtime identity was not verified")
+    require(type(runtime["container_id"]) is str and re.fullmatch(r"[0-9a-f]{12,64}", runtime["container_id"]) is not None, "official container id is invalid")
     require(_int(runtime["pid"], "official PID 1") > 0, "official PID 1 is invalid")
-    require(runtime["path"] == OFFICIAL_IMAGE_ENTRYPOINT[0], "official PID 1 path changed")
+    require(runtime["path"] == OFFICIAL_RUNTIME_PATH, "official PID 1 path changed")
     strict_equal(runtime["args"], list(PROBE_COMMAND), "official PID 1 arguments")
-    strict_equal(runtime["entrypoint"], OFFICIAL_IMAGE_ENTRYPOINT, "official runtime entrypoint")
+    require(runtime["entrypoint"] is None or runtime["entrypoint"] == OFFICIAL_RUNTIME_ENTRYPOINT, "official runtime entrypoint changed")
     policy = strict_keys(runtime["policy"], OFFICIAL_RUNTIME_POLICY_KEYS, "official applied policy")
-    require(policy["cap_drop_all"] is False, "official capability-drop observation changed")
-    require(policy["cap_add_approved"] is False, "official capability-add observation changed")
-    require(policy["no_new_privileges"] is False, "official no-new-privileges observation changed")
-    require(policy["published_ports"] is False, "official port exposure observation changed")
-    require(policy["host_network"] is False, "official host-network observation changed")
-    require(policy["named_volume_opt_data"] is True, "official named-volume observation changed")
-    require(_int(policy["cpu_quota"], "official CPU quota") == 500000000, "official CPU limit observation changed")
-    require(_int(policy["memory_limit"], "official memory limit") == 536870912, "official memory limit observation changed")
-    require(_int(policy["pids_limit"], "official PID limit") == 2048, "official PID limit observation changed")
+    resources = strict_keys(runtime["resources"], OFFICIAL_RUNTIME_RESOURCE_KEYS, "official runtime resources")
+    namespaces = strict_keys(runtime["namespaces"], OFFICIAL_RUNTIME_NAMESPACE_KEYS, "official runtime namespaces")
+    require(type(policy["cap_drop"]) is list, "runtime CapDrop was not retained")
+    require(type(policy["cap_add"]) is list, "runtime CapAdd was not retained")
+    require(type(policy["security_opt"]) is list, "runtime SecurityOpt was not retained")
+    _bool(policy["no_new_privileges"], "runtime NoNewPrivileges")
+    _bool(policy["published_ports"], "runtime published ports")
+    _bool(policy["host_network"], "runtime host network")
+    _bool(policy["named_volume_opt_data"], "runtime data volume")
+    _int(resources["nano_cpus"], "runtime CPU limit")
+    _int(resources["memory_limit"], "runtime memory limit")
+    _int(resources["pids_limit"], "runtime PID limit")
+    _int(resources["shm_size"], "runtime shared-memory limit")
+    require(_runtime_tmpfs_matches(resources["tmpfs"]), "runtime tmpfs policy changed")
+    require(resources["restart_policy"] == "no", "runtime restart policy changed")
+    require(resources["log_driver"] == "k8s-file", "runtime log driver changed")
+    require(namespaces["network"] != "host", "runtime network namespace escaped to host")
+    require(namespaces["ipc"] != "host", "runtime IPC namespace escaped to host")
+    require(namespaces["pid"] != "host", "runtime PID namespace escaped to host")
+    derived_policy = "passed" if _runtime_policy_matches(runtime) else "failed"
+    require(observations["applied_policy"] == derived_policy, "applied policy claim was not derived from inspect")
+    if record["status"] == "ready":
+        require(derived_policy == "passed", "readiness cannot claim unverified policy")
+        require(observations["readiness"] == "ready", "ready status lacks readiness observation")
+    else:
+        require(READINESS_PREFIX not in record["diagnostic"], "blocked diagnostic contains a readiness marker")
+        require(READINESS_PREFIX not in record["log_tail"], "blocked log tail contains a readiness marker")
+        require(record["status"] == "blocked", "blocked evidence status changed")
 
     _text(record["diagnostic"], "official diagnostic", max_length=MAX_ERROR_OUTPUT)
     _text(record["log_tail"], "official log tail", max_length=MAX_LOG_BYTES)
-    require(
-        record["limitations"]
-        == [
+    require(type(record["limitations"]) is list, "official limitations must be an array")
+    if record["status"] == "blocked":
+        require("readiness_not_proven" in record["limitations"], "blocked evidence must state readiness is unproved")
+    if derived_policy == "failed":
+        require("runtime_policy_mismatch" in record["limitations"], "policy mismatch must be recorded")
+    require("official_upstream_image_only" in record["limitations"], "official image boundary is missing")
+    require("no_provider_or_browser_auth" in record["limitations"], "provider boundary is missing")
+
+
+def generate_official_evidence(
+    result: ProbeResult,
+    rendered: RenderedProbe,
+    cases_document: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the checked-in record from the bounded runner result only."""
+
+    observations = dict(result.observations)
+    record = {
+        "schema": OFFICIAL_EVIDENCE_SCHEMA,
+        "operation": OPERATION,
+        "synthetic_only": False,
+        "live_run": True,
+        "status": result.status,
+        "classification": result.classification,
+        "teardown_exit_code": result.teardown_exit_code,
+        "correctness_executor": "rootless_podman",
+        "ssh_target": SSH_TARGET,
+        "executor": dict(result.executor),
+        "image": dict(result.image),
+        "command_candidate": list(PROBE_COMMAND),
+        "command_support": "official_image_runtime_command",
+        "readiness_marker": READINESS_PREFIX,
+        "readiness_source_status": "container_provenance_podman_logs",
+        "capability_policy": dict(cases_document["capability_policy"]),
+        "isolation_policy": dict(cases_document["isolation_policy"]),
+        "cleanup_scope": {
+            "project": rendered.project,
+            "network": rendered.network,
+            "volume": rendered.volume,
+        },
+        "observations": observations,
+        "runtime_identity": dict(result.runtime_identity),
+        "diagnostic": result.diagnostic,
+        "log_tail": result.log_tail,
+        "limitations": [
             "official_upstream_image_only",
-            "readiness_not_proven",
-            "runtime_policy_mismatch",
+            *( ["readiness_not_proven"] if result.status != "ready" else [] ),
+            *( ["runtime_policy_mismatch"] if observations.get("applied_policy") != "passed" else [] ),
             "no_concrete_upstream_error_observed",
             "no_provider_or_browser_auth",
             "no_source_equivalence_or_production_claim",
         ],
-        "official limitations changed",
-    )
+    }
+    validate_redaction(record)
+    return record
 
 
 def _success_payload(
     document: Mapping[str, Any],
     *,
-    evidence: Mapping[str, Any],
-    rerun_evidence: Mapping[str, Any],
+    official_evidence: Mapping[str, Any],
     rendered: RenderedProbe | None = None,
     image_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-
     payload: dict[str, Any] = {
         "ok": True,
         "compatible": False,
         "live_run": False,
         "proof_status": document["proof_status"],
-        "evidence_status": evidence["status"],
-        "rerun_evidence_status": rerun_evidence["status"],
+        "evidence_status": official_evidence["status"],
         "case_count": len(document["cases"]),
     }
     if rendered is not None:
@@ -2078,13 +2362,13 @@ class ControlledArgumentParser(argparse.ArgumentParser):
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = ControlledArgumentParser(add_help=False, description="Validate the rootless Hermes gateway readiness fixture")
+    parser = ControlledArgumentParser(add_help=False, description="Validate the official rootless Hermes gateway readiness boundary")
     parser.add_argument("--cases", type=Path, default=CASES_PATH)
+    parser.add_argument("--official-evidence", type=Path, default=OFFICIAL_EVIDENCE_PATH)
     parser.add_argument("--image-inspect", type=Path)
     parser.add_argument("--render", type=Path)
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--allow-live", action="store_true")
-    parser.add_argument("--source-root", type=Path)
     parser.add_argument("--stack-id", default="smoke")
     parser.add_argument("--instance", default="one")
     return parser.parse_args(argv)
@@ -2094,19 +2378,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parse_args(sys.argv[1:] if argv is None else argv)
         document = load_json(args.cases)
-        evidence = load_json(EVIDENCE_PATH)
-        rerun_evidence = load_json(RERUN_EVIDENCE_PATH)
-        official_evidence = load_json(OFFICIAL_EVIDENCE_PATH)
         validate_redaction(document)
-        validate_redaction(evidence)
-        validate_redaction(rerun_evidence)
-        validate_redaction(official_evidence)
         validate_cases_document(document)
-        validate_evidence_document(evidence, document)
-        validate_rerun_evidence_document(rerun_evidence, document)
-        validate_official_evidence_document(official_evidence, document)
         image_binding: dict[str, Any] | None = None
         if args.image_inspect is not None:
+            if args.run:
+                raise ValidationError("live execution cannot use synthetic image inspect input")
             image_binding = validate_image_binding(
                 _image_inspect_from_value(load_json(args.image_inspect))
             )
@@ -2119,12 +2396,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             except OSError as exc:
                 raise ValidationError("render output could not be written") from exc
         if not args.run:
+            official_evidence = load_json(args.official_evidence)
+            validate_redaction(official_evidence)
+            validate_official_evidence_document(official_evidence, document)
             print(
                 json.dumps(
                     _success_payload(
                         document,
-                        evidence=evidence,
-                        rerun_evidence=rerun_evidence,
+                        official_evidence=official_evidence,
                         rendered=rendered,
                         image_binding=image_binding,
                     ),
@@ -2135,18 +2414,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.allow_live:
             print(json.dumps(_failure_payload(ERROR_CODE, "live runner requires explicit --allow-live"), separators=(",", ":")))
             return 2
-        if args.source_root is None:
-            print(json.dumps(_failure_payload(ERROR_CODE, "live runner requires a pinned source root"), separators=(",", ":")))
-            return 2
-        identity = collect_source_identity(args.source_root)
+        if rendered is None:
+            rendered = render_probe(args.stack_id, instance=args.instance)
         with tempfile.TemporaryDirectory(prefix="hermes-gateway-readiness-") as temporary:
             compose_path = Path(temporary) / "compose.yml"
-            compose_path.write_text(rendered.compose if rendered is not None else render_probe(args.stack_id, instance=args.instance).compose, encoding="utf-8")
-            result = run_probe(rendered or render_probe(args.stack_id, instance=args.instance), compose_path, identity=identity)
+            compose_path.write_text(rendered.compose, encoding="utf-8")
+            result = run_probe(rendered, compose_path)
+        official_evidence = generate_official_evidence(result, rendered, document)
+        validate_official_evidence_document(official_evidence, document)
+        try:
+            args.official_evidence.write_text(
+                json.dumps(official_evidence, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise ValidationError("official evidence could not be written") from exc
         payload = {
             "ok": result.status == "ready",
             "compatible": False,
-            "live_run": result.status != "blocked" or result.classification != "capability_policy_pending",
+            "live_run": True,
+            "evidence_status": official_evidence["status"],
             "probe": result.public(),
         }
         print(json.dumps(payload, separators=(",", ":")))

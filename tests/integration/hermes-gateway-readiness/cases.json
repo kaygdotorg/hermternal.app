@@ -7,12 +7,10 @@
   "live_run": false,
   "proof_status": "not_run",
   "pinned_identity": {
-    "repository": "NousResearch/hermes-agent",
-    "source_commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
-    "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
-    "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
-    "image_reference": "hermes-agent:hermternal-f5be9236",
-    "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b"
+    "repository": "docker.io/nousresearch/hermes-agent",
+    "tag": "v2026.8.3",
+    "digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+    "reference": "docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e"
   },
   "executor_policy": {
     "name": "rootless_podman",
@@ -206,35 +204,31 @@
       "id": "identity-exact",
       "kind": "identity",
       "input": {
-        "repository": "NousResearch/hermes-agent",
-        "source_commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
-        "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
-        "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
-        "image_reference": "hermes-agent:hermternal-f5be9236",
-        "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b"
+        "repository": "docker.io/nousresearch/hermes-agent",
+        "tag": "v2026.8.3",
+        "digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+        "reference": "docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e"
       },
       "expected": {
         "accepted": true,
         "reason": "pinned_identity"
       },
-      "notes": "Source commit, tree, Dockerfile digest, and image tag are all exact."
+      "notes": "The official repository, tag, digest, and canonical reference are all exact."
     },
     {
       "id": "identity-drift-rejected",
       "kind": "identity",
       "input": {
-        "repository": "NousResearch/hermes-agent",
-        "source_commit": "0000000000000000000000000000000000000000",
-        "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
-        "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
-        "image_reference": "hermes-agent:hermternal-f5be9236",
-        "image_digest": "sha256:72ab6568f84dd72f843e4003492107ad5d793357d5d42327af34d1fb0035393b"
+        "repository": "docker.io/nousresearch/hermes-agent",
+        "tag": "v2026.8.3",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "reference": "docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e"
       },
       "expected": {
         "accepted": false,
         "reason": "pinned_identity_mismatch"
       },
-      "notes": "A complete but different source commit is still rejected."
+      "notes": "A complete but different pinned digest is still rejected."
     },
     {
       "id": "isolation-rendered",
