@@ -1,0 +1,37 @@
+{
+  "schema": "hermternal.web-production-build-workload.v1",
+  "fixture_id": "web-production-build",
+  "fixture_version": "1.0.0",
+  "build": {
+    "entrypoint": "node_modules/vite/bin/vite.js",
+    "arguments": ["build"],
+    "input_files": [
+      "package.json",
+      "svelte.config.js",
+      "tsconfig.json",
+      "vite.config.ts"
+    ],
+    "input_roots": ["src", "static"],
+    "output_root": "build",
+    "version_name": "hermternal-web-production-build-v1"
+  },
+  "repetitions": {
+    "cold": 30,
+    "warm": 30,
+    "maximum": 100
+  },
+  "limits": {
+    "build_timeout_ms": 120000,
+    "stdout_bytes": 131072,
+    "stderr_bytes": 131072,
+    "workspace_input_bytes": 16777216,
+    "artifact_files": 2048,
+    "artifact_bytes": 67108864,
+    "node_heap_megabytes": 1024
+  },
+  "network": {
+    "mode": "deny",
+    "guard": "network-guard.mjs"
+  },
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e"
+}
