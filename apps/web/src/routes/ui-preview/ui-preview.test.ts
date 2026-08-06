@@ -19,6 +19,21 @@ describe('ui preview route', () => {
     });
   });
 
+  it('returns to provider selection from callback cancellation and draft discard', async () => {
+    render(PreviewPage);
+
+    const authSelect = screen.getByRole('combobox', { name: 'Authentication state' });
+    await fireEvent.change(authSelect, { target: { value: 'callback' } });
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'callback'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel and return to providers' }));
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection'));
+
+    await fireEvent.change(authSelect, { target: { value: 'session-expired' } });
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'session-expired'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection'));
+  });
+
   it('switches both preview surfaces to the explicit dark appearance', async () => {
     render(PreviewPage);
 

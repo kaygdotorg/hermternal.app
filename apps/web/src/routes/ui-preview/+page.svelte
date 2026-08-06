@@ -50,8 +50,10 @@
 
     if (
       action.type === 'back-to-providers' ||
+      action.type === 'cancel-callback' ||
       action.type === 'choose-provider-again' ||
-      action.type === 'back-to-sign-in'
+      action.type === 'back-to-sign-in' ||
+      action.type === 'discard-draft'
     ) {
       authState = 'provider-selection';
     }
