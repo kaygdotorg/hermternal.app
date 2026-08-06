@@ -37,13 +37,17 @@ The proof includes canonical sibling, tie, non-integer, decreasing, cycle,
 missing-parent, wrong-root, and duplicate-node cases. Each malformed case returns
 `lineage_unavailable`. The reducer does not use a hard-coded descendant ID.
 
-The pinned session-lineage fixture confirms the reviewed root and branch parent
-relationship. Resolver sequence evidence adds only deterministic synthetic
-ordering. It does not claim a live Hermes ordering field.
+The pinned session-lineage fixture confirms every supplied node and parent edge.
+The valid branching case uses the reviewed root, branch, and closed-branch IDs.
+A parentless or self-rooted known branch and any fabricated descendant fail
+closed. Resolver sequence evidence adds only deterministic synthetic ordering.
+It does not claim a live Hermes ordering field.
 
 ## Pending target and reload
 
-The receive time plus 300 seconds is the exact deadline. Every pending action
+The receive time plus 300 seconds is the exact deadline. A receive time must
+leave room for that addition within the bounded integer range. An overflowing
+receive time fails with the fixed controlled error. Every pending action
 requires a time before the deadline. At exact second 300, authentication,
 lookup, message handling, completion, interruption, recovery, cancellation, and
 logout expire the target before acting. One trace proves that the target remains
@@ -51,9 +55,11 @@ pending one second before the deadline.
 
 Success, failure, cancellation, expiry, and logout erase the raw input link and
 all pending target IDs. The focused result records the exact message ID. Reload
-does not reuse erased target data. Its reload event supplies a fresh synthetic
-input and repeats grammar parsing, authentication
-confirmation, and exact lookup from the original synthetic input.
+does not reuse erased target data. Reload first erases the prior opened session,
+root, parent, focused message, and focus state. Its reload event then supplies a
+fresh synthetic input and repeats grammar parsing, authentication confirmation,
+and exact lookup. The cases cover success followed by success and success
+followed by failure.
 
 An interrupted lookup can recover only before its deadline. Recovery confirms
 authentication again before an idempotent lookup retry.

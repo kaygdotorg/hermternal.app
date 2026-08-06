@@ -154,23 +154,30 @@ the same full IDs and does not duplicate a session, prompt, or message.
 
 A valid target may wait for authentication in process memory for at most 300
 seconds. The resolver records the receive time and the exact receive-plus-300
-second deadline. Authentication, lookup, message focus, completion,
-interruption, recovery, cancellation, and logout require `now < deadline`.
+second deadline. The receive time MUST leave room for the 300-second addition
+inside the bounded integer range. An overflowing receive time fails closed.
+Authentication, lookup, message focus, completion, interruption, recovery,
+cancellation, and logout require `now < deadline`.
 At exact second 300, every pending path expires before it can act. Success,
 failure, cancellation, expiry, and logout erase the raw link and all target IDs.
 
-A direct load and reload use the same steps. Reload MUST parse the link again,
-confirm authentication again, and perform a new exact lookup. It MUST NOT reuse
-erased pending values. An interrupted lookup may recover only before its
+A direct load and reload use the same steps. Before new resolution, reload MUST
+erase the prior opened session ID, root ID, parent ID, focused message ID, and
+focus state. Reload MUST then parse the link again, confirm authentication again,
+and perform a new exact lookup. A later failure MUST NOT expose the prior success.
+Reload MUST NOT reuse erased pending values. An interrupted lookup may recover only before its
 recorded deadline. Recovery confirms authentication before an idempotent retry.
 
 A latest-descendant lookup requires explicit bounded lineage ordering evidence.
 Each node has an exact session ID, root ID, parent ID, and integer sequence. The
 resolver walks parent links and selects one unique descendant with the highest
 sequence. Every child sequence MUST be greater than its parent sequence. The
-requested root is not its own latest descendant when descendants exist. A tie,
-cycle, missing parent, wrong root, duplicate node, decreasing sequence, or
-malformed sequence fails closed. The resolver MUST NOT use a hard-coded descendant,
+requested root is not its own latest descendant when descendants exist. The
+resolver MUST prove the requested node, every supplied node, and every parent
+edge against pinned canonical lineage. A parentless or self-rooted known branch
+and a fabricated descendant fail closed. A tie, cycle, missing parent, wrong
+root, duplicate node, decreasing sequence, or malformed sequence also fails
+closed. The resolver MUST NOT use a hard-coded descendant,
 rewrite lineage, or infer lineage from display IDs.
 
 Unknown and unauthorized sessions return the same `session_not_found` result.

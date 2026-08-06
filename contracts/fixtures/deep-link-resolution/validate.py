@@ -26,7 +26,7 @@ MAX_NODES=50_000; MAX_DEPTH=32; MAX_INTEGER=1_000_000_000
 MAX_LINEAGE_NODES=32; READ_CHUNK_BYTES=65_536
 ROOT_ID="session-root-0000000000000000000000000000000000000001"
 BRANCH_ID="session-branch-0000000000000000000000000000000000000002"
-SIBLING_ID="session-sibling-0000000000000000000000000000000000000003"
+SIBLING_ID="session-closed-branch-0000000000000000000000000000000000000003"
 MESSAGE_ID="synthetic-message-anchor-00000000000000000000000000000001"
 DEFAULT_ORIGIN="https://synthetic.hermternal.test"
 DEPENDENCIES={
@@ -45,7 +45,8 @@ CASE_IDS=(
  "message-not-found-opens-session","pending-auth-resolves-and-clears",
  "pending-target-expires-at-deadline","pending-target-before-deadline-stays-pending",
  "logout-clears-pending-target","cancel-clears-pending-target",
- "direct-reload-reparses-and-reauthenticates","interrupted-lookup-recovers",
+ "direct-reload-reparses-and-reauthenticates","reload-success-clears-prior-presentation",
+ "reload-failure-clears-prior-presentation","interrupted-lookup-recovers",
  "invalid-private-https-origin","invalid-hermternal-authority","empty-no-target",
  "latest-descendant-message-focus",
 )
@@ -146,17 +147,18 @@ def pinned_lineage(store:ArtifactStore)->dict[str,tuple[str,str|None]]:
  document=parse_json_bytes(artifact.data); found={}
  for case in document["cases"]:
   expected=case["expected"]; sid=expected["session_id"]
-  if sid in {ROOT_ID,BRANCH_ID} and expected["durable"] is True: found[sid]=(expected["root_id"],expected["parent_id"])
- require(found=={ROOT_ID:(ROOT_ID,None),BRANCH_ID:(ROOT_ID,ROOT_ID)}); return found
+  if sid in {ROOT_ID,BRANCH_ID,SIBLING_ID} and expected["durable"] is True: found[sid]=(expected["root_id"],expected["parent_id"])
+ canonical={ROOT_ID:(ROOT_ID,None),BRANCH_ID:(ROOT_ID,ROOT_ID),SIBLING_ID:(ROOT_ID,ROOT_ID)}
+ require(found==canonical); return found
 def latest_descendant(requested:str,evidence:Any,lineage:Mapping[str,tuple[str,str|None]])->tuple[str,str,str|None]:
  """Select one strict descendant from monotonic bounded lineage evidence."""
  require(type(evidence)is list and 2<=len(evidence)<=MAX_LINEAGE_NODES); nodes={}
  for item in evidence:
   require(type(item)is dict and list(item)==["session_id","root_id","parent_id","sequence"])
   sid,root,parent,sequence=item.values(); require(type(sid)is str and type(root)is str and (parent is None or type(parent)is str)); require(type(sequence)is int and 0<=sequence<=MAX_INTEGER and sid not in nodes); nodes[sid]=(root,parent,sequence)
- require(requested in nodes and nodes[requested][1] is None)
+ require(requested in nodes and requested in lineage and nodes[requested][:2]==lineage[requested] and nodes[requested][1] is None)
  for sid,(root,parent,sequence) in nodes.items():
-  require(root==requested)
+  require(sid in lineage and lineage[sid]==(root,parent) and root==requested)
   if sid!=requested:
    require(parent in nodes and nodes[parent][2]<sequence)
  candidates=[]
@@ -182,10 +184,14 @@ class Resolver:
   if self.state!=state: self.state=state; self.state_trace.append(state)
  def cleanup(self)->None:
   self.link_input=self.pending_link=self.pending_session_id=self.pending_message_id=None; self.deadline_seconds=None; self.effects.append("pending_target_erased")
+ def clear_presentation(self)->None:
+  """A reload cannot expose a result from the previous resolution attempt."""
+  self.opened_session_id=self.root_id=self.parent_id=self.focused_message_id=None; self.focus="none"; self.decision="pending"; self.effects.append("prior_presentation_erased")
  def expire_due(self,now:int)->bool:
   if self.deadline_seconds is None or now<self.deadline_seconds: return False
   self.decision="target_expired"; self.effects.append("deadline_reached_300_seconds"); self.transition("expired"); self.cleanup(); return True
  def receive(self,now:int)->None:
+  require(now<=MAX_INTEGER-PENDING_TTL_SECONDS)
   self.parse_attempts+=1; valid,sid,mid=parse_link(self.link_input)
   if not valid: self.decision="invalid_link"; self.effects.append("grammar_rejected_before_lookup"); self.transition("failed"); self.cleanup(); return
   self.pending_link=self.link_input; self.pending_session_id=sid; self.pending_message_id=mid; self.deadline_seconds=now+PENDING_TTL_SECONDS; self.effects.extend(("grammar_validated","deadline_set_300_seconds"))
@@ -208,7 +214,7 @@ class Resolver:
   elif kind=="message_present": require(list(event)==["type","at_seconds"] and self.state=="session_open" and self.pending_message_id is not None); self.focused_message_id=self.pending_message_id; self.focus,self.decision="message","message_focused"; self.effects.append("message_anchor_focused"); self.transition("opened"); self.cleanup()
   elif kind=="message_missing": require(list(event)==["type","at_seconds"] and self.state=="session_open" and self.pending_message_id is not None); self.focus,self.decision="session_start","message_not_found"; self.effects.extend(("session_opened","message_not_found_fallback")); self.transition("opened"); self.cleanup()
   elif kind=="complete": require(list(event)==["type","at_seconds"] and self.state=="session_open" and self.pending_message_id is None); self.focus,self.decision="session","session_opened"; self.effects.append("session_opened"); self.transition("opened"); self.cleanup()
-  elif kind=="reload": require(list(event)==["type","at_seconds","link"] and self.state=="opened" and self.link_input is None and self.pending_link is None and self.deadline_seconds is None and type(event["link"])is str); self.link_input=event["link"]; self.effects.append("direct_reload_requires_fresh_resolution"); self.transition("idle")
+  elif kind=="reload": require(list(event)==["type","at_seconds","link"] and self.state=="opened" and self.link_input is None and self.pending_link is None and self.deadline_seconds is None and type(event["link"])is str); self.clear_presentation(); self.link_input=event["link"]; self.effects.append("direct_reload_requires_fresh_resolution"); self.transition("idle")
   elif kind=="interrupt": require(list(event)==["type","at_seconds"] and self.state=="lookup_pending"); self.effects.append("lookup_interrupted_safe_state"); self.transition("interrupted")
   elif kind=="recover": require(list(event)==["type","at_seconds"] and self.state=="interrupted" and self.pending_session_id is not None and self.deadline_seconds is not None); self.authentication_checks+=1; self.lookup_attempts+=1; self.effects.extend(("authentication_reconfirmed","authenticated_lookup_retried_idempotently")); self.transition("lookup_pending")
   elif kind=="expire":
@@ -226,7 +232,7 @@ def reduce_case(case:Mapping[str,Any],lineage:Mapping[str,tuple[str,str|None]])-
 ROOT_KEYS=["schema","operation","contract","hermes_source_sha","synthetic_only","network","pending_ttl_seconds","dependencies","invariants","cases","redaction"]
 CASE_KEYS=["id","link","authenticated","lookup_mode","lineage_ordering","events","expected","notes"]
 EXPECTED_KEYS=["decision","final_state","state_trace","effects","link_input","opened_session_id","root_id","parent_id","focused_message_id","focus","pending_link","pending_session_id","pending_message_id","deadline_seconds","lookup_attempts","parse_attempts","authentication_checks","session_creations","shares","transcript_mirror","network"]
-INVARIANTS={"exact_ids":"full opaque IDs are preserved without normalization","latest_descendant":"strict monotonic sequence evidence selects one unique descendant","authorization_safe_parity":"missing and denied share one session-not-found outcome","pending_target":"raw link and IDs are erased on every terminal outcome including cancellation","reload":"repeat parse and authentication resolution before lookup","creation":False,"sharing":False,"local_transcript_mirror":False}
+INVARIANTS={"exact_ids":"full opaque IDs are preserved without normalization","latest_descendant":"pinned canonical lineage plus strict monotonic sequence selects one unique descendant","authorization_safe_parity":"missing and denied share one session-not-found outcome","pending_target":"raw link and IDs are erased on every terminal outcome including cancellation","reload":"erase prior presentation then repeat parse and authentication before lookup","creation":False,"sharing":False,"local_transcript_mirror":False}
 REDACTION={"synthetic_only":True,"raw_links_in_errors":False,"raw_ids_in_errors":False,"fixed_error":ERROR_PAYLOAD}
 def verify_dependencies(document:Mapping[str,Any],store:ArtifactStore)->None:
  identities=document["dependencies"]; require(type(identities)is dict and list(identities)==list(DEPENDENCIES))

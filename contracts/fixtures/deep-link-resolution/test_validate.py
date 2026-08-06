@@ -16,7 +16,7 @@ class DeepLinkResolutionTests(unittest.TestCase):
   return subprocess.run(command,capture_output=True,text=True,check=False)
  def test_checked_in_cli_normal_and_optimized(self)->None:
   for optimized in (False,True):
-   result=self.cli(optimized); self.assertEqual(result.returncode,0,result.stdout+result.stderr); self.assertEqual(result.stderr,''); self.assertEqual(result.stdout,'deep_link_resolution_validation=ok cases=24 mutations=20\n')
+   result=self.cli(optimized); self.assertEqual(result.returncode,0,result.stdout+result.stderr); self.assertEqual(result.stderr,''); self.assertEqual(result.stdout,'deep_link_resolution_validation=ok cases=26 mutations=20\n')
  def test_unknown_cli_args_are_fixed_and_redacted(self)->None:
   secret=f'https://synthetic.hermternal.test/v1/c/{validate.ROOT_ID}'
   expected=json.dumps(validate.ERROR_PAYLOAD,separators=(',',':'),sort_keys=True)+'\n'
@@ -42,6 +42,19 @@ class DeepLinkResolutionTests(unittest.TestCase):
   for item in root_high['lineage_ordering']:
    if item['session_id']==validate.ROOT_ID: item['sequence']=9
   self.assertEqual(validate.reduce_case(root_high,self.lineage)['decision'],'lineage_unavailable')
+ def test_latest_descendant_requires_pinned_nodes_and_edges(self)->None:
+  cases={case['id']:case for case in self.document['cases']}; base=copy.deepcopy(cases['latest-descendant-ordered-branching']); base['events']=base['events'][:2]
+  mutations=[]
+  parentless=copy.deepcopy(base)
+  for item in parentless['lineage_ordering']:
+   if item['session_id']==validate.BRANCH_ID: item['parent_id']=None
+  mutations.append(parentless)
+  self_rooted=copy.deepcopy(base)
+  for item in self_rooted['lineage_ordering']:
+   if item['session_id']==validate.BRANCH_ID: item['root_id']=validate.BRANCH_ID
+  mutations.append(self_rooted)
+  fabricated=copy.deepcopy(base); fabricated['lineage_ordering'][-1]['session_id']='session-fabricated-0000000000000000000000000000000000000004'; mutations.append(fabricated)
+  for changed in mutations: self.assertEqual(validate.reduce_case(changed,self.lineage)['decision'],'lineage_unavailable')
  def test_authorization_safe_results_match(self)->None:
   cases={case['id']:case for case in self.document['cases']}; self.assertTrue(validate.strict_equal(cases['unknown-session-safe-not-found']['expected'],cases['unauthorized-session-safe-not-found']['expected']))
  def test_aggregate_credential_scanner_accepts_cases(self)->None:
@@ -55,6 +68,12 @@ class DeepLinkResolutionTests(unittest.TestCase):
   cancelled=next(c for c in self.document['cases'] if c['id']=='cancel-clears-pending-target')['expected']; self.assertEqual(cancelled['decision'],'cancelled')
  def test_reload_reparses_and_reauthenticates(self)->None:
   case=next(c for c in self.document['cases'] if c['id']=='direct-reload-reparses-and-reauthenticates'); result=case['expected']; self.assertEqual(result['parse_attempts'],2); self.assertEqual(result['authentication_checks'],2); self.assertEqual(result['lookup_attempts'],2); self.assertEqual(result['effects'].count('grammar_validated'),2); self.assertEqual(result['effects'].count('authentication_confirmed'),2)
+ def test_reload_clears_prior_success_before_new_outcome(self)->None:
+  cases={case['id']:case['expected'] for case in self.document['cases']}
+  success=cases['reload-success-clears-prior-presentation']; self.assertEqual(success['decision'],'session_opened'); self.assertEqual(success['opened_session_id'],validate.ROOT_ID); self.assertIsNone(success['focused_message_id']); self.assertEqual(success['focus'],'session'); self.assertIn('prior_presentation_erased',success['effects'])
+  failure=cases['reload-failure-clears-prior-presentation']; self.assertEqual(failure['decision'],'invalid_link'); self.assertEqual(failure['final_state'],'failed'); self.assertIn('prior_presentation_erased',failure['effects'])
+  for key in ('opened_session_id','root_id','parent_id','focused_message_id'): self.assertIsNone(failure[key])
+  self.assertEqual(failure['focus'],'none')
  def test_deadline_is_explicit_and_inclusive(self)->None:
   cases={case['id']:case for case in self.document['cases']}; expired=cases['pending-target-expires-at-deadline']['expected']; early=cases['pending-target-before-deadline-stays-pending']['expected']; self.assertEqual(expired['decision'],'target_expired'); self.assertIsNone(expired['deadline_seconds']); self.assertEqual(early['final_state'],'auth_pending'); self.assertEqual(early['deadline_seconds'],1300); self.assertIn('deadline_not_reached',early['effects'])
  def test_exact_message_id_is_focused(self)->None:
@@ -82,6 +101,12 @@ class DeepLinkResolutionTests(unittest.TestCase):
    for kind,at in events: resolver.apply({'type':kind,'at_seconds':at},self.lineage)
    result=resolver.result(); self.assertEqual(result['decision'],'target_expired',name); self.assertEqual(result['final_state'],'expired',name)
    for key in ('link_input','pending_link','pending_session_id','pending_message_id','deadline_seconds'): self.assertIsNone(result[key],f'{name}:{key}')
+ def test_receive_time_cannot_overflow_deadline(self)->None:
+  link=f'https://synthetic.hermternal.test/v1/c/{validate.ROOT_ID}'
+  for now in (validate.MAX_INTEGER,validate.MAX_INTEGER-validate.PENDING_TTL_SECONDS+1):
+   resolver=validate.Resolver(link,True,'exact',[])
+   with self.assertRaises(validate.ContractError): resolver.apply({'type':'receive','at_seconds':now},self.lineage)
+  resolver=validate.Resolver(link,False,'exact',[]); resolver.apply({'type':'receive','at_seconds':validate.MAX_INTEGER-validate.PENDING_TTL_SECONDS},self.lineage); self.assertEqual(resolver.deadline_seconds,validate.MAX_INTEGER)
  def test_r7_p95_matches_repository_method(self)->None:
   evidence=validate.parse_json_bytes(validate.read_artifact_once(FIXTURE_DIR/'baseline-evidence.json').data); validate.validate_evidence(evidence); self.assertEqual(evidence['normal']['distribution']['p95'],559.644058); self.assertEqual(evidence['optimized']['distribution']['p95'],222.135383)
  def test_streaming_limit_stops_before_full_allocation(self)->None:
@@ -133,7 +158,7 @@ class DeepLinkResolutionTests(unittest.TestCase):
    with mock.patch.object(validate.ArtifactStore,'read',forged_read), mock.patch.object(validate,'REVIEW_ROOT_DIGEST_PARTS',('f'*16,)*4,create=True):
     with self.assertRaises(validate.ContractError): validate.validate_all(cases,baseline,evidence)
  def test_review_root_binds_validator_and_all_evidence(self)->None:
-  count,mutations=validate.validate_all(FIXTURE_DIR/'cases.json',FIXTURE_DIR/'validation-baseline.json',FIXTURE_DIR/'baseline-evidence.json'); self.assertEqual((count,mutations),(24,20))
+  count,mutations=validate.validate_all(FIXTURE_DIR/'cases.json',FIXTURE_DIR/'validation-baseline.json',FIXTURE_DIR/'baseline-evidence.json'); self.assertEqual((count,mutations),(26,20))
  def test_mutations_and_compile(self)->None:
   self.assertEqual(validate.validate_mutations(self.document),20); py_compile.compile(str(FIXTURE_DIR/'validate.py'),doraise=True); py_compile.compile(str(FIXTURE_DIR/'test_validate.py'),doraise=True)
 

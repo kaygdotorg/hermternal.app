@@ -22,10 +22,10 @@
   },
   "invariants": {
     "exact_ids": "full opaque IDs are preserved without normalization",
-    "latest_descendant": "strict monotonic sequence evidence selects one unique descendant",
+    "latest_descendant": "pinned canonical lineage plus strict monotonic sequence selects one unique descendant",
     "authorization_safe_parity": "missing and denied share one session-not-found outcome",
     "pending_target": "raw link and IDs are erased on every terminal outcome including cancellation",
-    "reload": "repeat parse and authentication resolution before lookup",
+    "reload": "erase prior presentation then repeat parse and authentication before lookup",
     "creation": false,
     "sharing": false,
     "local_transcript_mirror": false
@@ -160,7 +160,7 @@
           "sequence": 1
         },
         {
-          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "session_id": "session-closed-branch-0000000000000000000000000000000000000003",
           "root_id": "session-root-0000000000000000000000000000000000000001",
           "parent_id": "session-root-0000000000000000000000000000000000000001",
           "sequence": 2
@@ -239,7 +239,7 @@
           "sequence": 1
         },
         {
-          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "session_id": "session-closed-branch-0000000000000000000000000000000000000003",
           "root_id": "session-root-0000000000000000000000000000000000000001",
           "parent_id": "session-root-0000000000000000000000000000000000000001",
           "sequence": 3
@@ -377,7 +377,7 @@
           "sequence": 9
         },
         {
-          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "session_id": "session-closed-branch-0000000000000000000000000000000000000003",
           "root_id": "session-root-0000000000000000000000000000000000000001",
           "parent_id": "session-root-0000000000000000000000000000000000000001",
           "sequence": 2
@@ -449,7 +449,7 @@
           "sequence": 1
         },
         {
-          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "session_id": "session-closed-branch-0000000000000000000000000000000000000003",
           "root_id": "session-root-0000000000000000000000000000000000000001",
           "parent_id": "session-branch-0000000000000000000000000000000000000002",
           "sequence": 2
@@ -457,7 +457,7 @@
         {
           "session_id": "session-branch-0000000000000000000000000000000000000002",
           "root_id": "session-root-0000000000000000000000000000000000000001",
-          "parent_id": "session-sibling-0000000000000000000000000000000000000003",
+          "parent_id": "session-closed-branch-0000000000000000000000000000000000000003",
           "sequence": 3
         }
       ],
@@ -521,7 +521,7 @@
           "sequence": 1
         },
         {
-          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "session_id": "session-closed-branch-0000000000000000000000000000000000000003",
           "root_id": "session-root-0000000000000000000000000000000000000001",
           "parent_id": "session-missing-0000000000000000000000000000000000000004",
           "sequence": 2
@@ -593,8 +593,8 @@
           "sequence": 1
         },
         {
-          "session_id": "session-sibling-0000000000000000000000000000000000000003",
-          "root_id": "session-sibling-0000000000000000000000000000000000000003",
+          "session_id": "session-closed-branch-0000000000000000000000000000000000000003",
+          "root_id": "session-closed-branch-0000000000000000000000000000000000000003",
           "parent_id": "session-root-0000000000000000000000000000000000000001",
           "sequence": 2
         },
@@ -665,7 +665,7 @@
           "sequence": 1
         },
         {
-          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "session_id": "session-closed-branch-0000000000000000000000000000000000000003",
           "root_id": "session-root-0000000000000000000000000000000000000001",
           "parent_id": "session-root-0000000000000000000000000000000000000001",
           "sequence": 2
@@ -1212,6 +1212,7 @@
           "exact_full_id_resolved",
           "session_opened",
           "pending_target_erased",
+          "prior_presentation_erased",
           "direct_reload_requires_fresh_resolution",
           "grammar_validated",
           "deadline_set_300_seconds",
@@ -1240,6 +1241,167 @@
         "network": false
       },
       "notes": "Reload repeats grammar parsing, authentication confirmation, and exact lookup."
+    },
+    {
+      "id": "reload-success-clears-prior-presentation",
+      "link": "https://synthetic.hermternal.test/v1/c/session-branch-0000000000000000000000000000000000000002/m/synthetic-message-anchor-00000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "lineage_ordering": [],
+      "events": [
+        {
+          "type": "receive",
+          "at_seconds": 1000
+        },
+        {
+          "type": "lookup_present",
+          "at_seconds": 1001
+        },
+        {
+          "type": "message_present",
+          "at_seconds": 1002
+        },
+        {
+          "type": "reload",
+          "at_seconds": 1010,
+          "link": "https://synthetic.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001"
+        },
+        {
+          "type": "receive",
+          "at_seconds": 1011
+        },
+        {
+          "type": "lookup_present",
+          "at_seconds": 1012
+        },
+        {
+          "type": "complete",
+          "at_seconds": 1013
+        }
+      ],
+      "expected": {
+        "decision": "session_opened",
+        "final_state": "opened",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "session_open",
+          "opened",
+          "idle",
+          "lookup_pending",
+          "session_open",
+          "opened"
+        ],
+        "effects": [
+          "grammar_validated",
+          "deadline_set_300_seconds",
+          "authentication_confirmed",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "message_anchor_focused",
+          "pending_target_erased",
+          "prior_presentation_erased",
+          "direct_reload_requires_fresh_resolution",
+          "grammar_validated",
+          "deadline_set_300_seconds",
+          "authentication_confirmed",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "session_opened",
+          "pending_target_erased"
+        ],
+        "link_input": null,
+        "opened_session_id": "session-root-0000000000000000000000000000000000000001",
+        "root_id": "session-root-0000000000000000000000000000000000000001",
+        "parent_id": null,
+        "focused_message_id": null,
+        "focus": "session",
+        "pending_link": null,
+        "pending_session_id": null,
+        "pending_message_id": null,
+        "deadline_seconds": null,
+        "lookup_attempts": 2,
+        "parse_attempts": 2,
+        "authentication_checks": 2,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A successful reload erases the prior message and session presentation before opening the fresh root target."
+    },
+    {
+      "id": "reload-failure-clears-prior-presentation",
+      "link": "https://synthetic.hermternal.test/v1/c/session-branch-0000000000000000000000000000000000000002/m/synthetic-message-anchor-00000000000000000000000000000001",
+      "authenticated": true,
+      "lookup_mode": "exact",
+      "lineage_ordering": [],
+      "events": [
+        {
+          "type": "receive",
+          "at_seconds": 1000
+        },
+        {
+          "type": "lookup_present",
+          "at_seconds": 1001
+        },
+        {
+          "type": "message_present",
+          "at_seconds": 1002
+        },
+        {
+          "type": "reload",
+          "at_seconds": 1010,
+          "link": "https://wrong.synthetic.hermternal.test/v1/c/session-root-0000000000000000000000000000000000000001"
+        },
+        {
+          "type": "receive",
+          "at_seconds": 1011
+        }
+      ],
+      "expected": {
+        "decision": "invalid_link",
+        "final_state": "failed",
+        "state_trace": [
+          "idle",
+          "lookup_pending",
+          "session_open",
+          "opened",
+          "idle",
+          "failed"
+        ],
+        "effects": [
+          "grammar_validated",
+          "deadline_set_300_seconds",
+          "authentication_confirmed",
+          "authenticated_lookup_started",
+          "exact_full_id_resolved",
+          "message_anchor_focused",
+          "pending_target_erased",
+          "prior_presentation_erased",
+          "direct_reload_requires_fresh_resolution",
+          "grammar_rejected_before_lookup",
+          "pending_target_erased"
+        ],
+        "link_input": null,
+        "opened_session_id": null,
+        "root_id": null,
+        "parent_id": null,
+        "focused_message_id": null,
+        "focus": "none",
+        "pending_link": null,
+        "pending_session_id": null,
+        "pending_message_id": null,
+        "deadline_seconds": null,
+        "lookup_attempts": 1,
+        "parse_attempts": 2,
+        "authentication_checks": 1,
+        "session_creations": 0,
+        "shares": 0,
+        "transcript_mirror": false,
+        "network": false
+      },
+      "notes": "A failed reload erases every presentation value from the prior successful message target."
     },
     {
       "id": "interrupted-lookup-recovers",
@@ -1445,7 +1607,7 @@
           "sequence": 1
         },
         {
-          "session_id": "session-sibling-0000000000000000000000000000000000000003",
+          "session_id": "session-closed-branch-0000000000000000000000000000000000000003",
           "root_id": "session-root-0000000000000000000000000000000000000001",
           "parent_id": "session-root-0000000000000000000000000000000000000001",
           "sequence": 2
