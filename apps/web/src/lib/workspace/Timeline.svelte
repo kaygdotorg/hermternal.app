@@ -6,6 +6,7 @@
 
   export let items: TimelineItem[] = [];
   export let runtimeState: WorkspaceRuntimeState = 'ready';
+  export let emptyLabel = 'No messages in this synthetic session.';
   export let onAction: WorkspaceActionHandler = () => {};
 
   $: timelineActionsDisabled = runtimeState !== 'ready';
@@ -36,7 +37,7 @@
   {#if items.length === 0}
     <div class="timeline-empty">
       <Icon name="conversation" size={20} />
-      <p>No messages in this synthetic session.</p>
+      <p>{emptyLabel}</p>
     </div>
   {/if}
 

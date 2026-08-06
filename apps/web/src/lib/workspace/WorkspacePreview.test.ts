@@ -134,4 +134,30 @@ describe('WorkspacePreview', () => {
     await waitFor(() => expect(grid).toHaveClass('inspector-hidden'));
     expect(screen.queryByRole('complementary', { name: 'Workspace inspector' })).not.toBeInTheDocument();
   });
+
+  it('renders explicit live timeline data without synthetic artifacts', () => {
+    render(WorkspacePreview, {
+      state: 'ready',
+      artifactInspectorEnabled: false,
+      timelineEmptyLabel: 'No messages in this chat yet.',
+      timelineItems: [{ kind: 'user-message', id: 'live-1', text: 'Live server message' }]
+    });
+
+    expect(screen.getByText('Live server message')).toBeInTheDocument();
+    expect(screen.queryByText('Quarterly inventory movement')).not.toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: 'Workspace inspector' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('runtime-preview').querySelector('.workspace-grid')).toHaveClass('inspector-hidden');
+  });
+
+  it('distinguishes a real empty live session from fixture timelines', () => {
+    render(WorkspacePreview, {
+      state: 'empty',
+      artifactInspectorEnabled: false,
+      timelineEmptyLabel: 'No messages in this chat yet.',
+      timelineItems: []
+    });
+
+    expect(screen.getByText('No messages in this chat yet.')).toBeInTheDocument();
+    expect(screen.queryByText('No messages in this synthetic session.')).not.toBeInTheDocument();
+  });
 });
