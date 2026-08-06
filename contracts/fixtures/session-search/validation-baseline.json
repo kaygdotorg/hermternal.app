@@ -6,31 +6,31 @@
   "artifact_files": [
     {
       "path": "README.md",
-      "sha256": "c5709e956d15fcd0de37cfc066f123faf47da96afa430a3d4da33b3a1cb02085",
-      "size_bytes": 5425
+      "sha256": "532e5b1891c69ec57174c083be0eb75863b58da9f472c517c169f1e8523d46da",
+      "size_bytes": 6641
     },
     {
       "path": "cases.json",
-      "sha256": "286b9095a7f22c0e7bb97979ebc71668fddff22b54a30e2eb335157e12cf4621",
-      "size_bytes": 71081
+      "sha256": "54f304014a697a7a92f5a4c071db1a6c7ef83d516957e68809368f0beb027489",
+      "size_bytes": 82842
     },
     {
       "path": "validate.py",
-      "sha256": "5df765f4e231654ac94260863c90ef30b04f5048d057a6584c1dd058353804d9",
-      "size_bytes": 32563
+      "sha256": "ee13f107f34a4b90f220da18fbd0e3cebf17a483e89c13d2899a13e04673713d",
+      "size_bytes": 28804
     },
     {
       "path": "test_validate.py",
-      "sha256": "7eb0af17513354ab6f08b737651b010ad69eabd190b4cffacd1c8ef2b29f6b67",
-      "size_bytes": 14540
+      "sha256": "ce2fa6e2a40d09d6d015d73e6f9dcd4cbceb4421a2c18310b9e023940d3f760e",
+      "size_bytes": 12975
     },
     {
       "path": "baseline-evidence.json",
-      "sha256": "02ad8d3a0b4949d00596f7333a0ac1de9d633cfe4684947aebfe87583e951a5e",
-      "size_bytes": 1497
+      "sha256": "4cd4384cc43f577dde75cfc58fab688bdfee07a261c8c0aacf53e79190fb3243",
+      "size_bytes": 1510
     }
   ],
-  "artifact_bytes": 125106,
+  "artifact_bytes": 132772,
   "environment": {
     "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
     "python": "3.14.6"
@@ -71,11 +71,12 @@
       147.578666
     ],
     "distribution": {
-      "min": 67.322375,
-      "p50": 148.219853,
-      "p95": 335.43425,
-      "max": 370.647875,
-      "mean": 171.569782
+      "min": 67.322,
+      "p50": 148.22,
+      "p95": 322.802,
+      "p99": 360.436,
+      "max": 370.648,
+      "mean": 171.57
     }
   },
   "optimized": {
@@ -113,11 +114,12 @@
       86.649
     ],
     "distribution": {
-      "min": 84.218084,
-      "p50": 97.876521,
-      "p95": 123.068958,
-      "max": 132.261541,
-      "mean": 101.809038
+      "min": 84.218,
+      "p50": 97.877,
+      "p95": 122.888,
+      "p99": 129.596,
+      "max": 132.262,
+      "mean": 101.809
     }
   },
   "threshold": null

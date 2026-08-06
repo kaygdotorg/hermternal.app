@@ -17,16 +17,19 @@ observations used here:
 
 - the authenticated `GET /api/sessions/search` route exists;
 - a missing or Unicode-whitespace-only query returns an empty result;
-- the original query is passed to the session-ID helper before FTS preparation;
+- the upstream session-ID helper strips and lowercases its query, then ranks
+  exact, prefix, and substring matches;
 - the source bounds its helper limit; and
 - the source route does not define a total result order or cursor contract.
 
 Only the empty-query classification is normalization backed by the pinned
-source. A nonempty query is not trimmed, lowercased, case-folded, decoded,
-stemmed, locale-normalized, or otherwise rewritten. Hermternal's deterministic
-ordering, strict page-size validation, and opaque cursor are conservative client
-contract rules. They are not claims that the pinned upstream route already
-implements them.
+route. A nonempty query is not trimmed, lowercased, case-folded, decoded,
+stemmed, locale-normalized, or otherwise rewritten. The upstream helper's
+broader normalized ID ranking is not adopted: complete case-sensitive
+`exact_id` equality is an intentional Hermternal privacy and identity policy.
+Hermternal's subsequence rule, deterministic ordering, strict page-size
+validation, and cursor are also client contract rules. They are not claims that
+the pinned upstream route already implements them.
 
 ## Search behavior
 
@@ -46,10 +49,13 @@ Results are ordered by descending synthetic `updated_ms`, then ascending ASCII
 `session_id`. The response exposes only `session_id`, never title text, message
 content, scores, counts, snippets, or transcript data.
 
-The opaque cursor binds the query, mode, snapshot, and last returned row. A
-cursor used with another query, mode, or snapshot fails with the same fixed
-`invalid_cursor` result. No total count is exposed. Repeating the same request
-against the same snapshot produces byte-identical output.
+The cursor is a non-semantic integrity token. It exposes no session identifier,
+timestamp, query digest, or row marker. Its integrity calculation binds the
+preserved query, mode, canonical digest of the actual catalog, and last returned
+row. A forged token or a token used with another query, mode, or catalog fails
+with the same fixed `invalid_cursor` result. No caller-supplied snapshot label
+is trusted. No total count is exposed. Repeating the same request against the
+same catalog produces byte-identical output.
 
 ## Privacy and recovery
 
@@ -60,25 +66,33 @@ failure and malformed requests use fixed controlled error codes and do not
 include raw queries, identifiers, paths, payloads, existence details, or
 sensitive values.
 
-An interruption known to occur before a response advances no cursor and permits
-an explicit retry of the same idempotent read. An unknown response enters
-delivery uncertainty. The caller must reconcile the source snapshot before
-retrying the same request; automatic retry is blocked. Search never creates,
-modifies, deletes, resumes, or prompts a session.
+An interruption known to occur before a response advances no cursor and returns
+an integrity-bound prior-request proof for an explicit retry of that same read.
+An unknown response enters delivery uncertainty. The caller must provide both
+the bound prior-request proof and a reconciliation proof for the same actual
+catalog before retrying. String retry labels, forged evidence, catalog drift,
+and automatic retry are rejected. Search never creates, modifies, deletes,
+resumes, or prompts a session.
 
 ## Files and immutable evidence
 
-- `cases.json` is the canonical closed document with 40 semantic cases.
+- `cases.json` is the canonical closed document with 45 semantic cases.
 - `validate.py` is a standard-library-only strict loader, validator, and reducer.
 - `test_validate.py` covers semantics, adversarial JSON, redaction, binding, and
   normal/optimized parity.
 - `baseline-evidence.json` contains 30 raw normal and 30 raw `-O` samples.
 - `validation-baseline.json` binds the raw evidence and artifact identities.
 
-The loader rejects duplicate keys, invalid UTF-8, non-finite numbers, numeric
-overflow, oversized integers, and byte, string, object, array, node, and depth
-limit violations. Bounds traversal is iterative. Validator failures emit one
-stable redacted JSON line.
+The loader opens each caller-selected artifact once without following a final
+symlink, requires a regular file, checks its declared size before allocation,
+streams within the byte bound, and rejects descriptor mutation or pathname
+replacement. The same immutable byte buffer is size-checked, parsed, and hashed.
+It rejects duplicate keys, invalid UTF-8 (including lone surrogates), non-finite
+numbers, numeric overflow, oversized integers, and byte, string, object, array,
+node, and depth violations. Bounds traversal is iterative. Exact numeric fields
+require built-in JSON integers, not booleans or numerically equal floats.
+Argument and validator failures emit one stable redacted JSON line without
+attacker-controlled argparse diagnostics.
 
 The validator carries reviewed SHA-256 trust anchors for the external artifacts,
 the baseline, and a normalized validator source identity. The baseline stores
@@ -98,8 +112,10 @@ python3 -m py_compile contracts/fixtures/session-search/validate.py contracts/fi
 ```
 
 `validation-baseline.json` records `build_mode: N/A`. Its `threshold` is `null`
-because no approved performance budget exists. The samples are local
-reproducibility evidence, not a latency or production claim.
+because no approved performance budget exists. Distributions use B-01 R-7
+inclusive linear interpolation at p50, p95, and p99, with Decimal arithmetic and
+half-even rounding to three decimal places. The samples are local reproducibility
+evidence, not a latency or production claim.
 
 ## Applicability
 

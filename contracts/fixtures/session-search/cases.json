@@ -31,32 +31,32 @@
       "contract_relevance": "This fixture models that approved route offline and does not widen the route allowlist."
     },
     {
-      "id": "empty-query-strip-only",
+      "id": "missing-or-empty-query",
       "path": "hermes_cli/web_routers/sessions.py",
       "anchor": "if not q or not q.strip():",
       "observation": "The pinned route treats a missing or Unicode-whitespace-only query as an empty result.",
-      "contract_relevance": "Whitespace stripping is used only to classify an empty query; nonempty query text is otherwise preserved."
+      "contract_relevance": "Whitespace stripping is used only to classify an empty query; nonempty query text is otherwise preserved by Hermternal policy."
     },
     {
-      "id": "raw-id-query",
-      "path": "hermes_cli/web_routers/sessions.py",
-      "anchor": "db.search_sessions_by_id(q",
-      "observation": "The pinned route passes the original query to the session-id helper before FTS preparation.",
-      "contract_relevance": "Exact opaque ID lookup does not trim, lowercase, decode, or accept prefixes."
+      "id": "upstream-id-ranking",
+      "path": "hermes_state_search.py",
+      "anchor": "def search_sessions_by_id(",
+      "observation": "The pinned helper strips and lowercases its query, then ranks exact, prefix, and substring session-id matches.",
+      "contract_relevance": "Hermternal intentionally narrows exact_id to complete case-sensitive equality; this is client policy, not an upstream claim."
     },
     {
       "id": "bounded-source-limit",
       "path": "hermes_cli/web_routers/sessions.py",
       "anchor": "safe_limit = max(1, min(int(limit or 20), 100))",
-      "observation": "The pinned route bounds its effective helper limit but defines no cursor.",
-      "contract_relevance": "Hermternal accepts only explicit integer page sizes in its narrower offline contract and defines a query-bound opaque cursor."
+      "observation": "The pinned route bounds its helper limit but defines no cursor.",
+      "contract_relevance": "Hermternal accepts explicit integer page sizes and defines a narrower integrity-bound cursor."
     },
     {
       "id": "no-source-total-order",
       "path": "hermes_cli/web_routers/sessions.py",
       "anchor": "results = list(seen.values())[:safe_limit]",
       "observation": "The pinned route combines helper insertion order without an explicit total ordering or tie-breaker.",
-      "contract_relevance": "Hermternal applies a deterministic metadata order before pagination and does not claim the order is upstream behavior."
+      "contract_relevance": "Hermternal applies deterministic ordering before pagination as client policy."
     }
   ],
   "rules": {
@@ -69,23 +69,24 @@
       "normalization": "none_after_empty_classification",
       "literal_matching": "case_sensitive_unicode_scalar_subsequence",
       "maximum_utf8_bytes": 256,
-      "controls": "rejected"
+      "controls": "rejected_except_strip_empty_whitespace"
     },
     "identity": {
       "session_id": "full_opaque_ascii_segment",
       "exact_lookup": "exact_code_unit_equality_only",
-      "prefix_suffix_casefold_decode": "forbidden"
+      "duplicates": "malformed_catalog",
+      "upstream_broader_matching": "not_adopted"
     },
     "ordering": {
       "primary": "updated_ms_descending",
       "tie_breaker": "session_id_ascii_ascending",
-      "stable": true
+      "input_order_independent": true
     },
     "pagination": {
       "page_size": "integer_1_through_50",
-      "cursor": "opaque_query_mode_snapshot_and_last_row_binding",
+      "cursor": "nonsemantic_integrity_token_bound_to_query_mode_catalog_and_last_row",
       "total_count": "not_exposed",
-      "snapshot_change": "invalid_cursor"
+      "catalog_change": "invalid_cursor"
     },
     "privacy": {
       "unavailable_deleted_unauthorized": "same_absent_result_without_disclosure",
@@ -96,10 +97,10 @@
       "local_transcript_mirror": false
     },
     "recovery": {
-      "interrupted_before_response": "no_cursor_advance_safe_same_request_retry",
-      "unknown_response": "reconcile_before_same_request_retry",
+      "interrupted_before_response": "integrity_bound_prior_request_proof_required",
+      "unknown_response": "prior_request_and_reconciliation_proofs_required",
       "automatic_retry": false,
-      "repeatability": "same_snapshot_query_mode_limit_cursor_same_bytes"
+      "repeatability": "same_catalog_query_mode_limit_cursor_same_bytes"
     },
     "boundary": {
       "synthetic_only": true,
@@ -110,16 +111,15 @@
   },
   "cases": [
     {
-      "id": "empty-query",
+      "id": "missing-query",
       "request": {
-        "query": "",
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -151,7 +151,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -165,9 +165,71 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Missing text returns the empty state."
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
+      "id": "empty-query",
+      "request": {
+        "query": "",
+        "mode": "literal_text",
+        "limit": 20,
+        "cursor": null,
+        "backend": "available",
+        "interruption": "none",
+        "prior_request_proof": null,
+        "reconciliation_proof": null
+      },
+      "catalog": [
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "empty",
+        "results": [],
+        "next_cursor": null,
+        "error": null,
+        "recovery": "none",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "whitespace-only-query",
@@ -176,10 +238,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -211,7 +273,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -225,9 +287,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Only source-backed strip-empty classification is applied."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "no-result",
@@ -236,10 +299,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -271,7 +334,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -285,9 +348,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "No match is a successful empty result."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "exact-opaque-id",
@@ -296,10 +360,10 @@
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -331,7 +395,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -349,9 +413,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "A complete opaque ID matches exactly."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "exact-id-prefix-rejected",
@@ -360,10 +425,10 @@
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -395,7 +460,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -409,9 +474,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Prefixes never identify a session."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "exact-id-case-sensitive",
@@ -420,10 +486,10 @@
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -455,7 +521,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -469,9 +535,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Opaque IDs are not case-folded."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "exact-id-leading-space-not-trimmed",
@@ -480,10 +547,10 @@
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -515,7 +582,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -529,21 +596,22 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Nonempty exact-ID queries preserve whitespace."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
-      "id": "literal-exact-subsequence",
+      "id": "literal-subsequence-distinguishes-substring",
       "request": {
-        "query": "atlas",
+        "query": "pa",
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -575,7 +643,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -596,9 +664,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Literal search is a code-point subsequence match."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "literal-case-sensitive",
@@ -607,10 +676,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -642,7 +711,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -660,21 +729,22 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Literal search is language-neutral and case-sensitive."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "unicode-literal-language-neutral",
       "request": {
-        "query": "東京",
+        "query": "\u6771\u4eac",
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -706,7 +776,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -724,9 +794,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Unicode text is preserved without stemming or locale rules."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "newest-first-order",
@@ -735,10 +806,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -770,7 +841,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -791,21 +862,22 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Results order by descending update marker."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "session-id-tie-break",
       "request": {
-        "query": "Atlas",
+        "query": "PA",
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -840,9 +912,78 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "ASCII session ID is the stable tie-breaker."
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
+      "id": "input-order-independent",
+      "request": {
+        "query": "project",
+        "mode": "literal_text",
+        "limit": 20,
+        "cursor": null,
+        "backend": "available",
+        "interruption": "none",
+        "prior_request_proof": null,
+        "reconciliation_proof": null
+      },
+      "catalog": [
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "results",
+        "results": [
+          {
+            "session_id": "session-alpha-0000000000000001"
+          },
+          {
+            "session_id": "session-beta-0000000000000002"
+          }
+        ],
+        "next_cursor": null,
+        "error": null,
+        "recovery": "none",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "first-page-with-cursor",
@@ -851,10 +992,10 @@
         "mode": "literal_text",
         "limit": 1,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -886,7 +1027,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -901,12 +1042,13 @@
             "session_id": "session-alpha-0000000000000001"
           }
         ],
-        "next_cursor": "c1.9a0e31fde1a8e3ac.300.session-alpha-0000000000000001",
+        "next_cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "A partial page returns an opaque bound cursor."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "second-page-from-cursor",
@@ -914,11 +1056,11 @@
         "query": "project",
         "mode": "literal_text",
         "limit": 1,
-        "cursor": "c1.9a0e31fde1a8e3ac.300.session-alpha-0000000000000001",
-        "snapshot": "snapshot-0000000000000001",
+        "cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -950,7 +1092,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -968,73 +1110,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "The cursor resumes strictly after its last row."
-    },
-    {
-      "id": "final-page-clears-cursor",
-      "request": {
-        "query": "project",
-        "mode": "literal_text",
-        "limit": 2,
-        "cursor": "c1.9a0e31fde1a8e3ac.300.session-alpha-0000000000000001",
-        "snapshot": "snapshot-0000000000000001",
-        "backend": "available",
-        "interruption": "none",
-        "retry": "fresh"
-      },
-      "catalog": [
-        {
-          "session_id": "session-alpha-0000000000000001",
-          "title_key": "project atlas",
-          "updated_ms": 300,
-          "available": true,
-          "deleted": false,
-          "authorized": true,
-          "redacted": false
-        },
-        {
-          "session_id": "session-beta-0000000000000002",
-          "title_key": "project atlas beta",
-          "updated_ms": 200,
-          "available": true,
-          "deleted": false,
-          "authorized": true,
-          "redacted": false
-        },
-        {
-          "session_id": "session-gamma-0000000000000003",
-          "title_key": "Project Atlas",
-          "updated_ms": 200,
-          "available": true,
-          "deleted": false,
-          "authorized": true,
-          "redacted": false
-        },
-        {
-          "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
-          "updated_ms": 100,
-          "available": true,
-          "deleted": false,
-          "authorized": true,
-          "redacted": false
-        }
-      ],
-      "expected": {
-        "decision": "results",
-        "results": [
-          {
-            "session_id": "session-beta-0000000000000002"
-          }
-        ],
-        "next_cursor": null,
-        "error": null,
-        "recovery": "none",
-        "transcript_mirror": false
-      },
-      "notes": "The final page has no continuation cursor."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "cursor-query-mismatch",
@@ -1042,11 +1121,11 @@
         "query": "atlas",
         "mode": "literal_text",
         "limit": 1,
-        "cursor": "c1.9a0e31fde1a8e3ac.300.session-alpha-0000000000000001",
-        "snapshot": "snapshot-0000000000000001",
+        "cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1078,7 +1157,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1095,72 +1174,10 @@
           "message": "Search unavailable"
         },
         "recovery": "restart_search",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "A cursor cannot be replayed with another query."
-    },
-    {
-      "id": "cursor-snapshot-mismatch",
-      "request": {
-        "query": "project",
-        "mode": "literal_text",
-        "limit": 1,
-        "cursor": "c1.9a0e31fde1a8e3ac.300.session-alpha-0000000000000001",
-        "snapshot": "snapshot-0000000000000002",
-        "backend": "available",
-        "interruption": "none",
-        "retry": "fresh"
-      },
-      "catalog": [
-        {
-          "session_id": "session-alpha-0000000000000001",
-          "title_key": "project atlas",
-          "updated_ms": 300,
-          "available": true,
-          "deleted": false,
-          "authorized": true,
-          "redacted": false
-        },
-        {
-          "session_id": "session-beta-0000000000000002",
-          "title_key": "project atlas beta",
-          "updated_ms": 200,
-          "available": true,
-          "deleted": false,
-          "authorized": true,
-          "redacted": false
-        },
-        {
-          "session_id": "session-gamma-0000000000000003",
-          "title_key": "Project Atlas",
-          "updated_ms": 200,
-          "available": true,
-          "deleted": false,
-          "authorized": true,
-          "redacted": false
-        },
-        {
-          "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
-          "updated_ms": 100,
-          "available": true,
-          "deleted": false,
-          "authorized": true,
-          "redacted": false
-        }
-      ],
-      "expected": {
-        "decision": "error",
-        "results": [],
-        "next_cursor": null,
-        "error": {
-          "code": "invalid_cursor",
-          "message": "Search unavailable"
-        },
-        "recovery": "restart_search",
-        "transcript_mirror": false
-      },
-      "notes": "A cursor cannot cross snapshots."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "cursor-mode-mismatch",
@@ -1168,11 +1185,11 @@
         "query": "session-alpha-0000000000000001",
         "mode": "exact_id",
         "limit": 1,
-        "cursor": "c1.9a0e31fde1a8e3ac.300.session-alpha-0000000000000001",
-        "snapshot": "snapshot-0000000000000001",
+        "cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1204,7 +1221,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1221,27 +1238,64 @@
           "message": "Search unavailable"
         },
         "recovery": "restart_search",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "A cursor cannot cross search modes."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
-      "id": "cursor-marker-missing",
+      "id": "cursor-catalog-drift",
       "request": {
         "query": "project",
         "mode": "literal_text",
         "limit": 1,
-        "cursor": "c1.9a0e31fde1a8e3ac.200.session-beta-0000000000000002",
-        "snapshot": "snapshot-0000000000000001",
+        "cursor": "c1.tjdt5dLrhdYlniMtbfvPrftbxf65JNXebdh1BKFUV_g",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
           "session_id": "session-alpha-0000000000000001",
           "title_key": "project atlas",
           "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-new-0000000000000000006",
+          "title_key": "project",
+          "updated_ms": 500,
           "available": true,
           "deleted": false,
           "authorized": true,
@@ -1257,9 +1311,74 @@
           "message": "Search unavailable"
         },
         "recovery": "restart_search",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "A stale marker fails closed."
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
+      "id": "cursor-forgery",
+      "request": {
+        "query": "project",
+        "mode": "literal_text",
+        "limit": 20,
+        "cursor": "c1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "backend": "available",
+        "interruption": "none",
+        "prior_request_proof": null,
+        "reconciliation_proof": null
+      },
+      "catalog": [
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "error",
+        "results": [],
+        "next_cursor": null,
+        "error": {
+          "code": "invalid_cursor",
+          "message": "Search unavailable"
+        },
+        "recovery": "restart_search",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "malformed-cursor",
@@ -1267,11 +1386,11 @@
         "query": "project",
         "mode": "literal_text",
         "limit": 20,
-        "cursor": "not-a-cursor",
-        "snapshot": "snapshot-0000000000000001",
+        "cursor": "bad",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1303,7 +1422,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1320,21 +1439,22 @@
           "message": "Search unavailable"
         },
         "recovery": "restart_search",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Malformed cursors are controlled errors."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
-      "id": "oversized-cursor",
+      "id": "lone-surrogate-cursor",
       "request": {
         "query": "project",
         "mode": "literal_text",
         "limit": 20,
-        "cursor": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        "snapshot": "snapshot-0000000000000001",
+        "cursor": "\ud800",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1366,7 +1486,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1383,9 +1503,10 @@
           "message": "Search unavailable"
         },
         "recovery": "restart_search",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Cursor bytes are bounded."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "zero-page-size",
@@ -1394,10 +1515,10 @@
         "mode": "literal_text",
         "limit": 0,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1429,7 +1550,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1446,9 +1567,10 @@
           "message": "Search unavailable"
         },
         "recovery": "correct_request",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Falsey limits are rejected rather than rewritten."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "oversized-page-size",
@@ -1457,10 +1579,10 @@
         "mode": "literal_text",
         "limit": 51,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1492,7 +1614,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1509,9 +1631,10 @@
           "message": "Search unavailable"
         },
         "recovery": "correct_request",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Page sizes above the contract bound fail."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "boolean-page-size",
@@ -1520,10 +1643,10 @@
         "mode": "literal_text",
         "limit": true,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1555,7 +1678,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1572,9 +1695,10 @@
           "message": "Search unavailable"
         },
         "recovery": "correct_request",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "JSON booleans are not integers."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "malformed-query-control",
@@ -1583,10 +1707,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1618,7 +1742,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1635,21 +1759,86 @@
           "message": "Search unavailable"
         },
         "recovery": "correct_request",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Control-bearing queries fail closed."
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
+      "id": "lone-surrogate-query",
+      "request": {
+        "query": "\ud800",
+        "mode": "literal_text",
+        "limit": 20,
+        "cursor": null,
+        "backend": "available",
+        "interruption": "none",
+        "prior_request_proof": null,
+        "reconciliation_proof": null
+      },
+      "catalog": [
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "error",
+        "results": [],
+        "next_cursor": null,
+        "error": {
+          "code": "invalid_query",
+          "message": "Search unavailable"
+        },
+        "recovery": "correct_request",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "oversized-query",
       "request": {
-        "query": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "query": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1681,7 +1870,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1698,9 +1887,10 @@
           "message": "Search unavailable"
         },
         "recovery": "correct_request",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "The UTF-8 byte bound is enforced, not a character count."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "invalid-mode",
@@ -1709,10 +1899,10 @@
         "mode": "folded_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1744,7 +1934,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -1761,9 +1951,56 @@
           "message": "Search unavailable"
         },
         "recovery": "correct_request",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Unapproved normalization modes fail closed."
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
+      "id": "duplicate-session-id",
+      "request": {
+        "query": "project",
+        "mode": "literal_text",
+        "limit": 20,
+        "cursor": null,
+        "backend": "available",
+        "interruption": "none",
+        "prior_request_proof": null,
+        "reconciliation_proof": null
+      },
+      "catalog": [
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "error",
+        "results": [],
+        "next_cursor": null,
+        "error": {
+          "code": "malformed_catalog",
+          "message": "Search unavailable"
+        },
+        "recovery": "stop",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "deleted-session-nondisclosure",
@@ -1772,10 +2009,10 @@
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1794,9 +2031,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Deleted and absent identities are indistinguishable."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "unauthorized-session-nondisclosure",
@@ -1805,10 +2043,10 @@
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1827,9 +2065,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Unauthorized and absent identities are indistinguishable."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "unavailable-session-nondisclosure",
@@ -1838,10 +2077,10 @@
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1860,9 +2099,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Unavailable and absent identities are indistinguishable."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "mixed-hidden-visible",
@@ -1871,14 +2111,14 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
-          "session_id": "session-hidden-0000000000000005",
+          "session_id": "session-hidden-deleted-0000000006",
           "title_key": "project atlas",
           "updated_ms": 400,
           "available": true,
@@ -1887,7 +2127,7 @@
           "redacted": false
         },
         {
-          "session_id": "session-hidden-0000000000000005",
+          "session_id": "session-hidden-denied-00000000007",
           "title_key": "project atlas",
           "updated_ms": 400,
           "available": true,
@@ -1896,7 +2136,7 @@
           "redacted": false
         },
         {
-          "session_id": "session-hidden-0000000000000005",
+          "session_id": "session-hidden-unavailable-00000008",
           "title_key": "project atlas",
           "updated_ms": 400,
           "available": false,
@@ -1924,9 +2164,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Hidden rows do not affect visible ordering or counts."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "redacted-metadata-not-searchable",
@@ -1935,10 +2176,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1957,9 +2198,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Redacted metadata cannot become a text oracle."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "redacted-exact-id-only",
@@ -1968,10 +2210,10 @@
         "mode": "exact_id",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -1994,9 +2236,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Exact authorized identity lookup returns only the opaque ID."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "backend-unavailable",
@@ -2005,10 +2248,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "unavailable",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -2040,7 +2283,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -2057,9 +2300,10 @@
           "message": "Search unavailable"
         },
         "recovery": "explicit_retry",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Backend failure uses one controlled error."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "interrupted-before-response",
@@ -2068,10 +2312,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "before_response",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -2103,7 +2347,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -2120,9 +2364,10 @@
           "message": "Search unavailable"
         },
         "recovery": "same_request_retry",
+        "recovery_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
         "transcript_mirror": false
       },
-      "notes": "No cursor advances before a known response."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "interrupted-safe-retry",
@@ -2131,10 +2376,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "same_request"
+        "prior_request_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -2166,7 +2411,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -2187,21 +2432,22 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "The same request can be retried after known pre-response interruption."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
-      "id": "unknown-response",
+      "id": "interrupted-forged-proof",
       "request": {
         "query": "project",
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
-        "interruption": "unknown_response",
-        "retry": "fresh"
+        "interruption": "none",
+        "prior_request_proof": "r1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -2233,7 +2479,71 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "error",
+        "results": [],
+        "next_cursor": null,
+        "error": {
+          "code": "retry_blocked",
+          "message": "Search unavailable"
+        },
+        "recovery": "restart_search",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
+      "id": "unknown-response",
+      "request": {
+        "query": "project",
+        "mode": "literal_text",
+        "limit": 20,
+        "cursor": null,
+        "backend": "available",
+        "interruption": "unknown_response",
+        "prior_request_proof": null,
+        "reconciliation_proof": null
+      },
+      "catalog": [
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -2250,21 +2560,22 @@
           "message": "Search unavailable"
         },
         "recovery": "reconcile_then_same_request",
+        "recovery_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
         "transcript_mirror": false
       },
-      "notes": "Unknown delivery requires reconciliation."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
-      "id": "unknown-response-direct-retry-blocked",
+      "id": "unknown-response-prior-only-blocked",
       "request": {
         "query": "project",
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
-        "interruption": "unknown_response",
-        "retry": "same_request"
+        "interruption": "none",
+        "prior_request_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
+        "reconciliation_proof": "r1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
       },
       "catalog": [
         {
@@ -2296,7 +2607,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -2312,10 +2623,11 @@
           "code": "retry_blocked",
           "message": "Search unavailable"
         },
-        "recovery": "reconcile_then_same_request",
+        "recovery": "restart_search",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Automatic retry after an unknown response is blocked."
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "unknown-response-reconciled-retry",
@@ -2324,10 +2636,10 @@
         "mode": "literal_text",
         "limit": 20,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
-        "interruption": "unknown_response",
-        "retry": "reconcile_then_same_request"
+        "interruption": "none",
+        "prior_request_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
+        "reconciliation_proof": "r1.NXUUflh-Dn6TTANJhRnWatw7wwrhiZJCYjO9krHMLNU"
       },
       "catalog": [
         {
@@ -2359,7 +2671,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -2380,9 +2692,83 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "Reconciliation permits the same idempotent read."
+      "notes": "Synthetic canonical session-search decision."
+    },
+    {
+      "id": "reconciliation-catalog-drift",
+      "request": {
+        "query": "project",
+        "mode": "literal_text",
+        "limit": 20,
+        "cursor": null,
+        "backend": "available",
+        "interruption": "none",
+        "prior_request_proof": "r1.4Vln3Kj530d0IxtokSVTlwsDvVwX5pw_ceSBk_LWsn8",
+        "reconciliation_proof": "r1.NXUUflh-Dn6TTANJhRnWatw7wwrhiZJCYjO9krHMLNU"
+      },
+      "catalog": [
+        {
+          "session_id": "session-alpha-0000000000000001",
+          "title_key": "project atlas",
+          "updated_ms": 300,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-beta-0000000000000002",
+          "title_key": "project atlas beta",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-gamma-0000000000000003",
+          "title_key": "Project Atlas",
+          "updated_ms": 200,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-delta-0000000000000004",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
+          "updated_ms": 100,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        },
+        {
+          "session_id": "session-new-0000000000000000006",
+          "title_key": "project",
+          "updated_ms": 500,
+          "available": true,
+          "deleted": false,
+          "authorized": true,
+          "redacted": false
+        }
+      ],
+      "expected": {
+        "decision": "error",
+        "results": [],
+        "next_cursor": null,
+        "error": {
+          "code": "retry_blocked",
+          "message": "Search unavailable"
+        },
+        "recovery": "restart_search",
+        "recovery_proof": null,
+        "transcript_mirror": false
+      },
+      "notes": "Synthetic canonical session-search decision."
     },
     {
       "id": "stable-repeatability",
@@ -2391,10 +2777,10 @@
         "mode": "literal_text",
         "limit": 2,
         "cursor": null,
-        "snapshot": "snapshot-0000000000000001",
         "backend": "available",
         "interruption": "none",
-        "retry": "fresh"
+        "prior_request_proof": null,
+        "reconciliation_proof": null
       },
       "catalog": [
         {
@@ -2426,7 +2812,7 @@
         },
         {
           "session_id": "session-delta-0000000000000004",
-          "title_key": "東京 設計",
+          "title_key": "\u6771\u4eac \u8a2d\u8a08",
           "updated_ms": 100,
           "available": true,
           "deleted": false,
@@ -2447,9 +2833,10 @@
         "next_cursor": null,
         "error": null,
         "recovery": "none",
+        "recovery_proof": null,
         "transcript_mirror": false
       },
-      "notes": "The same snapshot and request produce byte-identical output."
+      "notes": "Synthetic canonical session-search decision."
     }
   ],
   "redaction": {
