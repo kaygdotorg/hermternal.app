@@ -28,8 +28,11 @@ classification label:
   destination port.
 
 The independent evaluator derives the result from those fields without trusting
-the case identifier, kind, expected decision, or reason. There is exactly one
-allow representation. It is the configured proxy path. Its `upstream_call` value
+the case identifier, kind, expected decision, or reason. The one allow record
+also carries a deterministic reviewed path attestation derived from all exact
+path attributes. Rebinding only browser/client identity, interface, and hop labels
+cannot manufacture that attestation. There is exactly one allow representation.
+It is the configured proxy path. Its `upstream_call` value
 means only that the offline model may represent a forward. The validator itself
 makes no upstream call.
 
@@ -46,8 +49,11 @@ The strict loader rejects duplicate keys, malformed UTF-8, non-finite numbers,
 float overflow, oversized integers, excessive input bytes, excessive depth,
 excessive total nodes, oversized containers, oversized strings, control
 characters, unknown keys, changed key order, wrong scalar types, and booleans in
-integer fields. Structural, redaction, and equality walks are iterative. These
-checks use explicit exceptions and remain active under optimized Python.
+integer fields. Structural, redaction, and equality walks are iterative. Retained
+artifacts are opened with no-follow semantics, must be regular files, and are
+size-checked before and during chunked reads. Symlinks, special files, file swaps,
+and reads beyond the remaining aggregate byte budget fail closed. These checks
+use explicit exceptions and remain active under optimized Python.
 
 Malformed or incomplete evidence returns one bounded JSON line with status `2`.
 It emits no traceback, usage text, raw command-line value, duplicate key, or
@@ -57,17 +63,23 @@ hostile retained value. Denied cases always use `drop_without_upstream`, set
 ## Redaction and immutable evidence
 
 All six retained files are scanned under one total byte bound. Concrete URL,
-address, host-canary, and private-key values are rejected. Parsed JSON also
-rejects credential-shaped keys and assignments. Tests mutate every retained
-artifact with a hostile canary and require rejection.
+address, host-canary, private-key, and credential-assignment values are rejected.
+Parsed JSON also rejects credential-shaped keys and assignments. Tests mutate
+every retained artifact independently with both a URL canary and the credential
+assignment canary assembled as `token`, `=`, and `synthetic-secret-canary`; the
+assembled hostile value is never retained in this proof.
 
 The benchmark record contains 30 raw normal samples and 30 raw optimized samples
 with deterministic distribution fields and a `null` threshold. These are local
 validator-duration observations, not a budget or deployment claim. Canonical
-baseline evidence, README, cases, tests, and normalized validator source have
-immutable identities pinned in validator code. The baseline anchor and artifact
-metadata are not trust roots. Coordinated changes to an artifact, its metadata,
-its anchor, and the validator's visible self-pin still fail.
+baseline evidence, README, cases, tests, and normalized validator source keep
+local identity checks. A detached RSA review signature additionally binds those
+artifacts and the benchmark evidence. Its private key is discarded, and its
+public-key fingerprint is published in the PR review record outside this mutable
+proof directory. Coordinated local rewriting of artifacts, metadata, validator
+pins, and the signature file therefore cannot create a valid reviewed signature.
+The shared registry remains a separate integration trust root after serialized
+ownership becomes available.
 
 ## Reproduce
 

@@ -9,10 +9,13 @@ Explicit exceptions keep every check active under normal and optimized Python.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,18 +39,28 @@ MAX_OBJECT_KEYS = 64
 MAX_ARRAY_LENGTH = 256
 MAX_STRING_LENGTH = 4096
 MAX_ERROR_OUTPUT = 240
+MAX_SIGNATURE_BYTES = 512
+READ_CHUNK_BYTES = 64 * 1024
 BASELINE_REPETITIONS = 30
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py", "test_validate.py")
 RETAINED_FILES = ARTIFACT_FILES + ("validation-baseline.json", "validation-baseline-sha256.txt")
 # Immutable identities are code-pinned outside mutable benchmark metadata. A
 # coordinated artifact, trace, anchor, or metadata rewrite cannot self-authorize.
 PINNED_RETAINED_ARTIFACTS: dict[str, tuple[int, str]] = {
-    "README.md": (5134, "8f5d522cd6f670fa6cf4b27b2c715eca934e6bad15973340f805eb28fdb8632b"),
-    "cases.json": (19387, "3807c1eb6ac84212d7907e6bb15234bdd9ca9e16775aaaa5af5d9b040760240e"),
-    "test_validate.py": (18535, "6931d7946e1f7d3971db35af4dcbbc520c7e7e4ecd86a2b5fa1c24795f3b8e3e"),
+    "README.md": (6044, "030cbd97384a1c20accccc06f128191e43dfb96feacf54c3b485df98c520c706"),
+    "cases.json": (20375, "a41e16a8ab50c6443710ea3f3811611c96cbb69702738d42581667eb1de3964c"),
+    "test_validate.py": (22180, "f9ad863fdc6c52b42552abf8489381d581cabd5330d485646eaf5185d50873ce"),
 }
-PINNED_VALIDATOR_SOURCE_SHA256 = "afebf2c8bc388158610104fb152df5a6c6f9b7f9e26b04736d5ffcd603495e8b"
-PINNED_BASELINE_EVIDENCE_SHA256 = "3f33cf06f999fe5d8e6b6e7940e5555e7f15ec50ebf86e767f58c195ffe95d37"
+PINNED_VALIDATOR_SOURCE_SHA256 = "7d495d8613a71170bc36bc4ecd82f5dc5cc4eb7853ab46a5b8644a1b83df0ddf"
+PINNED_BASELINE_EVIDENCE_SHA256 = "563a88519ab056dc0fbf3e37879b4fe0cbaff89a800460deb04abe78b7efb2c9"
+# The detached review signature is made with a discarded private key. Its public
+# key fingerprint is published in the PR review record outside this mutable proof
+# directory, so rewriting local pins and the local public key is independently
+# detectable. The signature binds the reviewed artifacts and benchmark evidence.
+REVIEW_PUBLIC_MODULUS = 26575087703041462118266599013404640572753706014341925698530469480269661383274384794888974895289416874384433292440295673343260980338456607961373272406777892359450019794800690509112642577648911682379402544154209216395662202751406959972616117980040081264936112777702083642952260175589253640518144117607243236330651300399215748783487423911449291593125871123521198254560114051599627296808592501949639132246314963614864823129503002245851839426729792107180390197306845379286803960978504240956904771952898657571703898351025187405440902280947598408321439399094544248627332438036020383834388141291968010572418440029640725463063
+REVIEW_PUBLIC_EXPONENT = 65537
+REVIEW_PUBLIC_KEY_FINGERPRINT = "689f33ddf748eb0fced4f9a8cf2ee6ba2a096f8c25e76cac95410c8d6ffd46dd"
+PROXY_ATTESTATION = "6fa2dde11831a805a8ea7ef7e576e44b0fce69d130a7441d29b8822a0056f5b5"
 VALIDATOR_IDENTITY_RE = re.compile(r'(?m)^PINNED_VALIDATOR_SOURCE_SHA256 = "[0-9a-f]{64}"$')
 BASELINE_EVIDENCE_KEYS = ("schema", "validator", "fixture", "metric", "environment", "runs", "threshold")
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
@@ -127,6 +140,7 @@ RAW_NETWORK_KEYS = (
     "destination_port",
     "proxy_hops",
     "firewall_rule",
+    "proxy_attestation",
 )
 FIREWALL_RULE_KEYS = (
     "present",
@@ -232,6 +246,8 @@ REASONS = frozenset(
         "destination_port_mismatch",
         "transport_mismatch",
         "proxy_path_mismatch",
+        "proxy_attestation_missing",
+        "proxy_attestation_mismatch",
         "firewall_evidence_missing",
         "firewall_rule_inactive",
         "firewall_action_mismatch",
@@ -423,14 +439,15 @@ def validate_retained_artifact_redaction(root: Path = ROOT) -> None:
 
     total = 0
     for relative in RETAINED_FILES:
-        data = _read_artifact(root, relative)
+        remaining = MAX_TOTAL_RETAINED_BYTES - total
+        require(remaining >= 0, "retained artifact byte limit exceeded")
+        data = _read_artifact(root, relative, limit=remaining)
         total += len(data)
-        require(total <= MAX_TOTAL_RETAINED_BYTES, "retained artifact byte limit exceeded")
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValidationError("retained artifact is not UTF-8") from exc
-        for pattern in (LIVE_URL_RE, IPV4_RE, HOST_CANARY_RE, PRIVATE_KEY_RE):
+        for pattern in (LIVE_URL_RE, IPV4_RE, HOST_CANARY_RE, PRIVATE_KEY_RE, CREDENTIAL_ASSIGNMENT_RE):
             require(pattern.search(text) is None, "hostile retained artifact value is not allowed")
 
 
@@ -533,6 +550,9 @@ def _validate_case_shape(case: Any, index: int) -> dict[str, Any]:
     for hop in raw["proxy_hops"]:
         _enum(hop, PROXY_HOPS, "raw proxy hop")
     _validate_firewall_rule(raw["firewall_rule"])
+    if raw["proxy_attestation"] is not None:
+        require(type(raw["proxy_attestation"]) is str, "proxy attestation must be text or null")
+        require(HEX64_RE.fullmatch(raw["proxy_attestation"]) is not None, "proxy attestation is malformed")
     expected = strict_keys(row["expected"], EXPECTED_KEYS, "expected")
     _enum(expected["decision"], frozenset({"allow", "deny"}), "expected decision")
     _enum(expected["network_action"], frozenset({"represent_proxy_forward", "drop_without_upstream"}), "network action")
@@ -585,6 +605,10 @@ def evaluate_case(case: Any) -> dict[str, Any]:
         return _deny("transport_mismatch")
     if raw["proxy_hops"] != EXPECTED_BOUNDARY["required_proxy_hops"]:
         return _deny("proxy_path_mismatch")
+    if raw["proxy_attestation"] is None:
+        return _deny("proxy_attestation_missing")
+    if raw["proxy_attestation"] != PROXY_ATTESTATION:
+        return _deny("proxy_attestation_mismatch")
     rule = raw["firewall_rule"]
     if rule is None:
         return _deny("firewall_evidence_missing")
@@ -623,17 +647,45 @@ def validate_cases_document(document: Any) -> None:
     require(allow_count == 1, "exactly one configured proxy path must be allowed")
 
 
-def _read_artifact(root: Path, relative: str) -> bytes:
+def _read_artifact(root: Path, relative: str, *, limit: int = MAX_TOTAL_RETAINED_BYTES) -> bytes:
+    """Read a regular non-symlink file without allocating past its limit."""
+
+    path = root / relative
     try:
-        return (root / relative).read_bytes()
+        metadata = path.lstat()
+        require(stat.S_ISREG(metadata.st_mode), "retained artifact must be a regular file")
+        require(not stat.S_ISLNK(metadata.st_mode), "retained artifact symlink is not allowed")
+        require(metadata.st_size <= limit, "retained artifact byte limit exceeded")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            require(stat.S_ISREG(opened.st_mode), "retained artifact must remain a regular file")
+            require(opened.st_dev == metadata.st_dev and opened.st_ino == metadata.st_ino, "retained artifact changed during open")
+            require(opened.st_size <= limit, "retained artifact byte limit exceeded")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, min(READ_CHUNK_BYTES, limit - total + 1))
+                if not chunk:
+                    break
+                total += len(chunk)
+                require(total <= limit, "retained artifact byte limit exceeded")
+                chunks.append(chunk)
+            require(total == opened.st_size, "retained artifact changed during read")
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    except ValidationError:
+        raise
     except OSError as exc:
         raise ValidationError("retained artifact is unavailable") from exc
 
 
 def _validator_source_digest(root: Path = ROOT) -> str:
     try:
-        source = (root / "validate.py").read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        source = _read_artifact(root, "validate.py", limit=MAX_JSON_BYTES).decode("utf-8")
+    except (ValidationError, UnicodeError) as exc:
         raise ValidationError("validator identity is unavailable") from exc
     canonical, replacements = VALIDATOR_IDENTITY_RE.subn(
         'PINNED_VALIDATOR_SOURCE_SHA256 = "<code-pinned>"', source
@@ -654,9 +706,10 @@ def _artifact_digest(root: Path = ROOT) -> tuple[int, str]:
     digest = hashlib.sha256()
     total = 0
     for relative in ARTIFACT_FILES:
-        data = _read_artifact(root, relative)
+        remaining = MAX_TOTAL_RETAINED_BYTES - total
+        require(remaining >= 0, "artifact byte total exceeds the bounded limit")
+        data = _read_artifact(root, relative, limit=remaining)
         total += len(data)
-        require(total <= MAX_TOTAL_RETAINED_BYTES, "artifact byte total exceeds the bounded limit")
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(data)
@@ -707,13 +760,47 @@ def _canonical_baseline_evidence_bytes(baseline: dict[str, Any]) -> bytes:
     return _canonical_json_bytes({key: baseline[key] for key in BASELINE_EVIDENCE_KEYS})
 
 
-def _validate_baseline_anchor(baseline: dict[str, Any], anchor_path: Path) -> None:
+def _review_signature_payload(baseline: dict[str, Any], root: Path = ROOT) -> bytes:
+    """Bind the reviewed fixture bytes and canonical benchmark evidence."""
+
+    artifact_bytes, artifact_digest = _artifact_digest(root)
+    return b"\n".join(
+        (
+            b"hermternal.direct-port-denial.review.v1",
+            str(artifact_bytes).encode("ascii"),
+            artifact_digest.encode("ascii"),
+            hashlib.sha256(_canonical_baseline_evidence_bytes(baseline)).hexdigest().encode("ascii"),
+        )
+    )
+
+
+def _verify_review_signature(signature: bytes, payload: bytes) -> None:
+    """Verify the detached RSA PKCS#1 v1.5 SHA-256 review signature."""
+
+    require(REVIEW_PUBLIC_MODULUS > 0, "review public key is not configured")
+    fingerprint = hashlib.sha256(
+        f"rsa:{REVIEW_PUBLIC_MODULUS}:{REVIEW_PUBLIC_EXPONENT}".encode("ascii")
+    ).hexdigest()
+    require(fingerprint == REVIEW_PUBLIC_KEY_FINGERPRINT, "review public key fingerprint changed")
+    modulus_bytes = (REVIEW_PUBLIC_MODULUS.bit_length() + 7) // 8
+    require(len(signature) == modulus_bytes, "review signature length changed")
+    encoded = pow(int.from_bytes(signature, "big"), REVIEW_PUBLIC_EXPONENT, REVIEW_PUBLIC_MODULUS).to_bytes(
+        modulus_bytes, "big"
+    )
+    digest_info = bytes.fromhex("3031300d060960864801650304020105000420") + hashlib.sha256(payload).digest()
+    padding_length = modulus_bytes - len(digest_info) - 3
+    require(padding_length >= 8, "review public key is too short")
+    expected = b"\x00\x01" + (b"\xff" * padding_length) + b"\x00" + digest_info
+    require(encoded == expected, "external review signature changed")
+
+
+def _validate_baseline_anchor(baseline: dict[str, Any], anchor_path: Path, root: Path = ROOT) -> None:
     try:
-        anchor = anchor_path.read_text(encoding="ascii").strip()
-    except (OSError, UnicodeError) as exc:
-        raise ValidationError("baseline anchor is unavailable") from exc
-    require(HEX64_RE.fullmatch(anchor) is not None, "baseline anchor is malformed")
-    require(anchor == hashlib.sha256(_canonical_json_bytes(baseline)).hexdigest(), "baseline canonical digest changed")
+        encoded = _read_artifact(anchor_path.parent, anchor_path.name, limit=MAX_SIGNATURE_BYTES).strip()
+        signature = base64.b64decode(encoded, validate=True)
+    except (ValidationError, ValueError) as exc:
+        raise ValidationError("external review signature is unavailable or malformed") from exc
+    _verify_review_signature(signature, _review_signature_payload(baseline, root))
 
 
 def validate_baseline(baseline: Any, root: Path = ROOT, anchor_path: Path = BASELINE_ANCHOR_PATH) -> None:
@@ -754,7 +841,7 @@ def validate_baseline(baseline: Any, root: Path = ROOT, anchor_path: Path = BASE
     require(artifact["bytes"] == actual_bytes, "baseline artifact size changed")
     require(artifact["sha256"] == actual_digest, "baseline artifact digest changed")
     require(record["threshold"] is None, "baseline must not invent a threshold")
-    _validate_baseline_anchor(record, anchor_path)
+    _validate_baseline_anchor(record, anchor_path, root)
 
 
 def validate_all(

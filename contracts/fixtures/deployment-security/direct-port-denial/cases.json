@@ -18,7 +18,9 @@
     "private_bind_identity": "hermes_private_bind",
     "private_bind_interface": "private_service",
     "private_bind_port": 9119,
-    "required_proxy_hops": ["configured_proxy"],
+    "required_proxy_hops": [
+      "configured_proxy"
+    ],
     "default_action": "deny"
   },
   "redaction": {
@@ -41,7 +43,9 @@
         "destination_identity": "hermes_private_bind",
         "destination_interface": "private_service",
         "destination_port": 9119,
-        "proxy_hops": ["configured_proxy"],
+        "proxy_hops": [
+          "configured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -51,7 +55,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": "6fa2dde11831a805a8ea7ef7e576e44b0fce69d130a7441d29b8822a0056f5b5"
       },
       "expected": {
         "decision": "allow",
@@ -84,7 +89,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -117,7 +123,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -150,7 +157,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -173,7 +181,9 @@
         "destination_identity": "hermes_private_bind",
         "destination_interface": "private_service",
         "destination_port": 9119,
-        "proxy_hops": ["configured_proxy"],
+        "proxy_hops": [
+          "configured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -183,7 +193,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -206,7 +217,9 @@
         "destination_identity": "hermes_private_bind",
         "destination_interface": "public_service",
         "destination_port": 9119,
-        "proxy_hops": ["configured_proxy"],
+        "proxy_hops": [
+          "configured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -216,7 +229,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -239,7 +253,9 @@
         "destination_identity": "hermes_private_bind",
         "destination_interface": "private_service",
         "destination_port": 9120,
-        "proxy_hops": ["configured_proxy"],
+        "proxy_hops": [
+          "configured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -249,7 +265,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -272,7 +289,9 @@
         "destination_identity": "hermes_private_bind",
         "destination_interface": "private_service",
         "destination_port": 9119,
-        "proxy_hops": ["configured_proxy"],
+        "proxy_hops": [
+          "configured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -282,7 +301,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": "6fa2dde11831a805a8ea7ef7e576e44b0fce69d130a7441d29b8822a0056f5b5"
       },
       "expected": {
         "decision": "deny",
@@ -305,8 +325,11 @@
         "destination_identity": "hermes_private_bind",
         "destination_interface": "private_service",
         "destination_port": 9119,
-        "proxy_hops": ["configured_proxy"],
-        "firewall_rule": null
+        "proxy_hops": [
+          "configured_proxy"
+        ],
+        "firewall_rule": null,
+        "proxy_attestation": "6fa2dde11831a805a8ea7ef7e576e44b0fce69d130a7441d29b8822a0056f5b5"
       },
       "expected": {
         "decision": "deny",
@@ -329,7 +352,9 @@
         "destination_identity": "hermes_private_bind",
         "destination_interface": "private_service",
         "destination_port": 9119,
-        "proxy_hops": ["configured_proxy"],
+        "proxy_hops": [
+          "configured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -339,7 +364,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -362,7 +388,9 @@
         "destination_identity": "hermes_private_bind",
         "destination_interface": "private_service",
         "destination_port": 9119,
-        "proxy_hops": ["unconfigured_proxy"],
+        "proxy_hops": [
+          "unconfigured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -372,7 +400,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -405,7 +434,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -428,7 +458,10 @@
         "destination_identity": "hermes_private_bind",
         "destination_interface": "private_service",
         "destination_port": 9119,
-        "proxy_hops": ["configured_proxy", "unconfigured_proxy"],
+        "proxy_hops": [
+          "configured_proxy",
+          "unconfigured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -438,7 +471,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -461,7 +495,9 @@
         "destination_identity": "public_service_bind",
         "destination_interface": "public_service",
         "destination_port": 9119,
-        "proxy_hops": ["configured_proxy"],
+        "proxy_hops": [
+          "configured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -471,7 +507,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -494,7 +531,9 @@
         "destination_identity": "loopback_service_bind",
         "destination_interface": "loopback_service",
         "destination_port": 9119,
-        "proxy_hops": ["configured_proxy"],
+        "proxy_hops": [
+          "configured_proxy"
+        ],
         "firewall_rule": {
           "present": true,
           "action": "allow",
@@ -504,7 +543,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",
@@ -537,7 +577,8 @@
           "destination_identity": "hermes_private_bind",
           "destination_interface": "private_service",
           "destination_port": 9119
-        }
+        },
+        "proxy_attestation": null
       },
       "expected": {
         "decision": "deny",

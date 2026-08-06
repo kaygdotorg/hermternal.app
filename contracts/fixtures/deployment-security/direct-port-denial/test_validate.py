@@ -27,6 +27,7 @@ import validate  # noqa: E402
 HOST_CANARY = "retained" + ".invalid"
 HOSTILE_URL = "https" + "://" + HOST_CANARY
 ADDRESS_CANARY = "192" + ".0" + ".2" + ".1"
+CREDENTIAL_CANARY = "token" + "=" + "synthetic-secret-canary"
 
 
 class DirectPortDenialTests(unittest.TestCase):
@@ -70,16 +71,41 @@ class DirectPortDenialTests(unittest.TestCase):
                 self.assertNotIn("usage:", completed.stdout.lower())
 
     @staticmethod
-    def _refresh_mutable_baseline(root: Path) -> None:
+    def _rebind_all_mutable_local_evidence(root: Path) -> None:
+        """Reproduce a coordinated local rewrite without the discarded signing key."""
+
+        validator_path = root / "validate.py"
         baseline_path = root / "validation-baseline.json"
-        anchor_path = root / "validation-baseline-sha256.txt"
         baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        evidence_digest = hashlib.sha256(validate._canonical_baseline_evidence_bytes(baseline)).hexdigest()
+        source = validator_path.read_text(encoding="utf-8")
+        source = validate.re.sub(
+            r'(?m)^PINNED_BASELINE_EVIDENCE_SHA256 = "[0-9a-f]{64}"$',
+            f'PINNED_BASELINE_EVIDENCE_SHA256 = "{evidence_digest}"',
+            source,
+        )
+        identities = {}
+        for relative in ("README.md", "cases.json", "test_validate.py"):
+            data = (root / relative).read_bytes()
+            identities[relative] = (len(data), hashlib.sha256(data).hexdigest())
+        for relative, (size, digest) in identities.items():
+            source = validate.re.sub(
+                rf'(?m)^    "{validate.re.escape(relative)}": \([0-9]+, "[0-9a-f]{{64}}"\),$',
+                f'    "{relative}": ({size}, "{digest}"),',
+                source,
+            )
+        normalized = validate.VALIDATOR_IDENTITY_RE.sub(
+            'PINNED_VALIDATOR_SOURCE_SHA256 = "<code-pinned>"', source
+        )
+        self_digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        source = validate.VALIDATOR_IDENTITY_RE.sub(
+            f'PINNED_VALIDATOR_SOURCE_SHA256 = "{self_digest}"', source
+        )
+        validator_path.write_text(source, encoding="utf-8")
         total, digest = validate._artifact_digest(root)
         baseline["artifact"]["bytes"] = total
         baseline["artifact"]["sha256"] = digest
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-        anchor = hashlib.sha256(validate._canonical_json_bytes(baseline)).hexdigest()
-        anchor_path.write_text(anchor + "\n", encoding="ascii")
 
     def _run_fixture_copy(self, root: Path, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
         command = [sys.executable]
@@ -129,6 +155,16 @@ class DirectPortDenialTests(unittest.TestCase):
         self.assertEqual(derived["decision"], "allow")
         self.assertEqual(derived["reason"], "configured_proxy_path_exact")
 
+    def test_browser_label_rebinding_cannot_create_the_allow_attestation(self) -> None:
+        rebound = copy.deepcopy(self.cases["browser-direct-path-denied"])
+        rebound["raw_network"]["source_identity"] = "configured_proxy"
+        rebound["raw_network"]["source_interface"] = "proxy_egress"
+        rebound["raw_network"]["proxy_hops"] = ["configured_proxy"]
+        derived = validate.evaluate_case(rebound)
+        self.assertEqual(derived["decision"], "deny")
+        self.assertEqual(derived["reason"], "proxy_attestation_missing")
+        self.assertFalse(derived["upstream_call"])
+
     def test_every_allow_field_mutation_fails_closed_in_normal_and_optimized_modes(self) -> None:
         mutations = (
             ("transport", "udp"),
@@ -143,6 +179,8 @@ class DirectPortDenialTests(unittest.TestCase):
             ("destination_port", 9120),
             ("proxy_hops", []),
             ("proxy_hops", ["configured_proxy", "unconfigured_proxy"]),
+            ("proxy_attestation", None),
+            ("proxy_attestation", "0" * 64),
             ("firewall_rule", None),
         )
         for field, value in mutations:
@@ -228,6 +266,30 @@ class DirectPortDenialTests(unittest.TestCase):
         self._assert_cli_failure(b'"control\\u0000value"')
         self._assert_cli_failure(b"\xff")
 
+    def test_retained_reader_rejects_oversize_symlink_and_special_file_before_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            oversized = root / "oversized"
+            oversized.write_bytes(b"x" * 17)
+            with self.assertRaises(validate.ValidationError):
+                validate._read_artifact(root, "oversized", limit=16)
+
+            target = root / "target"
+            target.write_bytes(b"safe")
+            (root / "link").symlink_to(target)
+            with self.assertRaises(validate.ValidationError):
+                validate._read_artifact(root, "link", limit=16)
+
+            fifo = root / "fifo"
+            try:
+                import os
+
+                os.mkfifo(fifo)
+            except (AttributeError, OSError):
+                self.skipTest("FIFO creation is unavailable")
+            with self.assertRaises(validate.ValidationError):
+                validate._read_artifact(root, "fifo", limit=16)
+
     def test_iterative_walks_handle_bounded_deep_values(self) -> None:
         value: object = "safe_marker"
         for _ in range(validate.MAX_JSON_DEPTH):
@@ -259,7 +321,7 @@ class DirectPortDenialTests(unittest.TestCase):
             self.assertNotIn(HOST_CANARY, completed.stdout)
             self.assertNotIn("usage:", completed.stdout.lower())
 
-    def test_every_retained_artifact_rejects_redaction_canary(self) -> None:
+    def test_every_retained_artifact_rejects_url_redaction_canary(self) -> None:
         for relative in validate.RETAINED_FILES:
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory) / "fixture"
@@ -269,13 +331,23 @@ class DirectPortDenialTests(unittest.TestCase):
                 with self.assertRaises(validate.ValidationError):
                     validate.validate_retained_artifact_redaction(root)
 
+    def test_every_retained_artifact_rejects_credential_assignment_canary(self) -> None:
+        for relative in validate.RETAINED_FILES:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "fixture"
+                shutil.copytree(FIXTURE_DIR, root)
+                path = root / relative
+                path.write_bytes(path.read_bytes() + ("\n" + CREDENTIAL_CANARY + "\n").encode("utf-8"))
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_retained_artifact_redaction(root)
+
     def test_parsed_redaction_rejects_sensitive_keys_and_values(self) -> None:
         for value in (
             {"authorization": "synthetic"},
             {"safe": HOSTILE_URL},
             {"safe": ADDRESS_CANARY},
             {"safe": HOST_CANARY},
-            {"safe": "token=synthetic"},
+            {"safe": "token" + "=" + "synthetic"},
         ):
             with self.subTest(value=value):
                 with self.assertRaises(validate.ValidationError):
@@ -305,11 +377,11 @@ class DirectPortDenialTests(unittest.TestCase):
                     path.write_bytes(path.read_bytes() + b" \n")
                 else:
                     path.write_text(path.read_text(encoding="utf-8") + "\ncoordinated_rebind_marker\n", encoding="utf-8")
-                self._refresh_mutable_baseline(root)
+                self._rebind_all_mutable_local_evidence(root)
                 for optimized in (False, True):
                     completed = self._run_fixture_copy(root, optimized=optimized)
                     self.assertEqual(completed.returncode, 2)
-                    self.assertIn("pinned retained artifact", json.loads(completed.stdout)["error"]["message"])
+                    self.assertIn("external review signature changed", json.loads(completed.stdout)["error"]["message"])
 
     def test_validator_source_and_baseline_anchor_rebinding_fail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -317,15 +389,15 @@ class DirectPortDenialTests(unittest.TestCase):
             shutil.copytree(FIXTURE_DIR, root)
             validator_path = root / "validate.py"
             validator_path.write_text(validator_path.read_text(encoding="utf-8") + "\n# source_rebind_marker\n", encoding="utf-8")
-            self._refresh_mutable_baseline(root)
+            self._rebind_all_mutable_local_evidence(root)
             for optimized in (False, True):
                 completed = self._run_fixture_copy(root, optimized=optimized)
                 self.assertEqual(completed.returncode, 2)
-                self.assertIn("pinned validator identity changed", json.loads(completed.stdout)["error"]["message"])
+                self.assertIn("external review signature changed", json.loads(completed.stdout)["error"]["message"])
 
         baseline = validate.load_json(validate.BASELINE_PATH)
         with tempfile.NamedTemporaryFile(mode="w", encoding="ascii") as anchor:
-            anchor.write("0" * 64 + "\n")
+            anchor.write("not-a-signature\n")
             anchor.flush()
             with self.assertRaises(validate.ValidationError):
                 validate.validate_baseline(baseline, anchor_path=Path(anchor.name))
