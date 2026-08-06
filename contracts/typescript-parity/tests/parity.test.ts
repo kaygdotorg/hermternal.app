@@ -1,15 +1,20 @@
 import { describe, expect, it } from "bun:test";
-import { mkdir, rm, symlink } from "node:fs/promises";
+import { mkdir, open, readdir, rm, symlink } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import {
   assertNoNetworkImports,
   assertRejects,
+  atFdcwdForPlatform,
+  boundedErrorText,
   loadCase,
   loadRegistry,
   MAX_ERROR_MESSAGE_LENGTH,
   MAX_JSON_BYTES,
   MAX_JSON_DEPTH,
+  MAX_REPORT_BYTES,
+  readDescriptorBytes,
   repoRootFromModule,
   runParity,
 } from "../src/parity";
@@ -386,7 +391,7 @@ describe("C-20 TypeScript contract parity", () => {
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout).toBe("");
       const error = cliError(result);
-      expect(error.code).toBe("artifact_size_mismatch");
+      expect(error.code).toBe("unsafe_path");
       expect(error.message.length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_LENGTH);
       expect(result.stderr.length).toBeLessThan(512);
     } finally {
@@ -539,12 +544,288 @@ describe("C-20 TypeScript contract parity", () => {
       const result = runCli("--repo-root", temporaryRoot);
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout).toBe("");
-      expect(cliError(result).code).toBe("output_limit");
+      expect(cliError(result).code).toBe("incompatible_input");
       expect(result.stderr.length).toBeLessThan(1_024);
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
   });
+
+  it("enforces canonical aggregate compatibility linkage", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      await mutateParityRegistry(temporaryRoot, (registry) => {
+        const roots = registry.fixture_roots as Array<Record<string, unknown>>;
+        const aggregate = roots.find((entry) => entry.id === "source-audit-compatibility-gate");
+        if (!aggregate) throw new Error("aggregate compatibility root is missing");
+        aggregate.coverage_ids = ["deployment-attestation"];
+
+        const coverage = registry.coverage as Array<Record<string, unknown>>;
+        const deployment = coverage.find((entry) => entry.id === "deployment-attestation");
+        const compatibility = coverage.find((entry) => entry.id === "compatibility-gate");
+        if (!deployment || !compatibility) throw new Error("compatibility coverage rows are missing");
+        deployment.fixture_ids = [...(deployment.fixture_ids as string[]), aggregate.id].sort();
+        compatibility.fixture_ids = (compatibility.fixture_ids as string[]).filter((id) => id !== aggregate.id);
+      });
+      const result = runCli("--repo-root", temporaryRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(cliError(result).code).toBe("fixture_inventory_invalid");
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("validates canonical registry metadata, identifiers, paths, and integer tokens", async () => {
+    const mutations: Array<(registry: Record<string, unknown>) => void> = [
+      (registry) => { registry.evidence_status = "complete"; },
+      (registry) => {
+        const states = registry.states as Array<Record<string, unknown>>;
+        states[0]!.gate_decision = "passed";
+      },
+      (registry) => {
+        const redaction = registry.redaction as Record<string, unknown>;
+        redaction.contains_credentials = true;
+      },
+      (registry) => {
+        const benchmark = registry.benchmark as Record<string, unknown>;
+        benchmark.threshold = 1;
+      },
+      (registry) => {
+        const coverage = registry.coverage as Array<Record<string, unknown>>;
+        coverage[0]!.id = "not_ascii_é";
+      },
+      (registry) => {
+        const roots = registry.fixture_roots as Array<Record<string, unknown>>;
+        roots[0]!.path = "attachment-policy//nested";
+      },
+    ];
+    for (const mutate of mutations) {
+      const temporaryRoot = await writeRegistryMutation(mutate);
+      try {
+        await expect(loadRegistry(temporaryRoot)).rejects.toBeInstanceOf(Error);
+      } finally {
+        await rm(temporaryRoot, { recursive: true, force: true });
+      }
+    }
+
+    const registryText = await Bun.file(join(repoRoot, "contracts/fixtures/index.json")).text();
+    const floatSizeRoot = await writeRawRegistry(registryText.replace(/"size_bytes": (\d+)/, '"size_bytes": $1.0'));
+    try {
+      await expect(loadRegistry(floatSizeRoot)).rejects.toMatchObject({ code: "malformed_input" });
+    } finally {
+      await rm(floatSizeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("validates nested compatibility semantics and the focused node budget", async () => {
+    const fabricatedRoot = await writeParityFixtureTree();
+    try {
+      const artifact = "source-audit/compatibility-gate/compatibility_record.json";
+      const artifactPath = join(fabricatedRoot, "contracts/fixtures", artifact);
+      const record = await Bun.file(artifactPath).json() as Record<string, unknown>;
+      const redaction = record.redaction as Record<string, unknown>;
+      redaction.contains_hosts = true;
+      await Bun.write(artifactPath, `${JSON.stringify(record)}\n`);
+      await refreshManifest(fabricatedRoot, artifact);
+      const result = runCli("--repo-root", fabricatedRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(cliError(result).code).toBe("live_input");
+    } finally {
+      await rm(fabricatedRoot, { recursive: true, force: true });
+    }
+
+    const semanticMutations: Array<(record: Record<string, unknown>) => void> = [
+      (record) => {
+        const merged = record.merged_dev as Record<string, unknown>;
+        merged.head = "0".repeat(40);
+      },
+      (record) => {
+        const observations = record.observations as Record<string, unknown>;
+        const durations = observations.validator_duration_ms as Record<string, unknown>;
+        const normal = durations.normal as Record<string, unknown>;
+        normal.command = "python3 changed-validator.py";
+      },
+      (record) => {
+        const observations = record.observations as Record<string, unknown>;
+        const durations = observations.validator_duration_ms as Record<string, unknown>;
+        const optimized = durations.optimized as Record<string, unknown>;
+        const distribution = optimized.distribution as Record<string, unknown>;
+        distribution.p95 = Number(distribution.p95) + 0.001;
+      },
+      (record) => {
+        const artifacts = record.artifacts as Record<string, unknown>;
+        const files = artifacts.files as Array<Record<string, unknown>>;
+        files[0]!.sha256 = "0".repeat(64);
+        const digest = createHash("sha256");
+        for (const file of files) {
+          digest.update(`${file.path}\0${file.sha256}\0${file.size_bytes}\n`, "utf8");
+        }
+        const setDigest = digest.digest("hex");
+        artifacts.set_sha256 = setDigest;
+        const observations = record.observations as Record<string, unknown>;
+        observations.artifact_set_sha256 = setDigest;
+        const durations = observations.validator_duration_ms as Record<string, Record<string, unknown>>;
+        for (const mode of ["normal", "optimized"]) durations[mode]!.artifact_set_sha256 = setDigest;
+      },
+      (record) => {
+        const artifacts = record.artifacts as Record<string, unknown>;
+        const files = artifacts.files as Array<Record<string, unknown>>;
+        files[0]!.path = "contracts/fixtures/README.changed.md";
+        const digest = createHash("sha256");
+        for (const file of files) {
+          digest.update(`${file.path}\0${file.sha256}\0${file.size_bytes}\n`, "utf8");
+        }
+        const setDigest = digest.digest("hex");
+        artifacts.set_sha256 = setDigest;
+        const observations = record.observations as Record<string, unknown>;
+        observations.artifact_set_sha256 = setDigest;
+        const durations = observations.validator_duration_ms as Record<string, Record<string, unknown>>;
+        for (const mode of ["normal", "optimized"]) durations[mode]!.artifact_set_sha256 = setDigest;
+      },
+    ];
+    for (const mutate of semanticMutations) {
+      const semanticRoot = await writeParityFixtureTree();
+      try {
+        const artifact = "source-audit/compatibility-gate/compatibility_record.json";
+        const artifactPath = join(semanticRoot, "contracts/fixtures", artifact);
+        const record = await Bun.file(artifactPath).json() as Record<string, unknown>;
+        mutate(record);
+        await Bun.write(artifactPath, `${JSON.stringify(record)}\n`);
+        await refreshManifest(semanticRoot, artifact);
+        const result = runCli("--repo-root", semanticRoot);
+        expect(result.exitCode).not.toBe(0);
+        expect(cliError(result).code).toBe("incompatible_input");
+      } finally {
+        await rm(semanticRoot, { recursive: true, force: true });
+      }
+    }
+
+    const nodeRoot = await writeParityFixtureTree();
+    try {
+      const artifact = "source-audit/compatibility-gate/compatibility_record.json";
+      const artifactPath = join(nodeRoot, "contracts/fixtures", artifact);
+      const record = await Bun.file(artifactPath).json() as Record<string, unknown>;
+      record.blockers = Array.from({ length: 350 }, (_, index) =>
+        Object.fromEntries(Array.from({ length: 11 }, (__, key) => [`k${key}`, index])),
+      );
+      await Bun.write(artifactPath, `${JSON.stringify(record)}\n`);
+      await refreshManifest(nodeRoot, artifact);
+      const result = runCli("--repo-root", nodeRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(cliError(result).code).toBe("json_node_limit");
+    } finally {
+      await rm(nodeRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("bounds error text and complete reports by serialized UTF-8 bytes", async () => {
+    for (const input of [
+      "界".repeat(240),
+      String.fromCharCode(0xd800).repeat(240),
+      `before${String.fromCharCode(0x2028)}after${String.fromCharCode(0x85)}end`,
+    ]) {
+      const bounded = boundedErrorText(input, MAX_ERROR_MESSAGE_LENGTH, "fallback");
+      expect(new TextEncoder().encode(JSON.stringify(bounded)).byteLength - 2)
+        .toBeLessThanOrEqual(MAX_ERROR_MESSAGE_LENGTH);
+      expect(bounded).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\ud800-\udfff]/);
+    }
+
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      await mutateParityRegistry(temporaryRoot, (registry) => {
+        const coverage = registry.coverage as Array<Record<string, unknown>>;
+        for (let index = 0; index < 60; index += 1) {
+          const prefix = `z${index.toString().padStart(2, "0")}`;
+          coverage.push({
+            id: `${prefix}-${"x".repeat(115 - prefix.length)}`,
+            status: "pending",
+            fixture_ids: [],
+            platforms: ["web"],
+            required_states: ["pending"],
+            notes: "bounded synthetic blocked row",
+          });
+        }
+        coverage.sort((left, right) => String(left.id).localeCompare(String(right.id)));
+      });
+      const result = runCli("--repo-root", temporaryRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(cliError(result).code).toBe("output_limit");
+      expect(new TextEncoder().encode(result.stderr).byteLength).toBeLessThan(MAX_REPORT_BYTES);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds descriptor-rooted inventory depth and rejects a symlinked root", async () => {
+    const deepRoot = await writeParityFixtureTree();
+    try {
+      let directory = join(deepRoot, "contracts/fixtures/attachment-policy");
+      for (let index = 0; index < 34; index += 1) {
+        directory = join(directory, `d${index}`);
+        await mkdir(directory);
+      }
+      await Bun.write(join(directory, "extra.txt"), "unindexed\n");
+      const result = runCli("--repo-root", deepRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(cliError(result).code).toBe("fixture_inventory_invalid");
+    } finally {
+      await rm(deepRoot, { recursive: true, force: true });
+    }
+
+    const symlinkRoot = await writeParityFixtureTree();
+    try {
+      const fixtureRoot = join(symlinkRoot, "contracts/fixtures/attachment-policy");
+      const alternate = join(symlinkRoot, "alternate-attachment-policy");
+      await mkdir(alternate);
+      await rm(fixtureRoot, { recursive: true, force: true });
+      await symlink(alternate, fixtureRoot, "dir");
+      const result = runCli("--repo-root", symlinkRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(cliError(result).code).toBe("unsafe_artifact");
+    } finally {
+      await rm(symlinkRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("uses platform-correct AT_FDCWD values and cleans repeated FIFO descriptors", async () => {
+    expect(atFdcwdForPlatform("darwin")).toBe(-2);
+    expect(atFdcwdForPlatform("linux")).toBe(-100);
+
+    const blockingDirectory = join("/tmp", `hermternal-c20-blocking-${crypto.randomUUID()}`);
+    await mkdir(blockingDirectory);
+    const blockingFifo = join(blockingDirectory, "blocked-read");
+    createFifo(blockingFifo);
+    const blockingHandle = await open(blockingFifo, fsConstants.O_RDWR);
+    const beforeTimeout = (await readdir("/dev/fd")).length;
+    try {
+      const started = Bun.nanoseconds();
+      await expect(readDescriptorBytes(blockingHandle.fd, 1, "blocking descriptor"))
+        .rejects.toMatchObject({ code: "artifact_read_timeout" });
+      expect((Bun.nanoseconds() - started) / 1_000_000).toBeLessThan(2_000);
+    } finally {
+      await blockingHandle.close();
+      await rm(blockingDirectory, { recursive: true, force: true });
+    }
+    const afterTimeout = (await readdir("/dev/fd")).length;
+    expect(afterTimeout).toBeLessThanOrEqual(beforeTimeout);
+
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const replacement = join(temporaryRoot, "contracts/fixtures/deployment-security/browser-auth/cases.json");
+      await rm(replacement, { force: true });
+      createFifo(replacement);
+      const before = (await readdir("/dev/fd")).length;
+      for (let index = 0; index < 20; index += 1) {
+        await expect(runParity(temporaryRoot)).rejects.toMatchObject({ code: "unsafe_artifact" });
+      }
+      const after = (await readdir("/dev/fd")).length;
+      expect(after).toBeLessThanOrEqual(before + 2);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("exposes a typed rejection assertion for regression tests", () => {
     expect(() => assertRejects({ code: "wrong" }, "unknown_case")).toThrow(/expected unknown_case rejection/);

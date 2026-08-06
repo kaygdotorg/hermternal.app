@@ -22,12 +22,15 @@ The offline runner checks representative semantic outcomes for:
 The registry remains authoritative for readiness. A `pending`, `empty`,
 `failure`, `cancelled`, or `unknown` row is reported as `blocked`; it is never
 promoted to a successful parity result. Pending roots must use `validator: null`
-and `files: []`. A pending aggregate compatibility root returns bounded blocked
-compatibility evidence without attempting to load an unregistered artifact. The
-report uses semantic outcomes rather than platform-specific wire bytes, and it
-returns a bounded JSON object suitable for CI logs. The CLI accepts only an
-optional `--repo-root <path>` pair; unknown options, positional values, and
-duplicate roots return bounded JSON errors instead of guessing.
+and `files: []`. Fixture-to-coverage linkage is canonical and bidirectional; the
+aggregate compatibility root must own the `compatibility-gate` row, so a pending
+gate cannot be bypassed by relinking it to unrelated coverage. A pending aggregate
+root returns bounded blocked compatibility evidence without attempting to load an
+unregistered artifact. The report uses semantic outcomes rather than
+platform-specific wire bytes, and its complete serialized UTF-8 form is capped at
+8 KiB for CI logs. The CLI accepts only an optional `--repo-root <path>` pair;
+unknown options, positional values, and duplicate roots return bounded JSON errors
+instead of guessing.
 
 Before representatives run, the checker validates the complete registry
 inventory. Every ready root must have the exact sorted file manifest, every
@@ -41,26 +44,39 @@ Every artifact is opened descriptor-first with `O_NONBLOCK | O_NOFOLLOW`, then
 checked as a regular file. The Bun reader walks every parent component from an
 anchored directory descriptor with `openat` and `O_NOFOLLOW`; only the trusted
 repository root is canonicalized, so a replaced fixture directory cannot redirect
-the read through a symlink. Descriptor and pathname device/inode/size identities
-are compared before and after the bounded read. Bytes are read synchronously from
-the nonblocking descriptor under a fixed deadline, so there is no unresolved
-`FileHandle.read` promise left behind when a read is rejected. The registry and
-each registered artifact are capped at 256 KiB; the artifact must also match the
-registry's exact `size_bytes` and lowercase SHA-256 digest before it is decoded or
-semantically inspected. Symlinks, directories, special files, changed file
-identities or sizes, stale manifests, and digest mismatches fail closed. The
-Unix descriptor walk uses Bun's `bun:ffi` bindings for `openat`, `read`, and
-`close`; if the native boundary is unavailable, the checker fails closed rather
-than falling back to pathname-only reads.
+the read through a symlink. Inventory enumeration also stays descriptor-rooted: it
+uses duplicated directory descriptors with `fdopendir`/`readdir`, opens every child
+with relative `openat`, and enforces 32-level, 512-directory, and 512-file budgets.
+All directory streams, duplicated handles, and native descriptors have checked
+cleanup paths. Descriptor and pathname device/inode/size identities are compared
+before and after each bounded artifact read. Bytes are read by a killable
+subprocess that inherits only the already-secured nonblocking descriptor. Its
+one-second wall-clock deadline can interrupt a blocked
+kernel read, and the parent awaits process exit before closing its own descriptor,
+so no unresolved read or inherited descriptor survives a rejection. The
+registry and each registered artifact are capped at 256 KiB; the focused
+compatibility record uses its canonical 128 KiB, 4,096-node, and UTF-8 string
+budgets. Every artifact must also match the registry's exact integer-token
+`size_bytes` and lowercase SHA-256 digest before it is decoded or semantically
+inspected. Symlinks, directories, special files, changed identities or sizes,
+stale manifests, and digest mismatches fail closed. The Unix descriptor boundary
+uses Bun's `bun:ffi` bindings and platform-specific `AT_FDCWD` values (`-2` on
+Darwin and `-100` on Linux); unsupported native boundaries fail closed rather than
+falling back to pathname-only reads.
 
 The JSON reader is a bounded parser rather than `JSON.parse`. It rejects
 duplicate object keys and enforces limits on depth, nodes, array items, object
-keys, key length, and string length. Registry, artifact, case, expected-result,
-and compatibility records use exact allowlisted key sets, so unknown or missing
-fields do not become evidence. Report decisions and compatibility fields are
-length-bounded. Contract error codes and messages are sanitized and bounded before
-they reach stderr, including messages that contain nearly maximal registered paths.
-The CLI therefore emits only small JSON errors on failure.
+keys, key length, and string length. Registry identifiers and paths use the
+canonical ASCII languages and lengths, registry numeric fields require lexical
+integer tokens, and state, evidence-status, redaction, parity, and benchmark
+metadata are retained and semantically checked. The compatibility record pins
+its canonical source and revision snapshots, merged PR sequence, artifact paths
+and manifest digest, benchmark commands and recomputed distributions, status,
+redaction, and blocker contracts before any evidence is projected. Report decisions and
+compatibility fields are bounded. Contract error codes and messages normalize
+controls and lone surrogates, then enforce their limit against serialized UTF-8
+bytes rather than UTF-16 units. The CLI therefore emits one small JSON line on
+failure and rejects an oversized complete success report before writing stdout.
 
 ## TypeScript 7 and tool compatibility
 
