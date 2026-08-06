@@ -1,0 +1,672 @@
+{
+  "schema": "hermternal.fixture.image-attachment-lifecycle.v1",
+  "contract": "dashboard-v0.0.1",
+  "policy_reference": "attachment-policy-c13-f5be9236",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "fixture_policy": "synthetic_markers_only",
+  "synthetic_only": true,
+  "limits": {
+    "max_bytes": 26214400,
+    "max_progress_events": 16
+  },
+  "redaction": {
+    "raw_data_url_retained": false,
+    "base64_retained": false,
+    "paths_retained": false,
+    "filenames_retained": false,
+    "metadata_retained": false,
+    "hosts_retained": false,
+    "credentials_retained": false,
+    "prompts_retained": false,
+    "transcripts_retained": false,
+    "user_data_retained": false
+  },
+  "cases": [
+    {
+      "id": "empty-selection",
+      "scenario": "image-selection-empty",
+      "input": {
+        "selection": "none",
+        "declared_format": null,
+        "detected_format": null,
+        "data_url_state": "absent",
+        "size_state": "not_applicable",
+        "metadata_state": "absent",
+        "transport_state": "not_started",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": false,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selection_empty"],
+      "progress": [],
+      "expected": {
+        "decision": "no_attachment",
+        "attachment_state": "empty",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "none",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[empty]"
+      },
+      "notes": "No image is selected and the text draft remains available."
+    },
+    {
+      "id": "local-preprocess-metadata-strip",
+      "scenario": "local-preprocessing-metadata-removal",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "jpeg",
+        "detected_format": "jpeg",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "present",
+        "transport_state": "not_started",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": true,
+        "metadata_removed": true,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "metadata_removed", "preprocess_completed"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100}
+      ],
+      "expected": {
+        "decision": "ready",
+        "attachment_state": "preprocessed",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "wait_or_cancel",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[ready]"
+      },
+      "notes": "Local preprocessing removes metadata before any upload begins."
+    },
+    {
+      "id": "progress-uploading",
+      "scenario": "upload-progress-visible",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "png",
+        "detected_format": "png",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "available",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100},
+        {"phase": "upload", "percent": 0},
+        {"phase": "upload", "percent": 40}
+      ],
+      "expected": {
+        "decision": "pending",
+        "attachment_state": "uploading",
+        "draft": "preserved",
+        "upload_started": true,
+        "upload_attempts": 1,
+        "duplicate_uploads": 0,
+        "retry": "wait_or_cancel",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[pending]"
+      },
+      "notes": "Progress is monotonic and remains interruptible while upload is pending."
+    },
+    {
+      "id": "cancel-before-upload",
+      "scenario": "cancel-before-upload-start",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "png",
+        "detected_format": "png",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "present",
+        "transport_state": "not_started",
+        "cancel_point": "before_upload_start",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": true,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "metadata_removed", "preprocess_completed", "cancelled_before_upload"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100}
+      ],
+      "expected": {
+        "decision": "cancelled",
+        "attachment_state": "cancelled",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "none",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[cancelled;before_upload]"
+      },
+      "notes": "Cancellation before transport makes no outward upload action."
+    },
+    {
+      "id": "cancel-after-upload-start",
+      "scenario": "cancel-after-upload-start",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "webp",
+        "detected_format": "webp",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "available",
+        "cancel_point": "after_upload_start",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "required_before_retry"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "cancelled_after_upload_start"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100},
+        {"phase": "upload", "percent": 0},
+        {"phase": "upload", "percent": 35}
+      ],
+      "expected": {
+        "decision": "cancelled",
+        "attachment_state": "cancelled",
+        "draft": "preserved",
+        "upload_started": true,
+        "upload_attempts": 1,
+        "duplicate_uploads": 0,
+        "retry": "state_read_before_retry",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[cancelled;after_upload_start]"
+      },
+      "notes": "Post-start cancellation stops local progress and requires state evidence before retry."
+    },
+    {
+      "id": "safe-retry-after-state-read",
+      "scenario": "safe-retry-after-confirmed-no-upload",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "png",
+        "detected_format": "png",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "interrupted_before_upload",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "confirmed_no_upload"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "network_interrupted", "state_reread", "retry_started", "upload_started", "upload_progress", "upload_completed"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100},
+        {"phase": "upload", "percent": 0},
+        {"phase": "upload", "percent": 100}
+      ],
+      "expected": {
+        "decision": "accepted_after_retry",
+        "attachment_state": "uploaded",
+        "draft": "preserved",
+        "upload_started": true,
+        "upload_attempts": 1,
+        "duplicate_uploads": 0,
+        "retry": "safe_after_state_read",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[uploaded;retry_safe]"
+      },
+      "notes": "Retry is allowed only after a state reread confirms no prior upload."
+    },
+    {
+      "id": "success-transcript-reference",
+      "scenario": "success-semantic-transcript-reference",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "jpeg",
+        "detected_format": "jpeg",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "available",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": true,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "upload_completed", "transcript_reference_recorded"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100},
+        {"phase": "upload", "percent": 0},
+        {"phase": "upload", "percent": 100}
+      ],
+      "expected": {
+        "decision": "accepted",
+        "attachment_state": "uploaded",
+        "draft": "preserved",
+        "upload_started": true,
+        "upload_attempts": 1,
+        "duplicate_uploads": 0,
+        "retry": "none",
+        "metadata_retained": false,
+        "transcript_reference": "synthetic-attachment-ref-001",
+        "diagnostic": "attachment[uploaded]"
+      },
+      "notes": "Success records only a semantic synthetic reference, never image material."
+    },
+    {
+      "id": "declaration-content-mismatch",
+      "scenario": "declaration-content-mismatch",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "png",
+        "detected_format": "jpeg",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "not_started",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "rejected"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100}
+      ],
+      "expected": {
+        "decision": "rejected",
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "none",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[rejected;reason=declaration_content_mismatch]"
+      },
+      "notes": "Declared MIME and detected magic format must agree before upload."
+    },
+    {
+      "id": "malformed-base64",
+      "scenario": "malformed-base64-rejection",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "png",
+        "detected_format": "png",
+        "data_url_state": "malformed_base64",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "not_started",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "rejected"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100}
+      ],
+      "expected": {
+        "decision": "rejected",
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "none",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[rejected;reason=malformed_base64]"
+      },
+      "notes": "Malformed encoded content fails closed without retaining the payload."
+    },
+    {
+      "id": "malformed-data-url",
+      "scenario": "malformed-data-url-rejection",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "png",
+        "detected_format": "png",
+        "data_url_state": "malformed_data_url",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "not_started",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "rejected"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100}
+      ],
+      "expected": {
+        "decision": "rejected",
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "none",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[rejected;reason=malformed_data_url]"
+      },
+      "notes": "Malformed data URL structure fails closed before network work."
+    },
+    {
+      "id": "unsupported-format",
+      "scenario": "unsupported-image-format",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "svg",
+        "detected_format": "svg",
+        "data_url_state": "unsupported_format",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "not_started",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "rejected"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100}
+      ],
+      "expected": {
+        "decision": "rejected",
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "none",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[rejected;reason=unsupported_format]"
+      },
+      "notes": "Only the C-13 supported image families may reach upload."
+    },
+    {
+      "id": "oversized-image",
+      "scenario": "decoded-size-over-limit",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "bmp",
+        "detected_format": "bmp",
+        "data_url_state": "synthetic_valid",
+        "size_state": "over_limit",
+        "metadata_state": "absent",
+        "transport_state": "not_started",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "rejected"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100}
+      ],
+      "expected": {
+        "decision": "rejected",
+        "attachment_state": "failed",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "none",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[rejected;reason=too_large]"
+      },
+      "notes": "Decoded payloads above the C-13 25 MiB cap are rejected locally."
+    },
+    {
+      "id": "network-interruption-before-upload",
+      "scenario": "network-interruption-before-upload",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "gif",
+        "detected_format": "gif89a",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "interrupted_before_upload",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "required_before_retry"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "network_interrupted"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100}
+      ],
+      "expected": {
+        "decision": "interrupted",
+        "attachment_state": "interrupted",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "safe_after_state_read",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[interrupted]"
+      },
+      "notes": "A preflight transport interruption blocks retry until state is reread."
+    },
+    {
+      "id": "network-interruption-after-upload",
+      "scenario": "network-interruption-after-upload-start",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "gif",
+        "detected_format": "gif87a",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "interrupted_after_upload_start",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "required_before_retry"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "network_interrupted"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100},
+        {"phase": "upload", "percent": 0},
+        {"phase": "upload", "percent": 55}
+      ],
+      "expected": {
+        "decision": "interrupted",
+        "attachment_state": "interrupted",
+        "draft": "preserved",
+        "upload_started": true,
+        "upload_attempts": 1,
+        "duplicate_uploads": 0,
+        "retry": "state_read_before_retry",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[interrupted]"
+      },
+      "notes": "After transport starts the result is interrupted and retry is not automatic."
+    },
+    {
+      "id": "uncertain-completion-no-duplicate",
+      "scenario": "uncertain-completion-no-duplicate-upload",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "png",
+        "detected_format": "png",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "response_lost_after_upload",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.1",
+        "state_read": "required_before_retry"
+      },
+      "preprocess": {
+        "performed": true,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "response_lost"],
+      "progress": [
+        {"phase": "preprocess", "percent": 0},
+        {"phase": "preprocess", "percent": 100},
+        {"phase": "upload", "percent": 0},
+        {"phase": "upload", "percent": 100}
+      ],
+      "expected": {
+        "decision": "unknown",
+        "attachment_state": "unknown",
+        "draft": "preserved",
+        "upload_started": true,
+        "upload_attempts": 1,
+        "duplicate_uploads": 0,
+        "retry": "no_automatic_retry",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[unknown]"
+      },
+      "notes": "A lost response is uncertain and cannot trigger a duplicate upload."
+    },
+    {
+      "id": "incompatible-contract",
+      "scenario": "incompatible-contract-blocked",
+      "input": {
+        "selection": "one_image",
+        "declared_format": "png",
+        "detected_format": "png",
+        "data_url_state": "synthetic_valid",
+        "size_state": "within_limit",
+        "metadata_state": "absent",
+        "transport_state": "not_started",
+        "cancel_point": "none",
+        "contract": "dashboard-v0.0.2",
+        "state_read": "not_required"
+      },
+      "preprocess": {
+        "performed": false,
+        "orientation_normalized": false,
+        "metadata_removed": false,
+        "source_bytes_retained": false
+      },
+      "timeline": ["selected", "blocked"],
+      "progress": [],
+      "expected": {
+        "decision": "blocked",
+        "attachment_state": "blocked",
+        "draft": "preserved",
+        "upload_started": false,
+        "upload_attempts": 0,
+        "duplicate_uploads": 0,
+        "retry": "none",
+        "metadata_retained": false,
+        "transcript_reference": null,
+        "diagnostic": "attachment[blocked;reason=incompatible_contract]"
+      },
+      "notes": "An incompatible contract is blocked without probing a live service."
+    }
+  ]
+}
