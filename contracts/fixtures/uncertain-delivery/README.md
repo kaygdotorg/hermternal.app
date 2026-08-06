@@ -10,8 +10,10 @@ text, read a transcript, or claim live compatibility.
 - Operation: `C-06`
 - Dashboard contract: `dashboard-v0.0.1`
 - Reviewed Hermes source: `f5be9236e00ddf2f2a412697f267078fc4ee068e`
-- External expected revision: supplied by review/CI as `HERMTERNAL_C06_EXPECTED_COMMIT`
-- Non-release audit tag: `hermternal-c06-uncertain-delivery-bounded-output-anchor`
+- External expected revision: protected review/CI variable `HERMTERNAL_C06_EXPECTED_COMMIT`
+- External launcher source: protected review/CI variable `HERMTERNAL_C06_EXTERNAL_LAUNCHER`
+- External launcher digest: protected review/CI variable `HERMTERNAL_C06_EXTERNAL_LAUNCHER_SHA256`
+- Non-release audit tag: `hermternal-c06-uncertain-delivery-external-launcher-anchor`
 - Canonical inputs: `cases.json`
 - Validator: `validate.py`
 - Regression tests: `test_validate.py`
@@ -26,21 +28,28 @@ later unchanged commit, but its canonical bytes and clean worktree must match
 that external revision exactly. Missing, malformed, unavailable, or mismatched
 external expectation fails closed.
 
-Every supported validator launch uses a trusted two-stage Python isolated
-preflight. The first `python3 -I -B` (or `-I -B -O`) command checks the
-checkout path, linked-worktree metadata, external-gitdir boundary, and Git
-alternates before any checkout-owned source is read. It then reads the reviewed
-`preflight.py` blob incrementally through a fixed `/usr/bin/git` child, with a
-hard byte limit, two-second deadline, and process-group cleanup. No shell pipe
-or `communicate()` call can buffer the blob first. The reviewed preflight applies
-the same incremental bound and cleanup to every later Git-tree read, then checks
-the exact expected-commit bytes and executes the verified `validate.py` source
-from memory. Isolated mode also removes the fixture
-directory from `sys.path`, so untracked `selectors.py` or `subprocess.py`
-files cannot run before the checks. The exact normal and optimized commands
-are recorded in `validation-baseline.json` and reproduced below. Direct
-`python3 validate.py` and direct executable/shebang launches are unsupported:
-they do not provide the trusted preflight.
+Every authoritative validator or test launch uses a complete initial launcher
+supplied by protected review or CI configuration, not read, imported, or copied
+from this checkout. That external launcher's SHA-256 is recorded in
+`validation-baseline.json`; the in-validator reference copy exists only for
+non-authoritative regression probes. The launcher receives the protected exact
+commit and target path, checks repository metadata, then reads the reviewed
+`preflight.py` blob incrementally through fixed `/usr/bin/git`. Reads request
+only remaining capacity plus one rejection byte and enforce separate stdout and
+stderr caps, a two-second deadline, descriptor cleanup, and process-group
+cleanup before compile. Compile, invalid UTF-8, syntax, runtime, overflow, and
+timeout failures produce one fixed redacted line. A controlled `SystemExit`
+retains its existing output without a duplicate line.
+
+The reviewed preflight applies the same bounded Git-tree reads, compares every
+canonical expected-commit blob with the checkout, and only then executes the
+verified validator or test source from memory. For authoritative tests it first
+installs the verified expected-commit validator as the `validate` module, then
+executes the verified expected-commit `test_validate.py`; no checkout Python
+import occurs before binding. Direct `python3 validate.py`, direct unittest
+discovery, direct executable/shebang launches, and commands obtained from
+`validation-baseline.json` are non-authoritative because they do not supply the
+protected external launcher.
 
 The annotated tag is a non-release audit/availability marker only. It is not a
 signature, release tag, or trust root. A protected repository owner must publish
@@ -143,12 +152,12 @@ not discovered from a mutable branch):
 git clone <repository-url> <checkout>
 cd <checkout>
 git fetch --tags --unshallow 2>/dev/null || git fetch --tags
-# Run the exact `normal.command` from validation-baseline.json.
-# Run the exact `optimized.command` from validation-baseline.json.
-# Both commands first execute the isolated path/metadata guard, then feed
-# the reviewed preflight blob through an isolated interpreter.
-git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-bounded-output-anchor
-git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-bounded-output-anchor^{commit}
+# Protected review/CI supplies its complete launcher source and verifies that
+# its SHA-256 equals each baseline mode's external_launcher_sha256.
+# Run it with the protected expected commit, recorded python_flags, and target.
+# For authoritative tests, target test_validate.py instead of importing it.
+git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-external-launcher-anchor
+git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-external-launcher-anchor^{commit}
 ```
 
 The audit tag is an annotated, non-release consistency marker. It must be
@@ -170,27 +179,36 @@ Run from the repository root:
 
 ```text
 export HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit>
-# Execute normal.command and optimized.command from validation-baseline.json.
-python3 -I -B -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
-python3 -I -B -O -m unittest discover -s contracts/fixtures/uncertain-delivery -p 'test_*.py'
+# Obtain EXTERNAL_LAUNCHER only from protected review/CI configuration.
+# Verify sha256(EXTERNAL_LAUNCHER) against validation-baseline.json without
+# importing or evaluating that checkout file, then run:
+python3 -I -B -c "$EXTERNAL_LAUNCHER" contracts/fixtures/uncertain-delivery/validate.py
+python3 -I -B -O -c "$EXTERNAL_LAUNCHER" contracts/fixtures/uncertain-delivery/validate.py
+python3 -I -B -c "$EXTERNAL_LAUNCHER" contracts/fixtures/uncertain-delivery/test_validate.py
+python3 -I -B -O -c "$EXTERNAL_LAUNCHER" contracts/fixtures/uncertain-delivery/test_validate.py
 python3 -X pycache_prefix=/tmp/hermternal-c06-pycache -I -B -m py_compile contracts/fixtures/uncertain-delivery/preflight.py contracts/fixtures/uncertain-delivery/validate.py contracts/fixtures/uncertain-delivery/test_validate.py
 ```
 
-The focused tests execute the real validator CLI in both normal and optimized
-modes. They cover accepted/present, absent-and-idle, confirmed rejection,
+The externally launched focused tests execute verified expected-commit test and
+validator bytes in both normal and optimized modes. Direct unittest discovery is
+useful development feedback but is explicitly non-authoritative. Coverage includes
+accepted/present, absent-and-idle, confirmed rejection,
 timeout, WebSocket close, app suspension, process loss, restore, explicit
 resend, duplicate prevention, interruption, cancellation, sign-out, pending
 proof, compatibility failure, unknown interactive events, strict JSON, bounded
 redaction, canonical artifact rebinding, forged benchmark evidence, gateway,
 transport, draft, initial-state, state-identity, event-correlation, trusted
 preflight, symlinked-validator, ancestor-alias, external-gitdir, isolated-import,
-unexpected-sibling-module, oversized launcher-blob, and oversized preflight
-Git-tree mutations in normal and optimized modes. Oversized files, long keys,
+unexpected-sibling-module, coordinated validator/test replacement, malformed
+or invalid-UTF-8 preflight source, controlled exits, exact remaining-capacity
+read requests, oversized launcher/preflight Git output, and positive/negative
+exponent underflow in normal and optimized modes. Oversized files, long keys,
 directories, and FIFOs fail through the same bounded error path without opening
 unbounded or special-file streams.
 
-`validation-baseline.json` records 30 raw subprocess samples for each normal
-and optimized command, with min/mean/median/p95/max distributions and the
+`validation-baseline.json` records the protected external-launcher hash, Python
+flags, target, and 30 raw subprocess samples for each normal and optimized mode,
+with min/mean/median/p95/max distributions and the
 measured environment. `threshold` is intentionally `null`: this offline
 contract records reproducibility evidence and does not invent a product
 performance budget. `build_mode` is `N/A` because there is no production or

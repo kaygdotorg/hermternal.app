@@ -58,11 +58,35 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         flags = ["-I", "-B", "-O"] if optimized else ["-I", "-B"]
         # Pass the trusted launcher as one argv value: no shell pipe may buffer the
         # reviewed preflight blob before its incremental size guard runs.
-        command = [sys.executable, *flags, "-c", validate.TRUSTED_LAUNCHER_CODE, str(target), *arguments]
+        command = [sys.executable, *flags, "-c", validate.REFERENCE_EXTERNAL_LAUNCHER_CODE, str(target), *arguments]
         child_environment = dict(environment if environment is not None else self.canonical_environment())
         child_environment["PWD"] = str(working_directory)
         return subprocess.run(
             command,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=working_directory,
+            timeout=timeout,
+            env=child_environment,
+        )
+
+    def run_external_target(
+        self,
+        target: Path,
+        optimized: bool = False,
+        *,
+        cwd: Path | None = None,
+        environment: dict[str, str] | None = None,
+        timeout: float = 10,
+    ) -> subprocess.CompletedProcess[str]:
+        """Exercise the reference launcher; authoritative CI supplies it externally."""
+        flags = ["-I", "-B", "-O"] if optimized else ["-I", "-B"]
+        working_directory = cwd or self._repository_for_validator(target)
+        child_environment = dict(environment if environment is not None else self.canonical_environment())
+        child_environment["PWD"] = str(working_directory)
+        return subprocess.run(
+            [sys.executable, *flags, "-c", validate.REFERENCE_EXTERNAL_LAUNCHER_CODE, str(target)],
             capture_output=True,
             text=True,
             check=False,
@@ -204,6 +228,8 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 "nan.json": '{"value":NaN}',
                 "infinity.json": '{"value":Infinity}',
                 "overflow.json": '{"value":1e9999}',
+                "positive-underflow.json": '{"value":1e-9999}',
+                "negative-underflow.json": '{"value":-1e-9999}',
                 "huge-int.json": '{"value":' + ("9" * (validate.MAX_INTEGER_DIGITS + 1)) + '}',
                 "long-key.json": '{"' + ("k" * (validate.MAX_STRING_LENGTH + 1)) + '":1}',
                 "deep.json": "[" * (validate.MAX_JSON_DEPTH + 2) + "0" + "]" * (validate.MAX_JSON_DEPTH + 2),
@@ -411,6 +437,96 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                         self.assertEqual(result.stderr, '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n')
                         self.assertNotIn("Traceback", result.stderr)
 
+    def test_checkout_replacement_cannot_execute_before_external_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            repository = base / "coordinated-replacement"
+            copied = subprocess.run(
+                ["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(repository)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(copied.returncode, 0, copied.stderr)
+            marker = base / "checkout-code-executed"
+            for name in ("validate.py", "test_validate.py"):
+                path = repository / "contracts/fixtures/uncertain-delivery" / name
+                path.write_text(
+                    f"open({str(marker)!r}, 'a', encoding='utf-8').write({name!r})\n",
+                    encoding="utf-8",
+                )
+            environment = self.canonical_environment()
+            for target_name in ("validate.py", "test_validate.py"):
+                target = repository / "contracts/fixtures/uncertain-delivery" / target_name
+                for optimized in (False, True):
+                    result = self.run_external_target(
+                        target,
+                        optimized,
+                        cwd=repository,
+                        environment=environment,
+                    )
+                    with self.subTest(target=target_name, optimized=optimized):
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(result.stdout, "")
+                        self.assertEqual(result.stderr, '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n')
+                        self.assertFalse(marker.exists())
+
+    def test_external_launcher_preflight_compile_and_runtime_failures_are_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            variants = {
+                "truncated": b"def incomplete(\n",
+                "invalid-utf8": b"# coding: utf-8\n\xff\n",
+                "syntax": b"if True print('invalid')\n",
+                "runtime": b"import sys\nsys.stderr.write('sensitive-marker\\n')\nraise RuntimeError('sensitive-marker')\n",
+            }
+            for label, source in variants.items():
+                repository = base / label
+                subprocess.run(["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(repository)], check=True, capture_output=True)
+                subprocess.run(["git", "-C", str(repository), "config", "user.email", "fixture@example.invalid"], check=True)
+                subprocess.run(["git", "-C", str(repository), "config", "user.name", "Fixture Test"], check=True)
+                (repository / "contracts/fixtures/uncertain-delivery/preflight.py").write_bytes(source)
+                subprocess.run(["git", "-C", str(repository), "add", "contracts/fixtures/uncertain-delivery/preflight.py"], check=True)
+                subprocess.run(["git", "-C", str(repository), "commit", "-m", f"test: {label} preflight"], check=True, capture_output=True)
+                expected = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD^{commit}"], text=True).strip()
+                environment = self.canonical_environment()
+                environment[validate.EXPECTED_COMMIT_ENV] = expected
+                for optimized in (False, True):
+                    result = self.run_external_target(
+                        repository / "contracts/fixtures/uncertain-delivery/validate.py",
+                        optimized,
+                        cwd=repository,
+                        environment=environment,
+                    )
+                    with self.subTest(label=label, optimized=optimized):
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(result.stdout, "")
+                        self.assertEqual(result.stderr, '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n')
+                        self.assertNotIn("sensitive-marker", result.stderr)
+                        self.assertNotIn("Traceback", result.stderr)
+
+    def test_external_launcher_preserves_controlled_system_exit_without_duplicate_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve() / "controlled-exit"
+            subprocess.run(["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(repository)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repository), "config", "user.email", "fixture@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repository), "config", "user.name", "Fixture Test"], check=True)
+            preflight = repository / "contracts/fixtures/uncertain-delivery/preflight.py"
+            preflight.write_text("import sys\nsys.stderr.write('controlled\\n')\nraise SystemExit(7)\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", str(preflight.relative_to(repository))], check=True)
+            subprocess.run(["git", "-C", str(repository), "commit", "-m", "test: controlled preflight exit"], check=True, capture_output=True)
+            expected = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD^{commit}"], text=True).strip()
+            environment = self.canonical_environment()
+            environment[validate.EXPECTED_COMMIT_ENV] = expected
+            result = self.run_external_target(
+                repository / "contracts/fixtures/uncertain-delivery/validate.py",
+                cwd=repository,
+                environment=environment,
+            )
+            self.assertEqual(result.returncode, 7)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "controlled\n")
+
     def test_real_cli_rejects_long_keys_and_special_paths_without_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -595,16 +711,16 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         self.assertEqual(unrecovered_result["prompt_retry"], "blocked")
         self.assert_cli_success_both_modes()
 
-    def test_forged_baseline_samples_commands_and_environment_fail(self) -> None:
+    def test_forged_baseline_samples_launcher_and_environment_fail(self) -> None:
         mutations: list[dict[str, object]] = []
         forged_samples = copy.deepcopy(self.baseline)
         forged_samples["normal"]["samples_ms"] = [1.0] * 30
         forged_samples["normal"]["distribution"] = validate._distribution(forged_samples["normal"]["samples_ms"])
         mutations.append(forged_samples)
 
-        forged_command = copy.deepcopy(self.baseline)
-        forged_command["optimized"]["command"] = "python3 fabricated-validator.py"
-        mutations.append(forged_command)
+        forged_launcher = copy.deepcopy(self.baseline)
+        forged_launcher["optimized"]["external_launcher_sha256"] = "0" * 64
+        mutations.append(forged_launcher)
 
         forged_environment = copy.deepcopy(self.baseline)
         forged_environment["environment"]["python"] = "3.13.0"
@@ -1026,6 +1142,48 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                     validate.TRUSTED_GIT_EXECUTABLE = previous
                 self.assertIsNone(result)
 
+    def test_git_readers_request_only_remaining_capacity_plus_rejection_byte(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory).resolve() / "output-git"
+            executable.write_text("#!/bin/sh\nhead -c 1048576 /dev/zero\n", encoding="utf-8")
+            executable.chmod(0o755)
+            original_read = os.read
+            requests: list[int] = []
+
+            def bounded_read(descriptor: int, count: int) -> bytes:
+                requests.append(count)
+                return original_read(descriptor, min(count, 256))
+
+            previous = validate.TRUSTED_GIT_EXECUTABLE
+            validate.TRUSTED_GIT_EXECUTABLE = executable
+            os.read = bounded_read
+            try:
+                self.assertIsNone(validate._run_git(REPOSITORY_ROOT, ["rev-parse", "HEAD"], output_limit=1024))
+            finally:
+                os.read = original_read
+                validate.TRUSTED_GIT_EXECUTABLE = previous
+            git_requests = [count for count in requests if count <= 8192]
+            self.assertTrue(git_requests)
+            self.assertLessEqual(max(git_requests), 1025)
+            self.assertEqual(git_requests[-1], 1)
+
+            source = (ROOT / "preflight.py").read_text(encoding="utf-8")
+            prefix = source.split("\ntry:\n    _target, _arguments, _validator_source, _target_source = _collect()", 1)[0]
+            namespace = {"__name__": "preflight_test", "__file__": str(ROOT / "preflight.py")}
+            exec(compile(prefix, str(ROOT / "preflight.py"), "exec"), namespace, namespace)
+            namespace["TRUSTED_GIT_EXECUTABLE"] = executable
+            requests = []
+            os.read = bounded_read
+            try:
+                with self.assertRaises(namespace["PreflightError"]):
+                    namespace["_git"](REPOSITORY_ROOT, ["rev-parse", "HEAD"], 1024)
+            finally:
+                os.read = original_read
+            git_requests = [count for count in requests if count <= 8192]
+            self.assertTrue(git_requests)
+            self.assertLessEqual(max(git_requests), 1025)
+            self.assertEqual(git_requests[-1], 1)
+
     def test_fresh_clone_no_tags_and_shallow_lifecycle_both_modes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             # macOS exposes /tmp through /private; valid clones use a canonical path.
@@ -1257,7 +1415,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                     "-f",
                     "-m",
                     "forged synthetic audit marker",
-                    "hermternal-c06-uncertain-delivery-bounded-output-anchor",
+                    "hermternal-c06-uncertain-delivery-external-launcher-anchor",
                     "0ba168f16f6f8e646f5452a15627d7bb829828a5",
                 ],
                 capture_output=True,

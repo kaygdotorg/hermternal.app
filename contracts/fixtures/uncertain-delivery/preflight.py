@@ -23,7 +23,9 @@ import time
 ERROR_LINE = '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n'
 EXPECTED_COMMIT_ENV = "HERMTERNAL_C06_EXPECTED_COMMIT"
 FIXTURE_RELATIVE = pathlib.Path("contracts/fixtures/uncertain-delivery")
-TARGET_RELATIVE = FIXTURE_RELATIVE / "validate.py"
+VALIDATOR_RELATIVE = FIXTURE_RELATIVE / "validate.py"
+TEST_RELATIVE = FIXTURE_RELATIVE / "test_validate.py"
+TRUSTED_TARGETS = frozenset((VALIDATOR_RELATIVE, TEST_RELATIVE))
 CHAT_RELATIVE = pathlib.Path("contracts/state-models/chat.md")
 FIXTURE_NAMES = frozenset(
     (
@@ -176,7 +178,10 @@ def _git(root: pathlib.Path, arguments: list[str], limit: int) -> bytes:
                 continue
             for key, _ in events:
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    # Ask the kernel for at most the unfilled capacity plus one
+                    # rejection byte. The process never retains a full read chunk
+                    # beyond the declared bound.
+                    chunk = os.read(key.fileobj.fileno(), min(8192, limit - len(output) + 1))
                 except OSError:
                     _kill(process)
                     _fail()
@@ -275,7 +280,8 @@ def _target_path(root: pathlib.Path) -> tuple[pathlib.Path, list[str]]:
         target = pathlib.Path(sys.argv[1])
         if not target.is_absolute():
             target = root / target
-        if target != root / TARGET_RELATIVE or not _plain_path(target):
+        relative = target.relative_to(root)
+        if relative not in TRUSTED_TARGETS or not _plain_path(target):
             _fail()
         fixture = root / FIXTURE_RELATIVE
         if not _plain_path(fixture):
@@ -310,7 +316,7 @@ def _blob(root: pathlib.Path, expected: str, relative: pathlib.Path) -> bytes:
     return _git(root, ["cat-file", "blob", f"{expected}:{relative.as_posix()}"], MAX_GIT_OUTPUT_BYTES)
 
 
-def _collect() -> tuple[pathlib.Path, list[str], bytes]:
+def _collect() -> tuple[pathlib.Path, list[str], bytes, bytes]:
     try:
         root = pathlib.Path.cwd()
         if not _plain_path(root):
@@ -325,7 +331,9 @@ def _collect() -> tuple[pathlib.Path, list[str], bytes]:
             expected_bytes = _blob(root, expected, relative)
             if _regular_file(root / relative, MAX_FILE_BYTES) != expected_bytes:
                 _fail()
-        return target, arguments, _blob(root, expected, TARGET_RELATIVE)
+        validator_source = _blob(root, expected, VALIDATOR_RELATIVE)
+        target_source = validator_source if target.relative_to(root) == VALIDATOR_RELATIVE else _blob(root, expected, TEST_RELATIVE)
+        return target, arguments, validator_source, target_source
     except PreflightError:
         raise
     except (OSError, UnicodeError, RuntimeError, ValueError):
@@ -334,16 +342,39 @@ def _collect() -> tuple[pathlib.Path, list[str], bytes]:
 
 
 try:
-    _target, _arguments, _source = _collect()
+    _target, _arguments, _validator_source, _target_source = _collect()
+    sys.argv = [str(_target), *_arguments]
+    if _target.relative_to(pathlib.Path.cwd()) == TEST_RELATIVE:
+        import types
+
+        # The test module imports only this verified in-memory validator. No
+        # checkout-owned Python module is imported before every tree byte binds.
+        _validator_module = types.ModuleType("validate")
+        _validator_module.__file__ = str(pathlib.Path.cwd() / VALIDATOR_RELATIVE)
+        _validator_module.__package__ = None
+        _validator_module.__cached__ = None
+        sys.modules["validate"] = _validator_module
+        exec(
+            compile(_validator_source, _validator_module.__file__, "exec", optimize=sys.flags.optimize),
+            _validator_module.__dict__,
+            _validator_module.__dict__,
+        )
+    import types
+
+    _main_module = types.ModuleType("__main__")
+    _main_module.__file__ = str(_target)
+    _main_module.__package__ = None
+    _main_module.__cached__ = None
+    sys.modules["__main__"] = _main_module
+    exec(
+        compile(_target_source, str(_target), "exec", optimize=sys.flags.optimize),
+        _main_module.__dict__,
+        _main_module.__dict__,
+    )
+except SystemExit:
+    # Validator and unittest exits already own their output. Preserve them
+    # without adding a second diagnostic line.
+    raise
 except BaseException:
     sys.stderr.write(ERROR_LINE)
     raise SystemExit(1)
-
-sys.argv = [str(_target), *_arguments]
-_namespace = {
-    "__name__": "__main__",
-    "__file__": str(_target),
-    "__package__": None,
-    "__cached__": None,
-}
-exec(compile(_source, str(_target), "exec", optimize=sys.flags.optimize), _namespace, _namespace)

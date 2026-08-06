@@ -10,6 +10,7 @@ ContractError checks keep the fail-closed boundary active under ``python -O``.
 from __future__ import annotations
 
 import argparse
+import decimal
 import hashlib
 import json
 import math
@@ -44,20 +45,20 @@ HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 # tag is only a secondary consistency marker. The validator source digest masks
 # only self-referential binding literals, so changing validation logic still
 # fails.
-TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-bounded-output-anchor"
+TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-external-launcher-anchor"
 CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "chat.md")
 CANONICAL_FIXTURE_NAMES = frozenset(("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json"))
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_BOUND_SHA256 = {
-    "README.md": "aab203ace3009f3ad97da210bc76df395f5d7ba85690a46ce235db6dd47ed709",
+    "README.md": "fd0abbce46b206ef267f0cae4c9913eb6623d53bdd5a77d6d19b1e8e10c88cb1",
     "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
-    "preflight.py": "803eef20b8d91a1edafc300f241258e50a99d46d3d4a6ee34bbbdc7aebe15b07",
-    "validate.py": "9569c364bea45441501e161912a67c4752c167e88b4198c81cc287c7dd0576ff",
-    "test_validate.py": "51d9126a43a216bd8d784c9b4a9531af3e825dcb177259afd61123d4991309c0",
+    "preflight.py": "5c8400ce1253d4993191751bb636ad97115bd603cb90f95480eb7055b48f715e",
+    "validate.py": "5a11d7139f9c7514ac11f046e61e334c61b74943d37e9d4b4ee659b73c23d151",
+    "test_validate.py": "b66dc95799aa32f14adb9d3a5225797990c33fabb5110ae30940726c30a95eb1",
     "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
 }
-EXPECTED_BASELINE_SHA256 = "1cfde6d0c8f3d888af4df945d6c03f441826001c708a904fa95aec94077212a5"
+EXPECTED_BASELINE_SHA256 = "0d7d72c33acea3b93a0c46499c26dfdbd3e7b42271890a43c83e100510ef8998"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -257,7 +258,10 @@ MAX_GIT_STATUS_BYTES = 64 * 1024
 BENCHMARK_REPETITIONS = 30
 EXPECTED_COMMIT_ENV = "HERMTERNAL_C06_EXPECTED_COMMIT"
 TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
-TRUSTED_LAUNCHER_CODE = '''import json,os,pathlib,selectors,signal,stat,subprocess,sys,time
+# This is a regression/reference copy only. Authoritative invocations receive
+# the complete matching launcher from protected review or CI configuration
+# before any checkout file is read or imported.
+REFERENCE_EXTERNAL_LAUNCHER_CODE = '''import json,os,pathlib,selectors,signal,stat,subprocess,sys,time
 E=json.dumps({"error":{"code":"contract","message":"uncertain delivery fixture rejected"}},separators=(",",":"))+chr(10)
 P=None;S=None
 # The reviewed preflight must be size-bounded before Python receives or compiles it.
@@ -289,7 +293,8 @@ try:
   metadata_ok=(not bad(gd) and gd.parent==c/"worktrees" and c.name==".git" and not bad(c) and r.resolve().is_relative_to(c.parent.resolve()) and (gd/"commondir").is_file() and (gd/"gitdir").is_file() and not any((c/x).is_symlink() for x in ("objects","refs","config")) and not any((c/x).exists() or (c/x).is_symlink() for x in q))
  else: metadata_ok=False
  expected=os.environ.get("HERMTERNAL_C06_EXPECTED_COMMIT")
- ok=(not bad(r) and p==r/pathlib.Path("contracts/fixtures/uncertain-delivery/validate.py") and not bad(p) and metadata_ok and not any((g/x).exists() or (g/x).is_symlink() for x in q) and (not w or (not bad(pathlib.Path(w)) and pathlib.Path(w)==r)) and isinstance(expected,str) and len(expected)==40 and all(x in "0123456789abcdef" for x in expected))
+ targets=(r/pathlib.Path("contracts/fixtures/uncertain-delivery/validate.py"),r/pathlib.Path("contracts/fixtures/uncertain-delivery/test_validate.py"))
+ ok=(not bad(r) and p in targets and not bad(p) and metadata_ok and not any((g/x).exists() or (g/x).is_symlink() for x in q) and (not w or (not bad(pathlib.Path(w)) and pathlib.Path(w)==r)) and isinstance(expected,str) and len(expected)==40 and all(x in "0123456789abcdef" for x in expected))
  if not ok: fail()
  env=os.environ.copy()
  for name in list(env):
@@ -307,10 +312,11 @@ try:
   events=S.select(remaining)
   if not events: continue
   for key,event in events:
-   chunk=os.read(key.fileobj.fileno(),8192)
+   target=out if key.data=="stdout" else err;limit=525312 if key.data=="stdout" else 4096
+   chunk=os.read(key.fileobj.fileno(),min(8192,limit-len(target)+1))
    if not chunk: S.unregister(key.fileobj);continue
-   target=out if key.data=="stdout" else err;target.extend(chunk)
-   if len(out)>525312 or len(err)>4096: fail()
+   target.extend(chunk)
+   if len(target)>limit: fail()
  returncode=P.wait(timeout=1)
  if returncode!=0 or err: fail()
  S.close();S=None;P.stdout.close();P.stderr.close();source=bytes(out)
@@ -318,20 +324,34 @@ except SystemExit:
  raise
 except BaseException:
  fail()
-namespace={"__name__":"__main__","__file__":str(p),"__package__":None,"__cached__":None}
-exec(compile(source,str(p.parent/"preflight.py"),"exec",optimize=sys.flags.optimize),namespace,namespace)
+class Capture:
+ def __init__(self,limit): self.data=[];self.size=0;self.limit=limit;self.buffer=self;self.encoding="utf-8"
+ def write(self,value):
+  if isinstance(value,bytes): value=value.decode("utf-8")
+  if not isinstance(value,str): raise TypeError
+  self.size+=len(value.encode("utf-8"))
+  if self.size>self.limit: raise RuntimeError
+  self.data.append(value);return len(value)
+ def flush(self): pass
+ def value(self): return "".join(self.data)
+original_out=sys.stdout;original_err=sys.stderr;captured_out=Capture(4096);captured_err=Capture(4096)
+try:
+ sys.stdout=captured_out;sys.stderr=captured_err
+ namespace={"__name__":"__main__","__file__":str(p.parent/"preflight.py"),"__package__":None,"__cached__":None}
+ exec(compile(source,str(p.parent/"preflight.py"),"exec",optimize=sys.flags.optimize),namespace,namespace)
+ raise RuntimeError
+except SystemExit:
+ sys.stdout=original_out;sys.stderr=original_err
+ original_out.write(captured_out.value());original_err.write(captured_err.value())
+ raise
+except BaseException:
+ sys.stdout=original_out;sys.stderr=original_err
+ fail()
 '''
-TRUSTED_PREFLIGHT_NORMAL = (
-    "python3 -I -B -c '" + TRUSTED_LAUNCHER_CODE + "' "
-    "contracts/fixtures/uncertain-delivery/validate.py"
-)
-TRUSTED_PREFLIGHT_OPTIMIZED = (
-    "python3 -I -B -O -c '" + TRUSTED_LAUNCHER_CODE + "' "
-    "contracts/fixtures/uncertain-delivery/validate.py"
-)
-APPROVED_COMMANDS = {
-    "normal": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> " + TRUSTED_PREFLIGHT_NORMAL,
-    "optimized": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> " + TRUSTED_PREFLIGHT_OPTIMIZED,
+EXTERNAL_LAUNCHER_SHA256 = "71315991b361057f6af4b902654d2385e4d283454cf0c040dc1bfa188cf57ae0"
+APPROVED_MODE_EVIDENCE = {
+    "normal": {"python_flags": "-I -B", "target": "validate.py"},
+    "optimized": {"python_flags": "-I -B -O", "target": "validate.py"},
 }
 
 SYNTHETIC_REF = re.compile(r"^(?:session|request)-marker-[0-9]{3}$")
@@ -425,11 +445,16 @@ def _parse_int(raw: str) -> int:
 
 def _parse_float(raw: str) -> float:
     try:
+        exact = decimal.Decimal(raw)
         value = float(raw)
-    except (TypeError, ValueError, OverflowError):
+    except (decimal.InvalidOperation, TypeError, ValueError, OverflowError):
         _fail("invalid_number")
     if not math.isfinite(value):
         _fail("non_finite_number")
+    # Python's binary float parser silently rounds sufficiently small nonzero
+    # JSON numbers to signed zero. Preserve fail-closed numeric meaning instead.
+    if exact != 0 and value == 0.0:
+        _fail("number_underflow")
     return value
 
 
@@ -708,7 +733,8 @@ def _run_git(
             for key, _ in events:
                 stream_name = key.data
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    remaining_capacity = output_limit - len(output[stream_name])
+                    chunk = os.read(key.fileobj.fileno(), min(8192, remaining_capacity + 1))
                 except OSError:
                     _kill_git_process(process)
                     return None
@@ -1999,10 +2025,20 @@ def validate_baseline(
     total_samples = 0
     for mode in ("normal", "optimized"):
         record = baseline[mode]
-        if not isinstance(record, dict) or tuple(record.keys()) != ("command", "repetitions", "samples_ms", "distribution"):
+        if not isinstance(record, dict) or tuple(record.keys()) != (
+            "external_launcher_sha256",
+            "python_flags",
+            "target",
+            "repetitions",
+            "samples_ms",
+            "distribution",
+        ):
             _fail("baseline_mode")
-        if type(record["command"]) is not str or record["command"] != APPROVED_COMMANDS[mode]:
-            _fail("baseline_command")
+        expected_mode = APPROVED_MODE_EVIDENCE[mode]
+        if record["external_launcher_sha256"] != EXTERNAL_LAUNCHER_SHA256:
+            _fail("baseline_launcher")
+        if record["python_flags"] != expected_mode["python_flags"] or record["target"] != expected_mode["target"]:
+            _fail("baseline_invocation")
         if type(record["repetitions"]) is not int or record["repetitions"] != BENCHMARK_REPETITIONS:
             _fail("baseline_repetitions")
         samples = record["samples_ms"]
