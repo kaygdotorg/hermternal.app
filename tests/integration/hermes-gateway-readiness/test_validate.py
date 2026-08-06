@@ -14,6 +14,7 @@ from contextlib import redirect_stdout
 import copy
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,13 @@ IDENTITY = {
 }
 APPROVED_POLICY = {
     "status": "approved",
+    "cap_drop": ["ALL"],
+    "cap_add": list(validate.APPROVED_CAPABILITIES),
+    "no_new_privileges": True,
+    "dependency": "issue_250_review",
+}
+PENDING_POLICY = {
+    "status": "awaiting_issue_250",
     "cap_drop": ["ALL"],
     "cap_add": [],
     "no_new_privileges": True,
@@ -69,10 +77,13 @@ class GatewayReadinessTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.document = validate.load_json(validate.CASES_PATH)
         cls.evidence = validate.load_json(validate.EVIDENCE_PATH)
+        cls.rerun_evidence = validate.load_json(validate.RERUN_EVIDENCE_PATH)
         validate.validate_redaction(cls.document)
         validate.validate_redaction(cls.evidence)
+        validate.validate_redaction(cls.rerun_evidence)
         validate.validate_cases_document(cls.document)
         validate.validate_evidence_document(cls.evidence, cls.document)
+        validate.validate_rerun_evidence_document(cls.rerun_evidence, cls.document)
         cls.cases = {case["id"]: case for case in cls.document["cases"]}
 
     def _run_cli(self, *arguments: str, optimized: bool = False) -> subprocess.CompletedProcess[str]:
@@ -102,18 +113,44 @@ class GatewayReadinessTests(unittest.TestCase):
                 arguments.extend(["--image-inspect", str(image_path)])
             return self._run_cli(*arguments, optimized=optimized)
 
-    def test_checked_in_contract_is_synthetic_and_blocked(self) -> None:
+    def test_checked_in_contract_and_first_attempt_evidence_are_bounded(self) -> None:
         self.assertEqual(tuple(self.cases), validate.EXPECTED_CASE_IDS)
         self.assertEqual(len(self.cases), 18)
         self.assertTrue(self.document["synthetic_only"])
         self.assertEqual(self.document["network_access"], "executor_only")
         self.assertFalse(self.document["live_run"])
         self.assertEqual(self.document["proof_status"], "not_run")
-        self.assertEqual(self.document["capability_policy"]["status"], "awaiting_issue_250")
+        self.assertEqual(self.document["capability_policy"]["status"], "approved")
+        self.assertEqual(
+            self.document["capability_policy"]["cap_add"],
+            list(validate.APPROVED_CAPABILITIES),
+        )
         self.assertEqual(self.document["executor_policy"]["ssh_target"], validate.SSH_TARGET)
-        self.assertEqual(self.evidence["status"], "not_run")
+        self.assertFalse(self.evidence["synthetic_only"])
+        self.assertTrue(self.evidence["live_run"])
+        self.assertEqual(self.evidence["status"], "blocked")
+        self.assertEqual(self.evidence["classification"], "cleanup_failed")
+        self.assertEqual(self.evidence["teardown_exit_code"], 1)
         self.assertEqual(self.evidence["command_support"], "parser_option_present_readiness_candidate_requires_review")
         self.assertEqual(self.evidence["readiness_source_status"], "headless_backend_path_only")
+        self.assertEqual(self.evidence["observations"]["container_start"], "not_run")
+        self.assertEqual(self.evidence["observations"]["readiness"], "not_run")
+        self.assertEqual(self.evidence["observations"]["exit"], "not_run")
+        self.assertEqual(self.evidence["observations"]["teardown"], "failed")
+        self.assertEqual(self.evidence["observations"]["leftover_resources"], {
+            "containers": 0,
+            "networks": 0,
+            "volumes": 0,
+        })
+        self.assertEqual(self.rerun_evidence["status"], "blocked")
+        self.assertEqual(self.rerun_evidence["classification"], "image_identity_mismatch")
+        self.assertEqual(self.rerun_evidence["teardown_exit_code"], 0)
+        self.assertEqual(self.rerun_evidence["observations"]["teardown"], "passed")
+        self.assertEqual(self.rerun_evidence["observations"]["leftover_resources"], {
+            "containers": 0,
+            "networks": 0,
+            "volumes": 0,
+        })
 
     def test_every_checked_in_case_matches_the_independent_model(self) -> None:
         for case in self.document["cases"]:
@@ -182,6 +219,8 @@ class GatewayReadinessTests(unittest.TestCase):
         validate.validate_rendered_probe(first)
         validate.validate_rendered_probe(second)
         self.assertIn('image: "hermes-agent:hermternal-f5be9236"', first.compose)
+        self.assertIn('    cap_add:\n      - "CAP_CHOWN"\n      - "CAP_SETGID"\n      - "CAP_SETUID"', first.compose)
+        self.assertEqual(first.cap_add, validate.APPROVED_CAPABILITIES)
         self.assertIn('command: ["gateway", "run", "--no-supervise"]', first.compose)
         self.assertIn("internal: true", first.compose)
         self.assertNotIn("ports:", first.compose)
@@ -366,6 +405,13 @@ class GatewayReadinessTests(unittest.TestCase):
         with self.assertRaises(validate.FixtureJSONError):
             validate.load_json_text(b'{"value":"\xff"}')
 
+    def test_executor_environment_pins_rootless_compose_provider(self) -> None:
+        with patch.dict(os.environ, {"PODMAN_COMPOSE_PROVIDER": "docker-compose"}):
+            environment = validate._executor_environment()
+        self.assertEqual(environment["PODMAN_COMPOSE_PROVIDER"], "podman-compose")
+        self.assertNotIn("DOCKER_HOST", environment)
+        self.assertNotIn("HERMES_PROVIDER", environment)
+
     def test_run_bounded_caps_stdout_and_stderr_during_capture(self) -> None:
         command = (
             sys.executable,
@@ -410,14 +456,61 @@ class GatewayReadinessTests(unittest.TestCase):
                 validate.render_probe("smoke", instance="one"),
                 compose_path,
                 identity=IDENTITY,
+                capability_policy=PENDING_POLICY,
                 runner=unexpected_runner,
             )
         self.assertEqual(result.status, "blocked")
         self.assertEqual(result.classification, "capability_policy_pending")
         self.assertEqual(calls, [])
 
-    def test_synthetic_temp_source_reaches_capability_gate_before_executor(self) -> None:
-        """Exercise --run identity collection without authorizing a live command."""
+    def test_preflight_failures_teardown_exact_project_and_leave_zero_resources(self) -> None:
+        """Config and image gates must clean up without starting a container."""
+
+        rendered = validate.render_probe("smoke", instance="preflight")
+        for failure in ("compose", "image"):
+            with self.subTest(failure=failure):
+                calls: list[tuple[str, ...]] = []
+
+                def preflight_runner(command: Sequence[str], timeout: float) -> validate.CommandResult:
+                    del timeout
+                    command_tuple = tuple(command)
+                    calls.append(command_tuple)
+                    if "config" in command_tuple:
+                        if failure == "compose":
+                            return validate.CommandResult(23, "compose config failed")
+                        return validate.CommandResult(0, "services: {}\\n")
+                    if command_tuple[:4] == ("podman", "image", "inspect", "--format"):
+                        self.assertEqual(failure, "image")
+                        return validate.CommandResult(0, json.dumps(image_inspect_payload(digest="sha256:" + "f" * 64)))
+                    if "up" in command_tuple:
+                        raise AssertionError("preflight failure must not start a container")
+                    if "down" in command_tuple:
+                        return validate.CommandResult(0, "removed\\n")
+                    if command_tuple[1:3] in (("ps", "-a"), ("network", "ls"), ("volume", "ls")):
+                        return validate.CommandResult(0, "[]")
+                    raise AssertionError(f"unexpected fake command: {command_tuple}")
+
+                with tempfile.TemporaryDirectory() as directory:
+                    result = validate.run_probe(
+                        rendered,
+                        Path(directory) / "compose.yml",
+                        identity=IDENTITY,
+                        capability_policy=APPROVED_POLICY,
+                        runner=preflight_runner,
+                    )
+                expected_classification = (
+                    "compose_config_failed" if failure == "compose" else "image_identity_mismatch"
+                )
+                self.assertEqual(result.status, "blocked")
+                self.assertEqual(result.classification, expected_classification)
+                self.assertIsNone(result.readiness_port)
+                self.assertEqual(result.teardown_exit_code, 0)
+                self.assertEqual(result.leftovers, {"containers": 0, "networks": 0, "volumes": 0})
+                self.assertEqual(len([call for call in calls if "down" in call]), 1)
+                self.assertFalse(any("up" in call for call in calls))
+
+    def test_synthetic_temp_source_reaches_approved_live_boundary(self) -> None:
+        """Exercise --run identity collection without starting a real executor."""
 
         with tempfile.TemporaryDirectory() as directory:
             source_root = Path(directory) / "synthetic-hermes"
@@ -456,23 +549,27 @@ class GatewayReadinessTests(unittest.TestCase):
                     return SyntheticDigest()
                 return real_sha256(data)
 
-            original_run_probe = validate.run_probe
-
-            def executor_boundary(*args: object, **kwargs: object) -> validate.ProbeResult:
+            def blocked_boundary(*args: object, **kwargs: object) -> validate.ProbeResult:
+                rendered = args[0]
                 identity = kwargs["identity"]
                 self.assertEqual(identity["image_digest"], validate.PINNED_IMAGE_DIGEST)
-                return original_run_probe(*args, **kwargs)
+                self.assertEqual(rendered.cap_add, validate.APPROVED_CAPABILITIES)
+                return validate.ProbeResult(
+                    "blocked",
+                    "image_identity_mismatch",
+                    None,
+                    0,
+                    False,
+                    0,
+                    {"containers": 0, "networks": 0, "volumes": 0},
+                    "image digest is not the reviewed immutable content",
+                )
 
             output = io.StringIO()
             with (
                 patch.object(validate.subprocess, "run", side_effect=synthetic_git),
                 patch.object(validate.hashlib, "sha256", side_effect=synthetic_sha256),
-                patch.object(validate, "run_probe", side_effect=executor_boundary),
-                patch.object(
-                    validate,
-                    "run_bounded",
-                    side_effect=AssertionError("capability gate must prevent executor use"),
-                ),
+                patch.object(validate, "run_probe", side_effect=blocked_boundary),
                 redirect_stdout(output),
             ):
                 returncode = validate.main(
@@ -487,8 +584,8 @@ class GatewayReadinessTests(unittest.TestCase):
         self.assertEqual(returncode, 3)
         payload = json.loads(output.getvalue())
         self.assertFalse(payload["ok"])
-        self.assertFalse(payload["live_run"])
-        self.assertEqual(payload["probe"]["classification"], "capability_policy_pending")
+        self.assertTrue(payload["live_run"])
+        self.assertEqual(payload["probe"]["classification"], "image_identity_mismatch")
         self.assertEqual(git_calls, [
             ("git", "-C", str(source_root), "rev-parse", "HEAD"),
             ("git", "-C", str(source_root), "rev-parse", "HEAD^{tree}"),
@@ -761,7 +858,8 @@ class GatewayReadinessTests(unittest.TestCase):
                 self.assertEqual(payload["case_count"], 18)
                 self.assertFalse(payload["compatible"])
                 self.assertFalse(payload["live_run"])
-                self.assertEqual(payload["evidence_status"], "not_run")
+                self.assertEqual(payload["evidence_status"], "blocked")
+                self.assertEqual(payload["rerun_evidence_status"], "blocked")
 
                 invalid = self._run_cli("--unknown=synthetic", optimized=optimized)
                 self.assertEqual(invalid.returncode, 2)

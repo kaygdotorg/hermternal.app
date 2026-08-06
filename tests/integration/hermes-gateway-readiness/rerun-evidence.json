@@ -4,8 +4,8 @@
   "synthetic_only": false,
   "live_run": true,
   "status": "blocked",
-  "classification": "cleanup_failed",
-  "teardown_exit_code": 1,
+  "classification": "image_identity_mismatch",
+  "teardown_exit_code": 0,
   "correctness_executor": "rootless_podman",
   "ssh_target": "hermternal-test@hermternal-dev",
   "pinned_identity": {
@@ -43,7 +43,7 @@
     "container_start": "not_run",
     "readiness": "not_run",
     "exit": "not_run",
-    "teardown": "failed",
+    "teardown": "passed",
     "leftover_resources": {
       "containers": 0,
       "networks": 0,
@@ -53,8 +53,6 @@
   "diagnostic": "image tag is not pinned",
   "limitations": [
     "image_identity_mismatch",
-    "compose_provider_docker_precedence",
-    "teardown_command_failed",
     "container_start_not_run",
     "readiness_not_proven",
     "no_provider_or_browser_auth"

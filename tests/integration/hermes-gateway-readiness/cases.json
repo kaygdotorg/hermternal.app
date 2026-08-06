@@ -27,11 +27,15 @@
     "docker_comparison": "not_a_substitute"
   },
   "capability_policy": {
-    "status": "awaiting_issue_250",
+    "status": "approved",
     "cap_drop": [
       "ALL"
     ],
-    "cap_add": [],
+    "cap_add": [
+      "CAP_CHOWN",
+      "CAP_SETGID",
+      "CAP_SETUID"
+    ],
     "no_new_privileges": true,
     "dependency": "issue_250_review"
   },
@@ -257,16 +261,16 @@
       "notes": "A synthetic host-port mutation must fail closed."
     },
     {
-      "id": "capability-policy-pending",
+      "id": "capability-policy-approved",
       "kind": "capability",
       "input": {
         "policy": "checked_in"
       },
       "expected": {
-        "status": "awaiting_issue_250",
-        "live_allowed": false
+        "status": "approved",
+        "live_allowed": true
       },
-      "notes": "Live execution remains gated until issue 250 reviews minimal init capabilities."
+      "notes": "Only issue 250's reviewed CAP_CHOWN, CAP_SETGID, and CAP_SETUID set is active."
     },
     {
       "id": "cleanup-canonical-project",
