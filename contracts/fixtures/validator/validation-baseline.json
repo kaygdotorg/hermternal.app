@@ -14,8 +14,8 @@
   "artifact_manifest": [
     {
       "path": "contracts/fixtures/index.json",
-      "sha256": "0dc93e807de80c5cfed5536c889c8146ec0f0bdce5b2e286ab062096a63b0a0d",
-      "size_bytes": 51652
+      "sha256": "198a1e1ac6a138a2592df9b50fcc1fd3783f4f9fb24f2f84627c8ff33b699d08",
+      "size_bytes": 51492
     },
     {
       "path": "contracts/fixtures/schema.json",
@@ -23,17 +23,12 @@
       "size_bytes": 8799
     },
     {
-      "path": "contracts/fixtures/validator/test_validate.py",
-      "sha256": "151978d675874d8adfd5c68608694bf9a876cdd7d5b01ee102dbf68c64eeaaa5",
-      "size_bytes": 33903
-    },
-    {
       "path": "contracts/fixtures/validator/validate.py",
-      "sha256": "7c6cec5382bf617358878edb6126e27144bdc90d2e74f41775af1542878dbc63",
-      "size_bytes": 71701
+      "sha256": "a4ea4216b8ae83cc4ca67ea8c5ce8f20c0e8659858d18fe1506acfb86e51bdda",
+      "size_bytes": 80574
     }
   ],
-  "artifact_size_bytes": 166055,
+  "artifact_size_bytes": 140865,
   "normal": {
     "command": "python3 contracts/fixtures/validator/validate.py",
     "repetitions": 30,

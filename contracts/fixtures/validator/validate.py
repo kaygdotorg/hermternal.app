@@ -138,15 +138,19 @@ SCANNED_ARTIFACT_SUFFIXES = frozenset({".json", ".md", ".py", ".txt"})
 # total, which would otherwise create a self-referential hash cycle.
 BASELINE_SELF_MANIFEST_PATH = "contracts/fixtures/validator/validate.py"
 CENTRAL_VALIDATOR_SOURCE_PATHS = frozenset({
-    "contracts/fixtures/validator/test_validate.py",
     "contracts/fixtures/validator/validate.py",
+})
+CENTRAL_VALIDATOR_ARTIFACTS = frozenset({
+    "validator/test_validate.py",
+    "validator/validate.py",
+    "validator/validation-baseline.json",
 })
 # The separate aggregate test source carries the reviewed canonical validator
 # digest. Keeping this anchor outside validate.py means a local mutation cannot
 # refresh both the scanner and its self-manifest without changing an independent
 # reviewed source boundary as well.
 VALIDATOR_TRUST_ANCHOR_PATH = "contracts/fixtures/validator/test_validate.py"
-BASELINE_CANONICAL_SHA256 = "3890ef38a05e4a797956f0ab3fd171c1fb6fd5c25e1ff9565a3c60123b537ed5"
+BASELINE_CANONICAL_SHA256 = "35aecec135b9dbbdb53ad785e4fb38061637750e3892b0ddcff63941653fee52"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -165,6 +169,10 @@ TRUST_ANCHOR_PATTERN = re.compile(
     r'^TRUSTED_VALIDATE_SOURCE_SHA256 = "([0-9a-f]{64})"$',
     re.MULTILINE,
 )
+BASELINE_TRUST_ANCHOR_PATTERN = re.compile(
+    r'^TRUSTED_BASELINE_SHA256 = "([0-9a-f]{64})"$',
+    re.MULTILINE,
+)
 PRIVATE_KEY_PATTERN = re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE)
 AWS_KEY_PATTERN = re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.IGNORECASE)
 PROVIDER_TOKEN_PATTERN = re.compile(r"\b(?:ghp|github_pat|glpat|sk|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b", re.IGNORECASE)
@@ -175,12 +183,28 @@ ASSIGNMENT_SECRET_PATTERN = re.compile(
     r"(?:[?&]|\b)(?:ticket|cookie|password|secret|token)\s*[=:]\s*([A-Za-z0-9._~+/=-]{8,})",
     re.IGNORECASE,
 )
-SENSITIVE_MARKER = re.compile(
-    r"^(?:absent|present|expired|invalid|valid|issued|malformed|missing|none|unknown|redacted|blocked|"
-    r"not_[a-z0-9_]+|no_[a-z0-9_]+|synthetic[-_][a-z0-9_-]+|"
-    r"[a-z0-9]+(?:_[a-z0-9]+)+)$",
-    re.IGNORECASE,
-)
+# Sensitive JSON fields accept only reviewed semantic markers. A broad shape
+# such as arbitrary snake_case or `synthetic-*` can disguise provider tokens,
+# URLs, or newly introduced credential values under a sensitive key.
+SENSITIVE_MARKERS = frozenset({
+    "absent",
+    "blocked",
+    "expired",
+    "invalid",
+    "issued",
+    "malformed",
+    "missing",
+    "none",
+    "not_replayed",
+    "present",
+    "redacted",
+    "synthetic-expired-handle",
+    "synthetic-handle-a",
+    "synthetic-malformed-handle",
+    "unknown",
+    "valid",
+    "valid_exact_opaque_handle",
+})
 
 SENSITIVE_KEYS = frozenset(
     {
@@ -543,7 +567,10 @@ def _validate_sensitive_marker(value: Any, *, key: str = "") -> None:
         return
     if type(value) is str:
         require(len(value) <= 128, "sensitive marker is too long")
-        require(SENSITIVE_MARKER.fullmatch(value) is not None or _is_placeholder(value), "sensitive value is not a marker")
+        # A sensitive key does not exempt its retained value from the generic
+        # credential, assignment, control, and live-host scanners.
+        _validate_text_value(value)
+        require(value.casefold() in SENSITIVE_MARKERS, "sensitive value is not a reviewed marker")
         return
     if type(value) is list:
         require(len(value) <= 32, "sensitive marker list is too large")
@@ -568,10 +595,21 @@ def _regex_host_literals(raw_url: str) -> tuple[str, ...]:
     # expression rather than an authority terminator. Path/query/fragment
     # delimiters still bound the host before regex syntax is interpreted.
     host_text = re.split(r"[/#?]", remainder, maxsplit=1)[0]
-    # Escaped dots are literal punctuation in a detector regex. Character
-    # classes and quantifiers remain syntax, while every concrete dotted host
-    # fragment is still checked against the same allowlist as ordinary URLs.
-    host_text = host_text.replace(r"\.", ".")
+    # Normalize equivalent regex spellings of a literal dot before extracting
+    # hostnames. These encodings are syntax, not authority delimiters, and must
+    # not conceal a concrete live host from the ordinary URL allowlist.
+    for encoded_dot in (
+        r"\.",
+        "[.]",
+        r"\x2e",
+        r"\x2E",
+        "\\u002e",
+        "\\u002E",
+        r"\U0000002e",
+        r"\U0000002E",
+        r"\056",
+    ):
+        host_text = host_text.replace(encoded_dot, ".")
     return tuple(dict.fromkeys(REGEX_HOST_LITERAL_PATTERN.findall(host_text)))
 
 
@@ -777,11 +815,44 @@ def _bounded_static_text(value: Any) -> Any:
     return _STATIC_UNKNOWN
 
 
+def _contains_static_unknown(value: Any) -> bool:
+    if value is _STATIC_UNKNOWN:
+        return True
+    if isinstance(value, (list, tuple)):
+        return any(_contains_static_unknown(child) for child in value)
+    if isinstance(value, dict):
+        return any(_contains_static_unknown(child) for child in value.values())
+    return False
+
+
 def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
     if isinstance(node, ast.Constant):
         return _static_scalar(node.value)
     if isinstance(node, ast.Name):
         return bindings.get(node.id, _STATIC_UNKNOWN)
+    if isinstance(node, ast.Dict):
+        result: dict[Any, Any] = {}
+        for key_node, value_node in zip(node.keys, node.values):
+            if key_node is None:
+                return _STATIC_UNKNOWN
+            key = _static_value(key_node, bindings)
+            value = _static_value(value_node, bindings)
+            if key is _STATIC_UNKNOWN:
+                return _STATIC_UNKNOWN
+            try:
+                result[key] = value
+            except (TypeError, ValueError):
+                return _STATIC_UNKNOWN
+        return result
+    if isinstance(node, ast.Subscript):
+        container = _static_value(node.value, bindings)
+        key = _static_value(node.slice, bindings)
+        if container is _STATIC_UNKNOWN or key is _STATIC_UNKNOWN:
+            return _STATIC_UNKNOWN
+        try:
+            return container[key]
+        except (IndexError, KeyError, TypeError):
+            return _STATIC_UNKNOWN
     if isinstance(node, ast.JoinedStr):
         pieces: list[str] = []
         for part in node.values:
@@ -817,7 +888,7 @@ def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
         right = _static_value(node.right, bindings)
         if isinstance(node.op, ast.Add) and type(left) is str and type(right) is str:
             return _bounded_static_text(left + right)
-        if isinstance(node.op, ast.Mod) and type(left) is str and right is not _STATIC_UNKNOWN:
+        if isinstance(node.op, ast.Mod) and type(left) is str and not _contains_static_unknown(right):
             try:
                 return _bounded_static_text(left % right)
             except (IndexError, KeyError, TypeError, ValueError, OverflowError):
@@ -860,19 +931,102 @@ def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
     return _STATIC_UNKNOWN
 
 
-def _percent_probe_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
-    """Render unresolved percent operands as a credential scheme probe.
+def _percent_mapping_probe(key: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+    if "scheme" in normalized or normalized in {"auth", "authorization"}:
+        return "Basic"
+    return "AAAAAAAAAAAAAAAA"
 
-    An unknown `%s` operand can occupy the authorization-scheme position. A
-    harmless host-like sentinel would erase that possibility, so the scanner
-    also evaluates the retained template with `Basic` in every unresolved slot.
+
+def _percent_probe_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
+    """Render unresolved percent operands as credential-shaped probes.
+
+    Positional operands can occupy an authorization-scheme slot. Mapping
+    operands additionally preserve their keys so scheme fields become `Basic`
+    while token/secret fields become a detector-length candidate.
     """
+    if isinstance(node, ast.Dict):
+        result: dict[Any, Any] = {}
+        for key_node, value_node in zip(node.keys, node.values):
+            if key_node is None:
+                continue
+            key = _static_value(key_node, bindings)
+            if key is _STATIC_UNKNOWN:
+                continue
+            value = _static_value(value_node, bindings)
+            result[key] = _percent_mapping_probe(key) if value is _STATIC_UNKNOWN else value
+        return result
     value = _static_value(node, bindings)
+    if isinstance(value, dict):
+        return {
+            key: _percent_mapping_probe(key) if child is _STATIC_UNKNOWN else child
+            for key, child in value.items()
+        }
     if value is not _STATIC_UNKNOWN:
         return value
     if isinstance(node, ast.Tuple):
         return tuple(_percent_probe_value(child, bindings) for child in node.elts)
     return "Basic"
+
+
+def _addition_parts(node: ast.AST) -> list[ast.AST]:
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _addition_parts(node.left) + _addition_parts(node.right)
+    return [node]
+
+
+def _dynamic_authorization_scheme(node: ast.AST, bindings: dict[str, Any]) -> bool:
+    if isinstance(node, ast.JoinedStr):
+        for index, part in enumerate(node.values[:-1]):
+            if not isinstance(part, ast.Constant) or type(part.value) is not str:
+                continue
+            if re.search(r"authorization\s*:\s*$", part.value, re.IGNORECASE) is None:
+                continue
+            following = node.values[index + 1]
+            if isinstance(following, ast.FormattedValue) and _static_value(following.value, bindings) is _STATIC_UNKNOWN:
+                return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        static_prefix = ""
+        for part in _addition_parts(node):
+            literal = _static_value(part, bindings)
+            if type(literal) is str:
+                static_prefix = (static_prefix + literal)[-128:]
+                continue
+            if literal is _STATIC_UNKNOWN and re.search(
+                r"authorization\s*:\s*$",
+                static_prefix,
+                re.IGNORECASE,
+            ):
+                return True
+            static_prefix = ""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
+        receiver = _static_value(node.func.value, bindings)
+        if type(receiver) is not str:
+            return False
+        match = re.search(
+            r"authorization\s*:\s*\{([^{}!:]*)(?:![^}:]+)?(?::[^}]*)?\}",
+            receiver,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return False
+        field = match.group(1)
+        if field == "":
+            return bool(node.args) and _static_value(node.args[0], bindings) is _STATIC_UNKNOWN
+        if field.isdigit():
+            index = int(field)
+            return index < len(node.args) and _static_value(node.args[index], bindings) is _STATIC_UNKNOWN
+        for keyword in node.keywords:
+            if keyword.arg == field:
+                return _static_value(keyword.value, bindings) is _STATIC_UNKNOWN
+    return False
+
+
+def _with_dynamic_authorization_probe(node: ast.AST, bindings: dict[str, Any], rendered: str) -> str:
+    """Fail closed when a dynamic expression controls an auth scheme slot."""
+    if _dynamic_authorization_scheme(node, bindings):
+        return rendered + " Authorization: Basic AAAAAAAAAAAAAAAA"
+    return rendered
 
 
 def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
@@ -896,12 +1050,12 @@ def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
                 pieces.append(_conservative_text(part.value, bindings))
             else:
                 pieces.append(_STATIC_DYNAMIC_VALUE)
-        return "".join(pieces)
+        return _with_dynamic_authorization_probe(node, bindings, "".join(pieces))
     if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
         left = _conservative_text(node.left, bindings)
         right = _conservative_text(node.right, bindings)
         if isinstance(node.op, ast.Add):
-            return left + right
+            return _with_dynamic_authorization_probe(node, bindings, left + right)
         try:
             if isinstance(node.right, ast.Tuple):
                 values = tuple(_conservative_text(child, bindings) for child in node.right.elts)
@@ -917,7 +1071,7 @@ def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
         # Scan both ordinary conservative rendering and the auth-scheme probe.
         # This preserves known template context without letting an unresolved
         # `%s` choose `Basic` or another credential scheme only at runtime.
-        return rendered + " " + credential_probe
+        return _with_dynamic_authorization_probe(node, bindings, rendered + " " + credential_probe)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
         method = node.func.attr
         receiver = _conservative_text(node.func.value, bindings)
@@ -929,9 +1083,10 @@ def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
                 if keyword.arg is not None
             }
             try:
-                return receiver.format(*args, **keywords)
+                rendered = receiver.format(*args, **keywords)
             except (IndexError, KeyError, ValueError, TypeError, OverflowError):
-                return receiver + " " + " ".join(args + list(keywords.values()))
+                rendered = receiver + " " + " ".join(args + list(keywords.values()))
+            return _with_dynamic_authorization_probe(node, bindings, rendered)
         if method == "join" and len(node.args) == 1 and not node.keywords:
             sequence = node.args[0]
             if isinstance(sequence, (ast.List, ast.Tuple)):
@@ -963,7 +1118,7 @@ def _collect_static_bindings(tree: ast.AST) -> dict[str, Any]:
                 targets = (node.target,)
             else:
                 continue
-            if value is not _STATIC_UNKNOWN and not isinstance(value, (str, list, tuple)):
+            if value is not _STATIC_UNKNOWN and not isinstance(value, (str, list, tuple, dict)):
                 value = _STATIC_UNKNOWN
             for target in targets:
                 if isinstance(target, ast.Name) and bindings.get(target.id, _STATIC_UNKNOWN) != value:
@@ -1103,6 +1258,17 @@ def _trusted_validator_source_digest(repo_root: Path) -> str:
         raise ValidationError() from exc
     matches = TRUST_ANCHOR_PATTERN.findall(source)
     require(len(matches) == 1, "validator trust anchor is missing")
+    return matches[0]
+
+
+def _trusted_baseline_digest(repo_root: Path) -> str:
+    anchor_path = _safe_child(repo_root.resolve(), VALIDATOR_TRUST_ANCHOR_PATH)
+    try:
+        source = _read_bounded_bytes(anchor_path, MAX_ARTIFACT_BYTES).decode("utf-8")
+    except UnicodeError as exc:
+        raise ValidationError() from exc
+    matches = BASELINE_TRUST_ANCHOR_PATTERN.findall(source)
+    require(len(matches) == 1, "baseline trust anchor is missing")
     return matches[0]
 
 
@@ -1258,10 +1424,11 @@ def _validate_fixture_roots(
     state_ids: tuple[str, ...],
     coverage_ids: set[str],
     fixtures_root: Path,
-) -> tuple[dict[str, str], set[str]]:
+) -> tuple[dict[str, str], dict[str, dict[str, frozenset[str]]], set[str]]:
     roots = document["fixture_roots"]
     require(type(roots) is list and bool(roots), "fixture roots are missing")
     seen_ids: dict[str, str] = {}
+    fixture_details: dict[str, dict[str, frozenset[str]]] = {}
     seen_paths: set[str] = set()
     owned_files: set[str] = set()
     total_bytes = [0]
@@ -1280,11 +1447,16 @@ def _validate_fixture_roots(
         require(item["contract"] == CONTRACT, "fixture contract changed")
         require(item["hermes_source_sha"] == HERMES_SOURCE_SHA and HEX40.fullmatch(item["hermes_source_sha"]), "fixture source pin changed")
         require(item["synthetic_only"] is True and item["live_claim"] is False, "fixture live boundary changed")
-        _validate_string_list(item["platforms"], PLATFORMS)
+        platforms = _validate_string_list(item["platforms"], PLATFORMS)
         states = _validate_string_list(item["states"], state_ids)
         require(tuple(sorted(states)) == states, "fixture states must be sorted")
         fixture_coverage = _validate_string_list(item["coverage_ids"], coverage_ids)
         require(tuple(sorted(fixture_coverage)) == fixture_coverage, "fixture coverage ids must be sorted")
+        fixture_details[identifier] = {
+            "platforms": frozenset(platforms),
+            "states": frozenset(states),
+            "coverage_ids": frozenset(fixture_coverage),
+        }
         validator = item["validator"]
         if validator is not None:
             _safe_relative_path(validator)
@@ -1307,12 +1479,13 @@ def _validate_fixture_roots(
         for file_index, file_record in enumerate(files):
             _validate_manifest_file(file_record, fixtures_root=fixtures_root, fixture_relative_root=path, total_bytes=total_bytes)
     require(len(seen_ids) == len(roots), "fixture id inventory is inconsistent")
-    return seen_ids, owned_files
+    return seen_ids, fixture_details, owned_files
 
 
 def _validate_coverage(
     document: dict[str, Any],
     fixture_statuses: dict[str, str],
+    fixture_details: dict[str, dict[str, frozenset[str]]],
     state_ids: tuple[str, ...],
 ) -> tuple[set[str], set[str]]:
     coverage = document["coverage"]
@@ -1320,6 +1493,7 @@ def _validate_coverage(
     seen: set[str] = set()
     previous = ""
     fixture_to_coverage: set[str] = set()
+    reciprocal_links: set[tuple[str, str]] = set()
     for index, raw in enumerate(coverage):
         item = strict_keys(raw, COVERAGE_KEYS, f"coverage[{index}]")
         identifier = _validate_id(item["id"])
@@ -1336,6 +1510,12 @@ def _validate_coverage(
         require(tuple(sorted(platforms, key=PLATFORMS.index)) == platforms, "coverage platforms must use shared order")
         states = _validate_string_list(item["required_states"], state_ids)
         require(tuple(sorted(states, key=STATE_IDS.index)) == states, "coverage states must use shared order")
+        for reference in references:
+            reciprocal_links.add((reference, identifier))
+            details = fixture_details[reference]
+            require(identifier in details["coverage_ids"], "coverage reference is not reciprocal")
+            require(set(platforms).issubset(details["platforms"]), "coverage platform exceeds fixture support")
+            require(set(states).issubset(details["states"]), "coverage state exceeds fixture support")
         require(type(item["notes"]) is str and 0 < len(item["notes"]) <= 512, "coverage note is invalid")
         _validate_text_value(item["notes"])
         if status == "ready":
@@ -1344,6 +1524,12 @@ def _validate_coverage(
                 all(fixture_statuses.get(reference) == "ready" for reference in references),
                 "ready coverage cites a pending or missing fixture",
             )
+    expected_links = {
+        (fixture_id, coverage_id)
+        for fixture_id, details in fixture_details.items()
+        for coverage_id in details["coverage_ids"]
+    }
+    require(reciprocal_links == expected_links, "fixture and coverage links are not reciprocal")
     require(fixture_to_coverage, "fixture roots are not connected to coverage")
     return seen, fixture_to_coverage
 
@@ -1390,19 +1576,37 @@ def _validate_index_document(document: dict[str, Any], repo_root: Path) -> tuple
     require(benchmark["build_mode"] == "N/A - no production or release executable", "benchmark build mode changed")
     _safe_child(fixtures_root, benchmark_path)
 
-    fixture_statuses, owned_files = _validate_fixture_roots(
+    fixture_statuses, fixture_details, owned_files = _validate_fixture_roots(
         document,
         state_ids,
         set(item["id"] for item in document["coverage"]),
         fixtures_root,
     )
-    coverage_ids, referenced_fixtures = _validate_coverage(document, fixture_statuses, state_ids)
+    coverage_ids, referenced_fixtures = _validate_coverage(
+        document,
+        fixture_statuses,
+        fixture_details,
+        state_ids,
+    )
     require(referenced_fixtures == set(fixture_statuses), "every fixture root must be covered exactly at least once")
     require(document["evidence_status"] == ("complete" if not any(item["status"] != "ready" for item in document["coverage"]) else "partial"), "evidence status does not reflect pending coverage")
     if document["evidence_status"] == "complete":
         require(not any(item["status"] != "ready" for item in document["coverage"]), "complete index contains blocked coverage")
     else:
         require(any(item["status"] != "ready" for item in document["coverage"]), "partial index has no blocked coverage")
+
+    # The central validator is outside fixture_roots, so bind its directory to
+    # one exact reviewed artifact set. Caches, dotfiles, binaries, sockets, and
+    # future helper files must be reviewed and explicitly added before use.
+    validator_root = fixtures_root / "validator"
+    actual_central: set[str] = set()
+    for path in validator_root.rglob("*"):
+        require(not path.is_symlink(), "central validator contains a symlink")
+        if path.is_dir():
+            continue
+        require(path.is_file(), "central validator contains a special file")
+        actual_central.add(path.relative_to(fixtures_root).as_posix())
+    require(actual_central == CENTRAL_VALIDATOR_ARTIFACTS, "central validator artifact inventory changed")
 
     all_owned_candidates: set[str] = set()
     for path in fixtures_root.rglob("*"):
@@ -1484,6 +1688,11 @@ def _validate_baseline(
 ) -> None:
     canonical = (canonical_baseline_path or (repo_root / "contracts/fixtures/validator/validation-baseline.json")).resolve()
     require(baseline_path.resolve() == canonical, "baseline path is not canonical")
+    baseline_bytes = _read_bounded_bytes(canonical, MAX_JSON_BYTES)
+    require(
+        hashlib.sha256(baseline_bytes).hexdigest() == _trusted_baseline_digest(repo_root),
+        "baseline bytes changed outside the reviewed trust root",
+    )
     strict_keys(document, BASELINE_KEYS, "baseline")
     require(document["schema"] == BASELINE_SCHEMA, "baseline schema changed")
     require(document["fixture_schema"] == INDEX_SCHEMA, "baseline fixture schema changed")
@@ -1509,12 +1718,10 @@ def _validate_baseline(
         require(size == len(data) and digest == hashlib.sha256(data).hexdigest(), "baseline artifact manifest is stale")
         total += len(data)
     require(type(document["artifact_size_bytes"]) is int and type(document["artifact_size_bytes"]) is not bool and document["artifact_size_bytes"] == total, "baseline artifact size is stale")
-    # The baseline manifest is the aggregate validator's source boundary. Keep
-    # both central sources inside the immutable binding so a future edit cannot
-    # silently become an unverified scanner hole. The separate aggregate test
-    # source carries an independent canonical digest for validate.py; refreshing
-    # this manifest and its self-referential baseline line cannot refresh that
-    # reviewed source boundary locally.
+    # The baseline manifest binds validate.py while test_validate.py remains
+    # outside it as the independent reviewed root. The test source authenticates
+    # both this validator's canonical source and the baseline's exact bytes, so a
+    # coordinated local manifest refresh cannot rebind the scanner trust boundary.
     require(CENTRAL_VALIDATOR_SOURCE_PATHS.issubset(set(listed)), "central validator source is outside the baseline binding")
     validator_source = _read_bounded_bytes(
         _safe_child(repo_root.resolve(), BASELINE_SELF_MANIFEST_PATH),
@@ -1616,12 +1823,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser.parse_args(argv)
         repo_root = args.repo_root.resolve()
-        index = load_json(args.index.resolve(), limit=MAX_JSON_BYTES)
+        canonical_index_path = (repo_root / "contracts/fixtures/index.json").resolve()
+        canonical_schema_path = (repo_root / "contracts/fixtures/schema.json").resolve()
+        require(args.index.resolve() == canonical_index_path, "index path is not canonical")
+        require(args.schema.resolve() == canonical_schema_path, "schema path is not canonical")
+        index = load_json(canonical_index_path, limit=MAX_JSON_BYTES)
         canonical_baseline_path = _indexed_baseline_path(index, repo_root)
         # A caller-selected copy must never replace the checked-in evidence named
         # by the registry, even when that copy is schema-valid and redacted.
         require(args.baseline.resolve() == canonical_baseline_path, "baseline path is not canonical")
-        schema = load_json(args.schema.resolve(), limit=MAX_JSON_BYTES)
+        schema = load_json(canonical_schema_path, limit=MAX_JSON_BYTES)
         baseline = load_json(canonical_baseline_path, limit=MAX_JSON_BYTES)
         require(type(index) is dict and type(schema) is dict and type(baseline) is dict, "registry documents must be objects")
         fixture_count, coverage_count = validate_all(

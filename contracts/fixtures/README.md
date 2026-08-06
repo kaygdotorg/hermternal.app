@@ -106,14 +106,18 @@ exact path/value allowances only. Domain validators remain authoritative for
 case semantics; the aggregate layer does not run them and makes no network
 request.
 
-The `--baseline` input is bound to the exact canonical path named by the
-registry (`validator/validation-baseline.json`). Its full canonical content is
-also checked against a reviewed SHA-256 trust anchor in the validator; only the
-validator's own manifest digest and derived byte total are normalized to avoid a
-self-referential cycle. A schema-valid copy or coordinated sample/distribution/
-manifest replacement cannot replace the checked-in benchmark evidence. Ready
-coverage may reference only
-ready fixture roots with real manifests. A registry can be structurally valid
+The `--index`, `--schema`, and `--baseline` inputs are bound to their canonical
+reviewed paths. The aggregate test source is outside the baseline manifest and
+carries independent SHA-256 roots for both the validator's canonical source and
+the baseline's exact bytes. Only the validator's own baseline-manifest digest
+and derived byte total are normalized to avoid a self-reference. A schema-valid
+copy or coordinated validator, sample, distribution, and manifest replacement
+cannot locally rebind the checked-in evidence. The central `validator/`
+directory also has an exact artifact allowlist, so caches, dotfiles, binaries,
+symlinks, special files, and unreviewed helpers fail closed. Coverage references
+must be reciprocal, and every coverage platform and required state must be
+supported by every referenced root. Ready coverage may reference only ready
+fixture roots with real manifests. A registry can be structurally valid
 while coverage remains `partial`. A `pending`, `empty`, `failure`, `cancelled`,
 or `unknown` coverage row is never promoted to successful evidence. The
 checked-in index inventories the C-05 connection-restoration, C-07 session
