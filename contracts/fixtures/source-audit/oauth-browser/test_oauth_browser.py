@@ -10,12 +10,17 @@ contact a provider.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import copy
 import hashlib
 import json
+import math
+import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -31,6 +36,12 @@ CASES_PATH = FIXTURE_DIR / "cases.json"
 SOURCE_EXCERPT_DIR = FIXTURE_DIR / "source_excerpts"
 PINNED_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 PINNED_TREE_SHA = "886db5eb1150f819344d67fedc81aef0caab09ff"
+MAX_JSON_DEPTH = 128
+MAX_JSON_INTEGER_DIGITS = 4300
+MAX_ERROR_OUTPUT = 240
+DUPLICATE_JSON_KEY_ERROR = "duplicate JSON object key"
+NONFINITE_JSON_NUMBER_ERROR = "non-finite JSON number is not allowed"
+INTEGER_DIGIT_LIMIT_ERROR = "JSON integer digit limit exceeded"
 REQUIRED_CASES = {
     "success",
     "state-mismatch",
@@ -434,6 +445,28 @@ SENSITIVE_ASSIGNMENT = re.compile(
     r"\s*[:=]\s*(?P<value>[^\s,}]+)",
     re.IGNORECASE,
 )
+DIAGNOSTIC_ASSIGNMENT_NAME = (
+    r"(?:access[\s_-]*token|refresh[\s_-]*token|client[\s_-]*secret|"
+    r"cookie[\s_-]*value|api[\s_-]*key|authorization|bearer|password|token)"
+)
+DIAGNOSTIC_SENSITIVE_ASSIGNMENT = re.compile(
+    rf"\b(?P<name>{DIAGNOSTIC_ASSIGNMENT_NAME})\s*[:=]\s*"
+    r"(?P<value>(?:Bearer\s+)?(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|[^\s,}\]]+))",
+    re.IGNORECASE,
+)
+DIAGNOSTIC_SENSITIVE_NAMES = frozenset(
+    {
+        "accesstoken",
+        "refreshtoken",
+        "clientsecret",
+        "cookievalue",
+        "apikey",
+        "authorization",
+        "bearer",
+        "password",
+        "token",
+    }
+)
 SECRET_VALUE_PATTERNS = (
     re.compile(r"(?:ghp_live_|github_pat_|sk_live_|xox[baprs]-)[A-Za-z0-9_=-]+", re.IGNORECASE),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
@@ -449,22 +482,151 @@ EXCERPT_SAFE_ASSIGNMENT_RHS = re.compile(
 )
 
 
+def compact_error(message: object) -> str:
+    """Redact credential-shaped text and cap one validation diagnostic."""
+
+    redacted = str(message)
+    for pattern in SECRET_VALUE_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+
+    def redact_assignment(match: re.Match[str]) -> str:
+        name = re.sub(r"[\s_-]+", "", match.group("name")).lower()
+        if name not in DIAGNOSTIC_SENSITIVE_NAMES:
+            return match.group(0)
+        value_start = match.start("value") - match.start()
+        return f"{match.group(0)[:value_start]}[REDACTED]"
+
+    redacted = DIAGNOSTIC_SENSITIVE_ASSIGNMENT.sub(redact_assignment, redacted)
+    if len(redacted) > MAX_ERROR_OUTPUT:
+        return f"{redacted[: MAX_ERROR_OUTPUT - 3]}..."
+    return redacted
+
+
 def require(condition: bool, message: str) -> None:
     """Raise an assertion that remains active even under ``python -O``."""
     if not condition:
         raise AssertionError(message)
 
 
+class FixtureJSONError(ValueError):
+    """Raised for malformed or unsafe JSON before schema/redaction checks run."""
+
+    def __init__(self, message: object):
+        super().__init__(compact_error(message))
+
+
+def reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate keys without echoing attacker-controlled key text."""
+
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise FixtureJSONError(DUPLICATE_JSON_KEY_ERROR)
+        result[key] = value
+    return result
+
+
+def reject_nonfinite_json_constant(value: str) -> Any:
+    """Reject JSON extensions that can smuggle non-finite numbers."""
+
+    raise FixtureJSONError(NONFINITE_JSON_NUMBER_ERROR)
+
+
+def reject_overflowing_json_float(value: str) -> float:
+    """Reject exponent overflow such as ``1e9999`` at parse time."""
+
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise FixtureJSONError(NONFINITE_JSON_NUMBER_ERROR)
+    return parsed
+
+
+def reject_oversized_json_integer(value: str) -> int:
+    """Reject integers beyond the explicit bound before ``int`` can fail raw."""
+
+    digits = value[1:] if value.startswith("-") else value
+    if len(digits) > MAX_JSON_INTEGER_DIGITS:
+        raise FixtureJSONError(INTEGER_DIGIT_LIMIT_ERROR)
+    try:
+        return int(value)
+    except ValueError:
+        raise FixtureJSONError("invalid JSON integer") from None
+
+
+def scan_json_nesting(text: str) -> None:
+    """Bound structural nesting before ``json`` can recurse on hostile input."""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for offset, character in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise FixtureJSONError("maximum JSON nesting depth exceeded")
+        elif character in "]}":
+            depth -= 1
+            if depth < 0:
+                raise FixtureJSONError("malformed JSON nesting")
+
+
+def validate_json_tree(value: Any, label: str = "fixture", depth: int = 0) -> None:
+    """Reject unsupported leaves, non-finite values, and post-parse deep trees."""
+
+    if depth > MAX_JSON_DEPTH:
+        raise FixtureJSONError(f"{label}: maximum JSON nesting depth exceeded")
+    if type(value) is dict:
+        for key, child in value.items():
+            if type(key) is not str:
+                raise FixtureJSONError(f"{label}: object key must be a string")
+            validate_json_tree(child, f"{label}.{key}", depth + 1)
+        return
+    if type(value) is list:
+        for index, child in enumerate(value):
+            validate_json_tree(child, f"{label}[{index}]", depth + 1)
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise FixtureJSONError(f"{label}: non-finite JSON number is not allowed")
+        return
+    if value is None or type(value) in (bool, int, str):
+        return
+    raise FixtureJSONError(f"{label}: unsupported JSON value type")
+
+
 def load_json(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as stream:
-        value = json.load(stream)
-    if not isinstance(value, dict):
-        raise TypeError(f"fixture root must be an object: {path}")
-    return value
+    """Load every owned JSON artifact through one strict, fail-closed path."""
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        scan_json_nesting(text)
+        value = json.loads(
+            text,
+            object_pairs_hook=reject_duplicate_json_keys,
+            parse_constant=reject_nonfinite_json_constant,
+            parse_float=reject_overflowing_json_float,
+            parse_int=reject_oversized_json_integer,
+        )
+        if type(value) is not dict:
+            raise FixtureJSONError("fixture root must be an object")
+        validate_json_tree(value)
+        return value
+    except (FixtureJSONError, OSError, UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
+        raise FixtureJSONError(f"invalid JSON input: {exc}") from None
 
 
 def require_exact_keys(value: Any, expected: frozenset[str], label: str) -> dict[str, Any]:
-    require(isinstance(value, dict), f"{label} must be an object")
+    require(type(value) is dict, f"{label} must be an object")
     require(set(value) == expected, f"{label} keys changed")
     return value
 
@@ -477,7 +639,7 @@ def validate_no_live_secrets(
     scan_assignments: bool = True,
 ) -> None:
     """Walk every nested fixture value, including lists and mapping keys."""
-    if isinstance(value, dict):
+    if type(value) is dict:
         for key, child in value.items():
             key_path = f"{path}.{key}"
             if scan_keys:
@@ -489,7 +651,7 @@ def validate_no_live_secrets(
                 scan_assignments=scan_assignments,
             )
         return
-    if isinstance(value, list):
+    if type(value) is list:
         for index, child in enumerate(value):
             validate_no_live_secrets(
                 child,
@@ -498,7 +660,7 @@ def validate_no_live_secrets(
                 scan_assignments=scan_assignments,
             )
         return
-    if isinstance(value, str):
+    if type(value) is str:
         for pattern in SECRET_VALUE_PATTERNS:
             require(pattern.search(value) is None, f"live secret-shaped fixture value at {path}")
         for match in SENSITIVE_ASSIGNMENT.finditer(value):
@@ -513,10 +675,24 @@ def pkce_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-def fixture_artifact_bytes() -> int:
-    paths = [SOURCE_AUDIT_PATH, CASES_PATH]
+def fixture_artifact_bytes(
+    audit_path: Path = SOURCE_AUDIT_PATH,
+    cases_path: Path = CASES_PATH,
+) -> int:
+    """Measure the selected JSON overrides plus immutable source excerpts."""
+
+    paths = [audit_path, cases_path]
     paths.extend(SOURCE_EXCERPT_DIR / filename for filename in EXCERPT_FILES.values())
     return sum(path.stat().st_size for path in paths)
+
+
+def fixture_artifact_files(
+    audit_path: Path = SOURCE_AUDIT_PATH,
+    cases_path: Path = CASES_PATH,
+) -> str:
+    """Name the selected fixture paths rather than default paths."""
+
+    return f"{audit_path.name},{cases_path.name},source_excerpts/*"
 
 
 def load_source_excerpts() -> dict[str, str]:
@@ -537,6 +713,20 @@ def load_source_excerpts() -> dict[str, str]:
     return excerpts
 
 
+def validate_fixture_documents(audit_path: Path, cases_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load and schema-check selected fixture paths before running unittest."""
+
+    audit = load_json(audit_path)
+    cases = load_json(cases_path)
+    excerpts = load_source_excerpts()
+    try:
+        validate_audit_root(audit, excerpts)
+        validate_cases_root(cases)
+    except (AssertionError, AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+        raise FixtureJSONError(f"fixture schema validation failed: {exc}") from None
+    return audit, cases
+
+
 def assert_markers_in_order(text: str, markers: tuple[str, ...], label: str) -> None:
     if not markers:
         require("nonce" not in text, f"unexpected nonce marker in {label}")
@@ -549,7 +739,7 @@ def assert_markers_in_order(text: str, markers: tuple[str, ...], label: str) -> 
 
 
 def validate_source_url(url: Any, expected: dict[str, str]) -> None:
-    require(isinstance(url, str), f"source URL is not a string: {expected['path']}")
+    require(type(url) is str, f"source URL is not a string: {expected['path']}")
     require(url == expected["url"], f"source URL changed: {expected['path']}")
     parsed = urlparse(url)
     require(parsed.scheme == "https", f"source URL scheme is not HTTPS: {expected['path']}")
@@ -565,7 +755,9 @@ def validate_source_url(url: Any, expected: dict[str, str]) -> None:
 
 
 def validate_source_refs(audit: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    source = audit["source"]
+    require(type(audit) is dict, "audit must be an object")
+    source = audit.get("source")
+    require(type(source) is dict, "source provenance must be an object")
     require(
         set(source) == {"repository", "sha", "tree_sha", "refs"},
         "source provenance shape changed",
@@ -575,17 +767,18 @@ def validate_source_refs(audit: dict[str, Any]) -> dict[str, dict[str, Any]]:
     require(source["tree_sha"] == PINNED_TREE_SHA, "source tree changed")
 
     refs = source["refs"]
-    require(isinstance(refs, list), "source refs must remain a list")
+    require(type(refs) is list, "source refs must remain a list")
     require(len(refs) == len(EXPECTED_SOURCE_REFS), "source ref count changed")
-    require(all(isinstance(ref, dict) for ref in refs), "source refs must be objects")
+    require(all(type(ref) is dict for ref in refs), "source refs must be objects")
     paths = [ref.get("path") for ref in refs]
+    require(all(type(path) is str for path in paths), "source ref paths must be strings")
     require(len(paths) == len(set(paths)), "duplicate source ref path")
     expected_paths = {ref["path"] for ref in EXPECTED_SOURCE_REFS}
     require(set(paths) == expected_paths, "source ref path set changed")
 
     validated: dict[str, dict[str, Any]] = {}
     for expected in EXPECTED_SOURCE_REFS:
-        matches = [ref for ref in refs if ref.get("path") == expected["path"]]
+        matches = [ref for ref in refs if ref["path"] == expected["path"]]
         require(len(matches) == 1, f"source ref is not unique: {expected['path']}")
         ref = matches[0]
         require(set(ref) == EXPECTED_SOURCE_REF_KEYS, f"source ref shape changed: {expected['path']}")
@@ -600,10 +793,13 @@ def validate_source_observations(
     audit: dict[str, Any], excerpts: dict[str, str]
 ) -> None:
     refs = validate_source_refs(audit)
+    require(type(excerpts) is dict, "source excerpts must be an object")
+    require(all(type(text) is str for text in excerpts.values()), "source excerpts must be text")
     require(set(refs) == set(SOURCE_EVIDENCE), "source reference set changed")
 
     for path, expected_observations in SOURCE_EVIDENCE.items():
         observations = refs[path]["observations"]
+        require(type(observations) is dict, f"observations must be an object: {path}")
         require(
             set(observations) == set(expected_observations),
             f"observation IDs changed: {path}",
@@ -611,6 +807,7 @@ def validate_source_observations(
         for observation, evidence in expected_observations.items():
             require(observations[observation] is True, f"false source observation: {observation}")
             for excerpt_key, markers in evidence:
+                require(excerpt_key in excerpts, f"source excerpt is missing: {excerpt_key}")
                 assert_markers_in_order(excerpts[excerpt_key], markers, excerpt_key)
 
 
@@ -621,38 +818,59 @@ def validate_provider_http_400_case_bindings(
     validate_source_observations(audit, excerpts)
     refs = validate_source_refs(audit)
     nous_observations = refs["plugins/dashboard_auth/nous/__init__.py"]["observations"]
+    require(type(nous_observations) is dict, "Nous observations must be an object")
     require(
         nous_observations.get(PROVIDER_HTTP_400_OBSERVATION) is True,
         "provider HTTP 400 observation is missing",
     )
+    require(type(cases) is dict, "cases must be an object")
+    provider_observation = cases.get("provider_error_observation")
     require(
-        cases.get("provider_error_observation") == PROVIDER_HTTP_400_OBSERVATION,
+        type(provider_observation) is str and provider_observation == PROVIDER_HTTP_400_OBSERVATION,
         "case provider error observation changed",
     )
+    case_values = cases.get("cases")
+    require(type(case_values) is list, "cases must be a list")
+    require(all(type(case) is dict for case in case_values), "fixture cases must be objects")
+    ids = [case.get("id") for case in case_values]
+    require(all(type(case_id) is str for case_id in ids), "case IDs must be strings")
 
-    by_id = {case["id"]: case for case in cases["cases"]}
+    by_id = {case_id: case for case_id, case in zip(ids, case_values)}
     for case_id, verifier_result in PROVIDER_HTTP_400_CASES.items():
         case = by_id.get(case_id)
         require(case is not None, f"provider error case is missing: {case_id}")
-        require(case["expected"]["status"] == 400, f"provider error status changed: {case_id}")
+        expected = case.get("expected")
+        require(type(expected) is dict, f"expected outcome must be an object: {case_id}")
+        status = expected.get("status")
+        require(type(status) is int and status == 400, f"provider error status changed: {case_id}")
+        reason = expected.get("reason")
         require(
-            case["expected"]["reason"] == "invalid_code_or_pkce",
+            type(reason) is str and reason == "invalid_code_or_pkce",
             f"provider error reason changed: {case_id}",
         )
-        exchange = case["provider_exchange"]
-        require(exchange["called"] is True, f"provider exchange skipped: {case_id}")
+        exchange = case.get("provider_exchange")
+        require(type(exchange) is dict, f"provider exchange must be an object: {case_id}")
+        require(exchange.get("called") is True, f"provider exchange skipped: {case_id}")
+        exchange_result = exchange.get("verifier_result")
         require(
-            exchange["verifier_result"] == verifier_result,
+            type(exchange_result) is str and exchange_result == verifier_result,
             f"provider error result changed: {case_id}",
         )
+        request = case.get("request")
+        require(type(request) is dict, f"request must be an object: {case_id}")
+        cookie = request.get("pkce_cookie")
+        require(type(cookie) is dict, f"PKCE cookie must be an object: {case_id}")
+        verifier = cookie.get("verifier")
+        require(type(verifier) is str, f"provider verifier must be a string: {case_id}")
         require(
-            exchange["code_verifier"] == case["request"]["pkce_cookie"]["verifier"],
+            exchange.get("code_verifier") == verifier,
             f"provider verifier binding changed: {case_id}",
         )
 
 
 def validate_nonce_policy(requirements: dict[str, Any]) -> None:
     """Require a structured provider-scoped policy, never an implicit global one."""
+    require(type(requirements) is dict, "requirements must be an object")
     nonce = require_exact_keys(requirements.get("nonce"), NONCE_REQUIREMENT_KEYS, "requirements.nonce")
     require(nonce["policy"] == "provider_scoped", "nonce policy must remain provider-scoped")
     require(nonce["positive_requirements_require_compatibility_scope"] is True, "nonce scope guard disabled")
@@ -695,6 +913,9 @@ def validate_nonce_policy(requirements: dict[str, Any]) -> None:
 
 
 def validate_failure_semantics(audit: dict[str, Any], excerpts: dict[str, str]) -> None:
+    require(type(audit) is dict, "audit must be an object")
+    require(type(excerpts) is dict, "source excerpts must be an object")
+    require(all(type(text) is str for text in excerpts.values()), "source excerpts must be text")
     semantics = require_exact_keys(audit.get("failure_semantics"), FAILURE_SEMANTICS_KEYS, "failure_semantics")
     for key, expected in EXPECTED_FAILURE_SEMANTICS.items():
         entry = require_exact_keys(semantics[key], FAILURE_ENTRY_KEYS, f"failure_semantics.{key}")
@@ -706,6 +927,7 @@ def validate_failure_semantics(audit: dict[str, Any], excerpts: dict[str, str]) 
             require(not entry["markers"], f"unbound failure markers: {key}")
         else:
             require(expected["source_ref"] == "hermes_cli/dashboard_auth/routes.py", f"unexpected failure source: {key}")
+            require("routes" in excerpts, "route source excerpt is missing")
             assert_markers_in_order(excerpts["routes"], expected["markers"], f"failure_semantics.{key}")
 
 
@@ -766,12 +988,13 @@ def validate_cases_root(cases: dict[str, Any]) -> None:
         "case provider error observation changed",
     )
     require(cases["synthetic_only"] is True, "cases must remain synthetic")
-    require(isinstance(cases["cases"], list), "cases must be a list")
-    ids = [case.get("id") if isinstance(case, dict) else None for case in cases["cases"]]
+    require(type(cases["cases"]) is list, "cases must be a list")
+    require(all(type(case) is dict for case in cases["cases"]), "fixture case must be an object")
+    ids = [case.get("id") for case in cases["cases"]]
+    require(all(type(case_id) is str for case_id in ids), "case IDs must be strings")
     require(set(ids) == REQUIRED_CASES, "case ID set changed")
     require(len(ids) == len(set(ids)), "duplicate case ID")
     for case in cases["cases"]:
-        require(isinstance(case, dict), "fixture case must be an object")
         validate_synthetic_case_values(case)
         validate_oauth_case(case)
 
@@ -783,24 +1006,31 @@ def require_synthetic(value: Any, pattern: re.Pattern[str], label: str) -> None:
 
 def validate_synthetic_case_values(case: dict[str, Any]) -> None:
     """Validate every fixture value before applying cross-field behavior rules."""
+    require(type(case) is dict, "fixture case must be an object")
+    case_id = case.get("id")
+    require(type(case_id) is str, "case ID must be a string")
     require(
         set(case) == {"id", "request", "provider_exchange", "expected"},
-        f"case shape changed: {case.get('id')!r}",
+        f"case shape changed: {case_id!r}",
     )
-    require(re.fullmatch(r"[a-z0-9-]+", case["id"]) is not None, "case ID is not synthetic")
+    require(re.fullmatch(r"[a-z0-9-]+", case_id) is not None, "case ID is not synthetic")
 
-    request = case["request"]
+    request = case.get("request")
+    require(type(request) is dict, "request must be an object")
     require(set(request) == {"pkce_cookie", "authorization_request", "callback"}, "request shape changed")
 
-    cookie = request["pkce_cookie"]
+    cookie = request.get("pkce_cookie")
+    require(type(cookie) is dict, "PKCE cookie must be an object")
     require(set(cookie) == {"provider", "state", "verifier"}, "PKCE cookie shape changed")
-    require_synthetic(cookie["provider"], SYNTHETIC_IDENTIFIER, "pkce_cookie.provider")
-    require_synthetic(cookie["state"], SYNTHETIC_STATE, "pkce_cookie.state")
-    require_synthetic(cookie["verifier"], SYNTHETIC_VERIFIER, "pkce_cookie.verifier")
+    require_synthetic(cookie.get("provider"), SYNTHETIC_IDENTIFIER, "pkce_cookie.provider")
+    require_synthetic(cookie.get("state"), SYNTHETIC_STATE, "pkce_cookie.state")
+    require_synthetic(cookie.get("verifier"), SYNTHETIC_VERIFIER, "pkce_cookie.verifier")
 
-    authorization = request["authorization_request"]
+    authorization = request.get("authorization_request")
+    require(type(authorization) is dict, "authorization request must be an object")
     require(set(authorization) == {"params"}, "authorization request shape changed")
-    params = authorization["params"]
+    params = authorization.get("params")
+    require(type(params) is dict, "authorization params must be an object")
     expected_params = {
         "response_type",
         "client_id",
@@ -811,57 +1041,70 @@ def validate_synthetic_case_values(case: dict[str, Any]) -> None:
         "code_challenge_method",
     }
     require(set(params) == expected_params, "authorization parameter set changed")
-    require(params["response_type"] == "code", "response_type changed")
-    require_synthetic(params["client_id"], SYNTHETIC_CLIENT_ID, "authorization.params.client_id")
-    require_synthetic(params["redirect_uri"], SYNTHETIC_REDIRECT_URI, "authorization.params.redirect_uri")
-    require_synthetic(params["scope"], SYNTHETIC_SCOPE, "authorization.params.scope")
-    require_synthetic(params["state"], SYNTHETIC_STATE, "authorization.params.state")
-    require_synthetic(params["code_challenge"], CODE_CHALLENGE, "authorization.params.code_challenge")
-    require(params["code_challenge_method"] == "S256", "code_challenge_method changed")
+    require(params.get("response_type") == "code", "response_type changed")
+    require_synthetic(params.get("client_id"), SYNTHETIC_CLIENT_ID, "authorization.params.client_id")
+    require_synthetic(params.get("redirect_uri"), SYNTHETIC_REDIRECT_URI, "authorization.params.redirect_uri")
+    require_synthetic(params.get("scope"), SYNTHETIC_SCOPE, "authorization.params.scope")
+    require_synthetic(params.get("state"), SYNTHETIC_STATE, "authorization.params.state")
+    require_synthetic(params.get("code_challenge"), CODE_CHALLENGE, "authorization.params.code_challenge")
+    require(params.get("code_challenge_method") == "S256", "code_challenge_method changed")
 
-    callback = case["request"]["callback"]
+    callback = request.get("callback")
+    require(type(callback) is dict, "callback must be an object")
     expected_callback_keys = {"code", "state"}
-    if case["id"] == "cancellation":
+    if case_id == "cancellation":
         expected_callback_keys |= {"error", "error_description"}
-    require(set(callback) == expected_callback_keys, f"callback fields changed: {case['id']}")
-    require(callback["code"] == "" or SYNTHETIC_CODE.fullmatch(callback["code"]) is not None, "callback.code is not synthetic")
-    require(callback["state"] == "" or SYNTHETIC_STATE.fullmatch(callback["state"]) is not None, "callback.state is not synthetic")
+    require(set(callback) == expected_callback_keys, f"callback fields changed: {case_id}")
+    callback_code = callback.get("code")
+    callback_state = callback.get("state")
+    require(type(callback_code) is str, "callback.code must be a string")
+    require(type(callback_state) is str, "callback.state must be a string")
+    require(callback_code == "" or SYNTHETIC_CODE.fullmatch(callback_code) is not None, "callback.code is not synthetic")
+    require(callback_state == "" or SYNTHETIC_STATE.fullmatch(callback_state) is not None, "callback.state is not synthetic")
     if "error" in callback:
-        require(callback["error"] == "access_denied", "callback.error is not an allowed protocol value")
+        require(callback.get("error") == "access_denied", "callback.error is not an allowed protocol value")
         require("error_description" in callback, "provider error description is required")
     if "error_description" in callback:
-        require_synthetic(callback["error_description"], SYNTHETIC_DESCRIPTION, "callback.error_description")
+        require_synthetic(callback.get("error_description"), SYNTHETIC_DESCRIPTION, "callback.error_description")
 
-    exchange = require_exact_keys(case["provider_exchange"], {"called", "code_verifier", "verifier_result"}, "provider_exchange")
-    require(isinstance(exchange["called"], bool), "provider_exchange.called must be boolean")
+    exchange = require_exact_keys(case.get("provider_exchange"), {"called", "code_verifier", "verifier_result"}, "provider_exchange")
+    require(type(exchange["called"]) is bool, "provider_exchange.called must be boolean")
+    code_verifier = exchange["code_verifier"]
+    require(code_verifier is None or type(code_verifier) is str, "provider_exchange.code_verifier must be nullable text")
     require(
-        exchange["code_verifier"] is None
-        or SYNTHETIC_VERIFIER.fullmatch(exchange["code_verifier"]) is not None,
+        code_verifier is None or SYNTHETIC_VERIFIER.fullmatch(code_verifier) is not None,
         "provider_exchange.code_verifier is not synthetic",
     )
+    verifier_result = exchange["verifier_result"]
+    require(type(verifier_result) is str, "provider_exchange.verifier_result must be a string")
     require(
-        exchange["verifier_result"] in {"accepted", "rejected", "rejected_empty_code", "not_attempted"},
+        verifier_result in {"accepted", "rejected", "rejected_empty_code", "not_attempted"},
         "provider_exchange.verifier_result changed",
     )
 
     expected = require_exact_keys(
-        case["expected"],
+        case.get("expected"),
         {"status", "reason", "session_cookie_issued", "pkce_cookie", "separate_nonce_required"},
         "expected",
     )
-    require(expected["status"] in {302, 400}, "expected status changed")
-    require(expected["reason"] in {"login_success", "state_mismatch", "invalid_code_or_pkce", "idp_error"}, "expected reason changed")
-    require(isinstance(expected["session_cookie_issued"], bool), "expected session flag must be boolean")
-    require(expected["pkce_cookie"] in {"cleared", "retained_until_ttl"}, "expected PKCE cookie state changed")
-    require(isinstance(expected["separate_nonce_required"], bool), "expected nonce flag must be boolean")
+    status = expected["status"]
+    require(type(status) is int and status in {302, 400}, "expected status changed")
+    reason = expected["reason"]
+    require(type(reason) is str, "expected reason must be a string")
+    require(reason in {"login_success", "state_mismatch", "invalid_code_or_pkce", "idp_error"}, "expected reason changed")
+    require(type(expected["session_cookie_issued"]) is bool, "expected session flag must be boolean")
+    expected_pkce_cookie = expected["pkce_cookie"]
+    require(type(expected_pkce_cookie) is str, "expected PKCE cookie state must be a string")
+    require(expected_pkce_cookie in {"cleared", "retained_until_ttl"}, "expected PKCE cookie state changed")
+    require(type(expected["separate_nonce_required"]) is bool, "expected nonce flag must be boolean")
 
-    matrix = EXPECTED_OUTCOME_MATRIX.get(case["id"])
-    require(matrix is not None, f"case is not in expected outcome matrix: {case['id']}")
-    require(expected == matrix["expected"], f"expected outcome changed: {case['id']}")
+    matrix = EXPECTED_OUTCOME_MATRIX.get(case_id)
+    require(matrix is not None, f"case is not in expected outcome matrix: {case_id}")
+    require(expected == matrix["expected"], f"expected outcome changed: {case_id}")
     expected_exchange = dict(matrix["provider_exchange"])
     if expected_exchange["code_verifier"] == "cookie":
-        expected_exchange["code_verifier"] = case["request"]["pkce_cookie"]["verifier"]
-    require(exchange == expected_exchange, f"expected provider exchange changed: {case['id']}")
+        expected_exchange["code_verifier"] = cookie["verifier"]
+    require(exchange == expected_exchange, f"expected provider exchange changed: {case_id}")
 
 
 def validate_oauth_case(case: dict[str, Any]) -> None:
@@ -904,12 +1147,56 @@ def assert_nonce_policy_is_scoped(documentation: str) -> None:
 
 
 class BrowserOAuthContractTests(unittest.TestCase):
+    audit_path = SOURCE_AUDIT_PATH
+    cases_path = CASES_PATH
+
     @classmethod
     def setUpClass(cls) -> None:
-        cls.audit = load_json(SOURCE_AUDIT_PATH)
-        cls.cases = load_json(CASES_PATH)
+        cls.audit = load_json(cls.audit_path)
+        cls.cases = load_json(cls.cases_path)
         cls.documentation = DOC_PATH.read_text(encoding="utf-8")
         cls.excerpts = load_source_excerpts()
+
+    def _run_cli(
+        self,
+        fixture_path: Path,
+        *,
+        optimized: bool,
+        option: str = "--cases",
+    ) -> subprocess.CompletedProcess[str]:
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend([str(Path(__file__)), option, str(fixture_path)])
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+
+    def _assert_cli_parser_failure(
+        self,
+        payload: str,
+        expected_message: str,
+        *,
+        option: str = "--cases",
+        forbidden_fragments: tuple[str, ...] = (),
+    ) -> None:
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized, message=expected_message):
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    result = self._run_cli(
+                        Path(stream.name),
+                        optimized=optimized,
+                        option=option,
+                    )
+                self.assertEqual(result.returncode, 2, (optimized, result.stdout, result.stderr))
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+                self.assertLessEqual(len(result.stderr.rstrip("\n")), MAX_ERROR_OUTPUT)
+                for pattern in SECRET_VALUE_PATTERNS:
+                    self.assertIsNone(pattern.search(result.stderr), result.stderr)
+                for fragment in forbidden_fragments:
+                    self.assertNotIn(fragment, result.stderr)
+                self.assertIn("validation error", result.stderr.lower())
+                self.assertIn(expected_message, result.stderr)
 
     def test_source_pin_and_audit_shape(self) -> None:
         validate_audit_root(self.audit, self.excerpts)
@@ -917,6 +1204,215 @@ class BrowserOAuthContractTests(unittest.TestCase):
         validate_no_live_secrets(self.audit)
         validate_no_live_secrets(self.cases)
         validate_no_live_secrets(self.excerpts, scan_assignments=False)
+
+    def test_strict_loader_rejects_duplicate_nonfinite_deep_and_malformed_json(self) -> None:
+        for digits in (1000, MAX_JSON_INTEGER_DIGITS):
+            with self.subTest(accepted_integer_digits=digits):
+                payload = f'{{"value":{"7" * digits}}}'
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    parsed = load_json(Path(stream.name))
+                self.assertEqual(len(str(parsed["value"])), digits)
+
+        deep_document: dict[str, Any] = {}
+        cursor = deep_document
+        for _ in range(MAX_JSON_DEPTH + 1):
+            child: dict[str, Any] = {}
+            cursor["nested"] = child
+            cursor = child
+        payloads = (
+            ('{"scope":"ghp_live_hidden_secret","scope":"safe_fixture_scope"}', DUPLICATE_JSON_KEY_ERROR),
+            ('{"outer":{"scope":"ghp_live_nested_secret","scope":"safe_fixture_scope"}}', DUPLICATE_JSON_KEY_ERROR),
+            ('{"value":NaN}', "non-finite JSON number"),
+            ('{"value":Infinity}', "non-finite JSON number"),
+            ('{"value":-Infinity}', "non-finite JSON number"),
+            ('{"value":1e9999}', "non-finite JSON number"),
+            (f'{{"value":{"7" * (MAX_JSON_INTEGER_DIGITS + 1)}}}', INTEGER_DIGIT_LIMIT_ERROR),
+            (json.dumps(deep_document), "maximum JSON nesting depth"),
+            ('{"cases":[}', "invalid JSON input"),
+        )
+        for payload, expected_message in payloads:
+            with self.subTest(expected_message=expected_message):
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    with self.assertRaises(FixtureJSONError) as raised:
+                        load_json(Path(stream.name))
+                self.assertIn(expected_message, str(raised.exception))
+
+        huge_key = "ghp_live_" + ("x" * 100_000)
+        huge_duplicate = f"{{{json.dumps(huge_key)}:1,{json.dumps(huge_key)}:2}}"
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+            stream.write(huge_duplicate)
+            stream.flush()
+            with self.assertRaises(FixtureJSONError) as raised:
+                load_json(Path(stream.name))
+        error = str(raised.exception)
+        self.assertIn(DUPLICATE_JSON_KEY_ERROR, error)
+        self.assertLessEqual(len(error), MAX_ERROR_OUTPUT)
+        self.assertNotIn(huge_key, error)
+        self.assertNotIn("ghp_live_", error)
+
+    def test_exact_type_confusion_is_rejected_by_closed_schema(self) -> None:
+        for status in (True, 302.0, 400.0):
+            with self.subTest(status=status):
+                forged = copy.deepcopy(self.cases)
+                forged["cases"][0]["expected"]["status"] = status
+                with self.assertRaises(AssertionError):
+                    validate_cases_root(forged)
+                if status in (True, 400.0):
+                    provider_forged = copy.deepcopy(self.cases)
+                    provider_case = next(case for case in provider_forged["cases"] if case["id"] == "pkce-failure")
+                    provider_case["expected"]["status"] = status
+                    with self.assertRaises(AssertionError):
+                        validate_provider_http_400_case_bindings(self.audit, provider_forged, self.excerpts)
+
+    def test_temp_fixture_failures_are_controlled_in_normal_and_optimized_cli(self) -> None:
+        cases_text = CASES_PATH.read_text(encoding="utf-8")
+        duplicate_secret = cases_text.replace(
+            '"scope": "fixture-scope",',
+            '"scope": "ghp_live_hidden_secret",\n            "scope": "fixture-scope",',
+            1,
+        )
+        self.assertNotEqual(duplicate_secret, cases_text)
+        self._assert_cli_parser_failure(duplicate_secret, DUPLICATE_JSON_KEY_ERROR)
+        self._assert_cli_parser_failure(
+            '{"scope":"ghp_live_audit_secret","scope":"safe_fixture_scope"}',
+            DUPLICATE_JSON_KEY_ERROR,
+            option="--audit",
+        )
+        self._assert_cli_parser_failure(
+            '{"outer":{"scope":"ghp_live_nested_secret","scope":"safe_fixture_scope"}}',
+            DUPLICATE_JSON_KEY_ERROR,
+        )
+        huge_key = "ghp_live_" + ("x" * 100_000)
+        huge_duplicate = f"{{{json.dumps(huge_key)}:1,{json.dumps(huge_key)}:2}}"
+        self._assert_cli_parser_failure(huge_duplicate, DUPLICATE_JSON_KEY_ERROR)
+        self._assert_cli_parser_failure('{"value":NaN}', "non-finite JSON number")
+        self._assert_cli_parser_failure('{"value":Infinity}', "non-finite JSON number")
+        self._assert_cli_parser_failure('{"value":-Infinity}', "non-finite JSON number")
+        self._assert_cli_parser_failure('{"value":1e9999}', "non-finite JSON number")
+        oversized_integer = f'{{"value":{"7" * (MAX_JSON_INTEGER_DIGITS + 1)}}}'
+        self._assert_cli_parser_failure(oversized_integer, INTEGER_DIGIT_LIMIT_ERROR)
+
+        for assignment, secret in (
+            ("password=super-secret-value", "super-secret-value"),
+            ("api_key=fixture-api-key-value", "fixture-api-key-value"),
+            ("authorization=fixture-authorization-value", "fixture-authorization-value"),
+            ("token=fixture-token-value", "fixture-token-value"),
+        ):
+            forged = copy.deepcopy(self.cases)
+            forged["cases"][0]["request"]["pkce_cookie"]["provider"] = assignment
+            self._assert_cli_parser_failure(
+                json.dumps(forged),
+                "pkce_cookie.provider is not synthetic",
+                forbidden_fragments=(assignment, secret),
+            )
+
+        deep_document: dict[str, Any] = {}
+        cursor = deep_document
+        for _ in range(MAX_JSON_DEPTH + 1):
+            child: dict[str, Any] = {}
+            cursor["nested"] = child
+            cursor = child
+        self._assert_cli_parser_failure(json.dumps(deep_document), "maximum JSON nesting depth")
+        self._assert_cli_parser_failure('{"cases":[}', "invalid JSON input")
+
+        # The subprocess runs the full suite; skip this test in that child so
+        # the override evidence check cannot recursively launch itself.
+        if os.environ.get("HERMTERNAL_SKIP_OVERRIDE_EVIDENCE_REGRESSION") != "1":
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                audit_path = root / "override-audit.json"
+                cases_path = root / "override-cases.json"
+                audit_path.write_text(
+                    SOURCE_AUDIT_PATH.read_text(encoding="utf-8") + "\n",
+                    encoding="utf-8",
+                )
+                cases_path.write_text(
+                    CASES_PATH.read_text(encoding="utf-8") + " \n",
+                    encoding="utf-8",
+                )
+                expected_bytes = fixture_artifact_bytes(audit_path, cases_path)
+                expected_files = fixture_artifact_files(audit_path, cases_path)
+                for optimized in (False, True):
+                    with self.subTest(override_evidence_optimized=optimized):
+                        command = [sys.executable]
+                        if optimized:
+                            command.append("-O")
+                        command.extend(
+                            [
+                                str(Path(__file__)),
+                                "--audit",
+                                str(audit_path),
+                                "--cases",
+                                str(cases_path),
+                            ]
+                        )
+                        environment = os.environ.copy()
+                        environment["HERMTERNAL_SKIP_OVERRIDE_EVIDENCE_REGRESSION"] = "1"
+                        result = subprocess.run(
+                            command,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            env=environment,
+                        )
+                        self.assertEqual(result.returncode, 0, (optimized, result.stdout, result.stderr))
+                        self.assertIn(f"fixture_artifact_bytes={expected_bytes}", result.stdout)
+                        self.assertIn(f"fixture_artifact_files={expected_files}", result.stdout)
+                        self.assertNotIn(
+                            "fixture_artifact_files=source_audit.json,cases.json,source_excerpts/*",
+                            result.stdout,
+                        )
+
+        case_mutations = (
+            ("case-null", lambda forged: forged["cases"].__setitem__(0, None), "fixture case must be an object"),
+            ("case-id-list", lambda forged: forged["cases"][0].__setitem__("id", []), "case IDs must be strings"),
+            ("request-null", lambda forged: forged["cases"][0].__setitem__("request", None), "request must be an object"),
+            ("cookie-null", lambda forged: forged["cases"][0]["request"].__setitem__("pkce_cookie", None), "PKCE cookie must be an object"),
+            ("authorization-null", lambda forged: forged["cases"][0]["request"].__setitem__("authorization_request", None), "authorization request must be an object"),
+            ("params-null", lambda forged: forged["cases"][0]["request"]["authorization_request"].__setitem__("params", None), "authorization params must be an object"),
+            ("callback-null", lambda forged: forged["cases"][0]["request"].__setitem__("callback", None), "callback must be an object"),
+            ("exchange-null", lambda forged: forged["cases"][0].__setitem__("provider_exchange", None), "provider_exchange must be an object"),
+            ("verifier-list", lambda forged: forged["cases"][0]["provider_exchange"].__setitem__("code_verifier", []), "provider_exchange.code_verifier must be nullable text"),
+            ("expected-null", lambda forged: forged["cases"][0].__setitem__("expected", None), "expected must be an object"),
+            ("status-float", lambda forged: forged["cases"][0]["expected"].__setitem__("status", 302.0), "expected status changed"),
+            ("reason-list", lambda forged: forged["cases"][0]["expected"].__setitem__("reason", []), "expected reason must be a string"),
+        )
+        for label, mutate, expected_message in case_mutations:
+            with self.subTest(schema_case=label):
+                forged = copy.deepcopy(self.cases)
+                mutate(forged)
+                payload = json.dumps(forged)
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    with self.assertRaises(FixtureJSONError) as raised:
+                        validate_fixture_documents(SOURCE_AUDIT_PATH, Path(stream.name))
+                self.assertIn(expected_message, str(raised.exception))
+                self._assert_cli_parser_failure(payload, expected_message)
+
+        audit_mutations = (
+            ("source-null", lambda forged: forged.__setitem__("source", None), "source provenance must be an object"),
+            ("source-path-list", lambda forged: forged["source"]["refs"][0].__setitem__("path", []), "source ref paths must be strings"),
+            ("observations-null", lambda forged: forged["source"]["refs"][0].__setitem__("observations", None), "observations must be an object"),
+            ("nonce-null", lambda forged: forged["requirements"].__setitem__("nonce", None), "requirements.nonce must be an object"),
+            ("failure-null", lambda forged: forged.__setitem__("failure_semantics", None), "failure_semantics must be an object"),
+        )
+        for label, mutate, expected_message in audit_mutations:
+            with self.subTest(schema_audit=label):
+                forged = copy.deepcopy(self.audit)
+                mutate(forged)
+                payload = json.dumps(forged)
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    with self.assertRaises(FixtureJSONError) as raised:
+                        validate_fixture_documents(Path(stream.name), CASES_PATH)
+                self.assertIn(expected_message, str(raised.exception))
+                self._assert_cli_parser_failure(payload, expected_message, option="--audit")
 
     def test_root_and_nested_schema_mutations_are_rejected(self) -> None:
         extra_case_root = copy.deepcopy(self.cases)
@@ -1289,14 +1785,42 @@ class BrowserOAuthContractTests(unittest.TestCase):
         self.fail(f"missing case: {case_id}")
 
 
-def run() -> int:
+def run(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--audit", type=Path, default=SOURCE_AUDIT_PATH)
+    parser.add_argument("--cases", type=Path, default=CASES_PATH)
+    args = parser.parse_args(argv)
+    BrowserOAuthContractTests.audit_path = args.audit
+    BrowserOAuthContractTests.cases_path = args.cases
+    try:
+        # Preflight through the same loader and closed-schema validators used by
+        # the test lifecycle so malformed temporary fixtures fail as one
+        # controlled CLI error, never a unittest traceback. The second read is
+        # intentional: tests exercise the exact selected paths normally.
+        validate_fixture_documents(args.audit, args.cases)
+    except (
+        FixtureJSONError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        ValueError,
+        AssertionError,
+        AttributeError,
+        IndexError,
+        KeyError,
+        TypeError,
+    ) as exc:
+        print(compact_error(f"validation error: {exc}"), file=sys.stderr)
+        return 2
+
     started = time.perf_counter()
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     elapsed_ms = (time.perf_counter() - started) * 1000
     print(f"fixture_validation_ms={elapsed_ms:.3f}")
-    print(f"fixture_artifact_bytes={fixture_artifact_bytes()}")
-    print("fixture_artifact_files=source_audit.json,cases.json,source_excerpts/*")
+    print(f"fixture_artifact_bytes={fixture_artifact_bytes(args.audit, args.cases)}")
+    print(f"fixture_artifact_files={fixture_artifact_files(args.audit, args.cases)}")
     return 0 if result.wasSuccessful() else 1
 
 
