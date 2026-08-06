@@ -1,8 +1,8 @@
 # Images-only attachment policy fixtures
 
-**Contract:** `dashboard-v0.0.1`  
-**Pinned Hermes revision:** `f5be9236e00ddf2f2a412697f267078fc4ee068e`  
-**Status:** deterministic protocol fixture and policy proof  
+**Contract:** `dashboard-v0.0.1`
+**Pinned Hermes revision:** `f5be9236e00ddf2f2a412697f267078fc4ee068e`
+**Status:** deterministic protocol fixture and policy proof
 **Live integration:** none
 
 This directory freezes the narrow attachment boundary for Hermternal. It is an
@@ -142,14 +142,16 @@ route.
 `source_evidence` records the pinned source path, Git blob, file digest, tree,
 and exact markers for the route, limit, format detector, decoder, and response.
 With `--source-root`, the validator requires the supplied path to be the exact
-non-bare checkout top level, then reads only immutable bytes from
+non-bare checkout top level with checkout-style `.git` metadata, then reads only
+immutable bytes from
 `f5be9236e00ddf2f2a412697f267078fc4ee068e:path` with lazy fetch, replacement
 objects, repository-local `.git/objects/info/alternates`, alternate object
 stores, inherited Git config, grafts, shallow-file redirects, and
-implicit-work-tree overrides disabled. It independently rejects bare or
-non-worktree repositories, and does not trust a mutable worktree copy for those
-claims. Structured failures use one compact semantic JSON line capped at 240
-serialized characters and never echo source paths, unknown keys, or input data.
+implicit-work-tree overrides disabled. It independently rejects bare,
+disguised-bare, or non-worktree repositories, and does not trust a mutable
+worktree copy for those claims. Structured failures use one compact semantic
+JSON line capped at 240 serialized characters and never echo source paths,
+unknown keys, or input data.
 
 The loader bounds raw JSON bytes, string lengths, array items, object keys,
 integer digits, nesting, and value-graph nodes before costly parsing. It rejects
@@ -157,8 +159,10 @@ duplicate keys, parser overflow such as 5000-digit integers, exponent overflow
 such as `1e309`, malformed UTF-8/syntax, excessive nesting, and non-finite values.
 The data URL parser rejects an encoded payload above the 25 MiB base64 envelope
 before allocating decoded bytes. Retained case notes and source claims are
-bounded and reject raw data URLs, padded or valid unpadded base64 payloads,
-`file://` URLs, all absolute POSIX/Windows paths, and filename/path shapes;
+bounded and reject all raw data URLs, including non-image forms such as
+`data:text/plain,...` and `data:image/svg+xml,...`, padded or valid unpadded
+base64 payloads including lowercase/digit-only tokens, `file://` URLs, all
+absolute POSIX/Windows paths even after punctuation, and filename/path shapes;
 request fixtures themselves contain only the synthetic values needed to exercise
 the boundary. Pending, interrupted, and incompatible requests must carry their
 canonical phase or contract evidence rather than only a matching state label.
@@ -217,10 +221,10 @@ Environment:
 ```text
 interpreter: /opt/homebrew/opt/python@3.14/bin/python3.14 (Python 3.14.6)
 platform: Darwin 25.5.0 arm64
-artifact bytes: 118077
+artifact bytes: 119986
 repetitions per mode: 30
-normal distribution (ms): min 48.645, median 50.966, max 54.106
-optimized distribution (ms): min 49.038, median 50.678, max 58.712
+normal distribution (ms): min 51.189, median 75.024, max 118.310
+optimized distribution (ms): min 51.014, median 61.311, max 65.535
 ```
 
 Artifact bytes are the sum of the committed `README.md`, `cases.json`,

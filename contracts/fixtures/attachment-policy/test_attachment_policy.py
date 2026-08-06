@@ -314,6 +314,15 @@ class AttachmentPolicyTests(unittest.TestCase):
             "iVBORw0KGgo",
             "SGVsbG8",
             "YWJjZGVm",
+            "aaaaaaaa",
+            "zzzzzzzz",
+            "00000000",
+            "prefix=/srv/secret",
+            "path:/srv/secret",
+            "x=/etc/passwd",
+            "data:text/plain;base64,SGVsbG8=",
+            "data:text/plain,hello",
+            "data:image/svg+xml,<svg></svg>",
             "/any/absolute/posix/path",
             "/Users/example/clipboard.png",
             "file:///tmp/clipboard.png",
@@ -462,6 +471,14 @@ class AttachmentPolicyTests(unittest.TestCase):
             with self.assertRaises(validate.ContractError):
                 validate.validate_source(bare, document)
 
+            disguised = root.parent / "disguised-bare"
+            self._git(root.parent, "clone", "--bare", "-q", str(root), str(disguised))
+            self._git(disguised, "config", "core.bare", "false")
+            self._git(disguised, "config", "core.worktree", str(disguised))
+            self.assertEqual(self._git(disguised, "rev-parse", "--is-bare-repository"), "false")
+            with self.assertRaises(validate.ContractError):
+                validate.validate_source(disguised, document)
+
     def test_source_attestation_rejects_redirects_wrong_objects_and_missing_objects(self) -> None:
         root, document, metadata = self._make_source_repo()
         unrelated = root.parent / "unrelated"
@@ -575,6 +592,8 @@ class AttachmentPolicyTests(unittest.TestCase):
         py_compile.compile(str(FIXTURE_DIR / "validate.py"), doraise=True)
         source = (FIXTURE_DIR / "validate.py").read_text(encoding="utf-8")
         self.assertNotIn("assert ", source)
+        readme = (FIXTURE_DIR / "README.md").read_text(encoding="utf-8")
+        self.assertTrue(all(line == line.rstrip() for line in readme.splitlines()))
 
 
 if __name__ == "__main__":

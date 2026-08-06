@@ -820,13 +820,13 @@ def _iter_strings(value: Any) -> Iterable[str]:
 
 
 _RETAINED_DATA_URL_RE = re.compile(
-    r"(?i)\bdata:image/[a-z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}"
+    r"(?i)\bdata:[^,\s]+,[^\s]+"
 )
 _RETAINED_BASE64_RE = re.compile(
     r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{8,}={1,2}(?![A-Za-z0-9+/])"
 )
 _RETAINED_PATH_RE = re.compile(
-    r"(?i)(?:file://|(?:^|[\s(\"'])/(?!/)[^\s\"']*|(?:^|[\s(\"'])[a-z]:[\\/]|(?:^|[\s(\"'])\\\\)"
+    r"(?i)(?:file://|(?<![A-Za-z0-9_/])/(?!/)[^\s\"'<>]+|(?<![A-Za-z0-9_])[a-z]:[\\/][^\s\"'<>]*|(?<![A-Za-z0-9_])\\\\[^\s\"'<>]+)"
 )
 _RETAINED_FILENAME_RE = re.compile(
     r"(?i)(?<![\w.-])(?:\.\.?[\\/][^\r\n]*|[a-z0-9_.-]+[\\/][^\r\n]*|[a-z0-9_.-]+)\.(?:png|jpg|jpeg|gif|webp|bmp|tiff|pdf)(?![\w.-])"
@@ -834,13 +834,21 @@ _RETAINED_FILENAME_RE = re.compile(
 
 
 def _contains_unpadded_base64(value: str) -> bool:
-    """Reject canonical unpadded payload-like base64 without rejecting prose."""
+    """Reject canonical payload-like base64 while preserving ordinary prose."""
 
+    stripped = value.strip()
     for match in _RETAINED_BASE64_TOKEN_RE.finditer(value):
         token = match.group(0)
         if (len(token) < 8 and not any(character.isdigit() or character in "+/" for character in token)) or len(token) % 4 == 1:
             continue
-        if sum(character.isupper() for character in token) < 2:
+        preceding = value[match.start() - 1] if match.start() else ""
+        suspicious_context = (
+            token == stripped
+            or len(set(token)) == 1
+            or any(character.isdigit() or character in "+/" for character in token)
+            or (preceding and preceding in "=:+,;")
+        )
+        if not suspicious_context and sum(character.isupper() for character in token) < 2:
             continue
         padded = token + "=" * (-len(token) % 4)
         try:
@@ -1026,25 +1034,26 @@ def _run_git(root: Path, args: list[str], raw: bool = False) -> bytes | str:
     return result.stdout if raw else result.stdout.decode("utf-8").strip()
 
 
-def _reject_repository_local_alternates(root: Path) -> None:
-    """Reject object-store redirection declared inside the supplied repository."""
+def _reject_repository_local_alternates(root: Path) -> Path:
+    """Require checkout-style Git metadata and reject local object redirection."""
 
     marker = root / ".git"
-    git_dirs: list[Path] = []
+    _require(marker.is_dir() or marker.is_file(), "source root is not a checkout")
     if marker.is_dir():
-        git_dirs.append(marker)
-    elif marker.is_file():
+        git_dir = marker.resolve()
+    else:
         try:
             line = marker.read_text(encoding="utf-8").splitlines()[0]
         except (OSError, UnicodeDecodeError, IndexError) as exc:
             raise ContractError("invalid Git metadata") from exc
         if not line.startswith("gitdir:"):
             raise ContractError("invalid Git metadata")
-        git_dirs.append((root / line[7:].strip()).resolve())
-    for git_dir in git_dirs:
-        alternates = git_dir / "objects" / "info" / "alternates"
-        if alternates.exists() or alternates.is_symlink():
-            raise ContractError("repository-local object alternates are not allowed")
+        git_dir = (root / line[7:].strip()).resolve()
+    _require(git_dir.is_dir(), "invalid Git metadata")
+    alternates = git_dir / "objects" / "info" / "alternates"
+    if alternates.exists() or alternates.is_symlink():
+        raise ContractError("repository-local object alternates are not allowed")
+    return git_dir
 
 
 def validate_source(source_root: Path, document: dict[str, Any]) -> None:
@@ -1052,7 +1061,10 @@ def validate_source(source_root: Path, document: dict[str, Any]) -> None:
 
     root = source_root.resolve()
     _require(root.is_dir(), "source root is not a directory")
-    _reject_repository_local_alternates(root)
+    expected_git_dir = _reject_repository_local_alternates(root)
+    reported_git_dir_value = Path(_run_git(root, ["rev-parse", "--git-dir"]))
+    reported_git_dir = (root / reported_git_dir_value if not reported_git_dir_value.is_absolute() else reported_git_dir_value).resolve()
+    _require(reported_git_dir == expected_git_dir, "source root is not a checkout")
     _require(_run_git(root, ["rev-parse", "--is-bare-repository"]) == "false", "bare repositories are not allowed")
     _require(_run_git(root, ["rev-parse", "--is-inside-work-tree"]) == "true", "source root is not a worktree")
     checkout_root = Path(_run_git(root, ["rev-parse", "--show-toplevel"])).resolve()
