@@ -262,6 +262,22 @@ class ProofGateValidationTests(unittest.TestCase):
         self.assertCode(result, "stale-blocker")
         self.assertCode(result, "dependency-direction")
 
+    def test_deferred_ui_rows_cannot_become_proof_gate_dependencies(self) -> None:
+        g07 = self.table_row(self.checklist_text, "G-07")
+        self.assertIn("[D-14W](https://github.com/kaygdotorg/hermternal/issues/205)", g07)
+        self.assertIn("[C-15](https://github.com/kaygdotorg/hermternal/issues/65)", self.table_row(self.checklist_text, "G-06"))
+        for deferred_key in sorted(validator.DEFERRED_UI_GATE_KEYS):
+            issue_number = validator.ROADMAP_ISSUES[deferred_key]
+            deferred_link = f"[{deferred_key}](https://github.com/kaygdotorg/hermternal/issues/{issue_number})"
+            mutated = self.replace_gate_cell(
+                self.checklist_text,
+                "G-07",
+                "[D-14W](https://github.com/kaygdotorg/hermternal/issues/205)",
+                f"[D-14W](https://github.com/kaygdotorg/hermternal/issues/205), {deferred_link}",
+            )
+            with self.subTest(deferred_key=deferred_key):
+                self.assertCode(self.result(mutated), "deferred-ui-dependency")
+
     def test_gate_status_checked_waived_and_unknown_fail(self) -> None:
         checked = self.replace_gate_cell(self.checklist_text, "G-01", "[ ]", "[x]")
         self.assertCode(self.result(checked), "gate-checked")

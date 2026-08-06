@@ -176,6 +176,9 @@ ROADMAP_ISSUES: Dict[str, int] = {
 
 MILESTONE_RANK = {"P0": 0, "C": 1, "D": 2, "DEP": 3, "B": 4, "W": 5, "A": 6, "R": 7}
 M0_KEYS = frozenset({"P0-01", "P0-02", "P0-05", "P0-06"})
+# These design rows describe v0.0.2 user-facing UI. Keep them in the roadmap
+# for traceability, but reject them as v0.0.1 proof-gate dependencies.
+DEFERRED_UI_GATE_KEYS = frozenset({"D-04", "D-04A"})
 
 
 @dataclass(frozen=True)
@@ -242,7 +245,7 @@ GATES: Tuple[GateSpec, ...] = (
         "SCAFFOLD",
         "The Paper web manifest and semantic tokens cover the scaffold states; Apple boards remain a later shared-design dependency.",
         ("D-15W",),
-        ("D-01", "D-02", "D-03", "D-04", "D-04A", "D-05", "D-06", "D-07", "D-08", "D-11", "D-13", "D-14W"),
+        ("D-01", "D-02", "D-03", "D-05", "D-06", "D-07", "D-08", "D-11", "D-13", "D-14W"),
         ("E-07",),
     ),
     GateSpec(
@@ -1071,6 +1074,14 @@ def _validate_gate_table(h2: Sequence[Heading], scanned: Sequence[MarkdownLine])
             rank for owner in owner_keys if (rank := _issue_milestone(owner)) is not None
         ]
         for dependency in dependency_keys:
+            if dependency in DEFERRED_UI_GATE_KEYS:
+                errors.append(
+                    _error(
+                        "deferred-ui-dependency",
+                        source_line.number,
+                        f"Gate `{key}` cannot depend on deferred user-facing UI issue `{dependency}`.",
+                    )
+                )
             rank = _issue_milestone(dependency)
             if rank is None:
                 continue
