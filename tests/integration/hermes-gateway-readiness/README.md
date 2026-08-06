@@ -17,14 +17,19 @@ The fixture freezes:
 - Hermes tree `886db5eb1150f819344d67fedc81aef0caab09ff`.
 - Dockerfile SHA-256
   `a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc`.
-- Image tag `hermes-agent:hermternal-f5be9236`.
+- Image tag `hermes-agent:hermternal-f5be9236`, an immutable repository digest,
+  and mandatory labels `org.opencontainers.image.source`,
+  `org.opencontainers.image.revision`, and
+  `com.hermternal.dockerfile.sha256` bound to the pinned identity.
 - Command `gateway run --no-supervise`.
 - Exact readiness line `HERMES_BACKEND_READY port=<port>` on stdout.
 - Rootless Podman, cgroup v2, netavark, and overlay as the executor policy.
-- A generated internal network and named volume with no host ports.
+- A unique-per-run generated internal network and named volume with no host
+  ports. Teardown uses the exact generated project name.
 - No host profile bind, socket mount, provider, browser auth, PTY, or live data.
 - CPU, memory, PID, tmpfs, shared-memory, restart, capability, security, and
-  bounded-log limits.
+  bounded-log limits. Executor stdout and stderr are captured separately with
+  bounded tails; only successful stdout log queries can establish readiness.
 - Exact project-only teardown: `down --volumes --remove-orphans`.
 - Zero leftover containers, networks, and volumes after teardown.
 
@@ -58,11 +63,14 @@ or live resource names.
 
 ## Files
 
-- `cases.json` contains ordered synthetic policy and parser cases.
+- `cases.json` contains ordered synthetic policy and parser cases. The
+  validator independently pins each adversarial input and expected outcome so
+  changing both cannot silently weaken coverage.
 - `evidence.json` contains the bounded, redacted `not_run` evidence record.
 - `validate.py` contains the strict JSON loader, redaction boundary,
-  deterministic Compose renderer, pinned identity checks, readiness parser,
-  timeout/exit classifier, bounded rootless runner, and exact cleanup checks.
+  canonical unique-project Compose renderer, pinned image/source checks,
+  readiness parser, timeout/exit classifier, bounded rootless runner, and exact
+  cleanup checks.
 - `test_validate.py` covers normal and optimized CLI execution, parser and
   classification regressions, synthetic fake-executor flow, redaction, strict
   JSON limits, identity, isolation, capability gating, and cleanup.

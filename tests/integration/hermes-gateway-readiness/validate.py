@@ -16,9 +16,12 @@ import json
 import math
 import os
 import re
+import secrets
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +41,10 @@ PINNED_DOCKERFILE_SHA256 = "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8
 IMAGE_REPOSITORY = "hermes-agent"
 IMAGE_TAG = "hermternal-f5be9236"
 IMAGE_REFERENCE = f"{IMAGE_REPOSITORY}:{IMAGE_TAG}"
+IMAGE_SOURCE_LABEL = "org.opencontainers.image.source"
+IMAGE_REVISION_LABEL = "org.opencontainers.image.revision"
+IMAGE_DOCKERFILE_LABEL = "com.hermternal.dockerfile.sha256"
+IMAGE_SOURCE_URL = "https://github.com/NousResearch/hermes-agent"
 EXECUTOR = "podman"
 COMPOSE = "compose"
 ROOTLESS_ACCOUNT = "hermternal-test"
@@ -201,6 +208,95 @@ EXPECTED_CASE_IDS = (
     "cleanup-leftover-detected",
 )
 
+# Keep the adversarial payloads independent from cases.json.  Otherwise a
+# weakened input and matching expected value could make the inventory pass.
+PINNED_CASE_CONTRACTS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
+    "readiness-marker-accepted": (
+        {"text": "HERMES_BACKEND_READY port=9119"},
+        {"accepted": True, "port": 9119},
+    ),
+    "readiness-marker-rejects-prefix": (
+        {"text": "INFO HERMES_BACKEND_READY port=9119"},
+        {"accepted": False, "port": None},
+    ),
+    "readiness-marker-rejects-invalid-port": (
+        {"text": "HERMES_BACKEND_READY port=65536"},
+        {"accepted": False, "port": None},
+    ),
+    "readiness-conflicting-markers": (
+        {"text": "HERMES_BACKEND_READY port=9119 HERMES_BACKEND_READY port=9119"},
+        {"accepted": False, "port": None},
+    ),
+    "classify-timeout": (
+        {"readiness_port": None, "returncode": None, "timed_out": True},
+        {"status": "blocked", "classification": "timeout_waiting_for_readiness"},
+    ),
+    "classify-exit-126": (
+        {"readiness_port": None, "returncode": 126, "timed_out": False},
+        {"status": "blocked", "classification": "exit_126_before_ready"},
+    ),
+    "classify-exit-2": (
+        {"readiness_port": None, "returncode": 2, "timed_out": False},
+        {"status": "blocked", "classification": "exit_2_before_ready"},
+    ),
+    "classify-signal": (
+        {"readiness_port": None, "returncode": -9, "timed_out": False},
+        {"status": "blocked", "classification": "signal_9_before_ready"},
+    ),
+    "redaction-symbolic-diagnostic": (
+        {"fixture_id": "synthetic_diagnostic"},
+        {"marker": "[REDACTED]", "bounded": True},
+    ),
+    "identity-exact": (
+        {
+            "repository": "NousResearch/hermes-agent",
+            "source_commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+            "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
+            "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
+            "image_reference": "hermes-agent:hermternal-f5be9236",
+        },
+        {"accepted": True, "reason": "pinned_identity"},
+    ),
+    "identity-drift-rejected": (
+        {
+            "repository": "NousResearch/hermes-agent",
+            "source_commit": "0000000000000000000000000000000000000000",
+            "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
+            "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
+            "image_reference": "hermes-agent:hermternal-f5be9236",
+        },
+        {"accepted": False, "reason": "pinned_identity_mismatch"},
+    ),
+    "isolation-rendered": (
+        {"mutation": "none"},
+        {"accepted": True, "reason": "rootless_private_project"},
+    ),
+    "isolation-published-port-rejected": (
+        {"mutation": "published_port"},
+        {"accepted": False, "reason": "published_port_rejected"},
+    ),
+    "capability-policy-pending": (
+        {"policy": "checked_in"},
+        {"status": "awaiting_issue_250", "live_allowed": False},
+    ),
+    "cleanup-canonical-project": (
+        {"target": "canonical"},
+        {"accepted": True, "reason": "exact_project_only"},
+    ),
+    "cleanup-unrecognized-project": (
+        {"target": "other_project"},
+        {"accepted": False, "reason": "unrecognized_project"},
+    ),
+    "cleanup-zero-leftovers": (
+        {"leftovers": {"containers": 0, "networks": 0, "volumes": 0}},
+        {"zero": True},
+    ),
+    "cleanup-leftover-detected": (
+        {"leftovers": {"containers": 0, "networks": 0, "volumes": 1}},
+        {"zero": False},
+    ),
+}
+
 SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
         "password",
@@ -211,6 +307,8 @@ SENSITIVE_NORMALIZED_KEYS = frozenset(
         "bearer",
         "accesskey",
         "apikey",
+        "xaccesskey",
+        "xapikey",
         "cookie",
         "cookievalue",
         "clientsecret",
@@ -238,7 +336,8 @@ SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"cookie(?:[_ .-]*(?:value|id))?|credential|credentials|host(?:name)?|"
     r"(?:private[_ .-]*)?address|session(?:[_ .-]*(?:id|token|value))?|"
     r"ticket(?:[_ .-]*(?:id|value|fragment))?|profile[_ .-]*(?:path|bind)|"
-    r"user[_ .-]*data|file(?:name|path))\s*[:=]\s*)"
+    r"user[_ .-]*data|file(?:name|path)|"
+    r"(?:x[_ .-]*)?(?:api|access)[_ .-]*key)\s*[:=]\s*)"
     r"(?P<value>[^\s,}\]]+)",
     re.IGNORECASE,
 )
@@ -301,6 +400,7 @@ class CommandResult:
     returncode: int | None
     output: str
     timed_out: bool = False
+    stderr: str = ""
 
 
 @dataclass(frozen=True)
@@ -628,8 +728,12 @@ def project_name(stack_id: str, instance: str) -> str:
     """Derive a unique, inspectable project name without host or user data."""
 
     stack_id = _slug(stack_id, STACK_ID_RE, "stack id")
-    instance = _slug(instance, INSTANCE_RE, "stack instance")
-    suffix = hashlib.sha256(f"{stack_id}\0{instance}".encode("ascii")).hexdigest()[:8]
+    _slug(instance, INSTANCE_RE, "stack instance")
+    # The random suffix prevents concurrent runs from sharing a network or
+    # volume.  The readable stack prefix still makes exact-project teardown
+    # reviewable without retaining host or user data.
+    suffix = secrets.token_hex(4)
+    require(re.fullmatch(r"[0-9a-f]{8}", suffix) is not None, "project nonce is invalid")
     return f"{PROJECT_PREFIX}-{stack_id}-{suffix}"
 
 
@@ -651,21 +755,9 @@ def validate_capability_policy(policy: Mapping[str, Any]) -> None:
     require(value["dependency"] == "issue_250_review", "capability policy dependency changed")
 
 
-def render_probe(
-    stack_id: str,
-    *,
-    instance: str = "fixture",
-    capability_policy: Mapping[str, Any] | None = None,
-) -> RenderedProbe:
-    """Render the canonical rootless Podman no-provider gateway Compose policy."""
+def _canonical_compose(project: str, network: str, volume: str) -> str:
+    """Render the sole accepted Compose document for the probe policy."""
 
-    policy = dict(CAPABILITY_POLICY if capability_policy is None else capability_policy)
-    validate_capability_policy(policy)
-    stack_id = _slug(stack_id, STACK_ID_RE, "stack id")
-    instance = _slug(instance, INSTANCE_RE, "stack instance")
-    project = project_name(stack_id, instance)
-    network = f"{project}_internal"
-    volume = f"{project}_data"
     lines = [
         "services:",
         "  gateway:",
@@ -706,7 +798,25 @@ def render_probe(
         "  data:",
         f'    name: "{volume}"',
     ]
-    compose = "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n"
+
+
+def render_probe(
+    stack_id: str,
+    *,
+    instance: str = "fixture",
+    capability_policy: Mapping[str, Any] | None = None,
+) -> RenderedProbe:
+    """Render the canonical rootless Podman no-provider gateway Compose policy."""
+
+    policy = dict(CAPABILITY_POLICY if capability_policy is None else capability_policy)
+    validate_capability_policy(policy)
+    stack_id = _slug(stack_id, STACK_ID_RE, "stack id")
+    instance = _slug(instance, INSTANCE_RE, "stack instance")
+    project = project_name(stack_id, instance)
+    network = f"{project}_internal"
+    volume = f"{project}_data"
+    compose = _canonical_compose(project, network, volume)
     result = RenderedProbe(project, network, volume, stack_id, instance, compose)
     validate_rendered_probe(result)
     return result
@@ -716,9 +826,22 @@ def validate_rendered_probe(result: RenderedProbe) -> None:
     """Check every no-exposure and rootless resource invariant in the render."""
 
     require(PROJECT_RE.fullmatch(result.project) is not None, "project name is not canonical")
+    stack_id = _slug(result.stack_id, STACK_ID_RE, "stack id")
+    _slug(result.instance, INSTANCE_RE, "stack instance")
+    require(
+        result.project.startswith(f"{PROJECT_PREFIX}-{stack_id}-"),
+        "project name is not bound to the stack id",
+    )
     require(result.network == f"{result.project}_internal", "network name is not canonical")
     require(result.volume == f"{result.project}_data", "volume name is not canonical")
     text = result.compose
+    # Validate the complete document, not merely required substrings.  This
+    # rejects appended duplicate keys and any new volume, capability, PTY, or
+    # resource field that could otherwise override an earlier safe value.
+    require(
+        text == _canonical_compose(result.project, result.network, result.volume),
+        "Compose document is not the canonical policy",
+    )
     require(len(text.encode("utf-8")) <= MAX_JSON_BYTES, "rendered Compose exceeds the bounded size")
     require("${" not in text, "host environment interpolation is not allowed")
     for forbidden in (
@@ -781,19 +904,27 @@ def validate_image_binding(record: Mapping[str, Any]) -> dict[str, Any]:
     image_id = record.get("Id", record.get("id"))
     require(type(image_id) is str and IMAGE_ID_RE.fullmatch(image_id) is not None, "image id is invalid")
     digests = record.get("RepoDigests", record.get("repo_digests", []))
-    require(type(digests) is list, "image digests are not a list")
+    require(type(digests) is list and digests, "image digest binding is missing")
     for digest in digests:
         require(type(digest) is str and re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", digest) is not None, "image digest is invalid")
-    labels = record.get("Config", {}).get("Labels", record.get("labels", {}))
-    if labels is not None:
-        require(type(labels) is dict, "image labels are not an object")
-        if "org.opencontainers.image.revision" in labels:
-            require(labels["org.opencontainers.image.revision"] == PINNED_HERMES_SHA, "image source label changed")
+    canonical_digest_prefix = f"{IMAGE_REPOSITORY}@sha256:"
+    canonical_digests = [digest for digest in digests if digest.startswith(canonical_digest_prefix)]
+    require(len(canonical_digests) == 1, "image digest repository is not pinned")
+
+    config = record.get("Config", {})
+    require(type(config) is dict, "image config is not an object")
+    labels = config.get("Labels", record.get("labels"))
+    require(type(labels) is dict, "image labels are not an object")
+    require(labels.get(IMAGE_SOURCE_LABEL) == IMAGE_SOURCE_URL, "image source label is not pinned")
+    require(labels.get(IMAGE_REVISION_LABEL) == PINNED_HERMES_SHA, "image source revision label is not pinned")
+    require(labels.get(IMAGE_DOCKERFILE_LABEL) == PINNED_DOCKERFILE_SHA256, "image Dockerfile label is not pinned")
     return {
         "reference": IMAGE_REFERENCE,
         "id": image_id,
         "repo_digest_count": len(digests),
-        "source_label_verified": "org.opencontainers.image.revision" in labels,
+        "source_label_verified": True,
+        "dockerfile_label_verified": True,
+        "digest_verified": True,
     }
 
 
@@ -906,6 +1037,15 @@ def summarize_output(output: str) -> str:
     return redact_bounded_output("\n".join(lines))
 
 
+def summarize_result(result: CommandResult) -> str:
+    """Summarize diagnostics from separate streams without merging readiness."""
+
+    streams = [result.output]
+    if result.stderr:
+        streams.append(result.stderr)
+    return summarize_output("\n".join(streams))
+
+
 def _executor_environment() -> dict[str, str]:
     """Pass only runtime basics; provider and host profile variables are excluded."""
 
@@ -919,8 +1059,37 @@ def _bounded_bytes(value: bytes) -> str:
     return value.decode("utf-8", errors="replace")
 
 
+def _append_bounded(buffer: bytearray, chunk: bytes) -> None:
+    buffer.extend(chunk)
+    if len(buffer) > MAX_COMMAND_OUTPUT:
+        del buffer[:-MAX_COMMAND_OUTPUT]
+
+
+def _capture_pipe(pipe: Any, buffer: bytearray) -> None:
+    """Read one pipe concurrently while retaining only its bounded tail."""
+
+    try:
+        while True:
+            chunk = pipe.read(8192)
+            if not chunk:
+                return
+            _append_bounded(buffer, chunk)
+    except (OSError, ValueError):
+        return
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except (OSError, ProcessLookupError):
+            return
+
+
 def run_bounded(command: Sequence[str], *, timeout: float) -> CommandResult:
-    """Run one argv-only command with bounded combined output and no shell."""
+    """Run one argv-only command with bounded stdout/stderr and no shell."""
 
     require(
         all(type(argument) is str and argument and "\x00" not in argument for argument in command),
@@ -931,20 +1100,44 @@ def run_bounded(command: Sequence[str], *, timeout: float) -> CommandResult:
             tuple(command),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             env=_executor_environment(),
+            start_new_session=True,
         )
     except OSError as exc:
         raise ProbeError("rootless executor is unavailable") from exc
+    require(process.stdout is not None and process.stderr is not None, "executor pipes are unavailable")
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    readers = (
+        threading.Thread(target=_capture_pipe, args=(process.stdout, stdout_buffer), daemon=True),
+        threading.Thread(target=_capture_pipe, args=(process.stderr, stderr_buffer), daemon=True),
+    )
+    for reader in readers:
+        reader.start()
     timed_out = False
     try:
-        output, _ = process.communicate(timeout=max(0.1, float(timeout)))
-    except subprocess.TimeoutExpired as exc:
+        process.wait(timeout=max(0.1, float(timeout)))
+    except subprocess.TimeoutExpired:
         timed_out = True
-        process.kill()
-        remainder, _ = process.communicate()
-        output = (exc.output or b"") + (remainder or b"")
-    return CommandResult(process.returncode, _bounded_bytes(output), timed_out)
+        _kill_process_group(process)
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+    for reader in readers:
+        reader.join(timeout=1.0)
+    for pipe in (process.stdout, process.stderr):
+        try:
+            pipe.close()
+        except OSError:
+            pass
+    return CommandResult(
+        process.returncode,
+        _bounded_bytes(bytes(stdout_buffer)),
+        timed_out,
+        _bounded_bytes(bytes(stderr_buffer)),
+    )
 
 
 def compose_command(
@@ -1052,7 +1245,15 @@ Runner = Callable[[Sequence[str], float], CommandResult]
 
 
 def _call_runner(runner: Runner, command: Sequence[str], timeout: float) -> CommandResult:
-    return runner(command, timeout)
+    """Convert partial executor failures into bounded probe evidence."""
+
+    try:
+        result = runner(command, timeout)
+    except Exception as exc:
+        return CommandResult(None, "", False, compact_error(exc))
+    if not isinstance(result, CommandResult):
+        return CommandResult(None, "", False, "executor returned an invalid result")
+    return result
 
 
 def run_probe(
@@ -1098,7 +1299,7 @@ def run_probe(
             config_result.timed_out,
             None,
             {"containers": 0, "networks": 0, "volumes": 0},
-            summarize_output(config_result.output),
+            summarize_result(config_result),
         )
 
     image_result = _call_runner(
@@ -1115,7 +1316,7 @@ def run_probe(
             image_result.timed_out,
             None,
             {"containers": 0, "networks": 0, "volumes": 0},
-            summarize_output(image_result.output),
+            summarize_result(image_result),
         )
     try:
         validate_image_binding(_image_inspect_from_output(image_result.output))
@@ -1131,18 +1332,26 @@ def run_probe(
             compact_error(exc),
         )
 
-    up_result = _call_runner(
-        runner,
-        compose_command(rendered.project, compose_path, "up", "--detach", "--no-build", "gateway"),
-        30,
-    )
-    started = up_result.returncode == 0 and not up_result.timed_out
     readiness_port: int | None = None
     exit_code: int | None = None
     timed_out = False
-    diagnostic = summarize_output(up_result.output)
+    status, classification = "blocked", "executor_result_unknown"
+    diagnostic = ""
+    # The cleanup result is initialized so even an exceptional start path can
+    # return a bounded outcome instead of losing the exact teardown proof.
+    teardown_result = CommandResult(None, "", False, "teardown not attempted")
     try:
+        # Keep the up call inside the cleanup scope.  A runner timeout or
+        # partial exception after this point must still attempt exact teardown.
+        up_result = _call_runner(
+            runner,
+            compose_command(rendered.project, compose_path, "up", "--detach", "--no-build", "gateway"),
+            30,
+        )
+        started = up_result.returncode == 0 and not up_result.timed_out
+        diagnostic = summarize_result(up_result)
         if not started:
+            timed_out = up_result.timed_out
             status, classification = classify_probe(
                 readiness_port=None,
                 returncode=up_result.returncode,
@@ -1150,7 +1359,7 @@ def run_probe(
             )
         else:
             deadline = clock() + timeout_seconds
-            status, classification = "blocked", "timeout_waiting_for_readiness"
+            classification = "timeout_waiting_for_readiness"
             while True:
                 log_result = _call_runner(
                     runner,
@@ -1166,7 +1375,18 @@ def run_probe(
                     ),
                     5,
                 )
-                diagnostic = summarize_output(log_result.output)
+                diagnostic = summarize_result(log_result)
+                # Only a successful log query can contribute stdout to the
+                # readiness parser.  In particular, stderr is diagnostic-only.
+                if log_result.timed_out:
+                    timed_out = True
+                    readiness_port = None
+                    status, classification = "blocked", "logs_timeout"
+                    break
+                if log_result.returncode != 0:
+                    readiness_port = None
+                    status, classification = "blocked", "logs_failed"
+                    break
                 try:
                     readiness_port = parse_readiness_output(log_result.output)
                 except ProbeError as exc:
@@ -1187,6 +1407,13 @@ def run_probe(
                     ),
                     5,
                 )
+                if state_result.timed_out or state_result.returncode != 0:
+                    readiness_port = None
+                    timed_out = state_result.timed_out
+                    status = "blocked"
+                    classification = "container_state_timeout" if state_result.timed_out else "container_state_failed"
+                    diagnostic = summarize_result(state_result)
+                    break
                 running, observed_exit_code = _container_state(state_result.output)
                 if observed_exit_code is not None:
                     exit_code = observed_exit_code
@@ -1214,13 +1441,24 @@ def run_probe(
                     )
                     break
                 sleeper(min(poll_interval_seconds, remaining))
+    except Exception as exc:
+        readiness_port = None
+        status, classification = "blocked", "executor_failure"
+        diagnostic = compact_error(exc)
     finally:
         teardown_result = _call_runner(runner, teardown_command(rendered.project, compose_path), 20)
 
     leftovers: dict[str, int] = {}
     for resource_name, command in zip(("containers", "networks", "volumes"), _leftover_commands(rendered.project)):
         listing = _call_runner(runner, command, 10)
-        leftovers[resource_name] = parse_resource_listing(listing.output) if listing.returncode == 0 else -1
+        if listing.returncode != 0 or listing.timed_out:
+            leftovers[resource_name] = -1
+            continue
+        try:
+            leftovers[resource_name] = parse_resource_listing(listing.output)
+        except (FixtureJSONError, ValidationError, ValueError, TypeError) as exc:
+            leftovers[resource_name] = -1
+            diagnostic = compact_error(exc)
     if not zero_leftovers(leftovers):
         status = "blocked"
         classification = "cleanup_leftovers"
@@ -1386,8 +1624,12 @@ def validate_cases_document(document: Any) -> None:
     require(type(root["cases"]) is list, "cases must be an array")
     require(all(type(case) is dict for case in root["cases"]), "case entry must be an object")
     require(tuple(case["id"] for case in root["cases"]) == EXPECTED_CASE_IDS, "case inventory changed")
+    require(tuple(PINNED_CASE_CONTRACTS) == EXPECTED_CASE_IDS, "pinned case inventory changed")
     for index, case in enumerate(root["cases"]):
         row = _validate_case_shape(case, index)
+        pinned_input, pinned_expected = PINNED_CASE_CONTRACTS[row["id"]]
+        strict_equal(row["input"], pinned_input, f"case {row['id']} input")
+        strict_equal(row["expected"], pinned_expected, f"case {row['id']} expected")
         expected = _case_outcome(row)
         strict_equal(expected, row["expected"], f"case {row['id']} outcome")
 

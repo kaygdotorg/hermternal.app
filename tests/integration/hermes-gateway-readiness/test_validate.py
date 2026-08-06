@@ -79,6 +79,17 @@ class GatewayReadinessTests(unittest.TestCase):
             with self.subTest(case=case["id"]):
                 self.assertEqual(validate._case_outcome(case), case["expected"])
 
+    def test_case_payloads_cannot_be_weakened_with_matching_expectations(self) -> None:
+        accepted = self.cases["readiness-marker-accepted"]
+        self.assertEqual(accepted["input"], {"text": "HERMES_BACKEND_READY port=9119"})
+        self.assertEqual(accepted["expected"], {"accepted": True, "port": 9119})
+        weakened = copy.deepcopy(self.document)
+        case = next(row for row in weakened["cases"] if row["id"] == "readiness-marker-accepted")
+        case["input"] = {"text": "not-a-marker"}
+        case["expected"] = {"accepted": False, "port": None}
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_cases_document(weakened)
+
     def test_exact_readiness_marker_and_duplicate_rejection(self) -> None:
         self.assertEqual(validate.parse_readiness_marker("HERMES_BACKEND_READY port=9119"), 9119)
         self.assertIsNone(validate.parse_readiness_marker("INFO HERMES_BACKEND_READY port=9119"))
@@ -106,11 +117,15 @@ class GatewayReadinessTests(unittest.TestCase):
                     result,
                 )
 
-    def test_renderer_is_rootless_private_and_deterministic(self) -> None:
+    def test_renderer_is_rootless_private_and_unique_per_run(self) -> None:
         first = validate.render_probe("smoke", instance="one")
         second = validate.render_probe("smoke", instance="one")
-        self.assertEqual(first, second)
+        self.assertNotEqual(first.project, second.project)
+        self.assertNotEqual(first.network, second.network)
+        self.assertNotEqual(first.volume, second.volume)
         self.assertLessEqual(len(first.project), 63)
+        validate.validate_rendered_probe(first)
+        validate.validate_rendered_probe(second)
         self.assertIn('image: "hermes-agent:hermternal-f5be9236"', first.compose)
         self.assertIn('command: ["gateway", "run", "--no-supervise"]', first.compose)
         self.assertIn("internal: true", first.compose)
@@ -138,6 +153,36 @@ class GatewayReadinessTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.validate_rendered_probe(mutated)
 
+    def test_compose_rejects_extra_volumes_capabilities_duplicates_and_pty_overrides(self) -> None:
+        rendered = validate.render_probe("smoke", instance="mutation")
+        mutations = {
+            "host_profile_volume": rendered.compose.replace(
+                '      - "data:/opt/data"',
+                '      - "/host/profile:/profile"\n      - "data:/opt/data"',
+            ),
+            "capability_addition": rendered.compose.replace(
+                "    cap_drop:\n",
+                '    cap_add:\n      - "NET_ADMIN"\n    cap_drop:\n',
+            ),
+            "duplicate_cpu_override": rendered.compose + '    cpus: "4.00"\n',
+            "duplicate_pty_override": rendered.compose.replace(
+                "    stdin_open: false\n",
+                "    stdin_open: false\n    stdin_open: true\n",
+            ),
+        }
+        for name, compose in mutations.items():
+            with self.subTest(name=name), self.assertRaises(validate.ValidationError):
+                validate.validate_rendered_probe(
+                    validate.RenderedProbe(
+                        rendered.project,
+                        rendered.network,
+                        rendered.volume,
+                        rendered.stack_id,
+                        rendered.instance,
+                        compose,
+                    )
+                )
+
     def test_identity_and_image_binding_are_exact(self) -> None:
         validate.validate_pinned_identity(IDENTITY)
         drifted = copy.deepcopy(IDENTITY)
@@ -147,12 +192,37 @@ class GatewayReadinessTests(unittest.TestCase):
         inspect = {
             "RepoTags": [validate.IMAGE_REFERENCE],
             "Id": "sha256:" + "1" * 64,
-            "RepoDigests": [],
-            "Config": {"Labels": {"org.opencontainers.image.revision": validate.PINNED_HERMES_SHA}},
+            "RepoDigests": ["hermes-agent@sha256:" + "a" * 64],
+            "Config": {
+                "Labels": {
+                    validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
+                    validate.IMAGE_REVISION_LABEL: validate.PINNED_HERMES_SHA,
+                    validate.IMAGE_DOCKERFILE_LABEL: validate.PINNED_DOCKERFILE_SHA256,
+                }
+            },
         }
         public = validate.validate_image_binding(inspect)
         self.assertEqual(public["reference"], validate.IMAGE_REFERENCE)
+        self.assertTrue(public["source_label_verified"])
+        self.assertTrue(public["dockerfile_label_verified"])
+        self.assertTrue(public["digest_verified"])
         self.assertNotIn("Labels", public)
+        mutations = []
+        missing_digest = copy.deepcopy(inspect)
+        missing_digest["RepoDigests"] = []
+        mutations.append(missing_digest)
+        missing_revision = copy.deepcopy(inspect)
+        del missing_revision["Config"]["Labels"][validate.IMAGE_REVISION_LABEL]
+        mutations.append(missing_revision)
+        wrong_dockerfile = copy.deepcopy(inspect)
+        wrong_dockerfile["Config"]["Labels"][validate.IMAGE_DOCKERFILE_LABEL] = "0" * 64
+        mutations.append(wrong_dockerfile)
+        wrong_digest_repository = copy.deepcopy(inspect)
+        wrong_digest_repository["RepoDigests"] = ["other-image@sha256:" + "a" * 64]
+        mutations.append(wrong_digest_repository)
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), self.assertRaises(validate.ValidationError):
+                validate.validate_image_binding(mutation)
         inspect["RepoTags"] = ["hermes-agent:other"]
         with self.assertRaises(validate.ValidationError):
             validate.validate_image_binding(inspect)
@@ -176,6 +246,23 @@ class GatewayReadinessTests(unittest.TestCase):
         self.assertNotIn("synthetic.example", redacted)
         self.assertLessEqual(len(redacted), validate.MAX_ERROR_OUTPUT)
 
+    def test_redaction_rejects_api_key_assignments_and_headers(self) -> None:
+        for value in (
+            "api_key=LEAK",
+            "access_key: LEAK",
+            "X-API-Key: LEAK",
+            "x-access-key=LEAK",
+        ):
+            with self.subTest(value=value):
+                redacted = validate.compact_error(value)
+                self.assertNotIn("LEAK", redacted)
+                self.assertIn("[REDACTED]", redacted)
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_redaction({"diagnostic": value})
+        for key in ("API-Key", "Access-Key", "X-API-Key", "X-Access-Key"):
+            with self.subTest(key=key), self.assertRaises(validate.ValidationError):
+                validate.validate_redaction({key: "value123"})
+
     def test_strict_json_rejects_duplicate_nonfinite_oversized_and_controlled_inputs(self) -> None:
         with self.assertRaises(validate.FixtureJSONError):
             validate.load_json_text(b'{"schema":1,"schema":2}')
@@ -194,6 +281,20 @@ class GatewayReadinessTests(unittest.TestCase):
             validate.load_json_text(b'{"value":"' + b"x" * (validate.MAX_STRING_LENGTH + 1) + b'"}')
         with self.assertRaises(validate.FixtureJSONError):
             validate.load_json_text(b'{"value":"\xff"}')
+
+    def test_run_bounded_caps_stdout_and_stderr_during_capture(self) -> None:
+        command = (
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('x' * 262144); sys.stderr.write('y' * 262144)",
+        )
+        result = validate.run_bounded(command, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(result.timed_out)
+        self.assertLessEqual(len(result.output.encode()), validate.MAX_COMMAND_OUTPUT)
+        self.assertLessEqual(len(result.stderr.encode()), validate.MAX_COMMAND_OUTPUT)
+        self.assertTrue(result.output.endswith("x" * 32))
+        self.assertTrue(result.stderr.endswith("y" * 32))
 
     def test_exact_project_teardown_and_zero_leftovers(self) -> None:
         rendered = validate.render_probe("smoke", instance="one")
@@ -231,6 +332,145 @@ class GatewayReadinessTests(unittest.TestCase):
         self.assertEqual(result.classification, "capability_policy_pending")
         self.assertEqual(calls, [])
 
+    def test_exceptional_up_still_attempts_exact_teardown(self) -> None:
+        rendered = validate.render_probe("smoke", instance="partial")
+        calls: list[tuple[str, ...]] = []
+
+        def partial_runner(command: Sequence[str], timeout: float) -> validate.CommandResult:
+            del timeout
+            command_tuple = tuple(command)
+            calls.append(command_tuple)
+            if "config" in command_tuple:
+                return validate.CommandResult(0, "services: {}\n")
+            if command_tuple[:4] == ("podman", "image", "inspect", "--format"):
+                payload = {
+                    "RepoTags": [validate.IMAGE_REFERENCE],
+                    "Id": "sha256:" + "3" * 64,
+                    "RepoDigests": ["hermes-agent@sha256:" + "c" * 64],
+                    "Config": {
+                        "Labels": {
+                            validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
+                            validate.IMAGE_REVISION_LABEL: validate.PINNED_HERMES_SHA,
+                            validate.IMAGE_DOCKERFILE_LABEL: validate.PINNED_DOCKERFILE_SHA256,
+                        }
+                    },
+                }
+                return validate.CommandResult(0, json.dumps([payload]))
+            if " up " in f" {' '.join(command_tuple)} ":
+                raise RuntimeError("synthetic partial start")
+            if "down" in command_tuple:
+                return validate.CommandResult(0, "removed\n")
+            if command_tuple[1:3] in (("ps", "-a"), ("network", "ls"), ("volume", "ls")):
+                return validate.CommandResult(0, "[]")
+            raise AssertionError(f"unexpected fake command: {command_tuple}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = validate.run_probe(
+                rendered,
+                Path(directory) / "compose.yml",
+                identity=IDENTITY,
+                capability_policy=APPROVED_POLICY,
+                runner=partial_runner,
+            )
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.classification, "executor_result_unknown")
+        self.assertEqual(result.teardown_exit_code, 0)
+        self.assertEqual(len([call for call in calls if "down" in call]), 1)
+
+    def test_failed_logs_cannot_promote_a_marker_to_readiness(self) -> None:
+        rendered = validate.render_probe("smoke", instance="log-failure")
+        calls: list[tuple[str, ...]] = []
+
+        def failed_logs_runner(command: Sequence[str], timeout: float) -> validate.CommandResult:
+            del timeout
+            command_tuple = tuple(command)
+            calls.append(command_tuple)
+            if "config" in command_tuple:
+                return validate.CommandResult(0, "services: {}\n")
+            if command_tuple[:4] == ("podman", "image", "inspect", "--format"):
+                payload = {
+                    "RepoTags": [validate.IMAGE_REFERENCE],
+                    "Id": "sha256:" + "4" * 64,
+                    "RepoDigests": ["hermes-agent@sha256:" + "d" * 64],
+                    "Config": {
+                        "Labels": {
+                            validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
+                            validate.IMAGE_REVISION_LABEL: validate.PINNED_HERMES_SHA,
+                            validate.IMAGE_DOCKERFILE_LABEL: validate.PINNED_DOCKERFILE_SHA256,
+                        }
+                    },
+                }
+                return validate.CommandResult(0, json.dumps([payload]))
+            if " up " in f" {' '.join(command_tuple)} ":
+                return validate.CommandResult(0, "gateway started\n")
+            if "logs" in command_tuple:
+                return validate.CommandResult(17, "HERMES_BACKEND_READY port=9119")
+            if "down" in command_tuple:
+                return validate.CommandResult(0, "removed\n")
+            if command_tuple[1:3] in (("ps", "-a"), ("network", "ls"), ("volume", "ls")):
+                return validate.CommandResult(0, "[]")
+            raise AssertionError(f"unexpected fake command: {command_tuple}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = validate.run_probe(
+                rendered,
+                Path(directory) / "compose.yml",
+                identity=IDENTITY,
+                capability_policy=APPROVED_POLICY,
+                runner=failed_logs_runner,
+            )
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.classification, "logs_failed")
+        self.assertIsNone(result.readiness_port)
+        self.assertEqual(result.teardown_exit_code, 0)
+
+    def test_stderr_marker_is_not_readiness_evidence(self) -> None:
+        rendered = validate.render_probe("smoke", instance="stderr-marker")
+
+        def stderr_marker_runner(command: Sequence[str], timeout: float) -> validate.CommandResult:
+            del timeout
+            command_tuple = tuple(command)
+            if "config" in command_tuple:
+                return validate.CommandResult(0, "services: {}\n")
+            if command_tuple[:4] == ("podman", "image", "inspect", "--format"):
+                payload = {
+                    "RepoTags": [validate.IMAGE_REFERENCE],
+                    "Id": "sha256:" + "5" * 64,
+                    "RepoDigests": ["hermes-agent@sha256:" + "e" * 64],
+                    "Config": {
+                        "Labels": {
+                            validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
+                            validate.IMAGE_REVISION_LABEL: validate.PINNED_HERMES_SHA,
+                            validate.IMAGE_DOCKERFILE_LABEL: validate.PINNED_DOCKERFILE_SHA256,
+                        }
+                    },
+                }
+                return validate.CommandResult(0, json.dumps([payload]))
+            if " up " in f" {' '.join(command_tuple)} ":
+                return validate.CommandResult(0, "gateway started\n")
+            if "logs" in command_tuple:
+                return validate.CommandResult(0, "", stderr="HERMES_BACKEND_READY port=9119")
+            if "ps" in command_tuple and "--all" in command_tuple:
+                return validate.CommandResult(0, '[{"State":"exited","ExitCode":0}]')
+            if "down" in command_tuple:
+                return validate.CommandResult(0, "removed\n")
+            if command_tuple[1:3] in (("ps", "-a"), ("network", "ls"), ("volume", "ls")):
+                return validate.CommandResult(0, "[]")
+            raise AssertionError(f"unexpected fake command: {command_tuple}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = validate.run_probe(
+                rendered,
+                Path(directory) / "compose.yml",
+                identity=IDENTITY,
+                capability_policy=APPROVED_POLICY,
+                runner=stderr_marker_runner,
+            )
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.classification, "exit_0_before_ready")
+        self.assertIsNone(result.readiness_port)
+        self.assertEqual(result.teardown_exit_code, 0)
+
     def test_fake_rootless_probe_cleans_exact_project_and_accepts_one_marker(self) -> None:
         rendered = validate.render_probe("smoke", instance="one")
         calls: list[tuple[str, ...]] = []
@@ -245,8 +485,14 @@ class GatewayReadinessTests(unittest.TestCase):
                 payload = {
                     "RepoTags": [validate.IMAGE_REFERENCE],
                     "Id": "sha256:" + "1" * 64,
-                    "RepoDigests": [],
-                    "Config": {"Labels": {"org.opencontainers.image.revision": validate.PINNED_HERMES_SHA}},
+                    "RepoDigests": ["hermes-agent@sha256:" + "a" * 64],
+                    "Config": {
+                        "Labels": {
+                            validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
+                            validate.IMAGE_REVISION_LABEL: validate.PINNED_HERMES_SHA,
+                            validate.IMAGE_DOCKERFILE_LABEL: validate.PINNED_DOCKERFILE_SHA256,
+                        }
+                    },
                 }
                 return validate.CommandResult(0, json.dumps([payload]))
             if " up " in f" {' '.join(command_tuple)} " or command_tuple[-4:] == ("--no-build", "gateway"):
@@ -299,8 +545,14 @@ class GatewayReadinessTests(unittest.TestCase):
                         [{
                             "RepoTags": [validate.IMAGE_REFERENCE],
                             "Id": "sha256:" + "2" * 64,
-                            "RepoDigests": [],
-                            "Config": {"Labels": {"org.opencontainers.image.revision": validate.PINNED_HERMES_SHA}},
+                            "RepoDigests": ["hermes-agent@sha256:" + "b" * 64],
+                            "Config": {
+                                "Labels": {
+                                    validate.IMAGE_SOURCE_LABEL: validate.IMAGE_SOURCE_URL,
+                                    validate.IMAGE_REVISION_LABEL: validate.PINNED_HERMES_SHA,
+                                    validate.IMAGE_DOCKERFILE_LABEL: validate.PINNED_DOCKERFILE_SHA256,
+                                }
+                            },
                         }]
                     ),
                 )
