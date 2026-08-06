@@ -110,18 +110,20 @@ export async function discoverProviders(options: ProviderDiscoveryOptions = {}):
       response.type === 'opaqueredirect' ||
       response.type === 'opaque'
     ) {
+      await cancelResponseBody(response);
       throw new ProviderDiscoveryError('redirect', response.status);
     }
 
     if (response.status !== 200) {
-      throw await classifyHttpResponse(response, maxBodyBytes, abortPromise);
+      throw await classifyHttpResponse(response, maxBodyBytes, abortPromise, controller.signal);
     }
 
     if (!hasJsonContentType(response)) {
+      await cancelResponseBody(response);
       throw new ProviderDiscoveryError('invalid-response', response.status);
     }
 
-    const body = await Promise.race([readBoundedBody(response, maxBodyBytes), abortPromise]);
+    const body = await Promise.race([readBoundedBody(response, maxBodyBytes, controller.signal), abortPromise]);
     let parsed: unknown;
     try {
       parsed = parseStrictJson(body);
@@ -144,14 +146,16 @@ export async function discoverProviders(options: ProviderDiscoveryOptions = {}):
 async function classifyHttpResponse(
   response: Response,
   maxBodyBytes: number,
-  abortPromise: Promise<never>
+  abortPromise: Promise<never>,
+  signal: AbortSignal
 ): Promise<ProviderDiscoveryError> {
   if (response.status === 503) {
     if (!hasJsonContentType(response)) {
+      await cancelResponseBody(response);
       return new ProviderDiscoveryError('invalid-response', response.status);
     }
 
-    const body = await Promise.race([readBoundedBody(response, maxBodyBytes), abortPromise]);
+    const body = await Promise.race([readBoundedBody(response, maxBodyBytes, signal), abortPromise]);
     let parsed: unknown;
     try {
       parsed = parseStrictJson(body);
@@ -170,6 +174,7 @@ async function classifyHttpResponse(
     return new ProviderDiscoveryError('invalid-response', response.status);
   }
 
+  await cancelResponseBody(response);
   return new ProviderDiscoveryError('http', response.status);
 }
 
@@ -235,10 +240,11 @@ function hasJsonContentType(response: Response): boolean {
   return contentType?.split(';', 1)[0].trim().toLowerCase() === 'application/json';
 }
 
-async function readBoundedBody(response: Response, maxBodyBytes: number): Promise<string> {
+async function readBoundedBody(response: Response, maxBodyBytes: number, signal: AbortSignal): Promise<string> {
   const declaredLength = response.headers.get('content-length');
   if (declaredLength !== null) {
     if (!/^\d+$/u.test(declaredLength)) {
+      await cancelResponseBody(response);
       throw new ProviderDiscoveryError('invalid-response');
     }
     if (Number(declaredLength) > maxBodyBytes) {
@@ -256,6 +262,15 @@ async function readBoundedBody(response: Response, maxBodyBytes: number): Promis
   }
 
   const reader = response.body.getReader();
+  const cancelReader = (): void => {
+    // An injected fetch may return a stream that is not wired to the request
+    // signal. Cancel the active reader as well so abort and timeout still stop
+    // response work instead of leaving an unbounded body open in the background.
+    void reader.cancel().catch(() => {});
+  };
+  signal.addEventListener('abort', cancelReader, { once: true });
+  if (signal.aborted) cancelReader();
+
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
@@ -270,6 +285,7 @@ async function readBoundedBody(response: Response, maxBodyBytes: number): Promis
       chunks.push(value);
     }
   } finally {
+    signal.removeEventListener('abort', cancelReader);
     reader.releaseLock();
   }
 
@@ -431,7 +447,13 @@ class BoundedJsonParser {
   }
 
   private skipWhitespace(): void {
-    while (/\s/u.test(this.text[this.index] ?? '')) this.index += 1;
+    // JSON permits only space, tab, carriage return, and line feed here. Using
+    // JavaScript's broader `\s` class would silently accept non-JSON separators.
+    while (true) {
+      const character = this.text[this.index];
+      if (character !== ' ' && character !== '\t' && character !== '\r' && character !== '\n') return;
+      this.index += 1;
+    }
   }
 
   private expect(character: string): void {

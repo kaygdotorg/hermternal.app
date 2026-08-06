@@ -232,16 +232,27 @@
       </div>
       <label class="state-control">
         <span>{discoveryMode === 'live' ? 'Authentication state · live result' : 'Authentication state'}</span>
-        <select
-          bind:value={authState}
-          aria-label="Authentication state"
-          disabled={discoveryMode === 'live'}
-          title={discoveryMode === 'live' ? 'Live discovery state follows the same-origin response.' : undefined}
-        >
-          {#each authStates as state}
-            <option value={state}>{formatState(state)}</option>
-          {/each}
-        </select>
+        {#if discoveryMode === 'live'}
+          <!-- The live selector is output-only. It has no binding or change
+               listener, so a forced DOM event cannot relabel a fixture as a
+               same-origin discovery result. -->
+          <select
+            aria-label="Authentication state"
+            disabled
+            title="Live discovery state follows the same-origin response."
+            value={authState}
+          >
+            {#each authStates as state}
+              <option value={state}>{formatState(state)}</option>
+            {/each}
+          </select>
+        {:else}
+          <select bind:value={authState} aria-label="Authentication state">
+            {#each authStates as state}
+              <option value={state}>{formatState(state)}</option>
+            {/each}
+          </select>
+        {/if}
       </label>
     </div>
     <p class="section-note">{lastAuthAction}</p>

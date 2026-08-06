@@ -123,7 +123,7 @@
     if (value === 'failure') return 'Choose another local fixture state. Error details do not include credentials.';
     if (value === 'discovery-retry') return 'Retry starts only the idempotent GET /api/auth/providers boundary.';
     if (value === 'discovery-malformed')
-      return 'Unknown fields are ignored only after bounded strict parsing; malformed or unsafe data is rejected.';
+      return 'Unknown fields, malformed data, and unsafe values are rejected after bounded strict parsing.';
     if (value === 'discovery-aborted') return 'Cancellation leaves no provider list and does not expose response data.';
     return 'The endpoint did not provide a usable provider registry. No fallback provider is invented.';
   }

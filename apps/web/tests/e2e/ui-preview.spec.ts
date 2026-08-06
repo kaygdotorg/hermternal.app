@@ -427,14 +427,22 @@ test('opt-in live provider discovery uses the same-origin GET boundary and trans
   await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-discovery-mode', 'live');
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-pending');
+  await expect(page.getByTestId('auth-preview').getByRole('status')).toContainText('Discovering sign-in methods');
   await expect(page.getByRole('heading', { name: 'Discovering sign-in methods' })).toBeFocused();
-  await expect(page.getByRole('combobox', { name: 'Authentication state' })).toBeDisabled();
+  const liveStateOutput = page.getByRole('combobox', { name: 'Authentication state' });
+  await expect(liveStateOutput).toBeDisabled();
 
   releaseResponse();
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
   await expect(page.getByRole('button', { name: 'Nous, unavailable' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Hermes password' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Connect to Hermes' })).toBeFocused();
+
+  await liveStateOutput.evaluate((select: HTMLSelectElement) => {
+    select.value = 'discovery-empty';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
 
   // `supports_password: false` does not prove OAuth capability. Only the
   // password-capable provider advances through this reviewed response shape.
@@ -477,6 +485,7 @@ test('opt-in live provider discovery fails closed on reviewed 503 and retries id
 
   await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
+  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('No sign-in method is available');
   await expect(page.getByRole('heading', { name: 'Provider discovery stopped' })).toBeFocused();
   await expect(page.getByRole('combobox', { name: 'Authentication state' })).toBeDisabled();
 
@@ -524,6 +533,7 @@ test('opt-in live provider discovery exposes cancellation and retries after abor
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-pending');
   await page.getByRole('button', { name: 'Cancel discovery' }).click();
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-aborted');
+  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('Provider discovery was cancelled');
   await expect(page.getByRole('heading', { name: 'Provider discovery was cancelled' })).toBeFocused();
 
   releaseFirstResponse();

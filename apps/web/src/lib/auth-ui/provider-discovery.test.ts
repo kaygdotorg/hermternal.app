@@ -28,6 +28,23 @@ function providerPayload(): string {
   });
 }
 
+function cancellableResponse(
+  status: number,
+  contentType: string,
+  headers: Record<string, string> = {}
+): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      }
+    }),
+    { status, headers: { 'content-type': contentType, ...headers } }
+  );
+  return { response, wasCancelled: () => cancelled };
+}
+
 describe('discoverProviders', () => {
   it('uses the strict same-origin GET boundary and preserves source order', async () => {
     const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(jsonResponse(providerPayload()));
@@ -57,9 +74,14 @@ describe('discoverProviders', () => {
     await expect(discoverProviders({ fetch: fetcher })).rejects.toMatchObject({ code: 'invalid-response' });
   });
 
-  it('rejects malformed JSON and duplicate JSON keys', async () => {
+  it('rejects malformed JSON, non-JSON whitespace, and duplicate JSON keys', async () => {
     const malformed = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(jsonResponse('{"providers":'));
     await expect(discoverProviders({ fetch: malformed })).rejects.toMatchObject({ code: 'malformed-json' });
+
+    const nonJsonWhitespace = vi
+      .fn<ProviderDiscoveryFetch>()
+      .mockResolvedValue(jsonResponse('{ "providers":[]}'));
+    await expect(discoverProviders({ fetch: nonJsonWhitespace })).rejects.toMatchObject({ code: 'malformed-json' });
 
     const duplicate = vi
       .fn<ProviderDiscoveryFetch>()
@@ -155,6 +177,51 @@ describe('discoverProviders', () => {
     await expect(discoverProviders({ fetch: oversized, maxBodyBytes: 10 })).rejects.toMatchObject({
       code: 'body-too-large'
     });
+  });
+
+  it('cancels rejected response bodies before returning bounded diagnostics', async () => {
+    for (const [status, contentType, expectedCode] of [
+      [200, 'text/html', 'invalid-response'],
+      [302, 'application/json', 'redirect'],
+      [500, 'application/json', 'http'],
+      [503, 'text/html', 'invalid-response']
+    ] as const) {
+      const tracked = cancellableResponse(status, contentType);
+      const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(tracked.response);
+
+      await expect(discoverProviders({ fetch: fetcher })).rejects.toMatchObject({ code: expectedCode, status });
+      expect(tracked.wasCancelled()).toBe(true);
+    }
+  });
+
+  it('cancels bodies rejected from malformed or oversized declared lengths', async () => {
+    for (const [declaredLength, maxBodyBytes, expectedCode] of [
+      ['invalid', 128, 'invalid-response'],
+      ['129', 128, 'body-too-large']
+    ] as const) {
+      const tracked = cancellableResponse(200, 'application/json', { 'content-length': declaredLength });
+      const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(tracked.response);
+
+      await expect(discoverProviders({ fetch: fetcher, maxBodyBytes })).rejects.toMatchObject({ code: expectedCode });
+      expect(tracked.wasCancelled()).toBe(true);
+    }
+  });
+
+  it('cancels an active response reader after headers when the caller aborts or the timeout expires', async () => {
+    const callerTracked = cancellableResponse(200, 'application/json');
+    const callerFetch = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(callerTracked.response);
+    const controller = new AbortController();
+    const callerResult = discoverProviders({ fetch: callerFetch, signal: controller.signal, timeoutMs: 1_000 });
+    await vi.waitFor(() => expect(callerFetch).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(callerResult).rejects.toMatchObject({ code: 'aborted' });
+    await vi.waitFor(() => expect(callerTracked.wasCancelled()).toBe(true));
+
+    const timeoutTracked = cancellableResponse(200, 'application/json');
+    const timeoutFetch = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(timeoutTracked.response);
+    await expect(discoverProviders({ fetch: timeoutFetch, timeoutMs: 5 })).rejects.toMatchObject({ code: 'timeout' });
+    await vi.waitFor(() => expect(timeoutTracked.wasCancelled()).toBe(true));
   });
 
   it('maps network failures, caller aborts, and timeouts to bounded diagnostics', async () => {
