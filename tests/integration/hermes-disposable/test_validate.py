@@ -33,6 +33,8 @@ class HermesDisposableHarnessTests(unittest.TestCase):
         cls.document = validate.load_json(validate.CASES_PATH)
         validate.validate_redaction(cls.document)
         validate.validate_cases_document(cls.document)
+        cls.evidence = validate.load_json(validate.VM_EVIDENCE_PATH)
+        validate.validate_vm_evidence(cls.evidence)
         cls.cases = {case["id"]: case for case in cls.document["cases"]}
 
     def _run_cli(self, content: bytes, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
@@ -71,6 +73,19 @@ class HermesDisposableHarnessTests(unittest.TestCase):
         self.assertEqual(self.document["proof_status"], "not_run")
         self.assertEqual(self.document["executor_policy"]["default"], "podman")
         self.assertEqual(self.document["executor_policy"]["docker"]["smoke"], "not_run")
+
+    def test_vm_evidence_is_blocked_and_records_both_executor_results(self) -> None:
+        self.assertEqual(self.evidence["status"], "blocked_readiness")
+        self.assertEqual(self.evidence["runtime"]["exit_code"], 2)
+        self.assertEqual(self.evidence["docker_runtime"]["exit_code"], 126)
+        self.assertEqual(self.evidence["docker_runtime"]["teardown_status"], 0)
+        self.assertEqual(self.evidence["docker_runtime"]["leftover_containers"], 0)
+        self.assertEqual(self.evidence["docker_runtime"]["leftover_networks"], 0)
+        self.assertEqual(self.evidence["docker_runtime"]["leftover_volumes"], 0)
+        self.assertEqual(self.evidence["provenance"]["compose"]["podman"]["config_status"], "pass")
+        self.assertEqual(self.evidence["provenance"]["compose"]["docker"]["config_status"], "pass")
+        self.assertIsNone(self.evidence["threshold"])
+        self.assertTrue(self.evidence["redacted"])
 
     def test_every_case_matches_independent_boundary_model(self) -> None:
         for case in self.document["cases"]:
@@ -205,6 +220,81 @@ class HermesDisposableHarnessTests(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertNotIn(secret, redacted)
                 self.assertLessEqual(len(redacted), validate.MAX_ERROR_OUTPUT)
+
+    def test_vm_evidence_mutation_fails_in_normal_and_optimized_cli(self) -> None:
+        mutated = copy.deepcopy(self.evidence)
+        mutated["status"] = "successful_release_proof"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as handle:
+            json.dump(mutated, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            for optimized in (False, True):
+                with self.subTest(optimized=optimized):
+                    command = [sys.executable]
+                    if optimized:
+                        command.append("-O")
+                    command.extend([str(FIXTURE_DIR / "validate.py"), "--vm-evidence", handle.name])
+                    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertEqual(completed.stderr, "")
+                    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+                    self.assertEqual(len(lines), 1)
+                    payload = json.loads(lines[0])
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                    self.assertNotIn("successful_release_proof", completed.stdout)
+                    self.assertNotIn("Traceback", completed.stdout)
+
+    def test_unapproved_hex_and_key_assignments_fail_closed(self) -> None:
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_redaction({"retained": "a" * 40})
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_redaction({"retained": "b" * 64})
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_redaction({"value": validate.PINNED_HERMES_SHA})
+        validate.validate_redaction({"pinned_source_sha": validate.PINNED_HERMES_SHA})
+        for message, secret in (
+            ("api_key=synthetic-api-key", "synthetic-api-key"),
+            ("access_key: synthetic-access-key", "synthetic-access-key"),
+            ("API-KEY=synthetic-api-key", "synthetic-api-key"),
+            ("access.key=synthetic-access-key", "synthetic-access-key"),
+        ):
+            with self.subTest(message=message):
+                redacted = validate.compact_error(message)
+                self.assertNotIn(secret, redacted)
+                self.assertLessEqual(len(redacted), validate.MAX_ERROR_OUTPUT)
+
+    def test_docker_mount_projection_rejects_bind_and_wrong_volume(self) -> None:
+        for field, value in (
+            ("type", "bind"),
+            ("name", "hermes-disposable-docker-untrusted_data"),
+            ("destination", "/opt/untrusted"),
+        ):
+            with self.subTest(field=field):
+                mutated = copy.deepcopy(self.evidence)
+                mutated["inspection"]["docker_mounts"][0][field] = value
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_vm_evidence(mutated)
+
+    def test_vm_evidence_mount_mutation_fails_in_normal_and_optimized_cli(self) -> None:
+        mutated = copy.deepcopy(self.evidence)
+        mutated["inspection"]["docker_mounts"][0]["type"] = "bind"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as handle:
+            json.dump(mutated, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            for optimized in (False, True):
+                with self.subTest(optimized=optimized):
+                    command = [sys.executable]
+                    if optimized:
+                        command.append("-O")
+                    command.extend([str(FIXTURE_DIR / "validate.py"), "--vm-evidence", handle.name])
+                    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertEqual(completed.stderr, "")
+                    payload = json.loads(completed.stdout)
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                    self.assertNotIn('"type": "bind"', completed.stdout)
+                    self.assertNotIn("Traceback", completed.stdout)
 
     def test_unknown_keys_and_exact_scalar_types_fail_closed(self) -> None:
         unknown = copy.deepcopy(self.document)

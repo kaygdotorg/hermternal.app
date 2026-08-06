@@ -65,10 +65,13 @@ storage, netavark networking, Compose config rendering, resource limits, no
 published ports, named-volume isolation, and cleanup.
 
 Docker is retained as one controlled compatibility lane. It renders the same
-policy with Docker's `json-file` log options and runs `compose config` only. It
-does not start a second stack, and the harness does not assume that Docker and
-Podman Compose silently implement the same logging or networking semantics.
-The VM report must identify any difference observed by inspection.
+policy with Docker's `json-file` log options. The authorized root-only
+observation started the prepared Docker project once, reached no readiness
+state, exited 126, and completed exact project-only cleanup with zero leftovers.
+The run is compatibility evidence only; it is not release proof. Docker and
+Podman Compose semantics are not assumed equivalent, and the VM report records
+the engine, provider, version, config status, bounded raw observations, mount
+type, and cleanup result.
 
 ## VM smoke observation
 
@@ -78,8 +81,8 @@ it uses `COPY --link --chmod=a+rX,go-w`. The checkout stayed read-only. A
 short-lived VM-only adapter changed only that instruction to `COPY . .` so the
 same pinned source context could be built; it did not change application files,
 the entrypoint dispatcher, s6 scripts, or runtime content. The adapter is not
-stock-Dockerfile compatibility evidence, and the separate Docker lane remains
-configuration-only.
+stock-Dockerfile compatibility evidence. The Docker compatibility lane reused
+the already identified pinned image and did not rebuild the stock Dockerfile.
 
 The first `podman compose` invocation selected the external Docker Compose
 provider. Its configuration rendered safely, but start was blocked because the
@@ -89,12 +92,28 @@ published no ports, used the generated internal network and named volume, and
 applied the rendered CPU, memory, PID, tmpfs, shared-memory, log, capability,
 no-new-privileges, and `restart: "no"` limits. Readiness failed with exit 2
 while the pinned s6 startup emitted bounded `supervise-perms` chown warnings.
-The security policy was not relaxed and no replacement stack was started.
+The security policy was not relaxed and no replacement Podman stack was
+started.
 
-Teardown used only `down --volumes --remove-orphans` for the generated project
-and proved zero leftover containers, networks, and volumes. The redacted
-observation is retained in `vm-smoke-evidence.json`; it is blocked readiness
-evidence, not a successful Hermes smoke or R-02 release proof.
+The separate authorized root-only Docker compatibility observation used the
+same generated no-provider policy and exact project. Docker Compose config
+passed with no ports, host bind, or host network. The container started,
+reached no readiness state, exited 126, and was torn down with
+`down --volumes --remove-orphans`; zero containers, networks, and volumes
+remained. Its inspect evidence identifies the `/opt/data` mount as the exact
+generated named volume with `type=volume` and no `type=bind`. Neither executor
+result claims readiness or release proof.
+
+The evidence file is strict-schema validated, redaction-checked, and pinned by
+canonical JSON digest plus an anchor file. It includes Debian OS metadata,
+Podman/Docker Compose engine/provider/version metadata, and bounded raw
+observations for config, start, readiness, inspection, and cleanup. The Docker
+inspection retains only an allowlisted `.Mounts` projection: exactly one
+`type=volume` entry named `hermes-disposable-docker-078ac20d_data` at
+`/opt/data`; host `type=bind` entries and host `Source` paths are rejected or
+omitted. The redacted observation is retained in `vm-smoke-evidence.json`; it
+is blocked readiness evidence, not a successful Hermes smoke or R-02 release
+proof.
 
 The canonical renderer is executor-selectable:
 
@@ -133,7 +152,9 @@ scalar types are required, including under `python3 -O`.
 CLI failures emit one bounded JSON line with no traceback or argparse usage
 text. Diagnostics redact credential headers, Basic and Bearer values, cookies,
 URLs and data URLs, hostnames and addresses, paths and filenames, private-key
-markers, and Base64-shaped payloads. Hostile object keys are never echoed.
+markers, Base64-shaped payloads, and `api_key`/`access_key` assignments. Only
+exactly pinned source/tree and image/artifact digests are retained; arbitrary
+40- or 64-hex values are rejected. Hostile object keys are never echoed.
 
 ## Benchmark observations
 

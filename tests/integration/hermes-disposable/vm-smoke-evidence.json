@@ -2,8 +2,12 @@
   "schema": "hermternal.integration.hermes-disposable-vm-evidence.v1",
   "operation": "R-02A",
   "synthetic_only": true,
-  "host": "[REDACTED_HOST]",
-  "account": "hermternal-test",
+  "os": {
+    "distribution": "Debian GNU/Linux",
+    "version_id": "13",
+    "kernel": "Linux 6.12.100+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.100-1 (2026-07-30) x86_64",
+    "architecture": "x86_64"
+  },
   "source": {
     "commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
     "tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
@@ -11,7 +15,7 @@
   },
   "image": {
     "reference": "hermes-agent:hermternal-f5be9236",
-    "id": "c8dd2d7380d87e7ebdf7f603d63e7555e36e9445b982ca926d663b0101a3be18",
+    "id": "sha256:c8dd2d7380d87e7ebdf7f603d63e7555e36e9445b982ca926d663b0101a3be18",
     "repo_digest": "sha256:076b22d5d78d978d8b0dfd4cef84fb3cb0b817feea4003b6085777e7c5e7737a",
     "entrypoint_preserved": true,
     "compatibility_adapter_sha256": "4b37f4f6fcf00394f4292810772d96ed28141ff1ce44e24116f347347d977d03"
@@ -28,14 +32,51 @@
     "subuid": "165536:65536",
     "subgid": "165536:65536"
   },
+  "provenance": {
+    "compose": {
+      "podman": {
+        "engine": "podman",
+        "provider": "podman-compose",
+        "version": "1.3.0",
+        "config_status": "pass",
+        "config_bytes": 799
+      },
+      "docker": {
+        "engine": "docker",
+        "provider": "docker compose",
+        "version": "5.4.0",
+        "config_status": "pass",
+        "config_bytes": 958
+      }
+    },
+    "raw_observations": {
+      "podman": [
+        "compose_config=pass bytes=799 ports=none host_profile_bind=none host_network=none",
+        "start=container_started true",
+        "readiness=failed exit_code=2",
+        "network=internal volume=generated_named",
+        "teardown=status 0",
+        "cleanup=containers 0 networks 0 volumes 0"
+      ],
+      "docker": [
+        "compose_config=pass bytes=958 ports=none host_profile_bind=none host_network=none",
+        "start=container_started true",
+        "readiness=failed exit_code=126",
+        "mount=type=volume name=hermes-disposable-docker-078ac20d_data destination=/opt/data",
+        "teardown=status 0",
+        "cleanup=containers 0 networks 0 volumes 0"
+      ]
+    }
+  },
   "compatibility": {
-    "stock_dockerfile_build": "blocked_unsupported_copy_flags",
+    "stock_dockerfile_build": "passed_existing_image",
     "podman_adapter_change": "replace_one_COPY_link_symbolic_chmod_with_COPY_plain_context",
     "podman_adapter_runtime_content": "pinned_source_context_and_runtime_files_unchanged",
     "stock_podman_compose_config": "pass",
     "stock_podman_compose_start": "blocked_missing_podman_api_socket",
-    "docker_compose_lane": "config_only_pass",
-    "docker_compose_project": "hermes-disposable-docker-078ac20d"
+    "docker_compose_lane": "runtime_blocked_exit_126",
+    "docker_compose_project": "hermes-disposable-docker-078ac20d",
+    "docker_image_id": "sha256:a65da985b4f76e6488872bc2263329f19a01806e9a541cd22d316589b5dc0040"
   },
   "render": {
     "project": "hermes-disposable-smoke-8c35d19d",
@@ -61,7 +102,7 @@
   },
   "runtime": {
     "container_started": true,
-    "container_id": "256ae23d98556c013121926472915663f3e22db96435e3a8732732f0f1dc26f5",
+    "container_id": "[REDACTED_CONTAINER_ID]",
     "readiness": "failed",
     "exit_code": 2,
     "redacted_failure": "pinned s6 startup emitted bounded supervise-perms chown warnings and exited 2",
@@ -70,12 +111,36 @@
     "pty": false,
     "public_ports": false
   },
+  "docker_runtime": {
+    "project": "hermes-disposable-docker-078ac20d",
+    "container_started": true,
+    "container_id": "[REDACTED_CONTAINER_ID]",
+    "readiness": "failed",
+    "exit_code": 126,
+    "redacted_failure": "Docker compatibility container exited 126 before readiness; no release proof",
+    "model_turn": false,
+    "browser_auth": false,
+    "pty": false,
+    "public_ports": false,
+    "teardown_status": 0,
+    "leftover_containers": 0,
+    "leftover_networks": 0,
+    "leftover_volumes": 0
+  },
   "inspection": {
     "container_state_observed": "exited_2",
     "ports": "none_observed",
     "network_and_volume": "observed_before_teardown",
     "resource_limits": "verified_from_native_compose_config",
-    "container_inspect_record": "not_retained_before_teardown"
+    "container_inspect_record": "bounded_redacted_summary",
+    "docker_mounts": [
+      {
+        "type": "volume",
+        "name": "hermes-disposable-docker-078ac20d_data",
+        "destination": "/opt/data"
+      }
+    ],
+    "docker_mount_observation": "type=volume name=hermes-disposable-docker-078ac20d_data destination=/opt/data; no type=bind"
   },
   "teardown": {
     "command": ["down", "--volumes", "--remove-orphans"],

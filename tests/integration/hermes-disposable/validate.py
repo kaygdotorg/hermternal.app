@@ -32,8 +32,11 @@ ROOT = Path(__file__).resolve().parent
 CASES_PATH = ROOT / "cases.json"
 BASELINE_PATH = ROOT / "validation-baseline.json"
 BASELINE_ANCHOR_PATH = ROOT / "validation-baseline-sha256.txt"
+VM_EVIDENCE_PATH = ROOT / "vm-smoke-evidence.json"
+VM_EVIDENCE_ANCHOR_PATH = ROOT / "vm-smoke-evidence-sha256.txt"
 SCHEMA = "hermternal.integration.hermes-disposable.v1"
 BASELINE_SCHEMA = "hermternal.integration.hermes-disposable-baseline.v1"
+VM_EVIDENCE_SCHEMA = "hermternal.integration.hermes-disposable-vm-evidence.v1"
 OPERATION = "R-02A"
 CONTRACT = "hermes-disposable-v1"
 PINNED_HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
@@ -56,12 +59,13 @@ ARTIFACT_FILES = ("README.md", "cases.json", "test_validate.py")
 # These values are filled after the focused fixture is written and benchmarked.
 # The validator source uses a normalized self-identity to avoid a circular hash.
 PINNED_RETAINED_ARTIFACTS: dict[str, tuple[int, str]] = {
-    "README.md": (8563, "a747092dc27284ebef42c0a1f218cdc7d4a55c5026cb53cd831afd857b070385"),
+    "README.md": (9922, "88f64df129f8bcffe5005573b7eaeebcc2b9adf79f5a1b8d898c5209d5c3ad16"),
     "cases.json": (11331, "d44ea076192e5e391082820b85c4ed3937cef377b57e4a7e8719dcbb01af5475"),
-    "test_validate.py": (14398, "7a2095b93fb7f8ba698b69176ce34c3fcd3792e66c1f35f183c65d51befd8a0c"),
+    "test_validate.py": (19769, "8857de15f79d8f00629a05a273e169301e5bb0df2ec9de647f98b36215a5a787"),
 }
-PINNED_VALIDATOR_SOURCE_SHA256 = "401dc6a66b74ca589501a6eee2cbe2ba9d11066cf1b5a76f499cdf269e0a0ea3"
+PINNED_VALIDATOR_SOURCE_SHA256 = "e9f189d8d75cbee7b76ab774be5a852e806c7d6610d857bdcaa9e5b1ba25c9e4"
 PINNED_BASELINE_EVIDENCE_SHA256 = "3ecda8c4f9ca1a290166ec06c07415df8f2f3b12420113f9d792139d2fd176f0"
+PINNED_VM_EVIDENCE_SHA256 = "bfe5b680bd77a395c3d64663896f8a5774974e62812626b90fd6e307acb4d4d5"
 VALIDATOR_IDENTITY_RE = re.compile(r'(?m)^PINNED_VALIDATOR_SOURCE_SHA256 = "[^"]+"$')
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -137,6 +141,113 @@ BASELINE_DISTRIBUTION_KEYS = ("min_ms", "p50_ms", "p95_ms", "p99_ms", "max_ms", 
 BASELINE_ENVIRONMENT_KEYS = ("platform", "python")
 BASELINE_ARTIFACT_KEYS = ("files", "bytes", "sha256")
 BASELINE_EVIDENCE_KEYS = ("schema", "validator", "fixture", "metric", "runs", "threshold")
+VM_EVIDENCE_KEYS = (
+    "schema",
+    "operation",
+    "synthetic_only",
+    "os",
+    "source",
+    "image",
+    "executor",
+    "provenance",
+    "compatibility",
+    "render",
+    "runtime",
+    "docker_runtime",
+    "inspection",
+    "teardown",
+    "status",
+    "threshold",
+    "redacted",
+)
+VM_OS_KEYS = ("distribution", "version_id", "kernel", "architecture")
+VM_SOURCE_KEYS = ("commit", "tree", "dockerfile_sha256")
+VM_IMAGE_KEYS = ("reference", "id", "repo_digest", "entrypoint_preserved", "compatibility_adapter_sha256")
+VM_EXECUTOR_KEYS = (
+    "name",
+    "version",
+    "rootless",
+    "cgroup_manager",
+    "cgroup_filesystem",
+    "network_backend",
+    "storage_driver",
+    "compose_provider",
+    "subuid",
+    "subgid",
+)
+VM_PROVENANCE_KEYS = ("compose", "raw_observations")
+VM_COMPOSE_PROVENANCE_KEYS = ("podman", "docker")
+VM_RAW_OBSERVATION_KEYS = ("podman", "docker")
+VM_COMPATIBILITY_KEYS = (
+    "stock_dockerfile_build",
+    "podman_adapter_change",
+    "podman_adapter_runtime_content",
+    "stock_podman_compose_config",
+    "stock_podman_compose_start",
+    "docker_compose_lane",
+    "docker_compose_project",
+    "docker_image_id",
+)
+VM_RENDER_KEYS = (
+    "project",
+    "network",
+    "volume",
+    "lane",
+    "published_ports",
+    "host_profile_bind",
+    "host_network",
+    "internal_network",
+    "named_volume",
+    "restart",
+    "cpu_limit",
+    "memory_limit",
+    "pid_limit",
+    "tmpfs",
+    "shm_size",
+    "log_driver",
+    "log_max_size",
+    "cap_drop",
+    "no_new_privileges",
+    "provider_credentials",
+)
+VM_RUNTIME_KEYS = (
+    "container_started",
+    "container_id",
+    "readiness",
+    "exit_code",
+    "redacted_failure",
+    "model_turn",
+    "browser_auth",
+    "pty",
+    "public_ports",
+)
+VM_DOCKER_RUNTIME_KEYS = (
+    "project",
+    "container_started",
+    "container_id",
+    "readiness",
+    "exit_code",
+    "redacted_failure",
+    "model_turn",
+    "browser_auth",
+    "pty",
+    "public_ports",
+    "teardown_status",
+    "leftover_containers",
+    "leftover_networks",
+    "leftover_volumes",
+)
+VM_INSPECTION_KEYS = (
+    "container_state_observed",
+    "ports",
+    "network_and_volume",
+    "resource_limits",
+    "container_inspect_record",
+    "docker_mounts",
+    "docker_mount_observation",
+)
+VM_DOCKER_MOUNT_KEYS = ("type", "name", "destination")
+VM_TEARDOWN_KEYS = ("command", "status", "leftover_containers", "leftover_networks", "leftover_volumes")
 BASELINE_COMMANDS = {
     "normal": "python3 tests/integration/hermes-disposable/validate.py",
     "optimized": "python3 -O tests/integration/hermes-disposable/validate.py",
@@ -267,13 +378,40 @@ SENSITIVE_NORMALIZED_KEYS = frozenset(
 )
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?<![A-Za-z0-9])(?P<key>(?:password|passphrase|token|secret|authorization|bearer|"
-    r"cookie(?:[_ .-]*(?:value|id))?|credential|credentials|host(?:name)?|"
+    r"api[_ .-]*key|access[_ .-]*key|cookie(?:[_ .-]*(?:value|id))?|credential|credentials|host(?:name)?|"
     r"(?:private[_ .-]*)?address|session(?:[_ .-]*(?:id|token|value))?|"
     r"ticket(?:[_ .-]*(?:id|value|fragment))?|profile[_ .-]*(?:path|bind)|"
     r"user[_ .-]*data|file(?:name|path))\s*[:=]\s*)"
-    r"(?P<value>[^\s,}\]]+)",
+    r"(?!Bearer\b|Basic\b)(?P<value>[^\s,}\]]+)",
     re.IGNORECASE,
 )
+# Redaction accepts only exact digests in their known fixture fields. A
+# digest-shaped value is not safe merely because it appears under a key named
+# `sha256`: that key can also carry a credential in an untrusted observation.
+APPROVED_DIGEST_FIELDS: dict[str, frozenset[str]] = {
+    "pinned_source_sha": frozenset({PINNED_HERMES_SHA}),
+    "pinned_source_tree": frozenset({PINNED_HERMES_TREE}),
+    "commit": frozenset({PINNED_HERMES_SHA}),
+    "tree": frozenset({PINNED_HERMES_TREE}),
+    "dockerfile_sha256": frozenset({"a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc"}),
+    "id": frozenset({"sha256:c8dd2d7380d87e7ebdf7f603d63e7555e36e9445b982ca926d663b0101a3be18"}),
+    "repo_digest": frozenset({"sha256:076b22d5d78d978d8b0dfd4cef84fb3cb0b817feea4003b6085777e7c5e7737a"}),
+    "compatibility_adapter_sha256": frozenset({"4b37f4f6fcf00394f4292810772d96ed28141ff1ce44e24116f347347d977d03"}),
+    "docker_image_id": frozenset({"sha256:a65da985b4f76e6488872bc2263329f19a01806e9a541cd22d316589b5dc0040"}),
+    "sha256": frozenset({"fb7073fc23e48f913ac851cdc1dc97c246dc70155d86b6af05d63f78be6a9254"}),
+}
+APPROVED_STRUCTURAL_STRINGS = frozenset(
+    {
+        "/opt/data",
+        "/tmp:size=64m,mode=1777",
+        "/run:size=16m,mode=755",
+        "mount=type=volume name=hermes-disposable-docker-078ac20d_data destination=/opt/data",
+        "type=volume name=hermes-disposable-docker-078ac20d_data destination=/opt/data; no type=bind",
+        "compose_config=pass bytes=799 ports=none host_profile_bind=none host_network=none",
+        "compose_config=pass bytes=958 ports=none host_profile_bind=none host_network=none",
+    }
+)
+DIGEST_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64}|sha256:[0-9a-f]{64})")
 URL_RE = re.compile(r"\b(?:https?|ssh|file)://[^\s,}\]]+", re.IGNORECASE)
 DATA_URL_RE = re.compile(r"\bdata:[^\s,}\]]+,[^\s,}\]]+", re.IGNORECASE)
 HOSTNAME_RE = re.compile(
@@ -334,13 +472,20 @@ def compact_error(message: object) -> str:
     """Redact untrusted diagnostics before applying the fixed output cap."""
 
     redacted = str(message)
+
+    def redact_assignment(match: re.Match[str]) -> str:
+        # Normalize dotted spellings so the later hostname pass cannot mistake
+        # a redacted key such as `access.key` for a host and expose its label.
+        safe_key = match.group("key").replace(".", "_")
+        return f"{safe_key}[REDACTED]"
+
+    # Apply structured assignments first. Otherwise a dotted key such as
+    # `access.key=...` is mistaken for a hostname and its value can survive
+    # the hostname replacement.
+    redacted = SENSITIVE_ASSIGNMENT_RE.sub(redact_assignment, redacted)
     for pattern in SECRET_VALUE_PATTERNS:
         redacted = pattern.sub("[REDACTED]", redacted)
 
-    def redact_assignment(match: re.Match[str]) -> str:
-        return f"{match.group('key')}[REDACTED]"
-
-    redacted = SENSITIVE_ASSIGNMENT_RE.sub(redact_assignment, redacted)
     # Error labels are fixed; anything still shaped like a hostile object key or
     # shell fragment is safer as a marker than as retained diagnostic material.
     redacted = re.sub(r"(?:attacker|secret|credential)[^\s,}\]]*", "[REDACTED]", redacted, flags=re.IGNORECASE)
@@ -483,19 +628,22 @@ def _normalize_sensitive_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", key.casefold())
 
 
-def _walk_redaction(value: Any, *, allow_benchmark_paths: bool = False) -> None:
+def _walk_redaction(value: Any, *, allow_benchmark_paths: bool = False, field_name: str | None = None) -> None:
     if type(value) is dict:
         for key, child in value.items():
             require(type(key) is str, "redaction object key must be text")
             require(_normalize_sensitive_key(key) not in SENSITIVE_NORMALIZED_KEYS, "sensitive fixture field is not allowed")
-            _walk_redaction(child, allow_benchmark_paths=allow_benchmark_paths)
+            _walk_redaction(child, allow_benchmark_paths=allow_benchmark_paths, field_name=key)
         return
     if type(value) is list:
         for child in value:
-            _walk_redaction(child, allow_benchmark_paths=allow_benchmark_paths)
+            _walk_redaction(child, allow_benchmark_paths=allow_benchmark_paths, field_name=field_name)
         return
     if type(value) is str:
-        if HEX40_RE.fullmatch(value) or HEX64_RE.fullmatch(value):
+        if value in APPROVED_STRUCTURAL_STRINGS:
+            return
+        if DIGEST_RE.fullmatch(value):
+            require(value in APPROVED_DIGEST_FIELDS.get(field_name or "", frozenset()), "unapproved digest-shaped fixture value is not allowed")
             return
         for pattern in SECRET_VALUE_PATTERNS:
             if allow_benchmark_paths and pattern in {ABSOLUTE_PATH_RE, FILENAME_RE, HOSTNAME_RE}:
@@ -559,6 +707,23 @@ def strict_equal(actual: Any, expected: Any, label: str) -> None:
             strict_equal(actual_value, expected_value, f"{label} item")
         return
     require(actual == expected, f"{label} value changed")
+
+
+def validate_docker_mounts(mounts: Any) -> None:
+    """Validate the redacted persistent-volume projection of Docker `.Mounts`."""
+
+    require(type(mounts) is list and len(mounts) == 1, "Docker .Mounts must contain exactly one retained data mount")
+    mount = strict_keys(mounts[0], VM_DOCKER_MOUNT_KEYS, "Docker .Mounts entry")
+    require(mount["type"] != "bind", "Docker host bind mounts are not allowed")
+    strict_equal(
+        mount,
+        {
+            "type": "volume",
+            "name": "hermes-disposable-docker-078ac20d_data",
+            "destination": "/opt/data",
+        },
+        "Docker .Mounts data volume",
+    )
 
 
 def _slug(value: Any, pattern: re.Pattern[str], label: str) -> str:
@@ -956,6 +1121,252 @@ def _validate_baseline_anchor(baseline: dict[str, Any], anchor_path: Path) -> No
     require(anchor == hashlib.sha256(_canonical_baseline_bytes(baseline)).hexdigest(), "baseline canonical digest changed")
 
 
+def _canonical_vm_evidence_bytes(evidence: dict[str, Any]) -> bytes:
+    return json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def _validate_vm_evidence_anchor(evidence: dict[str, Any], anchor_path: Path) -> None:
+    try:
+        anchor = anchor_path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as exc:
+        raise ValidationError("VM evidence anchor is unavailable") from exc
+    require(HEX64_RE.fullmatch(anchor) is not None, "VM evidence anchor is malformed")
+    digest = hashlib.sha256(_canonical_vm_evidence_bytes(evidence)).hexdigest()
+    require(anchor == digest, "VM evidence canonical digest changed")
+
+
+def validate_vm_evidence(
+    evidence: Any,
+    *,
+    evidence_path: Path = VM_EVIDENCE_PATH,
+    anchor_path: Path = VM_EVIDENCE_ANCHOR_PATH,
+) -> None:
+    """Validate the one redacted VM observation without claiming readiness."""
+
+    record = strict_keys(evidence, VM_EVIDENCE_KEYS, "VM evidence")
+    require(record["schema"] == VM_EVIDENCE_SCHEMA, "VM evidence schema changed")
+    require(record["operation"] == OPERATION, "VM evidence operation changed")
+    require(_bool(record["synthetic_only"], "VM evidence synthetic_only") is True, "VM evidence must be synthetic")
+
+    os_info = strict_keys(record["os"], VM_OS_KEYS, "VM evidence OS")
+    require(os_info == {
+        "distribution": "Debian GNU/Linux",
+        "version_id": "13",
+        "kernel": "Linux 6.12.100+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.100-1 (2026-07-30) x86_64",
+        "architecture": "x86_64",
+    }, "VM evidence OS provenance changed")
+
+    source = strict_keys(record["source"], VM_SOURCE_KEYS, "VM evidence source")
+    source_commit = _text(source["commit"], "VM evidence source commit")
+    source_tree = _text(source["tree"], "VM evidence source tree")
+    dockerfile_sha = _text(source["dockerfile_sha256"], "VM evidence Dockerfile digest")
+    require(source_commit == PINNED_HERMES_SHA and HEX40_RE.fullmatch(source_commit), "VM evidence source commit changed")
+    require(source_tree == PINNED_HERMES_TREE and HEX40_RE.fullmatch(source_tree), "VM evidence source tree changed")
+    require(HEX64_RE.fullmatch(dockerfile_sha) is not None, "VM evidence Dockerfile digest is malformed")
+
+    image = strict_keys(record["image"], VM_IMAGE_KEYS, "VM evidence image")
+    image_reference = _text(image["reference"], "VM evidence image reference")
+    image_id = _text(image["id"], "VM evidence image ID")
+    image_repo_digest = _text(image["repo_digest"], "VM evidence image digest")
+    adapter_sha = _text(image["compatibility_adapter_sha256"], "VM evidence adapter digest")
+    require(image_reference == IMAGE_REFERENCE, "VM evidence image reference changed")
+    require(image_id == "sha256:c8dd2d7380d87e7ebdf7f603d63e7555e36e9445b982ca926d663b0101a3be18", "VM evidence Podman image identity changed")
+    require(image_repo_digest == "sha256:076b22d5d78d978d8b0dfd4cef84fb3cb0b817feea4003b6085777e7c5e7737a", "VM evidence image digest changed")
+    require(_bool(image["entrypoint_preserved"], "VM evidence entrypoint_preserved") is True, "VM evidence entrypoint was not preserved")
+    require(HEX64_RE.fullmatch(adapter_sha) is not None, "VM evidence adapter digest is malformed")
+
+    executor = strict_keys(record["executor"], VM_EXECUTOR_KEYS, "VM evidence executor")
+    strict_equal(
+        executor,
+        {
+            "name": "podman",
+            "version": "5.4.2",
+            "rootless": True,
+            "cgroup_manager": "systemd",
+            "cgroup_filesystem": "cgroup2fs",
+            "network_backend": "netavark",
+            "storage_driver": "overlay",
+            "compose_provider": "podman-compose",
+            "subuid": "165536:65536",
+            "subgid": "165536:65536",
+        },
+        "VM evidence executor",
+    )
+
+    provenance = strict_keys(record["provenance"], VM_PROVENANCE_KEYS, "VM evidence provenance")
+    compose = strict_keys(provenance["compose"], VM_COMPOSE_PROVENANCE_KEYS, "VM evidence Compose provenance")
+    strict_equal(
+        compose,
+        {
+            "podman": {
+                "engine": "podman",
+                "provider": "podman-compose",
+                "version": "1.3.0",
+                "config_status": "pass",
+                "config_bytes": 799,
+            },
+            "docker": {
+                "engine": "docker",
+                "provider": "docker compose",
+                "version": "5.4.0",
+                "config_status": "pass",
+                "config_bytes": 958,
+            },
+        },
+        "VM evidence Compose provenance",
+    )
+    raw_observations = strict_keys(provenance["raw_observations"], VM_RAW_OBSERVATION_KEYS, "VM evidence raw observations")
+    expected_raw_observations = {
+        "podman": [
+            "compose_config=pass bytes=799 ports=none host_profile_bind=none host_network=none",
+            "start=container_started true",
+            "readiness=failed exit_code=2",
+            "network=internal volume=generated_named",
+            "teardown=status 0",
+            "cleanup=containers 0 networks 0 volumes 0",
+        ],
+        "docker": [
+            "compose_config=pass bytes=958 ports=none host_profile_bind=none host_network=none",
+            "start=container_started true",
+            "readiness=failed exit_code=126",
+            "mount=type=volume name=hermes-disposable-docker-078ac20d_data destination=/opt/data",
+            "teardown=status 0",
+            "cleanup=containers 0 networks 0 volumes 0",
+        ],
+    }
+    strict_equal(raw_observations, expected_raw_observations, "VM evidence raw observations")
+    for executor_name, observations in raw_observations.items():
+        require(len(observations) <= 8, f"VM evidence {executor_name} observations are unbounded")
+        for observation in observations:
+            _text(observation, f"VM evidence {executor_name} observation", max_length=240)
+
+    compatibility = strict_keys(record["compatibility"], VM_COMPATIBILITY_KEYS, "VM evidence compatibility")
+    strict_equal(
+        compatibility,
+        {
+            "stock_dockerfile_build": "passed_existing_image",
+            "podman_adapter_change": "replace_one_COPY_link_symbolic_chmod_with_COPY_plain_context",
+            "podman_adapter_runtime_content": "pinned_source_context_and_runtime_files_unchanged",
+            "stock_podman_compose_config": "pass",
+            "stock_podman_compose_start": "blocked_missing_podman_api_socket",
+            "docker_compose_lane": "runtime_blocked_exit_126",
+            "docker_compose_project": "hermes-disposable-docker-078ac20d",
+            "docker_image_id": "sha256:a65da985b4f76e6488872bc2263329f19a01806e9a541cd22d316589b5dc0040",
+        },
+        "VM evidence compatibility",
+    )
+
+    render = strict_keys(record["render"], VM_RENDER_KEYS, "VM evidence render")
+    strict_equal(
+        render,
+        {
+            "project": "hermes-disposable-smoke-8c35d19d",
+            "network": "hermes-disposable-smoke-8c35d19d_internal",
+            "volume": "hermes-disposable-smoke-8c35d19d_data",
+            "lane": "no-provider",
+            "published_ports": False,
+            "host_profile_bind": False,
+            "host_network": False,
+            "internal_network": True,
+            "named_volume": True,
+            "restart": "no",
+            "cpu_limit": "0.50",
+            "memory_limit": "512m",
+            "pid_limit": 256,
+            "tmpfs": ["/tmp:size=64m,mode=1777", "/run:size=16m,mode=755"],
+            "shm_size": "64m",
+            "log_driver": "k8s-file",
+            "log_max_size": "1m",
+            "cap_drop": ["ALL"],
+            "no_new_privileges": True,
+            "provider_credentials": False,
+        },
+        "VM evidence render",
+    )
+
+    runtime = strict_keys(record["runtime"], VM_RUNTIME_KEYS, "VM evidence Podman runtime")
+    strict_equal(
+        runtime,
+        {
+            "container_started": True,
+            "container_id": "[REDACTED_CONTAINER_ID]",
+            "readiness": "failed",
+            "exit_code": 2,
+            "redacted_failure": "pinned s6 startup emitted bounded supervise-perms chown warnings and exited 2",
+            "model_turn": False,
+            "browser_auth": False,
+            "pty": False,
+            "public_ports": False,
+        },
+        "VM evidence Podman runtime",
+    )
+
+    docker_runtime = strict_keys(record["docker_runtime"], VM_DOCKER_RUNTIME_KEYS, "VM evidence Docker runtime")
+    strict_equal(
+        docker_runtime,
+        {
+            "project": "hermes-disposable-docker-078ac20d",
+            "container_started": True,
+            "container_id": "[REDACTED_CONTAINER_ID]",
+            "readiness": "failed",
+            "exit_code": 126,
+            "redacted_failure": "Docker compatibility container exited 126 before readiness; no release proof",
+            "model_turn": False,
+            "browser_auth": False,
+            "pty": False,
+            "public_ports": False,
+            "teardown_status": 0,
+            "leftover_containers": 0,
+            "leftover_networks": 0,
+            "leftover_volumes": 0,
+        },
+        "VM evidence Docker runtime",
+    )
+
+    inspection = strict_keys(record["inspection"], VM_INSPECTION_KEYS, "VM evidence inspection")
+    validate_docker_mounts(inspection["docker_mounts"])
+    strict_equal(
+        inspection,
+        {
+            "container_state_observed": "exited_2",
+            "ports": "none_observed",
+            "network_and_volume": "observed_before_teardown",
+            "resource_limits": "verified_from_native_compose_config",
+            "container_inspect_record": "bounded_redacted_summary",
+            "docker_mounts": [
+                {
+                    "type": "volume",
+                    "name": "hermes-disposable-docker-078ac20d_data",
+                    "destination": "/opt/data",
+                }
+            ],
+            "docker_mount_observation": "type=volume name=hermes-disposable-docker-078ac20d_data destination=/opt/data; no type=bind",
+        },
+        "VM evidence inspection",
+    )
+
+    teardown = strict_keys(record["teardown"], VM_TEARDOWN_KEYS, "VM evidence Podman teardown")
+    strict_equal(
+        teardown,
+        {
+            "command": ["down", "--volumes", "--remove-orphans"],
+            "status": 0,
+            "leftover_containers": 0,
+            "leftover_networks": 0,
+            "leftover_volumes": 0,
+        },
+        "VM evidence Podman teardown",
+    )
+    require(record["status"] == "blocked_readiness", "VM evidence cannot claim release proof")
+    require(record["threshold"] is None, "VM evidence must not invent a threshold")
+    require(_bool(record["redacted"], "VM evidence redacted") is True, "VM evidence must be redacted")
+
+    validate_redaction(record)
+    digest = hashlib.sha256(_canonical_vm_evidence_bytes(record)).hexdigest()
+    require(digest == PINNED_VM_EVIDENCE_SHA256, "VM evidence canonical digest changed")
+    _validate_vm_evidence_anchor(record, anchor_path)
+
+
 def validate_baseline(baseline: Any, root: Path = ROOT, anchor_path: Path = BASELINE_ANCHOR_PATH) -> None:
     record = strict_keys(baseline, BASELINE_ROOT_KEYS, "baseline")
     require(record["schema"] == BASELINE_SCHEMA, "baseline schema changed")
@@ -997,13 +1408,24 @@ def validate_baseline(baseline: Any, root: Path = ROOT, anchor_path: Path = BASE
     _validate_baseline_anchor(baseline, anchor_path)
 
 
-def validate_all(*, cases_path: Path = CASES_PATH, baseline_path: Path = BASELINE_PATH, anchor_path: Path = BASELINE_ANCHOR_PATH, root: Path = ROOT) -> tuple[int, int]:
+def validate_all(
+    *,
+    cases_path: Path = CASES_PATH,
+    baseline_path: Path = BASELINE_PATH,
+    anchor_path: Path = BASELINE_ANCHOR_PATH,
+    evidence_path: Path = VM_EVIDENCE_PATH,
+    evidence_anchor_path: Path = VM_EVIDENCE_ANCHOR_PATH,
+    root: Path = ROOT,
+) -> tuple[int, int]:
     document = load_json(cases_path)
     validate_redaction(document)
     validate_cases_document(document)
     baseline = load_json(baseline_path)
     validate_redaction(baseline, allow_benchmark_paths=True)
     validate_baseline(baseline, root, anchor_path)
+    evidence = load_json(evidence_path)
+    validate_redaction(evidence)
+    validate_vm_evidence(evidence, evidence_path=evidence_path, anchor_path=evidence_anchor_path)
     return len(document["cases"]), baseline["artifact"]["bytes"]
 
 
@@ -1058,6 +1480,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--cases", type=Path, default=CASES_PATH)
         parser.add_argument("--baseline", type=Path, default=BASELINE_PATH)
         parser.add_argument("--baseline-anchor", type=Path, default=BASELINE_ANCHOR_PATH)
+        parser.add_argument("--vm-evidence", type=Path, default=VM_EVIDENCE_PATH)
+        parser.add_argument("--vm-evidence-anchor", type=Path, default=VM_EVIDENCE_ANCHOR_PATH)
         parser.add_argument("--skip-baseline", action="store_true")
         parser.add_argument("--render", type=Path)
         parser.add_argument("--stack-id", default="fixture")
@@ -1077,6 +1501,9 @@ def main(argv: list[str] | None = None) -> int:
             validate_baseline(baseline, ROOT, args.baseline_anchor)
             case_count = len(document["cases"])
             artifact_bytes = baseline["artifact"]["bytes"]
+        evidence = load_json(args.vm_evidence)
+        validate_redaction(evidence)
+        validate_vm_evidence(evidence, evidence_path=args.vm_evidence, anchor_path=args.vm_evidence_anchor)
         rendered = None
         if args.render is not None:
             rendered = render_stack(args.stack_id, instance=args.instance, lane=args.lane, executor=args.executor)
