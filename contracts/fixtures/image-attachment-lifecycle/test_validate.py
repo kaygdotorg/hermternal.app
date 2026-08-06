@@ -70,6 +70,9 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
     def test_c13_policy_reference_and_redaction_contract(self) -> None:
         self.assertEqual(self.document["policy_reference"], VALIDATOR.C13_POLICY_REFERENCE)
         self.assertEqual(self.document["limits"]["max_bytes"], 25 * 1024 * 1024)
+        self.assertEqual(self.document["c13_consistency"]["c13_case_id"], "invalid-noncanonical-base64")
+        self.assertEqual(self.document["c13_consistency"]["c14_case_id"], "malformed-base64")
+        self.assertEqual(self.document["c13_consistency"]["expected_decision"], "rejected")
         self.assertTrue(VALIDATOR._format_agrees("gif", "gif87a"))
         self.assertTrue(VALIDATOR._format_agrees("gif", "gif89a"))
         self.assertFalse(VALIDATOR._format_agrees("gif", "png"))
@@ -136,12 +139,50 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
         semantic_drift["cases"][0]["expected"]["decision"] = "accepted"
         self.assertContractFailure(lambda: VALIDATOR.validate_document(semantic_drift), "semantic_drift")
 
-    def test_duplicate_rejection_happens_before_redaction(self) -> None:
-        text = '{"safe": "marker", "safe": "data:image/png;base64,secret"}'
+    def test_enum_fields_type_check_before_membership(self) -> None:
+        malformed_values = [[], {}, None, True, 1, 1.0]
+        for value in malformed_values:
+            with self.subTest(field="selection", value=repr(value)):
+                candidate = copy.deepcopy(self.document)
+                candidate["cases"][2]["input"]["selection"] = value
+                self.assertContractFailure(lambda: VALIDATOR.validate_document(candidate), "selection_type")
+            with self.subTest(field="data_url_state", value=repr(value)):
+                candidate = copy.deepcopy(self.document)
+                candidate["cases"][2]["input"]["data_url_state"] = value
+                self.assertContractFailure(lambda: VALIDATOR.validate_document(candidate), "data_url_state")
+            with self.subTest(field="decision", value=repr(value)):
+                candidate = copy.deepcopy(self.document)
+                candidate["cases"][2]["expected"]["decision"] = value
+                self.assertContractFailure(lambda: VALIDATOR.validate_document(candidate), "decision")
+
+    def test_malformed_scalar_cli_failures_are_controlled_in_both_modes(self) -> None:
+        candidate = copy.deepcopy(self.document)
+        candidate["cases"][2]["input"]["selection"] = []
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
-            stream.write(text)
+            json.dump(candidate, stream)
             stream.flush()
-            self.assertContractFailure(lambda: VALIDATOR.load_json(Path(stream.name)), "duplicate_key")
+            for optimized in (False, True):
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.extend([str(VALIDATOR.__file__), "--cases", stream.name, "--baseline", str(BASELINE_PATH)])
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                with self.subTest(optimized=optimized):
+                    self.assertEqual(result.returncode, 2)
+                    self.assertLessEqual(len(result.stdout), VALIDATOR.MAX_ERROR_OUTPUT_LENGTH)
+                    self.assertNotIn("Traceback", result.stdout + result.stderr)
+                    self.assertNotIn(stream.name, result.stdout + result.stderr)
+
+    def test_duplicate_rejection_happens_before_redaction(self) -> None:
+        texts = (
+            '{"safe": "marker", "safe": "data:image/png;base64,secret"}',
+            '{"very-sensitive-key": "a", "very-sensitive-key": "b"}',
+        )
+        for text in texts:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
+                stream.write(text)
+                stream.flush()
+                self.assertContractFailure(lambda: VALIDATOR.load_json(Path(stream.name)), "duplicate_key")
 
     def test_redaction_rejects_raw_material_and_forbidden_keys(self) -> None:
         raw_data_url = copy.deepcopy(self.document)
@@ -172,6 +213,24 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
         forbidden_key["cases"][0]["notes"] = {"filename_value": "synthetic"}
         self.assertContractFailure(lambda: VALIDATOR.validate_document(forbidden_key), "notes")
 
+    def test_retained_text_rejects_short_base64_hosts_and_auth_material(self) -> None:
+        mutations = (
+            ("iVBORw0KGgo", "raw_base64"),
+            ("abcdef", "raw_base64"),
+            ("12345678", "raw_base64"),
+            ("127.0.0.1", "host_value"),
+            ("localhost", "host_value"),
+            ("Basic c2VjcmV0", "credential_value"),
+            ("auth secret", "credential_value"),
+            ("password=secret", "credential_value"),
+            ("Cookie: session=secret", "credential_value"),
+        )
+        for value, code in mutations:
+            candidate = copy.deepcopy(self.document)
+            candidate["cases"][0]["notes"] = value
+            with self.subTest(value=value):
+                self.assertContractFailure(lambda: VALIDATOR.validate_document(candidate), code)
+
     def test_progress_and_retry_mutations_fail(self) -> None:
         regressed = copy.deepcopy(self.document)
         regressed["cases"][2]["progress"][2]["percent"] = 40
@@ -185,6 +244,24 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
         unknown_retry = copy.deepcopy(self.document)
         unknown_retry["cases"][14]["expected"]["retry"] = "safe_after_state_read"
         self.assertContractFailure(lambda: VALIDATOR.validate_document(unknown_retry), "semantic_drift")
+
+        for index in (1, 2, 6):
+            candidate = copy.deepcopy(self.document)
+            candidate["cases"][index]["preprocess"]["performed"] = False
+            with self.subTest(kind="preprocess", index=index):
+                self.assertContractFailure(lambda: VALIDATOR.validate_document(candidate), "preprocess_required")
+
+        for index in (2, 6):
+            candidate = copy.deepcopy(self.document)
+            candidate["cases"][index]["progress"] = []
+            with self.subTest(kind="progress", index=index):
+                self.assertContractFailure(lambda: VALIDATOR.validate_document(candidate), "preprocess_progress")
+
+        for index, code in ((4, "cancel_state_read_policy"), (13, "post_start_state_read_policy"), (14, "uncertain_state_read_policy")):
+            candidate = copy.deepcopy(self.document)
+            candidate["cases"][index]["input"]["state_read"] = "not_required"
+            with self.subTest(kind="state_read", index=index):
+                self.assertContractFailure(lambda: VALIDATOR.validate_document(candidate), code)
 
     def test_cli_is_controlled_and_capped_for_invalid_input(self) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as stream:
@@ -222,6 +299,28 @@ class ImageAttachmentLifecycleTests(unittest.TestCase):
             self.assertEqual(record["repetitions"], 30)
             self.assertEqual(len(record["samples_ms"]), 30)
             self.assertEqual(record["distribution"], VALIDATOR._distribution(record["samples_ms"]))
+
+    def test_coordinated_artifact_and_baseline_rebinding_fails(self) -> None:
+        forged_content = copy.deepcopy(self.baseline)
+        forged_content["normal"]["samples_ms"][0] = 9.99999
+        forged_content["normal"]["distribution"] = VALIDATOR._distribution(forged_content["normal"]["samples_ms"])
+        self.assertContractFailure(lambda: VALIDATOR.validate_baseline(forged_content), "baseline_canonical_anchor")
+
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory)
+            for name in VALIDATOR.ARTIFACT_NAMES:
+                (copied / name).write_bytes((FIXTURE_DIR / name).read_bytes())
+            (copied / "README.md").write_text(
+                (copied / "README.md").read_text(encoding="utf-8") + "\nSynthetic evidence note.\n",
+                encoding="utf-8",
+            )
+            forged = json.loads((copied / "baseline.json").read_text(encoding="utf-8"))
+            forged["artifact_bytes"] = VALIDATOR.artifact_bytes(copied)
+            (copied / "baseline.json").write_text(json.dumps(forged), encoding="utf-8")
+            candidate = VALIDATOR.load_json(copied / "baseline.json")
+            self.assertContractFailure(
+                lambda: VALIDATOR.validate_baseline(candidate, baseline_path=copied / "baseline.json", fixture_dir=copied),
+            )
 
 
 if __name__ == "__main__":

@@ -16,6 +16,13 @@ changing C-13. The pinned contract is `dashboard-v0.0.1`, the source evidence
 is pinned to Hermes commit `f5be9236e00ddf2f2a412697f267078fc4ee068e`, and the
 policy reference is `attachment-policy-c13-f5be9236`.
 
+The root `c13_consistency` assertion binds C-13 case
+`invalid-noncanonical-base64` to the C-14 `malformed-base64` lifecycle marker.
+That marker must be rejected before upload, remain in the failed attachment
+state, and retain only the semantic diagnostic
+`attachment[rejected;reason=malformed_base64]`. No C-13 file is edited by this
+fixture.
+
 The inherited boundary is:
 
 - images only, with the C-13 supported PNG, JPEG, GIF, WebP, and BMP families;
@@ -75,9 +82,19 @@ contract guards.
 
 The validator also checks semantic drift: the expected state must be derived
 from the case timeline and input markers, not merely copied into the fixture.
-It enforces one upload start at most, zero duplicate uploads, draft
-preservation, metadata removal, monotonic progress, safe retry rules, and the
-unknown-state no-automatic-retry rule.
+It enforces preprocessing completion before upload, required preprocess and
+upload progress phases, one upload start at most, zero duplicate uploads, draft
+preservation, metadata removal, post-start state rereads before any retry
+interpretation, safe retry rules, and the unknown-state no-automatic-retry rule.
+Retained text rejects short, unpadded, lowercase, and digit-only base64-like
+payloads, IPv4 addresses, `localhost`, auth and credential forms, and cookie
+headers in addition to URLs, paths, hosts, and filenames.
+
+The checked-in baseline is evidence, not a trust root. The validator pins the
+SHA-256 and byte count of the README, cases, tests, and baseline outside the
+mutable baseline object, and also hashes the canonical baseline content. A
+coordinated artifact plus baseline rebinding therefore fails instead of
+replacing the reviewed evidence.
 
 ## Verification commands
 

@@ -21,6 +21,17 @@
     "transcripts_retained": false,
     "user_data_retained": false
   },
+  "c13_consistency": {
+    "policy_reference": "attachment-policy-c13-f5be9236",
+    "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "rule": "noncanonical_base64_rejected_before_upload",
+    "c13_case_id": "invalid-noncanonical-base64",
+    "c14_case_id": "malformed-base64",
+    "c14_data_url_state": "malformed_base64",
+    "expected_decision": "rejected",
+    "expected_attachment_state": "failed",
+    "expected_diagnostic": "attachment[rejected;reason=malformed_base64]"
+  },
   "cases": [
     {
       "id": "empty-selection",
@@ -202,7 +213,7 @@
         "metadata_removed": false,
         "source_bytes_retained": false
       },
-      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "cancelled_after_upload_start"],
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "cancelled_after_upload_start", "state_reread"],
       "progress": [
         {"phase": "preprocess", "percent": 0},
         {"phase": "preprocess", "percent": 100},
@@ -568,7 +579,7 @@
         "metadata_removed": false,
         "source_bytes_retained": false
       },
-      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "network_interrupted"],
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "network_interrupted", "state_reread"],
       "progress": [
         {"phase": "preprocess", "percent": 0},
         {"phase": "preprocess", "percent": 100},
@@ -610,7 +621,7 @@
         "metadata_removed": false,
         "source_bytes_retained": false
       },
-      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "response_lost"],
+      "timeline": ["selected", "preprocess_started", "preprocess_completed", "upload_started", "upload_progress", "response_lost", "state_reread"],
       "progress": [
         {"phase": "preprocess", "percent": 0},
         {"phase": "preprocess", "percent": 100},
