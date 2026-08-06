@@ -96,11 +96,13 @@ wire-neutral shape. Each ready fixture root lists every checked-in artifact,
 its byte count, and its SHA-256 digest. The aggregate validator also rejects
 unsafe paths, duplicate JSON keys, non-finite numbers, oversized input,
 malformed UTF-8, credential-shaped values, live claims, `http`/`https`/`ws`/`wss`
-live hosts, symlinks, and unindexed artifacts. Registered Python artifacts are
-parsed and their retained string literals and comments are scanned, including
-assignment-shaped `ticket=`, `cookie=`, `password=`, `secret=`, and `token=`
-values; detector regex definitions and explicit domain negative-test markers are
-not treated as retained credentials. Domain validators remain authoritative for
+live hosts, symlinks, unsupported registered extensions, and unindexed
+artifacts. Registered Python artifacts are parsed and their retained string
+literals and comments are scanned, including assignment-shaped `ticket=`,
+`cookie=`, `password=`, `secret=`, and `token=` values; detector regex
+definitions and explicit domain negative-test markers are not treated as
+retained credentials. Reviewed source markers and negative-test samples use
+exact path/value allowances only. Domain validators remain authoritative for
 case semantics; the aggregate layer does not run them and makes no network
 request.
 
