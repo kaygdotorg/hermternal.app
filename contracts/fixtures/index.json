@@ -365,6 +365,53 @@
       ]
     },
     {
+      "id": "deployment-security-pty-local-adapter",
+      "path": "deployment-security/pty-local-adapter",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "web-pty"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/pty-local-adapter/README.md",
+          "sha256": "c68a3766b5e5cfcdbc9483e23169fd977f992c6fae41f51235daec50e45c9fce",
+          "size_bytes": 6207
+        },
+        {
+          "path": "deployment-security/pty-local-adapter/cases.json",
+          "sha256": "47f6dfb8c59b95a532b839e7c8bb80f17622c8bf96ebf156d075f1ada811a851",
+          "size_bytes": 21035
+        },
+        {
+          "path": "deployment-security/pty-local-adapter/test_validate.py",
+          "sha256": "4d9eee47df0e12c5d2d68dc142482200610a0d28953d4940ce5d40787d0011c9",
+          "size_bytes": 16826
+        },
+        {
+          "path": "deployment-security/pty-local-adapter/validate.py",
+          "sha256": "b7eb93de93b639baa4db91b99760c1a66fcdac2703ce2975e7e8425252484970",
+          "size_bytes": 78609
+        },
+        {
+          "path": "deployment-security/pty-local-adapter/validation-baseline.json",
+          "sha256": "1cffcd82a0f326ae625ca87ee39650822257ded8aa7d20fc2608a1e74db365e6",
+          "size_bytes": 2340
+        }
+      ]
+    },
+    {
       "id": "deployment-security-ws-ticket",
       "path": "deployment-security/ws-ticket",
       "status": "ready",
@@ -561,6 +608,53 @@
       ]
     },
     {
+      "id": "pty-detach-race",
+      "path": "pty-detach-race",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "web-pty"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "pty-detach-race/README.md",
+          "sha256": "7d83fbadcc32a7bea5e1e111384ea03988498ab4a597eb72f6b2664fb4d3d4d0",
+          "size_bytes": 7355
+        },
+        {
+          "path": "pty-detach-race/pty-detach-race-fixtures.json",
+          "sha256": "ee8211b672e5a78d1d069c1ca4df4155aecbce951058579e3a985cfb6de06227",
+          "size_bytes": 19319
+        },
+        {
+          "path": "pty-detach-race/test_validate.py",
+          "sha256": "88f6f732f5d024beb5a668e7b34876b1c544212166eeee3f85adb2789d040223",
+          "size_bytes": 20275
+        },
+        {
+          "path": "pty-detach-race/validate.py",
+          "sha256": "d922d7c0fdcc855bb7ae2e51663228d768b21b2f3c36ab9c4ab267e6f73111de",
+          "size_bytes": 72939
+        },
+        {
+          "path": "pty-detach-race/validation-baseline.json",
+          "sha256": "d637372677212e7874e5032ad36c13c1bea484edc27096ab9b22e62e0c68cb35",
+          "size_bytes": 2803
+        }
+      ]
+    },
+    {
       "id": "route-allowlist",
       "path": "route-allowlist",
       "status": "ready",
@@ -607,6 +701,65 @@
           "path": "route-allowlist/test_route_allowlist.py",
           "sha256": "023adfa76aa009dbfe8984da6c88d87f9f5925d9b8143aba344162158046fb54",
           "size_bytes": 117452
+        }
+      ]
+    },
+    {
+      "id": "session-persistence",
+      "path": "session-persistence",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "empty",
+        "failure",
+        "pending",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "chat-stream-and-completion"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "session-persistence/README.md",
+          "sha256": "d0ca31e4ad744350f4d73e07dd892155fd13997a88cde6b9b82506d61e7ec4ab",
+          "size_bytes": 5006
+        },
+        {
+          "path": "session-persistence/baseline-evidence.json",
+          "sha256": "6518b2b0c08dc4da2131585fce057cdf3af4acddbd5149aa08a94c738a7f7f94",
+          "size_bytes": 1458
+        },
+        {
+          "path": "session-persistence/cases.json",
+          "sha256": "59aec1f5b6eb83904f355df850b61379b737b64c6c214b47a909d0976acca6da",
+          "size_bytes": 68736
+        },
+        {
+          "path": "session-persistence/test_validate.py",
+          "sha256": "b69bb1ce49022526657e28c017a1445c0352323d61d8826a388028f764310692",
+          "size_bytes": 20629
+        },
+        {
+          "path": "session-persistence/validate.py",
+          "sha256": "7c499ca54dad7af1f6421cf8f5a3f2af99627b3441ae900f612a32e25bfae288",
+          "size_bytes": 64783
+        },
+        {
+          "path": "session-persistence/validation-baseline.json",
+          "sha256": "91c638f6b883508477ef34c8c2b56ed90cc6e7a9cde8bc7a0b891b8703aa2bb6",
+          "size_bytes": 2742
         }
       ]
     },
@@ -1026,7 +1179,9 @@
     {
       "id": "chat-stream-and-completion",
       "status": "pending",
-      "fixture_ids": [],
+      "fixture_ids": [
+        "session-persistence"
+      ],
       "platforms": [
         "web",
         "ios",
@@ -1341,7 +1496,9 @@
       "id": "web-pty",
       "status": "ready",
       "fixture_ids": [
+        "deployment-security-pty-local-adapter",
         "pty-contract",
+        "pty-detach-race",
         "source-audit-pty-attach"
       ],
       "platforms": [

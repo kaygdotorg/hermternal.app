@@ -136,7 +136,7 @@ BASELINE_REPETITIONS = 30
 # canonicalizer omits only this validator's own manifest digest and derived byte
 # total, which would otherwise create a self-referential hash cycle.
 BASELINE_SELF_MANIFEST_PATH = "contracts/fixtures/validator/validate.py"
-BASELINE_CANONICAL_SHA256 = "689573038e83e44214c9fa60101c163e64c60d7a4ec35f32f2ec51c0682d4408"
+BASELINE_CANONICAL_SHA256 = "71ea8ffd7a7fc57f3f3140d0b8e2adb1fc9381b5385a8ebb9320720d33759351"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -241,6 +241,7 @@ ALLOWED_URL_HOSTS = frozenset({
 STRUCTURAL_SENSITIVE_MARKERS = frozenset({
     "abcdefgh",
     "abcdefghijkl",
+    "live-value",
     "never-echo",
     "rawcookie",
     "rawticket",
