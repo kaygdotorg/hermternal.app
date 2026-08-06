@@ -1033,6 +1033,12 @@ export function createJsonRpcChatTransport(
 
     const event = createPublicEvent(envelope);
     if (envelope.type === "approval.request") {
+      try {
+        validateApprovalState(envelope.payload);
+      } catch {
+        failContext(context, "protocol-violation", "protocol-error");
+        return;
+      }
       if (pendingInteractions.has(operation.id)) {
         failContext(context, "protocol-violation", "protocol-error");
         return;
@@ -1993,6 +1999,25 @@ function requireSequence(value: BoundedJsonValue | undefined): number {
     throw new JsonRpcChatError("protocol-violation");
   }
   return value;
+}
+
+function validateApprovalState(payload: BoundedJsonValue): void {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    throw new JsonRpcChatError("protocol-violation");
+  }
+  const approval = payload as Record<string, BoundedJsonValue>;
+  const state = approval.state;
+  const approved = approval.approved;
+  if (state === "requested" && approved !== null) {
+    throw new JsonRpcChatError("protocol-violation");
+  }
+  if (state === "resolved" && typeof approved !== "boolean") {
+    throw new JsonRpcChatError("protocol-violation");
+  }
 }
 
 function findInteractionOwner(

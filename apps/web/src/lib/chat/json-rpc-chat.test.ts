@@ -19,6 +19,8 @@ import {
   type JsonRpcWebSocketUpgradeRequest,
 } from "./json-rpc-chat";
 
+// These synthetic evidence values are referenced by the deterministic W-07
+// fixture IDs documented in json-rpc-chat.md; they never represent a live deployment.
 const COMPATIBILITY_EVIDENCE: JsonRpcChatOptions["compatibilityEvidence"] = {
   deployment: {
     identity: "synthetic-deployment-001",
@@ -452,6 +454,35 @@ describe("createJsonRpcChatTransport", () => {
 
     emitResponse(socket, prompt.id as string, { status: "streaming" });
     expect(harness.transport.state.status).toBe("ready");
+  });
+
+  it("fails closed on contradictory approval state invariants", async () => {
+    const invalidStates = [
+      { state: "requested", approved: true },
+      { state: "resolved", approved: null },
+    ] as const;
+
+    for (const [index, approvalState] of invalidStates.entries()) {
+      const harness = makeHarness();
+      const socket = await connectHarness(harness);
+      const request = harness.transport.sendPrompt(
+        `approval-state-fixture-${index}`,
+      );
+      const requestId = emitPromptAccepted(socket);
+
+      emitEvent(
+        socket,
+        "approval.request",
+        { approval_id: `approval-state-${index}`, ...approvalState },
+        { request_id: requestId },
+      );
+
+      await expect(request.completion).rejects.toMatchObject({
+        code: "uncertain-delivery",
+      });
+      expect(socket.closed?.code).toBe(1002);
+      expect(harness.transport.state.status).toBe("failed");
+    }
   });
 
   it("derives blocking owners from source request_id when payloads omit local owner fields", async () => {

@@ -28,7 +28,27 @@ automatic.
 The W-05 ticket client remains the owner of the authenticated
 `POST /api/auth/ws-ticket` boundary. This file only consumes its injected fresh
 ticket provider. No production authentication or network integration is part of
-this planning-only prototype.
+this planning-only prototype. W-05 issue [#119](https://github.com/kaygdotorg/hermternal/issues/119)
+and PR [#271](https://github.com/kaygdotorg/hermternal/pull/271) remain open, so
+this seam is not an integrated ticket proof.
+
+## Deterministic W-07 fixture IDs
+
+The focused fake-WebSocket evidence uses these stable, synthetic IDs, all bound
+to `dashboard-v0.0.1` and Hermes SHA
+`f5be9236e00ddf2f2a412697f267078fc4ee068e2`:
+
+- `w07-gateway-ready-session-resume-v1` — server-first readiness and restore barrier;
+- `w07-prompt-event-ack-ordering-v1` — event-before-ack and late-ack ordering;
+- `w07-approval-state-invariant-v1` — requested/null and resolved/boolean approval states;
+- `w07-disconnect-reconnect-no-replay-v1` — uncertain delivery and fresh-ticket recovery;
+- `w07-close-code-classification-v1` — close mapping and stale-generation cleanup; and
+- `w07-compatibility-gates-v1` — typed evidence, attestation, and behavioral-probe gates.
+
+The shared C-19 registry still has pending C-05 and C-08 coverage. Child issue
+[#281](https://github.com/kaygdotorg/hermternal/issues/281) owns the coordinated
+registry update; PR #275 does not edit the shared `contracts/fixtures/index.json`
+artifact or claim that pending rows are ready.
 
 ## Server-first readiness and compatibility gates
 
@@ -158,7 +178,10 @@ any retry decision.
 `approval.request` and `clarify.request` each create exactly one local pending
 owner for the active operation. The owner is extracted from a source payload
 when present or assigned a bounded local owner marker when the source payload
-omits an ID. The local marker is never echoed to Hermes.
+omits an ID. The local marker is never echoed to Hermes. Approval state is also
+validated at the boundary: `state: "requested"` requires `approved: null`, and
+`state: "resolved"` requires a boolean `approved`; contradictory combinations
+fail closed as protocol violations.
 
 - `approval.respond` validates the matching request and approval owner, then
   sends only source-shaped session routing, `choice` (`once` for an affirmative
@@ -264,10 +287,17 @@ These validators do not import Hermes, open a WebSocket, contact a provider,
 read a live transcript, or claim deployment compatibility. They must retain
 `live_claim: false`.
 
-Benchmark evidence is **N/A — this is a planning-only protocol seam with no
-production or release executable and no live gateway to measure**. The shared
-benchmark contract and synthetic validator evidence remain the applicable
-preservation record; no 30-sample product latency or bundle-size claim is made.
+Benchmark evidence is **N/A for this W-07 prototype seam**. The deterministic
+fixture is `w07-gateway-ready-session-resume-v1` plus the focused transport IDs
+listed above. There is no production or release executable, no live gateway, and
+no approved product performance budget in this planning-only PR, so latency,
+render, memory, and bundle-size measurements would not describe a releasable
+artifact. Environment, build mode, repetitions, distribution, raw trace, and
+baseline are therefore **not applicable**, not omitted; the shared benchmark
+validator evidence remains the applicable format-preservation record. The
+registry child issue [#281](https://github.com/kaygdotorg/hermternal/issues/281)
+will attach any future coordinated trace or approved N/A record after its C-05,
+C-08, and W-05 dependencies are resolved. No 30-sample product claim is made.
 
 The unit suite uses a deterministic fake WebSocket and covers:
 
