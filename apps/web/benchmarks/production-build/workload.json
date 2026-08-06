@@ -4,15 +4,17 @@
   "fixture_version": "1.0.0",
   "build": {
     "entrypoint": "node_modules/vite/bin/vite.js",
-    "arguments": ["build"],
+    "arguments": ["build", "--configLoader", "runner"],
     "input_files": [
       "package.json",
+      "bun.lock",
       "svelte.config.js",
       "tsconfig.json",
-      "vite.config.ts"
+      "vite.config.ts",
+      ".svelte-kit/tsconfig.json"
     ],
     "input_roots": ["src", "static"],
-    "output_root": "build",
+    "output_root": ".artifact-output/build",
     "version_name": "hermternal-web-production-build-v1"
   },
   "repetitions": {
@@ -31,7 +33,7 @@
   },
   "network": {
     "mode": "deny",
-    "guard": "network-guard.mjs"
+    "boundary": "os_sandbox"
   },
   "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 }

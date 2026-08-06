@@ -4,7 +4,7 @@
 
 **Status:** deterministic, local, no-network benchmark harness with baseline-only evidence
 
-This exclusive directory owns the web production-build benchmark. It does not change the web package scripts, lockfile, routes, application styles, shared fixture registry, or production runtime. It builds a bounded temporary copy of the reviewed static web scaffold with the installed local dependencies. It does not start Hermes, a browser, a preview server, or a live integration.
+This exclusive directory owns the web production-build benchmark. It does not change package scripts, the lockfile, routes, application styles, the shared fixture registry, or production runtime. It builds a bounded temporary copy of the reviewed static web scaffold with an immutable snapshot of installed local dependencies. It does not start Hermes, a browser, a preview server, or a live integration.
 
 ## Workload and states
 
@@ -12,56 +12,56 @@ This exclusive directory owns the web production-build benchmark. It does not ch
 
 - A **cold** sample uses a new temporary workspace. No generated SvelteKit state or production output survives from another sample.
 - A **warm** sample reuses one temporary workspace after one unmeasured priming build. The priming observation is retained in the raw trace but excluded from the warm distribution.
-- Each checked-in evidence distribution contains 30 raw samples. The harness reports min, mean, p50, p95, p99, and max with the B-01 R-7 interpolation and half-even three-decimal rounding method.
+- Each checked-in evidence distribution contains 30 raw samples. The harness reports min, mean, p50, p95, p99, and max with B-01 R-7 interpolation and half-even three-decimal rounding.
 - `threshold` and `budget` remain `null`. These local observations are not a performance promise. A threshold must wait for reviewed baselines under B-08A.
 
-The benchmark copies only `package.json`, Svelte/Vite/TypeScript configuration, `src/`, and `static/`. In the temporary copy only, it wraps the source Svelte config with the fixture-pinned `kit.version.name`; SvelteKit otherwise defaults that value to the build timestamp and changes generated asset identities between identical runs. The source config is not edited. The harness rejects symlinks and non-file inputs, and it requires one generated artifact digest across the warm-up and every measured sample. Every workspace is removed after use, including failure, timeout, or interruption handled by the runner.
+The benchmark copies only the reviewed `package.json`, `bun.lock`, Svelte/Vite/TypeScript configuration, generated SvelteKit TypeScript configuration, `src/`, and `static/`. In the temporary copy only, it pins `kit.version.name`; SvelteKit otherwise uses a build timestamp and changes generated identities between equal runs. It also redirects adapter output below a quota mount so the adapter may replace its output directory without removing the mount point. The source configuration is not edited.
 
-## Determinism and resource boundaries
+## Isolation and resource boundaries
 
-The build runs through the locally installed Vite entrypoint with a minimal fixed environment. `network-guard.mjs` is preloaded before Vite. It denies `fetch`, DNS, datagram, HTTP, HTTPS, TCP, and TLS entry points. Offline package-manager flags are also set. No dependency installation occurs inside a measured run.
+The runner clones `node_modules` once into a benchmark-owned dependency snapshot, removes write permission, and binds packages into each workspace. Vite receives a separate writable `.vite-temp` directory. Dependency tree identities are recorded before and after all builds; mutation fails the run. Evidence binds the lockfile, complete resolved dependency bytes, Vite, SvelteKit, the Svelte Vite plugin, Svelte, TypeScript native package bytes, and Node, Bun, Python, and sandbox executable bytes.
 
-The workload bounds:
+The complete build descendant tree runs inside an operating-system network boundary:
 
-- repetitions;
-- build timeout;
-- Node heap size;
-- captured stdout and stderr;
-- copied input bytes;
-- generated artifact file count; and
-- generated artifact bytes.
+- macOS uses Seatbelt through `/usr/bin/sandbox-exec` with `network*` denied;
+- Linux uses bubblewrap with a separate network namespace and a read-only host root;
+- unsupported or unavailable sandbox backends fail closed.
 
-A limit violation or non-zero production build fails closed. The CLI emits one bounded JSON error with no raw child output, path, URL, environment value, or attacker-controlled argument. Raw build output is counted but is not stored in evidence.
+The boundary is inherited by direct sockets and children even if they clear `NODE_OPTIONS`. Offline package-manager flags remain defense in depth; no JavaScript patch is the security boundary.
+
+Each build starts in a detached process group. Timeout, output overflow, SIGINT, and SIGTERM terminate the whole group, wait a bounded grace period, escalate to `SIGKILL`, and bound pipe draining. Recorded build duration ends when the direct build process exits; descendant cleanup, pipe draining, artifact scanning, and hashing are excluded.
+
+The workload bounds repetitions, build timeout, Node heap, captured stdout and stderr, copied input bytes, artifact file count, and artifact bytes. macOS writes output to a quota-sized HFS+ sparse volume. Linux uses a quota-sized bubblewrap tmpfs. This enforces peak output capacity rather than relying on periodic or final-state sampling.
+
+Artifact scanning opens the workspace and every descendant relative to directory file descriptors with `O_NOFOLLOW`. It rejects root, intermediate, and file symlinks and compares validated and opened inodes before hashing. An external symlink target is never read or hashed.
+
+A limit violation or non-zero build fails closed. The CLI emits one bounded JSON error without raw child output, paths, URLs, environment values, or attacker-controlled arguments. Raw build output is counted but not stored.
 
 ## Evidence
 
-`evidence/raw-trace.json` records every successful observation, the excluded warm-up, resource counts, input identity, environment metadata, source commit, fixture digest, and applied limits. `evidence/benchmark-evidence.json` uses `hermternal.benchmark-evidence.v1` from B-01. It records the raw samples and distributions for cold and warm production builds, sanitized environment metadata, artifact hashes, redaction declarations, and null threshold and budget fields.
+`evidence/raw-trace.json` records every successful observation, the excluded warm-up, resource counts, complete B-01 provenance, environment metadata, build input identity, toolchain byte identity, sandbox mode, source commit, fixture digest, and applied limits. `evidence/benchmark-evidence.json` uses `hermternal.benchmark-evidence.v1`. It records raw cold and warm samples, recomputed distributions, sanitized environment metadata, immutable artifact anchors, redaction declarations, and null threshold and budget fields.
 
-All inputs are repository source, static assets, and synthetic prototype data. The evidence contains no credentials, cookies, tokens, user data, transcripts, live hosts, network traces, or provider data.
+The canonical B-01 validator at `contracts/benchmarks/validate.py` validates checked-in evidence in normal and optimized Python modes. It enforces bounded strict JSON parsing, duplicate-key rejection, non-finite and exponent-overflow rejection, exact ordered keys and types, redaction, provenance canonicalization, and code-pinned workload, trace, run, and artifact identities.
 
-The checked-in local observation benchmarks source commit
-`8b114f9c340c7dfc4044f006a2812ff1cff880a7` on an Apple M2 Max with Bun
-1.3.14, Node 26.7.0, and Vite 8.2.0. Cold p50/p95/p99 were
-`3215.628/4191.691/5221.844 ms`. Warm p50/p95/p99 were
-`3522.922/4489.742/4770.475 ms`. All 61 generated outputs, including the
-excluded warm-up, had artifact digest
-`191dd9cd25a6546bb53270be04cbd8fe8a7f2ad3aa9130804abd20ddf6de92be`.
-These values are evidence from one local run only. They do not establish a
-regression threshold or approved budget.
+All inputs are repository source, static assets, and synthetic prototype data. Evidence contains no credentials, cookies, tokens, user data, transcripts, live hosts, network traces, or provider data.
+
+Measured values in the checked-in evidence are observations from one local machine only. They do not establish a regression threshold or approved budget.
 
 ## Run and verify
 
-Install the pinned web dependencies once from `apps/web/`:
+Install pinned web dependencies once from `apps/web/`:
 
 ```sh
 bun install --frozen-lockfile
 ```
 
-Run focused contract tests:
+Run focused tests and TypeScript 7:
 
 ```sh
-bun test benchmarks/production-build/run.test.ts
+bun test benchmarks/production-build/run.test.ts benchmarks/production-build/evidence.test.ts
 bun x --package @typescript/native tsc --noEmit --pretty false -p tsconfig.json
+python3 contracts/benchmarks/validate.py --evidence apps/web/benchmarks/production-build/evidence/benchmark-evidence.json --skip-baseline
+python3 -O contracts/benchmarks/validate.py --evidence apps/web/benchmarks/production-build/evidence/benchmark-evidence.json --skip-baseline
 ```
 
 Run a short representative benchmark without changing checked-in evidence:
@@ -76,8 +76,8 @@ Collect review evidence with the B-01 minimum sample count:
 bun benchmarks/production-build/run.ts --cold 30 --warm 30 --write-evidence
 ```
 
-The evidence command intentionally refuses fewer than 30 cold or warm samples. Review raw samples and environment metadata as baseline observations only. Do not infer or add a threshold from one machine.
+The evidence command refuses fewer than 30 cold or warm samples. Review raw samples and environment metadata as baseline observations only. Do not infer or add a threshold from one machine.
 
 ## Accessibility
 
-Accessibility verification is **N/A**. This harness has no rendered UI, focus order, semantic controls, screen-reader surface, browser zoom layout, contrast theme, motion, transparency, or touch target. It does not change or remove any accessibility behavior from the web scaffold.
+Accessibility verification is **N/A**. This harness has no rendered UI, focus order, semantic controls, screen-reader surface, browser zoom layout, contrast theme, motion, transparency, or touch target. It does not change or remove accessibility behavior from the web scaffold.

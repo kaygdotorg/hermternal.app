@@ -1,5 +1,7 @@
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { arch, cpus, platform, release, tmpdir, type } from 'node:os';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -11,10 +13,14 @@ const WORKLOAD_PATH = join(BENCHMARK_ROOT, 'workload.json');
 const EVIDENCE_DIRECTORY = join(BENCHMARK_ROOT, 'evidence');
 const TRACE_PATH = join(EVIDENCE_DIRECTORY, 'raw-trace.json');
 const EVIDENCE_PATH = join(EVIDENCE_DIRECTORY, 'benchmark-evidence.json');
-const NETWORK_GUARD_PATH = join(BENCHMARK_ROOT, 'network-guard.mjs');
+const SANDBOX_RUNNER_PATH = join(BENCHMARK_ROOT, 'sandbox-runner.py');
+const ARTIFACT_SCANNER_PATH = join(BENCHMARK_ROOT, 'artifact-scanner.py');
 const MAX_ERROR_BYTES = 512;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const activeWorkspaces = new Set<string>();
-let activeChild: ReturnType<typeof Bun.spawn> | undefined;
+const activeRunRoots = new Set<string>();
+const quotaDevices = new Map<string, string>();
+let activeChild: ChildProcessWithoutNullStreams | undefined;
 let handlingSignal = false;
 
 export interface Workload {
@@ -39,7 +45,7 @@ export interface Workload {
     artifact_bytes: number;
     node_heap_megabytes: number;
   };
-  network: { mode: string; guard: string };
+  network: { mode: string; boundary: string };
   hermes_source_sha: string;
 }
 
@@ -79,20 +85,70 @@ function sha256(bytes: Uint8Array | string): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function canonicalDigestBytes(value: unknown): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(value));
+}
+
 function canonicalBytes(value: unknown): Uint8Array {
-  return new TextEncoder().encode(`${JSON.stringify(value)}\n`);
+  const payload = canonicalDigestBytes(value);
+  const output = new Uint8Array(payload.byteLength + 1);
+  output.set(payload);
+  output[payload.byteLength] = 10;
+  return output;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function requirePlainJsonValue(value: unknown, code: string, depth = 0): void {
+  if (depth > 16) throw new BenchmarkError(code);
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new BenchmarkError(code);
+    return;
+  }
+  if (typeof value !== 'object') throw new BenchmarkError(code);
+  const expectedPrototype = Array.isArray(value) ? Array.prototype : Object.prototype;
+  if (Object.getPrototypeOf(value) !== expectedPrototype) throw new BenchmarkError(code);
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') throw new BenchmarkError(code);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (Array.isArray(value) && key === 'length') {
+      if (!descriptor || descriptor.enumerable || !descriptor.writable || descriptor.configurable || descriptor.value !== value.length) {
+        throw new BenchmarkError(code);
+      }
+      continue;
+    }
+    if (!descriptor || !descriptor.enumerable || !descriptor.writable || !descriptor.configurable || !('value' in descriptor)) {
+      throw new BenchmarkError(code);
+    }
+    requirePlainJsonValue(descriptor.value, code, depth + 1);
+  }
+}
+
 function requireExactKeys(candidate: Record<string, unknown>, expected: string[], code: string): void {
-  const actual = Object.keys(candidate).sort();
+  const actual = Reflect.ownKeys(candidate);
+  if (actual.some((key) => typeof key !== 'string')) throw new BenchmarkError(code);
+  const actualStrings = (actual as string[]).sort();
   const required = [...expected].sort();
-  if (actual.length !== required.length || actual.some((key, index) => key !== required[index])) {
+  if (actualStrings.length !== required.length || actualStrings.some((key, index) => key !== required[index])) {
     throw new BenchmarkError(code);
   }
+}
+
+function immutableJsonCopy<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  const copy = Array.isArray(value) ? [] : {};
+  for (const key of Object.keys(value as object)) {
+    Object.defineProperty(copy, key, {
+      value: immutableJsonCopy((value as Record<string, unknown>)[key]),
+      enumerable: true,
+      writable: false,
+      configurable: false
+    });
+  }
+  return Object.freeze(copy) as T;
 }
 
 function requirePositiveInteger(value: unknown, code: string): number {
@@ -103,6 +159,7 @@ function requirePositiveInteger(value: unknown, code: string): number {
 }
 
 export function validateWorkload(candidate: unknown): Workload {
+  requirePlainJsonValue(candidate, 'workload_json_semantics_invalid');
   if (!isRecord(candidate) || candidate.schema !== 'hermternal.web-production-build-workload.v1') {
     throw new BenchmarkError('workload_schema_invalid');
   }
@@ -121,17 +178,21 @@ export function validateWorkload(candidate: unknown): Workload {
     ['build_timeout_ms', 'stdout_bytes', 'stderr_bytes', 'workspace_input_bytes', 'artifact_files', 'artifact_bytes', 'node_heap_megabytes'],
     'limit_keys_invalid'
   );
-  requireExactKeys(network, ['mode', 'guard'], 'network_keys_invalid');
+  requireExactKeys(network, ['mode', 'boundary'], 'network_keys_invalid');
   const pathLists = [build.input_files, build.input_roots, build.arguments];
   if (
     candidate.fixture_id !== 'web-production-build' ||
     candidate.fixture_version !== '1.0.0' ||
     build.entrypoint !== 'node_modules/vite/bin/vite.js' ||
-    build.output_root !== 'build' ||
+    build.output_root !== '.artifact-output/build' ||
     build.version_name !== 'hermternal-web-production-build-v1' ||
     pathLists.some((list) => !Array.isArray(list) || list.some((item) => typeof item !== 'string')) ||
+    JSON.stringify(build.arguments) !== JSON.stringify(['build', '--configLoader', 'runner']) ||
+    JSON.stringify(build.input_files) !==
+      JSON.stringify(['package.json', 'bun.lock', 'svelte.config.js', 'tsconfig.json', 'vite.config.ts', '.svelte-kit/tsconfig.json']) ||
+    JSON.stringify(build.input_roots) !== JSON.stringify(['src', 'static']) ||
     network.mode !== 'deny' ||
-    network.guard !== 'network-guard.mjs' ||
+    network.boundary !== 'os_sandbox' ||
     candidate.hermes_source_sha !== 'f5be9236e00ddf2f2a412697f267078fc4ee068e'
   ) {
     throw new BenchmarkError('workload_identity_invalid');
@@ -167,7 +228,7 @@ export function validateWorkload(candidate: unknown): Workload {
   ) {
     throw new BenchmarkError('resource_limit_invalid');
   }
-  return candidate as unknown as Workload;
+  return immutableJsonCopy(candidate) as unknown as Workload;
 }
 
 export function roundRationalHalfEven(numerator: number, denominator: number): number {
@@ -259,7 +320,70 @@ async function copyBoundedTree(source: string, destination: string, state: { byt
   }
 }
 
-async function createWorkspace(workload: Workload): Promise<string> {
+async function cloneDependencySnapshot(runRoot: string): Promise<string> {
+  const source = join(APP_ROOT, 'node_modules');
+  if (!(await stat(source)).isDirectory()) throw new BenchmarkError('dependencies_missing');
+  const destination = join(runRoot, 'node_modules');
+  const copyCommand = platform() === 'darwin'
+    ? ['cp', '-cR', source, destination]
+    : ['cp', '-a', '--reflink=auto', source, destination];
+  const copied = spawnSync(copyCommand[0], copyCommand.slice(1), { stdio: 'ignore' });
+  if (copied.status !== 0) throw new BenchmarkError('dependency_snapshot_failed');
+  const protectedSnapshot = spawnSync('chmod', ['-R', 'a-w', destination], { stdio: 'ignore' });
+  if (protectedSnapshot.status !== 0) throw new BenchmarkError('dependency_snapshot_failed');
+  return destination;
+}
+
+function runChecked(command: string, args: string[], code: string): void {
+  const result = spawnSync(command, args, { stdio: 'ignore' });
+  if (result.status !== 0) throw new BenchmarkError(code);
+}
+
+export async function mountArtifactQuota(workspace: string, artifactBytes: number): Promise<void> {
+  const output = join(workspace, '.artifact-output');
+  await mkdir(output, { recursive: true });
+  if (platform() !== 'darwin') return;
+  const image = join(workspace, '.artifact-quota.sparseimage');
+  // hdiutil's `b` suffix is a count of 512-byte sectors, not bytes.
+  // Convert explicitly so filesystem capacity enforces the reviewed byte cap.
+  const quotaSectors = Math.ceil(artifactBytes / 512);
+  runChecked('/usr/bin/hdiutil', ['create', '-quiet', '-size', `${quotaSectors}b`, '-fs', 'HFS+', '-volname', 'hermternal-benchmark', '-type', 'SPARSE', '-nospotlight', image], 'artifact_quota_create_failed');
+  runChecked('/usr/bin/hdiutil', ['attach', '-quiet', '-nobrowse', '-mountpoint', output, image], 'artifact_quota_mount_failed');
+  const diskInfo = spawnSync('/usr/sbin/diskutil', ['info', '-plist', output], { encoding: 'utf8', maxBuffer: 16384 });
+  const deviceMatch = typeof diskInfo.stdout === 'string'
+    ? diskInfo.stdout.match(/<key>DeviceIdentifier<\/key>\s*<string>(disk[0-9]+s[0-9]+)<\/string>/)
+    : null;
+  if (diskInfo.status !== 0 || !deviceMatch) throw new BenchmarkError('artifact_quota_mount_failed');
+  quotaDevices.set(workspace, `/dev/${deviceMatch[1]}`);
+}
+
+async function bindDependencySnapshot(workspace: string, dependencySnapshot: string): Promise<void> {
+  const bindingRoot = join(workspace, 'node_modules');
+  await mkdir(bindingRoot, { recursive: true });
+  const entries = await readdir(dependencySnapshot, { withFileTypes: true });
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    // Vite owns this cache directory during config loading. Keep it local and
+    // writable instead of binding the immutable snapshot's prior cache bytes.
+    if (entry.name === '.vite-temp') continue;
+    const source = join(dependencySnapshot, entry.name);
+    const destination = join(bindingRoot, entry.name);
+    if (entry.name.startsWith('@') && entry.isDirectory()) {
+      await mkdir(destination, { recursive: true });
+      const scoped = await readdir(source, { withFileTypes: true });
+      for (const packageEntry of scoped) {
+        if (!packageEntry.isDirectory() && !packageEntry.isSymbolicLink()) throw new BenchmarkError('dependency_type_invalid');
+        await symlink(join(source, packageEntry.name), join(destination, packageEntry.name), 'dir');
+      }
+    } else {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) throw new BenchmarkError('dependency_type_invalid');
+      await symlink(source, destination, 'dir');
+    }
+  }
+  await mkdir(join(bindingRoot, '.vite-temp'), { recursive: true });
+}
+
+async function createWorkspace(workload: Workload, dependencySnapshot: string): Promise<string> {
   const workspace = await mkdtemp(join(tmpdir(), 'hermternal-web-build-'));
   activeWorkspaces.add(workspace);
   try {
@@ -272,15 +396,15 @@ async function createWorkspace(workload: Workload): Promise<string> {
     }
     const copiedConfig = join(workspace, 'svelte.config.js');
     await rename(copiedConfig, join(workspace, 'svelte.config.source.js'));
-    const deterministicConfig = `import config from './svelte.config.source.js';\n\n// The benchmark pins SvelteKit's otherwise timestamp-based version so identical\n// source inputs produce identical production artifacts across repetitions.\nexport default {\n  ...config,\n  kit: {\n    ...config.kit,\n    version: { name: ${JSON.stringify(workload.build.version_name)}, pollInterval: 0 }\n  }\n};\n`;
+    const deterministicConfig = `import adapter from '@sveltejs/adapter-static';\nimport config from './svelte.config.source.js';\n\n// The benchmark pins SvelteKit's otherwise timestamp-based version so identical\n// source inputs produce identical production artifacts across repetitions. The\n// adapter writes below the quota mount so it may replace its output directory\n// without attempting to remove the mount point itself.\nexport default {\n  ...config,\n  kit: {\n    ...config.kit,\n    adapter: adapter({ pages: '.artifact-output/build', assets: '.artifact-output/build', fallback: '200.html' }),\n    version: { name: ${JSON.stringify(workload.build.version_name)}, pollInterval: 0 }\n  }\n};\n`;
     copied.bytes += new TextEncoder().encode(deterministicConfig).byteLength;
     if (copied.bytes > workload.limits.workspace_input_bytes) throw new BenchmarkError('workspace_input_limit_exceeded');
     await writeFile(copiedConfig, deterministicConfig);
-    const dependencies = join(APP_ROOT, 'node_modules');
-    if (!(await stat(dependencies)).isDirectory()) throw new BenchmarkError('dependencies_missing');
-    await symlink(dependencies, join(workspace, 'node_modules'), 'dir');
+    await bindDependencySnapshot(workspace, dependencySnapshot);
     await mkdir(join(workspace, '.home'), { recursive: true });
     await mkdir(join(workspace, '.tmp'), { recursive: true });
+    await mkdir(join(workspace, '.svelte-kit'), { recursive: true });
+    await mountArtifactQuota(workspace, workload.limits.artifact_bytes);
     return workspace;
   } catch (error) {
     await removeWorkspace(workspace);
@@ -288,86 +412,103 @@ async function createWorkspace(workload: Workload): Promise<string> {
   }
 }
 
-async function removeWorkspace(workspace: string): Promise<void> {
+export async function removeWorkspace(workspace: string): Promise<void> {
+  const quotaDevice = quotaDevices.get(workspace);
+  if (quotaDevice) {
+    // Detach by device: a full HFS+ volume may lose its mount point before
+    // cleanup, but the attached disk must still be released before deletion.
+    spawnSync('/usr/bin/hdiutil', ['detach', '-quiet', '-force', quotaDevice], { stdio: 'ignore' });
+    quotaDevices.delete(workspace);
+  }
   await rm(workspace, { recursive: true, force: true });
   activeWorkspaces.delete(workspace);
 }
 
-async function measureArtifacts(
+export async function measureArtifacts(
   root: string,
+  workspace: string,
   limits: Workload['limits'],
   includeDigest = false
 ): Promise<{ files: number; bytes: number; sha256?: string }> {
-  let files = 0;
-  let bytes = 0;
-  const records: Array<{ path: string; bytes: number; sha256: string }> = [];
-  async function visit(directory: string): Promise<void> {
-    const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
-      const path = join(directory, entry.name);
-      if (entry.isSymbolicLink()) throw new BenchmarkError('artifact_symlink_denied');
-      if (entry.isDirectory()) await visit(path);
-      else if (entry.isFile()) {
-        const fileStat = await stat(path);
-        files += 1;
-        bytes += fileStat.size;
-        if (files > limits.artifact_files) throw new BenchmarkError('artifact_file_limit_exceeded');
-        if (bytes > limits.artifact_bytes) throw new BenchmarkError('artifact_byte_limit_exceeded');
-        if (includeDigest) {
-          records.push({
-            path: relative(root, path).split(sep).join('/'),
-            bytes: fileStat.size,
-            sha256: sha256(await readFile(path))
-          });
-        }
-      } else throw new BenchmarkError('artifact_type_invalid');
-    }
+  const relativeRoot = relative(workspace, root).split(sep).join('/');
+  if (!relativeRoot || relativeRoot.startsWith('../') || relativeRoot === '..') {
+    throw new BenchmarkError('artifact_root_escape');
   }
-  await visit(root);
-  records.sort((left, right) => left.path.localeCompare(right.path));
-  return { files, bytes, ...(includeDigest ? { sha256: sha256(canonicalBytes(records)) } : {}) };
+  const pythonPath = Bun.which('python3');
+  if (!pythonPath) throw new BenchmarkError('runtime_missing');
+  const scanned = spawnSync(pythonPath, [
+    ARTIFACT_SCANNER_PATH,
+    '--workspace', workspace,
+    '--root', relativeRoot,
+    '--max-files', String(limits.artifact_files),
+    '--max-bytes', String(limits.artifact_bytes)
+  ], { encoding: 'utf8', maxBuffer: 4096 });
+  if (scanned.status !== 0 || typeof scanned.stdout !== 'string' || scanned.stdout.length > 1024) {
+    throw new BenchmarkError('artifact_scan_failed');
+  }
+  let result: unknown;
+  try {
+    result = JSON.parse(scanned.stdout);
+  } catch {
+    throw new BenchmarkError('artifact_scan_failed');
+  }
+  requirePlainJsonValue(result, 'artifact_scan_invalid');
+  const record = result as Record<string, unknown>;
+  requireExactKeys(record, ['files', 'bytes', 'sha256'], 'artifact_scan_invalid');
+  if (typeof record.files !== 'number' || !Number.isInteger(record.files) || record.files < 0 || record.files > limits.artifact_files ||
+      typeof record.bytes !== 'number' || !Number.isInteger(record.bytes) || record.bytes < 0 || record.bytes > limits.artifact_bytes ||
+      typeof record.sha256 !== 'string' || !SHA256_PATTERN.test(record.sha256)) {
+    throw new BenchmarkError('artifact_scan_invalid');
+  }
+  return {
+    files: record.files,
+    bytes: record.bytes,
+    ...(includeDigest ? { sha256: record.sha256 } : {})
+  };
 }
 
-async function consumeBounded(stream: ReadableStream<Uint8Array>, limit: number, onOverflow: () => void): Promise<number> {
-  const reader = stream.getReader();
+async function consumeBounded(stream: NodeJS.ReadableStream, limit: number, onOverflow: () => void): Promise<number> {
   let bytes = 0;
   let exceeded = false;
-  try {
-    while (true) {
-      const result = await reader.read();
-      if (result.done) return Math.min(bytes, limit + 1);
-      bytes += result.value.byteLength;
-      if (!exceeded && bytes > limit) {
-        exceeded = true;
-        onOverflow();
-      }
+  for await (const chunk of stream) {
+    bytes += Buffer.byteLength(chunk);
+    if (!exceeded && bytes > limit) {
+      exceeded = true;
+      onOverflow();
     }
-  } finally {
-    reader.releaseLock();
+  }
+  return Math.min(bytes, limit + 1);
+}
+
+function boundedWait<T>(promise: Promise<T>, timeoutMs: number, code: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new BenchmarkError(code)), timeoutMs))
+  ]);
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-function isMissingPath(error: unknown): boolean {
-  return isRecord(error) && error.code === 'ENOENT';
-}
-
-async function monitorArtifactLimits(
-  outputPath: string,
-  limits: Workload['limits'],
-  shouldStop: () => boolean,
-  onExceeded: (code: string) => void
-): Promise<void> {
-  while (!shouldStop()) {
+export async function terminateProcessGroup(child: ChildProcessWithoutNullStreams, graceMs = 500): Promise<void> {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, 'SIGTERM');
+  } catch {}
+  const deadline = performance.now() + graceMs;
+  while (processGroupExists(child.pid) && performance.now() < deadline) await Bun.sleep(20);
+  if (processGroupExists(child.pid)) {
     try {
-      await measureArtifacts(outputPath, limits);
-    } catch (error) {
-      if (!isMissingPath(error)) {
-        onExceeded(error instanceof BenchmarkError ? error.code : 'artifact_monitor_failed');
-        return;
-      }
-    }
-    await Bun.sleep(50);
+      process.kill(-child.pid, 'SIGKILL');
+    } catch {}
+    const forceDeadline = performance.now() + graceMs;
+    while (processGroupExists(child.pid) && performance.now() < forceDeadline) await Bun.sleep(20);
   }
 }
 
@@ -386,63 +527,74 @@ function benchmarkEnvironment(workspace: string, workload: Workload, nodePath: s
     npm_config_offline: 'true',
     npm_config_update_notifier: 'false',
     BUN_INSTALL_OFFLINE: '1',
-    NODE_OPTIONS: `--max-old-space-size=${workload.limits.node_heap_megabytes} --import=${pathToFileURL(NETWORK_GUARD_PATH).href}`
+    NODE_OPTIONS: `--max-old-space-size=${workload.limits.node_heap_megabytes}`
   };
 }
 
-async function runBuild(workspace: string, workload: Workload, sequence: number): Promise<BuildObservation> {
+async function runBuild(
+  workspace: string,
+  dependencySnapshot: string,
+  workload: Workload,
+  sequence: number
+): Promise<BuildObservation> {
   const nodePath = Bun.which('node');
-  if (!nodePath) throw new BenchmarkError('node_runtime_missing');
+  const pythonPath = Bun.which('python3');
+  if (!nodePath || !pythonPath) throw new BenchmarkError('runtime_missing');
   const entrypoint = join(workspace, workload.build.entrypoint);
-  const command = [nodePath, entrypoint, ...workload.build.arguments];
+  const executedCommand = [nodePath, entrypoint, ...workload.build.arguments];
+  const launcher = [
+    SANDBOX_RUNNER_PATH,
+    '--workspace',
+    workspace,
+    '--dependency-root',
+    dependencySnapshot,
+    '--artifact-bytes',
+    String(workload.limits.artifact_bytes),
+    '--',
+    ...executedCommand
+  ];
   const start = performance.now();
-  const child = Bun.spawn(command, {
+  const child = spawn(pythonPath, launcher, {
     cwd: workspace,
     env: benchmarkEnvironment(workspace, workload, nodePath),
-    stdin: 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe'
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe']
   });
   activeChild = child;
   let timedOut = false;
   let outputExceeded = false;
-  let artifactFailure: string | undefined;
-  let processFinished = false;
-  const outputPath = join(workspace, workload.build.output_root);
+  const stopTree = () => void terminateProcessGroup(child);
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill();
+    stopTree();
   }, workload.limits.build_timeout_ms);
   const onOverflow = () => {
     outputExceeded = true;
-    child.kill();
+    stopTree();
   };
-  const artifactMonitor = monitorArtifactLimits(
-    outputPath,
-    workload.limits,
-    () => processFinished,
-    (code) => {
-      artifactFailure = code;
-      child.kill();
-    }
-  );
+  const stdoutDrain = consumeBounded(child.stdout, workload.limits.stdout_bytes, onOverflow);
+  const stderrDrain = consumeBounded(child.stderr, workload.limits.stderr_bytes, onOverflow);
   try {
-    const [exitCode, stdoutBytes, stderrBytes] = await Promise.all([
-      child.exited,
-      consumeBounded(child.stdout, workload.limits.stdout_bytes, onOverflow),
-      consumeBounded(child.stderr, workload.limits.stderr_bytes, onOverflow)
-    ]);
-    processFinished = true;
-    await artifactMonitor;
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      child.once('error', () => reject(new BenchmarkError('production_build_spawn_failed')));
+      child.once('exit', (code) => resolve(code ?? 128));
+    });
+    const durationMs = Math.round((performance.now() - start) * 1000) / 1000;
+    await terminateProcessGroup(child);
+    const [stdoutBytes, stderrBytes] = await boundedWait(
+      Promise.all([stdoutDrain, stderrDrain]),
+      1000,
+      'process_pipe_drain_timeout'
+    );
     if (timedOut) throw new BenchmarkError('build_timeout');
     if (outputExceeded) throw new BenchmarkError('process_output_limit_exceeded');
-    if (artifactFailure) throw new BenchmarkError(artifactFailure);
     if (exitCode !== 0) throw new BenchmarkError('production_build_failed');
-    const artifacts = await measureArtifacts(outputPath, workload.limits, true);
+    const outputPath = join(workspace, workload.build.output_root);
+    const artifacts = await measureArtifacts(outputPath, workspace, workload.limits, true);
     if (!artifacts.sha256) throw new BenchmarkError('artifact_digest_missing');
     return {
       sequence,
-      duration_ms: Math.round((performance.now() - start) * 1000) / 1000,
+      duration_ms: durationMs,
       exit_code: exitCode,
       stdout_bytes: stdoutBytes,
       stderr_bytes: stderrBytes,
@@ -451,20 +603,20 @@ async function runBuild(workspace: string, workload: Workload, sequence: number)
       artifact_sha256: artifacts.sha256
     };
   } finally {
-    processFinished = true;
-    if (child.exitCode === null) child.kill();
-    await artifactMonitor;
     clearTimeout(timer);
+    await terminateProcessGroup(child);
+    child.stdout.destroy();
+    child.stderr.destroy();
     if (activeChild === child) activeChild = undefined;
   }
 }
 
-async function runCold(workload: Workload, repetitions: number): Promise<BuildObservation[]> {
+async function runCold(workload: Workload, dependencySnapshot: string, repetitions: number): Promise<BuildObservation[]> {
   const observations: BuildObservation[] = [];
   for (let sequence = 1; sequence <= repetitions; sequence += 1) {
-    const workspace = await createWorkspace(workload);
+    const workspace = await createWorkspace(workload, dependencySnapshot);
     try {
-      observations.push(await runBuild(workspace, workload, sequence));
+      observations.push(await runBuild(workspace, dependencySnapshot, workload, sequence));
     } finally {
       await removeWorkspace(workspace);
     }
@@ -472,13 +624,17 @@ async function runCold(workload: Workload, repetitions: number): Promise<BuildOb
   return observations;
 }
 
-async function runWarm(workload: Workload, repetitions: number): Promise<{ warmup: BuildObservation; observations: BuildObservation[] }> {
-  const workspace = await createWorkspace(workload);
+async function runWarm(
+  workload: Workload,
+  dependencySnapshot: string,
+  repetitions: number
+): Promise<{ warmup: BuildObservation; observations: BuildObservation[] }> {
+  const workspace = await createWorkspace(workload, dependencySnapshot);
   try {
-    const warmup = await runBuild(workspace, workload, 0);
+    const warmup = await runBuild(workspace, dependencySnapshot, workload, 0);
     const observations: BuildObservation[] = [];
     for (let sequence = 1; sequence <= repetitions; sequence += 1) {
-      observations.push(await runBuild(workspace, workload, sequence));
+      observations.push(await runBuild(workspace, dependencySnapshot, workload, sequence));
     }
     return { warmup, observations };
   } finally {
@@ -506,6 +662,84 @@ function sourceCommit(): string {
   return commit;
 }
 
+interface TreeIdentity { files: number; symlinks: number; bytes: number; sha256: string }
+
+async function treeIdentity(root: string): Promise<TreeIdentity> {
+  const resolvedRoot = await realpath(root);
+  const records: Array<{ path: string; type: 'file' | 'symlink'; bytes: number; sha256: string }> = [];
+  async function visit(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      const metadata = await lstat(path);
+      if (metadata.isDirectory()) await visit(path);
+      else if (metadata.isFile()) {
+        const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        try {
+          const opened = await handle.stat();
+          records.push({
+            path: relative(root, path).split(sep).join('/'),
+            type: 'file',
+            bytes: opened.size,
+            sha256: sha256(await handle.readFile())
+          });
+        } finally {
+          await handle.close();
+        }
+      } else if (metadata.isSymbolicLink()) {
+        const target = await realpath(path);
+        if (target !== resolvedRoot && !target.startsWith(`${resolvedRoot}${sep}`)) {
+          throw new BenchmarkError('dependency_symlink_escape');
+        }
+        const targetText = relative(dirname(path), target).split(sep).join('/');
+        records.push({ path: relative(root, path).split(sep).join('/'), type: 'symlink', bytes: 0, sha256: sha256(targetText) });
+      } else throw new BenchmarkError('dependency_type_invalid');
+    }
+  }
+  await visit(root);
+  records.sort((left, right) => left.path.localeCompare(right.path));
+  return {
+    files: records.filter((record) => record.type === 'file').length,
+    symlinks: records.filter((record) => record.type === 'symlink').length,
+    bytes: records.reduce((total, record) => total + record.bytes, 0),
+    sha256: sha256(new TextEncoder().encode(JSON.stringify(records)))
+  };
+}
+
+async function fileIdentity(path: string): Promise<{ bytes: number; sha256: string }> {
+  const resolved = await realpath(path);
+  const handle = await open(resolved, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw new BenchmarkError('toolchain_file_invalid');
+    return { bytes: metadata.size, sha256: sha256(await handle.readFile()) };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function toolchainIdentity(dependencySnapshot: string): Promise<Record<string, unknown>> {
+  const nodePath = Bun.which('node');
+  const pythonPath = Bun.which('python3');
+  const sandboxPath = platform() === 'darwin' ? '/usr/bin/sandbox-exec' : Bun.which('bwrap');
+  if (!nodePath || !pythonPath || !sandboxPath) throw new BenchmarkError('sandbox_runtime_missing');
+  return {
+    package_json: await fileIdentity(join(APP_ROOT, 'package.json')),
+    bun_lock: await fileIdentity(join(APP_ROOT, 'bun.lock')),
+    node_executable: await fileIdentity(nodePath),
+    bun_executable: await fileIdentity(process.execPath),
+    python_executable: await fileIdentity(pythonPath),
+    sandbox_executable: await fileIdentity(sandboxPath),
+    dependencies: await treeIdentity(dependencySnapshot),
+    vite: await treeIdentity(join(dependencySnapshot, 'vite')),
+    sveltekit: await treeIdentity(join(dependencySnapshot, '@sveltejs', 'kit')),
+    vite_svelte_plugin: await treeIdentity(join(dependencySnapshot, '@sveltejs', 'vite-plugin-svelte')),
+    svelte: await treeIdentity(join(dependencySnapshot, 'svelte')),
+    typescript_native: await treeIdentity(join(dependencySnapshot, '@typescript', 'native'))
+  };
+}
+
 async function inputIdentity(workload: Workload): Promise<{ bytes: number; sha256: string }> {
   const records: Array<{ path: string; bytes: number; sha256: string }> = [];
   async function addFile(path: string): Promise<void> {
@@ -528,12 +762,13 @@ async function inputIdentity(workload: Workload): Promise<{ bytes: number; sha25
   return { bytes: records.reduce((total, record) => total + record.bytes, 0), sha256: sha256(canonicalBytes(records)) };
 }
 
-function sampleProvenance(run: { id: string; state: string; command: string; repetitions: number; raw_samples: number[] }): string {
-  return sha256(canonicalBytes(run));
+function sampleProvenance(run: Record<string, unknown>): string {
+  return sha256(canonicalDigestBytes(run));
 }
 
 async function writeEvidenceFiles(
   workload: Workload,
+  toolchain: Record<string, unknown>,
   cold: BuildObservation[],
   warmup: BuildObservation,
   warm: BuildObservation[]
@@ -553,40 +788,50 @@ async function writeEvidenceFiles(
     runtime: `Bun-${Bun.version}; Node-${commandVersion(nodePath, ['--version'])}; Vite-${commandVersion(nodePath, [join(APP_ROOT, 'node_modules/vite/bin/vite.js'), '--version'])}`,
     browser: 'not_applicable'
   };
-  const trace = {
-    schema: 'hermternal.web-production-build-trace.v1',
-    recorded_at_utc: new Date().toISOString(),
-    source_commit_sha: commitSha,
-    fixture_sha256: sha256(workloadBytes),
-    build_input: input,
-    network_mode: 'deny',
-    limits: workload.limits,
-    warmup_excluded_from_distribution: warmup,
-    runs: [
-      { id: 'web-production-build-cold', state: 'cold', samples: cold },
-      { id: 'web-production-build-warm', state: 'warm', samples: warm }
-    ]
-  };
-  await mkdir(EVIDENCE_DIRECTORY, { recursive: true });
-  const traceBytes = canonicalBytes(trace);
-  await writeFile(TRACE_PATH, traceBytes);
-  const command = 'node node_modules/vite/bin/vite.js build';
+  const command = ['node', workload.build.entrypoint, ...workload.build.arguments].join(' ');
   const coldSamples = cold.map((sample) => sample.duration_ms);
   const warmSamples = warm.map((sample) => sample.duration_ms);
   const coldIdentity = {
     id: 'web-production-build-cold',
+    platform: 'web',
+    environment,
     state: 'cold',
+    build_mode: 'production',
+    optimization: 'not_applicable',
     command,
     repetitions: coldSamples.length,
     raw_samples: coldSamples
   };
   const warmIdentity = {
     id: 'web-production-build-warm',
+    platform: 'web',
+    environment,
     state: 'warm',
+    build_mode: 'production',
+    optimization: 'not_applicable',
     command,
     repetitions: warmSamples.length,
     raw_samples: warmSamples
   };
+  const trace = {
+    schema: 'hermternal.web-production-build-trace.v1',
+    recorded_at_utc: new Date().toISOString(),
+    source_commit_sha: commitSha,
+    fixture_sha256: sha256(workloadBytes),
+    environment,
+    build_input: input,
+    toolchain,
+    network_mode: 'os_sandbox_deny',
+    limits: workload.limits,
+    warmup_excluded_from_distribution: warmup,
+    runs: [
+      { provenance: coldIdentity, samples: cold },
+      { provenance: warmIdentity, samples: warm }
+    ]
+  };
+  await mkdir(EVIDENCE_DIRECTORY, { recursive: true });
+  const traceBytes = canonicalBytes(trace);
+  await writeFile(TRACE_PATH, traceBytes);
   const artifacts = [
     { path: 'workload.json', bytes: workloadBytes.byteLength, sha256: sha256(workloadBytes) },
     { path: 'evidence/raw-trace.json', bytes: traceBytes.byteLength, sha256: sha256(traceBytes) }
@@ -638,7 +883,7 @@ async function writeEvidenceFiles(
       }
     ],
     artifacts,
-    artifact_manifest_sha256: sha256(canonicalBytes(artifacts)),
+    artifact_manifest_sha256: sha256(canonicalDigestBytes(artifacts)),
     redaction: {
       policy: 'semantic_only',
       synthetic_only: true,
@@ -664,11 +909,18 @@ async function loadWorkload(): Promise<Workload> {
   return validateWorkload(parsed);
 }
 
+async function removeRunRoot(runRoot: string): Promise<void> {
+  spawnSync('chmod', ['-R', 'u+w', runRoot], { stdio: 'ignore' });
+  await rm(runRoot, { recursive: true, force: true });
+  activeRunRoots.delete(runRoot);
+}
+
 async function handleSignal(exitCode: number): Promise<void> {
   if (handlingSignal) return;
   handlingSignal = true;
-  activeChild?.kill();
+  if (activeChild) await terminateProcessGroup(activeChild);
   await Promise.all([...activeWorkspaces].map((workspace) => removeWorkspace(workspace)));
+  await Promise.all([...activeRunRoots].map((runRoot) => removeRunRoot(runRoot)));
   process.exit(exitCode);
 }
 
@@ -677,23 +929,33 @@ async function main(): Promise<void> {
   process.once('SIGTERM', () => void handleSignal(143));
   const workload = await loadWorkload();
   const options = parseArguments(process.argv.slice(2), workload);
-  const cold = await runCold(workload, options.coldRepetitions);
-  const warmResult = await runWarm(workload, options.warmRepetitions);
-  const artifactIdentities = [warmResult.warmup, ...cold, ...warmResult.observations].map((sample) => sample.artifact_sha256);
-  if (new Set(artifactIdentities).size !== 1) throw new BenchmarkError('artifact_identity_drift');
-  if (options.writeEvidence) await writeEvidenceFiles(workload, cold, warmResult.warmup, warmResult.observations);
-  const summary = {
-    ok: true,
-    cold: { repetitions: cold.length, distribution: distribution(cold.map((sample) => sample.duration_ms)) },
-    warm: {
-      repetitions: warmResult.observations.length,
-      distribution: distribution(warmResult.observations.map((sample) => sample.duration_ms))
-    },
-    artifact_sha256: artifactIdentities[0],
-    threshold: null,
-    evidence_written: options.writeEvidence
-  };
-  process.stdout.write(`${JSON.stringify(summary)}\n`);
+  const runRoot = await mkdtemp(join(tmpdir(), 'hermternal-web-benchmark-'));
+  activeRunRoots.add(runRoot);
+  try {
+    const dependencySnapshot = await cloneDependencySnapshot(runRoot);
+    const toolchain = await toolchainIdentity(dependencySnapshot);
+    const cold = await runCold(workload, dependencySnapshot, options.coldRepetitions);
+    const warmResult = await runWarm(workload, dependencySnapshot, options.warmRepetitions);
+    const artifactIdentities = [warmResult.warmup, ...cold, ...warmResult.observations].map((sample) => sample.artifact_sha256);
+    if (new Set(artifactIdentities).size !== 1) throw new BenchmarkError('artifact_identity_drift');
+    const finalToolchain = await toolchainIdentity(dependencySnapshot);
+    if (JSON.stringify(toolchain) !== JSON.stringify(finalToolchain)) throw new BenchmarkError('dependency_snapshot_mutated');
+    if (options.writeEvidence) await writeEvidenceFiles(workload, toolchain, cold, warmResult.warmup, warmResult.observations);
+    const summary = {
+      ok: true,
+      cold: { repetitions: cold.length, distribution: distribution(cold.map((sample) => sample.duration_ms)) },
+      warm: {
+        repetitions: warmResult.observations.length,
+        distribution: distribution(warmResult.observations.map((sample) => sample.duration_ms))
+      },
+      artifact_sha256: artifactIdentities[0],
+      threshold: null,
+      evidence_written: options.writeEvidence
+    };
+    process.stdout.write(`${JSON.stringify(summary)}\n`);
+  } finally {
+    await removeRunRoot(runRoot);
+  }
 }
 
 if (import.meta.main) {
