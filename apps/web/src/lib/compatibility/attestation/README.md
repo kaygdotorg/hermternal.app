@@ -13,18 +13,29 @@ returns `passed: true`:
   full pinned Hermes SHA;
 - the reviewed route-manifest, source-review, and proxy-proof paths, digests,
   and byte counts;
-- the detached deployment identity and release channel against the runtime
-  evidence already supplied to the JSON-RPC client;
-- an independent trust context whose authenticated channel matches the detached
-  record; and
+- the canonical synthetic deployment identity `synthetic-deployment-001`, trust
+  channel `release-channel`, and scope `fixture_only` in both detached and runtime
+  evidence;
+- an opaque trust context created by `createCanonicalFixtureTrustContext`; plain
+  attacker-controlled objects that repeat the fixture strings remain untrusted; and
 - the C-04 requirements that attestation alone cannot enable live operation.
 
 The record cannot declare itself trusted. Missing, empty, malformed, unknown,
-untrusted, additive, reordered, mismatched, oversized, or server-derived version
-evidence fails closed. Cancellation also returns a blocked decision. The helper
-`createCompatibilityAttestationGate` is structurally compatible with the
-existing JSON-RPC `verifyAttestation` callback, but this focused change does not
-wire a live connection or bypass the separate behavioral-probe gate.
+untrusted, additive, reordered, mismatched, oversized, accessor-backed,
+non-enumerable, symbolic, or server-derived version evidence fails closed.
+String code units and UTF-8 bytes are bounded before trimming or parsing. Object
+and array evidence is copied through data descriptors into an inert bounded
+snapshot; a million-entry array is rejected without spreading it onto the stack.
+
+Cancellation also returns a blocked decision. `createCompatibilityAttestationGate`
+returns a nominal non-callable wrapper with no exposed callback. It accepts only
+a privately branded wrapper from `createBehavioralProbeGate`, then returns the
+paired transport callbacks. Neither nominal wrapper can be supplied directly as
+the other callback, and forged structural probe objects are rejected. The
+source-backed transport tests prove pending, passed, failed, and cancelled probe
+states and prove that attestation alone never reaches `ready`. This focused
+change does not wire a live connection or implement the independent behavioral
+probe.
 
 The checked-in record is synthetic. A `verified` result proves only that the
 fixture bindings and caller-supplied trusted-channel context match. It does not
@@ -38,9 +49,12 @@ The tests read these contract fixtures directly from `contracts/`:
 - `contracts/fixtures/compatibility-attestation/revision_attestation.json`
 - `contracts/fixtures/compatibility-attestation/cases.json`
 
-They execute every C-04 attestation result and add regressions for untrusted
-context, duplicate/reordered/additive JSON, non-finite numbers, runtime evidence
-drift, server-shaped version metadata, bounded metadata traversal, and aborts.
+They execute every C-04 `attestation_result`, `behavioral_probe`, and
+`runtime_gate` value through `createJsonRpcChatTransport`. Regressions cover
+untrusted matching context, canonical deployment drift, duplicate/reordered/
+additive JSON, non-finite numbers, accessor/symbol/non-enumerable runtime data,
+normalized server-version metadata, million-entry arrays, Proxy array get traps,
+oversized whitespace, bounded traversal, distinct probe success, and aborts.
 Run the focused checks from `apps/web`:
 
 ```sh

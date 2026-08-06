@@ -1,7 +1,10 @@
 import { readFileSync, statSync } from 'node:fs';
 import { arch, platform, release } from 'node:os';
 import type { JsonRpcCompatibilityEvidence } from '../../chat/json-rpc-chat';
-import { evaluateCompatibilityAttestation } from './attestation';
+import {
+  createCanonicalFixtureTrustContext,
+  evaluateCompatibilityAttestation
+} from './attestation';
 
 const fixtureUrl = new URL(
   '../../../../../../contracts/fixtures/compatibility-attestation/revision_attestation.json',
@@ -9,7 +12,7 @@ const fixtureUrl = new URL(
 );
 const moduleUrl = new URL('./attestation.ts', import.meta.url);
 const attestation = JSON.parse(readFileSync(fixtureUrl, 'utf8')) as unknown;
-const trust = { status: 'trusted', channel: 'release-channel' } as const;
+const trust = createCanonicalFixtureTrustContext();
 const evidence: JsonRpcCompatibilityEvidence = {
   contract: 'dashboard-v0.0.1',
   hermesSourceSha: 'f5be9236e00ddf2f2a412697f267078fc4ee068e',

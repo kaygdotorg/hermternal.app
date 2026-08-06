@@ -1,19 +1,27 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import type { JsonRpcCompatibilityEvidence } from '../../chat/json-rpc-chat';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  JSON_RPC_EVENT_METHOD,
+  JSON_RPC_GATEWAY_READY_EVENT,
+  createJsonRpcChatTransport,
+  type JsonRpcChatOptions,
+  type JsonRpcCompatibilityEvidence,
+  type JsonRpcWebSocket
+} from '../../chat/json-rpc-chat';
+import {
+  createBehavioralProbeGate,
+  createCanonicalFixtureTrustContext,
   createCompatibilityAttestationGate,
   evaluateCompatibilityAttestation
 } from './attestation';
 
-const FIXTURE_ROOT = resolve(
-  process.cwd(),
-  '../../contracts/fixtures/compatibility-attestation'
+const FIXTURE_ROOT = resolve(process.cwd(), '../../contracts/fixtures/compatibility-attestation');
+const CANONICAL_ATTESTATION_TEXT = readFileSync(
+  resolve(FIXTURE_ROOT, 'revision_attestation.json'),
+  'utf8'
 );
-const CANONICAL_ATTESTATION = JSON.parse(
-  readFileSync(resolve(FIXTURE_ROOT, 'revision_attestation.json'), 'utf8')
-) as Record<string, unknown>;
+const CANONICAL_ATTESTATION = JSON.parse(CANONICAL_ATTESTATION_TEXT) as Record<string, unknown>;
 const CASES = JSON.parse(readFileSync(resolve(FIXTURE_ROOT, 'cases.json'), 'utf8')) as {
   cases: Array<{
     id: string;
@@ -23,17 +31,15 @@ const CASES = JSON.parse(readFileSync(resolve(FIXTURE_ROOT, 'cases.json'), 'utf8
       route_manifest: string;
       source_review: string;
       proxy_proof: string;
-      behavioral_probe: string;
+      behavioral_probe: 'not_run' | 'passed' | 'failed';
       dashboard_metadata: string;
     };
-    expected: { attestation_result: 'verified' | 'blocked' };
+    expected: {
+      attestation_result: 'verified' | 'blocked';
+      runtime_gate: 'blocked_pending_probe' | 'separate_probe_gate' | 'blocked_incompatible';
+    };
   }>;
 };
-
-const TRUSTED_FIXTURE_CHANNEL = {
-  status: 'trusted',
-  channel: 'release-channel'
-} as const;
 
 const RUNTIME_EVIDENCE: JsonRpcCompatibilityEvidence = {
   contract: 'dashboard-v0.0.1',
@@ -63,6 +69,47 @@ const RUNTIME_EVIDENCE: JsonRpcCompatibilityEvidence = {
   gatewayReadyPayload: Object.create(null) as Record<string, never>
 };
 
+const COMPATIBILITY_EVIDENCE: JsonRpcChatOptions['compatibilityEvidence'] = {
+  deployment: RUNTIME_EVIDENCE.deployment,
+  routeManifest: RUNTIME_EVIDENCE.routeManifest,
+  sourceReview: RUNTIME_EVIDENCE.sourceReview,
+  proxyProof: RUNTIME_EVIDENCE.proxyProof
+};
+
+class FakeWebSocket implements JsonRpcWebSocket {
+  onopen: ((event?: unknown) => void) | null = null;
+  onmessage: ((event: { readonly data: unknown }) => void) | null = null;
+  onerror: ((event?: unknown) => void) | null = null;
+  onclose: ((event?: { readonly code?: number; readonly reason?: string }) => void) | null = null;
+  closed: { readonly code?: number; readonly reason?: string } | undefined;
+
+  send(): void {}
+
+  close(code?: number, reason?: string): void {
+    if (this.closed) return;
+    this.closed = { code, reason };
+    this.onclose?.(this.closed);
+  }
+
+  emitOpen(): void {
+    this.onopen?.();
+  }
+
+  emitGatewayReady(payload: Record<string, unknown> = {}): void {
+    this.onmessage?.({
+      data: JSON.stringify({
+        jsonrpc: '2.0',
+        method: JSON_RPC_EVENT_METHOD,
+        params: { type: JSON_RPC_GATEWAY_READY_EVENT, payload }
+      })
+    });
+  }
+}
+
+async function flush(): Promise<void> {
+  for (let index = 0; index < 32; index += 1) await Promise.resolve();
+}
+
 function cloneAttestation(): Record<string, unknown> {
   return structuredClone(CANONICAL_ATTESTATION);
 }
@@ -82,8 +129,11 @@ function fixtureInput(caseInput: (typeof CASES.cases)[number]['input']): unknown
   if (caseInput.revision === 'mismatched') {
     nested(record, 'hermes').source_sha = '0000000000000000000000000000000000000000';
   }
-  if (caseInput.route_manifest === 'mismatch') nested(record, 'route_manifest').sha256 = '0'.repeat(64);
-  if (caseInput.source_review === 'mismatch') nested(record, 'source_review').sha256 = '0'.repeat(64);
+  if (caseInput.route_manifest === 'mismatch') {
+    nested(record, 'route_manifest').sha256 = '0'.repeat(64);
+  }
+  if (caseInput.source_review === 'mismatch')
+    nested(record, 'source_review').sha256 = '0'.repeat(64);
   if (caseInput.proxy_proof === 'mismatch') nested(record, 'proxy_proof').sha256 = '0'.repeat(64);
   if (caseInput.dashboard_metadata === 'unexpected') {
     nested(record, 'dashboard_metadata').source_revision_observable = true;
@@ -91,40 +141,150 @@ function fixtureInput(caseInput: (typeof CASES.cases)[number]['input']): unknown
   return record;
 }
 
+function makeTransport(
+  input: unknown,
+  behavioralProbe: JsonRpcChatOptions['runBehavioralProbe'],
+  signal?: AbortSignal
+): {
+  readonly transport: ReturnType<typeof createJsonRpcChatTransport>;
+  readonly socket: FakeWebSocket;
+  readonly connection: Promise<void>;
+} {
+  const socket = new FakeWebSocket();
+  const attestation = createCompatibilityAttestationGate(
+    input,
+    createCanonicalFixtureTrustContext()
+  );
+  const gates = attestation.pairWithBehavioralProbe(
+    createBehavioralProbeGate(behavioralProbe ?? (async () => false))
+  );
+  const transport = createJsonRpcChatTransport({
+    ticketProvider: async () => 'synthetic-ticket',
+    createWebSocket: () => socket,
+    compatibilityEvidence: COMPATIBILITY_EVIDENCE,
+    ...gates,
+    compatibilityGateTimeoutMs: 10_000
+  });
+  const connection = transport.connect(signal);
+  return { transport, socket, connection };
+}
+
 describe('fixture-driven compatibility attestation', () => {
-  it('implements every source-backed C-04 attestation result without promoting probe state', () => {
+  it('implements every C-04 attestation and runtime_gate result through the transport', async () => {
     for (const fixtureCase of CASES.cases) {
-      const result = evaluateCompatibilityAttestation(
-        fixtureInput(fixtureCase.input),
-        TRUSTED_FIXTURE_CHANNEL,
+      const probe = vi.fn(
+        fixtureCase.input.behavioral_probe === 'not_run'
+          ? () => new Promise<boolean>(() => undefined)
+          : async () => fixtureCase.input.behavioral_probe === 'passed'
+      );
+      const controller = new AbortController();
+      const harness = makeTransport(fixtureInput(fixtureCase.input), probe, controller.signal);
+      await flush();
+      harness.socket.emitOpen();
+      harness.socket.emitGatewayReady();
+      await flush();
+
+      if (fixtureCase.expected.runtime_gate === 'separate_probe_gate') {
+        await expect(harness.connection, fixtureCase.id).resolves.toBeUndefined();
+        expect(harness.transport.state.status, fixtureCase.id).toBe('ready');
+        expect(probe, fixtureCase.id).toHaveBeenCalledTimes(1);
+      } else if (fixtureCase.expected.runtime_gate === 'blocked_pending_probe') {
+        expect(harness.transport.state.status, fixtureCase.id).toBe('handshaking');
+        expect(probe, fixtureCase.id).toHaveBeenCalledTimes(1);
+        controller.abort();
+        await expect(harness.connection, fixtureCase.id).rejects.toMatchObject({
+          code: 'aborted'
+        });
+        expect(harness.transport.state.status, fixtureCase.id).toBe('offline');
+      } else {
+        await expect(harness.connection, fixtureCase.id).rejects.toMatchObject({
+          code: 'incompatible'
+        });
+        expect(harness.transport.state.status, fixtureCase.id).toBe('incompatible');
+        expect(probe, fixtureCase.id).toHaveBeenCalledTimes(
+          fixtureCase.expected.attestation_result === 'verified' ? 1 : 0
+        );
+      }
+    }
+  });
+
+  it('never becomes ready without a distinct successful behavioral probe', async () => {
+    const attestation = createCompatibilityAttestationGate(
+      CANONICAL_ATTESTATION_TEXT,
+      createCanonicalFixtureTrustContext()
+    );
+    // @ts-expect-error The nominal attestation wrapper is not a behavioral-probe callback.
+    const invalidProbe: JsonRpcChatOptions['runBehavioralProbe'] = attestation;
+    expect(invalidProbe).toBe(attestation);
+    expect(() => {
+      // @ts-expect-error A structural lookalike lacks the private nominal marker.
+      attestation.pairWithBehavioralProbe({ kind: 'behavioral-probe' });
+    }).toThrowError('A canonical behavioral-probe wrapper is required.');
+
+    for (const result of [false, { passed: false }] as const) {
+      const harness = makeTransport(CANONICAL_ATTESTATION_TEXT, async () => result);
+      await flush();
+      harness.socket.emitOpen();
+      harness.socket.emitGatewayReady();
+      await expect(harness.connection).rejects.toMatchObject({
+        code: 'incompatible'
+      });
+      expect(harness.transport.state.status).toBe('incompatible');
+    }
+  });
+
+  it('cancels a pending separate probe without claiming readiness', async () => {
+    const controller = new AbortController();
+    const harness = makeTransport(
+      CANONICAL_ATTESTATION_TEXT,
+      () => new Promise<boolean>(() => undefined),
+      controller.signal
+    );
+    await flush();
+    harness.socket.emitOpen();
+    harness.socket.emitGatewayReady();
+    await flush();
+    expect(harness.transport.state.status).toBe('handshaking');
+    controller.abort();
+    await expect(harness.connection).rejects.toMatchObject({ code: 'aborted' });
+    expect(harness.transport.state.status).toBe('offline');
+  });
+
+  it('pins canonical deployment fields and rejects attacker-controlled matching context', () => {
+    const trusted = createCanonicalFixtureTrustContext();
+    expect(
+      evaluateCompatibilityAttestation(CANONICAL_ATTESTATION, trusted, RUNTIME_EVIDENCE)
+    ).toEqual({ passed: true, code: 'verified' });
+
+    const matchingButUntrusted = {
+      status: 'trusted',
+      channel: 'release-channel',
+      deploymentIdentity: 'synthetic-deployment-001',
+      scope: 'fixture_only'
+    };
+    expect(
+      evaluateCompatibilityAttestation(
+        CANONICAL_ATTESTATION,
+        matchingButUntrusted,
         RUNTIME_EVIDENCE
-      );
-      expect(result.passed, fixtureCase.id).toBe(
-        fixtureCase.expected.attestation_result === 'verified'
-      );
+      )
+    ).toEqual({ passed: false, code: 'untrusted-source' });
+
+    for (const [section, key, value] of [
+      ['deployment', 'identity', 'attacker-controlled'],
+      ['deployment', 'trust_channel', 'attacker-channel'],
+      ['deployment', 'scope', 'live']
+    ] as const) {
+      const changed = cloneAttestation();
+      nested(changed, section)[key] = value;
+      expect(evaluateCompatibilityAttestation(changed, trusted, RUNTIME_EVIDENCE), key).toEqual({
+        passed: false,
+        code: 'evidence-mismatch'
+      });
     }
   });
 
-  it('fails closed for unknown or self-declared trust contexts', () => {
-    for (const trust of [
-      undefined,
-      {},
-      { status: 'unknown', channel: 'release-channel' },
-      { status: 'untrusted', channel: 'release-channel' },
-      { status: 'trusted', channel: 'other-channel' },
-      { status: 'trusted', channel: 'release-channel', assertedBy: 'record' }
-    ]) {
-      expect(
-        evaluateCompatibilityAttestation(
-          CANONICAL_ATTESTATION,
-          trust,
-          RUNTIME_EVIDENCE
-        )
-      ).toEqual({ passed: false, code: 'untrusted-source' });
-    }
-  });
-
-  it('rejects duplicate, reordered, additive, and non-finite JSON evidence', () => {
+  it('rejects duplicate, reordered, additive, and non-finite attestation JSON', () => {
     const canonicalJson = JSON.stringify(CANONICAL_ATTESTATION);
     const duplicateSchema = canonicalJson.replace(
       '"schema":"hermternal.revision-attestation.v1",',
@@ -137,90 +297,172 @@ describe('fixture-driven compatibility attestation', () => {
     const additive = cloneAttestation();
     additive.compatible = true;
 
-    for (const input of [duplicateSchema, reordered, additive, canonicalJson.replace('17859', '1e9999')]) {
+    for (const input of [
+      duplicateSchema,
+      reordered,
+      additive,
+      canonicalJson.replace('17859', '1e9999')
+    ]) {
       expect(
-        evaluateCompatibilityAttestation(input, TRUSTED_FIXTURE_CHANNEL, RUNTIME_EVIDENCE).passed
+        evaluateCompatibilityAttestation(
+          input,
+          createCanonicalFixtureTrustContext(),
+          RUNTIME_EVIDENCE
+        ).passed
       ).toBe(false);
     }
   });
 
-  it('binds runtime evidence to the detached record and rejects server-shaped version claims', () => {
-    expect(
-      evaluateCompatibilityAttestation(
-        CANONICAL_ATTESTATION,
-        TRUSTED_FIXTURE_CHANNEL,
-        undefined
-      )
-    ).toEqual({ passed: false, code: 'evidence-mismatch' });
-
-    const mismatchedEvidence: JsonRpcCompatibilityEvidence = {
-      ...RUNTIME_EVIDENCE,
-      proxyProof: { ...RUNTIME_EVIDENCE.proxyProof, sha256: '0'.repeat(64) }
-    };
-    expect(
-      evaluateCompatibilityAttestation(
-        CANONICAL_ATTESTATION,
-        TRUSTED_FIXTURE_CHANNEL,
-        mismatchedEvidence
-      )
-    ).toEqual({ passed: false, code: 'evidence-mismatch' });
-
-    for (const key of ['protocol_version', 'protocolVersion', 'protocol-version']) {
-      const serverClaim: JsonRpcCompatibilityEvidence = {
+  it('rejects normalized, punctuated, prefixed, and suffixed server-version metadata', () => {
+    for (const key of [
+      'protocol_version',
+      'protocolVersion',
+      ' protocol version ',
+      '...protocol-version!!!',
+      'x protocol version',
+      'xProtocolVersionSuffix',
+      'prefixprotocolversionsuffix',
+      'protocol version suffix',
+      '--server-source-sha--',
+      'prefix.revision-from-response'
+    ]) {
+      const evidence: JsonRpcCompatibilityEvidence = {
         ...RUNTIME_EVIDENCE,
-        gatewayReadyPayload: {
-          nested: { [key]: 'dashboard-v0.0.1' }
-        }
+        gatewayReadyPayload: { nested: { [key]: 'dashboard-v0.0.1' } }
       };
       expect(
         evaluateCompatibilityAttestation(
           CANONICAL_ATTESTATION,
-          TRUSTED_FIXTURE_CHANNEL,
-          serverClaim
+          createCanonicalFixtureTrustContext(),
+          evidence
         ),
         key
       ).toEqual({ passed: false, code: 'server-metadata-rejected' });
     }
   });
 
-  it('preserves cancellation and exposes a fail-closed JSON-RPC gate callback', async () => {
+  it('bounds whitespace, object strings, and million-entry arrays without throwing', () => {
+    const trusted = createCanonicalFixtureTrustContext();
+    expect(() =>
+      evaluateCompatibilityAttestation(' '.repeat(1_000_000), trusted, RUNTIME_EVIDENCE)
+    ).not.toThrow();
+    expect(
+      evaluateCompatibilityAttestation(' '.repeat(1_000_000), trusted, RUNTIME_EVIDENCE)
+    ).toEqual({ passed: false, code: 'malformed' });
+
+    const oversizedObject = cloneAttestation();
+    oversizedObject.schema = 'x'.repeat(1_000_000);
+    expect(() =>
+      evaluateCompatibilityAttestation(oversizedObject, trusted, RUNTIME_EVIDENCE)
+    ).not.toThrow();
+    expect(
+      evaluateCompatibilityAttestation(oversizedObject, trusted, RUNTIME_EVIDENCE).passed
+    ).toBe(false);
+
+    const millionEntries = new Array<null>(1_000_000).fill(null);
+    const evidence = {
+      ...RUNTIME_EVIDENCE,
+      gatewayReadyPayload: millionEntries
+    };
+    expect(() =>
+      evaluateCompatibilityAttestation(CANONICAL_ATTESTATION, trusted, evidence)
+    ).not.toThrow();
+    expect(evaluateCompatibilityAttestation(CANONICAL_ATTESTATION, trusted, evidence)).toEqual({
+      passed: false,
+      code: 'evidence-mismatch'
+    });
+  });
+
+  it('rejects additive, symbol, non-enumerable, and accessor runtime evidence', () => {
+    const trusted = createCanonicalFixtureTrustContext();
+    const mutations: Array<(evidence: Record<string, unknown>) => void> = [
+      (evidence) => {
+        evidence.additive = true;
+      },
+      (evidence) => {
+        Object.defineProperty(evidence, Symbol('hidden'), {
+          value: true,
+          enumerable: true
+        });
+      },
+      (evidence) => {
+        Object.defineProperty(evidence, 'hidden', {
+          value: true,
+          enumerable: false
+        });
+      },
+      (evidence) => {
+        Object.defineProperty(evidence, 'contract', {
+          enumerable: true,
+          get: () => 'dashboard-v0.0.1'
+        });
+      },
+      (evidence) => {
+        Object.defineProperty(evidence.deployment as object, 'identity', {
+          enumerable: true,
+          get: () => 'synthetic-deployment-001'
+        });
+      },
+      (evidence) => {
+        Object.defineProperty(evidence.proxyProof as object, 'additive', {
+          value: true,
+          enumerable: true
+        });
+      }
+    ];
+
+    for (const mutate of mutations) {
+      const evidence = structuredClone(RUNTIME_EVIDENCE) as unknown as Record<string, unknown>;
+      mutate(evidence);
+      expect(() =>
+        evaluateCompatibilityAttestation(CANONICAL_ATTESTATION, trusted, evidence)
+      ).not.toThrow();
+      expect(
+        evaluateCompatibilityAttestation(CANONICAL_ATTESTATION, trusted, evidence).passed
+      ).toBe(false);
+    }
+  });
+
+  it('snapshots inert data before validation and preserves cancellation', () => {
+    const trusted = createCanonicalFixtureTrustContext();
+    let reads = 0;
+    const evidence = structuredClone(RUNTIME_EVIDENCE) as unknown as Record<string, unknown>;
+    Object.defineProperty(evidence, 'contract', {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return 'dashboard-v0.0.1';
+      }
+    });
+    expect(evaluateCompatibilityAttestation(CANONICAL_ATTESTATION, trusted, evidence).passed).toBe(
+      false
+    );
+    expect(reads).toBe(0);
+
+    let proxyReads = 0;
+    const proxiedArray = new Proxy([], {
+      get(target, property, receiver) {
+        proxyReads += 1;
+        return Reflect.get(target, property, receiver);
+      }
+    });
+    expect(
+      evaluateCompatibilityAttestation(CANONICAL_ATTESTATION, trusted, {
+        ...RUNTIME_EVIDENCE,
+        gatewayReadyPayload: proxiedArray
+      })
+    ).toEqual({ passed: true, code: 'verified' });
+    expect(proxyReads).toBe(0);
+
     const controller = new AbortController();
     controller.abort();
     expect(
       evaluateCompatibilityAttestation(
         CANONICAL_ATTESTATION,
-        TRUSTED_FIXTURE_CHANNEL,
+        trusted,
         RUNTIME_EVIDENCE,
         controller.signal
       )
     ).toEqual({ passed: false, code: 'aborted' });
-
-    const gate = createCompatibilityAttestationGate(
-      CANONICAL_ATTESTATION,
-      TRUSTED_FIXTURE_CHANNEL
-    );
-    await expect(
-      Promise.resolve(gate(RUNTIME_EVIDENCE, new AbortController().signal))
-    ).resolves.toEqual({ passed: true });
-  });
-
-  it('bounds untrusted gateway metadata traversal', () => {
-    let value: Record<string, unknown> = {};
-    const root = value;
-    for (let index = 0; index < 1_025; index += 1) {
-      value.next = {};
-      value = value.next as Record<string, unknown>;
-    }
-    const evidence: JsonRpcCompatibilityEvidence = {
-      ...RUNTIME_EVIDENCE,
-      gatewayReadyPayload: root as JsonRpcCompatibilityEvidence['gatewayReadyPayload']
-    };
-    expect(
-      evaluateCompatibilityAttestation(
-        CANONICAL_ATTESTATION,
-        TRUSTED_FIXTURE_CHANNEL,
-        evidence
-      )
-    ).toEqual({ passed: false, code: 'server-metadata-rejected' });
   });
 });
