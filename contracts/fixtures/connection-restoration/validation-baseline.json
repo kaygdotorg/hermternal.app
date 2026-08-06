@@ -1,0 +1,119 @@
+{
+  "schema": "hermternal.connection-restoration-baseline.v1",
+  "validator": "contracts/fixtures/connection-restoration/validate.py",
+  "command": "python3 contracts/fixtures/connection-restoration/validate.py",
+  "build_mode": "N/A",
+  "artifact_files": [
+    {
+      "path": "README.md",
+      "sha256": "db1b594257ee756d746e6771ccc5bd7877255c5b86759bb1510c70ecd5b6499e",
+      "size_bytes": 6686
+    },
+    {
+      "path": "cases.json",
+      "sha256": "91b43223a17ebaf309f0f57b32f804dc9bab28af4d6860cae33dae9a7bb03935",
+      "size_bytes": 68422
+    },
+    {
+      "path": "validate.py",
+      "sha256": "42dbaa3c1b2332cd67a990732a4e18170d361387a4db2552c427f12d38fe3181",
+      "size_bytes": 52948
+    },
+    {
+      "path": "test_validate.py",
+      "sha256": "7c0350ae46a29879db092cd6476f70926ab69546b9806689d7f9406b5ab84627",
+      "size_bytes": 17710
+    }
+  ],
+  "artifact_bytes": 145766,
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "repetitions": 30,
+  "normal": {
+    "command": "python3 contracts/fixtures/connection-restoration/validate.py",
+    "samples_ms": [
+      70.45775,
+      64.631291,
+      64.519833,
+      63.971375,
+      64.371334,
+      67.977,
+      67.229125,
+      67.878,
+      62.3505,
+      62.773625,
+      66.194125,
+      65.991833,
+      94.989542,
+      217.833375,
+      75.519583,
+      66.13475,
+      66.620042,
+      65.449458,
+      65.646167,
+      68.223083,
+      67.170833,
+      71.039084,
+      64.400542,
+      65.88475,
+      66.317042,
+      66.890417,
+      71.713,
+      71.071625,
+      74.329625,
+      71.031
+    ],
+    "distribution": {
+      "min": 62.3505,
+      "p50": 66.755229,
+      "p95": 94.989542,
+      "max": 217.833375,
+      "mean": 73.28699
+    }
+  },
+  "optimized": {
+    "command": "python3 -O contracts/fixtures/connection-restoration/validate.py",
+    "samples_ms": [
+      73.684416,
+      73.715875,
+      64.13375,
+      71.11125,
+      67.57875,
+      69.558125,
+      70.128708,
+      73.981209,
+      71.634041,
+      113.208917,
+      72.269167,
+      136.877542,
+      171.773541,
+      77.262834,
+      117.575333,
+      101.636208,
+      78.519958,
+      144.34975,
+      74.482834,
+      114.151166,
+      117.788042,
+      75.476792,
+      129.587333,
+      91.28725,
+      65.014958,
+      61.15675,
+      67.36775,
+      103.436916,
+      65.110792,
+      63.835458
+    ],
+    "distribution": {
+      "min": 61.15675,
+      "p50": 74.232022,
+      "p95": 144.34975,
+      "max": 171.773541,
+      "mean": 89.256514
+    }
+  },
+  "threshold": null
+}
