@@ -1,0 +1,113 @@
+{
+  "schema": "hermternal.deployment-security.private-network-firewall-baseline.v1",
+  "validator": "contracts/fixtures/deployment-security/private-network-firewall/validate.py",
+  "fixture": "contracts/fixtures/deployment-security/private-network-firewall/cases.json",
+  "metric": "validator_duration_ms",
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "runs": [
+    {
+      "mode": "normal",
+      "command": "python3 contracts/fixtures/deployment-security/private-network-firewall/validate.py",
+      "repetitions": 30,
+      "distribution": {
+        "min_ms": 50.816,
+        "p50_ms": 53.168,
+        "p95_ms": 55.222,
+        "p99_ms": 55.992,
+        "max_ms": 56.205,
+        "mean_ms": 53.257
+      },
+      "trace": [
+        52.719,
+        53.129,
+        53.305,
+        52.341,
+        53.205,
+        55.472,
+        53.884,
+        53.022,
+        53.806,
+        56.205,
+        54.464,
+        54.9,
+        52.773,
+        54.917,
+        54.457,
+        54.812,
+        54.606,
+        51.754,
+        51.831,
+        51.055,
+        50.816,
+        53.422,
+        53.13,
+        53.391,
+        53.479,
+        53.106,
+        52.156,
+        52.115,
+        51.273,
+        52.163
+      ]
+    },
+    {
+      "mode": "optimized",
+      "command": "python3 -O contracts/fixtures/deployment-security/private-network-firewall/validate.py",
+      "repetitions": 30,
+      "distribution": {
+        "min_ms": 52.122,
+        "p50_ms": 53.663,
+        "p95_ms": 55.469,
+        "p99_ms": 55.75,
+        "max_ms": 55.858,
+        "mean_ms": 53.79
+      },
+      "trace": [
+        53.973,
+        52.971,
+        52.813,
+        52.483,
+        52.834,
+        53.801,
+        54.401,
+        53.912,
+        55.858,
+        52.692,
+        53.664,
+        52.914,
+        54.073,
+        53.209,
+        54.408,
+        53.336,
+        53.391,
+        53.137,
+        53.663,
+        54.853,
+        54.994,
+        54.996,
+        53.073,
+        55.449,
+        53.609,
+        54.802,
+        53.999,
+        55.486,
+        52.778,
+        52.122
+      ]
+    }
+  ],
+  "artifact": {
+    "files": [
+      "README.md",
+      "cases.json",
+      "validate.py",
+      "test_validate.py"
+    ],
+    "bytes": 76972,
+    "sha256": "a76114d34ef47ede646c1843c87fdf38acf49520f266e4b35ec049c68f478c22"
+  },
+  "threshold": null
+}

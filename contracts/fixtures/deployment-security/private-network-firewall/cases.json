@@ -1,0 +1,536 @@
+{
+  "schema": "hermternal.deployment-security.private-network-firewall.v1",
+  "operation": "DEP-01",
+  "contract": "dashboard-v0.0.1",
+  "pinned_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "network_access": false,
+  "live_run": false,
+  "compatible": false,
+  "proof_status": "not_run",
+  "topology": {
+    "origin_count": 1,
+    "public_origin": "configured_public_https_origin",
+    "static_client_path": "/",
+    "proxy_network_identity": "approved_proxy_network_identity",
+    "hermes_bind": {
+      "bind_identity": "fixed_private_non_loopback_9119",
+      "address_class": "private_non_loopback",
+      "port": 9119,
+      "publicly_reachable": false,
+      "loopback_only": false,
+      "stability": "fixed"
+    },
+    "unknown_topology_policy": "block"
+  },
+  "route_policy": {
+    "static_client_path": "/",
+    "reviewed_routes": [
+      {
+        "method": "GET",
+        "path": "/api/auth/me",
+        "surface": "hermes_api",
+        "upstream": "hermes_private_9119",
+        "exposure": "proxy_only"
+      },
+      {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "surface": "hermes_api",
+        "upstream": "hermes_private_9119",
+        "exposure": "proxy_only"
+      },
+      {
+        "method": "GET",
+        "path": "/api/sessions",
+        "surface": "hermes_api",
+        "upstream": "hermes_private_9119",
+        "exposure": "proxy_only"
+      },
+      {
+        "method": "WS",
+        "path": "/api/ws",
+        "surface": "hermes_api",
+        "upstream": "hermes_private_9119",
+        "exposure": "proxy_only"
+      },
+      {
+        "method": "WS",
+        "path": "/api/pty",
+        "surface": "hermes_api",
+        "upstream": "hermes_private_9119",
+        "exposure": "proxy_only_web"
+      }
+    ],
+    "blocked_management_prefixes": [
+      "/api/config",
+      "/api/env",
+      "/api/system",
+      "/api/gateway",
+      "/api/ops",
+      "/api/logs",
+      "/api/ssh"
+    ],
+    "unknown_route_action": "deny"
+  },
+  "firewall_policy": {
+    "port": 9119,
+    "default_action": "deny",
+    "allow_protocol": "tcp",
+    "allow_source": "approved_proxy_network_identity",
+    "public_access": "deny",
+    "direct_client_access": "deny",
+    "broad_source": "deny",
+    "unknown_source": "deny"
+  },
+  "proxy_contract": {
+    "variants": ["caddy", "traefik"],
+    "status": "not_run",
+    "equivalence": "same_topology_route_and_firewall_invariants",
+    "implementation": "neutral_contract_only"
+  },
+  "redaction": {
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_hosts": false,
+    "contains_private_addresses": false,
+    "contains_firewall_commands": false,
+    "contains_live_urls": false,
+    "contains_user_data": false,
+    "log_policy": "fixed_reason_markers_only"
+  },
+  "cases": [
+    {
+      "id": "topology-approved",
+      "kind": "topology",
+      "input": {
+        "origin": "not_applicable",
+        "client_surface": "proof_harness",
+        "route": null,
+        "network_path": "offline_fixture",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "approved_proxy_network_identity",
+        "topology_state": "approved",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "allow",
+        "route_action": "topology_validated",
+        "firewall_action": "allow",
+        "upstream_reached": false,
+        "observed_layer": "offline_validator",
+        "reason": "topology_approved",
+        "live_claim": false
+      },
+      "notes": "The complete topology is an offline symbolic contract, not a deployment proof."
+    },
+    {
+      "id": "static-client-root-approved",
+      "kind": "positive",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "public_browser",
+        "route": "/",
+        "network_path": "public_https_to_proxy",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "not_applicable",
+        "topology_state": "approved",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "allow",
+        "route_action": "serve_static",
+        "firewall_action": "not_applicable",
+        "upstream_reached": false,
+        "observed_layer": "proxy",
+        "reason": "static_client_at_root",
+        "live_claim": false
+      },
+      "notes": "The single configured HTTPS origin serves the static client at root."
+    },
+    {
+      "id": "reviewed-chat-via-proxy-approved",
+      "kind": "positive",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/ws",
+        "network_path": "proxy_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "approved_proxy_network_identity",
+        "topology_state": "approved",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "allow",
+        "route_action": "proxy_reviewed_route",
+        "firewall_action": "allow",
+        "upstream_reached": true,
+        "observed_layer": "proxy",
+        "reason": "proxy_to_private_hermes",
+        "live_claim": false
+      },
+      "notes": "A reviewed chat route reaches the private bind only through the approved proxy identity."
+    },
+    {
+      "id": "reviewed-pty-via-proxy-approved",
+      "kind": "positive",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/pty",
+        "network_path": "proxy_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "approved_proxy_network_identity",
+        "topology_state": "approved",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "allow",
+        "route_action": "proxy_reviewed_route",
+        "firewall_action": "allow",
+        "upstream_reached": true,
+        "observed_layer": "proxy",
+        "reason": "proxy_to_private_hermes",
+        "live_claim": false
+      },
+      "notes": "The web-only Terminal remains behind the same private network boundary."
+    },
+    {
+      "id": "direct-public-private-denied",
+      "kind": "negative",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "public_browser",
+        "route": "/api/ws",
+        "network_path": "public_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "public_internet",
+        "topology_state": "approved",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_private_direct",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "firewall",
+        "reason": "direct_public_access_denied",
+        "live_claim": false
+      },
+      "notes": "The public origin is not a direct path to the private Hermes bind."
+    },
+    {
+      "id": "direct-client-private-denied",
+      "kind": "negative",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "direct_client",
+        "route": "/api/ws",
+        "network_path": "client_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "direct_client",
+        "topology_state": "approved",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_private_direct",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "firewall",
+        "reason": "direct_client_access_denied",
+        "live_claim": false
+      },
+      "notes": "The client cannot bypass the proxy network identity."
+    },
+    {
+      "id": "wrong-origin-denied",
+      "kind": "negative",
+      "input": {
+        "origin": "unconfigured_public_https_origin",
+        "client_surface": "public_browser",
+        "route": "/",
+        "network_path": "public_https_to_proxy",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "not_applicable",
+        "topology_state": "wrong_origin",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_origin",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "proxy",
+        "reason": "unconfigured_origin_denied",
+        "live_claim": false
+      },
+      "notes": "Only the one configured public HTTPS origin is in scope."
+    },
+    {
+      "id": "second-origin-denied",
+      "kind": "negative",
+      "input": {
+        "origin": "second_public_https_origin",
+        "client_surface": "public_browser",
+        "route": "/",
+        "network_path": "public_https_to_proxy",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "not_applicable",
+        "topology_state": "additional_origin",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_origin",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "proxy",
+        "reason": "additional_origin_denied",
+        "live_claim": false
+      },
+      "notes": "Adding another origin changes the reviewed deployment boundary and blocks."
+    },
+    {
+      "id": "localhost-only-assumption-rejected",
+      "kind": "incompatible",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/ws",
+        "network_path": "localhost_only",
+        "hermes_bind": "loopback_only_9119",
+        "firewall_source": "localhost_only",
+        "topology_state": "localhost_only",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_bind",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "offline_validator",
+        "reason": "localhost_only_assumption_rejected",
+        "live_claim": false
+      },
+      "notes": "A loopback-only bind cannot satisfy the proxy-to-private-network contract."
+    },
+    {
+      "id": "public-hermes-bind-rejected",
+      "kind": "security",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/ws",
+        "network_path": "proxy_to_private_9119",
+        "hermes_bind": "public_9119",
+        "firewall_source": "approved_proxy_network_identity",
+        "topology_state": "public_bind",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_bind",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "offline_validator",
+        "reason": "public_bind_rejected",
+        "live_claim": false
+      },
+      "notes": "A public Hermes bind is never accepted as an equivalent topology."
+    },
+    {
+      "id": "wrong-hermes-port-rejected",
+      "kind": "incompatible",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/ws",
+        "network_path": "proxy_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_wrong_port",
+        "firewall_source": "approved_proxy_network_identity",
+        "topology_state": "wrong_port",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_bind",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "offline_validator",
+        "reason": "private_port_mismatch",
+        "live_claim": false
+      },
+      "notes": "The private service port is fixed at 9119 for this contract."
+    },
+    {
+      "id": "broad-firewall-source-denied",
+      "kind": "security",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/ws",
+        "network_path": "proxy_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "public_internet",
+        "topology_state": "broad_exposure",
+        "firewall_rule": "broad"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_firewall_rule",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "offline_validator",
+        "reason": "broad_firewall_source_denied",
+        "live_claim": false
+      },
+      "notes": "A firewall rule broader than the proxy identity fails closed."
+    },
+    {
+      "id": "unknown-network-identity-denied",
+      "kind": "negative",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/ws",
+        "network_path": "proxy_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "unknown_network_identity",
+        "topology_state": "unknown_network",
+        "firewall_rule": "unknown"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_firewall_rule",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "offline_validator",
+        "reason": "unknown_network_identity",
+        "live_claim": false
+      },
+      "notes": "The validator does not guess an unverified proxy network identity."
+    },
+    {
+      "id": "management-route-denied",
+      "kind": "security",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/config",
+        "network_path": "proxy_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "approved_proxy_network_identity",
+        "topology_state": "approved",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_management_route",
+        "firewall_action": "not_applicable",
+        "upstream_reached": false,
+        "observed_layer": "proxy",
+        "reason": "management_route_not_exposed",
+        "live_claim": false
+      },
+      "notes": "Private reachability does not authorize broad Hermes management exposure."
+    },
+    {
+      "id": "unknown-route-denied",
+      "kind": "negative",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/not-reviewed",
+        "network_path": "proxy_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "approved_proxy_network_identity",
+        "topology_state": "approved",
+        "firewall_rule": "present"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "deny_unknown_route",
+        "firewall_action": "not_applicable",
+        "upstream_reached": false,
+        "observed_layer": "proxy",
+        "reason": "unknown_route_not_exposed",
+        "live_claim": false
+      },
+      "notes": "The proxy does not guess or forward unreviewed routes."
+    },
+    {
+      "id": "unknown-topology-blocked",
+      "kind": "malformed_input",
+      "input": {
+        "origin": "not_applicable",
+        "client_surface": "proof_harness",
+        "route": null,
+        "network_path": "unknown_path",
+        "hermes_bind": "unknown_bind",
+        "firewall_source": "unknown_network_identity",
+        "topology_state": "unknown",
+        "firewall_rule": "unknown"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "block_topology",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "offline_validator",
+        "reason": "unknown_topology_blocked",
+        "live_claim": false
+      },
+      "notes": "Unknown topology evidence blocks rather than selecting a default path."
+    },
+    {
+      "id": "missing-firewall-rule-blocked",
+      "kind": "malformed_input",
+      "input": {
+        "origin": "configured_public_https_origin",
+        "client_surface": "proxy",
+        "route": "/api/ws",
+        "network_path": "proxy_to_private_9119",
+        "hermes_bind": "fixed_private_non_loopback_9119",
+        "firewall_source": "approved_proxy_network_identity",
+        "topology_state": "missing_firewall_rule",
+        "firewall_rule": "absent"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "block_topology",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "offline_validator",
+        "reason": "firewall_rule_missing",
+        "live_claim": false
+      },
+      "notes": "Missing firewall evidence is not treated as an allow."
+    },
+    {
+      "id": "malformed-topology-blocked",
+      "kind": "malformed_input",
+      "input": {
+        "origin": "malformed_origin",
+        "client_surface": "unknown_client",
+        "route": "/api/not-reviewed",
+        "network_path": "unknown_path",
+        "hermes_bind": "unknown_bind",
+        "firewall_source": "unknown_network_identity",
+        "topology_state": "malformed",
+        "firewall_rule": "unknown"
+      },
+      "expected": {
+        "decision": "deny",
+        "route_action": "block_topology",
+        "firewall_action": "deny",
+        "upstream_reached": false,
+        "observed_layer": "offline_validator",
+        "reason": "malformed_topology_blocked",
+        "live_claim": false
+      },
+      "notes": "Malformed evidence cannot select a public, private, or local fallback."
+    }
+  ]
+}
