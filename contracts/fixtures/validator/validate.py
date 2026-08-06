@@ -136,7 +136,7 @@ BASELINE_REPETITIONS = 30
 # canonicalizer omits only this validator's own manifest digest and derived byte
 # total, which would otherwise create a self-referential hash cycle.
 BASELINE_SELF_MANIFEST_PATH = "contracts/fixtures/validator/validate.py"
-BASELINE_CANONICAL_SHA256 = "d6107ca3feb66f8d5ceb1599fe8b14e40e4d150dcec8fe60d32b50926e2bed78"
+BASELINE_CANONICAL_SHA256 = "a3fb7afbaca3e7ca6742b60397773bfbaa3555cfd38cfadbc1b6f84e789da4ce"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -248,10 +248,15 @@ STRUCTURAL_SENSITIVE_MARKERS = frozenset({
     "session=secret",
     "sid=qwertyui",
     "super-secret-value",
-    # RFC 7617's synthetic Basic-auth negative-test sample is retained only
-    # inside registered fixture tests; it is never accepted in JSON evidence.
-    "qwxhzgrpbjpvcgvuihnlc2ftzq==",
 })
+# Only this already-registered test source contains the RFC 7617 sample as
+# deliberate negative-test input. Keep its exact candidate out of the global
+# marker set so validators and non-test artifacts cannot inherit the allowance.
+TEST_NEGATIVE_BASIC_AUTH_PATHS = frozenset({
+    "deployment-security/external-allowlist/test_validate.py",
+})
+TEST_NEGATIVE_BASIC_AUTH_CANDIDATE = "QWxhZGRpbjpvcGVuIHNlc2FtZQ" + "=="
+TEST_NEGATIVE_BASIC_AUTH_CANDIDATES = frozenset({TEST_NEGATIVE_BASIC_AUTH_CANDIDATE})
 
 SAFE_ERROR_MESSAGE = "fixture registry input rejected"
 
@@ -473,6 +478,7 @@ def _validate_text_value(
     allow_nul: bool = False,
     check_assignments: bool = True,
     allow_synthetic_markers: bool = False,
+    allowed_basic_auth_candidates: frozenset[str] = frozenset(),
 ) -> None:
     if not allow_nul:
         require("\x00" not in value, "text contains an embedded NUL")
@@ -502,8 +508,13 @@ def _validate_text_value(
         if match is None:
             continue
         candidate = match.group(1) if match.lastindex else match.group(0)
+        exact_test_allowance = (
+            pattern is BASIC_VALUE_PATTERN
+            and candidate in allowed_basic_auth_candidates
+        )
         require(
-            _is_placeholder(candidate, allow_synthetic_markers=allow_synthetic_markers),
+            exact_test_allowance
+            or _is_placeholder(candidate, allow_synthetic_markers=allow_synthetic_markers),
             "credential-shaped value is not allowed",
         )
     _validate_url_hosts(value, allow_synthetic_markers=allow_synthetic_markers)
@@ -512,6 +523,10 @@ def _validate_text_value(
 def _validate_redaction_tree(value: Any) -> None:
     if type(value) is dict:
         for key, child in value.items():
+            # Object keys are retained input too. Scan them before treating a
+            # normalized key as structural so nested credential-shaped keys
+            # cannot bypass the value scanner.
+            _validate_text_value(key)
             normalized = _normalize_key(key)
             if normalized in SENSITIVE_KEYS:
                 _validate_sensitive_marker(child, key=normalized)
@@ -539,13 +554,19 @@ def _validate_text_file(path: Path) -> None:
     _validate_text_value(text, check_assignments=False)
 
 
-def _validate_python_file(path: Path) -> None:
+def _validate_python_file(
+    path: Path,
+    *,
+    allow_test_negative_basic_auth: bool = False,
+) -> None:
     """Scan Python source while allowing explicit negative-test markers.
 
     Fixture tests intentionally contain credential-shaped inputs to prove that
     their domain validators reject them. Parse source literals instead of
     scanning detector regex definitions as if they were retained credentials;
-    unmarked bearer, provider, key, JWT, and URL values still fail closed.
+    unmarked bearer, provider, key, JWT, and URL values still fail closed. The
+    RFC 7617 sample is allowed only for the one registered test path that owns
+    that negative case; validator and other non-test sources never inherit it.
     """
     data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES)
     try:
@@ -581,6 +602,11 @@ def _validate_python_file(path: Path) -> None:
             allow_nul=True,
             check_assignments=True,
             allow_synthetic_markers=True,
+            allowed_basic_auth_candidates=(
+                TEST_NEGATIVE_BASIC_AUTH_CANDIDATES
+                if allow_test_negative_basic_auth
+                else frozenset()
+            ),
         )
     # Comments document detector rules and may contain source-shaped examples;
     # scan them too, but permit only the same explicit synthetic markers.
@@ -591,6 +617,11 @@ def _validate_python_file(path: Path) -> None:
                     token.string,
                     check_assignments=True,
                     allow_synthetic_markers=True,
+                    allowed_basic_auth_candidates=(
+                        TEST_NEGATIVE_BASIC_AUTH_CANDIDATES
+                        if allow_test_negative_basic_auth
+                        else frozenset()
+                    ),
                 )
     except tokenize.TokenError as exc:
         raise ValidationError() from exc
@@ -710,7 +741,11 @@ def _validate_manifest_file(
         _validate_redaction_tree(document)
         _reject_live_claims(document)
     elif actual.suffix.casefold() == ".py":
-        _validate_python_file(actual)
+        relative_path = actual.relative_to(fixtures_root).as_posix()
+        _validate_python_file(
+            actual,
+            allow_test_negative_basic_auth=relative_path in TEST_NEGATIVE_BASIC_AUTH_PATHS,
+        )
     elif actual.suffix.casefold() in {".md", ".txt"}:
         _validate_text_file(actual)
     return path
