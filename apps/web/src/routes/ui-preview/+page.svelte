@@ -107,6 +107,13 @@
     lastAuthAction = action.type;
 
     if (action.type === 'retry-discovery' && discoveryMode === 'live') {
+      if (!liveDiscoveryConfigured) {
+        // Retry cannot bypass the build-time gate or send ambient cookies.
+        providers = [];
+        authState = 'provider-unavailable';
+        lastAuthAction = 'live-discovery-disabled';
+        return;
+      }
       startProviderDiscovery();
       return;
     }
