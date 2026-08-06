@@ -13,7 +13,7 @@ text, read a transcript, or claim live compatibility.
 - External expected revision: protected review/CI variable `HERMTERNAL_C06_EXPECTED_COMMIT`
 - External launcher source: protected review/CI variable `HERMTERNAL_C06_EXTERNAL_LAUNCHER`
 - External launcher digest: protected review/CI variable `HERMTERNAL_C06_EXTERNAL_LAUNCHER_SHA256`
-- Non-release audit tag: `hermternal-c06-uncertain-delivery-cancel-restore-anchor`
+- Optional mutable audit marker: `hermternal-c06-uncertain-delivery-cancel-restore-anchor` (not a trust input)
 - Canonical inputs: `cases.json`
 - Validator: `validate.py`
 - Regression tests: `test_validate.py`
@@ -51,12 +51,15 @@ discovery, direct executable/shebang launches, and commands obtained from
 `validation-baseline.json` are non-authoritative because they do not supply the
 protected external launcher.
 
-The annotated tag is a non-release audit/availability marker only. It is not a
-signature, release tag, or trust root. A protected repository owner must publish
-it without force-retagging and keep its target equal to the externally supplied
-reviewed commit. A force-retagged, forged, missing, `--no-tags`, shallow, or
-partial clone fails closed. The executing source and caller-supplied cases and
-baseline paths must be repository-owned. The fixture directory must contain
+The annotated tag is a mutable non-release convenience marker only. This
+repository has no verified ruleset protecting it, so validation neither trusts
+nor requires the tag and makes no immutability claim about it. The protected
+external launcher, its independently pinned digest, the protected exact commit,
+and the expected-commit artifact bytes are the trust boundary. A missing or
+moved tag has no authority to select or replace those inputs. A shallow or
+partial clone, unavailable expected object, or byte mismatch fails closed. The
+executing source and caller-supplied cases and baseline paths must be
+repository-owned. The fixture directory must contain
 only its six declared files, including the reviewed `preflight.py`; unexpected
 or special-file siblings, including `selectors.py` or `subprocess.py`, fail
 closed. The validator-source digest masks only its own digest literals; it does
@@ -71,8 +74,9 @@ that a local checkout is a running deployment.
 
 The fixture proves these rules as executable traces:
 
-- A confirmed accepted prompt or correlated server event is not submitted a
-  second time.
+- A confirmed accepted prompt or correlated server event is irreversible
+  delivery evidence and is not submitted a second time. A later local cancel
+  changes only the waiting UI; it cannot enter restore or arm resend.
 - A timeout, WebSocket close, app suspension, process loss, or local
   cancellation without a confirmed server result after send is
   `delivery_uncertain`, not rejection. Cancellation cannot make an unknown
@@ -82,7 +86,11 @@ The fixture proves these rules as executable traces:
   status before making any resend decision. History and status keep independent
   current-attempt failure latches; a failed history read invalidates its prior
   result and any paired status, and each transient read requires a successful
-  retry of that same read before a fresh result can pass.
+  retry of that same read before a fresh result can pass. Every restore request
+  and response is bound to the exact selected session, active submission
+  request, and the next monotonic restore generation. Wrong-session,
+  wrong-request, stale-generation, replayed, conflicting, and incomplete
+  evidence fails closed and cannot arm resend.
 - Present history or a running/completed turn wins over the local draft; the
   client renders that correlated server result and does not resend.
 - Absent history plus idle server status keeps the original draft and waits for
@@ -144,8 +152,9 @@ supplied `HERMTERNAL_C06_EXPECTED_COMMIT`; it is checked as an exact commit
 object and its canonical tree bytes are compared with the checkout. This is
 independent of branch parent shape, so a normal post-merge `dev`/`main` clone
 and a later unchanged commit can validate when the same reviewed expectation is
-supplied. An absent expectation, altered canonical bytes, force-retagged audit
-tag, missing tags, shallow history, tarball, or partial clone fails closed.
+supplied. An absent expectation, altered canonical bytes, shallow history,
+tarball, or partial clone fails closed. Mutable tags are ignored rather than
+being represented as protected trust inputs.
 
 Fresh-clone procedure (the expected commit is supplied by protected review/CI,
 not discovered from a mutable branch):
@@ -158,18 +167,16 @@ git fetch --tags --unshallow 2>/dev/null || git fetch --tags
 # its SHA-256 equals each baseline mode's external_launcher_sha256.
 # Run it with the protected expected commit, recorded python_flags, and target.
 # For authoritative tests, target test_validate.py instead of importing it.
-git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-cancel-restore-anchor
-git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-cancel-restore-anchor^{commit}
+# No branch or tag ref participates in this authoritative selection.
 ```
 
-The audit tag is an annotated, non-release consistency marker. It must be
-protected from force updates by the repository owner and remain equal to the
-reviewed external expectation. A superseding reviewed correction publishes a
-new commit and a new non-release audit tag, updates the protected review/CI
-expected-commit record and this documentation in the same reviewed change, and
-retires the old marker only after consumers have migrated; existing markers are
-never silently moved. Tags are not signatures and do not replace the external
-expected-object control. The validator also freezes state meanings, terminal
+The optional audit tag is not protected by a verified repository ruleset and is
+therefore excluded from validation decisions. It may help a human locate a
+review, but moving, deleting, or recreating it cannot change the protected
+expected commit or accepted artifact bytes. A superseding reviewed correction
+updates the protected review/CI expected-commit record and this documentation;
+it does not rely on a tag transition for authority. The validator also freezes
+state meanings, terminal
 flags, action order, case order, and baseline key/type/order rules. Copying or
 coordinately rebinding a mutated case, baseline, preflight, source, README,
 tests, or chat contract therefore fails closed instead of replacing reviewed

@@ -45,8 +45,12 @@ The client must not blindly retry a prompt.
 - Reconnect and restore the server session before any resend decision. Observe
   `gateway.ready` and matching compatibility evidence before `session.history`,
   `session.status`, or another prompt operation.
-- Inspect fresh server-owned history and status for every uncertainty cycle. A
-  transient history read invalidates the prior history result and any status
+- Inspect fresh server-owned history and status for every uncertainty cycle.
+  Bind each restore request and response to the exact selected session, active
+  submission request, and next monotonic restore generation. Reject evidence
+  from another session or request, an earlier or skipped generation, a replay,
+  an incomplete pair, or a conflicting history/status pair. A transient history
+  read invalidates the prior history result and any status
   paired with it; a successful retry of `session.history` must complete before
   another history result can be used. A transient status read likewise requires
   a fresh successful status result. Stale `absent`/`idle` evidence cannot
@@ -77,7 +81,7 @@ The client must not blindly retry a prompt.
 | Evidence or action | Required transition | Retry or rendering rule |
 | --- | --- | --- |
 | Explicit send from a selected `ready` session (or after the user creates one from `empty`) | `submitting` | Count one outward `prompt.submit`; block another local send while the turn is active. |
-| Confirmed prompt acceptance or correlated output | `streaming`, then `completed` when the server completes | Never submit the same prompt again. Render the server-owned turn, not a local transcript copy. |
+| Confirmed prompt acceptance or correlated output | `streaming`, then `completed` when the server completes | Never submit the same prompt again. A later local cancel affects only waiting UI and cannot enter an absent/idle resend path. Render the server-owned turn, not a local transcript copy. |
 | Timeout, WebSocket close, app suspension, process loss, or local cancellation without a confirmed server result after send | `delivery_uncertain` | Do not classify the prompt as rejected and do not retry it automatically. A local cancel cannot make an unknown send safe to repeat. |
 | Restore begins | `restoring` | Reconnect first and wait for `gateway.ready` before application RPC. Keep the uncertainty notice and draft visible. |
 | History shows the prompt and status is `running`/`streaming` | `streaming` | The server turn wins; resume rendering and do not resend. |

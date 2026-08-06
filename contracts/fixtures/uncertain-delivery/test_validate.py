@@ -101,7 +101,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             with self.subTest(optimized=optimized):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stderr, "")
-                self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=27 benchmark_samples=60\n")
+                self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=28 benchmark_samples=60\n")
 
     def assert_cli_failure_both_modes(self, *arguments: str, forbidden: str | None = None) -> None:
         for optimized in (False, True):
@@ -145,7 +145,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         previous = os.environ.get(validate.EXPECTED_COMMIT_ENV)
         os.environ[validate.EXPECTED_COMMIT_ENV] = self.reviewed_commit
         try:
-            self.assertEqual(validate.validate_all(self.document, self.baseline), 27)
+            self.assertEqual(validate.validate_all(self.document, self.baseline), 28)
         finally:
             if previous is None:
                 os.environ.pop(validate.EXPECTED_COMMIT_ENV, None)
@@ -207,6 +207,14 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         self.assertEqual(self.cases["interrupt-confirmed"]["expected"]["decision"], "interrupt_confirmed")
         self.assertEqual(self.cases["interrupt-unknown-after-close"]["expected"]["final_state"], "streaming")
         self.assertEqual(self.cases["cancel-before-submit"]["expected"]["outward_changes"], 0)
+        accepted_cancel = self.cases["accepted-cancel-submitting"]
+        self.assertEqual(accepted_cancel["expected"]["trace"], ["ready", "submitting", "streaming"])
+        self.assertEqual(accepted_cancel["expected"]["submission_count"], 1)
+        self.assertEqual(accepted_cancel["expected"]["outward_changes"], 1)
+        self.assertEqual(accepted_cancel["expected"]["restore_barrier"], "not_required")
+        self.assertEqual(accepted_cancel["expected"]["prompt_retry"], "none")
+        self.assertEqual(accepted_cancel["expected"]["decision"], "cancelled_wait_after_accepted")
+
         cancelled = self.cases["cancel-submitting"]
         self.assertEqual(cancelled["expected"]["trace"][2], "delivery_uncertain")
         self.assertEqual(cancelled["expected"]["transport_trace"], ["ready", "reconnecting", "ready"])
@@ -266,6 +274,80 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         self.assertEqual(result["outward_changes"], 1)
         self.assertEqual(result["prompt_retry"], "blocked")
         self.assertEqual(result["contract_error"], "prompt_submit_not_ready")
+
+    def test_confirmed_acceptance_cancel_never_arms_restore_or_resend(self) -> None:
+        accepted = copy.deepcopy(self.cases["accepted-cancel-submitting"])
+        accepted["events"].append(
+            {
+                "kind": "restore_begin",
+                "session_ref": "session-marker-001",
+                "request_ref": "request-marker-001",
+                "restore_generation": 1,
+            }
+        )
+        result = validate.evaluate_case(accepted)
+        self.assertEqual(result["submission_count"], 1)
+        self.assertEqual(result["outward_changes"], 1)
+        self.assertEqual(result["prompt_retry"], "blocked")
+        self.assertEqual(result["contract_error"], "restore_not_required")
+
+        second_send = copy.deepcopy(self.cases["accepted-cancel-submitting"])
+        second_send["events"].append(
+            {"kind": "submit", "request_ref": "request-marker-002", "result": "accepted"}
+        )
+        result = validate.evaluate_case(second_send)
+        self.assertEqual(result["submission_count"], 1)
+        self.assertEqual(result["outward_changes"], 1)
+        self.assertEqual(result["contract_error"], "prompt_submit_not_ready")
+
+    def test_restore_evidence_requires_exact_fresh_correlation(self) -> None:
+        base = self.cases["websocket-close-absent-idle"]
+        mutations: list[tuple[str, dict[str, object], str]] = []
+
+        wrong_begin_session = copy.deepcopy(base)
+        wrong_begin_session["events"][3]["session_ref"] = "session-marker-002"
+        wrong_begin_session["events"] = wrong_begin_session["events"][:4]
+        mutations.append(("wrong begin session", wrong_begin_session, "restore_begin_not_correlated"))
+
+        skipped_generation = copy.deepcopy(base)
+        skipped_generation["events"][3]["restore_generation"] = 2
+        skipped_generation["events"] = skipped_generation["events"][:4]
+        mutations.append(("non-monotonic generation", skipped_generation, "restore_generation_not_fresh"))
+
+        wrong_history_request = copy.deepcopy(base)
+        wrong_history_request["events"][5]["request_ref"] = "request-marker-002"
+        wrong_history_request["events"] = wrong_history_request["events"][:6]
+        mutations.append(("wrong history request", wrong_history_request, "restore_history_not_correlated"))
+
+        stale_history = copy.deepcopy(base)
+        stale_history["events"][5]["restore_generation"] = 2
+        stale_history["events"] = stale_history["events"][:6]
+        mutations.append(("stale history generation", stale_history, "restore_history_not_correlated"))
+
+        wrong_status_session = copy.deepcopy(base)
+        wrong_status_session["events"][6]["session_ref"] = "session-marker-002"
+        mutations.append(("wrong status session", wrong_status_session, "restore_status_not_correlated"))
+
+        replayed_history = copy.deepcopy(base)
+        replayed_history["events"].insert(6, copy.deepcopy(replayed_history["events"][5]))
+        replayed_history["events"] = replayed_history["events"][:7]
+        mutations.append(("replayed history", replayed_history, "restore_history_replayed"))
+
+        conflicting = copy.deepcopy(base)
+        conflicting["events"][5]["prompt_presence"] = "present"
+        mutations.append(("conflicting present idle", conflicting, "restore_evidence_mismatch"))
+
+        incomplete = copy.deepcopy(base)
+        incomplete["events"] = incomplete["events"][:6] + [{"kind": "user_decision", "action": "resend"}]
+        mutations.append(("incomplete evidence", incomplete, "user_decision_not_allowed"))
+
+        for name, candidate, error in mutations:
+            with self.subTest(name=name):
+                result = validate.evaluate_case(candidate)
+                self.assertEqual(result["submission_count"], 1)
+                self.assertEqual(result["outward_changes"], 1)
+                self.assertEqual(result["prompt_retry"], "blocked")
+                self.assertEqual(result["contract_error"], error)
 
     def test_exact_types_and_semantic_mutations_fail_closed(self) -> None:
         wrong_bool = copy.deepcopy(self.document)
@@ -921,12 +1003,8 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             self.assertEqual(status.stdout, "")
             attack_head = subprocess.check_output(["git", "-C", str(copied_repo), "rev-parse", "HEAD^{commit}"], text=True).strip()
             attack_parent = subprocess.check_output(["git", "-C", str(copied_repo), "rev-parse", "HEAD^{commit}^"], text=True).strip()
-            tag_type = subprocess.check_output(["git", "-C", str(copied_repo), "cat-file", "-t", validate.TRUST_ANCHOR_REF], text=True).strip()
-            anchor = subprocess.check_output(["git", "-C", str(copied_repo), "rev-parse", f"{validate.TRUST_ANCHOR_REF}^{{commit}}"], text=True).strip()
-            self.assertNotEqual(attack_head, anchor)
+            self.assertNotEqual(attack_head, self.reviewed_commit)
             self.assertEqual(attack_parent, "3ec6a1f8eabc935575ba6f334195f9e86abeb1ff")
-            self.assertEqual(tag_type, "tag")
-            self.assertEqual(anchor, validate._trusted_anchor_commit(REPOSITORY_ROOT))
 
             for optimized in (False, True):
                 result = self.run_cli(
@@ -1031,12 +1109,8 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             self.assertEqual(status.stdout, "")
             attack_head = subprocess.check_output(["git", "-C", str(copied_repo), "rev-parse", "HEAD^{commit}"], text=True).strip()
             attack_parent = subprocess.check_output(["git", "-C", str(copied_repo), "rev-parse", "HEAD^{commit}^"], text=True).strip()
-            tag_type = subprocess.check_output(["git", "-C", str(copied_repo), "cat-file", "-t", validate.TRUST_ANCHOR_REF], text=True).strip()
-            anchor = subprocess.check_output(["git", "-C", str(copied_repo), "rev-parse", f"{validate.TRUST_ANCHOR_REF}^{{commit}}"], text=True).strip()
-            self.assertNotEqual(attack_head, anchor)
+            self.assertNotEqual(attack_head, self.reviewed_commit)
             self.assertEqual(attack_parent, "0ba168f16f6f8e646f5452a15627d7bb829828a5")
-            self.assertEqual(tag_type, "tag")
-            self.assertEqual(anchor, validate._trusted_anchor_commit(REPOSITORY_ROOT))
 
             for optimized in (False, True):
                 result = self.run_cli(
@@ -1108,7 +1182,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 result = self.run_cli(optimized, environment=environment)
                 with self.subTest(optimized=optimized):
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=27 benchmark_samples=60\n")
+                    self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=28 benchmark_samples=60\n")
                     self.assertEqual(result.stderr, "")
 
             original = dict(os.environ)
@@ -1148,7 +1222,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 result = self.run_cli(optimized, environment=environment)
                 with self.subTest(optimized=optimized):
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=27 benchmark_samples=60\n")
+                    self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=28 benchmark_samples=60\n")
 
     def test_git_helper_hang_and_output_are_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1216,7 +1290,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             base = Path(directory).resolve()
             cases = (
                 ("fresh", ["--no-local"], True),
-                ("no-tags", ["--no-local", "--no-tags"], False),
+                ("no-tags", ["--no-local", "--no-tags"], True),
                 ("shallow", ["--no-local", "--depth", "1"], False),
             )
             for label, options, succeeds in cases:
@@ -1239,7 +1313,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                     with self.subTest(label=label, optimized=optimized):
                         if succeeds:
                             self.assertEqual(result.returncode, 0, result.stderr)
-                            self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=27 benchmark_samples=60\n")
+                            self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=28 benchmark_samples=60\n")
                         else:
                             self.assertEqual(result.returncode, 1)
                             self.assertEqual(result.stdout, "")
@@ -1426,9 +1500,9 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             with self.assertRaises(validate.ContractError):
                 validate._require_clean_bound_worktree(REPOSITORY_ROOT / "contracts")
 
-    def test_force_retagged_audit_tag_cannot_replace_external_expectation(self) -> None:
+    def test_mutable_audit_tag_is_not_a_trust_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            repository = Path(directory) / "retagged"
+            repository = Path(directory).resolve() / "retagged"
             clone = subprocess.run(["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(repository)], capture_output=True, text=True, check=False)
             self.assertEqual(clone.returncode, 0, clone.stderr)
             result = subprocess.run(
@@ -1440,7 +1514,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                     "-a",
                     "-f",
                     "-m",
-                    "forged synthetic audit marker",
+                    "mutable synthetic audit marker",
                     "hermternal-c06-uncertain-delivery-cancel-restore-anchor",
                     "0ba168f16f6f8e646f5452a15627d7bb829828a5",
                 ],
@@ -1449,19 +1523,17 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            tag_type = subprocess.check_output(
-                ["git", "-C", str(repository), "cat-file", "-t", validate.TRUST_ANCHOR_REF],
-                text=True,
-            ).strip()
-            self.assertEqual(tag_type, "tag")
-            self.assertEqual(
-                subprocess.check_output(
-                    ["git", "-C", str(repository), "rev-parse", f"{validate.TRUST_ANCHOR_REF}^{{commit}}"],
-                    text=True,
-                ).strip(),
-                "0ba168f16f6f8e646f5452a15627d7bb829828a5",
-            )
-            self.assert_validator_failure(repository / "contracts/fixtures/uncertain-delivery/validate.py", self.canonical_environment())
+            for optimized in (False, True):
+                validated = self.run_cli(
+                    optimized,
+                    cwd=repository,
+                    environment=self.canonical_environment(),
+                    validator=repository / "contracts/fixtures/uncertain-delivery/validate.py",
+                )
+                with self.subTest(optimized=optimized):
+                    self.assertEqual(validated.returncode, 0, validated.stderr)
+                    self.assertEqual(validated.stdout, "uncertain_delivery_validation=ok cases=28 benchmark_samples=60\n")
+                    self.assertEqual(validated.stderr, "")
 
     def test_compile_in_both_modes_without_worktree_cache(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

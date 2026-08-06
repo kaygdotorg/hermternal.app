@@ -307,7 +307,10 @@
           "reason": "timeout"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -317,10 +320,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "present"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "running"
         },
         {
@@ -392,7 +401,10 @@
           "reason": "websocket_close"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -402,10 +414,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "absent"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "idle"
         }
       ],
@@ -469,7 +487,10 @@
           "reason": "app_suspension"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -479,10 +500,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "absent"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "idle"
         },
         {
@@ -570,7 +597,10 @@
           "reason": "process_loss"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -580,10 +610,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "present"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "running"
         },
         {
@@ -707,7 +743,10 @@
           "reason": "timeout"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -717,10 +756,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "unknown"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "unknown"
         }
       ],
@@ -769,7 +814,10 @@
       },
       "events": [
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -789,10 +837,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "absent"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "idle"
         }
       ],
@@ -960,7 +1014,10 @@
           "reason": "websocket_close"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -970,10 +1027,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "absent"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "idle"
         },
         {
@@ -1117,7 +1180,10 @@
           "reason": "websocket_close"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -1127,10 +1193,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "present"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "running"
         }
       ],
@@ -1273,7 +1345,10 @@
       },
       "events": [
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -1431,7 +1506,10 @@
           "reason": "websocket_close"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -1441,10 +1519,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "absent"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "idle"
         },
         {
@@ -1590,7 +1674,10 @@
           "reason": "websocket_close"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -1600,10 +1687,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "present"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "completed"
         }
       ],
@@ -1668,7 +1761,10 @@
           "reason": "websocket_close"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -1678,10 +1774,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "absent"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "idle"
         },
         {
@@ -1698,7 +1800,10 @@
           "reason": "timeout"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-002",
+          "restore_generation": 2
         },
         {
           "kind": "gateway_ready",
@@ -1708,6 +1813,9 @@
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-002",
+          "restore_generation": 1,
           "turn_state": "idle"
         }
       ],
@@ -1745,10 +1853,66 @@
         "idempotent_collection_retries": 0,
         "server_prompt_presence": "not_observed",
         "server_turn_state": "not_observed",
-        "decision": "history_required_before_status",
-        "contract_error": "history_required_before_status"
+        "decision": "restore_status_not_correlated",
+        "contract_error": "restore_status_not_correlated"
       },
-      "notes": "A second uncertain send must reread fresh history before any new resend decision."
+      "notes": "A prior-cycle status response cannot be replayed into a fresh restore generation or authorize another resend."
+    },
+    {
+      "id": "accepted-cancel-submitting",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
+      },
+      "events": [
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "accepted"
+        },
+        {
+          "kind": "cancel",
+          "where": "submitting"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "ready",
+          "submitting",
+          "streaming"
+        ],
+        "final_state": "streaming",
+        "transport_trace": [
+          "ready"
+        ],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "running",
+        "decision": "cancelled_wait_after_accepted",
+        "contract_error": null
+      },
+      "notes": "Confirmed acceptance is irreversible delivery evidence; local cancellation stops waiting UI only and cannot authorize restore or resend."
     },
     {
       "id": "cancel-submitting",
@@ -1778,7 +1942,10 @@
           "where": "submitting"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -1788,10 +1955,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "present"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "completed"
         }
       ],
@@ -1855,7 +2028,10 @@
           "where": "submitting"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -1865,10 +2041,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "absent"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "idle"
         },
         {
@@ -1939,7 +2121,10 @@
           "action": "keep_draft"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -1949,10 +2134,16 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "absent"
         },
         {
           "kind": "restore_status",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "turn_state": "idle"
         },
         {
@@ -2037,7 +2228,10 @@
           "reason": "timeout"
         },
         {
-          "kind": "restore_begin"
+          "kind": "restore_begin",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1
         },
         {
           "kind": "gateway_ready",
@@ -2052,6 +2246,9 @@
         },
         {
           "kind": "restore_history",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "restore_generation": 1,
           "prompt_presence": "absent"
         }
       ],

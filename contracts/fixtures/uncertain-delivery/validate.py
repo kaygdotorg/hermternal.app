@@ -41,24 +41,23 @@ HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 # source file, or benchmark trace by rebinding its own metadata. The exact
 # expected commit is supplied by protected review/CI input, never discovered
 # from this tree, a branch, or a tag. Its Git-tree bytes bind every retained
-# artifact independent of the current branch's parent shape. The non-release
-# tag is only a secondary consistency marker. The validator source digest masks
-# only self-referential binding literals, so changing validation logic still
-# fails.
-TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-cancel-restore-anchor"
+# artifact independent of the current branch's parent shape. Mutable branch and
+# tag refs are excluded from the trust decision. The validator source digest
+# masks only self-referential binding literals, so changing validation logic
+# still fails.
 CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "chat.md")
 CANONICAL_FIXTURE_NAMES = frozenset(("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json"))
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_BOUND_SHA256 = {
-    "README.md": "d24d40cfbd9fa656176b3a6bede3a6f229f16869ad6527d0e7ce2ed0d442ad60",
-    "cases.json": "47676157ea58bc628ff5302e7f033d86dcec6270b45a1f4c2d87ade7fa9652ed",
+    "README.md": "98ddbd6db92f6871a78d677b4cb524894c0505305f09d0470f9878a5f8019001",
+    "cases.json": "5c9d277359434183150b6405776b83a345f9268ac1e5b31e85f1815968f0d31b",
     "preflight.py": "5c8400ce1253d4993191751bb636ad97115bd603cb90f95480eb7055b48f715e",
-    "validate.py": "8dc1a1de9e7393fa1bef1a8e0f007bb417f7adae3e45a77f1aff4c8f29b578b6",
-    "test_validate.py": "6062ecaf07d71537cd71b7247b6aa8c1cbf1ded6b5e962830b76fabc754cbdea",
-    "chat.md": "ad5798049b36ff9957ea4aaefdebcc79b349eb9d51844b35fbd81ea5871a7189",
+    "validate.py": "9cd7b600c7cd59e19d72499bf25d351b8fab94289b959e371350bb8960e2c82e",
+    "test_validate.py": "a1097f202c1593441a2508fb623006c35e5ebb6927fcfd52f552f4521583b906",
+    "chat.md": "0b3d15c17524de0097441e34e62524731bce737c4ae1d423f1520d3054747a64",
 }
-EXPECTED_BASELINE_SHA256 = "a61644d85f15ae052c14b764c59d0e135bee72a10e26a2f44ff965cd646f1776"
+EXPECTED_BASELINE_SHA256 = "a0003cb8a853500845a5e19738673a2eb0033ad6d1ee0b462f78f773513b94d9"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -117,9 +116,9 @@ EVENT_KEYS = {
     "submit": ("kind", "request_ref", "result"),
     "server_event": ("kind", "name", "request_ref", "turn_ref", "session_ref"),
     "transport_loss": ("kind", "reason"),
-    "restore_begin": ("kind",),
-    "restore_history": ("kind", "prompt_presence"),
-    "restore_status": ("kind", "turn_state"),
+    "restore_begin": ("kind", "session_ref", "request_ref", "restore_generation"),
+    "restore_history": ("kind", "session_ref", "request_ref", "restore_generation", "prompt_presence"),
+    "restore_status": ("kind", "session_ref", "request_ref", "restore_generation", "turn_state"),
     "user_decision": ("kind", "action"),
     "duplicate_submit": ("kind",),
     "automatic_retry": ("kind", "method"),
@@ -181,6 +180,7 @@ CASE_IDS = (
     "confirmed-rejection-explicit-retry",
     "accepted-event-before-close",
     "stale-evidence-resend-blocked",
+    "accepted-cancel-submitting",
     "cancel-submitting",
     "cancel-submitting-absent-idle-resend",
     "keep-draft-before-restore",
@@ -832,17 +832,12 @@ def _external_expected_commit() -> str | None:
     return value if value is not None and HEX40.fullmatch(value) else None
 
 
-def _trusted_anchor_commit(repository: Path) -> str | None:
-    # This non-release tag is only a secondary availability/consistency check.
-    # The external expected commit remains authoritative because tag refs can
-    # be force-retagged by a mirror or local repository owner.
-    if _git_object_type(repository, TRUST_ANCHOR_REF) != "tag":
-        return None
-    return _git_revision(repository, f"{TRUST_ANCHOR_REF}^{{commit}}")
-
-
-def _repository_has_trust_anchor(candidate: Path) -> bool:
-    return _trusted_anchor_commit(candidate) is not None
+def _repository_contains_expected_commit(repository: Path) -> bool:
+    # Repository refs, including annotated tags, are mutable unless protection
+    # is independently verified. Root discovery therefore uses only the exact
+    # commit supplied by protected external configuration.
+    expected = _external_expected_commit()
+    return expected is not None and _git_revision(repository, f"{expected}^{{commit}}") == expected
 
 
 def _repository_root() -> Path:
@@ -859,6 +854,7 @@ def _repository_root() -> Path:
             and (candidate / CANONICAL_FIXTURE_RELATIVE / "cases.json").is_file()
             and (candidate / CANONICAL_FIXTURE_RELATIVE / "validation-baseline.json").is_file()
             and (candidate / CANONICAL_CHAT_RELATIVE).is_file()
+            and _repository_contains_expected_commit(candidate)
         ):
             return candidate
     _fail("canonical_binding")
@@ -1082,8 +1078,6 @@ def _require_clean_bound_worktree(root: Path) -> None:
     if expected is None:
         _fail("canonical_binding")
     if _git_revision(root, f"{expected}^{{commit}}") != expected:
-        _fail("canonical_binding")
-    if _trusted_anchor_commit(root) != expected:
         _fail("canonical_binding")
     if _git_revision(root, "HEAD^{commit}") is None:
         _fail("canonical_binding")
@@ -1389,10 +1383,16 @@ def _validate_events(events: Any) -> None:
             _synthetic_ref(event["session_ref"], "server_session_ref")
         elif kind == "transport_loss":
             _enum(event["reason"], UNCERTAIN_REASONS, "transport_loss_reason")
-        elif kind == "restore_history":
-            _enum(event["prompt_presence"], RESTORE_PROMPT_PRESENCE[1:], "prompt_presence")
-        elif kind == "restore_status":
-            _enum(event["turn_state"], RESTORE_TURN_STATES[1:], "turn_state")
+        elif kind in ("restore_begin", "restore_history", "restore_status"):
+            _synthetic_ref(event["session_ref"], "restore_session_ref")
+            _synthetic_ref(event["request_ref"], "restore_request_ref")
+            generation = _int(event["restore_generation"], "restore_generation")
+            if generation < 1 or generation > 32:
+                _fail("restore_generation")
+            if kind == "restore_history":
+                _enum(event["prompt_presence"], RESTORE_PROMPT_PRESENCE[1:], "prompt_presence")
+            elif kind == "restore_status":
+                _enum(event["turn_state"], RESTORE_TURN_STATES[1:], "turn_state")
         elif kind == "user_decision":
             _enum(event["action"], USER_ACTIONS, "user_action")
         elif kind == "automatic_retry":
@@ -1479,6 +1479,10 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     contract_error: str | None = None
     intent: str | None = "interrupt" if state == "interrupting" else ("prompt" if state in ("submitting", "streaming", "delivery_uncertain") else None)
     pending_result: str | None = None
+    # Acceptance and correlated output are irreversible delivery evidence. A
+    # local UI cancellation may stop waiting, but cannot make that request
+    # eligible for an absent/idle resend path.
+    delivery_confirmed = state in ("streaming", "awaiting_approval", "awaiting_clarification", "interrupting")
     resend_armed = False
     rejection_retry_armed = False
     resend_reason: str | None = None
@@ -1494,6 +1498,11 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     status_read_failed = False
     restore_history_seen = False
     restore_status_seen = False
+    # Each restore cycle is bound to the active session/submission pair and a
+    # strictly increasing client generation. Responses from another session,
+    # request, or earlier cycle cannot be replayed into the resend gate.
+    last_restore_generation = 0
+    active_restore_generation: int | None = None
     signed_out = False
     state_trace = [state]
     transport_trace = [transport]
@@ -1528,6 +1537,7 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
         nonlocal active_request_ref, active_turn_ref, gateway_ready_seen, compatibility_state
         nonlocal history_read_failed, status_read_failed
         nonlocal restore_history_seen, restore_status_seen, server_prompt_presence, server_turn_state
+        nonlocal active_restore_generation
         contract_error = "signed_out_latch"
         decision = "signed_out_latch"
         prompt_retry = "blocked"
@@ -1543,6 +1553,7 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
         status_read_failed = False
         restore_history_seen = False
         restore_status_seen = False
+        active_restore_generation = None
         server_prompt_presence = "not_observed"
         server_turn_state = "not_observed"
         intent = None
@@ -1593,8 +1604,10 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             status_read_failed = False
             restore_history_seen = False
             restore_status_seen = False
+            active_restore_generation = None
             intent = "prompt"
             pending_result = event["result"]
+            delivery_confirmed = event["result"] == "accepted"
             resend_armed = False
             rejection_retry_armed = False
             transition("submitting")
@@ -1627,6 +1640,8 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             if not correlated:
                 contract_failure("server_event_not_correlated")
                 continue
+            delivery_confirmed = True
+            pending_result = "accepted"
             if name in ("message.delta", "reasoning.delta", "thinking.delta", "tool.start", "tool.complete"):
                 server_prompt_presence = "present"
                 server_turn_state = "running"
@@ -1668,9 +1683,10 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
                 transition("delivery_uncertain")
                 restore_barrier = "pending"
                 draft_state = "present"
-                server_prompt_presence = "unknown"
+                server_prompt_presence = "present" if delivery_confirmed else "unknown"
                 server_turn_state = "unknown"
-                pending_result = "unknown"
+                if not delivery_confirmed:
+                    pending_result = "unknown"
                 resend_armed = False
                 rejection_retry_armed = False
                 explicit_action_required = False
@@ -1687,6 +1703,20 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             if transport not in ("reconnecting", "handshaking", "offline"):
                 contract_failure("restore_transport_not_reconnecting")
                 continue
+            generation = event["restore_generation"]
+            if (
+                selected_session is None
+                or active_request_ref is None
+                or event["session_ref"] != selected_session
+                or event["request_ref"] != active_request_ref
+            ):
+                contract_failure("restore_begin_not_correlated")
+                continue
+            if type(generation) is not int or generation != last_restore_generation + 1:
+                contract_failure("restore_generation_not_fresh")
+                continue
+            last_restore_generation = generation
+            active_restore_generation = generation
             gateway_ready_seen = False
             compatibility_state = "unknown"
             restore_history_seen = False
@@ -1740,6 +1770,17 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             if state != "restoring" or transport != "ready" or not gateway_ready_seen or compatibility_state != "passed":
                 contract_failure("history_without_restore")
                 continue
+            if (
+                active_restore_generation is None
+                or event["session_ref"] != selected_session
+                or event["request_ref"] != active_request_ref
+                or event["restore_generation"] != active_restore_generation
+            ):
+                contract_failure("restore_history_not_correlated")
+                continue
+            if restore_history_seen:
+                contract_failure("restore_history_replayed")
+                continue
             if history_read_failed:
                 contract_failure("restore_history_read_failed")
                 continue
@@ -1748,6 +1789,17 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
         elif kind == "restore_status":
             if state != "restoring" or transport != "ready" or not gateway_ready_seen or compatibility_state != "passed":
                 contract_failure("status_without_restore")
+                continue
+            if (
+                active_restore_generation is None
+                or event["session_ref"] != selected_session
+                or event["request_ref"] != active_request_ref
+                or event["restore_generation"] != active_restore_generation
+            ):
+                contract_failure("restore_status_not_correlated")
+                continue
+            if restore_status_seen:
+                contract_failure("restore_status_replayed")
                 continue
             if status_read_failed:
                 contract_failure("restore_status_read_failed")
@@ -1771,6 +1823,9 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
                 transition("completed")
                 decision = "accepted_present_after_restore"
             elif intent == "prompt" and server_prompt_presence == "absent" and server_turn_state == "idle":
+                if delivery_confirmed:
+                    contract_failure("accepted_delivery_evidence_conflict")
+                    continue
                 restore_barrier = "passed"
                 transition("ready")
                 prompt_retry = "explicit_user_only"
@@ -1879,9 +1934,21 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             if where == "before_submit" and state == "ready" and submission_count == 0:
                 decision = "cancelled_before_submit"
             elif where == "submitting" and state == "submitting":
-                # A local cancellation does not prove whether prompt.submit
-                # reached Hermes. Force the same restore barrier as a lost
-                # transport before any later user-authorized resend.
+                if delivery_confirmed:
+                    # Accepted is irreversible outward-delivery evidence. This
+                    # cancellation affects only the local waiting UI; it cannot
+                    # enter restore or arm an absent/idle resend.
+                    draft_state = "absent"
+                    server_prompt_presence = "present"
+                    server_turn_state = "running"
+                    resend_armed = False
+                    explicit_action_required = False
+                    transition("streaming")
+                    decision = "cancelled_wait_after_accepted"
+                    continue
+                # Without acceptance, local cancellation does not prove whether
+                # prompt.submit reached Hermes. Force the same restore barrier
+                # as a lost transport before any user-authorized resend.
                 draft_state = "present"
                 gateway_ready_seen = False
                 compatibility_state = "unknown"
@@ -1896,6 +1963,7 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
                 rejection_retry_armed = False
                 explicit_action_required = False
                 restore_barrier = "pending"
+                active_restore_generation = None
                 change_transport("reconnecting")
                 transition("delivery_uncertain")
                 decision = "cancelled_submission_uncertain"
@@ -1922,6 +1990,7 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             status_read_failed = False
             restore_history_seen = False
             restore_status_seen = False
+            active_restore_generation = None
             active_request_ref = None
             active_turn_ref = None
             server_prompt_presence = "not_observed"
