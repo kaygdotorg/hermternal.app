@@ -6,6 +6,7 @@
 
   export let state: WorkspaceRuntimeState = 'ready';
   export let dataSource: WorkspaceDataSource = 'synthetic-preview';
+  export let dataMode: 'fixture' | 'live' = 'fixture';
   export let onAction: WorkspaceActionHandler = () => {};
 
   let recoveryAction: HTMLButtonElement | undefined;
@@ -77,10 +78,21 @@
     <span aria-hidden="true" class="state-icon"><Icon name="conversation" size={20} /></span>
     <div class="empty-copy">
       <strong>Start with a question</strong>
-      <span>This session is ready for a fresh start. Available controls remain local to this preview.</span>
+      {#if dataMode === 'live'}
+        <span>This Hermes session has no messages yet. Send a message to begin.</span>
+      {:else}
+        <span>This session is ready for a fresh start. Available controls remain local to this preview.</span>
+      {/if}
     </div>
-    <Pill label="Choose an action" icon="spark" variant="action" onActivate={() => onAction({ type: 'new-session' })} />
-    <p>Mocked fixture only · synthetic empty state · no live connection</p>
+    {#if dataMode === 'fixture'}
+      <Pill
+        label="Choose an action"
+        icon="spark"
+        variant="action"
+        onActivate={() => onAction({ type: 'new-session' })}
+      />
+      <p>Mocked fixture only · synthetic empty state · no live connection</p>
+    {/if}
   </div>
 {:else if state === 'offline'}
   <div aria-live="polite" class="state-card offline-state" data-testid="offline-state" role="status">
@@ -180,7 +192,11 @@
     <span aria-hidden="true" class="state-icon"><Icon name="refresh" size={18} /></span>
     <div class="error-copy">
       <strong>Connection lost</strong>
-      <span>Your draft is safe. Reconnect before sending it. No prompt was resent.</span>
+      {#if dataMode === 'live'}
+        <span>Reconnect and inspect Hermes history before sending again. No prompt was resent.</span>
+      {:else}
+        <span>Your draft is safe. Reconnect before sending it. No prompt was resent.</span>
+      {/if}
       <small>Focus order: status → Retry now → Later. Copy reflows at 200% zoom.</small>
     </div>
     <div class="state-actions">
