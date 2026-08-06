@@ -115,9 +115,12 @@ ready fixture roots with real manifests. A registry can be structurally valid
 while coverage remains `partial`. A `pending`, `empty`, `failure`, `cancelled`,
 or `unknown` coverage row is never promoted to successful evidence. The
 checked-in index inventories the C-05 connection-restoration, C-07 session
-persistence, C-14 image attachment lifecycle, C-18 PTY detach-race, and DEP-10M
-PTY local-adapter artifacts. The C-05 coverage and C-08 stream-dependent
-coverage remain pending until their dependency gates complete; C-07 is connected
+persistence, C-07B session-lineage, C-14 image attachment lifecycle, C-18
+PTY detach-race, DEP-02 external method/path allowlist, and DEP-10M PTY
+local-adapter artifacts. The merged PR #260 compatibility-gate artifact
+manifests are also refreshed in this aggregate registry. The C-05 coverage and
+C-08 stream-dependent coverage remain pending until their dependency gates
+complete; C-07 is connected
 to the pending chat-stream coverage row. `live_claim` is always `false`; a
 passing validator proves only synthetic artifact integrity and registry
 consistency. The current blocked aggregate evidence is caused by three stale

@@ -313,6 +313,56 @@
       ]
     },
     {
+      "id": "deployment-security-external-allowlist",
+      "path": "deployment-security/external-allowlist",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "external-allowlist"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/external-allowlist/README.md",
+          "sha256": "938a575fccad4c0fa7b1c9ff1790f0094a28127f1c1b35478a41ffb219252ab9",
+          "size_bytes": 12365
+        },
+        {
+          "path": "deployment-security/external-allowlist/cases.json",
+          "sha256": "3e300ac1ffbcc4d65e2d103b5bef726a25557011396c16260403c38670702f2c",
+          "size_bytes": 50859
+        },
+        {
+          "path": "deployment-security/external-allowlist/test_validate.py",
+          "sha256": "c7a7ef97161d6e474991ddf47477215143d4349b5e6ef8c38de869b935cc3a32",
+          "size_bytes": 29079
+        },
+        {
+          "path": "deployment-security/external-allowlist/validate.py",
+          "sha256": "067ab14eaf8009a07d2f0b20ac109aab12cc62772c09dab1eacbc2b18ea35a39",
+          "size_bytes": 63667
+        },
+        {
+          "path": "deployment-security/external-allowlist/validation-baseline.json",
+          "sha256": "3e43065814627dc0649ad78988e678ca062ba0bf288bf9fb8b6e0d74ae24b252",
+          "size_bytes": 2406
+        }
+      ]
+    },
+    {
       "id": "deployment-security-private-network-firewall",
       "path": "deployment-security/private-network-firewall",
       "status": "ready",
@@ -705,6 +755,65 @@
       ]
     },
     {
+      "id": "session-lineage",
+      "path": "session-lineage",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "empty",
+        "failure",
+        "pending",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "session-lineage"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "session-lineage/README.md",
+          "sha256": "cd609d64f7f97e7c880fdaa5b4ec8361c074f2a0f6a59af38f851c8c182933eb",
+          "size_bytes": 6865
+        },
+        {
+          "path": "session-lineage/baseline-evidence.json",
+          "sha256": "30b82db987f901cf11d5aeb9abaf115a47d9790fa56504e4b3d79e8d4834890b",
+          "size_bytes": 1450
+        },
+        {
+          "path": "session-lineage/cases.json",
+          "sha256": "ebd320005dea1623b691346ef6b2b38a60fb510c7b4ed16855c02e9d395540ea",
+          "size_bytes": 77253
+        },
+        {
+          "path": "session-lineage/test_validate.py",
+          "sha256": "5f0b0574f0195748a25c801e35e4985d2847e94e3ff4a941948f0240a85861f5",
+          "size_bytes": 24156
+        },
+        {
+          "path": "session-lineage/validate.py",
+          "sha256": "067da5051431914662bf33d553eaebaf4d1c7a638a0956fb382def5230e015f3",
+          "size_bytes": 77967
+        },
+        {
+          "path": "session-lineage/validation-baseline.json",
+          "sha256": "c62ffce8836f873c03143d2716b83e99db1843083bef82d5697cd5a613f88b3d",
+          "size_bytes": 2718
+        }
+      ]
+    },
+    {
       "id": "session-persistence",
       "path": "session-persistence",
       "status": "ready",
@@ -788,8 +897,8 @@
       "files": [
         {
           "path": "source-audit/compatibility-gate/README.md",
-          "sha256": "e4c42cc109cd85c5da35d43ea8e9f1462193ab3c0755d1f6a25d2dd6fa6d6e74",
-          "size_bytes": 11463
+          "sha256": "485412e75c266383232aaae47403fbdbbabe6b6aa2571b0a9c7ed9e7e8371a10",
+          "size_bytes": 11907
         },
         {
           "path": "source-audit/compatibility-gate/compatibility_record.json",
@@ -798,13 +907,13 @@
         },
         {
           "path": "source-audit/compatibility-gate/test_validate.py",
-          "sha256": "4581791f875c1e8f1c6415b35679b91daa33411ce3bc3f8fa1f1919d2bf13167",
-          "size_bytes": 27230
+          "sha256": "1541c22f8025c0363c519cd8bea3adf713a8a42f6b886635247b83275435756f",
+          "size_bytes": 30144
         },
         {
           "path": "source-audit/compatibility-gate/validate.py",
-          "sha256": "7de6c1742b932c14d6bf521fca03b90b737b7d31a224fee22cdadc46e8dceac8",
-          "size_bytes": 41817
+          "sha256": "fd9a2aeb331063ff35c02852b0b1ea011ee11ff4827071e928ccb7cb14e13ee7",
+          "size_bytes": 41766
         }
       ]
     },
@@ -1257,6 +1366,24 @@
       "notes": "Attestation fixtures record match and mismatch observations without a live claim."
     },
     {
+      "id": "external-allowlist",
+      "status": "ready",
+      "fixture_ids": [
+        "deployment-security-external-allowlist"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "DEP-02 external method and path cases are synthetic default-deny evidence; no proxy or live host is configured."
+    },
+    {
       "id": "image-attachment-lifecycle",
       "status": "ready",
       "fixture_ids": [
@@ -1491,6 +1618,28 @@
         "failure"
       ],
       "notes": "The aggregate consumes the reviewed route and method allowlist only."
+    },
+    {
+      "id": "session-lineage",
+      "status": "ready",
+      "fixture_ids": [
+        "session-lineage"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "C-07B session lineage cases are synthetic identity and retry evidence; no server history or transcript mirror is claimed."
     },
     {
       "id": "web-pty",
