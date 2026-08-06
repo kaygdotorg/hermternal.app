@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   BenchmarkError,
   distribution,
@@ -221,6 +221,25 @@ describe('production-build benchmark contract', () => {
     ]);
     expect(() => process.kill(descendantPid, 0)).toThrow();
   });
+
+  test('SIGTERM removes the active dependency snapshot before exit', async () => {
+    const prefix = 'hermternal-web-benchmark-';
+    const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith(prefix)));
+    const child = Bun.spawn([process.execPath, join(benchmarkRoot, 'run.ts'), '--cold', '1', '--warm', '1'], {
+      cwd: resolve(benchmarkRoot, '../..'), stdout: 'pipe', stderr: 'pipe'
+    });
+    let created = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const current = (await readdir(tmpdir())).filter((name) => name.startsWith(prefix) && !before.has(name));
+      if (current.length > 0) { created = true; break; }
+      await Bun.sleep(20);
+    }
+    expect(created).toBe(true);
+    child.kill('SIGTERM');
+    expect(await child.exited).toBe(143);
+    const after = (await readdir(tmpdir())).filter((name) => name.startsWith(prefix) && !before.has(name));
+    expect(after).toEqual([]);
+  }, 30_000);
 
   test('CLI failures are bounded JSON without attacker-controlled values', () => {
     const result = Bun.spawnSync([process.execPath, join(benchmarkRoot, 'run.ts'), '--unknown', 'sensitive-value'], {
