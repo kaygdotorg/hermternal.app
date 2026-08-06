@@ -19,6 +19,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import time
@@ -37,6 +38,29 @@ MAX_OBJECT_KEYS = 64
 MAX_JSON_NODES = 4096
 MAX_INTEGER_BITS = 4096
 MAX_ERROR_MESSAGE_LENGTH = 512
+MAX_SOURCE_BLOB_BYTES = 16 * 1024 * 1024
+SAFE_ERROR_MESSAGE = "native password-provider audit validation failed"
+
+# Do not inherit Git's ambient object/config/working-tree redirects. The
+# source-root proof must describe the supplied checkout, not a caller's
+# environment or a replacement/lazy-fetch view of it.
+_GIT_REDIRECT_KEYS = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+}
 
 EXPECTED_SOURCE_FILES = {
     "hermes_cli/dashboard_auth/routes.py": {
@@ -58,6 +82,10 @@ EXPECTED_SOURCE_FILES = {
     "hermes_cli/web_server.py": {
         "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
         "git_blob": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+    },
+    "hermes_cli/dashboard_auth/audit.py": {
+        "sha256": "c566a10a6c18b27debd3787e0072e1b25fc661d0c55cda0ffcb098ae02d35690",
+        "git_blob": "937fa95a75ba9ecbe37d48b2b9d0858ffd2809de",
     },
 }
 
@@ -81,6 +109,16 @@ EXPECTED_EVIDENCE = {
         "hermes_cli/dashboard_auth/routes.py",
         "660-716",
         "status_code=429",
+    ),
+    "password-login-body-auth-scheme": (
+        "hermes_cli/dashboard_auth/routes.py",
+        "692-695",
+        "password=body.password",
+    ),
+    "password-provider-error-detail": (
+        "hermes_cli/dashboard_auth/routes.py",
+        "709-716",
+        "detail=f\"Provider unreachable: {e}\"",
     ),
     "password-login-cookie-tail": (
         "hermes_cli/dashboard_auth/routes.py",
@@ -112,6 +150,11 @@ EXPECTED_EVIDENCE = {
         "799-828",
         "mint_ticket(user_id=sess.user_id, provider=sess.provider)",
     ),
+    "ws-ticket-route-session-auth": (
+        "hermes_cli/dashboard_auth/routes.py",
+        "799-828",
+        "sess = getattr(request.state, \"session\", None)",
+    ),
     "ws-ticket-lifetime": (
         "hermes_cli/dashboard_auth/ws_tickets.py",
         "39-42",
@@ -132,6 +175,21 @@ EXPECTED_EVIDENCE = {
         "14704-14718",
         "consume_ticket(ticket)",
     ),
+    "ws-ticket-fragment-source": (
+        "hermes_cli/dashboard_auth/ws_tickets.py",
+        "92-95",
+        "truncated = (ticket[:8] + \"…\") if ticket else \"<empty>\"",
+    ),
+    "ws-ticket-audit-forward": (
+        "hermes_cli/web_server.py",
+        "14708-14716",
+        "reason=str(exc),",
+    ),
+    "audit-log-field-redaction": (
+        "hermes_cli/dashboard_auth/audit.py",
+        "71-87",
+        "if k not in _REDACTED_FIELDS",
+    ),
     "pty-web-only": (
         "hermes_cli/web_server.py",
         "14361-14372",
@@ -141,7 +199,9 @@ EXPECTED_EVIDENCE = {
 
 REQUIRED_CASES = {
     "provider-password-capability",
+    "basic-provider-not-http-basic",
     "login-success-native-cookie",
+    "native-login-no-http-basic",
     "login-wrong-password",
     "login-unknown-provider",
     "login-provider-unavailable",
@@ -155,8 +215,11 @@ REQUIRED_CASES = {
     "cookie-expired-no-refresh",
     "logout-clears-cookie-variants",
     "native-rest-cookie-no-ticket",
+    "native-rest-no-http-basic",
     "native-ws-ticket-mint",
+    "native-ws-ticket-no-http-basic",
     "native-ws-upgrade-ticket-only",
+    "native-ws-upgrade-no-http-basic",
     "native-ws-cookie-direct-denied",
     "native-ws-missing-ticket-denied",
     "native-ws-malformed-ticket-denied",
@@ -166,6 +229,8 @@ REQUIRED_CASES = {
     "native-ws-fresh-ticket-retry",
     "native-pty-route-forbidden",
     "native-no-retained-credentials",
+    "native-ws-ticket-fragment-no-retention",
+    "native-provider-error-no-retention",
 }
 
 FORBIDDEN_KEY_NAMES = {
@@ -183,6 +248,47 @@ FORBIDDEN_KEY_NAMES = {
     "session_token",
 }
 
+_SAFE_CASE_ID_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+_JWT_RE = re.compile(r"[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+_SCHEME_VALUE_RE = re.compile(
+    r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"
+)
+_BASIC_HEADER_RE = re.compile(
+    r"(?i)\bauthorization\s*:\s*basic\s+[A-Za-z0-9._~+/=-]{8,}"
+)
+_COOKIE_HEADER_RE = re.compile(
+    r"(?i)\bcookie\s*:\s*[A-Za-z0-9._~+/=-]{8,}"
+)
+_NAMED_SECRET_RE = re.compile(
+    r"(?i)\b(?:authorization|cookie|ticket|token|password|secret|"
+    r"access[_ -]?token|refresh[_ -]?token)\s*[:=]\s*"
+    r"[A-Za-z0-9._~+/=-]{8,}"
+)
+_RAW_SECRET_PATH_RE = re.compile(
+    r"(?i)(?:file://|/(?:users|home|private|tmp|var|srv|etc|opt|root)/|"
+    r"[a-z]:[\\\\/]|\\\\\\\\)"
+)
+# Source and retained diagnostics use both labels; block either form before
+# it can reach history, logs, or the DOM.
+_TICKET_FRAGMENT_RE = re.compile(
+    r"(?i)\b(?:unknown ticket|ticket fragment)\s*[:=]\s*"
+    r"[A-Za-z0-9_-]{8,}(?:…|\b)"
+)
+
+
+def validate_untrusted_text(value: Any, *, identifier: bool = False) -> None:
+    """Reject secrets, paths, and token-shaped claims before retention."""
+    require(type(value) is str and "\x00" not in value, "unsafe text")
+    if identifier:
+        require(_SAFE_CASE_ID_RE.fullmatch(value) is not None, "unsafe identifier")
+    require(_JWT_RE.search(value) is None, "credential-shaped text")
+    require(_SCHEME_VALUE_RE.search(value) is None, "credential-shaped text")
+    require(_BASIC_HEADER_RE.search(value) is None, "credential-shaped text")
+    require(_COOKIE_HEADER_RE.search(value) is None, "credential-shaped text")
+    require(_NAMED_SECRET_RE.search(value) is None, "credential-shaped text")
+    require(_TICKET_FRAGMENT_RE.search(value) is None, "ticket fragment")
+    require(_RAW_SECRET_PATH_RE.search(value) is None, "absolute source path")
+
 
 class ValidationError(AssertionError):
     """A contract fixture assertion failed."""
@@ -193,19 +299,17 @@ class DuplicateKeyError(ValidationError):
 
 
 def require(condition: bool, message: str) -> None:
+    """Raise one fixed error so untrusted labels never reach diagnostics."""
     if not condition:
-        raise ValidationError(message)
+        raise ValidationError(SAFE_ERROR_MESSAGE)
 
 
 def _bounded_error_message(exc: BaseException) -> str:
-    """Keep CLI output bounded even when malformed input controls an error."""
-    try:
-        message = str(exc)
-    except Exception:
-        return "validation failed"
-    if len(message) <= MAX_ERROR_MESSAGE_LENGTH:
-        return message
-    return message[: MAX_ERROR_MESSAGE_LENGTH - 3] + "..."
+    """Return a bounded, source- and credential-redacted CLI error."""
+    # JSON parser text, Git stderr, case IDs, source claims, and paths can all
+    # be attacker-controlled. A fixed message is safer than trying to classify
+    # every future parser or subprocess error at the presentation boundary.
+    return SAFE_ERROR_MESSAGE[:MAX_ERROR_MESSAGE_LENGTH]
 
 
 def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -239,9 +343,9 @@ def _read_bounded_stream(stream: Any, label: str) -> bytes:
         require(type(chunk) is bytes, f"strict JSON {label} stream returned non-bytes")
         total += len(chunk)
         if total > MAX_JSON_BYTES:
-            raise ValidationError(f"strict JSON {label} exceeds the input byte limit")
+            raise ValidationError(SAFE_ERROR_MESSAGE)
         chunks.append(chunk)
-    raise ValidationError(f"strict JSON {label} exceeds the input byte limit")
+    raise ValidationError(SAFE_ERROR_MESSAGE)
 
 
 def _scan_json(value: Any, path: str = "$", state: list[int] | None = None) -> None:
@@ -268,7 +372,7 @@ def _scan_json(value: Any, path: str = "$", state: list[int] | None = None) -> N
     elif value is None or type(value) is bool:
         return
     else:
-        raise ValidationError(f"{path}: unsupported JSON value type")
+        raise ValidationError(SAFE_ERROR_MESSAGE)
 
 
 def load_json(name: str) -> dict[str, Any]:
@@ -284,7 +388,7 @@ def load_json(name: str) -> dict[str, Any]:
             parse_constant=_reject_constant,
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
-        raise ValidationError(f"strict JSON {name}: {_bounded_error_message(exc)}") from exc
+        raise ValidationError(SAFE_ERROR_MESSAGE) from exc
     _scan_json(value)
     require(isinstance(value, dict), f"{name} must contain a JSON object")
     return value
@@ -315,18 +419,18 @@ def validate_synthetic_keys(value: Any, path: str = "$") -> None:
     """Reject fields that could retain credential material, not classifications."""
     if isinstance(value, dict):
         for key, child in value.items():
+            validate_untrusted_text(key)
             normalized = normalize_key(key)
             if normalized in FORBIDDEN_KEY_NAMES:
                 # A false boolean is a retention classification, not secret
                 # material. Any non-boolean value under these names is rejected.
-                require(type(child) is bool and child is False, f"{path}: prohibited sensitive field")
-            validate_synthetic_keys(child, f"{path}.{key}")
+                require(type(child) is bool and child is False, "prohibited sensitive field")
+            validate_synthetic_keys(child, path)
     elif isinstance(value, list):
-        for index, child in enumerate(value):
-            validate_synthetic_keys(child, f"{path}[{index}]")
+        for child in value:
+            validate_synthetic_keys(child, path)
     elif type(value) is str:
-        require(not re.search(r"(?i)\b(?:bearer|basic)\s+\S+", value), f"{path}: credential value is not allowed")
-        require(not re.search(r"(?i)(?:password|secret|cookie|ticket|token)\s*=\s*[^\s,]+", value), f"{path}: inline credential value is not allowed")
+        validate_untrusted_text(value)
 
 
 def validate_baseline(audit: dict[str, Any]) -> None:
@@ -391,9 +495,9 @@ def validate_source_provenance(audit: dict[str, Any]) -> None:
     provenance = audit["source_provenance"]
     exact_keys(provenance, {"pinned_revision", "pinned_tree", "verification", "source_root_modes", "citation_marker_policy", "files"}, set(), "source_provenance")
     require(provenance["pinned_revision"] == REVISION and provenance["pinned_tree"] == TREE, "source provenance pin changed")
-    require(provenance["verification"] == "sha256_digests_git_head_tree_and_blob_when_git_metadata_present", "source provenance verification rule changed")
+    require(provenance["verification"] == "git_head_tree_complete_blob_reads_and_sha256_when_git_metadata_present", "source provenance verification rule changed")
     require(provenance["source_root_modes"] == {
-        "git_checkout": "git_head_and_tree_must_equal_pinned_revision",
+        "git_checkout": "exact_non_bare_clean_checkout_with_local_metadata_and_pinned_commit_tree",
         "content_only_snapshot": "sha256_only_never_checkout_verified",
     }, "source root mode policy changed")
     require(provenance["citation_marker_policy"] == "marker_must_occur_in_cited_source_range_when_source_root_is_supplied", "citation marker policy changed")
@@ -424,7 +528,7 @@ def validate_source_provenance(audit: dict[str, Any]) -> None:
         require(record["lines"] == expected_lines, f"source evidence range changed: {evidence_id}")
         require(record["marker"] == expected_marker, f"source evidence marker changed: {evidence_id}")
         parse_lines(record["lines"], f"source evidence {evidence_id}")
-        require(isinstance(record["claim"], str) and record["claim"], f"source evidence claim missing: {evidence_id}")
+        validate_untrusted_text(record["claim"])
     require(seen == set(EXPECTED_EVIDENCE), "source evidence inventory changed")
     validate_baseline(audit)
 
@@ -433,63 +537,263 @@ def evidence_map(audit: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {record["id"]: record for record in audit["source_evidence"]}
 
 
-def validate_source_markers(audit: dict[str, Any], source_root: Path) -> None:
+def validate_source_markers(
+    audit: dict[str, Any],
+    source_root: Path,
+    source_texts: dict[str, str] | None = None,
+) -> None:
     evidence = evidence_map(audit)
     source_lines: dict[str, list[str]] = {}
     for evidence_id, (_file, _lines, marker) in EXPECTED_EVIDENCE.items():
         record = evidence[evidence_id]
         source_path = source_root / record["file"]
-        require(source_path.is_file(), f"source marker file is missing: {record['file']}")
+        require(source_path.is_file(), "source marker file is missing")
         if record["file"] not in source_lines:
-            source_lines[record["file"]] = source_path.read_text(encoding="utf-8").splitlines()
-        start, end = parse_lines(record["lines"], f"source evidence {evidence_id}")
-        require(end <= len(source_lines[record["file"]]), f"source evidence range exceeds file: {evidence_id}")
+            if source_texts is not None:
+                require(record["file"] in source_texts, "source marker blob is missing")
+                text = source_texts[record["file"]]
+            else:
+                text = source_path.read_text(encoding="utf-8")
+            source_lines[record["file"]] = text.splitlines()
+        start, end = parse_lines(record["lines"], "source evidence range")
+        require(end <= len(source_lines[record["file"]]), "source evidence range exceeds file")
         cited_text = "\n".join(source_lines[record["file"]][start - 1:end])
-        require(marker in cited_text, f"source marker is absent from cited source text: {evidence_id}")
+        require(marker in cited_text, "source marker is absent from cited source text")
+
+
+def _git_env(source_root: Path) -> dict[str, str]:
+    """Build a neutral Git environment for source-root attestation."""
+    env = dict(os.environ)
+    # Remove every inherited Git config/object/work-tree redirect, including
+    # numbered config pairs. Restore only neutral values below.
+    for key in list(env):
+        if key.startswith("GIT_") or key in _GIT_REDIRECT_KEYS:
+            env.pop(key, None)
+    env.update({
+        "HOME": str(source_root),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_COUNT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+    })
+    return env
+
+
+def _git_bytes(source_root: Path, *args: str, input_data: bytes | None = None) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(source_root), *args],
+            check=True,
+            capture_output=True,
+            input=input_data,
+            env=_git_env(source_root),
+            timeout=15,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+    require(type(result.stdout) is bytes, "Git returned non-bytes output")
+    return result.stdout
 
 
 def _git(source_root: Path, *args: str) -> str:
     try:
-        result = subprocess.run(["git", "-C", str(source_root), *args], check=True, capture_output=True, text=True)
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise ValidationError("source Git metadata could not be verified") from exc
-    return result.stdout.strip()
+        return _git_bytes(source_root, *args).decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+
+
+def _git_optional(source_root: Path, *args: str) -> str | None:
+    """Read optional local Git config without hiding command failures."""
+    try:
+        result = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(source_root), *args],
+            check=False,
+            capture_output=True,
+            env=_git_env(source_root),
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+    if result.returncode == 1 and not result.stdout and not result.stderr:
+        return None
+    if result.returncode != 0:
+        raise ValidationError(SAFE_ERROR_MESSAGE)
+    try:
+        return result.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+
+
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _reject_repository_local_alternates(source_root: Path) -> Path:
+    """Require checkout-style metadata rooted inside the supplied checkout."""
+    marker = source_root / ".git"
+    require(not marker.is_symlink(), "Git metadata must not be a symlink")
+    require(marker.is_dir() or marker.is_file(), "source root is not a checkout")
+    if marker.is_dir():
+        git_dir = marker.resolve()
+    else:
+        try:
+            lines = marker.read_text(encoding="ascii").splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+        require(len(lines) == 1 and lines[0].startswith("gitdir:"), "invalid Git metadata")
+        raw_git_dir = lines[0][7:].strip()
+        require(raw_git_dir and not Path(raw_git_dir).is_absolute(), "linked Git metadata is not allowed")
+        git_dir = (source_root / raw_git_dir).resolve()
+    require(_within(git_dir, source_root) and git_dir.is_dir(), "Git metadata escapes source root")
+    require(all((git_dir / name).is_file() and not (git_dir / name).is_symlink() for name in ("HEAD", "config", "index")), "checkout metadata is incomplete")
+    objects = git_dir / "objects"
+    refs = git_dir / "refs"
+    require(objects.is_dir() and not objects.is_symlink(), "checkout objects are invalid")
+    require(refs.is_dir() and not refs.is_symlink(), "checkout refs are invalid")
+
+    # A linked worktree can redirect its common object/ref metadata outside
+    # the supplied root. It is not an attested standalone checkout.
+    commondir = git_dir / "commondir"
+    if commondir.exists() or commondir.is_symlink():
+        require(not commondir.is_symlink() and commondir.is_file(), "linked Git metadata is not allowed")
+        raw_common = commondir.read_text(encoding="ascii").strip()
+        common_dir = (git_dir / raw_common).resolve()
+        require(_within(common_dir, source_root) and common_dir.is_dir(), "common Git metadata escapes source root")
+
+    for name in ("alternates", "http-alternates"):
+        alternate = objects / "info" / name
+        require(not alternate.exists() and not alternate.is_symlink(), "Git object alternates are not allowed")
+    return git_dir
+
+
+def _reject_bare_shape(source_root: Path) -> None:
+    """Reject bare and disguised-bare roots before treating them as snapshots."""
+    marker = source_root / ".git"
+    if marker.exists() or marker.is_symlink():
+        return
+    bare_markers = (source_root / "HEAD", source_root / "config", source_root / "objects", source_root / "refs")
+    require(not all(path.exists() for path in bare_markers), "bare Git roots are not allowed")
+    for ancestor in source_root.parents:
+        require(not (ancestor / ".git").exists(), "source root must be the checkout top-level")
+
+
+def _verify_git_checkout(source_root: Path, git_dir: Path, files: list[dict[str, Any]]) -> dict[str, bytes]:
+    require(_git(source_root, "rev-parse", "--show-toplevel") == str(source_root), "source root is not the checkout top-level")
+    require(_git(source_root, "rev-parse", "--is-bare-repository") == "false", "bare Git roots are not allowed")
+    bare_setting = _git_optional(source_root, "config", "--local", "--get", "core.bare")
+    require(bare_setting in {None, "false", "False", "0", "no"}, "checkout is configured as bare")
+    worktree_setting = _git_optional(source_root, "config", "--local", "--get", "core.worktree")
+    if worktree_setting:
+        worktree = Path(worktree_setting)
+        resolved_worktree = (git_dir / worktree if not worktree.is_absolute() else worktree).resolve()
+        require(resolved_worktree == source_root, "checkout worktree is redirected")
+    require(_git(source_root, "status", "--porcelain=v2", "--untracked-files=all", "--ignored=matching") == "", "source checkout is not clean")
+    require(_git(source_root, "for-each-ref", "--format=%(refname)", "refs/replace") == "", "Git replacement refs are not allowed")
+    require(_git_optional(source_root, "config", "--local", "--get-regexp", r"^extensions\.partialClone$") in {None, ""}, "lazy Git fetch is not allowed")
+    require(_git_optional(source_root, "config", "--local", "--get-regexp", r"^remote\..*\.promisor$") in {None, ""}, "promisor Git objects are not allowed")
+
+    head = _git(source_root, "rev-parse", "--verify", "HEAD^{commit}")
+    require(head == REVISION, "source Git revision is not pinned")
+    tree = _git(source_root, "rev-parse", "--verify", f"{head}^{{tree}}")
+    require(tree == TREE, "source Git tree is not pinned")
+    require(_git(source_root, "cat-file", "-t", head) == "commit", "pinned revision is not a commit object")
+    require(_git(source_root, "cat-file", "-t", tree) == "tree", "pinned tree is not a tree object")
+
+    requested_paths = [item["path"] for item in files]
+    tree_listing = _git_bytes(source_root, "ls-tree", "-r", "-z", "--full-tree", head, "--", *requested_paths)
+    entries: dict[str, tuple[bytes, bytes, bytes]] = {}
+    for record in tree_listing.split(b"\0"):
+        if not record:
+            continue
+        try:
+            header, path_bytes = record.split(b"\t", 1)
+            mode, object_type, object_id = header.split(b" ", 2)
+            path = path_bytes.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+        require(path not in entries, "duplicate Git tree entry")
+        entries[path] = (mode, object_type, object_id)
+    require(set(entries) == set(requested_paths), "pinned source tree inventory changed")
+
+    immutable: dict[str, bytes] = {}
+    for item in files:
+        path_name = item["path"]
+        mode, object_type, object_id = entries[path_name]
+        require(mode == b"100644" and object_type == b"blob", "pinned source object type changed")
+        require(object_id.decode("ascii") == item["git_blob"], "pinned source blob is not pinned")
+        request = object_id + b"\n"
+        batch = _git_bytes(source_root, "cat-file", "--batch", input_data=request)
+        try:
+            header, payload = batch.split(b"\n", 1)
+            returned_id, kind, size_text = header.split(b" ", 2)
+            size = int(size_text)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+        require(kind == b"blob" and returned_id == object_id and 0 <= size <= MAX_SOURCE_BLOB_BYTES, "Git blob header is invalid")
+        require(len(payload) == size + 1 and payload[-1:] == b"\n", "Git blob read was incomplete")
+        blob = payload[:size]
+        require(hashlib.sha256(blob).hexdigest() == item["sha256"], "pinned source blob digest changed")
+        immutable[path_name] = blob
+    return immutable
 
 
 def verify_source_root(audit: dict[str, Any], source_root: Path) -> tuple[int, str]:
     files = audit["source_provenance"]["files"]
-    git_metadata = source_root / ".git"
-    if git_metadata.exists():
-        head = _git(source_root, "rev-parse", "--verify", "HEAD^{commit}")
-        require(head == REVISION, f"source Git HEAD {head!r} does not equal pinned revision")
-        tree = _git(source_root, "rev-parse", "--verify", "HEAD^{tree}")
-        require(tree == TREE, f"source Git tree {tree!r} does not equal pinned tree")
-        require(_git(source_root, "cat-file", "-t", f"{REVISION}^{{commit}}") == "commit", "pinned revision is not a commit object")
+    try:
+        source_root = source_root.resolve(strict=True)
+    except OSError as exc:
+        raise ValidationError(SAFE_ERROR_MESSAGE) from exc
+    require(source_root.is_dir() and source_root.name != ".git", "source root must be a directory")
+    marker = source_root / ".git"
+    has_checkout_metadata = marker.exists() or marker.is_symlink()
+    immutable: dict[str, bytes] | None = None
+    if has_checkout_metadata:
+        git_dir = _reject_repository_local_alternates(source_root)
+        immutable = _verify_git_checkout(source_root, git_dir, files)
         provenance = "git_checkout_verified"
     else:
+        _reject_bare_shape(source_root)
         provenance = "content_only_snapshot"
 
     verified = 0
+    source_texts: dict[str, str] = {}
     for item in files:
         path = source_root / item["path"]
-        require(path.is_file(), f"pinned source file is missing: {item['path']}")
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        require(digest == item["sha256"], f"pinned source digest mismatch: {item['path']}")
-        if git_metadata.exists():
-            blob = _git(source_root, "rev-parse", "--verify", f"{REVISION}:{item['path']}")
-            require(blob == item["git_blob"], f"pinned source blob mismatch: {item['path']}")
-            require(_git(source_root, "cat-file", "-t", blob) == "blob", f"pinned source object is not a blob: {item['path']}")
+        require(not path.is_symlink() and path.is_file(), "pinned source file is missing")
+        working = path.read_bytes()
+        digest = hashlib.sha256(working).hexdigest()
+        require(digest == item["sha256"], "pinned source digest mismatch")
+        if immutable is not None:
+            require(working == immutable[item["path"]], "working tree differs from pinned blob")
+            source_bytes = immutable[item["path"]]
+        else:
+            source_bytes = working
+        try:
+            source_texts[item["path"]] = source_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValidationError(SAFE_ERROR_MESSAGE) from exc
         verified += 1
-    validate_source_markers(audit, source_root)
+    validate_source_markers(audit, source_root, source_texts)
     return verified, provenance
 
 
 def _validate_login(case_id: str, request: dict[str, Any], expected: dict[str, Any]) -> None:
-    exact_keys(request, {"method", "path", "provider_state", "credential_state", "transport", "cookie_store"}, set(), case_id + ".request")
-    exact_keys(expected, {"http_status", "session_cookie", "refresh_cookie", "provider_cookie", "password_retained"}, {"error_shape", "rest_auth"}, case_id + ".expected")
-    require(type(expected["http_status"]) is int and type(expected["password_retained"]) is bool, f"{case_id}: login result types changed")
+    exact_keys(request, {"method", "path", "provider_state", "credential_state", "transport", "cookie_store", "auth_scheme"}, set(), case_id + ".request")
+    exact_keys(expected, {"http_status", "session_cookie", "refresh_cookie", "provider_cookie", "password_retained", "http_authorization_basic"}, {"error_shape", "rest_auth"}, case_id + ".expected")
+    require(type(expected["http_status"]) is int and type(expected["password_retained"]) is bool and type(expected["http_authorization_basic"]) is bool, f"{case_id}: login result types changed")
     require(request["method"] == "POST" and request["path"] == "/auth/password-login", f"{case_id}: login route changed")
-    require(request["transport"] == "https" and request["cookie_store"] == "native_isolated", f"{case_id}: native login transport/store changed")
+    require(request["transport"] == "https" and request["cookie_store"] == "native_isolated" and request["auth_scheme"] == "password_form", f"{case_id}: native login transport/store/auth scheme changed")
+    require(expected["http_authorization_basic"] is False, f"{case_id}: HTTP Basic login fallback appeared")
     state = request["credential_state"]
     require(request["provider_state"] in {"registered_password", "unknown", "unavailable"}, f"{case_id}: invalid provider state")
     expected_shape = {
@@ -541,7 +845,7 @@ def _validate_cookie(case_id: str, request: dict[str, Any], expected: dict[str, 
         require(request == {"transport": "https", "deployment": "direct", "refresh_material": "provider_omits_refresh", "cookie_store": "native_isolated"}, f"{case_id}: request changed")
         require(expected == {"access_cookie": "issued", "refresh_cookie": "not_written", "provider_cookie": "issued", "session_mode": "access_only_until_expiry"}, f"{case_id}: omitted refresh behavior changed")
         return
-    raise ValidationError(f"unknown cookie case: {case_id}")
+    raise ValidationError(SAFE_ERROR_MESSAGE)
 
 
 def _validate_case(case: dict[str, Any]) -> None:
@@ -550,7 +854,8 @@ def _validate_case(case: dict[str, Any]) -> None:
     kind = case["kind"]
     request = case["request"]
     expected = case["expected"]
-    require(isinstance(case_id, str) and case_id in REQUIRED_CASES, f"unknown case id: {case_id}")
+    validate_untrusted_text(case_id, identifier=True)
+    require(case_id in REQUIRED_CASES, "unknown case id")
     require(isinstance(kind, str) and isinstance(request, dict) and isinstance(expected, dict), f"malformed case: {case_id}")
 
     if kind == "provider":
@@ -559,6 +864,8 @@ def _validate_case(case: dict[str, Any]) -> None:
         require(type(expected["oauth_redirect"]) is bool, f"{case_id}: provider flag type changed")
         require(request == {"provider_state": "registered_password", "capability": "supports_password", "oauth_redirect": "absent"}, f"{case_id}: provider handoff changed")
         require(expected == {"provider": "basic", "decision": "password_login_eligible", "oauth_redirect": False}, f"{case_id}: provider decision changed")
+    elif kind == "auth_scheme":
+        _validate_auth_scheme(case_id, request, expected)
     elif kind == "login":
         _validate_login(case_id, request, expected)
     elif kind == "cookie":
@@ -590,17 +897,17 @@ def _validate_case(case: dict[str, Any]) -> None:
         require(request == {"method": "POST", "path": "/auth/logout", "cookie_store": "native_isolated", "deployment": "any_reviewed_shape"}, f"{case_id}: logout request changed")
         require(expected == {"redirect": "login", "clear_cookie_store": True, "max_age": 0, "deleted_variants": ["bare", "__Host-", "__Secure-"], "deleted_cookie_families": ["access", "refresh", "provider"]}, f"{case_id}: logout deletion changed")
     elif case_id == "native-rest-cookie-no-ticket":
-        exact_keys(request, {"method", "path", "cookie_state", "bearer_state", "ws_ticket_state"}, set(), case_id + ".request")
-        exact_keys(expected, {"auth_source", "http_status", "ticket_on_rest", "cookie_store"}, set(), case_id + ".expected")
-        require(type(expected["ticket_on_rest"]) is bool, f"{case_id}: REST flag type changed")
-        require(request == {"method": "GET", "path": "/api/auth/me", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "ws_ticket_state": "absent"}, f"{case_id}: REST request changed")
-        require(expected == {"auth_source": "native_password_cookie", "http_status": "handler_dependent", "ticket_on_rest": False, "cookie_store": "app_isolated_protected"}, f"{case_id}: REST cookie policy changed")
+        exact_keys(request, {"method", "path", "cookie_state", "bearer_state", "ws_ticket_state", "auth_scheme", "authorization_header"}, set(), case_id + ".request")
+        exact_keys(expected, {"auth_source", "http_status", "ticket_on_rest", "cookie_store", "http_authorization_basic"}, set(), case_id + ".expected")
+        require(type(expected["ticket_on_rest"]) is bool and type(expected["http_authorization_basic"]) is bool, f"{case_id}: REST flag type changed")
+        require(request == {"method": "GET", "path": "/api/auth/me", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "ws_ticket_state": "absent", "auth_scheme": "session_cookie", "authorization_header": "absent"}, f"{case_id}: REST request changed")
+        require(expected == {"auth_source": "native_password_cookie", "http_status": "handler_dependent", "ticket_on_rest": False, "cookie_store": "app_isolated_protected", "http_authorization_basic": False}, f"{case_id}: REST cookie policy changed")
     elif case_id == "native-ws-ticket-mint":
-        exact_keys(request, {"method", "path", "cookie_state", "bearer_state", "cookie_store"}, set(), case_id + ".request")
-        exact_keys(expected, {"auth_source", "ticket_issuance", "ttl_seconds", "ticket_persisted", "ticket_logged"}, set(), case_id + ".expected")
-        require(type(expected["ttl_seconds"]) is int and type(expected["ticket_persisted"]) is bool and type(expected["ticket_logged"]) is bool, f"{case_id}: ticket result types changed")
-        require(request == {"method": "POST", "path": "/api/auth/ws-ticket", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "cookie_store": "app_isolated_protected"}, f"{case_id}: ticket mint request changed")
-        require(expected == {"auth_source": "native_password_cookie", "ticket_issuance": "fresh_single_use", "ttl_seconds": 30, "ticket_persisted": False, "ticket_logged": False}, f"{case_id}: ticket mint policy changed")
+        exact_keys(request, {"method", "path", "cookie_state", "bearer_state", "cookie_store", "auth_scheme", "authorization_header"}, set(), case_id + ".request")
+        exact_keys(expected, {"auth_source", "ticket_issuance", "ttl_seconds", "ticket_persisted", "ticket_logged", "http_authorization_basic"}, set(), case_id + ".expected")
+        require(type(expected["ttl_seconds"]) is int and type(expected["ticket_persisted"]) is bool and type(expected["ticket_logged"]) is bool and type(expected["http_authorization_basic"]) is bool, f"{case_id}: ticket result types changed")
+        require(request == {"method": "POST", "path": "/api/auth/ws-ticket", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "cookie_store": "app_isolated_protected", "auth_scheme": "session_cookie", "authorization_header": "absent"}, f"{case_id}: ticket mint request changed")
+        require(expected == {"auth_source": "native_password_cookie", "ticket_issuance": "fresh_single_use", "ttl_seconds": 30, "ticket_persisted": False, "ticket_logged": False, "http_authorization_basic": False}, f"{case_id}: ticket mint policy changed")
     elif kind == "ws_upgrade":
         _validate_ws_upgrade(case_id, request, expected)
     elif kind == "native_policy":
@@ -614,8 +921,61 @@ def _validate_case(case: dict[str, Any]) -> None:
         exact_keys(expected, {"password", "cookie_contents", "refresh_material", "bearer", "ticket", "ticket_fragment", "callback_url", "provider_state"}, set(), case_id + ".expected")
         require(request == {"evidence_surface": "fixture_logs_links_history_source_control"}, f"{case_id}: retention surface changed")
         require(all(value is False for value in expected.values()), f"{case_id}: retained sensitive material is not fail-closed")
+    elif kind == "retention_source":
+        _validate_source_retention(case_id, request, expected)
     else:
-        raise ValidationError(f"unsupported case kind: {kind}")
+        raise ValidationError(SAFE_ERROR_MESSAGE)
+
+
+def _validate_auth_scheme(case_id: str, request: dict[str, Any], expected: dict[str, Any]) -> None:
+    """Keep provider names separate from HTTP Authorization schemes."""
+    if case_id == "basic-provider-not-http-basic":
+        exact_keys(request, {"provider", "operation", "provider_auth_scheme", "authorization_header"}, set(), "auth scheme request")
+        exact_keys(expected, {"provider_auth_scheme", "http_authorization_basic", "decision"}, set(), "auth scheme expected")
+        require(request == {"provider": "basic", "operation": "password_login", "provider_auth_scheme": "password_form", "authorization_header": "absent"}, "provider auth scheme changed")
+        require(expected == {"provider_auth_scheme": "password_form", "http_authorization_basic": False, "decision": "provider_name_never_selects_http_basic"}, "provider/HTTP auth distinction changed")
+        return
+    if case_id == "native-login-no-http-basic":
+        exact_keys(request, {"method", "path", "provider", "auth_scheme", "authorization_header"}, set(), "login auth scheme request")
+        exact_keys(expected, {"http_authorization_basic", "session_result"}, set(), "login auth scheme expected")
+        require(request == {"method": "POST", "path": "/auth/password-login", "provider": "basic", "auth_scheme": "password_form", "authorization_header": "absent"}, "password login auth scheme changed")
+        require(expected == {"http_authorization_basic": False, "session_result": "shared_session_cookie_only_on_success"}, "password login HTTP Basic fallback appeared")
+        return
+    if case_id == "native-rest-no-http-basic":
+        exact_keys(request, {"method", "path", "auth_scheme", "cookie_state", "bearer_state", "authorization_header"}, set(), "REST auth scheme request")
+        exact_keys(expected, {"http_authorization_basic", "auth_source"}, set(), "REST auth scheme expected")
+        require(request == {"method": "GET", "path": "/api/auth/me", "auth_scheme": "session_cookie", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "authorization_header": "absent"}, "REST auth scheme changed")
+        require(expected == {"http_authorization_basic": False, "auth_source": "native_password_cookie"}, "REST HTTP Basic fallback appeared")
+        return
+    if case_id == "native-ws-ticket-no-http-basic":
+        exact_keys(request, {"method", "path", "auth_scheme", "cookie_state", "authorization_header"}, set(), "ticket auth scheme request")
+        exact_keys(expected, {"http_authorization_basic", "ticket_source"}, set(), "ticket auth scheme expected")
+        require(request == {"method": "POST", "path": "/api/auth/ws-ticket", "auth_scheme": "session_cookie", "cookie_state": "valid_native_password_cookie", "authorization_header": "absent"}, "ticket acquisition auth scheme changed")
+        require(expected == {"http_authorization_basic": False, "ticket_source": "authenticated_session_cookie"}, "ticket HTTP Basic fallback appeared")
+        return
+    if case_id == "native-ws-upgrade-no-http-basic":
+        exact_keys(request, {"method", "path", "auth_scheme", "query_credential", "authorization_header"}, set(), "upgrade auth scheme request")
+        exact_keys(expected, {"http_authorization_basic", "credential_source"}, set(), "upgrade auth scheme expected")
+        require(request == {"method": "GET", "path": "/api/ws", "auth_scheme": "query_ticket", "query_credential": "ticket_only", "authorization_header": "absent"}, "WebSocket upgrade auth scheme changed")
+        require(expected == {"http_authorization_basic": False, "credential_source": "ephemeral_ticket_only"}, "WebSocket HTTP Basic fallback appeared")
+        return
+    raise ValidationError("unknown auth-scheme case")
+
+
+def _validate_source_retention(case_id: str, request: dict[str, Any], expected: dict[str, Any]) -> None:
+    if case_id == "native-ws-ticket-fragment-no-retention":
+        exact_keys(request, {"source_flow", "forwarded_surface", "source_evidence"}, set(), "ticket retention request")
+        exact_keys(expected, {"ticket_fragment", "history", "logs", "dom"}, set(), "ticket retention expected")
+        require(request == {"source_flow": "ws_tickets_ticket_prefix_fragment", "forwarded_surface": "web_server_audit_reason", "source_evidence": ["ws-ticket-fragment-source", "ws-ticket-audit-forward", "audit-log-field-redaction"]}, "ticket fragment source path changed")
+        require(expected == {"ticket_fragment": False, "history": False, "logs": False, "dom": False}, "ticket fragment retention is not fail-closed")
+        return
+    if case_id == "native-provider-error-no-retention":
+        exact_keys(request, {"source_flow", "forwarded_surface", "source_evidence"}, set(), "provider error retention request")
+        exact_keys(expected, {"provider_exception_text", "history", "logs", "dom"}, set(), "provider error retention expected")
+        require(request == {"source_flow": "password_login_provider_exception", "forwarded_surface": "503_detail", "source_evidence": ["password-provider-error-detail"]}, "provider error source path changed")
+        require(expected == {"provider_exception_text": False, "history": False, "logs": False, "dom": False}, "provider exception retention is not fail-closed")
+        return
+    raise ValidationError("unknown source-retention case")
 
 
 def _validate_ws_upgrade(case_id: str, request: dict[str, Any], expected: dict[str, Any]) -> None:
@@ -655,7 +1015,7 @@ def _validate_ws_upgrade(case_id: str, request: dict[str, Any], expected: dict[s
         require(request == {"path": "/api/ws", "auth_mode": "gated", "first_ticket_state": "consumed", "replacement_ticket_state": "fresh_single_use", "cookie_state": "not_sent", "query_credential": "ticket_only"}, f"{case_id}: request changed")
         require(expected == {"first_upgrade": "one_use_only", "replacement_upgrade": "accept", "same_ticket_reused": False, "cookie_on_upgrade": False}, f"{case_id}: fresh retry policy changed")
     else:
-        raise ValidationError(f"unknown WebSocket case: {case_id}")
+        raise ValidationError(SAFE_ERROR_MESSAGE)
 
 
 def validate_cases(cases_doc: dict[str, Any]) -> int:
@@ -669,7 +1029,9 @@ def validate_cases(cases_doc: dict[str, Any]) -> int:
     for case in cases:
         require(isinstance(case, dict), "each case must be an object")
         case_id = case.get("id")
-        require(isinstance(case_id, str) and case_id not in ids, f"duplicate or invalid case id: {case_id}")
+        require(isinstance(case_id, str), "invalid case id")
+        validate_untrusted_text(case_id, identifier=True)
+        require(case_id not in ids, "duplicate case id")
         ids.add(case_id)
         _validate_case(case)
         validate_synthetic_keys(case)
@@ -682,7 +1044,7 @@ def expect_rejected(label: str, callback: Callable[[], None]) -> None:
         callback()
     except ValidationError:
         return
-    raise ValidationError(f"mutation was accepted: {label}")
+    raise ValidationError(SAFE_ERROR_MESSAGE)
 
 
 def validate_mutation_regressions(audit: dict[str, Any], cases: dict[str, Any]) -> int:
@@ -741,6 +1103,34 @@ def validate_mutation_regressions(audit: dict[str, Any], cases: dict[str, Any]) 
     unknown_key = copy.deepcopy(cases)
     unknown_key["cases"][0]["request"]["raw_ticket"] = "synthetic"
     expect_rejected("unknown sensitive request field", lambda: validate_cases(unknown_key))
+    mutations += 1
+
+    injected_case_id = copy.deepcopy(cases)
+    injected_case_id["cases"][0]["id"] = "case\nAuthorization: Basic dGVzdC1jcmVk"
+    expect_rejected("attacker case identifier", lambda: validate_cases(injected_case_id))
+    mutations += 1
+
+    basic_fallback = copy.deepcopy(cases)
+    basic_case = next(item for item in basic_fallback["cases"] if item["id"] == "native-login-no-http-basic")
+    basic_case["expected"]["http_authorization_basic"] = True
+    expect_rejected("HTTP Basic login fallback", lambda: validate_cases(basic_fallback))
+    mutations += 1
+
+    fragment_retention = copy.deepcopy(cases)
+    fragment_case = next(item for item in fragment_retention["cases"] if item["id"] == "native-ws-ticket-fragment-no-retention")
+    fragment_case["expected"]["logs"] = True
+    expect_rejected("ticket fragment retained in logs", lambda: validate_cases(fragment_retention))
+    mutations += 1
+
+    provider_error_retention = copy.deepcopy(cases)
+    provider_error_case = next(item for item in provider_error_retention["cases"] if item["id"] == "native-provider-error-no-retention")
+    provider_error_case["expected"]["dom"] = True
+    expect_rejected("provider exception retained in DOM", lambda: validate_cases(provider_error_retention))
+    mutations += 1
+
+    claim_mutation = copy.deepcopy(audit)
+    claim_mutation["source_evidence"][0]["claim"] = "Authorization: Basic dGVzdC1jcmVk"
+    expect_rejected("credential-shaped source claim", lambda: validate_source_provenance(claim_mutation))
     mutations += 1
 
     return mutations

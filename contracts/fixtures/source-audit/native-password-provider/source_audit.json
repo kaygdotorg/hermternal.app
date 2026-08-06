@@ -17,9 +17,9 @@
   "source_provenance": {
     "pinned_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
     "pinned_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
-    "verification": "sha256_digests_git_head_tree_and_blob_when_git_metadata_present",
+    "verification": "git_head_tree_complete_blob_reads_and_sha256_when_git_metadata_present",
     "source_root_modes": {
-      "git_checkout": "git_head_and_tree_must_equal_pinned_revision",
+      "git_checkout": "exact_non_bare_clean_checkout_with_local_metadata_and_pinned_commit_tree",
       "content_only_snapshot": "sha256_only_never_checkout_verified"
     },
     "citation_marker_policy": "marker_must_occur_in_cited_source_range_when_source_root_is_supplied",
@@ -48,6 +48,11 @@
         "path": "hermes_cli/web_server.py",
         "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
         "git_blob": "1fb3e6131629e7399ef12de78148ac6e7ec58d34"
+      },
+      {
+        "path": "hermes_cli/dashboard_auth/audit.py",
+        "sha256": "c566a10a6c18b27debd3787e0072e1b25fc661d0c55cda0ffcb098ae02d35690",
+        "git_blob": "937fa95a75ba9ecbe37d48b2b9d0858ffd2809de"
       }
     ]
   },
@@ -79,6 +84,20 @@
       "lines": "660-716",
       "marker": "status_code=429",
       "claim": "Password login failure statuses are fail-closed and do not reach the cookie-minting tail."
+    },
+    {
+      "id": "password-login-body-auth-scheme",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "692-695",
+      "marker": "password=body.password",
+      "claim": "Password login receives the provider password in the request body; the provider name is not an HTTP Authorization scheme."
+    },
+    {
+      "id": "password-provider-error-detail",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "709-716",
+      "marker": "detail=f\"Provider unreachable: {e}\"",
+      "claim": "The provider-unreachable branch forwards provider exception text into an HTTP detail, so the native fixture must retain only a redacted classification and never that text."
     },
     {
       "id": "password-login-cookie-tail",
@@ -123,6 +142,13 @@
       "claim": "An authenticated REST session mints the WebSocket upgrade ticket and returns its TTL."
     },
     {
+      "id": "ws-ticket-route-session-auth",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "799-828",
+      "marker": "sess = getattr(request.state, \"session\", None)",
+      "claim": "The ticket route reads the authenticated middleware session; it does not translate a provider name into HTTP Basic authorization."
+    },
+    {
       "id": "ws-ticket-lifetime",
       "file": "hermes_cli/dashboard_auth/ws_tickets.py",
       "lines": "39-42",
@@ -151,6 +177,27 @@
       "claim": "The gated upgrade consumes the ephemeral ticket and rejects missing or invalid ticket values."
     },
     {
+      "id": "ws-ticket-fragment-source",
+      "file": "hermes_cli/dashboard_auth/ws_tickets.py",
+      "lines": "92-95",
+      "marker": "truncated = (ticket[:8] + \"…\") if ticket else \"<empty>\"",
+      "claim": "The pinned ticket store constructs a short ticket fragment in the invalid-ticket exception, which is attacker-derived source text and must not be retained by the fixture."
+    },
+    {
+      "id": "ws-ticket-audit-forward",
+      "file": "hermes_cli/web_server.py",
+      "lines": "14708-14716",
+      "marker": "reason=str(exc),",
+      "claim": "The gated WebSocket path forwards the ticket exception string as an audit reason, so retained history, logs, and DOM-visible errors must contain no ticket fragment."
+    },
+    {
+      "id": "audit-log-field-redaction",
+      "file": "hermes_cli/dashboard_auth/audit.py",
+      "lines": "71-87",
+      "marker": "if k not in _REDACTED_FIELDS",
+      "claim": "The pinned audit helper drops selected fields but does not sanitize text embedded in reason, so this fixture proves source-derived ticket fragments are excluded before retention."
+    },
+    {
       "id": "pty-web-only",
       "file": "hermes_cli/web_server.py",
       "lines": "14361-14372",
@@ -161,14 +208,14 @@
   "validation_baseline": {
     "measurement": "developer_observation",
     "threshold_ms": null,
-    "normal": {"samples_ms": [58.257, 58.162, 58.64, 58.554, 59.653, 62.315, 59.757, 60.243, 60.58], "mean_ms": 59.573},
-    "optimized": {"samples_ms": [62.429, 60.914, 61.261, 61.391, 60.589, 61.767, 60.485, 57.865, 58.924], "mean_ms": 60.625},
-    "artifact_bytes": 68986,
+    "normal": {"samples_ms": [11.57, 11.689, 11.539, 11.525, 11.824, 11.538, 11.527, 11.504, 11.734, 11.524, 11.579, 11.705, 11.414, 11.624, 11.835, 11.976, 11.544, 11.734, 11.55, 11.581, 11.455, 11.303, 11.571, 11.79, 11.684, 11.63, 11.57, 11.6, 11.361, 11.79], "mean_ms": 11.609},
+    "optimized": {"samples_ms": [11.784, 11.794, 11.633, 11.613, 11.589, 11.584, 11.674, 11.643, 11.54, 11.616, 11.606, 11.635, 11.475, 11.57, 11.605, 12.056, 11.92, 11.853, 11.813, 11.727, 11.47, 11.546, 11.675, 11.527, 11.634, 11.667, 11.811, 11.567, 11.737, 11.526], "mean_ms": 11.663},
+    "artifact_bytes": 98340,
     "artifacts": [
-      {"path": "README.md", "bytes": 5760, "sha256": "99f5302d78d7e6181ccbf2fe70b31e99bd2a391861e94f8a441d8978d212ca6f"},
-      {"path": "cases.json", "bytes": 10792, "sha256": "2f7e00e4c0e98f41e19f725d217c09e0572b620eea743add837dc2b8051364ac"},
-      {"path": "validate.py", "bytes": 46917, "sha256": "084559f6359e23890b703e3abe8c501702e16db7fcfe1af1e74d72742d9c3bd1"},
-      {"path": "test_native_password_provider.py", "bytes": 5517, "sha256": "6e0470bd24318933379132b4e58ec4f46d621417af9f24679383ff8f044596dd"}
+      {"path": "README.md", "bytes": 6620, "sha256": "dd63da515f04f137da3cef426c25b42837f5b011561a19475eef86f14b0bdd2f"},
+      {"path": "cases.json", "bytes": 13939, "sha256": "961cb83fc91f32fdb4b969d47620b8ca9cbaa4a05bf4006b18239e2b7864ffcf"},
+      {"path": "validate.py", "bytes": 67890, "sha256": "4931b747c8c99ee7197433c159eabf87f7959a48d5f58f5714d6634b4a1a893a"},
+      {"path": "test_native_password_provider.py", "bytes": 9891, "sha256": "c2ff58abfb50988c031230e4de0723f1ece7a74288b991f214b40b95d4265530"}
     ]
   }
 }

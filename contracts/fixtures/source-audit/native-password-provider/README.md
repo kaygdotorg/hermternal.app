@@ -26,7 +26,8 @@ The pinned source records these facts:
   returns JSON success on valid credentials, and calls the shared session-cookie
   setter. Invalid credentials, unknown providers, provider failures, and rate
   limits fail with 401, 404, 503, and 429 respectively; failures do not issue a
-  session cookie.
+  session cookie. The provider label `basic` describes the password provider;
+  it never selects an HTTP `Authorization: Basic` header.
 - The shared cookie helper writes the access, refresh, and provider-hint cookies
   with `HttpOnly`, `SameSite=Lax`, the deployment `Path`, and `Secure` for HTTPS.
   Direct HTTPS uses `__Host-` names; a non-root prefix uses `__Secure-` names;
@@ -61,8 +62,12 @@ that must be proven by later native implementation work:
 - WebSocket ticket minting from a native password cookie;
 - missing, malformed, expired, reused, and gated legacy-token ticket failures;
 - fresh-ticket retry behavior and the rule that the cookie is not sent directly
-  on the gated WebSocket; and
-- synthetic redaction and no-retention invariants.
+  on the gated WebSocket;
+- explicit auth-scheme negatives for password login, REST, ticket acquisition,
+  and WebSocket upgrade, proving that `BasicAuthProvider` never means HTTP
+  Basic; and
+- source-backed redaction for ticket-prefix exception text, forwarded audit
+  reasons, provider-unreachable exception text, and history/log/DOM surfaces.
 
 The validator evaluates every row semantically and applies mutation regressions.
 It can optionally verify the five pinned source files from a local checkout:
@@ -76,17 +81,23 @@ python3 -m unittest discover -s contracts/fixtures/source-audit/native-password-
 python3 -m py_compile contracts/fixtures/source-audit/native-password-provider/validate.py contracts/fixtures/source-audit/native-password-provider/test_native_password_provider.py
 ```
 
-A Git source root must have `HEAD` equal to the pinned revision and is reported
-as `git_checkout_verified`. A source directory without Git metadata is reported
-as `content_only_snapshot`; it never claims checkout verification.
+A Git source root must be the exact checkout top-level, use checkout-style
+metadata contained below that root, be non-bare and clean, have no alternates,
+replacement refs, lazy-fetch redirects, or linked metadata outside the root,
+and have `HEAD`, tree, complete immutable blobs, object types, and working bytes
+matching the pinned identities. It is then reported as `git_checkout_verified`.
+A source directory without Git metadata is reported as `content_only_snapshot`; it
+never claims checkout verification.
 
 ## Safety, accessibility, and limits
 
 All case values are synthetic classifications or public repository metadata. No
 password, cookie, bearer, refresh token, WebSocket ticket, ticket fragment,
-provider data, hostname, transcript, PTY bytes, or user data is present. The
-fixture never imports Hermes, opens a socket, contacts a provider, or changes
-production authentication.
+provider exception text, HTTP Basic credential, hostname, transcript, PTY bytes,
+or user data is present. The validator rejects attacker-shaped case IDs, source
+claims, credential headers, ticket fragments, absolute paths, and retained DOM,
+history, or log values. The fixture never imports Hermes, opens a socket,
+contacts a provider, or changes production authentication.
 
 Paper and accessibility evidence are **N/A** because this is a non-UI source-
 audit artifact. No focus order, semantic label, VoiceOver, Switch Control,

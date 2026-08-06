@@ -13,32 +13,32 @@
     {
       "id": "login-success-native-cookie",
       "kind": "login",
-      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "registered_password", "credential_state": "valid", "transport": "https", "cookie_store": "native_isolated"},
-      "expected": {"http_status": 200, "session_cookie": "issued", "refresh_cookie": "issued", "provider_cookie": "issued", "rest_auth": "native_cookie", "password_retained": false}
+      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "registered_password", "credential_state": "valid", "transport": "https", "cookie_store": "native_isolated", "auth_scheme": "password_form"},
+      "expected": {"http_status": 200, "session_cookie": "issued", "refresh_cookie": "issued", "provider_cookie": "issued", "rest_auth": "native_cookie", "password_retained": false, "http_authorization_basic": false}
     },
     {
       "id": "login-wrong-password",
       "kind": "login",
-      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "registered_password", "credential_state": "wrong_password", "transport": "https", "cookie_store": "native_isolated"},
-      "expected": {"http_status": 401, "session_cookie": "absent", "refresh_cookie": "absent", "provider_cookie": "absent", "error_shape": "generic_invalid_credentials", "password_retained": false}
+      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "registered_password", "credential_state": "wrong_password", "transport": "https", "cookie_store": "native_isolated", "auth_scheme": "password_form"},
+      "expected": {"http_status": 401, "session_cookie": "absent", "refresh_cookie": "absent", "provider_cookie": "absent", "error_shape": "generic_invalid_credentials", "password_retained": false, "http_authorization_basic": false}
     },
     {
       "id": "login-unknown-provider",
       "kind": "login",
-      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "unknown", "credential_state": "not_attempted", "transport": "https", "cookie_store": "native_isolated"},
-      "expected": {"http_status": 404, "session_cookie": "absent", "refresh_cookie": "absent", "provider_cookie": "absent", "error_shape": "generic_unknown_provider", "password_retained": false}
+      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "unknown", "credential_state": "not_attempted", "transport": "https", "cookie_store": "native_isolated", "auth_scheme": "password_form"},
+      "expected": {"http_status": 404, "session_cookie": "absent", "refresh_cookie": "absent", "provider_cookie": "absent", "error_shape": "generic_unknown_provider", "password_retained": false, "http_authorization_basic": false}
     },
     {
       "id": "login-provider-unavailable",
       "kind": "login",
-      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "unavailable", "credential_state": "not_attempted", "transport": "https", "cookie_store": "native_isolated"},
-      "expected": {"http_status": 503, "session_cookie": "absent", "refresh_cookie": "absent", "provider_cookie": "absent", "error_shape": "provider_unreachable", "password_retained": false}
+      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "unavailable", "credential_state": "not_attempted", "transport": "https", "cookie_store": "native_isolated", "auth_scheme": "password_form"},
+      "expected": {"http_status": 503, "session_cookie": "absent", "refresh_cookie": "absent", "provider_cookie": "absent", "error_shape": "provider_unreachable", "password_retained": false, "http_authorization_basic": false}
     },
     {
       "id": "login-rate-limited",
       "kind": "login",
-      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "registered_password", "credential_state": "rate_limited", "transport": "https", "cookie_store": "native_isolated"},
-      "expected": {"http_status": 429, "session_cookie": "absent", "refresh_cookie": "absent", "provider_cookie": "absent", "error_shape": "rate_limited", "password_retained": false}
+      "request": {"method": "POST", "path": "/auth/password-login", "provider_state": "registered_password", "credential_state": "rate_limited", "transport": "https", "cookie_store": "native_isolated", "auth_scheme": "password_form"},
+      "expected": {"http_status": 429, "session_cookie": "absent", "refresh_cookie": "absent", "provider_cookie": "absent", "error_shape": "rate_limited", "password_retained": false, "http_authorization_basic": false}
     },
     {
       "id": "cookie-http-bare",
@@ -91,14 +91,14 @@
     {
       "id": "native-rest-cookie-no-ticket",
       "kind": "rest",
-      "request": {"method": "GET", "path": "/api/auth/me", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "ws_ticket_state": "absent"},
-      "expected": {"auth_source": "native_password_cookie", "http_status": "handler_dependent", "ticket_on_rest": false, "cookie_store": "app_isolated_protected"}
+      "request": {"method": "GET", "path": "/api/auth/me", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "ws_ticket_state": "absent", "auth_scheme": "session_cookie", "authorization_header": "absent"},
+      "expected": {"auth_source": "native_password_cookie", "http_status": "handler_dependent", "ticket_on_rest": false, "cookie_store": "app_isolated_protected", "http_authorization_basic": false}
     },
     {
       "id": "native-ws-ticket-mint",
       "kind": "ticket_mint",
-      "request": {"method": "POST", "path": "/api/auth/ws-ticket", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "cookie_store": "app_isolated_protected"},
-      "expected": {"auth_source": "native_password_cookie", "ticket_issuance": "fresh_single_use", "ttl_seconds": 30, "ticket_persisted": false, "ticket_logged": false}
+      "request": {"method": "POST", "path": "/api/auth/ws-ticket", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "cookie_store": "app_isolated_protected", "auth_scheme": "session_cookie", "authorization_header": "absent"},
+      "expected": {"auth_source": "native_password_cookie", "ticket_issuance": "fresh_single_use", "ttl_seconds": 30, "ticket_persisted": false, "ticket_logged": false, "http_authorization_basic": false}
     },
     {
       "id": "native-ws-upgrade-ticket-only",
@@ -159,6 +159,48 @@
       "kind": "retention",
       "request": {"evidence_surface": "fixture_logs_links_history_source_control"},
       "expected": {"password": false, "cookie_contents": false, "refresh_material": false, "bearer": false, "ticket": false, "ticket_fragment": false, "callback_url": false, "provider_state": false}
+    },
+    {
+      "id": "basic-provider-not-http-basic",
+      "kind": "auth_scheme",
+      "request": {"provider": "basic", "operation": "password_login", "provider_auth_scheme": "password_form", "authorization_header": "absent"},
+      "expected": {"provider_auth_scheme": "password_form", "http_authorization_basic": false, "decision": "provider_name_never_selects_http_basic"}
+    },
+    {
+      "id": "native-login-no-http-basic",
+      "kind": "auth_scheme",
+      "request": {"method": "POST", "path": "/auth/password-login", "provider": "basic", "auth_scheme": "password_form", "authorization_header": "absent"},
+      "expected": {"http_authorization_basic": false, "session_result": "shared_session_cookie_only_on_success"}
+    },
+    {
+      "id": "native-rest-no-http-basic",
+      "kind": "auth_scheme",
+      "request": {"method": "GET", "path": "/api/auth/me", "auth_scheme": "session_cookie", "cookie_state": "valid_native_password_cookie", "bearer_state": "absent", "authorization_header": "absent"},
+      "expected": {"http_authorization_basic": false, "auth_source": "native_password_cookie"}
+    },
+    {
+      "id": "native-ws-ticket-no-http-basic",
+      "kind": "auth_scheme",
+      "request": {"method": "POST", "path": "/api/auth/ws-ticket", "auth_scheme": "session_cookie", "cookie_state": "valid_native_password_cookie", "authorization_header": "absent"},
+      "expected": {"http_authorization_basic": false, "ticket_source": "authenticated_session_cookie"}
+    },
+    {
+      "id": "native-ws-upgrade-no-http-basic",
+      "kind": "auth_scheme",
+      "request": {"method": "GET", "path": "/api/ws", "auth_scheme": "query_ticket", "query_credential": "ticket_only", "authorization_header": "absent"},
+      "expected": {"http_authorization_basic": false, "credential_source": "ephemeral_ticket_only"}
+    },
+    {
+      "id": "native-ws-ticket-fragment-no-retention",
+      "kind": "retention_source",
+      "request": {"source_flow": "ws_tickets_ticket_prefix_fragment", "forwarded_surface": "web_server_audit_reason", "source_evidence": ["ws-ticket-fragment-source", "ws-ticket-audit-forward", "audit-log-field-redaction"]},
+      "expected": {"ticket_fragment": false, "history": false, "logs": false, "dom": false}
+    },
+    {
+      "id": "native-provider-error-no-retention",
+      "kind": "retention_source",
+      "request": {"source_flow": "password_login_provider_exception", "forwarded_surface": "503_detail", "source_evidence": ["password-provider-error-detail"]},
+      "expected": {"provider_exception_text": false, "history": false, "logs": false, "dom": false}
     }
   ]
 }

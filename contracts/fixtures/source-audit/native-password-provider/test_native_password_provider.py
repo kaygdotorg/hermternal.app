@@ -6,8 +6,10 @@ from __future__ import annotations
 import copy
 import io
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,8 +21,8 @@ class NativePasswordProviderFixtureTests(unittest.TestCase):
         audit = validate.load_json("source_audit.json")
         cases = validate.load_json("cases.json")
         validate.validate_source_provenance(audit)
-        self.assertEqual(validate.validate_cases(cases), 26)
-        self.assertEqual(validate.validate_mutation_regressions(audit, cases), 10)
+        self.assertEqual(validate.validate_cases(cases), 33)
+        self.assertEqual(validate.validate_mutation_regressions(audit, cases), 15)
 
     def test_cli_reports_offline_success(self) -> None:
         result = subprocess.run(
@@ -31,7 +33,7 @@ class NativePasswordProviderFixtureTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("native password-provider audit valid:", result.stdout)
-        self.assertIn("cases=26", result.stdout)
+        self.assertIn("cases=33", result.stdout)
         self.assertIn("provenance=metadata_only", result.stdout)
 
     def test_duplicate_json_keys_fail_without_echoing_key(self) -> None:
@@ -98,6 +100,87 @@ class NativePasswordProviderFixtureTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.validate_synthetic_keys({"password": "synthetic"})
         validate.validate_synthetic_keys({"password": False})
+
+    def test_source_claim_and_ticket_fragment_redaction_fail_closed(self) -> None:
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_synthetic_keys({"reason": "unknown ticket: Abcdefgh…"})
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_synthetic_keys({"reason": "ticket fragment: Abcdefgh"})
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_synthetic_keys({"reason": "safe\x00claim"})
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_synthetic_keys({"header": "Authorization: Basic dGVzdC1jcmVk"})
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_synthetic_keys({"source": "/Users/synthetic/secret"})
+
+        message = validate._bounded_error_message(
+            RuntimeError("case=evil\nAuthorization: Basic dGVzdC1jcmVk /Users/synthetic/secret")
+        )
+        self.assertEqual(message, validate.SAFE_ERROR_MESSAGE)
+        self.assertLessEqual(len(message), validate.MAX_ERROR_MESSAGE_LENGTH)
+        self.assertNotIn("evil", message)
+        self.assertNotIn("dGVzdC1jcmVk", message)
+
+        cases = validate.load_json("cases.json")
+        mutated = copy.deepcopy(cases)
+        mutated["cases"][0]["id"] = "case\nAuthorization: Basic dGVzdC1jcmVk"
+        with self.assertRaises(validate.ValidationError) as caught:
+            validate.validate_cases(mutated)
+        self.assertEqual(str(caught.exception), validate.SAFE_ERROR_MESSAGE)
+
+    def test_auth_scheme_negatives_cannot_become_http_basic(self) -> None:
+        cases = validate.load_json("cases.json")
+        mutated = copy.deepcopy(cases)
+        case = next(item for item in mutated["cases"] if item["id"] == "native-rest-no-http-basic")
+        case["expected"]["http_authorization_basic"] = True
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_cases(mutated)
+
+    def test_source_root_rejects_redirects_bare_and_child_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "checkout"
+            git_dir = root / ".git"
+            (git_dir / "objects" / "info").mkdir(parents=True)
+            (git_dir / "refs").mkdir()
+            for name in ("HEAD", "config", "index"):
+                (git_dir / name).write_text("synthetic", encoding="ascii")
+            (git_dir / "objects" / "info" / "alternates").write_text("/tmp/other", encoding="ascii")
+            with self.assertRaises(validate.ValidationError):
+                validate._reject_repository_local_alternates(root)
+            with self.assertRaises(validate.ValidationError):
+                validate.verify_source_root(validate.load_json("source_audit.json"), git_dir)
+
+            bare = Path(temporary) / "bare"
+            (bare / "objects").mkdir(parents=True)
+            (bare / "refs").mkdir()
+            (bare / "HEAD").write_text("synthetic", encoding="ascii")
+            (bare / "config").write_text("[core]\n\tbare = false\n\tworktree = /tmp/attacker-worktree\n", encoding="ascii")
+            with self.assertRaises(validate.ValidationError):
+                validate._reject_bare_shape(bare)
+
+            parent = Path(temporary) / "parent"
+            (parent / ".git").mkdir(parents=True)
+            child = parent / "child"
+            child.mkdir()
+            with self.assertRaises(validate.ValidationError):
+                validate._reject_bare_shape(child)
+
+    def test_git_environment_scrubs_inherited_redirects(self) -> None:
+        original = {key: os.environ.get(key) for key in validate._GIT_REDIRECT_KEYS}
+        try:
+            os.environ["GIT_DIR"] = "/tmp/attacker-git"
+            os.environ["GIT_CONFIG_PARAMETERS"] = "--bad"
+            env = validate._git_env(Path("/tmp/synthetic-checkout"))
+            self.assertNotEqual(env.get("GIT_DIR"), "/tmp/attacker-git")
+            self.assertNotIn("GIT_CONFIG_PARAMETERS", env)
+            self.assertEqual(env["GIT_NO_REPLACE_OBJECTS"], "1")
+            self.assertEqual(env["GIT_NO_LAZY_FETCH"], "1")
+        finally:
+            for key, value in original.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def test_source_digest_and_marker_mutations_fail_closed(self) -> None:
         audit = validate.load_json("source_audit.json")
