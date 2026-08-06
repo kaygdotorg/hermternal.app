@@ -16,6 +16,7 @@ import math
 import re
 import stat
 import statistics
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,15 +31,24 @@ OPERATION = "C-06"
 CONTRACT = "dashboard-v0.0.1"
 HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 
-# These identities are deliberately outside the JSON baseline.  A mutable
+# These identities are deliberately outside the JSON baseline. A mutable
 # timing record or copied validator cannot authorize a different fixture,
-# source file, or benchmark trace by rebinding its own metadata.
-# Canonical evidence is resolved from the repository-owned fixture, not from
-# this executable or a caller-supplied directory. This keeps a copied validator
-# from rebinding its own cases, source, baseline, or artifact manifest.
-CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "test_validate.py")
+# source file, or benchmark trace by rebinding its own metadata. The reviewed
+# head is a Git object anchor; the content digests below also bind every
+# retained evidence file. The validator source digest masks only these two
+# self-referential binding literals, so changing validation logic still fails.
+REVIEWED_HEAD = "3ec6a1f8eabc935575ba6f334195f9e86abeb1ff"
+CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "validate.py", "test_validate.py", "chat.md")
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
+EXPECTED_BOUND_SHA256 = {
+    "README.md": "3e068aaaa8475acc9ef5698ecbae77065a4ad077a8ef0a89c6cbe14880161cf4",
+    "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
+    "validate.py": "d613f92ad26dcb809a3759d6bb333d884931414ccb0e77cf6afe713b76b027c9",
+    "test_validate.py": "fa02756e96ccc1fb26759ed76a1a975554f03812a3f02cdc0b9f20166504f960",
+    "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
+}
+EXPECTED_BASELINE_SHA256 = "bfd95d9df18695804f46c63843183c7233e4c514765e0948397d751cc8379b62"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -246,10 +256,14 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 BASE64ISH = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 JWTISH = re.compile(r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}")
 API_KEYISH = re.compile(r"(?i)\b(?:api[_-]?key|api[_-]?token|access[_-]?token|secret[_-]?key|private[_-]?key|sk[-_])[=:][A-Za-z0-9._-]{8,}")
+SK_PROJISH = re.compile(r"\bsk-proj-[A-Za-z0-9_-]{8,}\b", re.IGNORECASE)
 GH_TOKENISH = re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{12,}\b")
 RELATIVE_PATH = re.compile(r"(?:^|[\s])(?:\.{1,2}/|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.[A-Za-z0-9_-]+)?)")
 ABSOLUTE_PATH = re.compile(r"(?:^|[\s])/(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
-WINDOWS_PATH = re.compile(r"(?i)(?:^|[\s])(?:[A-Z]:\\|\\\\)[^\r\n]+")
+WINDOWS_PATH = re.compile(r"(?i)(?:^|[\s])(?:[A-Z]:[/\\\\]|\\\\\\\\)[^\r\n]+")
+ORDINARY_PROMPT_PROSE = re.compile(
+    r"(?i)(?:\b(?:please|could you|would you|can you|tell me|summarize|explain|write|show me|give me|find me|help me|i need|i want|what is|how do|why do|when did|where is|who is|this is a prompt)\b|[?])"
+)
 IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 IPV6 = re.compile(r"(?<![A-Za-z0-9])(?:[0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f]{0,4}(?![A-Za-z0-9])")
 DOMAIN = re.compile(r"(?:^|[\s:=/])(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|test|local|example|invalid|internal)(?:$|[\s/:])", re.IGNORECASE)
@@ -488,8 +502,35 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
-    return _sha256_bytes(_bounded_read_file(path, MAX_JSON_BYTES, "artifact_unavailable"))
+def _source_binding_bytes(raw: bytes) -> bytes:
+    """Normalize only self-referential digest literals before hashing source."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _fail("source_identity")
+    text = re.sub(r'(?m)^(EXPECTED_BASELINE_SHA256\s*=\s*)"[^"]+"', r'\1"<bound>"', text)
+    text = re.sub(r'(?m)^(\s*"validate\.py"\s*:\s*)"[^"]+"', r'\1"<bound>"', text)
+    return text.encode("utf-8")
+
+
+def _source_digest(path: Path) -> tuple[int, str]:
+    raw = _bounded_read_file(path, MAX_JSON_BYTES, "artifact_unavailable")
+    normalized = _source_binding_bytes(raw)
+    return len(normalized), _sha256_bytes(normalized)
+
+
+def _repository_has_reviewed_anchor(candidate: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(candidate), "cat-file", "-e", f"{REVIEWED_HEAD}^{{commit}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _repository_root() -> Path:
@@ -506,6 +547,7 @@ def _repository_root() -> Path:
             and (candidate / CANONICAL_FIXTURE_RELATIVE / "cases.json").is_file()
             and (candidate / CANONICAL_FIXTURE_RELATIVE / "validation-baseline.json").is_file()
             and (candidate / CANONICAL_CHAT_RELATIVE).is_file()
+            and _repository_has_reviewed_anchor(candidate)
         ):
             return candidate
     _fail("canonical_binding")
@@ -516,6 +558,20 @@ def _trusted_fixture_directory() -> Path:
     return _repository_root() / CANONICAL_FIXTURE_RELATIVE
 
 
+def _artifact_path(fixture_dir: Path, name: str) -> Path:
+    if name == "chat.md":
+        return fixture_dir.parents[1] / "state-models" / "chat.md"
+    return fixture_dir / name
+
+
+def _artifact_digest(fixture_dir: Path, name: str) -> tuple[int, str]:
+    path = _artifact_path(fixture_dir, name)
+    if name == "validate.py":
+        return _source_digest(path)
+    raw = _bounded_read_file(path, MAX_JSON_BYTES, "artifact_unavailable")
+    return len(raw), _sha256_bytes(raw)
+
+
 def _require_exact_trusted_file(path: Path, trusted_path: Path, code: str) -> None:
     try:
         if path.resolve() != trusted_path.resolve() or _bounded_read_file(path, MAX_JSON_BYTES, code) != _bounded_read_file(trusted_path, MAX_JSON_BYTES, code):
@@ -524,6 +580,43 @@ def _require_exact_trusted_file(path: Path, trusted_path: Path, code: str) -> No
         raise
     except (OSError, ValueError):
         _fail(code)
+
+
+def _require_clean_bound_worktree(root: Path) -> None:
+    paths = [str(CANONICAL_FIXTURE_RELATIVE / name) for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json")]
+    paths.append(str(CANONICAL_CHAT_RELATIVE))
+    try:
+        parent = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD^"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+        result = subprocess.run(
+            ["git", "-C", str(root), "diff", "--quiet", "HEAD", "--", *paths],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _fail("canonical_binding")
+    if parent.returncode != 0 or parent.stdout.strip() != REVIEWED_HEAD or result.returncode != 0:
+        _fail("canonical_binding")
+
+
+def _require_bound_artifacts(root: Path) -> None:
+    _require_clean_bound_worktree(root)
+    fixture_dir = root / CANONICAL_FIXTURE_RELATIVE
+    for name in CANONICAL_ARTIFACT_NAMES:
+        size, digest = _artifact_digest(fixture_dir, name)
+        expected = EXPECTED_BOUND_SHA256[name]
+        if not HEX64.fullmatch(expected) or digest != expected or size <= 0:
+            _fail("artifact_identity")
+    baseline = root / CANONICAL_FIXTURE_RELATIVE / "validation-baseline.json"
+    if _sha256_bytes(_bounded_read_file(baseline, MAX_JSON_BYTES, "baseline_identity")) != EXPECTED_BASELINE_SHA256:
+        _fail("baseline_identity")
 
 
 def _load_trusted_document() -> dict[str, Any]:
@@ -537,9 +630,8 @@ def _load_trusted_baseline() -> dict[str, Any]:
 def _artifact_manifest(fixture_dir: Path) -> tuple[dict[str, dict[str, int | str]], str]:
     artifacts: dict[str, dict[str, int | str]] = {}
     for name in CANONICAL_ARTIFACT_NAMES:
-        path = fixture_dir / name
-        raw = _bounded_read_file(path, MAX_JSON_BYTES, "artifact_unavailable")
-        artifacts[name] = {"bytes": len(raw), "sha256": _sha256_bytes(raw)}
+        size, digest = _artifact_digest(fixture_dir, name)
+        artifacts[name] = {"bytes": size, "sha256": digest}
     material = "".join(f"{name}:{artifacts[name]['bytes']}:{artifacts[name]['sha256']}\n" for name in CANONICAL_ARTIFACT_NAMES)
     return artifacts, _sha256_bytes(material.encode("utf-8"))
 
@@ -570,15 +662,15 @@ def _validate_redaction(value: Any, *, in_source_observation: bool = False, key:
         return
     lowered = value.casefold()
     if key == "notes":
-        if "?" in value or any(marker in lowered for marker in (
-            "prompt text", "raw prompt", "prompt body", "prompt bytes", "transcript", "raw payload", "tool output", "please ", "what ", "how ", "why ", "tell me", "summarize",
+        if ORDINARY_PROMPT_PROSE.search(value) or any(marker in lowered for marker in (
+            "prompt text", "raw prompt", "prompt body", "prompt bytes", "transcript", "raw payload", "tool output", "prompt content", "user message",
         )):
             _fail("redaction_value")
     if any(marker in lowered for marker in (
         "http://", "https://", "file://", "bearer ", "basic ", "cookie:", "authorization:", "password=", "api_key=", "api-key=", "api_token=", "api-token=",
     )):
         _fail("redaction_value")
-    if JWTISH.search(value) or API_KEYISH.search(value) or GH_TOKENISH.search(value):
+    if JWTISH.search(value) or API_KEYISH.search(value) or SK_PROJISH.search(value) or GH_TOKENISH.search(value):
         _fail("redaction_value")
     if value.startswith(("/", "~/", "\\")) or ABSOLUTE_PATH.search(value) or WINDOWS_PATH.search(value) or RELATIVE_PATH.search(value) or IPV4.search(value) or IPV6.search(value) or DOMAIN.search(value):
         _fail("redaction_value")
@@ -718,6 +810,8 @@ def _validate_initial(initial: Any) -> None:
     active_state = initial["chat_state"] in ("submitting", "streaming", "awaiting_approval", "awaiting_clarification", "interrupting", "delivery_uncertain")
     if active_state and (count < 1 or initial["session_ref"] is None or active_request is None or active_turn is None):
         _fail("active_submission_required")
+    if initial["chat_state"] == "delivery_uncertain" and initial["draft_state"] != "present":
+        _fail("uncertain_draft_required")
     if not active_state and (active_request is not None or active_turn is not None):
         _fail("inactive_submission_reference")
     if initial["chat_state"] != "empty" and initial["session_ref"] is None:
@@ -801,6 +895,8 @@ def _validate_expected(expected: Any) -> None:
     if expected["selected_session"] is not None:
         _synthetic_ref(expected["selected_session"], "selected_session")
     _enum(expected["draft_state"], ("present", "absent"), "expected_draft_state")
+    if expected["final_state"] == "delivery_uncertain" and expected["draft_state"] != "present":
+        _fail("uncertain_draft_required")
     for key in ("submission_count", "duplicate_attempts", "outward_changes", "idempotent_collection_retries"):
         value = _int(expected[key], key)
         if value < 0 or value > 8:
@@ -1066,16 +1162,38 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             transition("restoring")
             restore_barrier = "pending"
         elif kind == "read_retry":
-            if state != "restoring" or transport != "ready" or not gateway_ready_seen or compatibility_state != "passed":
+            method = event["method"]
+            read_gate = (
+                transport == "ready"
+                and gateway_ready_seen
+                and compatibility_state == "passed"
+                and selected_session is not None
+            )
+            state_gate = state == "restoring" if method in ("session.history", "session.status") else state in (
+                "ready",
+                "restoring",
+                "streaming",
+                "awaiting_approval",
+                "awaiting_clarification",
+                "interrupting",
+            )
+            if not read_gate or not state_gate:
                 contract_failure("read_retry_without_restore")
                 continue
             automatic_retry = True
-            method = event["method"]
             if event["result"] == "transient_error":
                 if method == "session.history":
                     history_read_failed = True
+                    # A failed history read invalidates the prior presence and
+                    # any status paired with it. A later status cannot reuse it.
+                    restore_history_seen = False
+                    restore_status_seen = False
+                    server_prompt_presence = "unknown"
+                    server_turn_state = "unknown"
                 elif method == "session.status":
                     status_read_failed = True
+                    restore_status_seen = False
+                    server_turn_state = "unknown"
             elif method == "session.history" and history_read_failed:
                 idempotent_collection_retries += 1
                 history_read_failed = False
@@ -1148,11 +1266,18 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
                 prompt_retry = "explicit_user_only"
                 transition("ready")
             elif action == "keep_draft" and (resend_armed or state == "delivery_uncertain"):
+                had_resend_evidence = resend_armed
                 resend_armed = False
                 rejection_retry_armed = False
                 explicit_action_required = True
                 decision = "user_kept_draft"
-                transition("ready")
+                if had_resend_evidence or restore_barrier == "passed":
+                    transition("ready")
+                else:
+                    # Keeping a draft before restore does not prove delivery.
+                    # Remain uncertain so the declared restore action remains
+                    # legal and can later authorize one explicit resend.
+                    transition("delivery_uncertain")
             else:
                 contract_failure("user_decision_not_allowed")
         elif kind == "duplicate_submit":
@@ -1171,8 +1296,25 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             if method not in AUTOMATIC_RETRY_METHODS:
                 contract_failure("retry_method_not_idempotent")
                 continue
-            if state != "restoring":
-                contract_failure("read_retry_without_restore")
+            retry_gate = (
+                transport == "ready"
+                and gateway_ready_seen
+                and compatibility_state == "passed"
+                and selected_session is not None
+            )
+            if method in ("session.history", "session.status"):
+                retry_gate = retry_gate and state == "restoring"
+            else:
+                retry_gate = retry_gate and state in (
+                    "ready",
+                    "restoring",
+                    "streaming",
+                    "awaiting_approval",
+                    "awaiting_clarification",
+                    "interrupting",
+                )
+            if not retry_gate:
+                contract_failure("automatic_retry_not_ready")
                 continue
             automatic_retry = True
         elif kind == "interrupt_request":
@@ -1375,7 +1517,9 @@ def validate_canonical_identity(
     baseline_path: Path | None = None,
     executing_path: Path | None = None,
 ) -> None:
-    trusted = _trusted_fixture_directory()
+    root = _repository_root()
+    trusted = root / CANONICAL_FIXTURE_RELATIVE
+    _require_bound_artifacts(root)
     _require_exact_trusted_file(cases_path or CASES_PATH, trusted / "cases.json", "cases_identity")
     _require_exact_trusted_file(baseline_path or BASELINE_PATH, trusted / "validation-baseline.json", "baseline_identity")
     _require_exact_trusted_file(executing_path or Path(__file__), trusted / "validate.py", "source_identity")

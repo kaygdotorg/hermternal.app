@@ -1821,34 +1821,77 @@
         {
           "kind": "user_decision",
           "action": "keep_draft"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "absent"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "idle"
+        },
+        {
+          "kind": "user_decision",
+          "action": "resend"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-002",
+          "result": "accepted"
+        },
+        {
+          "kind": "server_event",
+          "name": "message.complete",
+          "request_ref": "request-marker-002",
+          "turn_ref": "turn-marker-002",
+          "session_ref": "session-marker-001"
         }
       ],
       "expected": {
         "trace": [
           "delivery_uncertain",
+          "restoring",
+          "ready",
+          "submitting",
+          "completed"
+        ],
+        "final_state": "completed",
+        "transport_trace": [
+          "reconnecting",
           "ready"
         ],
-        "final_state": "ready",
-        "transport_trace": [
-          "reconnecting"
-        ],
-        "final_transport_state": "reconnecting",
+        "final_transport_state": "ready",
         "selected_session": "session-marker-001",
-        "draft_state": "present",
-        "submission_count": 1,
+        "draft_state": "absent",
+        "submission_count": 2,
         "duplicate_attempts": 0,
-        "restore_barrier": "pending",
-        "prompt_retry": "none",
+        "restore_barrier": "passed",
+        "prompt_retry": "explicit_user_only",
         "automatic_retry": false,
         "explicit_action_required": true,
-        "outward_changes": 1,
+        "outward_changes": 2,
         "idempotent_collection_retries": 0,
-        "server_prompt_presence": "not_observed",
-        "server_turn_state": "not_observed",
-        "decision": "user_kept_draft",
+        "server_prompt_presence": "present",
+        "server_turn_state": "completed",
+        "decision": "resent_after_absent_idle",
         "contract_error": null
       },
-      "notes": "Keep draft is executable while delivery remains uncertain and does not invent server evidence."
+      "notes": "Keeping the draft before restore preserves uncertainty and permits a later fresh restore and explicit resend."
     },
     {
       "id": "restore-transient-without-recovery",
@@ -1922,8 +1965,8 @@
         "explicit_action_required": false,
         "outward_changes": 1,
         "idempotent_collection_retries": 0,
-        "server_prompt_presence": "not_observed",
-        "server_turn_state": "not_observed",
+        "server_prompt_presence": "unknown",
+        "server_turn_state": "unknown",
         "decision": "restore_history_read_failed",
         "contract_error": "restore_history_read_failed"
       },

@@ -10,10 +10,19 @@ text, read a transcript, or claim live compatibility.
 - Operation: `C-06`
 - Dashboard contract: `dashboard-v0.0.1`
 - Reviewed Hermes source: `f5be9236e00ddf2f2a412697f267078fc4ee068e`
+- Reviewed Git head anchor: `3ec6a1f8eabc935575ba6f334195f9e86abeb1ff`
 - Canonical inputs: `cases.json`
 - Validator: `validate.py`
 - Regression tests: `test_validate.py`
 - Measurement record: `validation-baseline.json`
+- Normative state model: `../../state-models/chat.md`
+
+The validator uses the reviewed Git object as an anchor and hard-coded SHA-256
+bindings for `cases.json`, `validation-baseline.json`, `validate.py`,
+`README.md`, `test_validate.py`, and `../../state-models/chat.md`. The executing
+source and caller-supplied cases and baseline paths must be the repository-owned
+paths. The validator-source digest masks only its own digest literals; it does
+not mask code, schema, reducer, or redaction changes.
 
 The source observations are limited to the pinned `gateway.ready`,
 `WebSocketDisconnect`, `prompt.submit`, and `session.resume` anchors. They bind
@@ -31,8 +40,9 @@ The fixture proves these rules as executable traces:
 - Restore is a barrier. The client must observe `gateway.ready` with matching
   contract/source compatibility, then reread fresh server-owned history and
   status before making any resend decision. History and status keep independent
-  current-attempt failure latches; each transient read requires a successful
-  retry of that same read before its evidence can pass.
+  current-attempt failure latches; a failed history read invalidates its prior
+  result and any paired status, and each transient read requires a successful
+  retry of that same read before a fresh result can pass.
 - Present history or a running/completed turn wins over the local draft; the
   client renders that correlated server result and does not resend.
 - Absent history plus idle server status keeps the original draft and waits for
@@ -41,9 +51,16 @@ The fixture proves these rules as executable traces:
 - A confirmed request rejection preserves the draft and permits one later
   explicit retry. It does not authorize automatic resend.
 - A second uncertain send never receives an automatic third send.
+- `delivery_uncertain` always retains a present original draft. Keeping that
+  draft before restore leaves the state uncertain with a pending barrier; the
+  user can then restore, collect fresh absent-and-idle evidence, and continue
+  through one explicit resend.
 - `session.resume`, `session.history`, `session.status`, and `model.options`
-  are the only automatic retry methods in this fixture. Prompt submission,
-  session creation, and interruption are never automatically retried.
+  are the only automatic retry methods in this fixture. Every automatic history,
+  status, or model-options retry requires a selected session, ready transport,
+  observed `gateway.ready`, and matching compatibility evidence; history and
+  status retries also require `restoring`. Prompt submission, session creation,
+  and interruption are never automatically retried.
 - Duplicate send while `submitting` or `streaming` is locally blocked and does
   not increase the outward submission count.
 - Every server event carries request, turn, and session markers and is accepted
@@ -71,20 +88,22 @@ not used for contract guards, so normal and optimized Python modes enforce the
 same checks.
 
 The loader and retained-marker scan reject credential-shaped keys, raw prompt
-or transcript fields, URLs, relative and absolute paths, Windows paths, IPv4
-and IPv6 hosts, cookie and authorization material, JWT/API-key-like values,
-and base64-like payloads. CLI failures are one fixed JSON line on standard
-error, capped at 240 characters. They do not echo paths, flags, keys, values,
-parser details, or tracebacks. Regular-file stat bounds run before every JSON or
+or transcript fields, ordinary prompt prose, bare `sk-proj-*` keys, URLs,
+relative and absolute paths, `C:/Users/...` and other Windows paths, IPv4 and
+IPv6 hosts, cookie and authorization material, JWT/API-key-like values, and
+base64-like payloads. CLI failures are one fixed JSON line on standard error,
+capped at 240 characters. They do not echo paths, flags, keys, values, parser
+details, or tracebacks. Regular-file stat bounds run before every JSON or
 artifact read, so oversized files and special paths fail without an unbounded
 read or FIFO/device block.
 
-The checked-in case, baseline, executing-source, chat-contract, and artifact
-files are bound to the repository-owned canonical paths outside any
-caller-supplied fixture directory. The validator also freezes state meanings,
-terminal flags, action order, case order, and baseline key/type/order rules.
-Copying or rebinding a mutated case, baseline, source, or validator therefore
-fails closed instead of replacing reviewed evidence.
+The checked-in case, baseline, executing-source, README, regression tests,
+chat-contract, and artifact files are bound to the repository-owned canonical
+paths and hard-coded digests, with the reviewed Git object required as an
+additional anchor. The validator also freezes state meanings, terminal flags,
+action order, case order, and baseline key/type/order rules. Copying or
+coordinately rebinding a mutated case, baseline, source, README, tests, or
+chat contract therefore fails closed instead of replacing reviewed evidence.
 
 ## Reproduce the proof
 

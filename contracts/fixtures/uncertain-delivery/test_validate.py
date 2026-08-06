@@ -16,6 +16,8 @@ import validate
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[2]
+CHAT_PATH = REPOSITORY_ROOT / "contracts" / "state-models" / "chat.md"
 CASES_PATH = ROOT / "cases.json"
 BASELINE_PATH = ROOT / "validation-baseline.json"
 
@@ -127,6 +129,12 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         self.assertEqual(signed_out["final_transport_state"], "offline")
         self.assertEqual(signed_out["draft_state"], "present")
         self.assertEqual(self.cases["pending-restore-evidence"]["expected"]["final_state"], "restoring")
+        kept = self.cases["keep-draft-before-restore"]
+        kept_result = validate.evaluate_case(kept)
+        self.assertEqual(kept_result, kept["expected"])
+        self.assertEqual(kept_result["trace"], ["delivery_uncertain", "restoring", "ready", "submitting", "completed"])
+        self.assertEqual(kept_result["submission_count"], 2)
+        self.assertEqual(kept_result["decision"], "resent_after_absent_idle")
 
     def test_strict_loader_rejects_duplicate_nonfinite_overflow_and_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -181,6 +189,8 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             ("windows path", "C:\\private\\prompt.txt", "redaction_value"),
             ("ipv6 host", "2001:db8::1", "redaction_value"),
             ("api key", "api_key=sk_test_123456789", "redaction_value"),
+            ("bare project key", "sk-proj-1234567890abcdef", "redaction_value"),
+            ("windows users path", "C:/Users/alice/private/prompt.txt", "redaction_value"),
         )
         for name, value, code in mutations:
             candidate = copy.deepcopy(self.document)
@@ -250,6 +260,11 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         absent_draft["cases"][1]["initial"]["draft_state"] = "absent"
         mutations.append(absent_draft)
 
+        uncertain_absent_draft = copy.deepcopy(self.document)
+        uncertain_case = next(case for case in uncertain_absent_draft["cases"] if case["id"] == "idempotent-read-retry")
+        uncertain_case["initial"]["draft_state"] = "absent"
+        mutations.append(uncertain_absent_draft)
+
         missing_active_request = copy.deepcopy(self.document)
         missing_active_request["cases"][2]["initial"]["active_request_ref"] = None
         mutations.append(missing_active_request)
@@ -262,6 +277,17 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         status_read_not_recovered["cases"][8]["events"][2]["method"] = "session.status"
         status_read_not_recovered["cases"][8]["events"][3]["method"] = "session.history"
         mutations.append(status_read_not_recovered)
+
+        for method in ("session.history", "session.status", "model.options"):
+            retry_without_gateway = copy.deepcopy(self.document)
+            retry_case = next(case for case in retry_without_gateway["cases"] if case["id"] == "idempotent-read-retry")
+            retry_case["events"].insert(1, {"kind": "automatic_retry", "method": method})
+            mutations.append(retry_without_gateway)
+
+        stale_history_after_failure = copy.deepcopy(self.document)
+        stale_history_case = next(case for case in stale_history_after_failure["cases"] if case["id"] == "idempotent-read-retry")
+        stale_history_case["events"].insert(5, {"kind": "read_retry", "method": "session.history", "result": "transient_error"})
+        mutations.append(stale_history_after_failure)
 
         for index, candidate in enumerate(mutations):
             with self.subTest(mutation=index):
@@ -424,6 +450,8 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             copied.mkdir()
             for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json"):
                 shutil.copy2(ROOT / name, copied / name)
+            copied_chat = root / "chat.md"
+            shutil.copy2(CHAT_PATH, copied_chat)
 
             copied_cases = root / "copied-cases.json"
             shutil.copy2(ROOT / "cases.json", copied_cases)
@@ -463,6 +491,67 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 with self.subTest(kind="source", optimized=optimized):
                     self.assertEqual(result.returncode, 1)
                     self.assertNotIn("Traceback", result.stderr)
+
+    def test_coordinated_copied_repository_rebinding_attack_fails_both_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            copied_repo = Path(directory) / "copied-repository"
+            head = subprocess.check_output(["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "HEAD"], text=True).strip()
+            clone = subprocess.run(
+                ["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(copied_repo)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(clone.returncode, 0, clone.stderr)
+            checkout = subprocess.run(
+                ["git", "-C", str(copied_repo), "checkout", "--detach", head],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(checkout.returncode, 0, checkout.stderr)
+            copied_fixture = copied_repo / "contracts" / "fixtures" / "uncertain-delivery"
+            copied_chat = copied_repo / "contracts" / "state-models" / "chat.md"
+
+            cases = json.loads((copied_fixture / "cases.json").read_text(encoding="utf-8"))
+            cases["cases"][0]["notes"] = "coordinated prompt prose rebinding"
+            (copied_fixture / "cases.json").write_text(json.dumps(cases, indent=2) + "\n", encoding="utf-8")
+            (copied_fixture / "README.md").write_text((copied_fixture / "README.md").read_text(encoding="utf-8") + "\nrebound evidence\n", encoding="utf-8")
+            (copied_fixture / "test_validate.py").write_text((copied_fixture / "test_validate.py").read_text(encoding="utf-8") + "\n# rebound tests\n", encoding="utf-8")
+            copied_chat.write_text(copied_chat.read_text(encoding="utf-8") + "\nrebound contract\n", encoding="utf-8")
+
+            validator_path = copied_fixture / "validate.py"
+            validator_text = validator_path.read_text(encoding="utf-8") + "\n# rebound validator\n"
+            for name in ("README.md", "cases.json", "test_validate.py", "chat.md"):
+                old_digest = validate.EXPECTED_BOUND_SHA256[name]
+                validator_text = validator_text.replace(f'"{name}": "{old_digest}"', f'"{name}": "' + ("0" * 64) + '"')
+            validator_path.write_text(validator_text, encoding="utf-8")
+            rebound_source_digest = validate._source_digest(validator_path)[1]
+            old_source_digest = validate.EXPECTED_BOUND_SHA256["validate.py"]
+            validator_text = validator_text.replace(f'"validate.py": "{old_source_digest}"', f'"validate.py": "{rebound_source_digest}"')
+            validator_path.write_text(validator_text, encoding="utf-8")
+
+            baseline = json.loads((copied_fixture / "validation-baseline.json").read_text(encoding="utf-8"))
+            artifacts, manifest = validate._artifact_manifest(copied_fixture)
+            baseline["artifacts"] = artifacts
+            baseline["artifact_manifest_sha256"] = manifest
+            baseline_path = copied_fixture / "validation-baseline.json"
+            baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+            rebound_baseline_digest = __import__("hashlib").sha256(baseline_path.read_bytes()).hexdigest()
+            validator_text = validator_path.read_text(encoding="utf-8").replace(validate.EXPECTED_BASELINE_SHA256, rebound_baseline_digest)
+            validator_path.write_text(validator_text, encoding="utf-8")
+
+            for optimized in (False, True):
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.append(str(copied_fixture / "validate.py"))
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                with self.subTest(optimized=optimized):
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n')
+                    self.assertLessEqual(len(result.stderr), validate.MAX_ERROR_LENGTH)
 
     def test_compile_in_both_modes_without_worktree_cache(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

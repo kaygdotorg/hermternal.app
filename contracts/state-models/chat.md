@@ -22,7 +22,7 @@ Hermes owns the transcript. Hermternal renders a server projection. A local memo
 | `awaiting_approval` | The server emitted `approval.request`. | Approve or deny the one pending request. Do not auto-approve. |
 | `awaiting_clarification` | The server emitted `clarify.request`. | Submit the answer or cancel the clarification. |
 | `interrupting` | `session.interrupt` was sent and the final state is not known. | Wait for a status/result or reconnect and restore. |
-| `delivery_uncertain` | The prompt may have been accepted, but the client lacks a result. | Restore first. Do not resend automatically. |
+| `delivery_uncertain` | The prompt may have been accepted, but the client lacks a result; the original draft is present. | Restore first, keep the draft, or sign out. Do not resend automatically. |
 | `completed` | The turn ended with a server completion or an explicit interruption. | Read, copy, start a new draft, or continue. |
 | `failed` | The server returned a known error or the turn failed. | Preserve the draft when possible and allow an explicit retry. |
 
@@ -46,9 +46,11 @@ The client must not blindly retry a prompt.
   `gateway.ready` and matching compatibility evidence before `session.history`,
   `session.status`, or another prompt operation.
 - Inspect fresh server-owned history and status for every uncertainty cycle. A
-  transient history or status read failure invalidates that read's current
-  evidence until a successful retry of the same idempotent read completes;
-  stale `absent`/`idle` evidence cannot authorize a later resend.
+  transient history read invalidates the prior history result and any status
+  paired with it; a successful retry of `session.history` must complete before
+  another history result can be used. A transient status read likewise requires
+  a fresh successful status result. Stale `absent`/`idle` evidence cannot
+  authorize a later resend.
 - If the prompt is present, render the server result and do not duplicate it.
 - If the prompt is absent and the server confirms that no turn is running, ask the user whether to resend.
 - Keep the original draft and a user-visible uncertainty notice until the decision is complete.
@@ -56,6 +58,11 @@ The client must not blindly retry a prompt.
 - A send requires a selected session, a non-empty draft, ready transport,
   gateway readiness, and compatible evidence. A `ready` label alone is not a
   transport or compatibility proof.
+- Automatic retries of `session.history`, `session.status`, and `model.options`
+  require a selected session, ready transport, observed `gateway.ready`, and
+  matching compatibility evidence. History and status retries also require the
+  `restoring` state. No automatic read retry may run while offline,
+  reconnecting, handshaking, incompatible, signed out, or terminal.
 - Sign-out clears selected session, active request/turn references, restore
   evidence, and armed retry decisions. It latches offline and rejects stale
   transport, event, or user-decision input until a new authenticated session
@@ -63,7 +70,7 @@ The client must not blindly retry a prompt.
 
 ## C-06 uncertain-delivery contract
 
-`delivery_uncertain` is a recoverable protocol state, not a server rejection. It applies when a prompt or interrupt may have reached Hermes but the client lost the result. The client keeps the draft and the selected session while it obtains authoritative evidence.
+`delivery_uncertain` is a recoverable protocol state, not a server rejection. It applies when a prompt or interrupt may have reached Hermes but the client lost the result. For prompt delivery, a present original draft is required. The client keeps the draft and the selected session while it obtains authoritative evidence.
 
 ### Transition matrix
 
@@ -84,6 +91,10 @@ The client must not blindly retry a prompt.
 - Only idempotent reads may retry automatically: `session.resume`, `session.history`, `session.status`, and `model.options`.
 - `prompt.submit`, `session.create`, and `session.interrupt` are never automatically retried. A restore barrier must complete before any resend decision.
 - A resend is valid only when restored history says the prompt is absent, restored status says the turn is idle, and the user confirms. Use a new local request marker and perform one explicit resend. If that resend becomes uncertain, return to restore; never issue an automatic third submission.
+- `keep_draft` before restore preserves `delivery_uncertain` and the pending
+  restore barrier. It does not invent `ready` evidence. The user may then start
+  restore, obtain fresh history and status, and continue to the same explicit
+  absent-and-idle resend gate.
 - A duplicate send while `submitting` or `streaming` is blocked locally and does not reach Hermes. A known rejection does not authorize an automatic retry.
 - `session.interrupt` enters `interrupting`. Mark it `completed` only after a confirmed interrupt result or restored server state that proves the turn stopped. If restore shows the turn still running, return to `streaming`; do not fabricate a stop result.
 - Sign-out clears the selected session, suppresses reconnect, and moves the view to `empty`/`offline` while preserving the draft. An explicit later sign-in may start a new restore.
