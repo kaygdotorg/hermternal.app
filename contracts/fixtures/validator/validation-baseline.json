@@ -24,16 +24,16 @@
     },
     {
       "path": "contracts/fixtures/validator/test_validate.py",
-      "sha256": "10e7a02a6ffe75d02b8287929a4729c71793d24f17f8fa9ae87a0afd486a40d3",
-      "size_bytes": 28829
+      "sha256": "ac13c6a86bd47f2e5408ea4e5c49c19348b08e3feb2fbedec5784ce28fea8928",
+      "size_bytes": 33521
     },
     {
       "path": "contracts/fixtures/validator/validate.py",
-      "sha256": "11f533bccfb7d9e60ab9d883d9e6bd0c893a8d8377e8f5493762cc6703547a8b",
-      "size_bytes": 63812
+      "sha256": "f48dfa1c62fbd49bfcb58f0b29a419cb572df7530f5fd83b914de444a2c16810",
+      "size_bytes": 70117
     }
   ],
-  "artifact_size_bytes": 153092,
+  "artifact_size_bytes": 164089,
   "normal": {
     "command": "python3 contracts/fixtures/validator/validate.py",
     "repetitions": 30,

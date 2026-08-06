@@ -19,6 +19,12 @@ from pathlib import Path
 import validate
 
 
+# Independent source trust anchor for the aggregate validator. This constant is
+# reviewed outside validate.py, whose own baseline line is normalized before the
+# canonical source digest is computed.
+TRUSTED_VALIDATE_SOURCE_SHA256 = "d9260c2e800b0238d74fbdaa8c8bd3ae19af960a8e1d8249ab28d3bfa45b1fc1"
+
+
 class StrictJsonTests(unittest.TestCase):
     def _write(self, payload: bytes) -> Path:
         handle = tempfile.NamedTemporaryFile(prefix="fixture-validator-", suffix=".json", delete=False)
@@ -187,6 +193,11 @@ class RegistryTests(unittest.TestCase):
 
     def test_canonical_baseline_anchor_matches_checked_in_content(self) -> None:
         self.assertEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
+
+    def test_independent_validator_source_anchor_matches_checked_in_content(self) -> None:
+        source = (validate.REPO_ROOT / validate.BASELINE_SELF_MANIFEST_PATH).read_bytes()
+        self.assertEqual(validate._canonical_validator_source_digest(source), TRUSTED_VALIDATE_SOURCE_SHA256)
+        self.assertEqual(validate._trusted_validator_source_digest(validate.REPO_ROOT), TRUSTED_VALIDATE_SOURCE_SHA256)
 
 
 class CliTests(unittest.TestCase):
@@ -368,6 +379,19 @@ class CliTests(unittest.TestCase):
         self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
 
+    def test_synthetic_marker_allowances_are_not_global(self) -> None:
+        snippets = (
+            'FORGED_SYNTHETIC_BASIC = "Authorization: Basic synthetic-basic-value-123456"\n',
+            'FORGED_SYNTHETIC_BEARER = "Authorization: Bearer synthetic-bearer-value-123456"\n',
+            'FORGED_SYNTHETIC_ASSIGNMENT = "token=synthetic-token-value-123456"\n',
+            'FORGED_SYNTHETIC_PROVIDER = "ghp_synthetic-provider-value-123456"\n',
+            'FORGED_SYNTHETIC_JWT = "eyJsyntheticheader.eyJsyntheticpayload.eyJsyntheticsignature"\n',
+            'FORGED_SYNTHETIC_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\\nsynthetic\\n-----END RSA PRIVATE KEY-----"\n',
+        )
+        for snippet in snippets:
+            with self.subTest(snippet=snippet):
+                self._append_artifact_and_block("connection-restoration/validate.py", "\n" + snippet)
+
     def test_registered_validate_python_rejects_rfc7617_sample_in_both_modes(self) -> None:
         repo_root = self._copy_fixture_repo()
         python_artifact = repo_root / "contracts/fixtures/deployment-security/external-allowlist/validate.py"
@@ -404,6 +428,7 @@ class CliTests(unittest.TestCase):
         snippets = (
             're.compile("Authorization: Basic AAAAAAAAAAAAAAAA")\n',
             'regex.compile("Authorization: Basic AAAAAAAAAAAAAAAA")\n',
+            're.compile(r"https://live.example.net/v1/[A-Za-z]+")\n',
             'FORGED_PLUS = "Authorization: " + "Basic AAAAAAAAAAAAAAAA"\n',
             'FORGED_RUNTIME_PLUS = "Authorization: Basic " + runtime_secret\n',
             'FORGED_FSTRING = f"Authorization: Basic {\'AAAAAAAAAAAAAAAA\'}"\n',
@@ -411,6 +436,9 @@ class CliTests(unittest.TestCase):
             'FORGED_FORMAT = "Authorization: Basic {}".format("AAAAAAAAAAAAAAAA")\n',
             'FORGED_RUNTIME_FORMAT = "Authorization: Basic {}".format(runtime_secret)\n',
             'FORGED_JOIN = "".join(["Authorization: ", "Basic ", "AAAAAAAAAAAAAAAA"])\n',
+            'FORGED_PERCENT = "Authorization: Basic %s" % runtime_secret\n',
+            'FORGED_PERCENT_LITERAL = "Authorization: Basic %s" % "AAAAAAAAAAAAAAAA"\n',
+            'FORGED_STALE = "<redacted>"\nFORGED_STALE = runtime_secret\nFORGED_STALE_HEADER = f"Authorization: Bearer {FORGED_STALE}"\n',
         )
         for snippet in snippets:
             with self.subTest(snippet=snippet):
@@ -427,11 +455,48 @@ class CliTests(unittest.TestCase):
             addition,
         )
 
+    def test_multiple_private_keys_aws_keys_and_provider_tokens_are_exhaustive(self) -> None:
+        cases = (
+            (
+                "source-audit/model-options/test_model_options.py",
+                'FORGED_PRIVATE_CHAIN = "-----BEGIN SYNTHETIC PRIVATE KEY-----\\n-----BEGIN RSA PRIVATE KEY-----"\n',
+            ),
+            (
+                "source-audit/oauth-browser/test_oauth_browser.py",
+                'FORGED_AWS_CHAIN = "AKIA0000000000000000 AKIA1234567890ABCDEF"\n',
+            ),
+            (
+                "source-audit/oauth-browser/test_oauth_browser.py",
+                'FORGED_PROVIDER_CHAIN = "ghp_synthetic-provider-value-123456 ghp_live-provider-value-123456"\n',
+            ),
+        )
+        for relative_path, addition in cases:
+            with self.subTest(relative_path=relative_path, addition=addition):
+                self._append_artifact_and_block(relative_path, "\n" + addition)
+
     def test_nul_split_bearer_value_is_rejected_in_both_modes(self) -> None:
         self._append_artifact_and_block(
             "connection-restoration/validate.py",
             '\nFORGED_NUL = "Bearer unredacted-\\x00secret-value-123456"\n',
         )
+
+    def test_non_nul_controls_cannot_split_credentials_in_python_markdown_and_json(self) -> None:
+        split_bearer = "Bearer abcdefghi\x01secret-value-123456"
+        self._append_artifact_and_block(
+            "connection-restoration/validate.py",
+            f'\nFORGED_CONTROL = {split_bearer!r}\n',
+        )
+        self._append_artifact_and_block(
+            "connection-restoration/README.md",
+            f"\n{split_bearer}\n",
+        )
+        repo_root = self._copy_fixture_repo()
+        json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
+        document = json.loads(json_path.read_text(encoding="utf-8"))
+        self._add_json_expected_value(document, "control", split_bearer)
+        json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
 
     def test_markdown_assignment_value_is_rejected_in_both_modes(self) -> None:
         self._append_artifact_and_block(
@@ -440,13 +505,26 @@ class CliTests(unittest.TestCase):
         )
 
     def test_sensitive_key_aliases_are_rejected_in_both_modes(self) -> None:
-        aliases = ("apiKey", "access-key", "clientSecret", "aws-secret-access-key", "x-api-key")
+        aliases = (
+            "apiKey",
+            "access-key",
+            "clientSecret",
+            "aws-secret-access-key",
+            "x-api-key",
+            "apikey",
+            "accesskey",
+            "clientsecret",
+            "awssecretaccesskey",
+            "xapikey",
+        )
         for alias in aliases:
             with self.subTest(alias=alias):
                 repo_root = self._copy_fixture_repo()
                 json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
                 document = json.loads(json_path.read_text(encoding="utf-8"))
-                self._add_json_expected_value(document, alias, "Basic AAAAAAAAAAAAAAAA")
+                # A boolean is otherwise ignored by the generic tree walk, so
+                # rejection proves the compact alias reached sensitive routing.
+                self._add_json_expected_value(document, alias, True)
                 json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
                 self._rebind_copy(repo_root, refresh_anchor=True)
                 self._assert_blocked_in_both_modes(repo_root)
@@ -535,6 +613,17 @@ class CliTests(unittest.TestCase):
                 record["sha256"] = hashlib.sha256(data).hexdigest()
         baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_coordinated_validator_self_manifest_refresh_is_rejected_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        validator_path = repo_root / "contracts/fixtures/validator/validate.py"
+        validator_path.write_text(
+            validator_path.read_text(encoding="utf-8")
+            + "\n# coordinated validator source mutation\n",
+            encoding="utf-8",
+        )
+        self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_ready_coverage_cannot_reference_pending_root_in_both_modes(self) -> None:
