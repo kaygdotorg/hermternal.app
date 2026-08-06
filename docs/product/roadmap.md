@@ -15,7 +15,7 @@ Each issue owns one independently verifiable operation or artifact. Split an iss
 
 Chat is the v0.0.1 release priority. User-facing deep-link UI and full-text session-search UI are deferred to v0.0.2 because both UIs need redesign. User-facing sharing remains deferred. The existing `C-07A`, `C-15`, and `C-16` search and deep-link contracts remain future compatibility references. Internal stable IDs and authentication callback routing remain allowed where v0.0.1 chat or sign-in needs them.
 
-The stable roadmap keys remain for contract traceability. Rows described as deferred to v0.0.2 are not v0.0.1 release work. Deferred UI rows MUST NOT be hard dependencies for v0.0.1 chat or authentication work.
+The stable roadmap keys remain for contract traceability. Rows described as deferred to v0.0.2 are not v0.0.1 release work. Deferred UI rows MUST NOT be hard dependencies for v0.0.1 chat, authentication, accessibility, performance, or release-gate work.
 
 ## Milestones
 
@@ -238,12 +238,12 @@ Web-only `W` suffix operations remove Swift and Apple benchmark prerequisites fr
 | `A-20` | [#174](https://github.com/kaygdotorg/hermternal/issues/174) | Implement macOS menus and keyboard commands. | `D-10`, `D-12`, `A-19` |
 | `A-20A` | [#175](https://github.com/kaygdotorg/hermternal/issues/175) | Implement macOS focus behavior. | `D-10`, `D-12`, `A-19` |
 | `A-20B` | [#176](https://github.com/kaygdotorg/hermternal/issues/176) | Defer user-facing macOS deep-link UI to v0.0.2; keep `C-16` as a future compatibility reference. | `C-16`, `D-10`, `D-12`, `A-19` |
-| `A-21` | [#177](https://github.com/kaygdotorg/hermternal/issues/177) | Implement VoiceOver and Switch Control behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A`, `A-20B` |
-| `A-21A` | [#178](https://github.com/kaygdotorg/hermternal/issues/178) | Implement Dynamic Type behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A`, `A-20B` |
-| `A-21B` | [#179](https://github.com/kaygdotorg/hermternal/issues/179) | Implement contrast behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A`, `A-20B` |
-| `A-21C` | [#180](https://github.com/kaygdotorg/hermternal/issues/180) | Implement reduced-motion behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A`, `A-20B` |
+| `A-21` | [#177](https://github.com/kaygdotorg/hermternal/issues/177) | Implement VoiceOver and Switch Control behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A` |
+| `A-21A` | [#178](https://github.com/kaygdotorg/hermternal/issues/178) | Implement Dynamic Type behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A` |
+| `A-21B` | [#179](https://github.com/kaygdotorg/hermternal/issues/179) | Implement contrast behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A` |
+| `A-21C` | [#180](https://github.com/kaygdotorg/hermternal/issues/180) | Implement reduced-motion behavior. | `D-12`, `D-13`, `A-10`, `A-10A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-19`, `A-20`, `A-20A` |
 | `A-22` | [#181](https://github.com/kaygdotorg/hermternal/issues/181) | Enforce iOS and iPadOS regression budgets. | `B-08`, `B-08A`, `A-17`, `A-18`, `A-18A`, `A-18B`, `A-21`, `A-21A`, `A-21B`, `A-21C` |
-| `A-22A` | [#182](https://github.com/kaygdotorg/hermternal/issues/182) | Enforce macOS regression budgets. | `B-08`, `B-08A`, `A-19`, `A-20`, `A-20A`, `A-20B`, `A-21`, `A-21A`, `A-21B`, `A-21C` |
+| `A-22A` | [#182](https://github.com/kaygdotorg/hermternal/issues/182) | Enforce macOS regression budgets. | `B-08`, `B-08A`, `A-19`, `A-20`, `A-20A`, `A-21`, `A-21A`, `A-21B`, `A-21C` |
 
 Apple clients do not implement `/api/pty`, direct SSH, Android, Windows, profile aggregation, or an unreviewed OAuth callback. They may implement a native OAuth/OIDC callback only when `DEP-09` proves source acceptance and platform support.
 
