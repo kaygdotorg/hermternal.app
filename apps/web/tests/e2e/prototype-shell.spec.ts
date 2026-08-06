@@ -72,9 +72,26 @@ test('computed reduced-motion behavior disables action transition duration', asy
 });
 
 test('pending cancellation is visible and safe in the browser shell', async ({ page }) => {
+  await page.addInitScript(() => {
+    // Hold only the synthetic 250 ms fixture timer. The abort action clears
+    // this real browser timer, so the test has no arbitrary click race window.
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    let holdNextMockDelay = true;
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: any[]) => {
+      if (holdNextMockDelay && timeout === 250) {
+        holdNextMockDelay = false;
+        return nativeSetTimeout(() => undefined, 2_147_483_647);
+      }
+      return nativeSetTimeout(handler, timeout, ...args);
+    }) as typeof window.setTimeout;
+  });
+
   await page.goto('/?delayMs=short');
   await expect(page.getByTestId('status-pending')).toBeVisible();
-  await page.getByRole('button', { name: 'Cancel mock check' }).click();
+  const cancel = page.getByRole('button', { name: 'Cancel mock check' });
+  await expect(cancel).toBeVisible();
+  await expect(cancel).toBeEnabled();
+  await cancel.click();
 
   await expect(page.getByTestId('status-cancelled')).toBeVisible();
   await expect(page.getByTestId('fixture-id')).toHaveText('w01-cancelled-v1');

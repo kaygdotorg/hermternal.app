@@ -12,11 +12,25 @@ const runtime = createServiceWorkerRuntime(policy, {
 });
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(runtime.install());
+  event.waitUntil(
+    (async () => {
+      await runtime.install();
+      // The prototype proof registers this worker in a fresh browser context;
+      // skip waiting so the generated worker can become active immediately.
+      await self.skipWaiting();
+    })()
+  );
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(runtime.activate());
+  event.waitUntil(
+    (async () => {
+      await runtime.activate();
+      // Claim only after the owned cache is ready so offline control cannot
+      // expose a partially installed shell to an existing client.
+      await self.clients.claim();
+    })()
+  );
 });
 
 self.addEventListener('fetch', (event) => {

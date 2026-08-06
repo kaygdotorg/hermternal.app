@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CLIENT_ROUTE_FALLBACK_PATH,
   createServiceWorkerPolicy,
-  SERVICE_WORKER_CACHE_PREFIX
+  SERVICE_WORKER_CACHE_PREFIX,
+  SERVICE_WORKER_SCRIPT_PATH
 } from './service-worker-policy';
 import {
   createServiceWorkerRuntime,
@@ -20,6 +21,15 @@ function request(pathname: string, mode: RequestMode = 'same-origin', method = '
     return { url: `${origin}${pathname}`, method, mode } as Request;
   }
   return new Request(`${origin}${pathname}`, { method, mode });
+}
+
+function rawRequest(
+  rawTarget: string,
+  mode: RequestMode = 'same-origin',
+  method = 'GET'
+): Request {
+  const url = rawTarget.startsWith('http') ? rawTarget : `${origin}${rawTarget}`;
+  return { url, method, mode } as Request;
 }
 
 class MemoryCache implements ServiceWorkerCache {
@@ -96,6 +106,7 @@ describe('service worker policy and runtime', () => {
         `${origin}/`,
         `${origin}/index.html`,
         `${origin}/200.html`,
+        `${origin}${SERVICE_WORKER_SCRIPT_PATH}`,
         `${origin}/_app/immutable/app.js`
       ])
     );
@@ -159,6 +170,38 @@ describe('service worker policy and runtime', () => {
     await Promise.resolve();
     expect(storage.opened).toEqual([]);
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('rejects raw route mutations before cache policy normalization', () => {
+    const storage = new MemoryCacheStorage();
+    const runtime = createServiceWorkerRuntime(policy, {
+      cacheStorage: storage,
+      fetcher: vi.fn(async () => new Response('unexpected')),
+      origin
+    });
+    const reservedPrefixes = ['/api', '/hermes', '/auth', '/ws', '/pty'];
+    const rawTargets = [
+      ...reservedPrefixes.flatMap((prefix) => [
+        `${prefix}/../v1/c/abcdefghijklmnop`,
+        `${prefix}/%2e%2e/v1/c/abcdefghijklmnop`,
+        `${prefix}\\..\\v1/c/abcdefghijklmnop`,
+        `${prefix}//../v1/c/abcdefghijklmnop`,
+        `${prefix}/%2fv1/c/abcdefghijklmnop`,
+        `${prefix}/%5cv1/c/abcdefghijklmnop`
+      ]),
+      '/apiary/v1/c/abcdefghijklmnop',
+      '//evil.example/v1/c/abcdefghijklmnop',
+      '/v1/c/abcdefghijklmnop?token=synthetic',
+      '/v1/c/abcdefghijklmnop#fragment',
+      `${SERVICE_WORKER_SCRIPT_PATH}?cache=synthetic`
+    ];
+
+    for (const rawTarget of rawTargets) {
+      const event = fetchEvent(rawRequest(rawTarget, 'navigate'));
+      runtime.handleFetch(event);
+      expect(event.response).toBeUndefined();
+    }
+    expect(storage.opened).toEqual([]);
   });
 
   it('maps only supported deep links to the cached 200.html shell', async () => {

@@ -8,6 +8,7 @@ export const SERVICE_WORKER_CACHE_PREFIX = 'hermternal-prototype-assets-';
 export const NAVIGATION_ALLOWLIST = Object.freeze(['/', '/index.html']);
 export const CLIENT_ROUTE_FALLBACK_PATH = '/200.html';
 export const ROOT_DOCUMENT_PATH = '/index.html';
+export const SERVICE_WORKER_SCRIPT_PATH = '/service-worker.js';
 
 const ID_SEGMENT = '[A-Za-z0-9._~-]{16,}';
 const CLIENT_ROUTE_PATTERN = new RegExp(
@@ -50,6 +51,50 @@ function normalizePath(value: string): string | undefined {
   }
 }
 
+/**
+ * Read the request URL lexically before WHATWG URL parsing. Service-worker
+ * requests are not the deployment perimeter, but keeping this boundary here
+ * prevents a normalized traversal from becoming a cache hit in the offline
+ * proof and keeps the worker policy aligned with the static host contract.
+ */
+function hasInvalidRawTargetCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code === undefined || code < 0x20 || (code >= 0x7f && code <= 0x9f) || code > 0x7e) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function readRawRequestTarget(
+  rawUrl: string,
+  origin: string
+): { pathname: string; hasQuery: boolean } | undefined {
+  const target = rawUrl === origin ? '/' : rawUrl.startsWith(`${origin}/`) ? rawUrl.slice(origin.length) : undefined;
+  if (!target || hasInvalidRawTargetCharacter(target)) {
+    return undefined;
+  }
+
+  if (target.includes('#')) {
+    return undefined;
+  }
+
+  const queryIndex = target.indexOf('?');
+  const pathname = queryIndex === -1 ? target : target.slice(0, queryIndex);
+  if (
+    !pathname.startsWith('/') ||
+    pathname.includes('%') ||
+    pathname.includes('\\') ||
+    pathname.includes('//') ||
+    pathname.split('/').some((segment) => segment === '.' || segment === '..')
+  ) {
+    return undefined;
+  }
+
+  return { pathname, hasQuery: queryIndex !== -1 };
+}
+
 export function isReservedPath(pathname: string): boolean {
   return RESERVED_PATH_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
@@ -74,6 +119,7 @@ export function createServiceWorkerPolicy(input: ServiceWorkerPolicyInput): Serv
     [
       ROOT_DOCUMENT_PATH,
       CLIENT_ROUTE_FALLBACK_PATH,
+      SERVICE_WORKER_SCRIPT_PATH,
       ...input.build,
       ...input.files
     ]
@@ -92,12 +138,22 @@ export function createServiceWorkerPolicy(input: ServiceWorkerPolicyInput): Serv
       return undefined;
     }
 
-    const requestUrl = new URL(request.url, origin);
-    if (requestUrl.origin !== origin || requestUrl.search || requestUrl.hash) {
+    const rawTarget = readRawRequestTarget(request.url, origin);
+    if (!rawTarget || rawTarget.hasQuery) {
       return undefined;
     }
 
-    const pathname = requestUrl.pathname;
+    const requestUrl = new URL(request.url, origin);
+    if (
+      requestUrl.origin !== origin ||
+      requestUrl.search ||
+      requestUrl.hash ||
+      requestUrl.pathname !== rawTarget.pathname
+    ) {
+      return undefined;
+    }
+
+    const pathname = rawTarget.pathname;
     if (isReservedPath(pathname)) {
       return undefined;
     }

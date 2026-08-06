@@ -14,7 +14,10 @@ export default defineConfig({
     colorScheme: 'light'
   },
   webServer: {
-    command: `bun run build && bun run preview -- --host 127.0.0.1 --port ${port}`,
+    // Vite preview does not implement the documented private-route fallback.
+    // Use the production-build evidence host so worker install can fetch both
+    // /service-worker.js and its /200.html precache entry.
+    command: `bun run build && node tests/static/static-host.mjs --port ${port}`,
     url: `http://127.0.0.1:${port}/`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000

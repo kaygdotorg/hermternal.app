@@ -1,111 +1,129 @@
-import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { cwd } from 'node:process';
+import { request as httpRequest } from 'node:http';
+import { startStaticHost, RESERVED_PATH_PREFIXES } from './static-host.mjs';
 
-const buildDirectory = resolve(cwd(), 'build');
-const fallbackPath = join(buildDirectory, '200.html');
-const rootPath = join(buildDirectory, 'index.html');
-const clientRoutePattern = /^\/v1\/c\/[A-Za-z0-9._~-]{16,}(?:\/m\/[A-Za-z0-9._~-]{16,})?$/;
-const reservedPathPrefixes = ['/api', '/hermes', '/auth', '/ws', '/pty'];
-
-function isReservedPath(pathname) {
-  return reservedPathPrefixes.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
-  );
+function rawHttpRequest(port, rawTarget, method = 'GET') {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        method,
+        path: rawTarget,
+        headers: { connection: 'close' }
+      },
+      (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => {
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: response.headers,
+            body: Buffer.concat(chunks).toString('utf8')
+          });
+        });
+      }
+    );
+    request.once('error', reject);
+    request.end();
+  });
 }
 
-function safeBuildPath(pathname) {
-  const relativePath = pathname.replace(/^\/+/, '');
-  const candidate = resolve(buildDirectory, relativePath);
-  return candidate === buildDirectory || candidate.startsWith(`${buildDirectory}/`)
-    ? candidate
-    : undefined;
-}
-
-/**
- * This is the exact W-01 static-host contract. Route order is security
- * relevant: reserved paths are denied before the 200.html client-route
- * rewrite, then the private deep-link grammar is rewritten, and all unknown
- * paths remain 404s.
- */
-function resolveStaticPath(pathname) {
-  if (isReservedPath(pathname)) {
-    return undefined;
-  }
-  if (clientRoutePattern.test(pathname)) {
-    return fallbackPath;
-  }
-  if (pathname === '/') {
-    return rootPath;
-  }
-  if (pathname === '/index.html' || pathname === '/200.html') {
-    return safeBuildPath(pathname);
-  }
-  if (pathname.startsWith('/_app/') || pathname === '/manifest.webmanifest' || pathname === '/icon.svg') {
-    return safeBuildPath(pathname);
-  }
-  return undefined;
-}
-
-const server = createServer(async (request, response) => {
-  const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
-  const filePath = resolveStaticPath(requestUrl.pathname);
-
-  if (!filePath) {
-    response.statusCode = 404;
-    response.end('not found');
-    return;
-  }
-
-  try {
-    response.statusCode = 200;
-    response.end(await readFile(filePath));
-  } catch (error) {
-    response.statusCode = 500;
-    response.end(String(error));
-  }
-});
-
-await new Promise((resolveServer) => server.listen(0, '127.0.0.1', resolveServer));
+const server = await startStaticHost({ port: 0 });
 const address = server.address();
 if (!address || typeof address === 'string') {
   throw new Error('The static evidence server did not expose a TCP address.');
 }
 
-const origin = `http://127.0.0.1:${address.port}`;
-const shellRoutes = ['/', '/index.html', '/v1/c/abcdefghijklmnop', '/v1/c/abcdefghijklmnop/m/qrstuvwxyzabcdef'];
+const shellRoutes = [
+  '/',
+  '/?scenario=success',
+  '/index.html',
+  '/200.html',
+  '/v1/c/abcdefghijklmnop',
+  '/v1/c/abcdefghijklmnop/m/qrstuvwxyzabcdef'
+];
+const workerRoute = '/service-worker.js';
+const canonicalMutationRoutes = [
+  '/v1/c/abcdefghijklmnop?token=synthetic',
+  '/v1/c/abcdefghijklmnop#fragment',
+  '/v1/c/abcdefghijklmnop/',
+  '/200.html?token=synthetic',
+  '/service-worker.js?cache=synthetic'
+];
+const lexicalMutationRoutes = RESERVED_PATH_PREFIXES.flatMap((prefix) => [
+  `${prefix}/../v1/c/abcdefghijklmnop`,
+  `${prefix}/%2e%2e/v1/c/abcdefghijklmnop`,
+  `${prefix}\\..\\v1/c/abcdefghijklmnop`,
+  `${prefix}//../v1/c/abcdefghijklmnop`,
+  `${prefix}/%2fv1/c/abcdefghijklmnop`,
+  `${prefix}/%5cv1/c/abcdefghijklmnop`
+]);
+const reservedPrefixLookalikes = [
+  '/apiary/v1/c/abcdefghijklmnop',
+  '/hermesian/v1/c/abcdefghijklmnop',
+  '/authentic/v1/c/abcdefghijklmnop',
+  '/wss/v1/c/abcdefghijklmnop',
+  '/ptyx/v1/c/abcdefghijklmnop'
+];
 const deniedRoutes = [
   '/foo/',
   '/v1/c/short',
-  '/api/anything',
-  '/hermes/anything',
-  '/auth/login',
-  '/ws/socket',
-  '/pty/session',
-  '/api/pty'
+  '/v1/c/abcdefghijklmnopx/extra',
+  '//evil.example/v1/c/abcdefghijklmnop',
+  'http://evil.example/v1/c/abcdefghijklmnop',
+  ...reservedPrefixLookalikes,
+  ...canonicalMutationRoutes,
+  ...lexicalMutationRoutes
 ];
 
 try {
-  for (const pathname of shellRoutes) {
-    const result = await fetch(`${origin}${pathname}`);
+  for (const rawTarget of shellRoutes) {
+    const result = await rawHttpRequest(address.port, rawTarget);
     if (result.status !== 200) {
-      throw new Error(`Expected direct shell load ${pathname} to return 200, got ${result.status}.`);
+      throw new Error(`Expected direct shell load ${rawTarget} to return 200, got ${result.status}.`);
     }
-    const body = await result.text();
-    if (!body.includes('/_app/')) {
-      throw new Error(`Expected ${pathname} to serve the production shell.`);
+    if (!result.body.includes('/_app/')) {
+      throw new Error(`Expected ${rawTarget} to serve the production shell.`);
     }
   }
 
-  for (const pathname of deniedRoutes) {
-    const result = await fetch(`${origin}${pathname}`);
-    if (result.status !== 404) {
-      throw new Error(`Expected denied or unknown route ${pathname} to remain 404, got ${result.status}.`);
+  const worker = await rawHttpRequest(address.port, workerRoute);
+  if (worker.status !== 200 || !worker.body.includes('addEventListener')) {
+    throw new Error('Expected the generated /service-worker.js route to serve executable worker code.');
+  }
+  if (!worker.headers['content-type']?.startsWith('text/javascript')) {
+    throw new Error('The generated service worker must use a JavaScript content type.');
+  }
+
+  for (const rawTarget of [...shellRoutes, workerRoute]) {
+    const head = await rawHttpRequest(address.port, rawTarget, 'HEAD');
+    if (head.status !== 200 || head.body !== '') {
+      throw new Error(`Expected HEAD ${rawTarget} to serve headers without a response body.`);
+    }
+  }
+
+  for (const method of ['POST', 'PUT', 'OPTIONS', 'PATCH', 'DELETE', 'TRACE', 'FOO']) {
+    const result = await rawHttpRequest(address.port, '/v1/c/abcdefghijklmnop', method);
+    const parserRejectedUnknownMethod = method === 'FOO' && result.status === 400;
+    if (result.status !== 405 && !parserRejectedUnknownMethod) {
+      throw new Error(
+        `Expected non-GET/HEAD method ${method} to fail closed with 405 or parser-level 400, got ${result.status}.`
+      );
+    }
+  }
+
+  for (const rawTarget of deniedRoutes) {
+    const result = await rawHttpRequest(address.port, rawTarget);
+    if (result.status !== 404 || result.body.includes('/_app/')) {
+      throw new Error(
+        `Expected raw denied or unknown target ${JSON.stringify(rawTarget)} to stay outside the shell, got ${result.status}.`
+      );
     }
   }
 } finally {
   await new Promise((resolveServer) => server.close(resolveServer));
 }
 
-console.log('static route evidence: root and /v1/c/* shell loads use 200.html; reserved and unknown paths stay 404');
+console.log(
+  'static route evidence: raw lexical checks, canonical query/fragment denial, GET/HEAD methods, 200.html, and service-worker.js pass'
+);
