@@ -8,6 +8,7 @@ This directory holds language-neutral artifacts that keep the web and Apple clie
 - [Fixtures](fixtures/README.md) define synthetic request, response, stream, recovery, and proof data.
 - [State models](state-models/README.md) define observable transitions without sharing runtime state code.
 - [Design tokens](design-tokens/README.md) define semantic design intent for Paper, web, and SwiftUI.
+- [Benchmark evidence](benchmarks/README.md) defines one redacted measurement format and deterministic percentile method for later web and Apple harnesses.
 
 The supported Hermes revision is pinned to `f5be9236e00ddf2f2a412697f267078fc4ee068e`. The pinned Dashboard does not report its revision. Missing or mismatched out-of-band deployment attestation, or a failed behavioral probe, blocks live operation. Contract changes must include redacted fixtures and matching web and Apple evidence.
 

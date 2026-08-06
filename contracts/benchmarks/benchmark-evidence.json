@@ -1,0 +1,157 @@
+{
+  "schema": "hermternal.benchmark-evidence.v1",
+  "evidence_id": "shared-format-example",
+  "revision": {
+    "commit_sha": "ca7fa38aa115bb0c0905d6b6f0630300aea5dfb4",
+    "fixture_id": "shared-synthetic-workload",
+    "fixture_version": "1.0.0",
+    "fixture_sha256": "53a99d28c407872b6eb366f864866896cbf95aba92ab492fcef2c1d695c0c51a",
+    "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e"
+  },
+  "metric": {
+    "name": "operation_duration",
+    "unit": "ms",
+    "clock": "monotonic"
+  },
+  "method": {
+    "percentile_method": "inclusive_linear_interpolation_r7",
+    "position_formula": "(n - 1) * q",
+    "rounding": "half_even_to_3_decimal_places",
+    "quantiles": {
+      "p50": 0.5,
+      "p95": 0.95,
+      "p99": 0.99
+    },
+    "minimum_repetitions": 30
+  },
+  "runs": [
+    {
+      "id": "web-cold-production",
+      "platform": "web",
+      "environment": {
+        "platform": "synthetic-web",
+        "os": "synthetic-os-1",
+        "architecture": "synthetic-arm64",
+        "device": "synthetic-desktop",
+        "runtime": "synthetic-browser-runtime",
+        "browser": "synthetic-browser"
+      },
+      "state": "cold",
+      "build_mode": "production",
+      "optimization": "not_applicable",
+      "command": "synthetic web cold workload",
+      "repetitions": 30,
+      "raw_samples": [12.000, 12.140, 12.210, 12.350, 12.480, 12.610, 12.760, 12.880, 13.010, 13.120, 13.240, 13.360, 13.480, 13.600, 13.720, 13.840, 13.960, 14.080, 14.200, 14.320, 14.440, 14.560, 14.680, 14.800, 14.920, 15.040, 15.160, 15.280, 15.400, 15.520],
+      "distribution": {
+        "min": 12.000,
+        "p50": 13.780,
+        "p95": 15.346,
+        "p99": 15.485,
+        "max": 15.520,
+        "mean": 13.772
+      }
+    },
+    {
+      "id": "web-warm-production",
+      "platform": "web",
+      "environment": {
+        "platform": "synthetic-web",
+        "os": "synthetic-os-1",
+        "architecture": "synthetic-arm64",
+        "device": "synthetic-desktop",
+        "runtime": "synthetic-browser-runtime",
+        "browser": "synthetic-browser"
+      },
+      "state": "warm",
+      "build_mode": "production",
+      "optimization": "not_applicable",
+      "command": "synthetic web warm workload",
+      "repetitions": 30,
+      "raw_samples": [4.200, 4.260, 4.310, 4.360, 4.410, 4.460, 4.510, 4.560, 4.610, 4.660, 4.710, 4.760, 4.810, 4.860, 4.910, 4.960, 5.010, 5.060, 5.110, 5.160, 5.210, 5.260, 5.310, 5.360, 5.410, 5.460, 5.510, 5.560, 5.610, 5.660],
+      "distribution": {
+        "min": 4.200,
+        "p50": 4.935,
+        "p95": 5.588,
+        "p99": 5.646,
+        "max": 5.660,
+        "mean": 4.935
+      }
+    },
+    {
+      "id": "ios-cold-release",
+      "platform": "ios",
+      "environment": {
+        "platform": "synthetic-ios",
+        "os": "synthetic-os-1",
+        "architecture": "synthetic-arm64",
+        "device": "synthetic-phone",
+        "runtime": "synthetic-swift-runtime",
+        "browser": "not_applicable"
+      },
+      "state": "cold",
+      "build_mode": "release",
+      "optimization": "not_applicable",
+      "command": "synthetic iOS cold workload",
+      "repetitions": 30,
+      "raw_samples": [22.000, 22.180, 22.360, 22.540, 22.720, 22.900, 23.080, 23.260, 23.440, 23.620, 23.800, 23.980, 24.160, 24.340, 24.520, 24.700, 24.880, 25.060, 25.240, 25.420, 25.600, 25.780, 25.960, 26.140, 26.320, 26.500, 26.680, 26.860, 27.040, 27.220],
+      "distribution": {
+        "min": 22.000,
+        "p50": 24.610,
+        "p95": 26.959,
+        "p99": 27.168,
+        "max": 27.220,
+        "mean": 24.610
+      }
+    },
+    {
+      "id": "ios-warm-release",
+      "platform": "ios",
+      "environment": {
+        "platform": "synthetic-ios",
+        "os": "synthetic-os-1",
+        "architecture": "synthetic-arm64",
+        "device": "synthetic-phone",
+        "runtime": "synthetic-swift-runtime",
+        "browser": "not_applicable"
+      },
+      "state": "warm",
+      "build_mode": "release",
+      "optimization": "not_applicable",
+      "command": "synthetic iOS warm workload",
+      "repetitions": 30,
+      "raw_samples": [7.100, 7.150, 7.200, 7.250, 7.300, 7.350, 7.400, 7.450, 7.500, 7.550, 7.600, 7.650, 7.700, 7.750, 7.800, 7.850, 7.900, 7.950, 8.000, 8.050, 8.100, 8.150, 8.200, 8.250, 8.300, 8.350, 8.400, 8.450, 8.500, 8.550],
+      "distribution": {
+        "min": 7.100,
+        "p50": 7.825,
+        "p95": 8.478,
+        "p99": 8.536,
+        "max": 8.550,
+        "mean": 7.825
+      }
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "synthetic/workload.json",
+      "bytes": 128,
+      "sha256": "a02f78903df5fefeb5a87e12459e1012a7f520454fba20446516967b4d10f4df"
+    },
+    {
+      "path": "synthetic/trace.json",
+      "bytes": 512,
+      "sha256": "2afbe86c8be00e480b95001131a301c94955d3add27a9db9553040e8517b522e"
+    }
+  ],
+  "artifact_manifest_sha256": "393b018ef6a82a62a74cae32a5d9654a21c2e264f2b013d3ed1e28108d9e10ae",
+  "redaction": {
+    "policy": "semantic_only",
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_tokens": false,
+    "contains_user_data": false,
+    "contains_live_hosts": false,
+    "contains_transcripts": false
+  },
+  "threshold": null,
+  "budget": null
+}
