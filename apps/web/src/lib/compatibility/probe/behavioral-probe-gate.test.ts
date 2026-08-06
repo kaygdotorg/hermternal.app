@@ -133,6 +133,31 @@ describe('evaluateBehavioralProbeGate', () => {
     expect(evaluateBehavioralProbeGate(missingRequirement)).toEqual(incompatibleResult());
   });
 
+  it.each(['reverse', 'adjacent-swap', 'arbitrary-reorder'] as const)(
+    'rejects %s ordering of both canonical evidence inventories',
+    (mutation) => {
+      const canonical = createBehavioralProbeFixtureEvidence('success');
+      const reorder = <T>(items: readonly T[]): T[] => {
+        if (mutation === 'reverse') return [...items].reverse();
+        if (mutation === 'adjacent-swap') {
+          const result = [...items];
+          [result[0], result[1]] = [result[1]!, result[0]!];
+          return result;
+        }
+        return [...items.slice(2), ...items.slice(0, 2)];
+      };
+
+      expect(evaluateBehavioralProbeGate({
+        ...canonical,
+        caseResults: reorder(canonical.caseResults)
+      })).toEqual(incompatibleResult());
+      expect(evaluateBehavioralProbeGate({
+        ...canonical,
+        requirementResults: reorder(canonical.requirementResults)
+      })).toEqual(incompatibleResult());
+    }
+  );
+
   it('fails closed when success evidence has a false requirement', () => {
     const evidence = createBehavioralProbeFixtureEvidence('success');
     const first = evidence.requirementResults[0];
@@ -204,6 +229,84 @@ describe('evaluateBehavioralProbeGate', () => {
     expect(evaluateBehavioralProbeGate(evidence)).toEqual(incompatibleResult());
     expect(reads).toBe(0);
   });
+
+  it('accepts array proxies without property or method reads', () => {
+    const evidence = createBehavioralProbeFixtureEvidence('success');
+    let getCalls = 0;
+    const guarded = <T>(items: readonly T[]): readonly T[] => new Proxy([...items], {
+      get() {
+        getCalls += 1;
+        throw new Error('array property read');
+      }
+    });
+
+    const result = evaluateBehavioralProbeGate({
+      ...evidence,
+      caseResults: guarded(evidence.caseResults),
+      requirementResults: guarded(evidence.requirementResults)
+    });
+
+    expect(result).toMatchObject({
+      state: 'success',
+      fixtureValidated: true,
+      compatible: false,
+      liveRun: false
+    });
+    expect(getCalls).toBe(0);
+  });
+
+  it('ignores changing and nonfinite proxy length reads', () => {
+    const evidence = createBehavioralProbeFixtureEvidence('success');
+    let getCalls = 0;
+    const proxiedCases = new Proxy([...evidence.caseResults], {
+      get(_target, property) {
+        getCalls += 1;
+        if (property === 'length') return getCalls === 1 ? Number.POSITIVE_INFINITY : 0;
+        throw new Error('array method read');
+      }
+    });
+
+    expect(evaluateBehavioralProbeGate({ ...evidence, caseResults: proxiedCases })).toMatchObject({
+      state: 'success', fixtureValidated: true, compatible: false, liveRun: false
+    });
+    expect(getCalls).toBe(0);
+  });
+
+  it('rejects an own keys accessor without invoking it', () => {
+    const evidence = createBehavioralProbeFixtureEvidence('success');
+    const caseResults = [...evidence.caseResults];
+    let getterCalls = 0;
+    Object.defineProperty(caseResults, 'keys', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error('array method getter');
+      }
+    });
+
+    expect(evaluateBehavioralProbeGate({ ...evidence, caseResults })).toEqual(incompatibleResult());
+    expect(getterCalls).toBe(0);
+  });
+
+  it('returns in bounded time for oversized and adversarial array proxies', () => {
+    const evidence = createBehavioralProbeFixtureEvidence('success');
+    const oversized = new Array(501);
+    let getCalls = 0;
+    const proxy = new Proxy(oversized, {
+      get() {
+        getCalls += 1;
+        throw new Error('must not read proxy properties');
+      }
+    });
+    const started = performance.now();
+
+    expect(evaluateBehavioralProbeGate({ ...evidence, caseResults: proxy })).toEqual(
+      incompatibleResult()
+    );
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(getCalls).toBe(0);
+  }, 1_000);
 
   it.each(['top', 'case', 'requirement', 'case-array'])(
     'rejects symbol and non-enumerable additions at the %s evidence level',

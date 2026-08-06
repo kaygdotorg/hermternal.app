@@ -256,27 +256,26 @@ function readEvidence(evidence: unknown, contract: FixtureContract): BehavioralP
     requirementResults.length !== contract.requirements.length
   ) return null;
 
-  const expectedCases = new Set(contract.cases.map(({ id }) => id));
   const parsedCases: BehavioralProbeCaseResult[] = [];
-  const seenCases = new Set<string>();
-  for (const result of caseResults) {
-    if (!isRecord(result) || !hasExactDataKeys(result, ['id', 'observed']) ||
-        !isIdentifier(result.id) || !expectedCases.has(result.id) || seenCases.has(result.id) ||
+  for (let index = 0; index < caseResults.length; index += 1) {
+    const result = caseResults[index];
+    const expected = contract.cases[index];
+    if (!result || !expected || !isRecord(result) ||
+        !hasExactDataKeys(result, ['id', 'observed']) ||
+        result.id !== expected.id || !isIdentifier(result.id) ||
         !isJsonValue(result.observed)) return null;
-    seenCases.add(result.id);
     parsedCases.push({ id: result.id, observed: result.observed });
   }
 
   const parsedRequirements: BehavioralProbeRequirementResult[] = [];
-  const seenRequirements = new Set<string>();
-  for (const result of requirementResults) {
-    if (!isRecord(result) || !hasExactDataKeys(result, ['id', 'passed']) ||
-        !isIdentifier(result.id) || typeof result.passed !== 'boolean' ||
-        !contract.requirements.includes(result.id) || seenRequirements.has(result.id)) return null;
-    seenRequirements.add(result.id);
+  for (let index = 0; index < requirementResults.length; index += 1) {
+    const result = requirementResults[index];
+    const expectedId = contract.requirements[index];
+    if (!result || expectedId === undefined || !isRecord(result) ||
+        !hasExactDataKeys(result, ['id', 'passed']) || result.id !== expectedId ||
+        !isIdentifier(result.id) || typeof result.passed !== 'boolean') return null;
     parsedRequirements.push({ id: result.id, passed: result.passed });
   }
-  if (contract.requirements.some((id) => !seenRequirements.has(id))) return null;
   return Object.freeze({
     schema: EVIDENCE_SCHEMA,
     fixtureSchema: contract.schema,
@@ -332,16 +331,26 @@ function snapshotJson(value: unknown, maxNodes: number): BehavioralProbeJsonValu
     active.add(candidate);
     try {
       if (Array.isArray(candidate)) {
-        if (candidate.length > 500) throw new TypeError('invalid evidence');
+        // Never read through the array object. A proxy can make `length`,
+        // `keys`, or iteration stateful; one own data descriptor provides the
+        // bounded inventory without invoking getters or array methods.
+        const lengthDescriptor = Object.getOwnPropertyDescriptor(candidate, 'length');
+        if (!lengthDescriptor || !('value' in lengthDescriptor) ||
+            lengthDescriptor.enumerable !== false ||
+            !Number.isSafeInteger(lengthDescriptor.value) ||
+            lengthDescriptor.value < 0 || lengthDescriptor.value > 500) {
+          throw new TypeError('invalid evidence');
+        }
+        const length = lengthDescriptor.value;
         const keys = Reflect.ownKeys(candidate);
-        const expected = [...candidate.keys()].map(String);
-        if (keys.length !== expected.length + 1 || keys[keys.length - 1] !== 'length') {
+        if (keys.length !== length + 1 || keys[length] !== 'length') {
           throw new TypeError('invalid evidence');
         }
         const result: BehavioralProbeJsonValue[] = [];
-        for (let index = 0; index < expected.length; index += 1) {
-          if (keys[index] !== expected[index]) throw new TypeError('invalid evidence');
-          const descriptor = Object.getOwnPropertyDescriptor(candidate, expected[index]);
+        for (let index = 0; index < length; index += 1) {
+          const key = String(index);
+          if (keys[index] !== key) throw new TypeError('invalid evidence');
+          const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
           if (!descriptor || !('value' in descriptor) || descriptor.enumerable !== true) {
             throw new TypeError('invalid evidence');
           }

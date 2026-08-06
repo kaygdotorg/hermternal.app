@@ -25,8 +25,12 @@ All results remain blocked. Canonical synthetic success reports
 fixture evidence, not deployment proof. Evidence is copied exactly once from
 own enumerable data descriptors into inert structures before any decision.
 Accessors, symbols, non-enumerable additions, missing, malformed, additive,
-duplicated, unknown, incompatible, cyclic, or mismatched evidence returns one
-bounded `incompatible` result without reflecting the supplied content.
+duplicated, reordered, unknown, incompatible, cyclic, or mismatched evidence
+returns one bounded `incompatible` result without reflecting the supplied
+content. Arrays are inspected only through one own `length` data descriptor,
+bounded locally generated numeric keys, and own element descriptors. The gate
+never reads an array property or calls an array method, including through a
+Proxy.
 `cancelled` and `unknown` preserve the source-state-reread recovery rule. The
 gate performs no retry or outward action, so it cannot duplicate a prompt,
 session, credential exchange, ticket mint, PTY input, or other side effect.
