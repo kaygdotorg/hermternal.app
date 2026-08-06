@@ -1,0 +1,928 @@
+{
+  "schema": "hermternal.uncertain-delivery.v1",
+  "operation": "C-06",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "source_observations": [
+    {
+      "file": "tui_gateway/ws.py",
+      "anchor": "gateway.ready",
+      "rule": "ready_before_application_rpc"
+    },
+    {
+      "file": "tui_gateway/ws.py",
+      "anchor": "WebSocketDisconnect",
+      "rule": "disconnect_detaches_transport"
+    },
+    {
+      "file": "tui_gateway/methods_prompt.py",
+      "anchor": "prompt.submit",
+      "rule": "server_starts_prompt_turn"
+    },
+    {
+      "file": "tui_gateway/methods_session.py",
+      "anchor": "session.resume",
+      "rule": "restore_server_owned_session"
+    }
+  ],
+  "states": [
+    {
+      "id": "empty",
+      "meaning": "No server session is selected.",
+      "terminal": false,
+      "allowed_actions": ["start_session", "write_draft"]
+    },
+    {
+      "id": "ready",
+      "meaning": "The selected session can accept one explicit prompt send.",
+      "terminal": false,
+      "allowed_actions": ["edit_draft", "send", "restore", "sign_out"]
+    },
+    {
+      "id": "submitting",
+      "meaning": "A prompt request is in flight and its result is not final.",
+      "terminal": false,
+      "allowed_actions": ["wait", "cancel", "sign_out"]
+    },
+    {
+      "id": "streaming",
+      "meaning": "A correlated server turn is active.",
+      "terminal": false,
+      "allowed_actions": ["interrupt", "answer_pending_input", "wait", "sign_out"]
+    },
+    {
+      "id": "awaiting_approval",
+      "meaning": "One supported approval request is pending.",
+      "terminal": false,
+      "allowed_actions": ["approve", "deny", "sign_out"]
+    },
+    {
+      "id": "awaiting_clarification",
+      "meaning": "One supported clarification request is pending.",
+      "terminal": false,
+      "allowed_actions": ["answer", "cancel", "sign_out"]
+    },
+    {
+      "id": "interrupting",
+      "meaning": "An interrupt was requested but its final result is unknown.",
+      "terminal": false,
+      "allowed_actions": ["wait", "restore", "sign_out"]
+    },
+    {
+      "id": "delivery_uncertain",
+      "meaning": "A prompt may have reached the server but has no known result.",
+      "terminal": false,
+      "allowed_actions": ["restore", "keep_draft", "sign_out"]
+    },
+    {
+      "id": "restoring",
+      "meaning": "Server history and status are being reread after an unknown result.",
+      "terminal": false,
+      "allowed_actions": ["wait", "cancel", "sign_out"]
+    },
+    {
+      "id": "completed",
+      "meaning": "The server confirmed the turn completion or interruption.",
+      "terminal": true,
+      "allowed_actions": ["read", "copy", "new_draft", "continue", "sign_out"]
+    },
+    {
+      "id": "failed",
+      "meaning": "A known failure or contract error stopped the affected turn.",
+      "terminal": true,
+      "allowed_actions": ["keep_draft", "explicit_retry", "sign_out"]
+    }
+  ],
+  "policies": {
+    "automatic_retry_methods": ["session.resume", "session.history", "session.status", "model.options"],
+    "never_automatic_retry_methods": ["prompt.submit", "session.create", "session.interrupt"],
+    "uncertain_transport_reasons": ["timeout", "websocket_close", "app_suspension", "process_loss"],
+    "restore_evidence_order": ["session.history", "session.status"],
+    "explicit_resend_gate": ["restore_complete", "prompt_absent", "turn_idle", "user_confirmed"],
+    "draft_policy": "preserve_original_until_server_presence_or_user_discard",
+    "duplicate_policy": "one_submission_per_explicit_send",
+    "source_result_rule": "correlate_reply_by_request_identifier_and_events_by_event_name"
+  },
+  "cases": [
+    {
+      "id": "empty-session",
+      "initial": {
+        "chat_state": "empty",
+        "transport_state": "ready",
+        "session_ref": null,
+        "draft_state": "absent",
+        "submission_count": 0
+      },
+      "events": [],
+      "expected": {
+        "trace": ["empty"],
+        "final_state": "empty",
+        "transport_trace": ["ready"],
+        "final_transport_state": "ready",
+        "selected_session": null,
+        "draft_state": "absent",
+        "submission_count": 0,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 0,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "empty_noop",
+        "contract_error": null
+      },
+      "notes": "No result exists and no outward operation is invented."
+    },
+    {
+      "id": "accepted-present",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "accepted"},
+        {"kind": "server_event", "name": "message.delta"},
+        {"kind": "server_event", "name": "message.complete"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "streaming", "completed"],
+        "final_state": "completed",
+        "transport_trace": ["ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "completed",
+        "decision": "accepted_present",
+        "contract_error": null
+      },
+      "notes": "A correlated acceptance and completion are not retried."
+    },
+    {
+      "id": "timeout-present-after-restore",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
+        {"kind": "transport_loss", "reason": "timeout"},
+        {"kind": "restore_begin"},
+        {"kind": "restore_history", "prompt_presence": "present"},
+        {"kind": "restore_status", "turn_state": "running"},
+        {"kind": "server_event", "name": "message.complete"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "streaming", "completed"],
+        "final_state": "completed",
+        "transport_trace": ["ready", "reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "completed",
+        "decision": "accepted_present_after_restore",
+        "contract_error": null
+      },
+      "notes": "A timeout is not rejection; server presence wins without a second submission."
+    },
+    {
+      "id": "websocket-close-absent-idle",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
+        {"kind": "transport_loss", "reason": "websocket_close"},
+        {"kind": "restore_begin"},
+        {"kind": "restore_history", "prompt_presence": "absent"},
+        {"kind": "restore_status", "turn_state": "idle"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "ready"],
+        "final_state": "ready",
+        "transport_trace": ["ready", "reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "passed",
+        "prompt_retry": "explicit_user_only",
+        "automatic_retry": false,
+        "explicit_action_required": true,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "absent",
+        "server_turn_state": "idle",
+        "decision": "absent_idle_wait_user",
+        "contract_error": null
+      },
+      "notes": "Only an explicit user choice may resend after absence and idle status."
+    },
+    {
+      "id": "app-suspension-absent-idle-explicit-resend",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
+        {"kind": "transport_loss", "reason": "app_suspension"},
+        {"kind": "restore_begin"},
+        {"kind": "restore_history", "prompt_presence": "absent"},
+        {"kind": "restore_status", "turn_state": "idle"},
+        {"kind": "user_decision", "action": "resend"},
+        {"kind": "submit", "request_ref": "request-marker-002", "result": "accepted"},
+        {"kind": "server_event", "name": "message.complete"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "ready", "submitting", "completed"],
+        "final_state": "completed",
+        "transport_trace": ["ready", "reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 2,
+        "duplicate_attempts": 0,
+        "restore_barrier": "passed",
+        "prompt_retry": "explicit_user_only",
+        "automatic_retry": false,
+        "explicit_action_required": true,
+        "outward_changes": 2,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "completed",
+        "decision": "resent_after_absent_idle",
+        "contract_error": null
+      },
+      "notes": "The resend is user-directed, uses a new local request marker, and occurs once."
+    },
+    {
+      "id": "process-loss-present-running",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
+        {"kind": "transport_loss", "reason": "process_loss"},
+        {"kind": "restore_begin"},
+        {"kind": "restore_history", "prompt_presence": "present"},
+        {"kind": "restore_status", "turn_state": "running"},
+        {"kind": "server_event", "name": "message.complete"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "streaming", "completed"],
+        "final_state": "completed",
+        "transport_trace": ["ready", "reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "completed",
+        "decision": "accepted_present_after_restore",
+        "contract_error": null
+      },
+      "notes": "A client process loss has the same unknown-delivery rule as a transport loss."
+    },
+    {
+      "id": "confirmed-rejection",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "rejected"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "failed"],
+        "final_state": "failed",
+        "transport_trace": ["ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "explicit_user_only",
+        "automatic_retry": false,
+        "explicit_action_required": true,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "absent",
+        "server_turn_state": "rejected",
+        "decision": "confirmed_rejection",
+        "contract_error": null
+      },
+      "notes": "Known rejection preserves the draft and permits only a later explicit retry."
+    },
+    {
+      "id": "restore-inconclusive",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
+        {"kind": "transport_loss", "reason": "timeout"},
+        {"kind": "restore_begin"},
+        {"kind": "restore_history", "prompt_presence": "unknown"},
+        {"kind": "restore_status", "turn_state": "unknown"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "delivery_uncertain"],
+        "final_state": "delivery_uncertain",
+        "transport_trace": ["ready", "reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "inconclusive",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "unknown",
+        "server_turn_state": "unknown",
+        "decision": "restore_inconclusive",
+        "contract_error": null
+      },
+      "notes": "Unknown server evidence remains unknown and cannot be converted into rejection."
+    },
+    {
+      "id": "idempotent-read-retry",
+      "initial": {
+        "chat_state": "delivery_uncertain",
+        "transport_state": "reconnecting",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1
+      },
+      "events": [
+        {"kind": "restore_begin"},
+        {"kind": "read_retry", "method": "session.history", "result": "transient_error"},
+        {"kind": "read_retry", "method": "session.history", "result": "success"},
+        {"kind": "restore_history", "prompt_presence": "absent"},
+        {"kind": "restore_status", "turn_state": "idle"}
+      ],
+      "expected": {
+        "trace": ["delivery_uncertain", "restoring", "ready"],
+        "final_state": "ready",
+        "transport_trace": ["reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "passed",
+        "prompt_retry": "explicit_user_only",
+        "automatic_retry": true,
+        "explicit_action_required": true,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 1,
+        "server_prompt_presence": "absent",
+        "server_turn_state": "idle",
+        "decision": "absent_idle_wait_user",
+        "contract_error": null
+      },
+      "notes": "History collection may retry after a transient read failure; prompt delivery may not."
+    },
+    {
+      "id": "automatic-prompt-retry-blocked",
+      "initial": {
+        "chat_state": "delivery_uncertain",
+        "transport_state": "reconnecting",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1
+      },
+      "events": [
+        {"kind": "automatic_retry", "method": "prompt.submit"}
+      ],
+      "expected": {
+        "trace": ["delivery_uncertain", "failed"],
+        "final_state": "failed",
+        "transport_trace": ["reconnecting", "incompatible"],
+        "final_transport_state": "incompatible",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "pending",
+        "prompt_retry": "blocked",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "automatic_prompt_retry_blocked",
+        "contract_error": "prompt_retry_requires_restore"
+      },
+      "notes": "An automatic prompt retry is a contract error before any duplicate outward action."
+    },
+    {
+      "id": "duplicate-submit-blocked",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "pending"},
+        {"kind": "duplicate_submit"},
+        {"kind": "server_event", "name": "message.complete"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "completed"],
+        "final_state": "completed",
+        "transport_trace": ["ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1,
+        "duplicate_attempts": 1,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "completed",
+        "decision": "duplicate_blocked",
+        "contract_error": null
+      },
+      "notes": "A second local send while submitting is disabled and never reaches Hermes."
+    },
+    {
+      "id": "resend-unknown-no-third-send",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
+        {"kind": "transport_loss", "reason": "websocket_close"},
+        {"kind": "restore_begin"},
+        {"kind": "restore_history", "prompt_presence": "absent"},
+        {"kind": "restore_status", "turn_state": "idle"},
+        {"kind": "user_decision", "action": "resend"},
+        {"kind": "submit", "request_ref": "request-marker-002", "result": "unknown"},
+        {"kind": "transport_loss", "reason": "timeout"},
+        {"kind": "automatic_retry", "method": "prompt.submit"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "ready", "submitting", "delivery_uncertain", "failed"],
+        "final_state": "failed",
+        "transport_trace": ["ready", "reconnecting", "ready", "reconnecting", "incompatible"],
+        "final_transport_state": "incompatible",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 2,
+        "duplicate_attempts": 0,
+        "restore_barrier": "pending",
+        "prompt_retry": "blocked",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 2,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "absent",
+        "server_turn_state": "idle",
+        "decision": "automatic_prompt_retry_blocked",
+        "contract_error": "prompt_retry_requires_restore"
+      },
+      "notes": "After an explicit resend becomes uncertain, no automatic third submission is allowed."
+    },
+    {
+      "id": "interrupt-confirmed",
+      "initial": {
+        "chat_state": "streaming",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1
+      },
+      "events": [
+        {"kind": "interrupt_request"},
+        {"kind": "interrupt_result", "result": "confirmed"}
+      ],
+      "expected": {
+        "trace": ["streaming", "interrupting", "completed"],
+        "final_state": "completed",
+        "transport_trace": ["ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 2,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "completed",
+        "decision": "interrupt_confirmed",
+        "contract_error": null
+      },
+      "notes": "A confirmed stop is completed; a lost stop is never claimed as confirmed."
+    },
+    {
+      "id": "interrupt-unknown-after-close",
+      "initial": {
+        "chat_state": "streaming",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1
+      },
+      "events": [
+        {"kind": "interrupt_request"},
+        {"kind": "transport_loss", "reason": "websocket_close"},
+        {"kind": "restore_begin"},
+        {"kind": "restore_history", "prompt_presence": "present"},
+        {"kind": "restore_status", "turn_state": "running"}
+      ],
+      "expected": {
+        "trace": ["streaming", "interrupting", "restoring", "streaming"],
+        "final_state": "streaming",
+        "transport_trace": ["ready", "reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 2,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "running",
+        "decision": "interrupt_unknown_after_restore",
+        "contract_error": null
+      },
+      "notes": "Restore observes the active turn without replaying its prompt or fabricating an interrupt result."
+    },
+    {
+      "id": "cancel-before-submit",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "cancel", "where": "before_submit"}
+      ],
+      "expected": {
+        "trace": ["ready"],
+        "final_state": "ready",
+        "transport_trace": ["ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 0,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "cancelled_before_submit",
+        "contract_error": null
+      },
+      "notes": "Cancelling a draft does not create a server session or prompt."
+    },
+    {
+      "id": "sign-out-during-uncertainty",
+      "initial": {
+        "chat_state": "delivery_uncertain",
+        "transport_state": "reconnecting",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1
+      },
+      "events": [
+        {"kind": "sign_out"}
+      ],
+      "expected": {
+        "trace": ["delivery_uncertain", "empty"],
+        "final_state": "empty",
+        "transport_trace": ["reconnecting", "offline"],
+        "final_transport_state": "offline",
+        "selected_session": null,
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "signed_out_safe",
+        "contract_error": null
+      },
+      "notes": "Sign-out clears the selected session and suppresses reconnect while preserving the draft."
+    },
+    {
+      "id": "pending-restore-evidence",
+      "initial": {
+        "chat_state": "delivery_uncertain",
+        "transport_state": "reconnecting",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1
+      },
+      "events": [
+        {"kind": "restore_begin"},
+        {"kind": "evidence_pending"}
+      ],
+      "expected": {
+        "trace": ["delivery_uncertain", "restoring"],
+        "final_state": "restoring",
+        "transport_trace": ["reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "evidence_pending",
+        "contract_error": null
+      },
+      "notes": "Pending evidence is exposed as pending, never as success or rejection."
+    },
+    {
+      "id": "incompatible-evidence",
+      "initial": {
+        "chat_state": "restoring",
+        "transport_state": "handshaking",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "compatibility_failure", "reason": "attestation_mismatch"}
+      ],
+      "expected": {
+        "trace": ["restoring", "failed"],
+        "final_state": "failed",
+        "transport_trace": ["handshaking", "incompatible"],
+        "final_transport_state": "incompatible",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "blocked",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 0,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "incompatible_evidence",
+        "contract_error": "compatibility_evidence_required"
+      },
+      "notes": "Missing or mismatched compatibility evidence fails closed before chat resumes."
+    },
+    {
+      "id": "unknown-interactive-event",
+      "initial": {
+        "chat_state": "streaming",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1
+      },
+      "events": [
+        {"kind": "unknown_event", "name": "unknown.interactive"}
+      ],
+      "expected": {
+        "trace": ["streaming", "failed"],
+        "final_state": "failed",
+        "transport_trace": ["ready", "incompatible"],
+        "final_transport_state": "incompatible",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "blocked",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "running",
+        "decision": "unknown_interactive_event_blocked",
+        "contract_error": "unsupported_interactive_event"
+      },
+      "notes": "An unknown interactive event is not presented as approval or clarification."
+    },
+    {
+      "id": "explicit-keep-draft-after-absent-idle",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
+        {"kind": "transport_loss", "reason": "websocket_close"},
+        {"kind": "restore_begin"},
+        {"kind": "restore_history", "prompt_presence": "absent"},
+        {"kind": "restore_status", "turn_state": "idle"},
+        {"kind": "user_decision", "action": "keep_draft"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "ready"],
+        "final_state": "ready",
+        "transport_trace": ["ready", "reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "passed",
+        "prompt_retry": "explicit_user_only",
+        "automatic_retry": false,
+        "explicit_action_required": true,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "absent",
+        "server_turn_state": "idle",
+        "decision": "user_kept_draft",
+        "contract_error": null
+      },
+      "notes": "The user may keep the draft without resending it."
+    },
+    {
+      "id": "confirmed-rejection-explicit-retry",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "rejected"},
+        {"kind": "user_decision", "action": "retry_after_rejection"},
+        {"kind": "submit", "request_ref": "request-marker-002", "result": "accepted"},
+        {"kind": "server_event", "name": "message.complete"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "failed", "ready", "submitting", "completed"],
+        "final_state": "completed",
+        "transport_trace": ["ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 2,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "explicit_user_only",
+        "automatic_retry": false,
+        "explicit_action_required": true,
+        "outward_changes": 2,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "completed",
+        "decision": "accepted_after_confirmed_rejection",
+        "contract_error": null
+      },
+      "notes": "A confirmed rejection is the only non-uncertain prompt outcome that permits explicit retry."
+    },
+    {
+      "id": "accepted-event-before-close",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0
+      },
+      "events": [
+        {"kind": "submit", "request_ref": "request-marker-001", "result": "pending"},
+        {"kind": "server_event", "name": "message.delta"},
+        {"kind": "transport_loss", "reason": "websocket_close"},
+        {"kind": "restore_begin"},
+        {"kind": "restore_history", "prompt_presence": "present"},
+        {"kind": "restore_status", "turn_state": "completed"}
+      ],
+      "expected": {
+        "trace": ["ready", "submitting", "streaming", "delivery_uncertain", "restoring", "completed"],
+        "final_state": "completed",
+        "transport_trace": ["ready", "reconnecting", "ready"],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "absent",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "present",
+        "server_turn_state": "completed",
+        "decision": "accepted_present_after_restore",
+        "contract_error": null
+      },
+      "notes": "A visible correlated event is evidence of acceptance even when completion arrives after reconnect."
+    }
+  ],
+  "redaction": {
+    "contains_prompt_text": false,
+    "contains_transcript": false,
+    "contains_credentials": false,
+    "contains_hosts": false,
+    "contains_paths": false,
+    "contains_raw_transport": false,
+    "diagnostic_max_chars": 240
+  },
+  "accessibility": {
+    "applicable": false,
+    "reason": "Non-UI protocol fixture; downstream web and Apple clients retain their own accessibility obligations."
+  }
+}

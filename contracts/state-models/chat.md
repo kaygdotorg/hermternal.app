@@ -48,6 +48,36 @@ The client must not blindly retry a prompt.
 - Keep the original draft and a user-visible uncertainty notice until the decision is complete.
 - Do not create a new session as an automatic workaround.
 
+## C-06 uncertain-delivery contract
+
+`delivery_uncertain` is a recoverable protocol state, not a server rejection. It applies when a prompt or interrupt may have reached Hermes but the client lost the result. The client keeps the draft and the selected session while it obtains authoritative evidence.
+
+### Transition matrix
+
+| Evidence or action | Required transition | Retry or rendering rule |
+| --- | --- | --- |
+| Explicit send from a selected `ready` session (or after the user creates one from `empty`) | `submitting` | Count one outward `prompt.submit`; block another local send while the turn is active. |
+| Confirmed prompt acceptance or correlated output | `streaming`, then `completed` when the server completes | Never submit the same prompt again. Render the server-owned turn, not a local transcript copy. |
+| Timeout, WebSocket close, app suspension, or process loss after send | `delivery_uncertain` | Do not classify the prompt as rejected and do not retry it automatically. |
+| Restore begins | `restoring` | Reconnect first and wait for `gateway.ready` before application RPC. Keep the uncertainty notice and draft visible. |
+| History shows the prompt and status is `running`/`streaming` | `streaming` | The server turn wins; resume rendering and do not resend. |
+| History shows the prompt and status is `completed` | `completed` | Render completion and do not resend. |
+| History shows the prompt absent and status is `idle` | `ready` | Preserve the draft and require an explicit user choice before one resend. |
+| History or status remains unknown/pending | `delivery_uncertain` or `restoring` | Wait for more evidence. Unknown is never converted to rejection, success, or permission to resend. |
+| Confirmed `prompt.submit` rejection | `failed` | Preserve the draft and permit only a later explicit retry. |
+
+### Retry and idempotency rules
+
+- Only idempotent reads may retry automatically: `session.resume`, `session.history`, `session.status`, and `model.options`.
+- `prompt.submit`, `session.create`, and `session.interrupt` are never automatically retried. A restore barrier must complete before any resend decision.
+- A resend is valid only when restored history says the prompt is absent, restored status says the turn is idle, and the user confirms. Use a new local request marker and perform one explicit resend. If that resend becomes uncertain, return to restore; never issue an automatic third submission.
+- A duplicate send while `submitting` or `streaming` is blocked locally and does not reach Hermes. A known rejection does not authorize an automatic retry.
+- `session.interrupt` enters `interrupting`. Mark it `completed` only after a confirmed interrupt result or restored server state that proves the turn stopped. If restore shows the turn still running, return to `streaming`; do not fabricate a stop result.
+- Sign-out clears the selected session, suppresses reconnect, and moves the view to `empty`/`offline` while preserving the draft. An explicit later sign-in may start a new restore.
+- An incompatible restore result or unknown interactive event fails closed. It must not become an approval, clarification, retry permission, or new session workaround.
+
+The deterministic C-06 fixture in `contracts/fixtures/uncertain-delivery/` freezes this matrix with synthetic markers only. It also covers the pending-evidence and keep-draft paths. The fixture is protocol evidence, not a live Hermes integration test.
+
 ## Approval and clarification boundary
 
 Only these interactive flows are supported:

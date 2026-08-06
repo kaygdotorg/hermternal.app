@@ -1,0 +1,119 @@
+{
+  "schema": "hermternal.uncertain-delivery-baseline.v1",
+  "operation": "C-06",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "metric": "validator_process_duration_ms",
+  "deterministic_fixture": "cases.json",
+  "environment": {
+    "platform": "Darwin-25.5.0-arm64",
+    "python": "3.14.6",
+    "device": "Mac14,6",
+    "build_mode": "N/A"
+  },
+  "threshold": null,
+  "artifacts": {
+    "README.md": {
+      "bytes": 5703,
+      "sha256": "1c6005cc23cf027ee7d3f5f525265e6a1a2e1ba1b9df37171f518b79893adee2"
+    },
+    "cases.json": {
+      "bytes": 34707,
+      "sha256": "18a0224bdf0f358f477c4f7d8175654096ed9caf41ac83e8e1607f6c2df53fdd"
+    },
+    "test_validate.py": {
+      "bytes": 14353,
+      "sha256": "71d148a3f641254b6972586e864e21b82208785f69b9eeb7df779a8624cbd7aa"
+    }
+  },
+  "artifact_manifest_sha256": "f6427e76a133bbf8d47d9c4a8ffa820b2c7cbb677833908e5c33543bd338a952",
+  "normal": {
+    "command": "python3 contracts/fixtures/uncertain-delivery/validate.py",
+    "repetitions": 30,
+    "samples_ms": [
+      60.387416,
+      59.177792,
+      58.148375,
+      58.735417,
+      59.495125,
+      59.488917,
+      58.112667,
+      61.956542,
+      59.835667,
+      60.292084,
+      57.78675,
+      57.556375,
+      61.314708,
+      58.450792,
+      59.921875,
+      58.737959,
+      67.14775,
+      60.112042,
+      55.39575,
+      59.011875,
+      62.849125,
+      59.629333,
+      60.715166,
+      59.696667,
+      60.668417,
+      59.83025,
+      59.870292,
+      59.957917,
+      60.381583,
+      58.890667
+    ],
+    "distribution": {
+      "count": 30,
+      "minimum_ms": 55.39575,
+      "maximum_ms": 67.14775,
+      "mean_ms": 59.785177,
+      "median_ms": 59.763458,
+      "p95_ms": 62.849125
+    }
+  },
+  "optimized": {
+    "command": "python3 -O contracts/fixtures/uncertain-delivery/validate.py",
+    "repetitions": 30,
+    "samples_ms": [
+      59.642792,
+      59.991958,
+      60.33775,
+      63.966625,
+      60.153209,
+      57.183667,
+      59.12625,
+      60.701833,
+      60.527083,
+      58.559083,
+      61.547709,
+      60.70575,
+      59.670291,
+      63.156167,
+      59.888458,
+      59.330291,
+      60.558917,
+      58.1515,
+      59.554667,
+      61.598709,
+      59.536375,
+      59.313916,
+      58.544583,
+      59.53725,
+      59.05525,
+      58.302667,
+      60.202833,
+      61.586,
+      59.025709,
+      60.137583
+    ],
+    "distribution": {
+      "count": 30,
+      "minimum_ms": 57.183667,
+      "maximum_ms": 63.966625,
+      "mean_ms": 59.986496,
+      "median_ms": 59.779375,
+      "p95_ms": 63.156167
+    }
+  }
+}
