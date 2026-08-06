@@ -69,6 +69,8 @@
     }
   },
   "compatibility": {
+    "docker_renderer_scope": "offline_config_only",
+    "docker_runtime_scope": "recorded_root_only_compatibility",
     "stock_dockerfile_build": "passed_existing_image",
     "podman_adapter_change": "replace_one_COPY_link_symbolic_chmod_with_COPY_plain_context",
     "podman_adapter_runtime_content": "pinned_source_context_and_runtime_files_unchanged",
@@ -121,11 +123,7 @@
     "model_turn": false,
     "browser_auth": false,
     "pty": false,
-    "public_ports": false,
-    "teardown_status": 0,
-    "leftover_containers": 0,
-    "leftover_networks": 0,
-    "leftover_volumes": 0
+    "public_ports": false
   },
   "inspection": {
     "container_state_observed": "exited_2",
@@ -143,6 +141,17 @@
     "docker_mount_observation": "type=volume name=hermes-disposable-docker-078ac20d_data destination=/opt/data; no type=bind"
   },
   "teardown": {
+    "executor": "podman",
+    "project": "hermes-disposable-smoke-8c35d19d",
+    "command": ["down", "--volumes", "--remove-orphans"],
+    "status": 0,
+    "leftover_containers": 0,
+    "leftover_networks": 0,
+    "leftover_volumes": 0
+  },
+  "docker_teardown": {
+    "executor": "docker",
+    "project": "hermes-disposable-docker-078ac20d",
     "command": ["down", "--volumes", "--remove-orphans"],
     "status": 0,
     "leftover_containers": 0,

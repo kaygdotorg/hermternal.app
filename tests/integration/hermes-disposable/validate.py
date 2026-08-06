@@ -55,23 +55,38 @@ MAX_ERROR_OUTPUT = 240
 BASELINE_REPETITIONS = 30
 ERROR_CODE = "hermes_disposable_harness_validation_error"
 ARTIFACT_FILES = ("README.md", "cases.json", "test_validate.py")
+# Compose project names and the generated network/volume names must fit the
+# smallest engine-specific identifier boundary used by this fixture. The
+# suffixes are deliberately included in the calculation instead of relying on
+# a renderer to truncate an untrusted identifier after it has been accepted.
+STACK_ID_MAX_LENGTH = 27
+INSTANCE_MAX_LENGTH = 24
+PROJECT_MAX_LENGTH = 54
+RESOURCE_NAME_MAX_LENGTH = 63
+
+EXPECTED_BASELINE_ENVIRONMENT = {
+    "platform": "local-standard-library",
+    "python": "python-3.14",
+}
+PODMAN_SMOKE_PROJECT = "hermes-disposable-smoke-8c35d19d"
+DOCKER_COMPATIBILITY_PROJECT = "hermes-disposable-docker-078ac20d"
 
 # These values are filled after the focused fixture is written and benchmarked.
 # The validator source uses a normalized self-identity to avoid a circular hash.
 PINNED_RETAINED_ARTIFACTS: dict[str, tuple[int, str]] = {
-    "README.md": (9922, "88f64df129f8bcffe5005573b7eaeebcc2b9adf79f5a1b8d898c5209d5c3ad16"),
-    "cases.json": (11331, "d44ea076192e5e391082820b85c4ed3937cef377b57e4a7e8719dcbb01af5475"),
-    "test_validate.py": (19769, "8857de15f79d8f00629a05a273e169301e5bb0df2ec9de647f98b36215a5a787"),
+    "README.md": (10641, "4c1bb3d0aeacf80c8ace0a3f4a7d31243cd8b7437392695f7404ab2635afe0b0"),
+    "cases.json": (11634, "77d7046c5f94863423d1055aecdefb03f46ee6190fb6c594c638e4ca67b006c9"),
+    "test_validate.py": (34229, "0f3294bf1ca44037f5bf42d663ecfc89e025b71869f03befd8c4aa883bc27836"),
 }
-PINNED_VALIDATOR_SOURCE_SHA256 = "e9f189d8d75cbee7b76ab774be5a852e806c7d6610d857bdcaa9e5b1ba25c9e4"
-PINNED_BASELINE_EVIDENCE_SHA256 = "3ecda8c4f9ca1a290166ec06c07415df8f2f3b12420113f9d792139d2fd176f0"
-PINNED_VM_EVIDENCE_SHA256 = "bfe5b680bd77a395c3d64663896f8a5774974e62812626b90fd6e307acb4d4d5"
+PINNED_VALIDATOR_SOURCE_SHA256 = "8305993f538cc8a5dc274730029aa6f689efa463c64dbba5b4e195364e98daf6"
+PINNED_BASELINE_EVIDENCE_SHA256 = "8d7cc41a015d1080c8e850046d094dd801ab3bbb3edb33e435c9d3a3885ebe3c"
+PINNED_VM_EVIDENCE_SHA256 = "78d10c552df6dfd63ff97e8013b88b4b755710ccead74265fa1f1923fd0ad589"
 VALIDATOR_IDENTITY_RE = re.compile(r'(?m)^PINNED_VALIDATOR_SOURCE_SHA256 = "[^"]+"$')
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
-STACK_ID_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+STACK_ID_RE = re.compile(r"[a-z][a-z0-9-]{0,26}")
 INSTANCE_RE = re.compile(r"[a-z][a-z0-9-]{0,23}")
-PROJECT_RE = re.compile(r"hermes-disposable-[a-z][a-z0-9-]{0,31}-[0-9a-f]{8}")
+PROJECT_RE = re.compile(r"hermes-disposable-[a-z][a-z0-9-]{0,26}-[0-9a-f]{8}")
 
 ROOT_KEYS = (
     "schema",
@@ -90,7 +105,7 @@ ROOT_KEYS = (
     "cases",
 )
 EXECUTOR_POLICY_KEYS = ("default", "podman", "docker")
-EXECUTOR_DETAIL_KEYS = ("mode", "compose_command", "storage", "network", "cgroup", "smoke")
+EXECUTOR_DETAIL_KEYS = ("mode", "compose_command", "storage", "network", "cgroup", "smoke", "renderer_scope", "runtime_observation")
 STACK_POLICY_KEYS = (
     "compose_format",
     "service_name",
@@ -140,7 +155,10 @@ BASELINE_RUN_KEYS = ("mode", "command", "repetitions", "distribution", "trace")
 BASELINE_DISTRIBUTION_KEYS = ("min_ms", "p50_ms", "p95_ms", "p99_ms", "max_ms", "mean_ms")
 BASELINE_ENVIRONMENT_KEYS = ("platform", "python")
 BASELINE_ARTIFACT_KEYS = ("files", "bytes", "sha256")
-BASELINE_EVIDENCE_KEYS = ("schema", "validator", "fixture", "metric", "runs", "threshold")
+# Pin the complete baseline record. A digest over a hand-picked subset would
+# let an attacker mutate environment, artifact, or future evidence fields while
+# recomputing only the external anchor.
+BASELINE_EVIDENCE_KEYS = BASELINE_ROOT_KEYS
 VM_EVIDENCE_KEYS = (
     "schema",
     "operation",
@@ -156,6 +174,7 @@ VM_EVIDENCE_KEYS = (
     "docker_runtime",
     "inspection",
     "teardown",
+    "docker_teardown",
     "status",
     "threshold",
     "redacted",
@@ -179,6 +198,8 @@ VM_PROVENANCE_KEYS = ("compose", "raw_observations")
 VM_COMPOSE_PROVENANCE_KEYS = ("podman", "docker")
 VM_RAW_OBSERVATION_KEYS = ("podman", "docker")
 VM_COMPATIBILITY_KEYS = (
+    "docker_renderer_scope",
+    "docker_runtime_scope",
     "stock_dockerfile_build",
     "podman_adapter_change",
     "podman_adapter_runtime_content",
@@ -232,10 +253,6 @@ VM_DOCKER_RUNTIME_KEYS = (
     "browser_auth",
     "pty",
     "public_ports",
-    "teardown_status",
-    "leftover_containers",
-    "leftover_networks",
-    "leftover_volumes",
 )
 VM_INSPECTION_KEYS = (
     "container_state_observed",
@@ -247,10 +264,27 @@ VM_INSPECTION_KEYS = (
     "docker_mount_observation",
 )
 VM_DOCKER_MOUNT_KEYS = ("type", "name", "destination")
-VM_TEARDOWN_KEYS = ("command", "status", "leftover_containers", "leftover_networks", "leftover_volumes")
+VM_TEARDOWN_KEYS = (
+    "executor",
+    "project",
+    "command",
+    "status",
+    "leftover_containers",
+    "leftover_networks",
+    "leftover_volumes",
+)
 BASELINE_COMMANDS = {
     "normal": "python3 tests/integration/hermes-disposable/validate.py",
     "optimized": "python3 -O tests/integration/hermes-disposable/validate.py",
+}
+# The baseline is allowed to name only these exact repository-local benchmark
+# artifacts. This is intentionally value-scoped; it does not disable path,
+# filename, or host redaction for arbitrary baseline mutations.
+APPROVED_BENCHMARK_FIELDS: dict[str, frozenset[str]] = {
+    "validator": frozenset({"tests/integration/hermes-disposable/validate.py"}),
+    "fixture": frozenset({"tests/integration/hermes-disposable/cases.json"}),
+    "command": frozenset(BASELINE_COMMANDS.values()),
+    "files": frozenset(ARTIFACT_FILES),
 }
 
 EXPECTED_EXECUTOR_POLICY = {
@@ -262,6 +296,8 @@ EXPECTED_EXECUTOR_POLICY = {
         "network": "netavark",
         "cgroup": "v2",
         "smoke": "one_live_no_provider_stack",
+        "renderer_scope": "offline_renderer",
+        "runtime_observation": "authorized_rootless_vm_smoke",
     },
     "docker": {
         "mode": "compatibility_config_only",
@@ -269,7 +305,9 @@ EXPECTED_EXECUTOR_POLICY = {
         "storage": "engine_selected",
         "network": "engine_selected",
         "cgroup": "engine_selected",
-        "smoke": "not_run",
+        "smoke": "recorded_root_compatibility_observation",
+        "renderer_scope": "offline_config_only",
+        "runtime_observation": "recorded_root_only_compatibility",
     },
 }
 EXPECTED_STACK_POLICY = {
@@ -353,7 +391,9 @@ SENSITIVE_NORMALIZED_KEYS = frozenset(
         "authorization",
         "bearer",
         "accesskey",
+        "accesskeyvalue",
         "apikey",
+        "apikeyvalue",
         "cookie",
         "cookievalue",
         "clientsecret",
@@ -376,13 +416,31 @@ SENSITIVE_NORMALIZED_KEYS = frozenset(
         "filepath",
     }
 )
-SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?P<key>(?:password|passphrase|token|secret|authorization|bearer|"
-    r"api[_ .-]*key|access[_ .-]*key|cookie(?:[_ .-]*(?:value|id))?|credential|credentials|host(?:name)?|"
-    r"(?:private[_ .-]*)?address|session(?:[_ .-]*(?:id|token|value))?|"
+SENSITIVE_KEY_PATTERN = (
+    r"(?:password|passphrase|token|secret|authorization|bearer|"
+    r"api[_ .-]*key(?:[_ .-]*value)?|access[_ .-]*key(?:[_ .-]*value)?|"
+    r"cookie(?:[_ .-]*(?:value|id))?|credential|credentials|"
+    r"host[_ .-]*(?:name)?|(?:private[_ .-]*)?address|"
+    r"session(?:[_ .-]*(?:id|token|value))?|"
     r"ticket(?:[_ .-]*(?:id|value|fragment))?|profile[_ .-]*(?:path|bind)|"
-    r"user[_ .-]*data|file(?:name|path))\s*[:=]\s*)"
+    r"user[_ .-]*data|file(?:name|path))"
+)
+# Handle JSON/Python-style quoted values as one unit. This prevents a value such
+# as `api_key='top confidential'` from leaking the trailing words after the
+# first whitespace-delimited token.
+QUOTED_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<key>{SENSITIVE_KEY_PATTERN})(?:[\"'])?\s*[:=]\s*"
+    r"(?P<quote>[\"'])(?P<value>(?:\\.|(?!(?P=quote)).)*)(?P=quote)",
+    re.IGNORECASE,
+)
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<key>{SENSITIVE_KEY_PATTERN})(?:[\"'])?\s*[:=]\s*"
     r"(?!Bearer\b|Basic\b)(?P<value>[^\s,}\]]+)",
+    re.IGNORECASE,
+)
+DIGEST_ASSIGNMENT_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<key>[A-Za-z][A-Za-z0-9_.-]*)(?:[\"'])?\s*[:=]\s*"
+    r"(?P<quote>[\"']?)(?:sha256:)?(?:[0-9a-f]{40}|[0-9a-f]{64})(?P=quote)(?![0-9a-f])",
     re.IGNORECASE,
 )
 # Redaction accepts only exact digests in their known fixture fields. A
@@ -398,11 +456,13 @@ APPROVED_DIGEST_FIELDS: dict[str, frozenset[str]] = {
     "repo_digest": frozenset({"sha256:076b22d5d78d978d8b0dfd4cef84fb3cb0b817feea4003b6085777e7c5e7737a"}),
     "compatibility_adapter_sha256": frozenset({"4b37f4f6fcf00394f4292810772d96ed28141ff1ce44e24116f347347d977d03"}),
     "docker_image_id": frozenset({"sha256:a65da985b4f76e6488872bc2263329f19a01806e9a541cd22d316589b5dc0040"}),
-    "sha256": frozenset({"fb7073fc23e48f913ac851cdc1dc97c246dc70155d86b6af05d63f78be6a9254"}),
+    "sha256": frozenset({"8344076d97284b60bbc6df66797dd4f393405cf49fb2aa5eb3efc130e09156f3"}),
 }
 APPROVED_STRUCTURAL_STRINGS = frozenset(
     {
         "/opt/data",
+        "Debian GNU/Linux",
+        "Docker renderer/config is offline-only; the separately recorded root-only compatibility observation is not a second readiness or release-proof stack.",
         "/tmp:size=64m,mode=1777",
         "/run:size=16m,mode=755",
         "mount=type=volume name=hermes-disposable-docker-078ac20d_data destination=/opt/data",
@@ -411,7 +471,7 @@ APPROVED_STRUCTURAL_STRINGS = frozenset(
         "compose_config=pass bytes=958 ports=none host_profile_bind=none host_network=none",
     }
 )
-DIGEST_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64}|sha256:[0-9a-f]{64})")
+DIGEST_RE = re.compile(r"(?:sha256:[0-9a-f]{64}|[0-9a-f]{64}|[0-9a-f]{40})", re.IGNORECASE)
 URL_RE = re.compile(r"\b(?:https?|ssh|file)://[^\s,}\]]+", re.IGNORECASE)
 DATA_URL_RE = re.compile(r"\bdata:[^\s,}\]]+,[^\s,}\]]+", re.IGNORECASE)
 HOSTNAME_RE = re.compile(
@@ -419,12 +479,19 @@ HOSTNAME_RE = re.compile(
     r"[a-z]{2,63}(?![A-Za-z0-9.-])",
     re.IGNORECASE,
 )
+SINGLE_LABEL_HOST_CONTEXT_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:host(?:name)?|server|address)\b\s*(?:[:=]\s*|\s+)"
+    r"(?:localhost|[a-z0-9-]+)(?![A-Za-z0-9.-])",
+    re.IGNORECASE,
+)
 IPV4_RE = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9])")
 IPV6_RE = re.compile(r"(?<![A-Za-z0-9])[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?![A-Za-z0-9])", re.IGNORECASE)
 ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9])(?:/[^\s,}\]]+|[A-Za-z]:[\\/][^\s,}\]]+)")
+RELATIVE_PATH_RE = re.compile(r"(?<![A-Za-z0-9])(?:\.\.?/|(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)(?![A-Za-z0-9])")
 FILENAME_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9_.-]+\.(?:json|ya?ml|txt|py|log|env|pem|key)(?![A-Za-z0-9])", re.IGNORECASE)
 BASE64_RE = re.compile(r"(?<![A-Za-z0-9+/=_])(?:[A-Za-z0-9+/]{20,}={0,2})(?![A-Za-z0-9+/=_-])")
 SECRET_VALUE_PATTERNS = (
+    DIGEST_RE,
     DATA_URL_RE,
     URL_RE,
     re.compile(r"\b(?:Bearer|Basic)\s+[^\s,}\]]+", re.IGNORECASE),
@@ -432,7 +499,9 @@ SECRET_VALUE_PATTERNS = (
     IPV4_RE,
     IPV6_RE,
     HOSTNAME_RE,
+    SINGLE_LABEL_HOST_CONTEXT_RE,
     ABSOLUTE_PATH_RE,
+    RELATIVE_PATH_RE,
     FILENAME_RE,
     BASE64_RE,
 )
@@ -479,10 +548,12 @@ def compact_error(message: object) -> str:
         safe_key = match.group("key").replace(".", "_")
         return f"{safe_key}[REDACTED]"
 
-    # Apply structured assignments first. Otherwise a dotted key such as
-    # `access.key=...` is mistaken for a hostname and its value can survive
-    # the hostname replacement.
+    # Apply quoted assignments before bare assignments and generic patterns.
+    # Otherwise JSON/Python values can leak quoted text or a dotted key can be
+    # mistaken for a hostname before its secret value is removed.
+    redacted = QUOTED_SENSITIVE_ASSIGNMENT_RE.sub(redact_assignment, redacted)
     redacted = SENSITIVE_ASSIGNMENT_RE.sub(redact_assignment, redacted)
+    redacted = DIGEST_ASSIGNMENT_RE.sub("[REDACTED]", redacted)
     for pattern in SECRET_VALUE_PATTERNS:
         redacted = pattern.sub("[REDACTED]", redacted)
 
@@ -642,22 +713,27 @@ def _walk_redaction(value: Any, *, allow_benchmark_paths: bool = False, field_na
     if type(value) is str:
         if value in APPROVED_STRUCTURAL_STRINGS:
             return
+        if value in APPROVED_BENCHMARK_FIELDS.get(field_name or "", frozenset()):
+            return
         if DIGEST_RE.fullmatch(value):
             require(value in APPROVED_DIGEST_FIELDS.get(field_name or "", frozenset()), "unapproved digest-shaped fixture value is not allowed")
             return
-        for pattern in SECRET_VALUE_PATTERNS:
-            if allow_benchmark_paths and pattern in {ABSOLUTE_PATH_RE, FILENAME_RE, HOSTNAME_RE}:
-                continue
-            require(pattern.search(value) is None, "secret-shaped fixture value is not allowed")
+        # A pinned digest is safe only as the complete value of its approved
+        # field. Substrings and assignment payloads are untrusted, even when a
+        # key happens to be named `sha256`.
+        require(DIGEST_RE.search(value) is None, "digest-shaped fixture value is not allowed")
+        require(QUOTED_SENSITIVE_ASSIGNMENT_RE.search(value) is None, "credential-shaped fixture value is not allowed")
         require(SENSITIVE_ASSIGNMENT_RE.search(value) is None, "credential-shaped fixture value is not allowed")
+        for pattern in SECRET_VALUE_PATTERNS:
+            require(pattern.search(value) is None, "secret-shaped fixture value is not allowed")
 
 
 def validate_redaction(value: Any, *, allow_benchmark_paths: bool = False) -> None:
     """Reject retained credentials, hosts, URLs, and user-data shapes.
 
-    Benchmark metadata may name the checked-in validator and fixture files; that
-    narrow exception does not permit hostnames, URLs, credentials, or runtime
-    paths in the observed trace.
+    ``allow_benchmark_paths`` is retained for compatibility with older callers,
+    but it now permits only exact checked-in benchmark strings. It never disables
+    path, filename, host, or digest checks for arbitrary values.
     """
 
     _walk_redaction(value, allow_benchmark_paths=allow_benchmark_paths)
@@ -726,8 +802,8 @@ def validate_docker_mounts(mounts: Any) -> None:
     )
 
 
-def _slug(value: Any, pattern: re.Pattern[str], label: str) -> str:
-    text = _text(value, label, max_length=32)
+def _slug(value: Any, pattern: re.Pattern[str], label: str, *, max_length: int) -> str:
+    text = _text(value, label, max_length=max_length)
     require(pattern.fullmatch(text) is not None, f"{label} is not a safe identifier")
     require("--" not in text and ".." not in text, f"{label} contains an unsafe separator")
     return text
@@ -757,7 +833,12 @@ def _lane_environment(lane: str, project: str) -> list[tuple[str, str]]:
         ("HERMES_DISABLE_LAZY_INSTALLS", "1"),
     ]
     if lane == "no-provider":
-        environment.append(("HERMES_DASHBOARD", "0"))
+        environment.extend(
+            [
+                ("HERMES_DASHBOARD", "0"),
+                ("HERMES_PROVIDER_AUTO_DISCOVERY", "0"),
+            ]
+        )
     elif lane == "browser":
         username, password = _browser_values(project)
         environment.extend(
@@ -790,13 +871,16 @@ def render_stack(
 ) -> RenderedStack:
     """Render one safe stack without reading host environment or provider state."""
 
-    stack_id = _slug(stack_id, STACK_ID_RE, "stack id")
-    instance = _slug(instance, INSTANCE_RE, "stack instance")
+    stack_id = _slug(stack_id, STACK_ID_RE, "stack id", max_length=STACK_ID_MAX_LENGTH)
+    instance = _slug(instance, INSTANCE_RE, "stack instance", max_length=INSTANCE_MAX_LENGTH)
     lane = _enum(lane, frozenset({"no-provider", "browser", "model"}), "lane")
     executor = _enum(executor, frozenset({"podman", "docker"}), "executor")
     project = _project_name(stack_id, instance)
     network = f"{project}_internal"
     volume = f"{project}_data"
+    require(len(project) <= PROJECT_MAX_LENGTH, "generated project exceeds the engine name bound")
+    require(len(network) <= RESOURCE_NAME_MAX_LENGTH, "generated network exceeds the engine name bound")
+    require(len(volume) <= RESOURCE_NAME_MAX_LENGTH, "generated volume exceeds the engine name bound")
     log_driver = "k8s-file" if executor == "podman" else "json-file"
     environment = _lane_environment(lane, project)
     lines = [
@@ -854,8 +938,11 @@ def validate_rendered_stack(result: RenderedStack) -> None:
     """Check the canonical render for all no-host and entrypoint invariants."""
 
     require(type(result.project) is str and PROJECT_RE.fullmatch(result.project) is not None, "project name is not canonical")
+    require(len(result.project) <= PROJECT_MAX_LENGTH, "project name exceeds the engine name bound")
     require(result.network == f"{result.project}_internal", "network name is not canonical")
     require(result.volume == f"{result.project}_data", "volume name is not canonical")
+    require(len(result.network) <= RESOURCE_NAME_MAX_LENGTH, "network name exceeds the engine name bound")
+    require(len(result.volume) <= RESOURCE_NAME_MAX_LENGTH, "volume name exceeds the engine name bound")
     require(result.executor in {"podman", "docker"}, "executor is not supported")
     require(result.lane in {"no-provider", "browser", "model"}, "lane is not supported")
     text = result.compose
@@ -885,7 +972,9 @@ def validate_rendered_stack(result: RenderedStack) -> None:
         require('      driver: "k8s-file"' in text, "Podman log driver changed")
         require('        max-file:' not in text, "Podman lane must not assume Docker max-file semantics")
     if result.lane == "no-provider":
-        require("HERMES_PROVIDER" not in text and "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" not in text, "no-provider lane contains runtime credentials")
+        require('      HERMES_PROVIDER_AUTO_DISCOVERY: "0"' in text, "no-provider lane must disable provider auto-discovery")
+        require('      HERMES_PROVIDER: ' not in text, "no-provider lane contains a provider marker")
+        require("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" not in text, "no-provider lane contains runtime credentials")
     elif result.lane == "browser":
         require('HERMES_DASHBOARD: "1"' in text, "browser lane dashboard is not enabled")
         require("HERMES_DASHBOARD_BASIC_AUTH_USERNAME" in text and "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" in text, "browser lane auth is not generated")
@@ -901,7 +990,7 @@ def compose_command(executor: str, project: str, compose_path: Path, verb: str, 
     """Build an argv tuple for one explicitly selected Compose implementation."""
 
     executor = _enum(executor, frozenset({"podman", "docker"}), "executor")
-    project = _slug(project, PROJECT_RE, "project")
+    project = _slug(project, PROJECT_RE, "project", max_length=PROJECT_MAX_LENGTH)
     verb = _enum(verb, frozenset({"config", "up", "down"}), "Compose operation")
     require(isinstance(compose_path, Path) and compose_path.name.endswith((".yml", ".yaml")), "Compose path is not a YAML file")
     require(all(type(argument) is str and "\x00" not in argument for argument in arguments), "Compose argument is invalid")
@@ -914,7 +1003,7 @@ def compose_command(executor: str, project: str, compose_path: Path, verb: str, 
 def validate_teardown_target(expected_project: str, target_project: str) -> None:
     """Refuse teardown unless the caller names the exact generated project."""
 
-    _slug(expected_project, PROJECT_RE, "expected project")
+    _slug(expected_project, PROJECT_RE, "expected project", max_length=PROJECT_MAX_LENGTH)
     require(type(target_project) is str and target_project == expected_project, "teardown project is not recognized")
 
 
@@ -1244,6 +1333,8 @@ def validate_vm_evidence(
     strict_equal(
         compatibility,
         {
+            "docker_renderer_scope": "offline_config_only",
+            "docker_runtime_scope": "recorded_root_only_compatibility",
             "stock_dockerfile_build": "passed_existing_image",
             "podman_adapter_change": "replace_one_COPY_link_symbolic_chmod_with_COPY_plain_context",
             "podman_adapter_runtime_content": "pinned_source_context_and_runtime_files_unchanged",
@@ -1315,10 +1406,6 @@ def validate_vm_evidence(
             "browser_auth": False,
             "pty": False,
             "public_ports": False,
-            "teardown_status": 0,
-            "leftover_containers": 0,
-            "leftover_networks": 0,
-            "leftover_volumes": 0,
         },
         "VM evidence Docker runtime",
     )
@@ -1349,6 +1436,8 @@ def validate_vm_evidence(
     strict_equal(
         teardown,
         {
+            "executor": "podman",
+            "project": PODMAN_SMOKE_PROJECT,
             "command": ["down", "--volumes", "--remove-orphans"],
             "status": 0,
             "leftover_containers": 0,
@@ -1356,6 +1445,20 @@ def validate_vm_evidence(
             "leftover_volumes": 0,
         },
         "VM evidence Podman teardown",
+    )
+    docker_teardown = strict_keys(record["docker_teardown"], VM_TEARDOWN_KEYS, "VM evidence Docker teardown")
+    strict_equal(
+        docker_teardown,
+        {
+            "executor": "docker",
+            "project": DOCKER_COMPATIBILITY_PROJECT,
+            "command": ["down", "--volumes", "--remove-orphans"],
+            "status": 0,
+            "leftover_containers": 0,
+            "leftover_networks": 0,
+            "leftover_volumes": 0,
+        },
+        "VM evidence Docker teardown",
     )
     require(record["status"] == "blocked_readiness", "VM evidence cannot claim release proof")
     require(record["threshold"] is None, "VM evidence must not invent a threshold")
@@ -1374,8 +1477,7 @@ def validate_baseline(baseline: Any, root: Path = ROOT, anchor_path: Path = BASE
     require(record["fixture"] == "tests/integration/hermes-disposable/cases.json", "baseline fixture path changed")
     require(record["metric"] == "validator_duration_ms", "baseline metric changed")
     environment = strict_keys(record["environment"], BASELINE_ENVIRONMENT_KEYS, "baseline.environment")
-    _text(environment["platform"], "baseline environment platform", max_length=160)
-    _text(environment["python"], "baseline environment python", max_length=64)
+    strict_equal(environment, EXPECTED_BASELINE_ENVIRONMENT, "baseline environment")
     runs = record["runs"]
     require(type(runs) is list and len(runs) == 2, "baseline must contain normal and optimized runs")
     seen_modes: set[str] = set()
@@ -1421,7 +1523,7 @@ def validate_all(
     validate_redaction(document)
     validate_cases_document(document)
     baseline = load_json(baseline_path)
-    validate_redaction(baseline, allow_benchmark_paths=True)
+    validate_redaction(baseline)
     validate_baseline(baseline, root, anchor_path)
     evidence = load_json(evidence_path)
     validate_redaction(evidence)
@@ -1497,7 +1599,7 @@ def main(argv: list[str] | None = None) -> int:
             artifact_bytes = 0
         else:
             baseline = load_json(args.baseline)
-            validate_redaction(baseline, allow_benchmark_paths=True)
+            validate_redaction(baseline)
             validate_baseline(baseline, ROOT, args.baseline_anchor)
             case_count = len(document["cases"])
             artifact_bytes = baseline["artifact"]["bytes"]

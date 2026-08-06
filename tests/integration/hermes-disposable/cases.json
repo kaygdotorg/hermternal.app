@@ -17,7 +17,9 @@
       "storage": "overlay",
       "network": "netavark",
       "cgroup": "v2",
-      "smoke": "one_live_no_provider_stack"
+      "smoke": "one_live_no_provider_stack",
+      "renderer_scope": "offline_renderer",
+      "runtime_observation": "authorized_rootless_vm_smoke"
     },
     "docker": {
       "mode": "compatibility_config_only",
@@ -25,7 +27,9 @@
       "storage": "engine_selected",
       "network": "engine_selected",
       "cgroup": "engine_selected",
-      "smoke": "not_run"
+      "smoke": "recorded_root_compatibility_observation",
+      "renderer_scope": "offline_config_only",
+      "runtime_observation": "recorded_root_only_compatibility"
     }
   },
   "stack_policy": {
@@ -152,7 +156,7 @@
         "logs_bounded": true,
         "live_claim": false
       },
-      "notes": "Docker is retained as a config-only compatibility lane and does not start a second smoke stack."
+      "notes": "Docker renderer/config is offline-only; the separately recorded root-only compatibility observation is not a second readiness or release-proof stack."
     },
     {
       "id": "render-browser-disposable",

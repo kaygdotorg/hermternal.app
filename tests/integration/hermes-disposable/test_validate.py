@@ -9,6 +9,7 @@ or a network service. The VM smoke evidence is a separate one-stack lane.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -62,6 +63,102 @@ class HermesDisposableHarnessTests(unittest.TestCase):
                 self.assertNotIn("Traceback", completed.stdout + completed.stderr)
                 self.assertNotIn("usage:", completed.stdout.lower())
 
+    def _assert_direct_loader_failure(self, content: bytes) -> None:
+        """Exercise the bounded loader directly in normal and optimized Python."""
+
+        with tempfile.NamedTemporaryFile(suffix=".json") as handle:
+            handle.write(content)
+            handle.flush()
+            with self.assertRaises((validate.FixtureJSONError, validate.ValidationError)):
+                validate.load_json(Path(handle.name))
+            script = (
+                "import sys\n"
+                "from pathlib import Path\n"
+                "sys.path.insert(0, sys.argv[2])\n"
+                "import validate\n"
+                "try:\n"
+                "    validate.load_json(Path(sys.argv[1]))\n"
+                "except (validate.FixtureJSONError, validate.ValidationError):\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(1)\n"
+            )
+            for optimized in (False, True):
+                with self.subTest(optimized=optimized):
+                    command = [sys.executable]
+                    if optimized:
+                        command.append("-O")
+                    command.extend(["-c", script, handle.name, str(FIXTURE_DIR)])
+                    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    self.assertEqual(completed.stderr, "")
+
+    def _assert_vm_cli_failure(self, evidence: dict[str, object], *, recompute_anchor: bool = True) -> None:
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as evidence_handle:
+                    json.dump(evidence, evidence_handle, ensure_ascii=False, indent=2)
+                    evidence_handle.flush()
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt") as anchor_handle:
+                        if recompute_anchor:
+                            digest = hashlib.sha256(
+                                validate._canonical_vm_evidence_bytes(evidence)
+                            ).hexdigest()
+                            anchor_handle.write(digest + "\n")
+                        else:
+                            anchor_handle.write(validate.PINNED_VM_EVIDENCE_SHA256 + "\n")
+                        anchor_handle.flush()
+                        command = [sys.executable]
+                        if optimized:
+                            command.append("-O")
+                        command.extend(
+                            [
+                                str(FIXTURE_DIR / "validate.py"),
+                                "--vm-evidence",
+                                evidence_handle.name,
+                                "--vm-evidence-anchor",
+                                anchor_handle.name,
+                            ]
+                        )
+                        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+                        self.assertEqual(completed.returncode, 2)
+                        self.assertEqual(completed.stderr, "")
+                        payload = json.loads(completed.stdout)
+                        self.assertFalse(payload["ok"])
+                        self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                        self.assertNotIn("Traceback", completed.stdout)
+
+    def _assert_baseline_cli_failure(self, baseline: dict[str, object], *, anchor: str | None = None) -> None:
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as baseline_handle:
+                    json.dump(baseline, baseline_handle, ensure_ascii=False, indent=2)
+                    baseline_handle.flush()
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt") as anchor_handle:
+                        digest = anchor or hashlib.sha256(
+                            validate._canonical_baseline_bytes(baseline)
+                        ).hexdigest()
+                        anchor_handle.write(digest + "\n")
+                        anchor_handle.flush()
+                        command = [sys.executable]
+                        if optimized:
+                            command.append("-O")
+                        command.extend(
+                            [
+                                str(FIXTURE_DIR / "validate.py"),
+                                "--baseline",
+                                baseline_handle.name,
+                                "--baseline-anchor",
+                                anchor_handle.name,
+                            ]
+                        )
+                        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+                        self.assertEqual(completed.returncode, 2)
+                        self.assertEqual(completed.stderr, "")
+                        payload = json.loads(completed.stdout)
+                        self.assertFalse(payload["ok"])
+                        self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                        self.assertNotIn("Traceback", completed.stdout)
+
     def test_checked_in_inventory_is_synthetic_and_blocked(self) -> None:
         self.assertEqual(tuple(self.cases), validate.EXPECTED_CASE_IDS)
         self.assertEqual(len(self.cases), 11)
@@ -72,16 +169,23 @@ class HermesDisposableHarnessTests(unittest.TestCase):
         self.assertFalse(self.document["compatible"])
         self.assertEqual(self.document["proof_status"], "not_run")
         self.assertEqual(self.document["executor_policy"]["default"], "podman")
-        self.assertEqual(self.document["executor_policy"]["docker"]["smoke"], "not_run")
+        self.assertEqual(self.document["executor_policy"]["docker"]["renderer_scope"], "offline_config_only")
+        self.assertEqual(self.document["executor_policy"]["docker"]["runtime_observation"], "recorded_root_only_compatibility")
 
     def test_vm_evidence_is_blocked_and_records_both_executor_results(self) -> None:
         self.assertEqual(self.evidence["status"], "blocked_readiness")
         self.assertEqual(self.evidence["runtime"]["exit_code"], 2)
         self.assertEqual(self.evidence["docker_runtime"]["exit_code"], 126)
-        self.assertEqual(self.evidence["docker_runtime"]["teardown_status"], 0)
-        self.assertEqual(self.evidence["docker_runtime"]["leftover_containers"], 0)
-        self.assertEqual(self.evidence["docker_runtime"]["leftover_networks"], 0)
-        self.assertEqual(self.evidence["docker_runtime"]["leftover_volumes"], 0)
+        self.assertEqual(self.evidence["teardown"]["executor"], "podman")
+        self.assertEqual(self.evidence["teardown"]["project"], validate.PODMAN_SMOKE_PROJECT)
+        self.assertEqual(self.evidence["docker_teardown"]["executor"], "docker")
+        self.assertEqual(self.evidence["docker_teardown"]["project"], validate.DOCKER_COMPATIBILITY_PROJECT)
+        for teardown in (self.evidence["teardown"], self.evidence["docker_teardown"]):
+            self.assertEqual(teardown["command"], ["down", "--volumes", "--remove-orphans"])
+            self.assertEqual(teardown["status"], 0)
+            self.assertEqual(teardown["leftover_containers"], 0)
+            self.assertEqual(teardown["leftover_networks"], 0)
+            self.assertEqual(teardown["leftover_volumes"], 0)
         self.assertEqual(self.evidence["provenance"]["compose"]["podman"]["config_status"], "pass")
         self.assertEqual(self.evidence["provenance"]["compose"]["docker"]["config_status"], "pass")
         self.assertIsNone(self.evidence["threshold"])
@@ -128,7 +232,8 @@ class HermesDisposableHarnessTests(unittest.TestCase):
         no_provider = validate.render_stack("lanes", instance="none", lane="no-provider")
         browser = validate.render_stack("lanes", instance="browser", lane="browser")
         model = validate.render_stack("lanes", instance="model", lane="model")
-        self.assertNotIn("HERMES_PROVIDER", no_provider.compose)
+        self.assertIn('HERMES_PROVIDER_AUTO_DISCOVERY: "0"', no_provider.compose)
+        self.assertNotIn('HERMES_PROVIDER: "', no_provider.compose)
         self.assertNotIn("BASIC_AUTH_PASSWORD", no_provider.compose)
         self.assertIn("HERMES_DASHBOARD_BASIC_AUTH_USERNAME", browser.compose)
         self.assertIn("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", browser.compose)
@@ -137,6 +242,35 @@ class HermesDisposableHarnessTests(unittest.TestCase):
         self.assertIn('HERMES_PROVIDER: "synthetic-local"', model.compose)
         self.assertIn('HERMES_PROVIDER_AUTO_DISCOVERY: "0"', model.compose)
         self.assertNotIn("API_SERVER_KEY", model.compose)
+
+    def test_no_provider_auto_discovery_is_explicitly_disabled_in_normal_and_optimized_cli(self) -> None:
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                with tempfile.NamedTemporaryFile() as output:
+                    command = [sys.executable]
+                    if optimized:
+                        command.append("-O")
+                    command.extend(
+                        [
+                            str(FIXTURE_DIR / "validate.py"),
+                            "--skip-baseline",
+                            "--render",
+                            output.name,
+                            "--stack-id",
+                            "policy",
+                            "--instance",
+                            "none",
+                            "--lane",
+                            "no-provider",
+                            "--executor",
+                            "podman",
+                        ]
+                    )
+                    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    rendered = Path(output.name).read_text(encoding="utf-8")
+                    self.assertIn('HERMES_PROVIDER_AUTO_DISCOVERY: "0"', rendered)
+                    self.assertNotIn('HERMES_PROVIDER: "', rendered)
 
     def test_project_network_volume_names_are_unique_for_concurrent_instances(self) -> None:
         first = validate.render_stack("parallel", instance="first")
@@ -148,6 +282,50 @@ class HermesDisposableHarnessTests(unittest.TestCase):
         self.assertIn(first.volume, first.compose)
         self.assertIn(second.network, second.compose)
         self.assertIn(second.volume, second.compose)
+
+    def test_long_identifiers_fit_project_network_volume_bounds_in_normal_and_optimized_cli(self) -> None:
+        long_stack_id = "a" + ("b" * (validate.STACK_ID_MAX_LENGTH - 1))
+        long_instance = "i" + ("j" * (validate.INSTANCE_MAX_LENGTH - 1))
+        self.assertEqual(len(long_stack_id), validate.STACK_ID_MAX_LENGTH)
+        self.assertEqual(len(long_instance), validate.INSTANCE_MAX_LENGTH)
+        for lane, executor in (("no-provider", "docker"), ("browser", "podman")):
+            rendered = validate.render_stack(long_stack_id, instance=long_instance, lane=lane, executor=executor)
+            with self.subTest(lane=lane, executor=executor):
+                self.assertLessEqual(len(rendered.project), validate.PROJECT_MAX_LENGTH)
+                self.assertLessEqual(len(rendered.network), validate.RESOURCE_NAME_MAX_LENGTH)
+                self.assertLessEqual(len(rendered.volume), validate.RESOURCE_NAME_MAX_LENGTH)
+                validate.validate_teardown_target(rendered.project, rendered.project)
+                command = validate.compose_command(executor, rendered.project, Path("compose.yml"), "down", "--volumes", "--remove-orphans")
+                self.assertEqual(command[-3:], ("down", "--volumes", "--remove-orphans"))
+                for optimized in (False, True):
+                    with self.subTest(optimized=optimized):
+                        with tempfile.NamedTemporaryFile() as output:
+                            cli = [sys.executable]
+                            if optimized:
+                                cli.append("-O")
+                            cli.extend(
+                                [
+                                    str(FIXTURE_DIR / "validate.py"),
+                                    "--skip-baseline",
+                                    "--render",
+                                    output.name,
+                                    "--stack-id",
+                                    long_stack_id,
+                                    "--instance",
+                                    long_instance,
+                                    "--lane",
+                                    lane,
+                                    "--executor",
+                                    executor,
+                                ]
+                            )
+                            completed = subprocess.run(cli, check=False, capture_output=True, text=True)
+                            self.assertEqual(completed.returncode, 0, completed.stderr)
+                            payload = json.loads(completed.stdout)
+                            self.assertTrue(payload["ok"])
+                            self.assertEqual(payload["rendered"]["project"], rendered.project)
+                            self.assertEqual(completed.stderr, "")
+                            self.assertIn(f'name: "{rendered.network}"', Path(output.name).read_text(encoding="utf-8"))
 
     def test_unsafe_identifiers_and_executor_fail_closed(self) -> None:
         for kwargs in (
@@ -188,19 +366,28 @@ class HermesDisposableHarnessTests(unittest.TestCase):
                     validate.validate_rendered_stack(mutated)
 
     def test_duplicate_keys_nonfinite_overflow_depth_and_containers_are_bounded(self) -> None:
-        self._assert_cli_failure(b'{"schema":"one","schema":"two"}')
-        self._assert_cli_failure(b'{"value":NaN}')
-        self._assert_cli_failure(b'{"value":1e9999}')
-        oversized = b'{"value":' + (b"9" * (validate.MAX_JSON_INTEGER_DIGITS + 1)) + b"}"
-        self._assert_cli_failure(oversized)
-        nested = (b"[" * (validate.MAX_JSON_DEPTH + 1)) + (b"]" * (validate.MAX_JSON_DEPTH + 1))
-        self._assert_cli_failure(nested)
-        too_many_keys = b"{" + b",".join(f'"k{index}":0'.encode() for index in range(validate.MAX_OBJECT_KEYS + 1)) + b"}"
-        self._assert_cli_failure(too_many_keys)
-        too_many_items = b"[" + b",".join(b"0" for _ in range(validate.MAX_ARRAY_LENGTH + 1)) + b"]"
-        self._assert_cli_failure(too_many_items)
-        too_long = b'{"value":"' + (b"x" * (validate.MAX_STRING_LENGTH + 1)) + b'"}'
-        self._assert_cli_failure(too_long)
+        payloads = (
+            b'{"schema":"one","schema":"two"}',
+            b'{"value":NaN}',
+            b'{"value":1e9999}',
+            b'{"value":' + (b"9" * (validate.MAX_JSON_INTEGER_DIGITS + 1)) + b"}",
+            (b"[" * (validate.MAX_JSON_DEPTH + 1)) + (b"]" * (validate.MAX_JSON_DEPTH + 1)),
+            b"{" + b",".join(f'"k{index}":0'.encode() for index in range(validate.MAX_OBJECT_KEYS + 1)) + b"}",
+            b"[" + b",".join(b"0" for _ in range(validate.MAX_ARRAY_LENGTH + 1)) + b"]",
+            b'{"value":"' + (b"x" * (validate.MAX_STRING_LENGTH + 1)) + b'"}',
+        )
+        for payload in payloads:
+            with self.subTest(payload_prefix=payload[:24]):
+                self._assert_direct_loader_failure(payload)
+                self._assert_cli_failure(payload)
+
+    def test_malformed_utf8_and_control_characters_fail_in_normal_and_optimized_paths(self) -> None:
+        malformed_utf8 = b'{"value":"\xff"}'
+        control_character = b'{"value":"\x01"}'
+        for payload in (malformed_utf8, control_character):
+            with self.subTest(payload=payload):
+                self._assert_direct_loader_failure(payload)
+                self._assert_cli_failure(payload)
 
     def test_error_output_redacts_controlled_failures_and_retained_data_shapes(self) -> None:
         huge_key = "attacker-" + ("x" * 2000)
@@ -244,6 +431,59 @@ class HermesDisposableHarnessTests(unittest.TestCase):
                     self.assertNotIn("successful_release_proof", completed.stdout)
                     self.assertNotIn("Traceback", completed.stdout)
 
+    def test_vm_evidence_status_mutation_with_recomputed_anchor_still_fails(self) -> None:
+        mutated = copy.deepcopy(self.evidence)
+        mutated["status"] = "successful_release_proof"
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_vm_evidence(mutated)
+        self._assert_vm_cli_failure(mutated, recompute_anchor=True)
+
+    def test_vm_evidence_commit_tree_cross_field_mutations_fail_normal_and_optimized(self) -> None:
+        for field, value in (
+            ("commit", validate.PINNED_HERMES_TREE),
+            ("tree", validate.PINNED_HERMES_SHA),
+        ):
+            with self.subTest(field=field):
+                mutated = copy.deepcopy(self.evidence)
+                mutated["source"][field] = value
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_vm_evidence(mutated)
+                self._assert_vm_cli_failure(mutated, recompute_anchor=True)
+
+    def test_vm_evidence_teardown_scope_and_cleanup_mutations_fail(self) -> None:
+        for teardown_key in ("teardown", "docker_teardown"):
+            for field, value in (
+                ("project", "hermes-disposable-untrusted"),
+                ("command", ["up"]),
+                ("status", 126),
+                ("leftover_containers", 1),
+                ("leftover_networks", 1),
+                ("leftover_volumes", 1),
+            ):
+                with self.subTest(teardown=teardown_key, field=field):
+                    mutated = copy.deepcopy(self.evidence)
+                    mutated[teardown_key][field] = value
+                    with self.assertRaises(validate.ValidationError):
+                        validate.validate_vm_evidence(mutated)
+                    self._assert_vm_cli_failure(mutated, recompute_anchor=True)
+
+    def test_baseline_environment_and_anchor_mutations_fail_with_recomputed_anchor(self) -> None:
+        for path, value in (
+            (("environment", "platform"), "remote-runtime"),
+            (("artifact", "bytes"), 1),
+            (("runs", 0, "command"), validate.BASELINE_COMMANDS["optimized"]),
+        ):
+            with self.subTest(path=path):
+                mutated = copy.deepcopy(validate.load_json(validate.BASELINE_PATH))
+                target: object = mutated
+                for key in path[:-1]:
+                    target = target[key]  # type: ignore[index]
+                target[path[-1]] = value  # type: ignore[index]
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_baseline(mutated, root=FIXTURE_DIR, anchor_path=validate.BASELINE_ANCHOR_PATH)
+                self._assert_baseline_cli_failure(mutated)
+        self._assert_baseline_cli_failure(validate.load_json(validate.BASELINE_PATH), anchor="0" * 64)
+
     def test_unapproved_hex_and_key_assignments_fail_closed(self) -> None:
         with self.assertRaises(validate.ValidationError):
             validate.validate_redaction({"retained": "a" * 40})
@@ -252,11 +492,32 @@ class HermesDisposableHarnessTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.validate_redaction({"value": validate.PINNED_HERMES_SHA})
         validate.validate_redaction({"pinned_source_sha": validate.PINNED_HERMES_SHA})
+        for hostile in (
+            "api_key='top confidential'",
+            '"api_key":"synthetic-api-key"',
+            "host_name=localhost",
+            "host localhost",
+            "profiles/alice",
+            "sha256=" + ("d" * 64),
+        ):
+            with self.subTest(hostile=hostile):
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_redaction({"message": hostile})
         for message, secret in (
             ("api_key=synthetic-api-key", "synthetic-api-key"),
             ("access_key: synthetic-access-key", "synthetic-access-key"),
             ("API-KEY=synthetic-api-key", "synthetic-api-key"),
             ("access.key=synthetic-access-key", "synthetic-access-key"),
+            ("api_key_value=synthetic-api-key", "synthetic-api-key"),
+            ("api_key='top confidential'", "top confidential"),
+            ("host_name=localhost", "localhost"),
+            ("host-name=localhost", "localhost"),
+            ("host localhost", "localhost"),
+            ('{"host":"localhost"}', "localhost"),
+            ('{"api_key":"synthetic-api-key"}', "synthetic-api-key"),
+            ("commit=" + ("a" * 40), "a" * 40),
+            ("value=" + ("b" * 64), "b" * 64),
+            ("sha256=" + ("c" * 64), "c" * 64),
         ):
             with self.subTest(message=message):
                 redacted = validate.compact_error(message)

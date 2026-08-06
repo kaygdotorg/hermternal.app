@@ -38,7 +38,10 @@ host-specific image output is checked into this fixture.
 ## Frozen Compose invariants
 
 Every render creates a project-derived name, internal network, and named data
-volume from the bounded stack ID and instance. The service has:
+volume from the bounded stack ID and instance. Stack IDs are limited so the
+project is at most 54 characters and the generated network and volume are at
+most 63 characters, matching the strictest engine name boundary used here. The
+service has:
 
 - no `container_name`, host networking, published ports, host profile bind, or
   host environment interpolation;
@@ -53,8 +56,11 @@ volume from the bounded stack ID and instance. The service has:
   PTY or public Dashboard exposure.
 
 The generated teardown command is project-scoped and must be exactly
-`down --volumes --remove-orphans`. The validator refuses an unrecognized
-project name.
+`down --volumes --remove-orphans`. VM evidence records separate Podman and
+Docker teardown objects, each bound to its executor and exact generated
+project, with status zero and zero leftover containers, networks, and volumes.
+The validator refuses an unrecognized project name, command, status, or cleanup
+count.
 
 ## Executor contract
 
@@ -64,14 +70,15 @@ user namespaces, subordinate UID/GID ranges, cgroup v2 delegation, overlay
 storage, netavark networking, Compose config rendering, resource limits, no
 published ports, named-volume isolation, and cleanup.
 
-Docker is retained as one controlled compatibility lane. It renders the same
-policy with Docker's `json-file` log options. The authorized root-only
-observation started the prepared Docker project once, reached no readiness
+Docker has two explicitly separated scopes. The offline renderer/config lane
+uses Docker's `json-file` log options and never starts a stack. Separately, the
+VM evidence records one authorized root-only Docker compatibility observation.
+That observation started the prepared Docker project once, reached no readiness
 state, exited 126, and completed exact project-only cleanup with zero leftovers.
 The run is compatibility evidence only; it is not release proof. Docker and
 Podman Compose semantics are not assumed equivalent, and the VM report records
 the engine, provider, version, config status, bounded raw observations, mount
-type, and cleanup result.
+type, and executor/project-bound cleanup result.
 
 ## VM smoke observation
 
@@ -130,7 +137,9 @@ The command writes only the requested synthetic Compose file. It does not read
 
 `cases.json` freezes three renderer lanes:
 
-- `no-provider`: `sleep infinity`, no provider variables, Dashboard disabled;
+- `no-provider`: `sleep infinity`, Dashboard disabled, and explicit
+  `HERMES_PROVIDER_AUTO_DISCOVERY=0` so no provider probe can discover a host
+  provider;
 - `browser`: internal-only Dashboard with deterministic disposable Basic-auth
   values, render-only and never used for the VM smoke;
 - `model`: `synthetic-local` provider marker with auto-discovery disabled,
@@ -151,10 +160,12 @@ scalar types are required, including under `python3 -O`.
 
 CLI failures emit one bounded JSON line with no traceback or argparse usage
 text. Diagnostics redact credential headers, Basic and Bearer values, cookies,
-URLs and data URLs, hostnames and addresses, paths and filenames, private-key
-markers, Base64-shaped payloads, and `api_key`/`access_key` assignments. Only
-exactly pinned source/tree and image/artifact digests are retained; arbitrary
-40- or 64-hex values are rejected. Hostile object keys are never echoed.
+URLs and data URLs, hostnames and addresses, absolute or relative paths,
+filenames, private-key markers, Base64-shaped payloads, quoted or bare
+`api_key`/`access_key` assignments, and digest-shaped assignment values. Only
+exactly pinned source/tree and image/artifact digests are retained as complete
+approved fields; arbitrary 40- or 64-hex values and digest substrings are
+rejected. Hostile object keys are never echoed.
 
 ## Benchmark observations
 
