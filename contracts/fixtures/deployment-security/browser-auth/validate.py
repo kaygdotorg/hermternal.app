@@ -159,18 +159,35 @@ SYNTHETIC_URL_RE = re.compile(
     r"^https://[a-z0-9.-]+\.hermternal\.test(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~!$&'()*+,;=:@/%-]*)?$"
 )
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-SENSITIVE_KEY_RE = re.compile(
-    r"^(?:password|token|secret|authorization|bearer|access[_-]?key|cookie[_-]?value|client[_-]?secret)$",
-    re.IGNORECASE,
+SENSITIVE_NORMALIZED_KEYS = frozenset(
+    {
+        "password",
+        "token",
+        "secret",
+        "authorization",
+        "bearer",
+        "accesskey",
+        "apikey",
+        "cookievalue",
+        "clientsecret",
+        "sessionid",
+        "ticketid",
+    }
 )
 SENSITIVE_ASSIGNMENT_NAMES = (
-    r"password|token|authorization|api[_ -]?key|client[_ -]?secret|bearer|"
-    r"cookie(?:[_ -]?value)?|ticket|csrf(?:[_ -]?token)?|"
-    r"session(?:[_ -]?(?:cookie|token|value))?|state(?:[_ -]?(?:token|value))?|"
-    r"(?:access|refresh|id)[_ -]?token|pkce(?:[_ -]?(?:token|verifier|challenge))?"
+    r"(?:password|token|secret|authorization|api[_\-. ]*key|"
+    r"client[_\-. ]*secret|bearer|"
+    r"cookie(?:[_\-. ]*(?:value|id))?|"
+    r"ticket(?:[_\-. ]*id)?|"
+    r"csrf(?:[_\-. ]*token)?|"
+    r"session(?:[_\-. ]*(?:cookie|token|value|id))?|"
+    r"state(?:[_\-. ]*(?:token|value|id))?|"
+    r"(?:access|refresh|id)[_\-. ]*token|"
+    r"pkce(?:[_\-. ]*(?:token|verifier|challenge))?)"
 )
 SENSITIVE_ASSIGNMENT_RE = re.compile(
-    rf"\b(?P<name>{SENSITIVE_ASSIGNMENT_NAMES})\s*[:=]\s*"
+    rf"(?<![A-Za-z0-9])(?P<key>(?P<quote>[\"']?)(?P<name>{SENSITIVE_ASSIGNMENT_NAMES})"
+    rf"(?P=quote)\s*[:=]\s*)"
     rf"(?P<value>(?:Bearer\s+)?(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,}}\]]+))",
     re.IGNORECASE,
 )
@@ -178,7 +195,6 @@ SECRET_VALUE_PATTERNS = (
     re.compile(r"\b(?:ghp|github_pat|sk_live|AKIA)[A-Za-z0-9_\-]+\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[^\s,}\]]+", re.IGNORECASE),
     re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----", re.IGNORECASE),
-    SENSITIVE_ASSIGNMENT_RE,
 )
 BASELINE_COMMANDS = {
     "normal": "python3 contracts/fixtures/deployment-security/browser-auth/validate.py",
@@ -217,8 +233,7 @@ def compact_error(message: object) -> str:
         redacted = pattern.sub("[REDACTED]", redacted)
 
     def redact_assignment(match: re.Match[str]) -> str:
-        value_start = match.start("value") - match.start()
-        return f"{match.group(0)[:value_start]}[REDACTED]"
+        return f"{match.group('key')}[REDACTED]"
 
     redacted = SENSITIVE_ASSIGNMENT_RE.sub(redact_assignment, redacted)
     if len(redacted) > MAX_ERROR_OUTPUT:
@@ -352,11 +367,17 @@ def load_json(path: Path) -> Any:
     return value
 
 
+def _normalize_sensitive_key(key: str) -> str:
+    """Normalize key separators before checking the fixture redaction boundary."""
+
+    return re.sub(r"[^a-z0-9]+", "", key.casefold())
+
+
 def _walk_redaction(value: Any, path: str = "$") -> None:
     if type(value) is dict:
         for key, child in value.items():
-            normalized = re.sub(r"[_-]+", "_", key).lower()
-            require(not SENSITIVE_KEY_RE.search(normalized), f"sensitive fixture field at {path}")
+            normalized = _normalize_sensitive_key(key)
+            require(normalized not in SENSITIVE_NORMALIZED_KEYS, f"sensitive fixture field at {path}")
             _walk_redaction(child, f"{path}.{key}")
         return
     if type(value) is list:
@@ -366,6 +387,7 @@ def _walk_redaction(value: Any, path: str = "$") -> None:
     if type(value) is str:
         for pattern in SECRET_VALUE_PATTERNS:
             require(pattern.search(value) is None, f"secret-shaped fixture value at {path}")
+        require(SENSITIVE_ASSIGNMENT_RE.search(value) is None, f"secret-shaped fixture value at {path}")
         if "://" in value:
             require(SYNTHETIC_URL_RE.fullmatch(value) is not None, f"non-synthetic URL at {path}")
         return

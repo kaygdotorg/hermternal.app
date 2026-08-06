@@ -70,6 +70,14 @@ class BrowserAuthBoundaryTests(unittest.TestCase):
             for argument, secret in (
                 ("--token=synthetic-secret", "synthetic-secret"),
                 ("--unknown=untrusted-value", "untrusted-value"),
+                ("--session_id=raw-session-id", "raw-session-id"),
+                ("--ticket-id=raw-ticket-id", "raw-ticket-id"),
+                ('"cookie": "raw-cookie-json"', "raw-cookie-json"),
+                ('"ticket": "raw-ticket-json"', "raw-ticket-json"),
+                ('"csrf_token":"raw-csrf-json"', "raw-csrf-json"),
+                ('"session_id":"raw-session-json"', "raw-session-json"),
+                ('"state": "raw-state-json"', "raw-state-json"),
+                ('"pkce_verifier": "raw-pkce-json"', "raw-pkce-json"),
             ):
                 with self.subTest(optimized=optimized, argument=argument):
                     command = [sys.executable]
@@ -211,32 +219,48 @@ class BrowserAuthBoundaryTests(unittest.TestCase):
         self.assertEqual(result["session_cookie"], "absent")
 
     def test_redaction_covers_assignment_shaped_diagnostics(self) -> None:
-        message = (
-            "authorization=Bearer synthetic-bearer password=synthetic-password "
-            "token='synthetic-token' cookie=rawcookie ticket=rawticket csrf=rawcsrf "
-            "session=rawsession state=rawstate pkce_verifier=rawpkce"
+        messages = (
+            ("authorization=Bearer synthetic-bearer", "synthetic-bearer"),
+            ("password=synthetic-password", "synthetic-password"),
+            ("token='synthetic-token'", "synthetic-token"),
+            ("cookie=rawcookie", "rawcookie"),
+            ("ticket=rawticket", "rawticket"),
+            ("csrf=rawcsrf", "rawcsrf"),
+            ("session=rawsession", "rawsession"),
+            ("state=rawstate", "rawstate"),
+            ("pkce_verifier=rawpkce", "rawpkce"),
+            ("session_id=raw-session-id", "raw-session-id"),
+            ("ticket-id: raw-ticket-id", "raw-ticket-id"),
+            ('"cookie": "raw-cookie-json"', "raw-cookie-json"),
+            ('"ticket": "raw-ticket-json"', "raw-ticket-json"),
+            ('"csrf_token":"raw-csrf-json"', "raw-csrf-json"),
+            ('"session_id":"raw-session-json"', "raw-session-json"),
+            ('"state": "raw-state-json"', "raw-state-json"),
+            ('"pkce_verifier": "raw-pkce-json"', "raw-pkce-json"),
+            ('"SESSION-ID": "raw-session-case"', "raw-session-case"),
+            ('"ticket.id": "raw-ticket-separator"', "raw-ticket-separator"),
+            ('"CSRF-TOKEN": "raw-csrf-separator"', "raw-csrf-separator"),
         )
-        redacted = validate.compact_error(message)
-        self.assertIn("[REDACTED]", redacted)
-        for secret in (
-            "synthetic-bearer",
-            "synthetic-password",
-            "synthetic-token",
-            "rawcookie",
-            "rawticket",
-            "rawcsrf",
-            "rawsession",
-            "rawstate",
-            "rawpkce",
-        ):
-            self.assertNotIn(secret, redacted)
-        self.assertLessEqual(len(redacted), validate.MAX_ERROR_OUTPUT)
+        for message, secret in messages:
+            with self.subTest(message=message):
+                redacted = validate.compact_error(message)
+                self.assertIn("[REDACTED]", redacted)
+                self.assertNotIn(secret, redacted)
+                self.assertLessEqual(len(redacted), validate.MAX_ERROR_OUTPUT)
 
     def test_redaction_rejects_sensitive_fixture_field(self) -> None:
         mutated = copy.deepcopy(self.document)
         mutated["cases"][0]["input"]["password"] = "synthetic-marker"
         with self.assertRaises(validate.ValidationError):
             validate.validate_redaction(mutated)
+
+    def test_normalized_sensitive_suffix_keys_fail_closed(self) -> None:
+        for key in ("session_id", "SESSION-ID", "ticket_id", "ticket.id"):
+            with self.subTest(key=key):
+                mutated = copy.deepcopy(self.document)
+                mutated["cases"][0]["input"][key] = "synthetic-marker"
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_redaction(mutated)
 
     def test_unknown_keys_and_boolean_statuses_fail_closed(self) -> None:
         unknown = copy.deepcopy(self.document)

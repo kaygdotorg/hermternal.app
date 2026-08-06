@@ -120,8 +120,10 @@ A failure is one JSON line, status `2`, with a bounded
 usage text. Invalid or unknown CLI arguments use the same controlled object and
 do not echo argument values. The diagnostic redactor removes credential-shaped
 assignments, including cookie, ticket, CSRF, session, state, PKCE, and token
-names, plus bearer-shaped text, private-key markers, and common live-token
-prefixes before applying the output cap. The checked-in JSON and baseline
+names, including `session_id` and `ticket_id` with case, hyphen, underscore,
+separator, and quoted JSON-key forms, plus bearer-shaped text, private-key
+markers, and common live-token prefixes before applying the output cap. The
+checked-in JSON and baseline
 contain no credentials, raw cookies, tokens, provider data, transcripts, user
 data, or public hosts.
 
