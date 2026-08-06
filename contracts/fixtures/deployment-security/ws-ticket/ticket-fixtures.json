@@ -70,7 +70,21 @@
       "forwarding_markers": [
         "audit_log(",
         "path=ws.url.path"
-      ]
+      ],
+      "forwarding_source_sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+      "forwarding_git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+      "independent_forwarding_markers": [
+        "except TicketInvalid as exc:",
+        "reason=str(exc),",
+        "path=ws.url.path,"
+      ],
+      "forwarding_source_excerpt": [
+        "        except TicketInvalid as exc:",
+        "            audit_log(",
+        "                reason=str(exc),",
+        "                path=ws.url.path,"
+      ],
+      "forwarding_source_excerpt_sha256": "08cac9ae776a9ca2a1950f5735d004eb73102815170e1f9e825928013f12c5f8"
     },
     {
       "id": "existing-ticket-fixtures",

@@ -32,8 +32,8 @@ CONTRACT = "dashboard-v0.0.1"
 HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 MANIFEST_RELATIVE = "contracts/hermes-dashboard/manifest.md"
 MANIFEST_SHA256 = "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197"
-EXPECTED_FIXTURE_CANONICAL_SHA256 = "cfbbb8b85f6c13dd2f8080d18337dd171404ea318b34f58bd3d04a3f47910d08"
-EXPECTED_BASELINE_CANONICAL_SHA256 = "f0d0c8d1e5a953bd5fdb265a4f9631f8e7a4d50d34028a820cc5d2560d905726"
+EXPECTED_FIXTURE_CANONICAL_SHA256 = "2b8cb396aa999a9d3a41a8371f38cbfcb719a7147fb52918ef29731b9ea9d7b8"
+EXPECTED_BASELINE_CANONICAL_SHA256 = "dc6699968787f36221c1575ea6ac297b0b1132f30d4e268ad1050980b9445d8c"
 BASELINE_REPETITIONS = 30
 # These limits are enforced by the byte scanner before json.loads allocates a
 # Python tree. The approved source-audit JSON is well below them; the limits
@@ -91,6 +91,15 @@ SOURCE_EVIDENCE_IDS = (
     "existing-ticket-fixtures",
     "existing-error-layer-fixtures",
 )
+PINNED_FORWARDING_SOURCE_SHA256 = "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a"
+PINNED_FORWARDING_GIT_BLOB_SHA = "1fb3e6131629e7399ef12de78148ac6e7ec58d34"
+PINNED_FORWARDING_EXCERPT = (
+    "        except TicketInvalid as exc:",
+    "            audit_log(",
+    "                reason=str(exc),",
+    "                path=ws.url.path,",
+)
+PINNED_FORWARDING_EXCERPT_SHA256 = "08cac9ae776a9ca2a1950f5735d004eb73102815170e1f9e825928013f12c5f8"
 
 EXPECTED_SOURCE_EVIDENCE = [
     {
@@ -133,6 +142,20 @@ EXPECTED_SOURCE_EVIDENCE = [
         "forwarding_source_file": "hermes_cli/web_server.py",
         "forwarding_lines": [14708, 14716],
         "forwarding_markers": ["audit_log(", "path=ws.url.path"],
+        "forwarding_source_sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+        "forwarding_git_blob_sha": "1fb3e6131629e7399ef12de78148ac6e7ec58d34",
+        "independent_forwarding_markers": [
+            "except TicketInvalid as exc:",
+            "reason=str(exc),",
+            "path=ws.url.path,",
+        ],
+        "forwarding_source_excerpt": [
+            "        except TicketInvalid as exc:",
+            "            audit_log(",
+            "                reason=str(exc),",
+            "                path=ws.url.path,",
+        ],
+        "forwarding_source_excerpt_sha256": "08cac9ae776a9ca2a1950f5735d004eb73102815170e1f9e825928013f12c5f8",
     },
     {
         "id": "existing-ticket-fixtures",
@@ -600,6 +623,17 @@ def _validate_source_evidence(value: Any) -> None:
             require(14708 >= forwarding["lines"][0] and 14716 <= forwarding["lines"][1])
             require(all(marker in ticket["markers"] for marker in entry["ticket_markers"]))
             require(all(marker in forwarding["markers"] for marker in entry["forwarding_markers"]))
+            require(entry["forwarding_source_sha256"] == PINNED_FORWARDING_SOURCE_SHA256 == forwarding["sha256"])
+            require(entry["forwarding_git_blob_sha"] == PINNED_FORWARDING_GIT_BLOB_SHA == forwarding["git_blob_sha"])
+            require(tuple(entry["independent_forwarding_markers"]) == (
+                "except TicketInvalid as exc:",
+                "reason=str(exc),",
+                "path=ws.url.path,",
+            ))
+            excerpt = tuple(entry["forwarding_source_excerpt"])
+            require(excerpt == PINNED_FORWARDING_EXCERPT)
+            require(entry["forwarding_source_excerpt_sha256"] == PINNED_FORWARDING_EXCERPT_SHA256)
+            require(hashlib.sha256("\n".join(excerpt).encode("utf-8")).hexdigest() == PINNED_FORWARDING_EXCERPT_SHA256)
         else:
             existing = load_json(resolved)
             require(type(existing) is dict and type(existing.get("cases")) is list)
@@ -625,6 +659,15 @@ RETAINED_TEXT_KEYS = frozenset({
 })
 
 
+BASE64_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9+/])([A-Za-z0-9+/]{7,}(?:={1,2})?)(?![A-Za-z0-9+/=])")
+BASE64_CONTEXT_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])(?:base64|encoded|payload|token|fragment|credential|secret|value)\b\s*[:=]?\s*$"
+)
+SOURCE_TICKET_FRAGMENT_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])(?:unknown\s+ticket|ticket\s+fragment|ticket)\s*[:=]\s*[A-Za-z0-9_-]{8}(?:…|\.{3})?(?![A-Za-z0-9_-])"
+)
+
+
 def _is_base64_token(value: str) -> bool:
     if len(value) < 7 or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value):
         return False
@@ -635,6 +678,26 @@ def _is_base64_token(value: str) -> bool:
     if padding and len(value) % 4 != 0:
         return False
     return True
+
+
+def _looks_like_embedded_base64(value: str, match: re.Match[str]) -> bool:
+    token = match.group(1)
+    if not _is_base64_token(token):
+        return False
+    uppercase_count = sum(character.isupper() for character in token)
+    if "=" in token or (uppercase_count >= 2 and any(character.islower() for character in token)):
+        return True
+    if token.islower() or token.isdigit():
+        context = value[:match.start()]
+        if BASE64_CONTEXT_PATTERN.search(context):
+            return True
+        if len(token) >= 8:
+            if len(set(token)) == 1:
+                return True
+            deltas = [ord(next_character) - ord(character) for character, next_character in zip(token, token[1:])]
+            if deltas and len(set(deltas)) == 1 and deltas[0] in {-1, 1}:
+                return True
+    return False
 
 
 def _scan_retained_text(value: str) -> None:
@@ -650,14 +713,16 @@ def _scan_retained_text(value: str) -> None:
     require(not windows_path_pattern.search(value))
     require(not relative_path_pattern.search(value))
     require(not filename_pattern.search(value))
+    require(not SOURCE_TICKET_FRAGMENT_PATTERN.search(value))
 
     stripped = value.strip()
     if not any(character.isspace() for character in stripped):
         # Retained text carries semantic copy only; arbitrary base64-shaped
         # payloads are forbidden even when padding or case makes them subtle.
         require(not _is_base64_token(stripped))
-    for match in re.finditer(r"(?<=[=:])[A-Za-z0-9+/]{7,}={0,2}", value):
-        require(not _is_base64_token(match.group(0)))
+    for match in BASE64_TOKEN_PATTERN.finditer(value):
+        if value[:match.start()].strip() or value[match.end():].strip():
+            require(not _looks_like_embedded_base64(value, match))
 
 
 def _scan_redaction(value: Any, *, retained_text: bool = False) -> None:

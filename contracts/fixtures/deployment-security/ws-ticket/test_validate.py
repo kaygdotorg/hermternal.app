@@ -75,6 +75,15 @@ class WsTicketValidatorTests(unittest.TestCase):
         self.assertIn("truncated = (ticket[:8] + \"…\") if ticket else \"<empty>\"", evidence["ticket_markers"])
         self.assertEqual(evidence["forwarding_source_file"], "hermes_cli/web_server.py")
         self.assertEqual(evidence["forwarding_lines"], [14708, 14716])
+        self.assertEqual(evidence["forwarding_source_sha256"], validate.PINNED_FORWARDING_SOURCE_SHA256)
+        self.assertEqual(evidence["forwarding_git_blob_sha"], validate.PINNED_FORWARDING_GIT_BLOB_SHA)
+        self.assertEqual(evidence["independent_forwarding_markers"], [
+            "except TicketInvalid as exc:",
+            "reason=str(exc),",
+            "path=ws.url.path,",
+        ])
+        self.assertEqual(evidence["forwarding_source_excerpt"], list(validate.PINNED_FORWARDING_EXCERPT))
+        self.assertEqual(evidence["forwarding_source_excerpt_sha256"], validate.PINNED_FORWARDING_EXCERPT_SHA256)
         by_id = {item["id"]: item for item in self.fixture["cases"]}
         for case_id in ("history-bounded-fragment-redaction", "log-bounded-fragment-redaction", "dom-bounded-fragment-redaction"):
             self.assertEqual(by_id[case_id]["request"]["ticket_state"], "bounded_fragment_candidate")
@@ -166,6 +175,70 @@ class WsTicketValidatorTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(validate.ContractError):
                     validate._scan_redaction({"notes": value})
+
+    def test_embedded_base64_and_source_fragments_are_rejected_on_each_surface(self) -> None:
+        embedded = (
+            "prefix SGVsbG8=",
+            "prefix SGVsbG8",
+            "(SGVsbG8=)",
+            "payload abcdefgh",
+            "payload 01234567",
+            "prefix aaaaaaaa",
+            "prefix 00000000",
+            "prefix abcdefgh",
+            "prefix 01234567",
+        )
+        fragments = (
+            "unknown ticket: Abcdefgh…",
+            "ticket fragment: Abcdefgh",
+        )
+        for surface in ("history", "logs", "dom"):
+            for value in embedded + fragments:
+                with self.subTest(surface=surface, value=value):
+                    with self.assertRaises(validate.ContractError):
+                        validate._scan_redaction({surface: value})
+
+    def test_embedded_scanner_preserves_ordinary_retained_copy(self) -> None:
+        for value in ("ordinary words remain readable", "prefix ordinary", "state: ready"):
+            with self.subTest(value=value):
+                validate._scan_redaction({"notes": value})
+
+    def test_embedded_base64_and_source_fragments_fail_closed_in_normal_and_optimized_cli(self) -> None:
+        candidates = (
+            "prefix SGVsbG8=",
+            "prefix SGVsbG8",
+            "(SGVsbG8=)",
+            "payload abcdefgh",
+            "payload 01234567",
+            "prefix aaaaaaaa",
+            "prefix 00000000",
+            "prefix abcdefgh",
+            "prefix 01234567",
+            "unknown ticket: Abcdefgh…",
+            "ticket fragment: Abcdefgh",
+        )
+        for surface in ("history", "logs", "dom"):
+            for value in candidates:
+                with self.subTest(surface=surface, value=value), tempfile.TemporaryDirectory() as directory:
+                    mutated = copy.deepcopy(self.fixture)
+                    target = next(case for case in mutated["cases"] if case["surface"] == surface)
+                    target["notes"] = value
+                    fixture_path = Path(directory) / "adversarial-fixture.json"
+                    fixture_path.write_text(json.dumps(mutated, indent=2) + "\n", encoding="utf-8")
+                    for optimized in (False, True):
+                        command = [sys.executable] + (["-O"] if optimized else []) + [str(ROOT / "validate.py"), "--fixture", str(fixture_path)]
+                        completed = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+                        self.assertEqual(completed.returncode, 1)
+                        self.assertNotIn(value, completed.stdout)
+                        self.assertNotIn(str(fixture_path), completed.stdout)
+                        self.assertEqual(json.loads(completed.stdout)["live_run"], False)
+
+    def test_forwarding_reason_marker_is_load_bearing(self) -> None:
+        mutated = copy.deepcopy(self.fixture)
+        evidence = next(item for item in mutated["source_evidence"] if item["id"] == "ticket-fragment-source-anchor")
+        evidence["independent_forwarding_markers"].remove("reason=str(exc),")
+        with self.assertRaises(validate.ContractError):
+            validate._validate_fixture_shape(mutated)
 
     def test_uniform_fabricated_baseline_fails(self) -> None:
         fabricated = copy.deepcopy(self.baseline)

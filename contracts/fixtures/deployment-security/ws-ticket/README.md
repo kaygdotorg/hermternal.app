@@ -38,7 +38,10 @@ probe. It references the existing ticket and edge/upstream cases only to keep
 this security seam aligned with the approved contract. A pinned source-anchor
 record also checks the `ticket[:8]` ellipsis fragment in
 `hermes_cli/dashboard_auth/ws_tickets.py:90-95` and the forwarding audit-log
-surface in `hermes_cli/web_server.py:14708-14716`.
+surface in `hermes_cli/web_server.py:14708-14716`. The source anchor independently
+pins the `except TicketInvalid as exc`, `reason=str(exc),`, and
+`path=ws.url.path,` lines with the reviewed source and blob hashes; it does not
+rely only on the route-audit marker list.
 
 ## Fixture inventory
 
@@ -71,8 +74,11 @@ semantic error state and retry action label. None may retain or render raw
 cookies, bearer values, authorization values, credentials, ticket values,
 bounded `ticket[:8]` fragments, prompt text, transcript bytes, hostnames, or
 user data. Retained text also rejects raw data URLs, file URLs, absolute or
-punctuation-delimited paths, path-shaped filenames, and padded or unpadded
-base64-looking values. Controlled CLI failures are one JSON object, have a
+punctuation-delimited paths, path-shaped filenames, embedded padded or unpadded
+base64-looking values, and source-shaped `unknown ticket: Abcdefgh…` fragments.
+Lowercase-only and digit-only candidates are rejected when their shape or nearby
+payload context makes them credential-like, while ordinary retained copy remains
+allowed. Controlled CLI failures are one JSON object, have a
 maximum length of 240 characters, do not echo input, and do not include a
 traceback.
 
