@@ -8,7 +8,6 @@ commands, start Hermes or a proxy, use containers, or contact infrastructure.
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import shutil
 import subprocess
@@ -33,9 +32,10 @@ CREDENTIAL_CANARY = "token" + "=" + "synthetic-secret-canary"
 class DirectPortDenialTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.reviewed_cases = validate._load_reviewed_network_cases(validate._repo_root(FIXTURE_DIR))
         cls.document = validate.load_json(validate.CASES_PATH)
         validate.validate_redaction(cls.document)
-        validate.validate_cases_document(cls.document)
+        validate.validate_cases_document(cls.document, cls.reviewed_cases)
         cls.cases = {case["id"]: case for case in cls.document["cases"]}
 
     def _run_cli(
@@ -44,14 +44,11 @@ class DirectPortDenialTests(unittest.TestCase):
         *,
         optimized: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        with tempfile.NamedTemporaryFile(suffix=".json") as handle:
-            handle.write(content)
-            handle.flush()
-            command = [sys.executable]
-            if optimized:
-                command.append("-O")
-            command.extend([str(FIXTURE_DIR / "validate.py"), "--cases", handle.name, "--skip-baseline"])
-            return subprocess.run(command, check=False, capture_output=True, text=True)
+        with tempfile.TemporaryDirectory(dir=FIXTURE_DIR.parent) as directory:
+            root = Path(directory) / "direct-port-denial"
+            shutil.copytree(FIXTURE_DIR, root)
+            (root / "cases.json").write_bytes(content)
+            return self._run_fixture_copy(root, optimized=optimized)
 
     def _assert_cli_failure(self, content: bytes) -> None:
         for optimized in (False, True):
@@ -70,43 +67,6 @@ class DirectPortDenialTests(unittest.TestCase):
                 self.assertNotIn("Traceback", completed.stdout + completed.stderr)
                 self.assertNotIn("usage:", completed.stdout.lower())
 
-    @staticmethod
-    def _rebind_all_mutable_local_evidence(root: Path) -> None:
-        """Reproduce a coordinated local rewrite without the discarded signing key."""
-
-        validator_path = root / "validate.py"
-        baseline_path = root / "validation-baseline.json"
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-        evidence_digest = hashlib.sha256(validate._canonical_baseline_evidence_bytes(baseline)).hexdigest()
-        source = validator_path.read_text(encoding="utf-8")
-        source = validate.re.sub(
-            r'(?m)^PINNED_BASELINE_EVIDENCE_SHA256 = "[0-9a-f]{64}"$',
-            f'PINNED_BASELINE_EVIDENCE_SHA256 = "{evidence_digest}"',
-            source,
-        )
-        identities = {}
-        for relative in ("README.md", "cases.json", "test_validate.py"):
-            data = (root / relative).read_bytes()
-            identities[relative] = (len(data), hashlib.sha256(data).hexdigest())
-        for relative, (size, digest) in identities.items():
-            source = validate.re.sub(
-                rf'(?m)^    "{validate.re.escape(relative)}": \([0-9]+, "[0-9a-f]{{64}}"\),$',
-                f'    "{relative}": ({size}, "{digest}"),',
-                source,
-            )
-        normalized = validate.VALIDATOR_IDENTITY_RE.sub(
-            'PINNED_VALIDATOR_SOURCE_SHA256 = "<code-pinned>"', source
-        )
-        self_digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-        source = validate.VALIDATOR_IDENTITY_RE.sub(
-            f'PINNED_VALIDATOR_SOURCE_SHA256 = "{self_digest}"', source
-        )
-        validator_path.write_text(source, encoding="utf-8")
-        total, digest = validate._artifact_digest(root)
-        baseline["artifact"]["bytes"] = total
-        baseline["artifact"]["sha256"] = digest
-        baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-
     def _run_fixture_copy(self, root: Path, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
         command = [sys.executable]
         if optimized:
@@ -121,7 +81,11 @@ class DirectPortDenialTests(unittest.TestCase):
         self.assertEqual([case["id"] for case in allowed], ["configured-proxy-path-allowed"])
         for case in self.document["cases"]:
             with self.subTest(case=case["id"]):
-                self.assertEqual(validate.evaluate_case(case), case["expected"])
+                index = validate.EXPECTED_CASE_IDS.index(case["id"])
+                self.assertEqual(
+                    validate.evaluate_case(case, index=index, reviewed_cases=self.reviewed_cases),
+                    case["expected"],
+                )
                 self.assertFalse(case["expected"]["retained_hostile_values"])
                 self.assertFalse(case["expected"]["live_claim"])
                 if case["expected"]["decision"] == "deny":
@@ -151,19 +115,19 @@ class DirectPortDenialTests(unittest.TestCase):
         allowed["id"] = "public-direct-path-denied"
         allowed["kind"] = "malformed_evidence"
         allowed["expected"] = self.cases["public-direct-path-denied"]["expected"]
-        derived = validate.evaluate_case(allowed)
+        derived = validate.evaluate_case(allowed, index=0, reviewed_cases=self.reviewed_cases)
         self.assertEqual(derived["decision"], "allow")
         self.assertEqual(derived["reason"], "configured_proxy_path_exact")
 
-    def test_browser_label_rebinding_cannot_create_the_allow_attestation(self) -> None:
-        rebound = copy.deepcopy(self.cases["browser-direct-path-denied"])
-        rebound["raw_network"]["source_identity"] = "configured_proxy"
-        rebound["raw_network"]["source_interface"] = "proxy_egress"
-        rebound["raw_network"]["proxy_hops"] = ["configured_proxy"]
-        derived = validate.evaluate_case(rebound)
+    def test_copying_every_allow_field_into_browser_case_fails_normal_and_optimized(self) -> None:
+        document = copy.deepcopy(self.document)
+        document["cases"][2]["raw_network"] = copy.deepcopy(document["cases"][0]["raw_network"])
+        rebound = document["cases"][2]
+        derived = validate.evaluate_case(rebound, index=2, reviewed_cases=self.reviewed_cases)
         self.assertEqual(derived["decision"], "deny")
-        self.assertEqual(derived["reason"], "proxy_attestation_missing")
+        self.assertEqual(derived["reason"], "source_evidence_mismatch")
         self.assertFalse(derived["upstream_call"])
+        self._assert_cli_failure(json.dumps(document).encode("utf-8"))
 
     def test_every_allow_field_mutation_fails_closed_in_normal_and_optimized_modes(self) -> None:
         mutations = (
@@ -179,8 +143,8 @@ class DirectPortDenialTests(unittest.TestCase):
             ("destination_port", 9120),
             ("proxy_hops", []),
             ("proxy_hops", ["configured_proxy", "unconfigured_proxy"]),
-            ("proxy_attestation", None),
-            ("proxy_attestation", "0" * 64),
+            ("source_evidence", None),
+            ("source_evidence", copy.deepcopy(self.cases["browser-direct-path-denied"]["raw_network"]["source_evidence"])),
             ("firewall_rule", None),
         )
         for field, value in mutations:
@@ -360,7 +324,7 @@ class DirectPortDenialTests(unittest.TestCase):
         self.assertEqual([run["repetitions"] for run in baseline["runs"]], [30, 30])
         self.assertEqual([len(run["trace"]) for run in baseline["runs"]], [30, 30])
 
-    def test_forged_trace_and_coordinated_artifact_rebinding_fail(self) -> None:
+    def test_forged_trace_and_local_identity_rebinding_fail(self) -> None:
         baseline = validate.load_json(validate.BASELINE_PATH)
         forged = copy.deepcopy(baseline)
         forged["runs"][0]["trace"] = [1.0] * validate.BASELINE_REPETITIONS
@@ -368,39 +332,54 @@ class DirectPortDenialTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.validate_baseline(forged)
 
-        for relative in ("README.md", "cases.json", "test_validate.py"):
-            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory) / "fixture"
-                shutil.copytree(FIXTURE_DIR, root)
-                path = root / relative
-                if relative == "cases.json":
-                    path.write_bytes(path.read_bytes() + b" \n")
-                else:
-                    path.write_text(path.read_text(encoding="utf-8") + "\ncoordinated_rebind_marker\n", encoding="utf-8")
-                self._rebind_all_mutable_local_evidence(root)
-                for optimized in (False, True):
-                    completed = self._run_fixture_copy(root, optimized=optimized)
-                    self.assertEqual(completed.returncode, 2)
-                    self.assertIn("external review signature changed", json.loads(completed.stdout)["error"]["message"])
+        captured = validate._capture_retained_artifacts(FIXTURE_DIR)
+        changed = dict(captured.files)
+        changed["README.md"] += b"\nlocal_rebind_marker\n"
+        rebound = validate.CapturedArtifacts(captured.root, changed)
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_pinned_artifacts(rebound)
 
-    def test_validator_source_and_baseline_anchor_rebinding_fail(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "fixture"
+    def test_reviewed_git_objects_have_exact_independent_identities(self) -> None:
+        repo_root = validate._repo_root(FIXTURE_DIR)
+        validate._validate_reviewed_launcher(repo_root)
+        reviewed = validate._load_reviewed_network_cases(repo_root)
+        self.assertIn("reviewed-chat-via-proxy-approved", reviewed)
+        with self.assertRaises(validate.ValidationError):
+            validate._read_reviewed_git_artifact(
+                repo_root,
+                validate.REVIEWED_NETWORK_COMMIT,
+                validate.REVIEWED_NETWORK_PATH,
+                validate.REVIEWED_NETWORK_BYTES,
+                "0" * 64,
+            )
+
+    def test_canonical_path_replacement_after_capture_cannot_change_parsed_or_hashed_bytes(self) -> None:
+        with tempfile.TemporaryDirectory(dir=FIXTURE_DIR.parent) as directory:
+            root = Path(directory) / "direct-port-denial"
             shutil.copytree(FIXTURE_DIR, root)
-            validator_path = root / "validate.py"
-            validator_path.write_text(validator_path.read_text(encoding="utf-8") + "\n# source_rebind_marker\n", encoding="utf-8")
-            self._rebind_all_mutable_local_evidence(root)
-            for optimized in (False, True):
-                completed = self._run_fixture_copy(root, optimized=optimized)
-                self.assertEqual(completed.returncode, 2)
-                self.assertIn("external review signature changed", json.loads(completed.stdout)["error"]["message"])
+            captured = validate._capture_retained_artifacts(root)
+            with self.assertRaises(TypeError):
+                captured.files["cases.json"] = b"replacement"  # type: ignore[index]
+            original_document = validate.parse_json_bytes(captured.files["cases.json"])
+            original_digest = validate._artifact_digest(captured)
+            (root / "cases.json").write_bytes(b'{"replacement":true}\n')
+            self.assertEqual(validate.parse_json_bytes(captured.files["cases.json"]), original_document)
+            self.assertEqual(validate._artifact_digest(captured), original_digest)
+            self.assertNotEqual(captured.files["cases.json"], (root / "cases.json").read_bytes())
 
-        baseline = validate.load_json(validate.BASELINE_PATH)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="ascii") as anchor:
-            anchor.write("not-a-signature\n")
-            anchor.flush()
-            with self.assertRaises(validate.ValidationError):
-                validate.validate_baseline(baseline, anchor_path=Path(anchor.name))
+    def test_alternate_artifact_paths_are_rejected_in_normal_and_optimized_modes(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".json") as alternate:
+            alternate.write(json.dumps(self.document).encode("utf-8"))
+            alternate.flush()
+            for optimized in (False, True):
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.extend([str(FIXTURE_DIR / "validate.py"), "--cases", alternate.name])
+                completed = subprocess.run(command, check=False, capture_output=True, text=True)
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stderr, "")
+                self.assertEqual(json.loads(completed.stdout)["error"]["message"], "invalid command-line arguments")
 
     def test_normal_and_optimized_cli_report_synthetic_scope(self) -> None:
         for optimized in (False, True):
@@ -419,17 +398,17 @@ class DirectPortDenialTests(unittest.TestCase):
             self.assertIsNone(payload["threshold"])
             self.assertEqual(payload["cleanup"], "not_applicable_no_state_created")
 
-    def test_validator_has_no_network_or_process_primitives(self) -> None:
+    def test_validator_has_no_network_or_shell_primitives(self) -> None:
         source = (FIXTURE_DIR / "validate.py").read_text(encoding="utf-8")
         for forbidden in (
             "import socket",
-            "import subprocess",
             "import requests",
             "import urllib",
             "os.system",
-            "subprocess.run",
+            "shell=True",
         ):
             self.assertNotIn(forbidden, source)
+        self.assertIn('["git", "-C", str(repo_root)', source)
         self.assertIn("network_access", source)
         self.assertIn("socket_operations", source)
         self.assertIn("firewall_changes", source)

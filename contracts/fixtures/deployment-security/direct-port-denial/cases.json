@@ -56,7 +56,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": "6fa2dde11831a805a8ea7ef7e576e44b0fce69d130a7441d29b8822a0056f5b5"
+        "source_evidence": {
+          "observation_index": 0,
+          "network_contract_case_id": "reviewed-chat-via-proxy-approved",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "approved_proxy_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "allow",
@@ -90,7 +98,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 1,
+          "network_contract_case_id": "direct-public-private-denied",
+          "client_surface": "public_browser",
+          "network_path": "public_to_private_9119",
+          "firewall_source": "public_internet",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -124,7 +140,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 2,
+          "network_contract_case_id": "direct-public-private-denied",
+          "client_surface": "public_browser",
+          "network_path": "public_to_private_9119",
+          "firewall_source": "public_internet",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -158,7 +182,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 3,
+          "network_contract_case_id": "direct-client-private-denied",
+          "client_surface": "direct_client",
+          "network_path": "client_to_private_9119",
+          "firewall_source": "direct_client",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -194,7 +226,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 4,
+          "network_contract_case_id": "unknown-network-identity-denied",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "unknown_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -230,7 +270,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 5,
+          "network_contract_case_id": "public-hermes-bind-rejected",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "approved_proxy_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -266,7 +314,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 6,
+          "network_contract_case_id": "wrong-hermes-port-rejected",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "approved_proxy_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -302,7 +358,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": "6fa2dde11831a805a8ea7ef7e576e44b0fce69d130a7441d29b8822a0056f5b5"
+        "source_evidence": {
+          "observation_index": 7,
+          "network_contract_case_id": "broad-firewall-source-denied",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "public_internet",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -329,7 +393,15 @@
           "configured_proxy"
         ],
         "firewall_rule": null,
-        "proxy_attestation": "6fa2dde11831a805a8ea7ef7e576e44b0fce69d130a7441d29b8822a0056f5b5"
+        "source_evidence": {
+          "observation_index": 8,
+          "network_contract_case_id": "missing-firewall-rule-blocked",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "approved_proxy_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -365,7 +437,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 9,
+          "network_contract_case_id": "unknown-topology-blocked",
+          "client_surface": "proof_harness",
+          "network_path": "unknown_path",
+          "firewall_source": "unknown_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -401,7 +481,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 10,
+          "network_contract_case_id": "unknown-network-identity-denied",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "unknown_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -435,7 +523,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 11,
+          "network_contract_case_id": "unknown-network-identity-denied",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "unknown_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -472,7 +568,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 12,
+          "network_contract_case_id": "unknown-network-identity-denied",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "unknown_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -508,7 +612,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 13,
+          "network_contract_case_id": "public-hermes-bind-rejected",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "approved_proxy_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -544,7 +656,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 14,
+          "network_contract_case_id": "localhost-only-assumption-rejected",
+          "client_surface": "proxy",
+          "network_path": "localhost_only",
+          "firewall_source": "localhost_only",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",
@@ -578,7 +698,15 @@
           "destination_interface": "private_service",
           "destination_port": 9119
         },
-        "proxy_attestation": null
+        "source_evidence": {
+          "observation_index": 15,
+          "network_contract_case_id": "unknown-network-identity-denied",
+          "client_surface": "proxy",
+          "network_path": "proxy_to_private_9119",
+          "firewall_source": "unknown_network_identity",
+          "network_contract_commit": "014c4b84789b0d14a4b024c4a670033146aed25a",
+          "launcher_commit": "a9cbdab8ece2d4f43d10263d4292f2b82a7750cc"
+        }
       },
       "expected": {
         "decision": "deny",

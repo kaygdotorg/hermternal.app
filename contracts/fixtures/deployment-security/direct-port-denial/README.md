@@ -28,13 +28,17 @@ classification label:
   destination port.
 
 The independent evaluator derives the result from those fields without trusting
-the case identifier, kind, expected decision, or reason. The one allow record
-also carries a deterministic reviewed path attestation derived from all exact
-path attributes. Rebinding only browser/client identity, interface, and hop labels
-cannot manufacture that attestation. There is exactly one allow representation.
-It is the configured proxy path. Its `upstream_call` value
-means only that the offline model may represent a forward. The validator itself
-makes no upstream call.
+the case kind, expected decision, or reason. Each row also records exact raw
+`client_surface`, `network_path`, and `firewall_source` observations. The
+validator derives those values from the DEP-01 fixture bytes at reviewed commit
+`014c4b84789b0d14a4b024c4a670033146aed25a`. It also requires the exact protected
+launcher, launcher tests, and launcher skill bytes at commit
+`a9cbdab8ece2d4f43d10263d4292f2b82a7750cc`. The row position and reviewed DEP-01
+case identity bind each observation to its source. Copying every local allow
+field into a browser row therefore fails source-evidence validation in normal and
+optimized Python. There is exactly one allow representation: the configured
+proxy path. Its `upstream_call` value means only that the offline model may
+represent a forward. The validator itself makes no upstream call.
 
 The inventory denies direct public, browser, and client-network sources. It also
 denies a wrong source interface, wrong destination interface, wrong port, broad
@@ -50,10 +54,12 @@ float overflow, oversized integers, excessive input bytes, excessive depth,
 excessive total nodes, oversized containers, oversized strings, control
 characters, unknown keys, changed key order, wrong scalar types, and booleans in
 integer fields. Structural, redaction, and equality walks are iterative. Retained
-artifacts are opened with no-follow semantics, must be regular files, and are
-size-checked before and during chunked reads. Symlinks, special files, file swaps,
-and reads beyond the remaining aggregate byte budget fail closed. These checks
-use explicit exceptions and remain active under optimized Python.
+artifacts are opened once with no-follow semantics, must be regular files, and
+are size-checked before and during chunked reads. Parsing, hashing, redaction, and
+identity checks consume the same captured bytes; no phase reopens a canonical
+path. Symlinks, special files, file swaps during capture, alternate CLI artifact
+paths, and reads beyond the remaining aggregate byte budget fail closed. These
+checks use explicit exceptions and remain active under optimized Python.
 
 Malformed or incomplete evidence returns one bounded JSON line with status `2`.
 It emits no traceback, usage text, raw command-line value, duplicate key, or
@@ -73,13 +79,12 @@ The benchmark record contains 30 raw normal samples and 30 raw optimized samples
 with deterministic distribution fields and a `null` threshold. These are local
 validator-duration observations, not a budget or deployment claim. Canonical
 baseline evidence, README, cases, tests, and normalized validator source keep
-local identity checks. A detached RSA review signature additionally binds those
-artifacts and the benchmark evidence. Its private key is discarded, and its
-public-key fingerprint is published in the PR review record outside this mutable
-proof directory. Coordinated local rewriting of artifacts, metadata, validator
-pins, and the signature file therefore cannot create a valid reviewed signature.
-The shared registry remains a separate integration trust root after serialized
-ownership becomes available.
+local reproducibility checks. The checksum file is also local reproducibility
+metadata; it is not described as an immutable signature or custody claim.
+Independent source/path authority instead comes from exact byte counts and
+SHA-256 identities read from the pinned DEP-01 and protected-launcher Git
+objects. The shared registry remains a separate integration trust root after
+serialized ownership becomes available.
 
 ## Reproduce
 
