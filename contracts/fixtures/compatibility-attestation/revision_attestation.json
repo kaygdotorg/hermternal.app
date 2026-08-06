@@ -1,0 +1,51 @@
+{
+  "schema": "hermternal.revision-attestation.v1",
+  "operation": "C-04",
+  "contract": "dashboard-v0.0.1",
+  "hermes": {
+    "repository": "NousResearch/hermes-agent",
+    "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e"
+  },
+  "deployment": {
+    "identity": "synthetic-deployment-001",
+    "trust_channel": "release-channel",
+    "scope": "fixture_only"
+  },
+  "route_manifest": {
+    "path": "contracts/hermes-dashboard/manifest.md",
+    "contract_revision": "dashboard-v0.0.1",
+    "sha256": "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197",
+    "size_bytes": 17859
+  },
+  "source_review": {
+    "path": "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
+    "sha256": "0a84cba82e6e966ab35de187f560fd38d6e10c43dd2204062d6ebf2bc5c32077",
+    "size_bytes": 20045
+  },
+  "proxy_proof": {
+    "path": "docs/deployment/proof-matrix.md",
+    "sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+    "size_bytes": 16167
+  },
+  "dashboard_metadata": {
+    "source_revision_observable": false,
+    "stable_wire_version_observable": false,
+    "blocked_ssh_ownership_version_is_evidence": false
+  },
+  "requirements": {
+    "full_source_sha_required": true,
+    "unknown_revision_policy": "block",
+    "behavioral_probe_required_before_live_operation": true,
+    "attestation_alone_enables_live_operation": false
+  },
+  "redaction": {
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_hosts": false,
+    "contains_auth_material": false,
+    "contains_raw_tickets": false,
+    "contains_prompts": false,
+    "contains_transcripts": false,
+    "contains_user_data": false
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "schema": "hermternal.revision-attestation-baseline.v1",
+  "validator": "contracts/fixtures/compatibility-attestation/validate.py",
+  "command": "python3 contracts/fixtures/compatibility-attestation/validate.py",
+  "build_mode": "N/A",
+  "artifact_files": [
+    {
+      "path": "contracts/fixtures/compatibility-attestation/README.md",
+      "sha256": "d473be26713ee91383cb0ae4b70dc47430d5aa9fe96445e84a2cec788ebc18f3",
+      "size_bytes": 7537
+    },
+    {
+      "path": "contracts/fixtures/compatibility-attestation/revision_attestation.json",
+      "sha256": "3969cf7fb5bb4845b8f2b77e85f367e3040dc1d6157494f34edeeba02109b9bc",
+      "size_bytes": 1679
+    },
+    {
+      "path": "contracts/fixtures/compatibility-attestation/cases.json",
+      "sha256": "bdac588896e47eb62e3292e2ab284a1b6cef0916e9e5ed83bafe28cc5de763c4",
+      "size_bytes": 7447
+    },
+    {
+      "path": "contracts/fixtures/compatibility-attestation/validate.py",
+      "sha256": "da997795d5fa478ca0eeaab2e9a236e5a990355a97ce20f5d800df7805ea8781",
+      "size_bytes": 45544
+    },
+    {
+      "path": "contracts/fixtures/compatibility-attestation/test_validate.py",
+      "sha256": "aab4a96742d284b04bc22db65f9b812d71f5e78195b39754300ab88bdf99f5f9",
+      "size_bytes": 23419
+    }
+  ],
+  "artifact_bytes": 85626,
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "repetitions": 30,
+  "duration_ms": {
+    "min": 544.776,
+    "p50": 597.613,
+    "p95": 635.5,
+    "max": 641.336,
+    "mean": 597.172
+  },
+  "threshold": null
+}
