@@ -1,0 +1,289 @@
+{
+  "schema": "hermternal.hermes-rootless-init.v1",
+  "operation": "R-02B",
+  "issue": 250,
+  "synthetic_only": true,
+  "live_execution": false,
+  "pinned_source": {
+    "repository": "NousResearch/hermes-agent",
+    "commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
+    "references": [
+      {
+        "path": "Dockerfile",
+        "lines": "298-311",
+        "blob": "2de6192715ed9a839c257b1f34f98d0832797159",
+        "finding": "The image returns to USER root so stage2 can remap the hermes UID/GID and own startup state."
+      },
+      {
+        "path": "docker/stage2-hook.sh",
+        "lines": "23-24",
+        "blob": "899c8e86ac989735a27d67cb3b11df88762bbb9b",
+        "finding": "The bootstrap drops startup work to hermes with s6-setuidgid."
+      },
+      {
+        "path": "docker/stage2-hook.sh",
+        "lines": "214-220",
+        "blob": "899c8e86ac989735a27d67cb3b11df88762bbb9b",
+        "finding": "Recursive data-volume chown failures are logged and allowed to continue."
+      },
+      {
+        "path": "docker/stage2-hook.sh",
+        "lines": "234-245",
+        "blob": "899c8e86ac989735a27d67cb3b11df88762bbb9b",
+        "finding": "The pinned source explicitly treats rootless chown failure as non-fatal when the mapped volume is already usable."
+      },
+      {
+        "path": "docker/stage2-hook.sh",
+        "lines": "374-396",
+        "blob": "899c8e86ac989735a27d67cb3b11df88762bbb9b",
+        "finding": "Fresh startup directories are created through s6-setuidgid hermes."
+      },
+      {
+        "path": "docker/cont-init.d/015-supervise-perms",
+        "lines": "64-86",
+        "blob": "8d7b473d29ca5cae8da6e24150cec18c8c9284b7",
+        "finding": "s6 supervise and event ownership warnings are best-effort; the script does not make chown failure fatal."
+      },
+      {
+        "path": "docker/main-wrapper.sh",
+        "lines": "31-31",
+        "blob": "efabad9839343853106e18bf51657fe5db84f44a",
+        "finding": "The real CMD path also drops root to hermes with s6-setuidgid."
+      },
+      {
+        "path": "docker/s6-rc.d/dashboard/run",
+        "lines": "53-56",
+        "blob": "2eb0cf9cb18b38772b35ed156e3a542ed7e51636",
+        "finding": "An enabled dashboard uses the same root-to-hermes drop."
+      }
+    ]
+  },
+  "approved_boundary": {
+    "cap_drop": ["ALL"],
+    "cap_add": [],
+    "no_new_privileges": true,
+    "host_network": false,
+    "published_ports": [],
+    "host_profile_bind": false,
+    "network_internal": true,
+    "volume_kind": "named_project_scoped",
+    "restart": "no",
+    "resource_limits": {
+      "cpus": "0.50",
+      "memory": "512m",
+      "pids": 256
+    }
+  },
+  "capability_matrix": {
+    "status": "candidate_only_pending_review",
+    "not_live_verified": true,
+    "entries": [
+      {
+        "executor": "docker",
+        "user_namespace": "rootful",
+        "volume_state": "fresh_named",
+        "required_caps": ["CAP_CHOWN", "CAP_SETGID", "CAP_SETUID"],
+        "conditional_caps": [],
+        "not_source_justified": ["CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_NET_ADMIN", "CAP_NET_RAW", "CAP_SYS_ADMIN"],
+        "reason_codes": ["stage2_targeted_chown", "stage2_setuidgid", "main_wrapper_setuidgid"]
+      },
+      {
+        "executor": "podman",
+        "user_namespace": "rootless",
+        "volume_state": "fresh_named",
+        "required_caps": ["CAP_CHOWN", "CAP_SETGID", "CAP_SETUID"],
+        "conditional_caps": [],
+        "not_source_justified": ["CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_NET_ADMIN", "CAP_NET_RAW", "CAP_SYS_ADMIN"],
+        "reason_codes": ["stage2_targeted_chown", "stage2_setuidgid", "main_wrapper_setuidgid"],
+        "preconditions": ["subuid_mapping_includes_hermes_uid", "subgid_mapping_includes_hermes_gid", "rootless_user_namespace"]
+      }
+    ]
+  },
+  "proposed_one_run": {
+    "status": "awaiting_independent_review",
+    "executor": "podman",
+    "compose_provider": "podman-compose",
+    "account": "hermternal-test",
+    "rootless": true,
+    "project": "generated_hermes_rootless_init_candidate",
+    "image": "hermes-agent:hermternal-f5be9236",
+    "command": ["sleep", "infinity"],
+    "cap_drop": ["ALL"],
+    "cap_add": ["CAP_CHOWN", "CAP_SETGID", "CAP_SETUID"],
+    "no_new_privileges": true,
+    "security_opt": ["no-new-privileges:true"],
+    "published_ports": [],
+    "binds": [],
+    "host_network": false,
+    "host_profile_bind": false,
+    "network": "generated_internal_project_network",
+    "volume": "generated_named_project_volume",
+    "resource_limits": {
+      "cpus": "0.50",
+      "memory": "512m",
+      "pids": 256,
+      "tmpfs": ["/tmp:size=64m,mode=1777", "/run:size=16m,mode=755"],
+      "shm_size": "64m",
+      "log_driver": "k8s-file",
+      "log_max_size": "1m"
+    },
+    "evidence": ["bounded_redacted_state", "native_inspect", "zero_leftover_counts"],
+    "teardown": ["down", "--volumes", "--remove-orphans"],
+    "readiness": "bounded_container_state_and_native_inspect_only",
+    "approval_required": true
+  },
+  "cases": [
+    {
+      "id": "docker-cap-drop-all-exit-126",
+      "kind": "runtime_observation",
+      "executor": "docker",
+      "rootless": false,
+      "boundary": {
+        "cap_drop": ["ALL"],
+        "cap_add": [],
+        "no_new_privileges": true,
+        "host_network": false,
+        "published_ports": [],
+        "host_profile_bind": false,
+        "network_internal": true,
+        "volume_kind": "named_project_scoped",
+        "restart": "no"
+      },
+      "runtime": {
+        "started": true,
+        "readiness": "failed",
+        "exit_code": 126,
+        "failure_code": "s6_setuidgid_permission_denied",
+        "warning_codes": [],
+        "raw_log_retained": false
+      },
+      "cleanup": {
+        "project_scope": "recognized_generated_project",
+        "command": ["down", "--volumes", "--remove-orphans"],
+        "status": 0,
+        "leftover_containers": 0,
+        "leftover_networks": 0,
+        "leftover_volumes": 0
+      },
+      "expected": {
+        "classification": "pinned_boundary_incompatibility",
+        "release_status": "blocked_readiness"
+      }
+    },
+    {
+      "id": "podman-rootless-supervise-perms-exit-2",
+      "kind": "runtime_observation",
+      "executor": "podman",
+      "rootless": true,
+      "boundary": {
+        "cap_drop": ["ALL"],
+        "cap_add": [],
+        "no_new_privileges": true,
+        "host_network": false,
+        "published_ports": [],
+        "host_profile_bind": false,
+        "network_internal": true,
+        "volume_kind": "named_project_scoped",
+        "restart": "no"
+      },
+      "runtime": {
+        "started": true,
+        "readiness": "failed",
+        "exit_code": 2,
+        "failure_code": "s6_supervise_perms_chown_warning",
+        "warning_codes": ["supervise_perms_chown"],
+        "raw_log_retained": false
+      },
+      "cleanup": {
+        "project_scope": "recognized_generated_project",
+        "command": ["down", "--volumes", "--remove-orphans"],
+        "status": 0,
+        "leftover_containers": 0,
+        "leftover_networks": 0,
+        "leftover_volumes": 0
+      },
+      "expected": {
+        "classification": "pinned_rootless_incompatibility",
+        "release_status": "blocked_readiness"
+      }
+    },
+    {
+      "id": "harness-hostconfig-binds-volume-assertion",
+      "kind": "harness_evidence",
+      "executor": "docker",
+      "rootless": false,
+      "observed": {
+        "hostconfig_binds": ["generated_named_volume:/opt/data:rw"],
+        "mounts": [{"type": "volume", "source_kind": "named", "destination": "/opt/data"}],
+        "assertion": "named_volume_must_not_appear_in_hostconfig_binds"
+      },
+      "expected": {
+        "classification": "harness_defect",
+        "correction": "inspect_native_mount_type_and_source_kind"
+      }
+    },
+    {
+      "id": "unsafe-workaround-capability-escalation",
+      "kind": "policy_mutation",
+      "executor": "docker",
+      "rootless": false,
+      "mutation": {
+        "cap_drop": [],
+        "cap_add": ["ALL"],
+        "privileged": true,
+        "no_new_privileges": false,
+        "host_network": true,
+        "published_ports": ["9119:9119"],
+        "host_profile_bind": true,
+        "network_internal": false
+      },
+      "expected": {
+        "classification": "unsafe_workaround_rejected",
+        "reason_codes": ["privileged", "capability_escalation", "host_network", "published_port", "host_profile_bind", "no_new_privileges_disabled"]
+      }
+    },
+    {
+      "id": "cleanup-after-failed-readiness",
+      "kind": "cleanup_observation",
+      "executor": "podman",
+      "rootless": true,
+      "runtime": {
+        "readiness": "failed",
+        "failure_code": "s6_supervise_perms_chown_warning"
+      },
+      "cleanup": {
+        "project_scope": "recognized_generated_project",
+        "command": ["down", "--volumes", "--remove-orphans"],
+        "status": 0,
+        "leftover_containers": 0,
+        "leftover_networks": 0,
+        "leftover_volumes": 0
+      },
+      "expected": {
+        "classification": "cleanup_complete",
+        "release_status": "blocked_readiness"
+      }
+    },
+    {
+      "id": "unsafe-workaround-arbitrary-user",
+      "kind": "policy_mutation",
+      "executor": "podman",
+      "rootless": true,
+      "mutation": {
+        "user_override": "arbitrary_non_hermes_uid",
+        "cap_drop": ["ALL"],
+        "cap_add": [],
+        "no_new_privileges": true,
+        "host_network": false,
+        "published_ports": [],
+        "host_profile_bind": false,
+        "network_internal": true
+      },
+      "expected": {
+        "classification": "unsafe_workaround_rejected",
+        "reason_codes": ["arbitrary_user_override"]
+      }
+    }
+  ]
+}
