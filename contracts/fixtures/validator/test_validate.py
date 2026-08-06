@@ -351,6 +351,41 @@ class CliTests(unittest.TestCase):
         self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
 
+    def test_registered_validate_python_rejects_rfc7617_sample_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        python_artifact = repo_root / "contracts/fixtures/deployment-security/external-allowlist/validate.py"
+        python_artifact.write_text(
+            python_artifact.read_text(encoding="utf-8")
+            + '\nFORGED_BASIC = "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="\n',
+            encoding="utf-8",
+        )
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_registered_non_test_source_rejects_rfc7617_sample_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        readme = repo_root / "contracts/fixtures/deployment-security/external-allowlist/README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8")
+            + '\nAuthorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==\n',
+            encoding="utf-8",
+        )
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_nested_json_key_with_credential_shaped_text_is_rejected_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        json_artifact = repo_root / "contracts/fixtures/connection-restoration/cases.json"
+        document = json.loads(json_artifact.read_text(encoding="utf-8"))
+        document["cases"][0]["expected"]["nested"] = {
+            "safe": {
+                "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==": "redacted",
+            },
+        }
+        json_artifact.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
     def test_registered_ws_and_wss_live_hosts_are_rejected_in_both_modes(self) -> None:
         repo_root = self._copy_fixture_repo()
         readme = repo_root / "contracts/fixtures/connection-restoration/README.md"
