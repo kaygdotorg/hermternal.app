@@ -1,0 +1,1716 @@
+{
+  "schema": "hermternal.session-persistence.v1",
+  "operation": "C-07",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "surface": "shared-web-apple",
+  "source_observations": [
+    {
+      "id": "create-lazy-row",
+      "path": "tui_gateway/methods_session.py",
+      "anchor": "@method(\"session.create\")",
+      "observation": "session.create returns an ephemeral live id and stored session key without eagerly inserting a database row.",
+      "contract_relevance": "An abandoned empty draft must not become a durable session."
+    },
+    {
+      "id": "first-prompt-row",
+      "path": "tui_gateway/methods_prompt.py",
+      "anchor": "_ensure_session_db_row(session)",
+      "observation": "prompt.submit persists the session row before deferred agent work starts; a storage error clears the running turn and returns an error.",
+      "contract_relevance": "Persistence failure cannot be reported as accepted prompt success."
+    },
+    {
+      "id": "idempotent-row-upsert",
+      "path": "hermes_state.py",
+      "anchor": "def create_session(self, session_id: str, source: str, **kwargs)",
+      "observation": "SessionDB create_session delegates to an idempotent row insert keyed by the stored session id.",
+      "contract_relevance": "Retries of the same creation do not create a second durable session."
+    },
+    {
+      "id": "reopen-clears-ended",
+      "path": "hermes_state.py",
+      "anchor": "def reopen_session(self, session_id: str)",
+      "observation": "reopen_session clears ended markers before a session resume reads server-owned history.",
+      "contract_relevance": "Reopen resumes the same session identity rather than creating a replacement."
+    },
+    {
+      "id": "resume-history",
+      "path": "tui_gateway/methods_session.py",
+      "anchor": "@method(\"session.resume\")",
+      "observation": "session.resume reopens the stored row and loads the durable conversation projection; a missing id returns an error.",
+      "contract_relevance": "Resume must fail closed on a missing session and must not fall back to a new one."
+    },
+    {
+      "id": "interrupt-safe",
+      "path": "tui_gateway/methods_session.py",
+      "anchor": "@method(\"session.interrupt\")",
+      "observation": "session.interrupt clears queued prompts, requests a hard interrupt for an active turn, and returns an interrupted status.",
+      "contract_relevance": "Interruption preserves safe state and does not duplicate queued input."
+    },
+    {
+      "id": "detach-reconnect",
+      "path": "tui_gateway/ws.py",
+      "anchor": "_close_sessions_for_transport",
+      "observation": "A WebSocket loss detaches ordinary sessions for a bounded reconnect window; resume can rebind the same live session.",
+      "contract_relevance": "Transport loss is not proof of session loss or prompt rejection."
+    },
+    {
+      "id": "unknown-boundary",
+      "path": "tui_gateway/ws.py",
+      "anchor": "server.dispatch",
+      "observation": "Dispatch and parse failures are explicit transport errors rather than successful method results.",
+      "contract_relevance": "Malformed or incompatible session evidence must stop instead of invoking an unreviewed fallback."
+    }
+  ],
+  "states": [
+    {
+      "id": "empty",
+      "meaning": "An ephemeral session exists, but no durable row has been created.",
+      "allowed_actions": [
+        "edit_draft",
+        "submit_prompt",
+        "create_new"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "pending_create",
+      "meaning": "session.create is pending and no durable session exists yet.",
+      "allowed_actions": [
+        "wait",
+        "cancel"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "pending_persist",
+      "meaning": "The first prompt is accepted locally while the session row write is pending.",
+      "allowed_actions": [
+        "wait",
+        "interrupt",
+        "cancel"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "ready",
+      "meaning": "A durable server session is available for the next user action.",
+      "allowed_actions": [
+        "submit_prompt",
+        "interrupt",
+        "resume",
+        "close"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "restoring",
+      "meaning": "The client is reopening the stored session and reading server-owned history.",
+      "allowed_actions": [
+        "wait",
+        "cancel"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "interrupted",
+      "meaning": "A turn was stopped or safely cancelled without an automatic resend.",
+      "allowed_actions": [
+        "resume",
+        "submit_prompt",
+        "close"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "delivery_uncertain",
+      "meaning": "A prompt outcome is unknown and the source state must be restored first.",
+      "allowed_actions": [
+        "resume",
+        "cancel",
+        "sign_out"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "failed",
+      "meaning": "A known creation, persistence, or resume operation failed.",
+      "allowed_actions": [
+        "explicit_retry",
+        "sign_out"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "closed",
+      "meaning": "The live session is detached or closed while its durable row remains addressable.",
+      "allowed_actions": [
+        "resume",
+        "create_new"
+      ],
+      "terminal": false
+    },
+    {
+      "id": "incompatible",
+      "meaning": "Evidence or an event is malformed, unknown, foreign, or unsafe to interpret.",
+      "allowed_actions": [
+        "stop",
+        "sign_out"
+      ],
+      "terminal": true
+    }
+  ],
+  "invariants": {
+    "creation": {
+      "method": "session.create",
+      "live_identity": "ephemeral_session_id",
+      "durable_identity": "stored_session_id",
+      "empty_row": "not_created_until_first_prompt",
+      "retry": "same_draft_no_duplicate"
+    },
+    "persistence": {
+      "trigger": "prompt.submit",
+      "ordering": "row_write_before_agent_build",
+      "row_write": "idempotent_upsert",
+      "known_failure": "preserve_draft_clear_running_return_error",
+      "transcript_failure": "abort_turn"
+    },
+    "resume": {
+      "method": "session.resume",
+      "source_of_truth": "server_owned_history",
+      "reopen": "clear_ended_markers",
+      "missing": "failed_without_new_session",
+      "duplicate": "reuse_or_deduplicate_same_stored_session"
+    },
+    "empty": {
+      "create_without_prompt": "empty_ephemeral_only",
+      "durable_row": "false",
+      "automatic_new_session": "blocked"
+    },
+    "interruption": {
+      "method": "session.interrupt",
+      "queued_input": "cleared",
+      "confirmed": "interrupted_without_resend",
+      "unknown_result": "delivery_uncertain_restore_first"
+    },
+    "duplicates": {
+      "create_retry": "same_durable_key",
+      "prompt_while_pending": "blocked",
+      "resume_while_restoring": "deduplicated",
+      "automatic_prompt_retry": "blocked"
+    },
+    "fail_closed": {
+      "unknown_event": "incompatible",
+      "malformed_result": "incompatible",
+      "foreign_session": "incompatible",
+      "fallback": "no_new_session"
+    }
+  },
+  "cases": [
+    {
+      "id": "create-request-pending",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.create.request"
+      ],
+      "expected": {
+        "decision": "create_pending",
+        "final_state": "pending_create",
+        "trace": [
+          "empty",
+          "pending_create"
+        ],
+        "effects": [
+          "create_requested"
+        ],
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "notes": "A pending create exposes work without claiming a durable session."
+    },
+    {
+      "id": "create-empty-draft",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.create.request",
+        "session.create.accepted"
+      ],
+      "expected": {
+        "decision": "create_empty",
+        "final_state": "empty",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty"
+        ],
+        "effects": [
+          "create_requested",
+          "ephemeral_session_created",
+          "durable_row_deferred_until_prompt"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "An accepted empty draft has only an ephemeral live identity."
+    },
+    {
+      "id": "create-failure-fails-closed",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.create.request",
+        "session.create.failed"
+      ],
+      "expected": {
+        "decision": "creation_failed",
+        "final_state": "failed",
+        "trace": [
+          "empty",
+          "pending_create",
+          "failed"
+        ],
+        "effects": [
+          "create_requested",
+          "creation_failed",
+          "no_new_session_fallback"
+        ],
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "unknown",
+        "error_kind": "create_failed"
+      },
+      "notes": "A known create failure does not silently create a replacement session."
+    },
+    {
+      "id": "create-retry-reuses-empty-draft",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.create.request",
+        "session.create.accepted",
+        "session.create.retry"
+      ],
+      "expected": {
+        "decision": "duplicate_create_suppressed",
+        "final_state": "empty",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty"
+        ],
+        "effects": [
+          "create_requested",
+          "ephemeral_session_created",
+          "durable_row_deferred_until_prompt",
+          "same_empty_session_reused",
+          "no_second_durable_row"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "A repeated create result reuses the same empty draft and stored key."
+    },
+    {
+      "id": "first-prompt-persists-session",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.create.request",
+        "session.create.accepted",
+        "prompt.submit.request",
+        "session.persist.ok"
+      ],
+      "expected": {
+        "decision": "session_persisted",
+        "final_state": "ready",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty",
+          "pending_persist",
+          "ready"
+        ],
+        "effects": [
+          "create_requested",
+          "ephemeral_session_created",
+          "durable_row_deferred_until_prompt",
+          "prompt_delivery_started",
+          "session_row_persisted",
+          "prompt_not_automatically_repeated"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "The first prompt creates the durable row before agent work is reported ready."
+    },
+    {
+      "id": "persistence-failure-preserves-draft",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.create.request",
+        "session.create.accepted",
+        "prompt.submit.request",
+        "session.persist.failed"
+      ],
+      "expected": {
+        "decision": "persistence_failed",
+        "final_state": "failed",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty",
+          "pending_persist",
+          "failed"
+        ],
+        "effects": [
+          "create_requested",
+          "ephemeral_session_created",
+          "durable_row_deferred_until_prompt",
+          "prompt_delivery_started",
+          "session_row_write_failed",
+          "draft_preserved",
+          "automatic_prompt_retry_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "present",
+        "prompt_in_flight": false,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "storage"
+      },
+      "notes": "A storage failure leaves the draft safe and reports failure instead of success."
+    },
+    {
+      "id": "persistence-retry-is-explicit",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.create.request",
+        "session.create.accepted",
+        "prompt.submit.request",
+        "session.persist.failed",
+        "session.persist.retry",
+        "session.persist.ok"
+      ],
+      "expected": {
+        "decision": "session_persisted",
+        "final_state": "ready",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty",
+          "pending_persist",
+          "failed",
+          "pending_persist",
+          "ready"
+        ],
+        "effects": [
+          "create_requested",
+          "ephemeral_session_created",
+          "durable_row_deferred_until_prompt",
+          "prompt_delivery_started",
+          "session_row_write_failed",
+          "draft_preserved",
+          "automatic_prompt_retry_blocked",
+          "explicit_retry_only",
+          "session_row_persisted",
+          "prompt_not_automatically_repeated"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 2,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "storage"
+      },
+      "notes": "Only an explicit idempotent persistence retry can recover a known storage failure."
+    },
+    {
+      "id": "duplicate-prompt-while-persisting",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": null,
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 0,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.create.request",
+        "session.create.accepted",
+        "prompt.submit.request",
+        "prompt.submit.duplicate"
+      ],
+      "expected": {
+        "decision": "duplicate_prompt_blocked",
+        "final_state": "pending_persist",
+        "trace": [
+          "empty",
+          "pending_create",
+          "empty",
+          "pending_persist"
+        ],
+        "effects": [
+          "create_requested",
+          "ephemeral_session_created",
+          "durable_row_deferred_until_prompt",
+          "prompt_delivery_started",
+          "duplicate_prompt_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "A second prompt is blocked while the first session write is pending."
+    },
+    {
+      "id": "duplicate-persist-ack-is-ignored",
+      "initial_state": "ready",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.persist.duplicate"
+      ],
+      "expected": {
+        "decision": "duplicate_persist_ack_ignored",
+        "final_state": "ready",
+        "trace": [
+          "ready"
+        ],
+        "effects": [
+          "duplicate_persist_ack_ignored"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "A stale persistence acknowledgement cannot create another row or turn."
+    },
+    {
+      "id": "resume-reopens-durable-session",
+      "initial_state": "closed",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.resume.request",
+        "session.reopen.present"
+      ],
+      "expected": {
+        "decision": "resume_restored",
+        "final_state": "ready",
+        "trace": [
+          "closed",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "resume_same_stored_session",
+          "server_history_reloaded"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 1,
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "Resume reopens the same stored session and reloads server-owned history."
+    },
+    {
+      "id": "resume-empty-history",
+      "initial_state": "closed",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "empty",
+        "server_presence": "empty",
+        "error_kind": null
+      },
+      "events": [
+        "session.resume.request",
+        "session.reopen.empty"
+      ],
+      "expected": {
+        "decision": "resume_restored_empty",
+        "final_state": "ready",
+        "trace": [
+          "closed",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "resume_same_stored_session",
+          "server_history_empty",
+          "no_automatic_prompt_retry"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "empty",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 1,
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "empty",
+        "error_kind": null
+      },
+      "notes": "An existing session with no messages returns a safe empty server projection."
+    },
+    {
+      "id": "resume-missing-fails-closed",
+      "initial_state": "closed",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.resume.request",
+        "session.reopen.missing"
+      ],
+      "expected": {
+        "decision": "resume_failed_missing",
+        "final_state": "failed",
+        "trace": [
+          "closed",
+          "restoring",
+          "failed"
+        ],
+        "effects": [
+          "resume_same_stored_session",
+          "stored_session_not_found",
+          "no_new_session_fallback"
+        ],
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 1,
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "missing",
+        "error_kind": "resume_missing"
+      },
+      "notes": "A missing stored session fails without silently creating a new one."
+    },
+    {
+      "id": "resume-interrupted-fails-closed",
+      "initial_state": "closed",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.resume.request",
+        "session.reopen.interrupted"
+      ],
+      "expected": {
+        "decision": "resume_interrupted",
+        "final_state": "failed",
+        "trace": [
+          "closed",
+          "restoring",
+          "failed"
+        ],
+        "effects": [
+          "resume_same_stored_session",
+          "resume_interrupted_safe_state",
+          "no_new_session_fallback"
+        ],
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 1,
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "resume_interrupted"
+      },
+      "notes": "Interrupted restore preserves a safe failure state and no replacement session."
+    },
+    {
+      "id": "duplicate-resume-request-is-deduplicated",
+      "initial_state": "closed",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.resume.request",
+        "session.resume.request",
+        "session.reopen.present"
+      ],
+      "expected": {
+        "decision": "resume_restored",
+        "final_state": "ready",
+        "trace": [
+          "closed",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "resume_same_stored_session",
+          "duplicate_resume_request_blocked",
+          "server_history_reloaded"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 1,
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "Concurrent resume requests share one restore barrier for one stored key."
+    },
+    {
+      "id": "close-detach-preserves-durable-session",
+      "initial_state": "ready",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.close.detach"
+      ],
+      "expected": {
+        "decision": "session_detached",
+        "final_state": "closed",
+        "trace": [
+          "ready",
+          "closed"
+        ],
+        "effects": [
+          "server_session_detached",
+          "no_reconnect_without_user_action"
+        ],
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "Close detaches the live session but preserves the durable identity for resume."
+    },
+    {
+      "id": "confirmed-interruption-preserves-draft",
+      "initial_state": "ready",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "connected",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.interrupt.request",
+        "session.interrupt.ack"
+      ],
+      "expected": {
+        "decision": "interrupted",
+        "final_state": "interrupted",
+        "trace": [
+          "ready",
+          "interrupted"
+        ],
+        "effects": [
+          "interrupt_requested",
+          "queued_prompt_cleared",
+          "interrupt_confirmed",
+          "prompt_not_automatically_repeated"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "A confirmed stop clears active work without automatically resending the draft."
+    },
+    {
+      "id": "unknown-interruption-requires-restore",
+      "initial_state": "ready",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "connected",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.interrupt.unknown"
+      ],
+      "expected": {
+        "decision": "interrupt_outcome_unknown",
+        "final_state": "delivery_uncertain",
+        "trace": [
+          "ready",
+          "delivery_uncertain"
+        ],
+        "effects": [
+          "delivery_uncertain",
+          "restore_before_retry"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "pending",
+        "prompt_retry": "restore_before_user_decision",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "notes": "A lost interrupt result is delivery uncertainty, not a rejection or success."
+    },
+    {
+      "id": "transport-loss-enters-delivery-uncertain",
+      "initial_state": "ready",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "connected",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "transport.lost"
+      ],
+      "expected": {
+        "decision": "delivery_uncertain",
+        "final_state": "delivery_uncertain",
+        "trace": [
+          "ready",
+          "delivery_uncertain"
+        ],
+        "effects": [
+          "delivery_uncertain",
+          "restore_before_retry"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "pending",
+        "prompt_retry": "restore_before_user_decision",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "notes": "Transport loss during delivery preserves the draft and opens a restore barrier."
+    },
+    {
+      "id": "uncertain-resume-present-suppresses-duplicate",
+      "initial_state": "delivery_uncertain",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "unknown",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.resume.request",
+        "session.reopen.present"
+      ],
+      "expected": {
+        "decision": "resume_restored",
+        "final_state": "ready",
+        "trace": [
+          "delivery_uncertain",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "resume_same_stored_session",
+          "server_history_reloaded",
+          "duplicate_prompt_suppressed"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 1,
+        "restore_barrier": "passed",
+        "prompt_retry": "user_decision_after_source_reread",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "Restored server history wins and the uncertain prompt is not duplicated."
+    },
+    {
+      "id": "uncertain-resume-absent-needs-user-decision",
+      "initial_state": "delivery_uncertain",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "unknown",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "session.resume.request",
+        "session.reopen.empty"
+      ],
+      "expected": {
+        "decision": "resume_restored_empty",
+        "final_state": "ready",
+        "trace": [
+          "delivery_uncertain",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "resume_same_stored_session",
+          "server_history_empty",
+          "no_automatic_prompt_retry"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": false,
+        "history": "empty",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 1,
+        "restore_barrier": "passed",
+        "prompt_retry": "user_decision_after_source_reread",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "empty",
+        "error_kind": null
+      },
+      "notes": "An absent prompt remains a user decision after source state is reread."
+    },
+    {
+      "id": "uncertain-prompt-is-blocked-before-restore",
+      "initial_state": "delivery_uncertain",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "unknown",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "prompt.submit.request"
+      ],
+      "expected": {
+        "decision": "duplicate_prompt_blocked",
+        "final_state": "delivery_uncertain",
+        "trace": [
+          "delivery_uncertain"
+        ],
+        "effects": [
+          "duplicate_prompt_blocked"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "history": "unknown",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "pending",
+        "prompt_retry": "restore_before_user_decision",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "notes": "A prompt cannot cross the restore barrier while delivery is uncertain."
+    },
+    {
+      "id": "automatic-prompt-retry-fails-closed",
+      "initial_state": "delivery_uncertain",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "unknown",
+        "server_presence": "unknown",
+        "error_kind": null
+      },
+      "events": [
+        "prompt.submit.auto_retry"
+      ],
+      "expected": {
+        "decision": "automatic_prompt_retry_blocked",
+        "final_state": "incompatible",
+        "trace": [
+          "delivery_uncertain",
+          "incompatible"
+        ],
+        "effects": [
+          "automatic_prompt_retry_blocked",
+          "no_new_session_fallback"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "history": "unknown",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "pending",
+        "prompt_retry": "restore_before_user_decision",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": true,
+        "server_presence": "unknown",
+        "error_kind": "incompatible"
+      },
+      "notes": "An automatic resend attempt is a compatibility failure, not a recovery path."
+    },
+    {
+      "id": "empty-restore-requires-explicit-new-prompt",
+      "initial_state": "closed",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "empty",
+        "server_presence": "empty",
+        "error_kind": null
+      },
+      "events": [
+        "session.resume.request",
+        "session.reopen.empty",
+        "prompt.submit.after_empty_restore"
+      ],
+      "expected": {
+        "decision": "new_prompt_requires_user_action",
+        "final_state": "ready",
+        "trace": [
+          "closed",
+          "restoring",
+          "ready"
+        ],
+        "effects": [
+          "resume_same_stored_session",
+          "server_history_empty",
+          "no_automatic_prompt_retry",
+          "new_prompt_requires_explicit_user_action"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": true,
+        "history": "empty",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 0,
+        "resume_attempts": 1,
+        "restore_barrier": "passed",
+        "prompt_retry": "none",
+        "transport_closed": false,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "empty",
+        "error_kind": null
+      },
+      "notes": "A new prompt after an empty restore is a new explicit user action."
+    },
+    {
+      "id": "foreign-resume-fails-closed",
+      "initial_state": "closed",
+      "initial_context": {
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "detached",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.resume.request",
+        "session.reopen.foreign"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "closed",
+          "restoring",
+          "incompatible"
+        ],
+        "effects": [
+          "resume_same_stored_session",
+          "foreign_session_identity",
+          "no_new_session_fallback"
+        ],
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 1,
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "incompatible"
+      },
+      "notes": "A resume response for another session identity is rejected."
+    },
+    {
+      "id": "unknown-event-fails-closed",
+      "initial_state": "ready",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "unknown.event"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "ready",
+          "incompatible"
+        ],
+        "effects": [
+          "unknown_event",
+          "no_new_session_fallback"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "incompatible"
+      },
+      "notes": "Unknown session evidence never promotes into a recovery action."
+    },
+    {
+      "id": "malformed-persistence-result-fails-closed",
+      "initial_state": "empty",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "not_started",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "none",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "prompt.submit.request",
+        "session.persist.malformed"
+      ],
+      "expected": {
+        "decision": "blocked_incompatible",
+        "final_state": "incompatible",
+        "trace": [
+          "empty",
+          "pending_persist",
+          "incompatible"
+        ],
+        "effects": [
+          "prompt_delivery_started",
+          "malformed_persistence_result",
+          "no_new_session_fallback"
+        ],
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": false,
+        "draft": "present",
+        "prompt_in_flight": true,
+        "history": "none",
+        "session_creations": 1,
+        "prompt_submissions": 1,
+        "persist_attempts": 1,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": "incompatible"
+      },
+      "notes": "Malformed storage evidence stops the operation without a fallback."
+    },
+    {
+      "id": "close-interrupted-session-does-not-reconnect",
+      "initial_state": "interrupted",
+      "initial_context": {
+        "selected_session": "session-marker-001",
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "transport": "connected",
+        "persistence": "available",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "history": "present",
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "events": [
+        "session.close.detach"
+      ],
+      "expected": {
+        "decision": "session_detached",
+        "final_state": "closed",
+        "trace": [
+          "interrupted",
+          "closed"
+        ],
+        "effects": [
+          "server_session_detached",
+          "no_reconnect_without_user_action"
+        ],
+        "selected_session": null,
+        "stored_session": "stored-session-marker-001",
+        "durable_row": true,
+        "draft": "empty",
+        "prompt_in_flight": false,
+        "history": "present",
+        "session_creations": 1,
+        "prompt_submissions": 0,
+        "persist_attempts": 0,
+        "resume_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "transport_closed": true,
+        "automatic_prompt_retry_attempted": false,
+        "server_presence": "present",
+        "error_kind": null
+      },
+      "notes": "Closing after interruption is terminal for the live transport and schedules no retry."
+    }
+  ],
+  "redaction": {
+    "synthetic_only": true,
+    "contains_credentials": false,
+    "contains_cookies": false,
+    "contains_tickets": false,
+    "contains_prompts": false,
+    "contains_transcripts": false,
+    "contains_hosts": false,
+    "contains_user_data": false,
+    "diagnostic_policy": "stable semantic errors only; retain no raw input, paths, or live values"
+  }
+}
