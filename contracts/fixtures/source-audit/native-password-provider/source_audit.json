@@ -1,0 +1,305 @@
+{
+  "schema": "hermternal.source-audit.native-password-provider.v1",
+  "contract_version": "dashboard-v0.0.1",
+  "hermes_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "scope": {
+    "platform": "web_and_native_policy",
+    "auth_family": "native_password_cookie_session",
+    "source_checkout": "git_checkout_or_content_only_snapshot",
+    "integration_mode": "mock_and_proof_only",
+    "fail_closed_unknown_case": true,
+    "native_cookie_policy": "app_isolated_protected_store",
+    "native_rest_policy": "cookie_only_no_ticket",
+    "native_websocket_policy": "fresh_single_use_ticket_only",
+    "native_pty_policy": "forbidden_web_only_route",
+    "ticket_session_binding": "not_assumed"
+  },
+  "source_provenance": {
+    "pinned_revision": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "pinned_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
+    "verification": "git_head_tree_complete_blob_reads_and_sha256_when_git_metadata_present",
+    "source_root_modes": {
+      "git_checkout": "exact_non_bare_clean_checkout_with_local_metadata_and_pinned_commit_tree",
+      "content_only_snapshot": "sha256_only_never_checkout_verified"
+    },
+    "citation_marker_policy": "marker_must_occur_in_cited_source_range_when_source_root_is_supplied",
+    "files": [
+      {
+        "path": "hermes_cli/dashboard_auth/routes.py",
+        "sha256": "d42be557b9b1ba798c038c91246cba0bf046e89ebe34a27db0c7803c517e9c20",
+        "git_blob": "0c142963bcc83f38fddbdcec29c35608f14f7bc1"
+      },
+      {
+        "path": "hermes_cli/dashboard_auth/cookies.py",
+        "sha256": "a87cd352864fab9d8fc46ec25efe7d6cc8e58eb92caaa8c82245ea50c4a42b3d",
+        "git_blob": "8bcd9db78eb6a8e9209e1b3087ab4e85b8997f1e"
+      },
+      {
+        "path": "plugins/dashboard_auth/basic/__init__.py",
+        "sha256": "81da36adae712bb133d522a5df1d66ccefcf5f9803e7bc90b226d4f096ac4cba",
+        "git_blob": "12ec0fe51355caa7f5657d514bbb5513a8318704"
+      },
+      {
+        "path": "hermes_cli/dashboard_auth/ws_tickets.py",
+        "sha256": "b66e29a067002ad8a345b49281d30c75d6ec2bb177d58214611db66925bb4429",
+        "git_blob": "118a988e142adf3a904d2a553698b38da22f34fc"
+      },
+      {
+        "path": "hermes_cli/web_server.py",
+        "sha256": "b52cc35523f891b6947fa59ac70516d955e47714877069e5ed3f06544b793c1a",
+        "git_blob": "1fb3e6131629e7399ef12de78148ac6e7ec58d34"
+      },
+      {
+        "path": "hermes_cli/dashboard_auth/audit.py",
+        "sha256": "c566a10a6c18b27debd3787e0072e1b25fc661d0c55cda0ffcb098ae02d35690",
+        "git_blob": "937fa95a75ba9ecbe37d48b2b9d0858ffd2809de"
+      }
+    ]
+  },
+  "source_evidence": [
+    {
+      "id": "basic-provider-capability",
+      "file": "plugins/dashboard_auth/basic/__init__.py",
+      "lines": "201-259",
+      "marker": "supports_password = True",
+      "claim": "The Basic provider is password-capable, uses generic invalid-credential failure, and returns a provider session from complete_password_login."
+    },
+    {
+      "id": "basic-provider-refresh",
+      "file": "plugins/dashboard_auth/basic/__init__.py",
+      "lines": "273-283",
+      "marker": "def refresh_session",
+      "claim": "A valid protected refresh credential can mint a new Basic provider session; invalid or expired refresh material fails closed."
+    },
+    {
+      "id": "password-login-route",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "650-739",
+      "marker": "@router.post(\"/auth/password-login\", name=\"auth_password_login\")",
+      "claim": "Password login distinguishes rate limiting, unknown providers, invalid credentials, provider misconfiguration, provider outage, and successful session-cookie issuance."
+    },
+    {
+      "id": "password-login-failures",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "660-716",
+      "marker": "status_code=429",
+      "claim": "Password login failure statuses are fail-closed and do not reach the cookie-minting tail."
+    },
+    {
+      "id": "password-login-body-auth-scheme",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "692-695",
+      "marker": "password=body.password",
+      "claim": "Password login receives the provider password in the request body; the provider name is not an HTTP Authorization scheme."
+    },
+    {
+      "id": "password-provider-error-detail",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "709-716",
+      "marker": "detail=f\"Provider unreachable: {e}\"",
+      "claim": "The provider-unreachable branch forwards provider exception text into an HTTP detail, so the native fixture must retain only a redacted classification and never that text."
+    },
+    {
+      "id": "password-login-cookie-tail",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "727-739",
+      "marker": "set_session_cookies(",
+      "claim": "Only a successful password session reaches shared access, refresh, and provider-cookie issuance."
+    },
+    {
+      "id": "logout-route",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "742-770",
+      "marker": "clear_session_cookies(",
+      "claim": "Logout best-effort revokes the protected refresh session and clears session-cookie variants before returning to login."
+    },
+    {
+      "id": "cookie-prefix-selection",
+      "file": "hermes_cli/dashboard_auth/cookies.py",
+      "lines": "107-145",
+      "marker": "return f\"__Secure-{bare}\"",
+      "claim": "Cookie names and common attributes vary by HTTPS and deployment prefix; HTTPS cookies are Secure, HttpOnly, SameSite=Lax, and have no Domain."
+    },
+    {
+      "id": "cookie-setter",
+      "file": "hermes_cli/dashboard_auth/cookies.py",
+      "lines": "166-212",
+      "marker": "def set_session_cookies(",
+      "claim": "Access, optional refresh, and provider-routing cookies use the active prefix and path; an empty refresh value is not persisted."
+    },
+    {
+      "id": "cookie-clearer",
+      "file": "hermes_cli/dashboard_auth/cookies.py",
+      "lines": "215-237",
+      "marker": "max_age=0",
+      "claim": "Logout and expiry deletion emits Max-Age zero for bare, Host, and Secure access, refresh, and provider-cookie variants."
+    },
+    {
+      "id": "ws-ticket-route",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "799-828",
+      "marker": "mint_ticket(user_id=sess.user_id, provider=sess.provider)",
+      "claim": "An authenticated REST session mints the WebSocket upgrade ticket and returns its TTL."
+    },
+    {
+      "id": "ws-ticket-route-session-auth",
+      "file": "hermes_cli/dashboard_auth/routes.py",
+      "lines": "799-828",
+      "marker": "sess = getattr(request.state, \"session\", None)",
+      "claim": "The ticket route reads the authenticated middleware session; it does not translate a provider name into HTTP Basic authorization."
+    },
+    {
+      "id": "ws-ticket-lifetime",
+      "file": "hermes_cli/dashboard_auth/ws_tickets.py",
+      "lines": "39-42",
+      "marker": "TTL_SECONDS = 30",
+      "claim": "New WebSocket tickets have a 30-second lifetime."
+    },
+    {
+      "id": "ws-ticket-consume",
+      "file": "hermes_cli/dashboard_auth/ws_tickets.py",
+      "lines": "81-99",
+      "marker": "entry = _tickets.pop(ticket, None)",
+      "claim": "Ticket consumption removes the entry before validation completes, enforcing single use and fail-closed missing, expired, and reused behavior."
+    },
+    {
+      "id": "ws-gated-ticket-policy",
+      "file": "hermes_cli/web_server.py",
+      "lines": "14644-14725",
+      "marker": "The legacy ``?token=`` path is unconditionally rejected in gated mode",
+      "claim": "Gated upgrades accept a fresh ticket or internal process credential, never the legacy query-token credential, and log only credential class and bounded reason."
+    },
+    {
+      "id": "ws-gated-ticket-consume",
+      "file": "hermes_cli/web_server.py",
+      "lines": "14704-14718",
+      "marker": "consume_ticket(ticket)",
+      "claim": "The gated upgrade consumes the ephemeral ticket and rejects missing or invalid ticket values."
+    },
+    {
+      "id": "ws-ticket-fragment-source",
+      "file": "hermes_cli/dashboard_auth/ws_tickets.py",
+      "lines": "92-95",
+      "marker": "truncated = (ticket[:8] + \"…\") if ticket else \"<empty>\"",
+      "claim": "The pinned ticket store constructs a short ticket fragment in the invalid-ticket exception, which is attacker-derived source text and must not be retained by the fixture."
+    },
+    {
+      "id": "ws-ticket-audit-forward",
+      "file": "hermes_cli/web_server.py",
+      "lines": "14708-14716",
+      "marker": "reason=str(exc),",
+      "claim": "The gated WebSocket path forwards the ticket exception string as an audit reason, so retained history, logs, and DOM-visible errors must contain no ticket fragment."
+    },
+    {
+      "id": "audit-log-field-redaction",
+      "file": "hermes_cli/dashboard_auth/audit.py",
+      "lines": "71-87",
+      "marker": "if k not in _REDACTED_FIELDS",
+      "claim": "The pinned audit helper drops selected fields but does not sanitize text embedded in reason, so this fixture proves source-derived ticket fragments are excluded before retention."
+    },
+    {
+      "id": "pty-web-only",
+      "file": "hermes_cli/web_server.py",
+      "lines": "14361-14372",
+      "marker": "/api/pty — PTY-over-WebSocket bridge",
+      "claim": "The PTY WebSocket surface is a web dashboard bridge and is not a native password-cookie client route."
+    }
+  ],
+  "validation_baseline": {
+    "measurement": "developer_observation",
+    "threshold_ms": null,
+    "normal": {
+      "samples_ms": [
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        22.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        23.0,
+        22.0,
+        23.0,
+        24.0,
+        23.0,
+        23.0,
+        22.0,
+        21.0
+      ],
+      "mean_ms": 21.467
+    },
+    "optimized": {
+      "samples_ms": [
+        23.0,
+        22.0,
+        22.0,
+        23.0,
+        23.0,
+        22.0,
+        22.0,
+        22.0,
+        22.0,
+        22.0,
+        21.0,
+        21.0,
+        21.0,
+        21.0,
+        20.0,
+        21.0,
+        21.0,
+        21.0,
+        20.0,
+        20.0,
+        20.0,
+        20.0,
+        20.0,
+        20.0,
+        20.0,
+        20.0,
+        21.0,
+        21.0,
+        21.0,
+        20.0
+      ],
+      "mean_ms": 21.1
+    },
+    "artifact_bytes": 112993,
+    "artifacts": [
+      {
+        "path": "README.md",
+        "bytes": 7817,
+        "sha256": "dd48adfdf5f29efa95e0c2e597ab135ef7dd756c946053ecc7d2ae8dc65c8b5b"
+      },
+      {
+        "path": "cases.json",
+        "bytes": 13939,
+        "sha256": "961cb83fc91f32fdb4b969d47620b8ca9cbaa4a05bf4006b18239e2b7864ffcf"
+      },
+      {
+        "path": "validate.py",
+        "bytes": 74800,
+        "sha256": "e7548a9db48dd63058082e0079d1a3e538cda56e0eb742d8393e1c832a912982"
+      },
+      {
+        "path": "test_native_password_provider.py",
+        "bytes": 16437,
+        "sha256": "08ab58022f90cac2adfb457be02ef1811ecf57e469f74cbfc130fea3aa7aaffb"
+      }
+    ]
+  }
+}
