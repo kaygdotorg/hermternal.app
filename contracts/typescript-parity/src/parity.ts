@@ -1,8 +1,28 @@
-import { resolve, relative, normalize, isAbsolute, join } from "node:path";
+import { createHash } from "node:crypto";
+import { lstat, open, type FileHandle } from "node:fs/promises";
+import { resolve, normalize, isAbsolute, join } from "node:path";
 
 export const HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e";
 export const CONTRACT = "dashboard-v0.0.1";
 export const REGISTRY_SCHEMA = "hermternal.fixture-index.v1";
+
+// These caps keep fixture validation bounded even when a checked-in path is replaced
+// between the initial stat and the read. They are intentionally above every reviewed
+// artifact while remaining small enough for synchronous CI and offline CLI use.
+export const MAX_JSON_BYTES = 256 * 1024;
+export const MAX_JSON_DEPTH = 16;
+const MAX_JSON_NODES = 10_000;
+const MAX_JSON_ARRAYS = 512;
+const MAX_JSON_ARRAY_ITEMS = 512;
+const MAX_JSON_OBJECTS = 512;
+const MAX_JSON_OBJECT_KEYS = 128;
+const MAX_JSON_KEY_LENGTH = 128;
+const MAX_JSON_STRING_VALUES = 4_096;
+const MAX_JSON_STRING_LENGTH = 1_024;
+const MAX_OUTPUT_STRING_LENGTH = 256;
+const MAX_OUTPUT_CASES = 64;
+const MAX_OUTPUT_COVERAGE_IDS = 64;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 export const PLATFORMS = ["web", "ios", "ipados", "macos"] as const;
 export type Platform = (typeof PLATFORMS)[number];
@@ -135,6 +155,97 @@ const JSON_ARTIFACTS: Readonly<Record<string, string>> = {
     "source-audit/compatibility-gate/compatibility_record.json",
 };
 
+interface ArtifactSchema {
+  readonly topKeys: readonly string[];
+  readonly caseKeys?: readonly string[];
+  readonly expectedKeys?: readonly string[];
+  readonly expectedKeysByKind?: Readonly<Record<string, readonly string[]>>;
+  readonly schemaField?: string;
+  readonly schemaValue?: string;
+  readonly sourceField?: string;
+  readonly contractIsObject?: boolean;
+}
+
+const ARTIFACT_SCHEMAS: Readonly<Record<string, ArtifactSchema>> = {
+  "deployment-security-browser-auth": {
+    topKeys: ["schema", "operation", "contract", "pinned_source_sha", "synthetic_only", "network_access", "redaction", "cases"],
+    caseKeys: ["expected", "id", "input", "kind"],
+    expectedKeys: ["cookie_cleanup", "diagnostic", "provider_exchange", "providers", "reason", "redirect", "session_cookie", "state", "status"],
+    schemaField: "schema",
+    schemaValue: "hermternal.deployment-security.browser-auth.v1",
+    sourceField: "pinned_source_sha",
+  },
+  "connection-restoration": {
+    topKeys: ["schema", "operation", "contract", "hermes_source_sha", "synthetic_only", "surface", "states", "invariants", "cases", "redaction"],
+    caseKeys: ["events", "expected", "id", "initial_context", "initial_state", "notes"],
+    expectedKeys: ["active_profile", "compatibility_gate", "decision", "draft", "effects", "final_state", "prompt_auto_resubmitted", "prompt_retry", "restore_barrier", "selected_profile", "selected_session", "ticket_generations", "trace", "transport_closed"],
+    schemaField: "schema",
+    schemaValue: "hermternal.connection-restoration.v1",
+    sourceField: "hermes_source_sha",
+  },
+  "session-persistence": {
+    topKeys: ["schema", "operation", "contract", "hermes_source_sha", "synthetic_only", "surface", "source_observations", "states", "invariants", "cases", "redaction"],
+    caseKeys: ["events", "expected", "id", "initial_context", "initial_state", "notes"],
+    expectedKeys: ["automatic_prompt_retry_attempted", "decision", "draft", "durable_row", "effects", "error_kind", "final_state", "history", "persist_attempts", "persistence", "prompt_in_flight", "prompt_retry", "prompt_submissions", "restore_barrier", "resume_attempts", "selected_session", "server_presence", "session_creations", "stored_session", "trace", "transport_closed"],
+    schemaField: "schema",
+    schemaValue: "hermternal.session-persistence.v1",
+    sourceField: "hermes_source_sha",
+  },
+  "image-attachment-lifecycle": {
+    topKeys: ["schema", "contract", "policy_reference", "hermes_source_sha", "fixture_policy", "synthetic_only", "limits", "redaction", "c13_consistency", "cases"],
+    caseKeys: ["expected", "id", "input", "notes", "preprocess", "progress", "scenario", "timeline"],
+    expectedKeys: ["attachment_state", "decision", "diagnostic", "draft", "duplicate_uploads", "metadata_retained", "retry", "transcript_reference", "upload_attempts", "upload_started"],
+    schemaField: "schema",
+    schemaValue: "hermternal.fixture.image-attachment-lifecycle.v1",
+    sourceField: "hermes_source_sha",
+  },
+  "pty-contract": {
+    topKeys: ["schema_version", "contract", "constants", "evidence", "source_audit", "cases"],
+    contractIsObject: true,
+    caseKeys: ["expected", "id", "input", "kind"],
+    expectedKeysByKind: {
+      "raw-bytes": ["render_hex", "utf8_decode", "reencode", "pty_bytes_logged"],
+      "raw-bytes-multiframe": ["frame_boundaries_preserved", "incomplete_fragment_ref", "invalid_fragment_ref", "joined_hex", "pty_bytes_logged", "reencode", "rendered_frame_hex", "rendered_frame_refs", "split_codepoint_frames", "utf8_decode"],
+      "resize": ["control_is_single_binary_message", "prefix_hex", "suffix_hex", "written_to_pty"],
+      "resize-rejection": ["error_mode", "pty_write", "rejected_before_binary_send"],
+      "legacy-lifecycle": ["close_result", "disconnect_result", "event_sequence", "final_state", "mode", "process_ref", "reattach", "registry_path", "spawn_count", "trigger"],
+      "attach-lifecycle": ["close_result", "disconnect_result", "event_sequence", "handle_ref", "identity_preserved", "mode", "process_ref", "process_result", "reattach", "registry_ref", "registry_result", "registry_reuse_count", "retention_seconds", "session_ref", "socket_sequence", "spawn_count", "state_sequence"],
+      "replacement": ["active_socket_ref", "close_before_assign", "handle_ref", "identity_preserved", "process_ref", "replacement_active", "session_ref", "stale_cleanup_detaches_replacement", "stale_close_code"],
+      "process-exit": ["close_code", "final_state", "process_ref", "retry"],
+      "detach-window": ["after_window", "at_boundary", "identity_preserved_during_window", "retention_seconds", "within_window"],
+      "registry-cap": ["max_entries", "overflow_behavior", "size_never_exceeds_cap"],
+      "replay-ring": ["capacity_bytes", "frame_type", "older_output", "tail_length", "tail_ref"],
+      "replay-action-exclusion": ["prompt_output_may_be_retained", "replayed_action_kinds", "retained_output_refs", "snapshot_mode", "tool_output_may_be_retained"],
+      "replay-live-race": ["allowed_orderings", "render_each_frame_as_received", "replay_boundary_claim", "separator_hex"],
+      "no-byte-logging": ["action_payloads_logged", "allowed_metadata", "metadata_only", "payload_fields_are_null", "raw_bytes_logged", "retained_action_refs"],
+    },
+  },
+  "deep-link-grammar": {
+    topKeys: ["schema", "contract", "synthetic", "configured_origin", "id_policy", "reason_order", "redaction", "cases"],
+    caseKeys: ["expected", "id", "link", "synthetic"],
+    expectedKeys: ["diagnostic", "kind", "message_id", "reasons", "session_id", "valid"],
+    schemaField: "schema",
+    schemaValue: "hermternal.deep-link-grammar/v1",
+  },
+  "compatibility-attestation": {
+    topKeys: ["schema", "operation", "contract", "pinned_source_sha", "cases", "redaction"],
+    caseKeys: ["description", "expected", "id", "input"],
+    expectedKeys: ["attestation_result", "runtime_gate"],
+    schemaField: "schema",
+    schemaValue: "hermternal.revision-attestation-fixtures.v1",
+    sourceField: "pinned_source_sha",
+  },
+};
+
+const REGISTRY_TOP_KEYS = ["schema", "contract", "hermes_source_sha", "synthetic_only", "live_claim", "evidence_status", "fixture_roots", "coverage", "parity", "states", "redaction", "benchmark"] as const;
+const FIXTURE_ROOT_KEYS = ["id", "path", "status", "contract", "hermes_source_sha", "synthetic_only", "live_claim", "platforms", "states", "coverage_ids", "validator", "files"] as const;
+const REGISTRY_FILE_KEYS = ["path", "sha256", "size_bytes"] as const;
+const COVERAGE_KEYS = ["id", "status", "fixture_ids", "platforms", "required_states", "notes"] as const;
+const PARITY_KEYS = ["status", "fixture_source", "platforms", "pty_policy", "missing_result_policy", "result_equivalence", "live_claim"] as const;
+const COMPATIBILITY_RECORD_KEYS = ["schema", "operation", "contract", "source", "merged_dev", "integration_dev", "artifacts", "observations", "status", "redaction", "blockers"] as const;
+const COMPATIBILITY_SOURCE_KEYS = ["repository", "sha"] as const;
+const COMPATIBILITY_STATUS_KEYS = ["compatible", "live_run", "deployment_attestation", "behavioral_probe", "proxy_proof", "parity_evidence", "benchmark_evidence"] as const;
+
 interface Representative {
   readonly family: Family;
   readonly rootId: string;
@@ -201,27 +312,25 @@ function isRecord(value: JsonValue | undefined): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isJsonValue(value: unknown): value is JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return true;
-  }
-  if (typeof value === "number") {
-    return Number.isFinite(value);
-  }
-  if (Array.isArray(value)) {
-    return value.every(isJsonValue);
-  }
-  if (typeof value === "object") {
-    return Object.values(value).every(isJsonValue);
-  }
-  return false;
-}
-
 function record(value: JsonValue | undefined, label: string): JsonRecord {
   if (!isRecord(value)) {
     fail("malformed_input", `${label} must be an object`);
   }
   return value;
+}
+
+function exactRecord(value: JsonValue | undefined, label: string, expectedKeys: readonly string[]): JsonRecord {
+  const entry = record(value, label);
+  const expected = new Set(expectedKeys);
+  const unknown = Object.keys(entry).find((key) => !expected.has(key));
+  if (unknown) {
+    fail("unknown_field", `${label} contains unknown field ${unknown}`);
+  }
+  const missing = expectedKeys.find((key) => !Object.prototype.hasOwnProperty.call(entry, key));
+  if (missing) {
+    fail("missing_field", `${label} is missing required field ${missing}`);
+  }
+  return entry;
 }
 
 function array(value: JsonValue | undefined, label: string): JsonValue[] {
@@ -235,7 +344,18 @@ function string(value: JsonValue | undefined, label: string): string {
   if (typeof value !== "string" || value.length === 0) {
     fail("malformed_input", `${label} must be a non-empty string`);
   }
+  if (value.length > MAX_JSON_STRING_LENGTH) {
+    fail("json_string_limit", `${label} exceeds the bounded string limit`);
+  }
   return value;
+}
+
+function boundedOutputString(value: JsonValue | undefined, label: string): string {
+  const result = string(value, label);
+  if (result.length > MAX_OUTPUT_STRING_LENGTH) {
+    fail("output_limit", `${label} exceeds the bounded output limit`);
+  }
+  return result;
 }
 
 function boolean(value: JsonValue | undefined, label: string): boolean {
@@ -298,52 +418,303 @@ function strings(value: JsonValue | undefined, label: string): readonly string[]
   return result;
 }
 
-function parseJson(text: string, label: string): JsonValue {
-  try {
-    const value: unknown = JSON.parse(text);
-    if (!isJsonValue(value)) {
-      fail("malformed_json", `${label} contains a non-finite JSON value`);
+// JSON.parse cannot reject duplicate keys and recursively consumes unbounded input.
+// This parser accounts for every value before descending and never guesses on syntax.
+class BoundedJsonParser {
+  private index = 0;
+  private nodes = 0;
+  private arrays = 0;
+  private objects = 0;
+  private strings = 0;
+
+  constructor(private readonly text: string, private readonly label: string) {}
+
+  parse(): JsonValue {
+    this.skipWhitespace();
+    const value = this.parseValue(0);
+    this.skipWhitespace();
+    if (this.index !== this.text.length) {
+      fail("malformed_json", `${this.label} contains trailing JSON input`);
     }
     return value;
-  } catch (error) {
-    if (error instanceof ContractInputError) {
-      throw error;
+  }
+
+  private parseValue(depth: number): JsonValue {
+    if (depth > MAX_JSON_DEPTH) {
+      fail("json_depth_limit", `${this.label} exceeds the bounded JSON depth`);
     }
-    fail("malformed_json", `${label} is not valid JSON`);
+    this.nodes += 1;
+    if (this.nodes > MAX_JSON_NODES) {
+      fail("json_node_limit", `${this.label} exceeds the bounded JSON node count`);
+    }
+    this.skipWhitespace();
+    const current = this.text[this.index];
+    if (current === "{") return this.parseObject(depth);
+    if (current === "[") return this.parseArray(depth);
+    if (current === '"') return this.parseString();
+    if (current === "t") return this.parseLiteral("true", true);
+    if (current === "f") return this.parseLiteral("false", false);
+    if (current === "n") return this.parseLiteral("null", null);
+    if (current === "-" || (current !== undefined && current >= "0" && current <= "9")) {
+      return this.parseNumber();
+    }
+    fail("malformed_json", `${this.label} contains an invalid JSON value`);
+  }
+
+  private parseObject(depth: number): JsonRecord {
+    this.objects += 1;
+    if (this.objects > MAX_JSON_OBJECTS) {
+      fail("json_object_limit", `${this.label} exceeds the bounded object count`);
+    }
+    this.index += 1;
+    const result = Object.create(null) as JsonRecord;
+    const keys = new Set<string>();
+    this.skipWhitespace();
+    if (this.consume("}")) return result;
+    while (true) {
+      if (keys.size >= MAX_JSON_OBJECT_KEYS) {
+        fail("json_object_limit", `${this.label} exceeds the bounded object-key count`);
+      }
+      this.skipWhitespace();
+      const key = this.parseString();
+      if (key.length > MAX_JSON_KEY_LENGTH) {
+        fail("json_key_limit", `${this.label} contains an oversized object key`);
+      }
+      if (keys.has(key)) {
+        fail("duplicate_key", `${this.label} contains a duplicate object key`);
+      }
+      keys.add(key);
+      this.skipWhitespace();
+      if (!this.consume(":")) {
+        fail("malformed_json", `${this.label} is missing an object separator`);
+      }
+      result[key] = this.parseValue(depth + 1);
+      this.skipWhitespace();
+      if (this.consume("}")) return result;
+      if (!this.consume(",")) {
+        fail("malformed_json", `${this.label} is missing an object delimiter`);
+      }
+      this.skipWhitespace();
+      if (this.text[this.index] === "}") {
+        fail("malformed_json", `${this.label} contains a trailing object delimiter`);
+      }
+    }
+  }
+
+  private parseArray(depth: number): JsonValue[] {
+    this.arrays += 1;
+    if (this.arrays > MAX_JSON_ARRAYS) {
+      fail("json_array_limit", `${this.label} exceeds the bounded array count`);
+    }
+    this.index += 1;
+    const result: JsonValue[] = [];
+    this.skipWhitespace();
+    if (this.consume("]")) return result;
+    while (true) {
+      if (result.length >= MAX_JSON_ARRAY_ITEMS) {
+        fail("json_array_limit", `${this.label} exceeds the bounded array length`);
+      }
+      result.push(this.parseValue(depth + 1));
+      this.skipWhitespace();
+      if (this.consume("]")) return result;
+      if (!this.consume(",")) {
+        fail("malformed_json", `${this.label} is missing an array delimiter`);
+      }
+      this.skipWhitespace();
+      if (this.text[this.index] === "]") {
+        fail("malformed_json", `${this.label} contains a trailing array delimiter`);
+      }
+    }
+  }
+
+  private parseString(): string {
+    this.strings += 1;
+    if (this.strings > MAX_JSON_STRING_VALUES) {
+      fail("json_string_limit", `${this.label} exceeds the bounded string count`);
+    }
+    if (!this.consume('"')) {
+      fail("malformed_json", `${this.label} contains an invalid JSON string at ${this.index}`);
+    }
+    let result = "";
+    while (this.index < this.text.length) {
+      const character = this.text[this.index];
+      this.index += 1;
+      if (character === '"') return result;
+      if (character === "\\") {
+        const escape = this.text[this.index];
+        this.index += 1;
+        if (escape === '"' || escape === "\\" || escape === "/") result += escape;
+        else if (escape === "b") result += "\b";
+        else if (escape === "f") result += "\f";
+        else if (escape === "n") result += "\n";
+        else if (escape === "r") result += "\r";
+        else if (escape === "t") result += "\t";
+        else if (escape === "u") {
+          const hex = this.text.slice(this.index, this.index + 4);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+            fail("malformed_json", `${this.label} contains an invalid Unicode escape`);
+          }
+          result += String.fromCharCode(Number.parseInt(hex, 16));
+          this.index += 4;
+        } else {
+          fail("malformed_json", `${this.label} contains an invalid string escape`);
+        }
+      } else {
+        if (character === undefined || character.charCodeAt(0) < 0x20) {
+          fail("malformed_json", `${this.label} contains an unescaped control character`);
+        }
+        result += character;
+      }
+      if (result.length > MAX_JSON_STRING_LENGTH) {
+        fail("json_string_limit", `${this.label} exceeds the bounded string length`);
+      }
+    }
+    fail("malformed_json", `${this.label} contains an unterminated JSON string`);
+  }
+
+  private parseLiteral<T extends JsonValue>(literal: string, value: T): T {
+    if (!this.text.startsWith(literal, this.index)) {
+      fail("malformed_json", `${this.label} contains an invalid JSON literal`);
+    }
+    this.index += literal.length;
+    return value;
+  }
+
+  private parseNumber(): number {
+    const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(this.text.slice(this.index));
+    if (!match) {
+      fail("malformed_json", `${this.label} contains an invalid JSON number`);
+    }
+    this.index += match[0].length;
+    const value = Number(match[0]);
+    if (!Number.isFinite(value)) {
+      fail("json_number_limit", `${this.label} contains an unrepresentable JSON number`);
+    }
+    return value;
+  }
+
+  private skipWhitespace(): void {
+    while (this.index < this.text.length && /[\t\n\r ]/.test(this.text[this.index] ?? "")) {
+      this.index += 1;
+    }
+  }
+
+  private consume(expected: string): boolean {
+    if (this.text[this.index] !== expected) return false;
+    this.index += 1;
+    return true;
   }
 }
 
-async function readJson(path: string, label: string): Promise<JsonValue> {
+function parseJson(text: string, label: string): JsonValue {
+  return new BoundedJsonParser(text, label).parse();
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+// Check both the path and the opened handle. This closes the common replacement
+// race without allocating or hashing bytes from an oversized or unregistered file.
+async function readBoundedBytes(path: string, label: string, registered?: RegistryFile): Promise<Uint8Array> {
+  let handle: FileHandle | undefined;
   try {
-    const file = Bun.file(path);
-    if (!(await file.exists())) {
+    let pathStats;
+    try {
+      pathStats = await lstat(path);
+    } catch {
       fail("missing_artifact", `${label} is not checked in`);
     }
-    const bytes = await file.arrayBuffer();
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    return parseJson(text, label);
-  } catch (error) {
-    if (error instanceof ContractInputError) {
-      throw error;
+    if (!pathStats.isFile()) {
+      fail("unsafe_artifact", `${label} is not a regular file`);
     }
+    if (registered && pathStats.size !== registered.sizeBytes) {
+      fail("artifact_size_mismatch", `${label} does not match its registered byte size`);
+    }
+    if (pathStats.size > MAX_JSON_BYTES) {
+      fail("json_too_large", `${label} exceeds the bounded artifact size`);
+    }
+
+    try {
+      handle = await open(path, "r");
+    } catch {
+      fail("artifact_read_failed", `${label} could not be opened`);
+    }
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      fail("unsafe_artifact", `${label} is not a regular file`);
+    }
+    if (registered && stats.size !== registered.sizeBytes) {
+      fail("artifact_size_mismatch", `${label} does not match its registered byte size`);
+    }
+    if (stats.size > MAX_JSON_BYTES) {
+      fail("json_too_large", `${label} exceeds the bounded artifact size`);
+    }
+
+    const bytes = new Uint8Array(stats.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const result = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (result.bytesRead === 0) {
+        fail("artifact_changed", `${label} ended before its declared byte size`);
+      }
+      offset += result.bytesRead;
+    }
+    const finalStats = await handle.stat();
+    if (finalStats.size !== stats.size) {
+      fail("artifact_changed", `${label} changed while it was being read`);
+    }
+    if (registered && sha256(bytes) !== registered.sha256) {
+      fail("artifact_hash_mismatch", `${label} does not match its registered SHA-256`);
+    }
+    return bytes;
+  } catch (error) {
+    if (error instanceof ContractInputError) throw error;
+    return fail("artifact_read_failed", `${label} could not be read as bounded UTF-8 JSON`);
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
+  }
+}
+
+async function readJson(path: string, label: string, registered?: RegistryFile): Promise<JsonValue> {
+  const bytes = await readBoundedBytes(path, label, registered);
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
     fail("malformed_utf8", `${label} is not valid UTF-8`);
   }
+  return parseJson(text, label);
 }
 
 function parseRegistryFile(value: JsonValue | undefined, label: string): RegistryFile {
-  const entry = record(value, label);
+  const entry = exactRecord(value, label, REGISTRY_FILE_KEYS);
+  const digest = string(entry.sha256, `${label}.sha256`);
+  const sizeBytes = number(entry.size_bytes, `${label}.size_bytes`);
+  if (!SHA256_PATTERN.test(digest)) {
+    fail("malformed_input", `${label}.sha256 must be a lowercase SHA-256 digest`);
+  }
+  if (sizeBytes > MAX_JSON_BYTES) {
+    fail("json_too_large", `${label}.size_bytes exceeds the bounded artifact size`);
+  }
   return {
     path: safeRelativePath(string(entry.path, `${label}.path`), `${label}.path`),
-    sha256: string(entry.sha256, `${label}.sha256`),
-    sizeBytes: number(entry.size_bytes, `${label}.size_bytes`),
+    sha256: digest,
+    sizeBytes,
   };
 }
 
 function parseFixtureRoot(value: JsonValue | undefined, index: number): FixtureRoot {
-  const entry = record(value, `fixture_roots[${index}]`);
+  const entry = exactRecord(value, `fixture_roots[${index}]`, FIXTURE_ROOT_KEYS);
   const status = string(entry.status, `fixture_roots[${index}].status`);
   if (status !== "ready" && status !== "pending") {
     fail("unknown_status", `fixture_roots[${index}].status is unknown`);
+  }
+  const files = array(entry.files, `fixture_roots[${index}].files`).map((file, fileIndex) =>
+    parseRegistryFile(file, `fixture_roots[${index}].files[${fileIndex}]`),
+  );
+  if (new Set(files.map((file) => file.path)).size !== files.length) {
+    fail("malformed_input", `fixture_roots[${index}].files contains a duplicate path`);
   }
   return {
     id: string(entry.id, `fixture_roots[${index}].id`),
@@ -357,14 +728,12 @@ function parseFixtureRoot(value: JsonValue | undefined, index: number): FixtureR
     states: strings(entry.states, `fixture_roots[${index}].states`),
     coverageIds: strings(entry.coverage_ids, `fixture_roots[${index}].coverage_ids`),
     validator: string(entry.validator, `fixture_roots[${index}].validator`),
-    files: array(entry.files, `fixture_roots[${index}].files`).map((file, fileIndex) =>
-      parseRegistryFile(file, `fixture_roots[${index}].files[${fileIndex}]`),
-    ),
+    files,
   };
 }
 
 function parseCoverage(value: JsonValue | undefined, index: number): CoverageRow {
-  const entry = record(value, `coverage[${index}]`);
+  const entry = exactRecord(value, `coverage[${index}]`, COVERAGE_KEYS);
   const status = string(entry.status, `coverage[${index}].status`);
   if (status !== "ready" && status !== "pending") {
     fail("unknown_status", `coverage[${index}].status is unknown`);
@@ -380,7 +749,7 @@ function parseCoverage(value: JsonValue | undefined, index: number): CoverageRow
 }
 
 function parseParity(value: JsonValue | undefined): RegistryParity {
-  const entry = record(value, "parity");
+  const entry = exactRecord(value, "parity", PARITY_KEYS);
   return {
     status: string(entry.status, "parity.status"),
     fixtureSource: string(entry.fixture_source, "parity.fixture_source"),
@@ -394,7 +763,11 @@ function parseParity(value: JsonValue | undefined): RegistryParity {
 
 export async function loadRegistry(repoRoot: string): Promise<FixtureRegistry> {
   const root = resolve(repoRoot);
-  const raw = record(await readJson(join(root, "contracts/fixtures/index.json"), "fixture index"), "fixture index");
+  const raw = exactRecord(
+    await readJson(join(root, "contracts/fixtures/index.json"), "fixture index"),
+    "fixture index",
+    REGISTRY_TOP_KEYS,
+  );
   literal(raw.schema, REGISTRY_SCHEMA, "fixture index schema");
   literal(raw.contract, CONTRACT, "fixture index contract");
   literal(raw.hermes_source_sha, HERMES_SOURCE_SHA, "fixture index source revision");
@@ -434,6 +807,66 @@ export async function loadRegistry(repoRoot: string): Promise<FixtureRegistry> {
   return { fixtureRoots, coverage, parity };
 }
 
+function validateArtifactShape(rootId: string, artifact: JsonRecord): void {
+  if (rootId === "source-audit-compatibility-gate") {
+    exactRecord(artifact, `fixture ${rootId}`, COMPATIBILITY_RECORD_KEYS);
+    return;
+  }
+  const schema = ARTIFACT_SCHEMAS[rootId];
+  if (!schema || !schema.caseKeys) {
+    fail("unknown_fixture", "fixture root has no approved JSON schema");
+  }
+  const entry = exactRecord(artifact, `fixture ${rootId}`, schema.topKeys);
+  if (schema.schemaField && schema.schemaValue) {
+    literal(entry[schema.schemaField], schema.schemaValue, `fixture ${rootId}.${schema.schemaField}`);
+  }
+  if (schema.sourceField) {
+    literal(entry[schema.sourceField], HERMES_SOURCE_SHA, `fixture ${rootId}.${schema.sourceField}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, "contract") && !schema.contractIsObject) {
+    literal(entry.contract, CONTRACT, `fixture ${rootId}.contract`);
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, "synthetic_only") && boolean(entry.synthetic_only, `fixture ${rootId}.synthetic_only`) !== true) {
+    fail("live_input", `fixture ${rootId} is not synthetic-only`);
+  }
+  if (rootId === "pty-contract") {
+    literal(entry.schema_version, "pty-contract-v1", "fixture pty-contract.schema_version");
+    const contract = exactRecord(entry.contract, "fixture pty-contract.contract", [
+      "route",
+      "surface",
+      "proof_mode",
+      "pinned_hermes_sha",
+      "source_of_truth",
+      "output_encoding",
+      "attach_rule",
+      "replay_rule",
+      "logging_rule",
+    ]);
+    literal(contract.surface, "web-only", "fixture pty-contract.contract.surface");
+    literal(contract.pinned_hermes_sha, HERMES_SOURCE_SHA, "fixture pty-contract.contract.pinned_hermes_sha");
+  }
+
+  const cases = array(entry.cases, `fixture ${rootId}.cases`);
+  const caseIds = new Set<string>();
+  for (const [index, value] of cases.entries()) {
+    const fixtureCase = exactRecord(value, `fixture ${rootId}.cases[${index}]`, schema.caseKeys);
+    const caseId = string(fixtureCase.id, `fixture ${rootId}.cases[${index}].id`);
+    if (caseIds.has(caseId)) {
+      fail("malformed_input", `fixture ${rootId}.cases contains a duplicate ID`);
+    }
+    caseIds.add(caseId);
+    let expectedKeys = schema.expectedKeys;
+    if (schema.expectedKeysByKind) {
+      const kind = string(fixtureCase.kind, `fixture ${rootId}.cases[${index}].kind`);
+      expectedKeys = schema.expectedKeysByKind[kind];
+      if (!expectedKeys) {
+        fail("unknown_case_schema", `fixture ${rootId}.cases[${index}] has an unknown kind`);
+      }
+    }
+    exactRecord(fixtureCase.expected, `fixture ${rootId}.cases[${index}].expected`, expectedKeys ?? []);
+  }
+}
+
 function rootById(registry: FixtureRegistry, rootId: string): FixtureRoot {
   const root = registry.fixtureRoots.find((entry) => entry.id === rootId);
   if (!root) {
@@ -459,15 +892,33 @@ function artifactPath(repoRoot: string, root: FixtureRoot): string {
   if (!relativeArtifact.startsWith(expectedPrefix)) {
     fail("incompatible_input", "fixture artifact is outside its registered root");
   }
-  const registered = root.files.some((entry) => entry.path === relativeArtifact);
-  if (!registered) {
-    fail("unregistered_artifact", "fixture JSON artifact is not listed by the registry");
+  const registeredMatches = root.files.filter((entry) => entry.path === relativeArtifact);
+  if (registeredMatches.length !== 1) {
+    fail("unregistered_artifact", "fixture JSON artifact is not listed exactly once by the registry");
   }
   return join(resolve(repoRoot), "contracts/fixtures", safeRelativePath(relativeArtifact, "fixture artifact"));
 }
 
+function registeredArtifact(root: FixtureRoot): RegistryFile {
+  const relativeArtifact = JSON_ARTIFACTS[root.id];
+  if (!relativeArtifact) {
+    fail("unknown_fixture", "fixture root has no approved JSON artifact");
+  }
+  const matches = root.files.filter((entry) => entry.path === relativeArtifact);
+  const [match] = matches;
+  if (matches.length !== 1 || !match) {
+    fail("unregistered_artifact", "fixture JSON artifact is not listed exactly once by the registry");
+  }
+  return match;
+}
+
 async function loadArtifact(repoRoot: string, root: FixtureRoot): Promise<JsonRecord> {
-  return record(await readJson(artifactPath(repoRoot, root), `fixture ${root.id}`), `fixture ${root.id}`);
+  const artifact = record(
+    await readJson(artifactPath(repoRoot, root), `fixture ${root.id}`, registeredArtifact(root)),
+    `fixture ${root.id}`,
+  );
+  validateArtifactShape(root.id, artifact);
+  return artifact;
 }
 
 export async function loadCase(repoRoot: string, registry: FixtureRegistry, rootId: string, caseId: string): Promise<FixtureCase> {
@@ -496,9 +947,9 @@ export async function loadCompatibilityRecord(repoRoot: string, registry: Fixtur
   const root = rootById(registry, "source-audit-compatibility-gate");
   const artifact = await loadArtifact(repoRoot, root);
   literal(artifact.schema, "hermternal.compatibility-gate.v1", "compatibility schema");
-  const source = record(artifact.source, "compatibility source");
+  const source = exactRecord(artifact.source, "compatibility source", COMPATIBILITY_SOURCE_KEYS);
   literal(source.sha, HERMES_SOURCE_SHA, "compatibility source revision");
-  const status = record(artifact.status, "compatibility status");
+  const status = exactRecord(artifact.status, "compatibility status", COMPATIBILITY_STATUS_KEYS);
   if (boolean(status.compatible, "compatibility status.compatible") !== false) {
     fail("live_claim", "compatibility record claims compatibility without live evidence");
   }
@@ -508,11 +959,11 @@ export async function loadCompatibilityRecord(repoRoot: string, registry: Fixtur
   return {
     compatible: false,
     liveRun: false,
-    deploymentAttestation: string(status.deployment_attestation, "compatibility deployment attestation"),
-    behavioralProbe: string(status.behavioral_probe, "compatibility behavioral probe"),
-    proxyProof: string(status.proxy_proof, "compatibility proxy proof"),
-    parityEvidence: string(status.parity_evidence, "compatibility parity evidence"),
-    benchmarkEvidence: string(status.benchmark_evidence, "compatibility benchmark evidence"),
+    deploymentAttestation: boundedOutputString(status.deployment_attestation, "compatibility deployment attestation"),
+    behavioralProbe: boundedOutputString(status.behavioral_probe, "compatibility behavioral probe"),
+    proxyProof: boundedOutputString(status.proxy_proof, "compatibility proxy proof"),
+    parityEvidence: boundedOutputString(status.parity_evidence, "compatibility parity evidence"),
+    benchmarkEvidence: boundedOutputString(status.benchmark_evidence, "compatibility benchmark evidence"),
   };
 }
 
@@ -530,7 +981,7 @@ function decision(expected: JsonRecord): string {
   for (const key of ["decision", "state", "final_state", "attestation_result", "runtime_gate", "valid"]) {
     const value = expected[key];
     if (typeof value === "string") {
-      return value;
+      return boundedOutputString(value, `expected.${key}`);
     }
     if (typeof value === "boolean") {
       return value ? "valid" : "blocked";
@@ -640,7 +1091,16 @@ export async function runParity(repoRoot: string): Promise<ParityReport> {
     cases.push(...(await runRepresentative(repoRoot, registry, representative)));
   }
   const compatibility = await loadCompatibilityRecord(repoRoot, registry);
-  const blockedCoverageIds = registry.coverage.filter((entry) => entry.status === "pending").map((entry) => entry.id);
+  if (cases.length > MAX_OUTPUT_CASES) {
+    fail("output_limit", "parity report contains too many case results");
+  }
+  const blockedCoverage = registry.coverage.filter((entry) => entry.status === "pending");
+  if (blockedCoverage.length > MAX_OUTPUT_COVERAGE_IDS) {
+    fail("output_limit", "parity report contains too many blocked coverage IDs");
+  }
+  const blockedCoverageIds = blockedCoverage.map((entry, index) =>
+    boundedOutputString(entry.id, `blockedCoverageIds[${index}]`),
+  );
   return {
     ok: true,
     contract: CONTRACT,

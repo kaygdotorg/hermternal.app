@@ -26,6 +26,21 @@ bounded JSON object suitable for CI logs. The CLI accepts only an optional
 `--repo-root <path>` pair; unknown options, positional values, and duplicate
 roots return bounded JSON errors instead of guessing.
 
+## Input and output safety
+
+Every input is read through a regular-file handle after a pre-read size check.
+The registry and each registered artifact are capped at 256 KiB; the artifact
+must also match the registry's exact `size_bytes` and lowercase SHA-256 digest
+before it is decoded or semantically inspected. Symlinks, directories, changed
+file sizes, stale manifests, and digest mismatches fail closed.
+
+The JSON reader is a bounded parser rather than `JSON.parse`. It rejects
+duplicate object keys and enforces limits on depth, nodes, array items, object
+keys, key length, and string length. Registry, artifact, case, expected-result,
+and compatibility records use exact allowlisted key sets, so unknown or missing
+fields do not become evidence. Report decisions and compatibility fields are
+length-bounded, and the CLI emits only small JSON errors on failure.
+
 ## TypeScript 7 and tool compatibility
 
 The primary compiler is the pinned TypeScript 7 native alias:

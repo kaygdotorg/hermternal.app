@@ -1,11 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 import {
   assertNoNetworkImports,
   assertRejects,
   loadCase,
   loadRegistry,
+  MAX_JSON_BYTES,
+  MAX_JSON_DEPTH,
   repoRootFromModule,
   runParity,
 } from "../src/parity";
@@ -44,6 +47,65 @@ function runCli(...args: string[]): { exitCode: number; stdout: string; stderr: 
     stdout: new TextDecoder().decode(completed.stdout),
     stderr: new TextDecoder().decode(completed.stderr),
   };
+}
+
+const PARITY_ARTIFACTS = [
+  "deployment-security/browser-auth/cases.json",
+  "connection-restoration/cases.json",
+  "session-persistence/cases.json",
+  "image-attachment-lifecycle/cases.json",
+  "pty-contract/pty-contract-fixtures.json",
+  "deep-link-grammar/cases.json",
+  "compatibility-attestation/cases.json",
+  "source-audit/compatibility-gate/compatibility_record.json",
+] as const;
+
+async function writeParityFixtureTree(): Promise<string> {
+  const temporaryRoot = join("/tmp", `hermternal-c20-${crypto.randomUUID()}`);
+  const fixturesDirectory = join(temporaryRoot, "contracts/fixtures");
+  await mkdir(fixturesDirectory, { recursive: true });
+  await Bun.write(
+    join(fixturesDirectory, "index.json"),
+    await Bun.file(join(repoRoot, "contracts/fixtures/index.json")).arrayBuffer(),
+  );
+  for (const artifact of PARITY_ARTIFACTS) {
+    const destination = join(fixturesDirectory, artifact);
+    await mkdir(dirname(destination), { recursive: true });
+    await Bun.write(
+      destination,
+      await Bun.file(join(repoRoot, "contracts/fixtures", artifact)).arrayBuffer(),
+    );
+  }
+  return temporaryRoot;
+}
+
+function cliError(result: { stderr: string }): { code: string; message: string } {
+  const parsed = JSON.parse(result.stderr) as { ok: false; error: { code: string; message: string } };
+  return parsed.error;
+}
+
+function nestedObject(depth: number): string {
+  let value = "null";
+  for (let index = 0; index < depth; index += 1) {
+    value = `{"nested":${value}}`;
+  }
+  return value;
+}
+
+async function refreshManifest(root: string, artifact: string): Promise<void> {
+  const artifactPath = join(root, "contracts/fixtures", artifact);
+  const bytes = new Uint8Array(await Bun.file(artifactPath).arrayBuffer());
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const indexPath = join(root, "contracts/fixtures/index.json");
+  const registry = await Bun.file(indexPath).json() as Record<string, unknown>;
+  const fixtureRoots = registry.fixture_roots as Array<Record<string, unknown>>;
+  const fixtureRoot = fixtureRoots.find((entry) => (entry.files as Array<Record<string, unknown>>).some((file) => file.path === artifact));
+  if (!fixtureRoot) throw new Error(`fixture root not found for ${artifact}`);
+  const file = (fixtureRoot.files as Array<Record<string, unknown>>).find((entry) => entry.path === artifact);
+  if (!file) throw new Error(`fixture artifact not found for ${artifact}`);
+  file.sha256 = digest;
+  file.size_bytes = bytes.byteLength;
+  await Bun.write(indexPath, `${JSON.stringify(registry)}\n`);
 }
 
 describe("C-20 TypeScript contract parity", () => {
@@ -137,6 +199,100 @@ describe("C-20 TypeScript contract parity", () => {
       ok: false,
       error: { code: "malformed_input", message: "parity CLI accepts only --repo-root" },
     });
+  });
+
+  it("executes the normal CLI through Bun with bounded JSON output", () => {
+    const result = runCli("--repo-root", repoRoot);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    const report = JSON.parse(result.stdout) as { ok: boolean; readyCaseCount: number; cases: unknown[] };
+    expect(report.ok).toBe(true);
+    expect(report.readyCaseCount).toBe(11);
+    expect(report.cases.length).toBe(17);
+    expect(result.stdout.length).toBeLessThan(16_384);
+  });
+
+  it("rejects malformed, duplicate-key, deep, oversized, and unknown-field CLI input", async () => {
+    const inputs: readonly [string, string, string][] = [
+      ["malformed", "{\n", "malformed_json"],
+      ["duplicate", '{"schema":"one","schema":"two"}', "duplicate_key"],
+      ["deep", nestedObject(MAX_JSON_DEPTH + 2), "json_depth_limit"],
+      ["oversized", " ".repeat(MAX_JSON_BYTES + 1), "json_too_large"],
+    ];
+    for (const [name, contents, code] of inputs) {
+      const temporaryRoot = await writeRawRegistry(contents);
+      try {
+        const result = runCli("--repo-root", temporaryRoot);
+        expect(result.exitCode, name).not.toBe(0);
+        expect(result.stdout, name).toBe("");
+        expect(cliError(result).code, name).toBe(code);
+        expect(result.stderr.length, name).toBeLessThan(1_024);
+      } finally {
+        await rm(temporaryRoot, { recursive: true, force: true });
+      }
+    }
+
+    const unknownFieldRoot = await writeRegistryMutation((registry) => {
+      registry.unexpected = true;
+    });
+    try {
+      const result = runCli("--repo-root", unknownFieldRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(cliError(result).code).toBe("unknown_field");
+    } finally {
+      await rm(unknownFieldRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects stale oversized and same-size replacement artifacts before parsing", async () => {
+    const oversizedRoot = await writeParityFixtureTree();
+    try {
+      const replacement = join(oversizedRoot, "contracts/fixtures/deployment-security/browser-auth/cases.json");
+      await Bun.write(replacement, `{"cases":[]}\n${" ".repeat(2 * 1024 * 1024)}`);
+      const result = runCli("--repo-root", oversizedRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(cliError(result).code).toBe("artifact_size_mismatch");
+      expect(result.stderr.length).toBeLessThan(1_024);
+    } finally {
+      await rm(oversizedRoot, { recursive: true, force: true });
+    }
+
+    const hashRoot = await writeParityFixtureTree();
+    try {
+      const replacement = join(hashRoot, "contracts/fixtures/deployment-security/browser-auth/cases.json");
+      const original = await Bun.file(replacement).arrayBuffer();
+      const bytes = new Uint8Array(original.byteLength);
+      bytes.fill(0x20);
+      await Bun.write(replacement, bytes);
+      const result = runCli("--repo-root", hashRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(cliError(result).code).toBe("artifact_hash_mismatch");
+      expect(result.stderr.length).toBeLessThan(1_024);
+    } finally {
+      await rm(hashRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds compatibility fields before they can enlarge the report", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const artifact = "source-audit/compatibility-gate/compatibility_record.json";
+      const artifactPath = join(temporaryRoot, "contracts/fixtures", artifact);
+      const record = await Bun.file(artifactPath).json() as Record<string, unknown>;
+      const status = record.status as Record<string, unknown>;
+      status.deployment_attestation = "x".repeat(300);
+      await Bun.write(artifactPath, `${JSON.stringify(record)}\n`);
+      await refreshManifest(temporaryRoot, artifact);
+      const result = runCli("--repo-root", temporaryRoot);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(cliError(result).code).toBe("output_limit");
+      expect(result.stderr.length).toBeLessThan(1_024);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   });
 
   it("exposes a typed rejection assertion for regression tests", () => {
