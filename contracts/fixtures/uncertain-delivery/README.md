@@ -13,7 +13,7 @@ text, read a transcript, or claim live compatibility.
 - External expected revision: protected review/CI variable `HERMTERNAL_C06_EXPECTED_COMMIT`
 - External launcher source: protected review/CI variable `HERMTERNAL_C06_EXTERNAL_LAUNCHER`
 - External launcher digest: protected review/CI variable `HERMTERNAL_C06_EXTERNAL_LAUNCHER_SHA256`
-- Non-release audit tag: `hermternal-c06-uncertain-delivery-external-launcher-anchor`
+- Non-release audit tag: `hermternal-c06-uncertain-delivery-cancel-restore-anchor`
 - Canonical inputs: `cases.json`
 - Validator: `validate.py`
 - Regression tests: `test_validate.py`
@@ -73,8 +73,10 @@ The fixture proves these rules as executable traces:
 
 - A confirmed accepted prompt or correlated server event is not submitted a
   second time.
-- A timeout, WebSocket close, app suspension, or process loss after send is
-  `delivery_uncertain`, not rejection.
+- A timeout, WebSocket close, app suspension, process loss, or local
+  cancellation without a confirmed server result after send is
+  `delivery_uncertain`, not rejection. Cancellation cannot make an unknown
+  first delivery safe to repeat.
 - Restore is a barrier. The client must observe `gateway.ready` with matching
   contract/source compatibility, then reread fresh server-owned history and
   status before making any resend decision. History and status keep independent
@@ -156,8 +158,8 @@ git fetch --tags --unshallow 2>/dev/null || git fetch --tags
 # its SHA-256 equals each baseline mode's external_launcher_sha256.
 # Run it with the protected expected commit, recorded python_flags, and target.
 # For authoritative tests, target test_validate.py instead of importing it.
-git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-external-launcher-anchor
-git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-external-launcher-anchor^{commit}
+git cat-file -t refs/tags/hermternal-c06-uncertain-delivery-cancel-restore-anchor
+git rev-parse --verify refs/tags/hermternal-c06-uncertain-delivery-cancel-restore-anchor^{commit}
 ```
 
 The audit tag is an annotated, non-release consistency marker. It must be
@@ -194,7 +196,9 @@ validator bytes in both normal and optimized modes. Direct unittest discovery is
 useful development feedback but is explicitly non-authoritative. Coverage includes
 accepted/present, absent-and-idle, confirmed rejection,
 timeout, WebSocket close, app suspension, process loss, restore, explicit
-resend, duplicate prevention, interruption, cancellation, sign-out, pending
+resend, duplicate prevention, interruption, cancellation-before-send,
+uncertain cancellation after send, delivered/not-delivered cancellation restore,
+sign-out, pending
 proof, compatibility failure, unknown interactive events, strict JSON, bounded
 redaction, canonical artifact rebinding, forged benchmark evidence, gateway,
 transport, draft, initial-state, state-identity, event-correlation, trusted

@@ -45,20 +45,20 @@ HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 # tag is only a secondary consistency marker. The validator source digest masks
 # only self-referential binding literals, so changing validation logic still
 # fails.
-TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-external-launcher-anchor"
+TRUST_ANCHOR_REF = "refs/tags/hermternal-c06-uncertain-delivery-cancel-restore-anchor"
 CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "chat.md")
 CANONICAL_FIXTURE_NAMES = frozenset(("README.md", "cases.json", "preflight.py", "validate.py", "test_validate.py", "validation-baseline.json"))
 CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
 CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_BOUND_SHA256 = {
-    "README.md": "fd0abbce46b206ef267f0cae4c9913eb6623d53bdd5a77d6d19b1e8e10c88cb1",
-    "cases.json": "61800917cf6695d43f3e348ec34755f17a2e02847e877e307d98a6432175c337",
+    "README.md": "d24d40cfbd9fa656176b3a6bede3a6f229f16869ad6527d0e7ce2ed0d442ad60",
+    "cases.json": "47676157ea58bc628ff5302e7f033d86dcec6270b45a1f4c2d87ade7fa9652ed",
     "preflight.py": "5c8400ce1253d4993191751bb636ad97115bd603cb90f95480eb7055b48f715e",
-    "validate.py": "5a11d7139f9c7514ac11f046e61e334c61b74943d37e9d4b4ee659b73c23d151",
-    "test_validate.py": "b66dc95799aa32f14adb9d3a5225797990c33fabb5110ae30940726c30a95eb1",
-    "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
+    "validate.py": "8dc1a1de9e7393fa1bef1a8e0f007bb417f7adae3e45a77f1aff4c8f29b578b6",
+    "test_validate.py": "6062ecaf07d71537cd71b7247b6aa8c1cbf1ded6b5e962830b76fabc754cbdea",
+    "chat.md": "ad5798049b36ff9957ea4aaefdebcc79b349eb9d51844b35fbd81ea5871a7189",
 }
-EXPECTED_BASELINE_SHA256 = "0d7d72c33acea3b93a0c46499c26dfdbd3e7b42271890a43c83e100510ef8998"
+EXPECTED_BASELINE_SHA256 = "a61644d85f15ae052c14b764c59d0e135bee72a10e26a2f44ff965cd646f1776"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -182,6 +182,7 @@ CASE_IDS = (
     "accepted-event-before-close",
     "stale-evidence-resend-blocked",
     "cancel-submitting",
+    "cancel-submitting-absent-idle-resend",
     "keep-draft-before-restore",
     "restore-transient-without-recovery",
 )
@@ -1878,9 +1879,26 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             if where == "before_submit" and state == "ready" and submission_count == 0:
                 decision = "cancelled_before_submit"
             elif where == "submitting" and state == "submitting":
+                # A local cancellation does not prove whether prompt.submit
+                # reached Hermes. Force the same restore barrier as a lost
+                # transport before any later user-authorized resend.
                 draft_state = "present"
-                transition("ready")
-                decision = "cancelled_submission_pending"
+                gateway_ready_seen = False
+                compatibility_state = "unknown"
+                restore_history_seen = False
+                restore_status_seen = False
+                history_read_failed = False
+                status_read_failed = False
+                server_prompt_presence = "unknown"
+                server_turn_state = "unknown"
+                pending_result = "unknown"
+                resend_armed = False
+                rejection_retry_armed = False
+                explicit_action_required = False
+                restore_barrier = "pending"
+                change_transport("reconnecting")
+                transition("delivery_uncertain")
+                decision = "cancelled_submission_uncertain"
             elif where == "restoring" and state == "restoring":
                 transition("delivery_uncertain")
                 restore_barrier = "pending"

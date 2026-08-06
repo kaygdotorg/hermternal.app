@@ -78,7 +78,7 @@ The client must not blindly retry a prompt.
 | --- | --- | --- |
 | Explicit send from a selected `ready` session (or after the user creates one from `empty`) | `submitting` | Count one outward `prompt.submit`; block another local send while the turn is active. |
 | Confirmed prompt acceptance or correlated output | `streaming`, then `completed` when the server completes | Never submit the same prompt again. Render the server-owned turn, not a local transcript copy. |
-| Timeout, WebSocket close, app suspension, or process loss after send | `delivery_uncertain` | Do not classify the prompt as rejected and do not retry it automatically. |
+| Timeout, WebSocket close, app suspension, process loss, or local cancellation without a confirmed server result after send | `delivery_uncertain` | Do not classify the prompt as rejected and do not retry it automatically. A local cancel cannot make an unknown send safe to repeat. |
 | Restore begins | `restoring` | Reconnect first and wait for `gateway.ready` before application RPC. Keep the uncertainty notice and draft visible. |
 | History shows the prompt and status is `running`/`streaming` | `streaming` | The server turn wins; resume rendering and do not resend. |
 | History shows the prompt and status is `completed` | `completed` | Render completion and do not resend. |
@@ -90,7 +90,7 @@ The client must not blindly retry a prompt.
 
 - Only idempotent reads may retry automatically: `session.resume`, `session.history`, `session.status`, and `model.options`.
 - `prompt.submit`, `session.create`, and `session.interrupt` are never automatically retried. A restore barrier must complete before any resend decision.
-- A resend is valid only when restored history says the prompt is absent, restored status says the turn is idle, and the user confirms. Use a new local request marker and perform one explicit resend. If that resend becomes uncertain, return to restore; never issue an automatic third submission.
+- A resend is valid only when restored history says the prompt is absent, restored status says the turn is idle, and the user confirms. This rule also applies after a local cancellation of an unconfirmed in-flight submission. Use a new local request marker and perform one explicit resend. If that resend becomes uncertain, return to restore; never issue an automatic third submission.
 - `keep_draft` before restore preserves `delivery_uncertain` and the pending
   restore barrier. It does not invent `ready` evidence. The user may then start
   restore, obtain fresh history and status, and continue to the same explicit

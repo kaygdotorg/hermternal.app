@@ -101,7 +101,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             with self.subTest(optimized=optimized):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stderr, "")
-                self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=26 benchmark_samples=60\n")
+                self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=27 benchmark_samples=60\n")
 
     def assert_cli_failure_both_modes(self, *arguments: str, forbidden: str | None = None) -> None:
         for optimized in (False, True):
@@ -145,7 +145,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         previous = os.environ.get(validate.EXPECTED_COMMIT_ENV)
         os.environ[validate.EXPECTED_COMMIT_ENV] = self.reviewed_commit
         try:
-            self.assertEqual(validate.validate_all(self.document, self.baseline), 26)
+            self.assertEqual(validate.validate_all(self.document, self.baseline), 27)
         finally:
             if previous is None:
                 os.environ.pop(validate.EXPECTED_COMMIT_ENV, None)
@@ -207,6 +207,20 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         self.assertEqual(self.cases["interrupt-confirmed"]["expected"]["decision"], "interrupt_confirmed")
         self.assertEqual(self.cases["interrupt-unknown-after-close"]["expected"]["final_state"], "streaming")
         self.assertEqual(self.cases["cancel-before-submit"]["expected"]["outward_changes"], 0)
+        cancelled = self.cases["cancel-submitting"]
+        self.assertEqual(cancelled["expected"]["trace"][2], "delivery_uncertain")
+        self.assertEqual(cancelled["expected"]["transport_trace"], ["ready", "reconnecting", "ready"])
+        self.assertEqual(cancelled["expected"]["submission_count"], 1)
+        self.assertEqual(cancelled["expected"]["outward_changes"], 1)
+        self.assertEqual(cancelled["expected"]["restore_barrier"], "passed")
+        self.assertEqual(cancelled["expected"]["server_prompt_presence"], "present")
+        self.assertEqual(cancelled["expected"]["final_state"], "completed")
+
+        cancelled_absent = self.cases["cancel-submitting-absent-idle-resend"]
+        self.assertEqual(cancelled_absent["expected"]["server_prompt_presence"], "present")
+        self.assertEqual(cancelled_absent["expected"]["submission_count"], 2)
+        self.assertEqual(cancelled_absent["expected"]["decision"], "resent_after_absent_idle")
+        self.assertEqual(cancelled_absent["events"][7], {"kind": "user_decision", "action": "resend"})
         signed_out = self.cases["sign-out-during-uncertainty"]["expected"]
         self.assertIsNone(signed_out["selected_session"])
         self.assertEqual(signed_out["final_transport_state"], "offline")
@@ -240,6 +254,18 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 with self.subTest(name=name):
                     with self.assertRaises(validate.ContractError):
                         validate.load_json(path, "synthetic input")
+
+    def test_cancelled_pending_submit_blocks_second_send_until_restore(self) -> None:
+        candidate = copy.deepcopy(self.cases["cancel-submitting"])
+        candidate["events"] = candidate["events"][:3] + [
+            {"kind": "submit", "request_ref": "request-marker-002", "result": "accepted"}
+        ]
+        result = validate.evaluate_case(candidate)
+        self.assertEqual(result["trace"], ["ready", "submitting", "delivery_uncertain", "failed"])
+        self.assertEqual(result["submission_count"], 1)
+        self.assertEqual(result["outward_changes"], 1)
+        self.assertEqual(result["prompt_retry"], "blocked")
+        self.assertEqual(result["contract_error"], "prompt_submit_not_ready")
 
     def test_exact_types_and_semantic_mutations_fail_closed(self) -> None:
         wrong_bool = copy.deepcopy(self.document)
@@ -1082,7 +1108,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 result = self.run_cli(optimized, environment=environment)
                 with self.subTest(optimized=optimized):
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=26 benchmark_samples=60\n")
+                    self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=27 benchmark_samples=60\n")
                     self.assertEqual(result.stderr, "")
 
             original = dict(os.environ)
@@ -1122,7 +1148,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 result = self.run_cli(optimized, environment=environment)
                 with self.subTest(optimized=optimized):
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=26 benchmark_samples=60\n")
+                    self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=27 benchmark_samples=60\n")
 
     def test_git_helper_hang_and_output_are_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1213,7 +1239,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                     with self.subTest(label=label, optimized=optimized):
                         if succeeds:
                             self.assertEqual(result.returncode, 0, result.stderr)
-                            self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=26 benchmark_samples=60\n")
+                            self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=27 benchmark_samples=60\n")
                         else:
                             self.assertEqual(result.returncode, 1)
                             self.assertEqual(result.stdout, "")
@@ -1415,7 +1441,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                     "-f",
                     "-m",
                     "forged synthetic audit marker",
-                    "hermternal-c06-uncertain-delivery-external-launcher-anchor",
+                    "hermternal-c06-uncertain-delivery-cancel-restore-anchor",
                     "0ba168f16f6f8e646f5452a15627d7bb829828a5",
                 ],
                 capture_output=True,
