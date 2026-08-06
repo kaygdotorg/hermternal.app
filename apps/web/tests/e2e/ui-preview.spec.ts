@@ -1,5 +1,100 @@
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import { createServer } from 'node:net';
+import type { Readable } from 'node:stream';
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
+
+let uiPreviewOrigin = '';
+let previewProcess: ChildProcessByStdio<null, Readable, Readable> | undefined;
+let previewDiagnostics = '';
+
+async function reservePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error('The UI preview test could not reserve a local port.');
+  }
+
+  const port = address.port;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+  return port;
+}
+
+async function waitForPreview(url: string): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  let lastFailure = 'no response';
+
+  while (Date.now() < deadline) {
+    if (previewProcess?.exitCode !== null && previewProcess?.exitCode !== undefined) {
+      throw new Error(`The isolated UI preview exited before readiness: ${previewDiagnostics}`);
+    }
+
+    try {
+      const response = await fetch(url, { redirect: 'manual' });
+      if (response.status >= 200 && response.status < 400) return;
+      lastFailure = `HTTP ${response.status}`;
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : String(error);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(`The isolated UI preview did not become ready: ${lastFailure}. ${previewDiagnostics}`);
+}
+
+function previewUrl(path: string): string {
+  if (!uiPreviewOrigin) throw new Error('The isolated UI preview server is not ready.');
+  return `${uiPreviewOrigin}${path}`;
+}
+
+test.beforeAll(async () => {
+  const port = await reservePort();
+  uiPreviewOrigin = `http://127.0.0.1:${port}`;
+  previewDiagnostics = '';
+  const serverProcess = spawn(
+    'bun',
+    ['run', 'preview', '--', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe']
+    }
+  );
+  previewProcess = serverProcess;
+
+  const collectDiagnostics = (chunk: Buffer): void => {
+    previewDiagnostics = `${previewDiagnostics}${chunk.toString()}`.slice(-4_000);
+  };
+  serverProcess.stdout.on('data', collectDiagnostics);
+  serverProcess.stderr.on('data', collectDiagnostics);
+  await waitForPreview(previewUrl('/ui-preview'));
+});
+
+test.afterAll(async () => {
+  const processToStop = previewProcess;
+  previewProcess = undefined;
+  if (!processToStop || processToStop.exitCode !== null) return;
+
+  processToStop.kill('SIGTERM');
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      processToStop.kill('SIGKILL');
+      resolve();
+    }, 2_000);
+    processToStop.once('exit', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+});
 
 for (const viewport of [
   { name: 'desktop', width: 1440, height: 900 },
@@ -8,7 +103,7 @@ for (const viewport of [
 ]) {
   test(`${viewport.name} UI preview keeps both surfaces usable`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    await page.goto('/ui-preview');
+    await page.goto(previewUrl('/ui-preview'));
 
     await expect(page.getByRole('heading', { name: 'Runtime and authentication states' })).toBeVisible();
     await expect(page.getByTestId('runtime-preview')).toBeVisible();
@@ -23,7 +118,7 @@ for (const viewport of [
 }
 
 test('UI preview exposes local state controls and dark appearance', async ({ page }) => {
-  await page.goto('/ui-preview');
+  await page.goto(previewUrl('/ui-preview'));
 
   await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('streaming');
   await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('failure');
@@ -39,7 +134,7 @@ test('UI preview exposes local state controls and dark appearance', async ({ pag
 
 test('narrow absolute surfaces stay contained and Send activates the local action', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/ui-preview');
+  await page.goto(previewUrl('/ui-preview'));
 
   const auth = page.locator('.auth-preview');
   const statusBar = page.locator('.mobile-status-bar');
@@ -67,7 +162,7 @@ test('narrow absolute surfaces stay contained and Send activates the local actio
 });
 
 test('password preview submits only a credential-free local fixture action', async ({ page }) => {
-  await page.goto('/ui-preview');
+  await page.goto(previewUrl('/ui-preview'));
   await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
 
   await page.getByLabel('Username').fill('sam');
@@ -81,14 +176,14 @@ test('password preview submits only a credential-free local fixture action', asy
 });
 
 test('UI preview has no axe violations', async ({ page }) => {
-  await page.goto('/ui-preview');
+  await page.goto(previewUrl('/ui-preview'));
 
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
 });
 
 test('records production preview timing without a threshold', async ({ page }) => {
-  await page.goto('/ui-preview', { waitUntil: 'networkidle' });
+  await page.goto(previewUrl('/ui-preview'), { waitUntil: 'networkidle' });
 
   const measurement = await page.evaluate(() => {
     const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
@@ -110,7 +205,7 @@ test('visible UI controls keep the shared 44px effective target', async ({ page 
     { width: 390, height: 844 }
   ]) {
     await page.setViewportSize(viewport);
-    await page.goto('/ui-preview');
+    await page.goto(previewUrl('/ui-preview'));
 
     const undersizedControls = await page.evaluate(() =>
       Array.from(document.querySelectorAll('button, select, input, textarea'))
@@ -142,7 +237,7 @@ test('visible UI controls keep the shared 44px effective target', async ({ page 
 
 test('UI preview stays local and accessible at 200% zoom with reduced motion', async ({ page }) => {
   const unexpectedRequests: string[] = [];
-  const expectedOrigin = new URL('http://127.0.0.1:4173').origin;
+  const expectedOrigin = uiPreviewOrigin;
 
   await page.route('**/*', async (route) => {
     const requestUrl = new URL(route.request().url());
@@ -154,7 +249,7 @@ test('UI preview stays local and accessible at 200% zoom with reduced motion', a
     await route.continue();
   });
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.goto('/ui-preview');
+  await page.goto(previewUrl('/ui-preview'));
   await page.evaluate(() => {
     document.documentElement.style.zoom = '2';
   });
