@@ -96,7 +96,10 @@ blocker, not an implicit pass.
 ### Reproducible benchmark evidence
 
 This is artifact-size and local validator evidence, not a product performance
-budget. No threshold is claimed.
+budget. No threshold is claimed. Later web and Apple harnesses use the shared
+[B-01 benchmark evidence contract](../../contracts/benchmarks/README.md). This
+10-run P0-06 observation remains a separate planning-validator trace; it does
+not define a product budget or replace the shared 30-sample method.
 
 - **Deterministic fixture:** The checked-in `implementation-proof-gates.md` fixture and the standard-library validator's valid JSON result.
 - **Metric:** Artifact bytes and local validator duration only; product latency, memory, bundle, render, and startup budgets are not measured here.
