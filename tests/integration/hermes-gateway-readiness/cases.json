@@ -1,0 +1,323 @@
+{
+  "schema": "hermternal.integration.hermes-gateway-readiness.v1",
+  "operation": "R-02C",
+  "contract": "hermes-gateway-readiness-v1",
+  "synthetic_only": true,
+  "network_access": "executor_only",
+  "live_run": false,
+  "proof_status": "not_run",
+  "pinned_identity": {
+    "repository": "NousResearch/hermes-agent",
+    "source_commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
+    "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
+    "image_reference": "hermes-agent:hermternal-f5be9236"
+  },
+  "executor_policy": {
+    "name": "rootless_podman",
+    "account": "hermternal-test",
+    "ssh_target": "hermternal-test@hermternal-dev",
+    "rootless": true,
+    "compose_command": "podman compose",
+    "cgroup": "v2",
+    "network_backend": "netavark",
+    "storage_driver": "overlay",
+    "correctness_executor": true,
+    "docker_comparison": "not_a_substitute"
+  },
+  "capability_policy": {
+    "status": "awaiting_issue_250",
+    "cap_drop": [
+      "ALL"
+    ],
+    "cap_add": [],
+    "no_new_privileges": true,
+    "dependency": "issue_250_review"
+  },
+  "probe_policy": {
+    "service_name": "gateway",
+    "command": [
+      "gateway",
+      "run",
+      "--no-supervise"
+    ],
+    "readiness_prefix": "HERMES_BACKEND_READY port=",
+    "readiness_stream": "stdout",
+    "port_min": 1,
+    "port_max": 65535,
+    "timeout_seconds": 30.0,
+    "poll_interval_seconds": 0.25,
+    "restart": "no",
+    "log_driver": "k8s-file",
+    "log_max_size": "1m",
+    "log_max_files": null
+  },
+  "isolation_policy": {
+    "project_prefix": "hermes-gateway-readiness",
+    "internal_network": true,
+    "named_volume": true,
+    "published_ports": false,
+    "host_network": false,
+    "host_profile_bind": false,
+    "socket_mount": false,
+    "pty": false,
+    "provider": "none",
+    "browser_auth": false,
+    "model_turn": false,
+    "resources": {
+      "cpu_limit": "0.50",
+      "memory_limit": "512m",
+      "pid_limit": 256,
+      "tmpfs": [
+        "/tmp:size=64m,mode=1777",
+        "/run:size=16m,mode=755"
+      ],
+      "shm_size": "64m"
+    },
+    "teardown": [
+      "down",
+      "--volumes",
+      "--remove-orphans"
+    ]
+  },
+  "cases": [
+    {
+      "id": "readiness-marker-accepted",
+      "kind": "readiness_marker",
+      "input": {
+        "text": "HERMES_BACKEND_READY port=9119"
+      },
+      "expected": {
+        "accepted": true,
+        "port": 9119
+      },
+      "notes": "Only the exact backend marker with an in-range port is accepted."
+    },
+    {
+      "id": "readiness-marker-rejects-prefix",
+      "kind": "readiness_marker",
+      "input": {
+        "text": "INFO HERMES_BACKEND_READY port=9119"
+      },
+      "expected": {
+        "accepted": false,
+        "port": null
+      },
+      "notes": "A log prefix cannot be mistaken for the exact marker."
+    },
+    {
+      "id": "readiness-marker-rejects-invalid-port",
+      "kind": "readiness_marker",
+      "input": {
+        "text": "HERMES_BACKEND_READY port=65536"
+      },
+      "expected": {
+        "accepted": false,
+        "port": null
+      },
+      "notes": "Ports outside the TCP range do not establish readiness."
+    },
+    {
+      "id": "readiness-conflicting-markers",
+      "kind": "readiness_output",
+      "input": {
+        "text": "HERMES_BACKEND_READY port=9119 HERMES_BACKEND_READY port=9119"
+      },
+      "expected": {
+        "accepted": false,
+        "port": null
+      },
+      "notes": "A duplicated marker is rejected even when both values match."
+    },
+    {
+      "id": "classify-timeout",
+      "kind": "classification",
+      "input": {
+        "readiness_port": null,
+        "returncode": null,
+        "timed_out": true
+      },
+      "expected": {
+        "status": "blocked",
+        "classification": "timeout_waiting_for_readiness"
+      },
+      "notes": "A still-running process at the bounded deadline is a timeout."
+    },
+    {
+      "id": "classify-exit-126",
+      "kind": "classification",
+      "input": {
+        "readiness_port": null,
+        "returncode": 126,
+        "timed_out": false
+      },
+      "expected": {
+        "status": "blocked",
+        "classification": "exit_126_before_ready"
+      },
+      "notes": "Permission or executable failures are classified before readiness."
+    },
+    {
+      "id": "classify-exit-2",
+      "kind": "classification",
+      "input": {
+        "readiness_port": null,
+        "returncode": 2,
+        "timed_out": false
+      },
+      "expected": {
+        "status": "blocked",
+        "classification": "exit_2_before_ready"
+      },
+      "notes": "The pinned s6 boundary's early exit remains non-readiness evidence."
+    },
+    {
+      "id": "classify-signal",
+      "kind": "classification",
+      "input": {
+        "readiness_port": null,
+        "returncode": -9,
+        "timed_out": false
+      },
+      "expected": {
+        "status": "blocked",
+        "classification": "signal_9_before_ready"
+      },
+      "notes": "Signal termination is never promoted to a readiness claim."
+    },
+    {
+      "id": "redaction-symbolic-diagnostic",
+      "kind": "redaction",
+      "input": {
+        "fixture_id": "synthetic_diagnostic"
+      },
+      "expected": {
+        "marker": "[REDACTED]",
+        "bounded": true
+      },
+      "notes": "Only symbolic credentials and a synthetic URL exercise redaction."
+    },
+    {
+      "id": "identity-exact",
+      "kind": "identity",
+      "input": {
+        "repository": "NousResearch/hermes-agent",
+        "source_commit": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+        "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
+        "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
+        "image_reference": "hermes-agent:hermternal-f5be9236"
+      },
+      "expected": {
+        "accepted": true,
+        "reason": "pinned_identity"
+      },
+      "notes": "Source commit, tree, Dockerfile digest, and image tag are all exact."
+    },
+    {
+      "id": "identity-drift-rejected",
+      "kind": "identity",
+      "input": {
+        "repository": "NousResearch/hermes-agent",
+        "source_commit": "0000000000000000000000000000000000000000",
+        "source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
+        "dockerfile_sha256": "a11fc9fc39eadcaffd99377d831b5ec2458f1e09a5f5d5312fd8adcec362b7fc",
+        "image_reference": "hermes-agent:hermternal-f5be9236"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "pinned_identity_mismatch"
+      },
+      "notes": "A complete but different source commit is still rejected."
+    },
+    {
+      "id": "isolation-rendered",
+      "kind": "isolation",
+      "input": {
+        "mutation": "none"
+      },
+      "expected": {
+        "accepted": true,
+        "reason": "rootless_private_project"
+      },
+      "notes": "The canonical render has no host ports, sockets, profiles, or provider."
+    },
+    {
+      "id": "isolation-published-port-rejected",
+      "kind": "isolation",
+      "input": {
+        "mutation": "published_port"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "published_port_rejected"
+      },
+      "notes": "A synthetic host-port mutation must fail closed."
+    },
+    {
+      "id": "capability-policy-pending",
+      "kind": "capability",
+      "input": {
+        "policy": "checked_in"
+      },
+      "expected": {
+        "status": "awaiting_issue_250",
+        "live_allowed": false
+      },
+      "notes": "Live execution remains gated until issue 250 reviews minimal init capabilities."
+    },
+    {
+      "id": "cleanup-canonical-project",
+      "kind": "cleanup",
+      "input": {
+        "target": "canonical"
+      },
+      "expected": {
+        "accepted": true,
+        "reason": "exact_project_only"
+      },
+      "notes": "Teardown names the generated project and removes only its volumes and orphans."
+    },
+    {
+      "id": "cleanup-unrecognized-project",
+      "kind": "cleanup",
+      "input": {
+        "target": "other_project"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "unrecognized_project"
+      },
+      "notes": "A different project name cannot be cleaned by this probe."
+    },
+    {
+      "id": "cleanup-zero-leftovers",
+      "kind": "leftovers",
+      "input": {
+        "leftovers": {
+          "containers": 0,
+          "networks": 0,
+          "volumes": 0
+        }
+      },
+      "expected": {
+        "zero": true
+      },
+      "notes": "Successful cleanup proves no project-scoped resources remain."
+    },
+    {
+      "id": "cleanup-leftover-detected",
+      "kind": "leftovers",
+      "input": {
+        "leftovers": {
+          "containers": 0,
+          "networks": 0,
+          "volumes": 1
+        }
+      },
+      "expected": {
+        "zero": false
+      },
+      "notes": "Any leftover container, network, or volume blocks the evidence."
+    }
+  ]
+}
