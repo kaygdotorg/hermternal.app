@@ -160,8 +160,8 @@
     },
     {
       "path": "test_validate.py",
-      "bytes": 17484,
-      "sha256": "5553c1a1887b342734350cb7c309e06e3a0381433c1f5d98a2234f0d9c3219f1"
+      "bytes": 18148,
+      "sha256": "3179feac70894468bbb57181ce3e18618a439f9917bbc5374a3fa70a0234b87a"
     },
     {
       "path": "sample-provenance.json",
@@ -179,7 +179,7 @@
       "sha256": "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"
     }
   ],
-  "artifact_manifest_sha256": "f7897ce674b581fcbf12fd06399d4e3d19015ca324e404f18c05b2f68e43e1b6",
+  "artifact_manifest_sha256": "9381bd09180f298e22ea1285d6b32d98b65486e2873e12c758ae056c2f77e2d5",
   "redaction": {
     "policy": "semantic_only",
     "synthetic_only": true,

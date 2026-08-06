@@ -12,6 +12,7 @@ import ast
 import copy
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,7 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         optimized: bool = False,
         extra: tuple[str, ...] = ("--skip-baseline",),
         baseline_raw: bytes | None = None,
+        script_path: Path = FIXTURE_DIR / "validate.py",
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.NamedTemporaryFile(suffix=".json") as evidence_handle:
             evidence_handle.write(raw)
@@ -57,7 +59,7 @@ class BenchmarkEvidenceTests(unittest.TestCase):
                 command = [sys.executable]
                 if optimized:
                     command.append("-O")
-                command.extend([str(FIXTURE_DIR / "validate.py"), "--evidence", evidence_handle.name, *arguments])
+                command.extend([str(script_path), "--evidence", evidence_handle.name, *arguments])
                 return subprocess.run(command, check=False, capture_output=True, text=True)
             finally:
                 if baseline_handle is not None:
@@ -76,10 +78,17 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         secret: str | None = None,
         *,
         baseline_raw: bytes | None = None,
+        script_path: Path = FIXTURE_DIR / "validate.py",
     ) -> None:
         for optimized in (False, True):
             with self.subTest(optimized=optimized):
-                completed = self._run_cli(raw, optimized=optimized, extra=() if baseline_raw is not None else ("--skip-baseline",), baseline_raw=baseline_raw)
+                completed = self._run_cli(
+                    raw,
+                    optimized=optimized,
+                    extra=() if baseline_raw is not None else ("--skip-baseline",),
+                    baseline_raw=baseline_raw,
+                    script_path=script_path,
+                )
                 self.assertEqual(completed.returncode, 2)
                 self.assertEqual(completed.stderr, "")
                 lines = [line for line in completed.stdout.splitlines() if line.strip()]
@@ -283,13 +292,20 @@ class BenchmarkEvidenceTests(unittest.TestCase):
                 self._assert_cli_document_failure(candidate, secret)
 
     def test_missing_recorded_artifact_fails_in_both_cli_modes(self) -> None:
-        missing = validate.ROOT / "synthetic" / "trace.json"
-        backup = missing.with_suffix(".json.missing-during-test")
-        missing.replace(backup)
-        try:
-            self._assert_cli_failure(validate.EVIDENCE_PATH.read_bytes())
-        finally:
-            backup.replace(missing)
+        """Exercise local artifact absence without mutating the checkout.
+
+        The validator resolves artifacts beside its own script, so a copied
+        benchmark directory gives the subprocess a realistic root while keeping
+        normal and optimized test processes safe to run concurrently.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            copied_root = Path(directory) / "benchmarks"
+            shutil.copytree(FIXTURE_DIR, copied_root)
+            (copied_root / "synthetic" / "trace.json").unlink()
+            self._assert_cli_failure(
+                validate.EVIDENCE_PATH.read_bytes(),
+                script_path=copied_root / "validate.py",
+            )
 
     def test_threshold_and_budget_cannot_become_unreviewed_limits(self) -> None:
         for key in ("threshold", "budget"):
