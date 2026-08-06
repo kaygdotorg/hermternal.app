@@ -1,0 +1,124 @@
+{
+  "schema": "hermternal.session-persistence-baseline.v1",
+  "validator": "contracts/fixtures/session-persistence/validate.py",
+  "command": "python3 contracts/fixtures/session-persistence/validate.py",
+  "build_mode": "N/A",
+  "artifact_files": [
+    {
+      "path": "README.md",
+      "sha256": "d0ca31e4ad744350f4d73e07dd892155fd13997a88cde6b9b82506d61e7ec4ab",
+      "size_bytes": 5006
+    },
+    {
+      "path": "cases.json",
+      "sha256": "59aec1f5b6eb83904f355df850b61379b737b64c6c214b47a909d0976acca6da",
+      "size_bytes": 68736
+    },
+    {
+      "path": "validate.py",
+      "sha256": "7c499ca54dad7af1f6421cf8f5a3f2af99627b3441ae900f612a32e25bfae288",
+      "size_bytes": 64783
+    },
+    {
+      "path": "test_validate.py",
+      "sha256": "b69bb1ce49022526657e28c017a1445c0352323d61d8826a388028f764310692",
+      "size_bytes": 20629
+    },
+    {
+      "path": "baseline-evidence.json",
+      "sha256": "6518b2b0c08dc4da2131585fce057cdf3af4acddbd5149aa08a94c738a7f7f94",
+      "size_bytes": 1458
+    }
+  ],
+  "artifact_bytes": 160612,
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "repetitions": 30,
+  "normal": {
+    "command": "python3 contracts/fixtures/session-persistence/validate.py",
+    "samples_ms": [
+      47.742625,
+      48.149958,
+      48.076959,
+      47.822334,
+      47.020125,
+      47.231417,
+      46.3945,
+      47.773375,
+      45.371125,
+      46.862083,
+      48.501834,
+      47.052167,
+      46.305541,
+      46.254125,
+      47.953708,
+      47.458083,
+      47.264,
+      45.799458,
+      46.636916,
+      47.510542,
+      47.77775,
+      47.879375,
+      47.667916,
+      47.355958,
+      48.215917,
+      46.897875,
+      47.343917,
+      46.830542,
+      47.4695,
+      51.366917
+    ],
+    "distribution": {
+      "min": 45.371125,
+      "p50": 47.407021,
+      "p95": 48.501834,
+      "max": 51.366917,
+      "mean": 47.399551
+    }
+  },
+  "optimized": {
+    "command": "python3 -O contracts/fixtures/session-persistence/validate.py",
+    "samples_ms": [
+      45.249292,
+      46.095917,
+      46.608583,
+      46.979917,
+      46.482875,
+      47.768333,
+      48.699,
+      46.679417,
+      47.771917,
+      46.972417,
+      47.412208,
+      47.6405,
+      47.052541,
+      46.739125,
+      46.106166,
+      47.794916,
+      48.598334,
+      47.601,
+      47.689291,
+      47.302208,
+      47.99575,
+      47.094583,
+      47.659375,
+      48.11,
+      46.651125,
+      46.658042,
+      46.750167,
+      48.740125,
+      46.960833,
+      49.044125
+    ],
+    "distribution": {
+      "min": 45.249292,
+      "p50": 47.198396,
+      "p95": 48.740125,
+      "max": 49.044125,
+      "mean": 47.296936
+    }
+  },
+  "threshold": null
+}
