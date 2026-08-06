@@ -75,7 +75,7 @@ Failures emit exactly one bounded JSON line with status `2`, no traceback, no
 argparse usage text, and no unredacted attacker-controlled key or value. Error
 messages are capped at 240 characters and redact credential-shaped assignments,
 URLs, credential-header material, private-key markers, cookie/token/session/ticket
-fields, and other secret-shaped text.
+fields, bare hostname-shaped values, and other secret-shaped text.
 
 The fixture, README, validator, tests, and benchmark baseline contain only
 synthetic markers. The redaction contract rejects credentials, hostnames, raw
@@ -83,18 +83,25 @@ private addresses, firewall commands, live URLs, and user data. The validator
 never opens a socket, invokes a network or firewall command, starts Hermes, or
 contacts a proxy.
 
-## Baseline evidence
+## Baseline evidence and immutable identities
 
 `validation-baseline.json` records 30 fresh normal and 30 fresh optimized
 validator-process observations. It records the exact commands, environment,
 raw samples, deterministic `min`, `p50`, `p95`, `p99`, `max`, and `mean`, and a
 `null` threshold because this issue defines no performance budget. The baseline
-also binds the reviewed artifact file set and digest.
+also records the reviewed artifact file set and aggregate digest.
 
-`validation-baseline-sha256.txt` binds the canonical baseline JSON bytes so a
-fabricated but internally consistent replacement trace is rejected. Re-run the
-baseline commands on the target machine when the fixture or interpreter
-changes; the measurements are observations, not a performance promise.
+The mutable artifact metadata and `validation-baseline-sha256.txt` anchor are
+not trust roots. `validate.py` code-pins the canonical baseline evidence,
+`README.md`, `cases.json`, and `test_validate.py` identities outside those
+mutable files. It also pins a normalized digest of its own source after
+replacing only its self-identity literal, which avoids a circular self-hash.
+Therefore, changing a trace, recomputing its distribution, rewriting artifact
+metadata, or recomputing the anchor cannot authorize forged evidence. A bare
+hostname-shaped retained value is rejected under the no-host rule. Re-running
+measurements after an intentional fixture, validator, test, or documentation
+change requires a reviewed update to the corresponding code-pinned identities;
+the measurements remain observations, not a performance promise.
 
 ## Reproduce the proof
 

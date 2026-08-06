@@ -9,7 +9,9 @@ a network service.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,6 +60,57 @@ class PrivateNetworkFirewallTests(unittest.TestCase):
                 self.assertLessEqual(len(payload["error"]["message"]), validate.MAX_ERROR_OUTPUT)
                 self.assertNotIn("Traceback", completed.stdout + completed.stderr)
                 self.assertNotIn("usage:", completed.stdout.lower())
+
+    def _recompute_artifact_and_anchor(
+        self,
+        fixture_root: Path,
+        baseline: dict[str, object],
+        baseline_path: Path,
+        anchor_path: Path,
+    ) -> None:
+        artifact_bytes, artifact_digest = validate._artifact_digest(fixture_root)
+        baseline["artifact"]["bytes"] = artifact_bytes
+        baseline["artifact"]["sha256"] = artifact_digest
+        baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        anchor = hashlib.sha256(validate._canonical_baseline_bytes(baseline)).hexdigest()
+        anchor_path.write_text(anchor + "\n", encoding="ascii")
+
+    def _assert_full_cli_failure(
+        self,
+        validator_path: Path,
+        baseline_path: Path,
+        anchor_path: Path,
+        expected_message: str,
+    ) -> None:
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                command = [sys.executable]
+                if optimized:
+                    command.append("-O")
+                command.extend(
+                    [
+                        str(validator_path),
+                        "--baseline",
+                        str(baseline_path),
+                        "--baseline-anchor",
+                        str(anchor_path),
+                    ]
+                )
+                completed = subprocess.run(command, check=False, capture_output=True, text=True)
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stderr, "")
+                self.assertEqual(
+                    json.loads(completed.stdout),
+                    {
+                        "ok": False,
+                        "compatible": False,
+                        "live_run": False,
+                        "error": {
+                            "code": validate.ERROR_CODE,
+                            "message": expected_message,
+                        },
+                    },
+                )
 
     def test_checked_in_inventory_and_safe_state_are_frozen(self) -> None:
         self.assertEqual(tuple(self.cases), validate.EXPECTED_CASE_IDS)
@@ -221,7 +274,7 @@ class PrivateNetworkFirewallTests(unittest.TestCase):
             self.assertNotIn(secret, redacted)
             self.assertLessEqual(len(redacted), validate.MAX_ERROR_OUTPUT)
 
-    def test_baseline_is_anchored_and_has_two_30_run_traces(self) -> None:
+    def test_baseline_is_code_pinned_and_has_two_30_run_traces(self) -> None:
         baseline = validate.load_json(validate.BASELINE_PATH)
         validate.validate_baseline(baseline)
         self.assertEqual(baseline["threshold"], None)
@@ -230,13 +283,44 @@ class PrivateNetworkFirewallTests(unittest.TestCase):
         forged = copy.deepcopy(baseline)
         forged["runs"][0]["trace"] = [1.0] * validate.BASELINE_REPETITIONS
         forged["runs"][0]["distribution"] = validate._expected_distribution(forged["runs"][0]["trace"])
-        with self.assertRaises(validate.ValidationError):
-            validate.validate_baseline(forged)
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_path = Path(directory) / "forged-baseline.json"
+            anchor_path = Path(directory) / "forged-anchor.txt"
+            self._recompute_artifact_and_anchor(FIXTURE_DIR, forged, baseline_path, anchor_path)
+            self._assert_full_cli_failure(
+                FIXTURE_DIR / "validate.py",
+                baseline_path,
+                anchor_path,
+                "baseline evidence digest changed",
+            )
 
         stale_command = copy.deepcopy(baseline)
         stale_command["runs"][1]["command"] = "python3 -O fabricated.py"
         with self.assertRaises(validate.ValidationError):
             validate.validate_baseline(stale_command)
+
+    def test_recomputed_digests_cannot_authorize_hostname_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_root = Path(directory) / "fixture"
+            shutil.copytree(FIXTURE_DIR, fixture_root)
+            readme_path = fixture_root / "README.md"
+            readme_path.write_text(
+                readme_path.read_text(encoding="utf-8") + "\nretained.example.invalid\n",
+                encoding="utf-8",
+            )
+            baseline_path = fixture_root / "validation-baseline.json"
+            anchor_path = fixture_root / "validation-baseline-sha256.txt"
+            mutated_baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            self._recompute_artifact_and_anchor(fixture_root, mutated_baseline, baseline_path, anchor_path)
+            self._assert_full_cli_failure(
+                fixture_root / "validate.py",
+                baseline_path,
+                anchor_path,
+                "secret-shaped fixture value is not allowed",
+            )
+
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_redaction({"retained": "retained.example.invalid"})
 
     def test_normal_and_optimized_cli_keep_claims_blocked(self) -> None:
         for optimized in (False, True):

@@ -106,8 +106,8 @@
       "validate.py",
       "test_validate.py"
     ],
-    "bytes": 81123,
-    "sha256": "6889b5b10ba120b4fdd8126cfa4cbfa6c71629d41a2145f0d86c1c3e00084fac"
+    "bytes": 88341,
+    "sha256": "d1ad296152fe73882807977a8fc82818bbc589c31a53dc35f6c721038d403374"
   },
   "threshold": null
 }

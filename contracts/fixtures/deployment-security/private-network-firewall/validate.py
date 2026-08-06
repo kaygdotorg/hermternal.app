@@ -39,6 +39,18 @@ MAX_STRING_LENGTH = 4096
 MAX_ERROR_OUTPUT = 240
 BASELINE_REPETITIONS = 30
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py", "test_validate.py")
+# These identities are deliberately code-pinned rather than read from the mutable
+# baseline or anchor files. The validator source uses a normalized self-identity
+# so its own digest does not form a circular baseline dependency.
+PINNED_RETAINED_ARTIFACTS: dict[str, tuple[int, str]] = {
+    "README.md": (7161, "12dd9ccf0a97437221b216707f7357dfd168b0e153c8a18d95cec1d570bf62ac"),
+    "cases.json": (17789, "1bd23d7bfc48eb758071598246ad138eaa787616539ee50926c5cbb91b3f95b8"),
+    "test_validate.py": (17745, "3d65f8a1b0adf4d69db5e58e49838fb397bca0562cb658435f2333c25fa398f8"),
+}
+PINNED_VALIDATOR_SOURCE_SHA256 = "48cc6bb0248577e82dc2ff813e05bdc422d42d0e54d37f5e76ffe60461776d24"
+PINNED_BASELINE_EVIDENCE_SHA256 = "ff516b44f0dbce8bb1b9be7070d25908bcb3c8d3b1adc247d18d156118225c2a"
+VALIDATOR_IDENTITY_RE = re.compile(r'(?m)^PINNED_VALIDATOR_SOURCE_SHA256 = "[0-9a-f]{64}"$')
+BASELINE_EVIDENCE_KEYS = ("schema", "validator", "fixture", "metric", "runs", "threshold")
 ERROR_CODE = "private_network_firewall_fixture_validation_error"
 
 ROOT_KEYS = (
@@ -387,11 +399,17 @@ SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?P<value>[^\s,}\]]+)",
     re.IGNORECASE,
 )
+HOSTNAME_RE = re.compile(
+    r"(?<![A-Za-z0-9._/-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?!(?:json|py|md|txt)(?![A-Za-z0-9]))[a-z]{2,63}(?![A-Za-z0-9.-])",
+    re.IGNORECASE,
+)
 SECRET_VALUE_PATTERNS = (
     re.compile(r"\b(?:ghp|github_pat|glpat|sk_live|AKIA)[A-Za-z0-9_\-]+\b", re.IGNORECASE),
     re.compile(r"\b(?:Bearer|Basic)\s+[^\s,}\]]+", re.IGNORECASE),
     re.compile(r"-----BEGIN [A-Z0-9 ]+ PRIVATE KEY-----", re.IGNORECASE),
     re.compile(r"https?://[^\s,}\]]+", re.IGNORECASE),
+    HOSTNAME_RE,
     re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
 )
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -972,15 +990,51 @@ def validate_cases_document(document: Any) -> None:
         strict_equal(actual, row["expected"], "case outcome")
 
 
+def _read_artifact(root: Path, relative: str) -> bytes:
+    path = root / relative
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise ValidationError("benchmark artifact is unavailable") from exc
+
+
+def _validator_source_digest(root: Path = ROOT) -> str:
+    """Hash validator source after replacing only its self-identity literal."""
+
+    try:
+        source = (root / "validate.py").read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValidationError("validator identity is unavailable") from exc
+    canonical, replacements = VALIDATOR_IDENTITY_RE.subn(
+        'PINNED_VALIDATOR_SOURCE_SHA256 = "<code-pinned>"',
+        source,
+    )
+    require(replacements == 1, "validator identity marker changed")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validate_pinned_artifacts(root: Path = ROOT) -> None:
+    """Reject retained artifacts that differ from code-pinned reviewed bytes."""
+
+    for relative, (expected_bytes, expected_digest) in PINNED_RETAINED_ARTIFACTS.items():
+        data = _read_artifact(root, relative)
+        require(len(data) == expected_bytes, f"pinned artifact size changed: {relative}")
+        require(hashlib.sha256(data).hexdigest() == expected_digest, f"pinned artifact digest changed: {relative}")
+    require(_validator_source_digest(root) == PINNED_VALIDATOR_SOURCE_SHA256, "pinned validator identity changed")
+
+
+def _canonical_baseline_evidence_bytes(baseline: dict[str, Any]) -> bytes:
+    """Canonicalize mutable-independent benchmark evidence for the code pin."""
+
+    evidence = {key: baseline[key] for key in BASELINE_EVIDENCE_KEYS}
+    return json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
 def _artifact_digest(root: Path = ROOT) -> tuple[int, str]:
     digest = hashlib.sha256()
     total = 0
     for relative in ARTIFACT_FILES:
-        path = root / relative
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            raise ValidationError("benchmark artifact is unavailable") from exc
+        data = _read_artifact(root, relative)
         total += len(data)
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
@@ -1074,6 +1128,11 @@ def validate_baseline(baseline: Any, root: Path = ROOT, anchor_path: Path = BASE
             "baseline distribution order changed",
         )
     require(seen_modes == {"normal", "optimized"}, "baseline modes are incomplete")
+    require(
+        hashlib.sha256(_canonical_baseline_evidence_bytes(record)).hexdigest() == PINNED_BASELINE_EVIDENCE_SHA256,
+        "baseline evidence digest changed",
+    )
+    _validate_pinned_artifacts(root)
     artifact = strict_keys(record["artifact"], BASELINE_ARTIFACT_KEYS, "baseline artifact")
     require(type(artifact["files"]) is list and tuple(artifact["files"]) == ARTIFACT_FILES, "baseline artifact files changed")
     require(type(artifact["bytes"]) is int and type(artifact["bytes"]) is not bool and artifact["bytes"] > 0, "baseline artifact bytes invalid")
