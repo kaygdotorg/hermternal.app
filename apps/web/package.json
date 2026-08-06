@@ -10,6 +10,7 @@
     "typecheck": "bun x --package @typescript/native tsc --noEmit --pretty false -p tsconfig.json",
     "typecheck:version": "bun x --package @typescript/native tsc --version",
     "test": "vitest run",
+    "benchmark:transport": "bun tests/bench/live-rest-transport.bench.ts",
     "test:watch": "vitest",
     "test:component": "vitest run src/lib/components",
     "test:e2e": "playwright test",
