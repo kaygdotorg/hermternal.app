@@ -146,7 +146,7 @@ CENTRAL_VALIDATOR_SOURCE_PATHS = frozenset({
 # refresh both the scanner and its self-manifest without changing an independent
 # reviewed source boundary as well.
 VALIDATOR_TRUST_ANCHOR_PATH = "contracts/fixtures/validator/test_validate.py"
-BASELINE_CANONICAL_SHA256 = "22ffc0cb0af3fa48f1cd4b2649b73d770420150ba393d9c9e39d2afc76439bbf"
+BASELINE_CANONICAL_SHA256 = "3890ef38a05e4a797956f0ab3fd171c1fb6fd5c25e1ff9565a3c60123b537ed5"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -156,7 +156,10 @@ URL_PATTERN = re.compile(r"(?:https?|wss?)://[^\s\"'<>]+", re.IGNORECASE)
 REGEX_HOST_LITERAL_PATTERN = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+"
 )
-UNSAFE_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+# Normalize every C0/C1 control before content scanning, including layout
+# controls such as HT, LF, and CR. Retained malformed-input fixtures may keep
+# these bytes, but they cannot split credential or URL tokens at scan time.
+UNSAFE_CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 BASELINE_ANCHOR_PATTERN = re.compile(rb'^BASELINE_CANONICAL_SHA256 = "[0-9a-f]{64}"$', re.MULTILINE)
 TRUST_ANCHOR_PATTERN = re.compile(
     r'^TRUSTED_VALIDATE_SOURCE_SHA256 = "([0-9a-f]{64})"$',
@@ -561,7 +564,10 @@ def _regex_host_literals(raw_url: str) -> tuple[str, ...]:
     if scheme is None:
         return ()
     remainder = raw_url[scheme.end():]
-    host_text = re.split(r"[/\\?#]", remainder, maxsplit=1)[0]
+    # A backslash can escape a literal host dot, so it is part of the authority
+    # expression rather than an authority terminator. Path/query/fragment
+    # delimiters still bound the host before regex syntax is interpreted.
+    host_text = re.split(r"[/#?]", remainder, maxsplit=1)[0]
     # Escaped dots are literal punctuation in a detector regex. Character
     # classes and quantifiers remain syntax, while every concrete dotted host
     # fragment is still checked against the same allowlist as ordinary URLs.
@@ -854,8 +860,23 @@ def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
     return _STATIC_UNKNOWN
 
 
+def _percent_probe_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
+    """Render unresolved percent operands as a credential scheme probe.
+
+    An unknown `%s` operand can occupy the authorization-scheme position. A
+    harmless host-like sentinel would erase that possibility, so the scanner
+    also evaluates the retained template with `Basic` in every unresolved slot.
+    """
+    value = _static_value(node, bindings)
+    if value is not _STATIC_UNKNOWN:
+        return value
+    if isinstance(node, ast.Tuple):
+        return tuple(_percent_probe_value(child, bindings) for child in node.elts)
+    return "Basic"
+
+
 def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
-    """Render unresolved string expressions with a credential-shaped sentinel."""
+    """Render unresolved string expressions with credential-shaped probes."""
     value = _static_value(node, bindings)
     if type(value) is str:
         return value
@@ -884,10 +905,19 @@ def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
         try:
             if isinstance(node.right, ast.Tuple):
                 values = tuple(_conservative_text(child, bindings) for child in node.right.elts)
-                return left % values
-            return left % right
+                rendered = left % values
+            else:
+                rendered = left % right
         except (IndexError, KeyError, TypeError, ValueError, OverflowError):
-            return left + " " + right
+            rendered = left + " " + right
+        try:
+            credential_probe = left % _percent_probe_value(node.right, bindings)
+        except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+            credential_probe = left
+        # Scan both ordinary conservative rendering and the auth-scheme probe.
+        # This preserves known template context without letting an unresolved
+        # `%s` choose `Basic` or another credential scheme only at runtime.
+        return rendered + " " + credential_probe
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
         method = node.func.attr
         receiver = _conservative_text(node.func.value, bindings)

@@ -22,7 +22,7 @@ import validate
 # Independent source trust anchor for the aggregate validator. This constant is
 # reviewed outside validate.py, whose own baseline line is normalized before the
 # canonical source digest is computed.
-TRUSTED_VALIDATE_SOURCE_SHA256 = "d9260c2e800b0238d74fbdaa8c8bd3ae19af960a8e1d8249ab28d3bfa45b1fc1"
+TRUSTED_VALIDATE_SOURCE_SHA256 = "729b66d33fade50c616c124504c5b78a62c3931b9b63c22fc99b360c093acee4"
 
 
 class StrictJsonTests(unittest.TestCase):
@@ -429,6 +429,7 @@ class CliTests(unittest.TestCase):
             're.compile("Authorization: Basic AAAAAAAAAAAAAAAA")\n',
             'regex.compile("Authorization: Basic AAAAAAAAAAAAAAAA")\n',
             're.compile(r"https://live.example.net/v1/[A-Za-z]+")\n',
+            're.compile(r"https://live\\.example\\.net/v1/.*")\n',
             'FORGED_PLUS = "Authorization: " + "Basic AAAAAAAAAAAAAAAA"\n',
             'FORGED_RUNTIME_PLUS = "Authorization: Basic " + runtime_secret\n',
             'FORGED_FSTRING = f"Authorization: Basic {\'AAAAAAAAAAAAAAAA\'}"\n',
@@ -437,6 +438,7 @@ class CliTests(unittest.TestCase):
             'FORGED_RUNTIME_FORMAT = "Authorization: Basic {}".format(runtime_secret)\n',
             'FORGED_JOIN = "".join(["Authorization: ", "Basic ", "AAAAAAAAAAAAAAAA"])\n',
             'FORGED_PERCENT = "Authorization: Basic %s" % runtime_secret\n',
+            'FORGED_PERCENT_SCHEME = "Authorization: %s AAAAAAAAAAAAAAAA" % runtime_scheme\n',
             'FORGED_PERCENT_LITERAL = "Authorization: Basic %s" % "AAAAAAAAAAAAAAAA"\n',
             'FORGED_STALE = "<redacted>"\nFORGED_STALE = runtime_secret\nFORGED_STALE_HEADER = f"Authorization: Bearer {FORGED_STALE}"\n',
         )
@@ -480,12 +482,16 @@ class CliTests(unittest.TestCase):
             '\nFORGED_NUL = "Bearer unredacted-\\x00secret-value-123456"\n',
         )
 
-    def test_non_nul_controls_cannot_split_credentials_in_python_markdown_and_json(self) -> None:
+    def test_c0_controls_cannot_split_credentials_in_python_markdown_and_json(self) -> None:
+        for separator in ("\x01", "\t", "\n", "\r"):
+            with self.subTest(separator=repr(separator)):
+                split_bearer = f"Bearer abcdefghi{separator}secret-value-123456"
+                self._append_artifact_and_block(
+                    "connection-restoration/validate.py",
+                    f'\nFORGED_CONTROL = {split_bearer!r}\n',
+                )
+
         split_bearer = "Bearer abcdefghi\x01secret-value-123456"
-        self._append_artifact_and_block(
-            "connection-restoration/validate.py",
-            f'\nFORGED_CONTROL = {split_bearer!r}\n',
-        )
         self._append_artifact_and_block(
             "connection-restoration/README.md",
             f"\n{split_bearer}\n",
