@@ -57,7 +57,7 @@ EXPECTED_BOUND_SHA256 = {
     "test_validate.py": "d19840026d9d913e9943bd333baaf07551950fba95d555ff083ba6a523871a93",
     "chat.md": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252",
 }
-EXPECTED_BASELINE_SHA256 = "e5a11f906c36bf0eeeb819d66d1a7ecec2c4bb6ea6d7cbecd6b8f9b80e4011c1"
+EXPECTED_BASELINE_SHA256 = "909458b24e7694ada8f1a4e7ce9a2c0d4d47d6d5ce228fee9871d5f7eebfb3e0"
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
