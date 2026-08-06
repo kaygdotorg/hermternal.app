@@ -249,6 +249,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(normal.stderr, "")
         self.assertEqual(optimized.stderr, "")
 
+    def test_every_owned_file_is_indexed_without_weakening_unknown_file_detection(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        for optimized in (False, True):
+            completed = self._run(optimized=optimized, repo_root=repo_root)
+            self.assertEqual(completed.returncode, 0)
+            payload = json.loads(completed.stdout)
+            self.assertEqual(payload["fixture_count"], 22)
+            self.assertEqual(payload["coverage_count"], 22)
+            self.assertEqual(payload["evidence_status"], "partial")
+            self.assertEqual(completed.stderr, "")
+
+        unknown = repo_root / "contracts/fixtures/pty-detach-race/unregistered-artifact.txt"
+        unknown.write_text("synthetic unknown artifact\n", encoding="utf-8")
+        self._assert_blocked_in_both_modes(repo_root)
+
     def test_alternate_modified_baseline_is_rejected_in_both_modes(self) -> None:
         repo_root = self._copy_fixture_repo()
         alternate = repo_root / "contracts/fixtures/validator/alternate-baseline.json"
