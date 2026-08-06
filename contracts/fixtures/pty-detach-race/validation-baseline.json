@@ -1,0 +1,116 @@
+{
+  "schema_version": "pty-detach-race-baseline-v1",
+  "fixture_schema_version": "pty-detach-race-v1",
+  "artifacts": {
+    "README.md": {
+      "path": "contracts/fixtures/pty-detach-race/README.md",
+      "size_bytes": 7355,
+      "sha256": "7d83fbadcc32a7bea5e1e111384ea03988498ab4a597eb72f6b2664fb4d3d4d0"
+    },
+    "pty-detach-race-fixtures.json": {
+      "path": "contracts/fixtures/pty-detach-race/pty-detach-race-fixtures.json",
+      "size_bytes": 19319,
+      "sha256": "ee8211b672e5a78d1d069c1ca4df4155aecbce951058579e3a985cfb6de06227"
+    },
+    "validate.py": {
+      "path": "contracts/fixtures/pty-detach-race/validate.py",
+      "size_bytes": 72939,
+      "sha256": "d922d7c0fdcc855bb7ae2e51663228d768b21b2f3c36ab9c4ab267e6f73111de"
+    },
+    "test_validate.py": {
+      "path": "contracts/fixtures/pty-detach-race/test_validate.py",
+      "size_bytes": 20275,
+      "sha256": "88f6f732f5d024beb5a668e7b34876b1c544212166eeee3f85adb2789d040223"
+    }
+  },
+  "benchmark": {
+    "normal": {
+      "sample_count": 30,
+      "samples_ms": [
+        48.342459,
+        47.789125,
+        47.415583,
+        47.978916,
+        48.055208,
+        49.290958,
+        49.09075,
+        48.238,
+        49.27875,
+        50.149333,
+        49.908292,
+        50.52625,
+        50.55875,
+        48.521584,
+        48.03225,
+        48.587833,
+        48.611417,
+        48.134708,
+        47.399042,
+        47.39075,
+        47.509083,
+        47.512,
+        47.893,
+        48.551625,
+        49.383875,
+        50.246292,
+        49.562334,
+        50.606875,
+        49.306083,
+        49.271792
+      ],
+      "distribution": {
+        "count": 30,
+        "minimum_ms": 47.39075,
+        "maximum_ms": 50.606875,
+        "mean_ms": 48.771431,
+        "median_ms": 48.569729,
+        "p95_ms": 50.52625
+      }
+    },
+    "optimized": {
+      "sample_count": 30,
+      "samples_ms": [
+        49.714167,
+        48.083291,
+        48.827333,
+        49.871416,
+        50.203458,
+        47.816875,
+        47.468084,
+        47.427334,
+        47.510625,
+        47.984333,
+        47.495958,
+        48.489625,
+        48.560583,
+        50.586333,
+        48.654917,
+        49.883833,
+        48.796333,
+        48.465417,
+        48.1595,
+        48.483083,
+        47.60125,
+        49.610166,
+        49.584875,
+        51.04625,
+        50.674666,
+        49.906541,
+        49.854333,
+        51.279333,
+        52.093416,
+        48.673208
+      ],
+      "distribution": {
+        "count": 30,
+        "minimum_ms": 47.427334,
+        "maximum_ms": 52.093416,
+        "mean_ms": 49.093551,
+        "median_ms": 48.73477,
+        "p95_ms": 51.04625
+      }
+    },
+    "threshold": null
+  },
+  "manifest_sha256": "58c4616b725e9c58980867fd32904ce7bee864e1867b72359515ab068654bd73"
+}
