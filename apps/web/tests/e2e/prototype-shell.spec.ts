@@ -6,7 +6,7 @@ for (const viewport of [
 ]) {
   test(`${viewport.name} layout keeps the prototype shell usable`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    await page.goto('/');
+    await page.goto('/?scenario=success');
 
     await expect(page.getByRole('main')).toBeVisible();
     await expect(page.getByTestId('status-success')).toBeVisible();
@@ -20,7 +20,7 @@ for (const viewport of [
 }
 
 test('Tab and Space activate the focused action with an effective target and visible focus', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?scenario=success');
   const action = page.getByRole('button', { name: 'Re-run mock check' });
 
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
@@ -47,7 +47,7 @@ test('Tab and Space activate the focused action with an effective target and vis
 
 test('200% browser zoom equivalent uses a real 640 CSS-pixel viewport', async ({ page }) => {
   await page.setViewportSize({ width: 640, height: 720 });
-  await page.goto('/');
+  await page.goto('/?scenario=success');
 
   await expect(page.getByRole('heading', { name: 'Prototype shell' })).toBeVisible();
   const viewportAndOverflow = await page.evaluate(() => ({
@@ -61,7 +61,7 @@ test('200% browser zoom equivalent uses a real 640 CSS-pixel viewport', async ({
 
 test('computed reduced-motion behavior disables action transition duration', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.goto('/');
+  await page.goto('/?scenario=success');
 
   const motion = await page.getByRole('button', { name: 'Re-run mock check' }).evaluate((element) => ({
     mediaMatches: matchMedia('(prefers-reduced-motion: reduce)').matches,
@@ -86,7 +86,7 @@ test('pending cancellation is visible and safe in the browser shell', async ({ p
     }) as typeof window.setTimeout;
   });
 
-  await page.goto('/?delayMs=short');
+  await page.goto('/?scenario=success&delayMs=short');
   await expect(page.getByTestId('status-pending')).toBeVisible();
   const cancel = page.getByRole('button', { name: 'Cancel mock check' });
   await expect(cancel).toBeVisible();
