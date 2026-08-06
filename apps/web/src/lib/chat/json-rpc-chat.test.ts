@@ -1,12 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  JSON_RPC_HANDSHAKE_METHOD,
+  DASHBOARD_CONTRACT,
+  HERMES_SOURCE_SHA,
+  JSON_RPC_APPROVAL_METHOD,
+  JSON_RPC_CLARIFICATION_METHOD,
+  JSON_RPC_EVENT_METHOD,
+  JSON_RPC_GATEWAY_READY_EVENT,
+  JSON_RPC_INTERRUPT_METHOD,
   JSON_RPC_PROMPT_METHOD,
+  JSON_RPC_SESSION_RESUME_METHOD,
+  JSON_RPC_WS_PATH,
   JsonRpcChatError,
   createJsonRpcChatTransport,
+  parseBoundedJsonFrame,
   type JsonRpcChatEvent,
   type JsonRpcChatOptions,
-  type JsonRpcWebSocket
+  type JsonRpcWebSocket,
+  type JsonRpcWebSocketUpgradeRequest
 } from './json-rpc-chat';
 
 class FakeWebSocket implements JsonRpcWebSocket {
@@ -16,9 +26,10 @@ class FakeWebSocket implements JsonRpcWebSocket {
   onclose: ((event?: { readonly code?: number; readonly reason?: string }) => void) | null = null;
   readonly sent: string[] = [];
   closed: { readonly code?: number; readonly reason?: string } | undefined;
+  throwOnSend = false;
 
   send(data: string): void {
-    if (this.closed) {
+    if (this.throwOnSend || this.closed) {
       throw new Error('socket-closed');
     }
     this.sent.push(data);
@@ -41,23 +52,24 @@ class FakeWebSocket implements JsonRpcWebSocket {
   }
 
   emitClose(code = 1006, reason = ''): void {
-    const handler = this.onclose;
-    handler?.({ code, reason });
+    this.onclose?.({ code, reason });
   }
 }
 
 interface TestHarness {
   readonly transport: ReturnType<typeof createJsonRpcChatTransport>;
   readonly sockets: FakeWebSocket[];
+  readonly upgrades: JsonRpcWebSocketUpgradeRequest[];
   readonly tickets: string[];
-  readonly options: JsonRpcChatOptions;
 }
 
 function makeHarness(overrides: Partial<JsonRpcChatOptions> = {}): TestHarness {
   const sockets: FakeWebSocket[] = [];
+  const upgrades: JsonRpcWebSocketUpgradeRequest[] = [];
   const tickets: string[] = [];
   let ticketCount = 0;
   const options: JsonRpcChatOptions = {
+    selectedSessionId: 'session-marker-001',
     ticketProvider: async (signal) => {
       if (signal.aborted) {
         throw new JsonRpcChatError('aborted');
@@ -65,45 +77,32 @@ function makeHarness(overrides: Partial<JsonRpcChatOptions> = {}): TestHarness {
       ticketCount += 1;
       return `ticket-${ticketCount}`;
     },
-    createWebSocket: (ticket) => {
-      tickets.push(ticket);
+    createWebSocket: (upgrade) => {
+      upgrades.push(upgrade);
+      tickets.push(upgrade.query.ticket);
       const socket = new FakeWebSocket();
       sockets.push(socket);
       return socket;
     },
+    verifyAttestation: async (evidence) =>
+      evidence.contract === DASHBOARD_CONTRACT &&
+      evidence.hermesSourceSha === HERMES_SOURCE_SHA &&
+      evidence.websocketPath === JSON_RPC_WS_PATH,
+    runBehavioralProbe: async () => true,
     ...overrides
   };
   return {
     transport: createJsonRpcChatTransport(options),
     sockets,
-    tickets,
-    options
+    upgrades,
+    tickets
   };
 }
 
 async function flush(): Promise<void> {
-  for (let index = 0; index < 6; index += 1) {
+  for (let index = 0; index < 8; index += 1) {
     await Promise.resolve();
   }
-}
-
-async function connectHarness(harness: TestHarness): Promise<FakeWebSocket> {
-  const connection = harness.transport.connect();
-  await flush();
-  const socket = harness.sockets.at(-1);
-  if (!socket) {
-    throw new Error('fake socket was not created');
-  }
-  socket.emitOpen();
-  const handshake = frame(socket, 0);
-  expect(handshake.method).toBe(JSON_RPC_HANDSHAKE_METHOD);
-  socket.emitMessage({
-    jsonrpc: '2.0',
-    id: handshake.id,
-    result: { accepted: true }
-  });
-  await connection;
-  return socket;
 }
 
 function frame(socket: FakeWebSocket, index: number): Record<string, unknown> {
@@ -114,152 +113,249 @@ function frame(socket: FakeWebSocket, index: number): Record<string, unknown> {
   return JSON.parse(raw) as Record<string, unknown>;
 }
 
-function emitResponse(socket: FakeWebSocket, id: string): void {
-  socket.emitMessage({ jsonrpc: '2.0', id, result: { accepted: true } });
+function emitResponse(socket: FakeWebSocket, id: string, result: unknown = { status: 'ok' }): void {
+  socket.emitMessage({ jsonrpc: '2.0', id, result });
 }
 
-function emitEvent(socket: FakeWebSocket, method: string, params: Record<string, unknown>): void {
-  socket.emitMessage({ jsonrpc: '2.0', method, params });
+function emitEvent(
+  socket: FakeWebSocket,
+  type: string,
+  payload: Record<string, unknown> = {},
+  fields: Record<string, unknown> = {}
+): void {
+  socket.emitMessage({
+    jsonrpc: '2.0',
+    method: JSON_RPC_EVENT_METHOD,
+    params: { type, payload, ...fields }
+  });
+}
+
+async function connectHarness(harness: TestHarness): Promise<FakeWebSocket> {
+  const connection = harness.transport.connect();
+  await flush();
+  const socket = harness.sockets.at(-1);
+  if (!socket) {
+    throw new Error('fake socket was not created');
+  }
+  socket.emitOpen();
+  expect(socket.sent).toHaveLength(0);
+  expect(harness.transport.state.status).toBe('handshaking');
+  emitEvent(socket, JSON_RPC_GATEWAY_READY_EVENT, {
+    skin: 'synthetic-skin',
+    change_events: true
+  });
+  await flush();
+  const resume = frame(socket, 0);
+  expect(resume.method).toBe(JSON_RPC_SESSION_RESUME_METHOD);
+  expect(resume.params).toEqual({ session_id: 'session-marker-001' });
+  emitResponse(socket, resume.id as string, { session_id: 'session-marker-001', restored: true });
+  await connection;
+  expect(harness.transport.state.status).toBe('ready');
+  return socket;
+}
+
+function promptFrame(socket: FakeWebSocket): Record<string, unknown> {
+  return frame(socket, 1);
+}
+
+function emitPromptAccepted(socket: FakeWebSocket): string {
+  const prompt = promptFrame(socket);
+  emitResponse(socket, prompt.id as string, { status: 'streaming' });
+  return prompt.id as string;
+}
+
+async function reconnectHarness(harness: TestHarness): Promise<FakeWebSocket> {
+  const reconnect = harness.transport.reconnect();
+  await flush();
+  const replacement = harness.sockets.at(-1);
+  if (!replacement) {
+    throw new Error('replacement socket was not created');
+  }
+  replacement.emitOpen();
+  emitEvent(replacement, JSON_RPC_GATEWAY_READY_EVENT, { skin: 'replacement' });
+  await flush();
+  const resume = frame(replacement, 0);
+  expect(resume.method).toBe(JSON_RPC_SESSION_RESUME_METHOD);
+  emitResponse(replacement, resume.id as string, { restored: true });
+  await reconnect;
+  return replacement;
 }
 
 describe('createJsonRpcChatTransport', () => {
-  it('performs the handshake and emits ordered stream, tool, approval, clarification, and completion events', async () => {
+  it('waits for server-first gateway.ready, runs both gates, and restores with session.resume', async () => {
+    const onOpen = vi.fn();
+    const harness = makeHarness({ onOpen });
+    const connection = harness.transport.connect();
+    await flush();
+    const socket = harness.sockets[0];
+    if (!socket) {
+      throw new Error('fake socket was not created');
+    }
+    socket.emitOpen();
+    expect(harness.transport.state.status).toBe('handshaking');
+    expect(socket.sent).toHaveLength(0);
+    expect(() => harness.transport.sendPrompt('blocked before ready')).toThrowError(
+      expect.objectContaining({ code: 'not-connected' })
+    );
+
+    emitEvent(socket, JSON_RPC_GATEWAY_READY_EVENT, { skin: 'synthetic', change_events: true }, { additive: 'ignored' });
+    await flush();
+    expect(harness.transport.state.status).toBe('restoring');
+    const resume = frame(socket, 0);
+    expect(resume).toMatchObject({
+      jsonrpc: '2.0',
+      method: JSON_RPC_SESSION_RESUME_METHOD,
+      params: { session_id: 'session-marker-001' }
+    });
+    emitResponse(socket, resume.id as string, { restored: true, additive: { safe: true } });
+    await connection;
+
+    expect(harness.transport.state.status).toBe('ready');
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(harness.upgrades).toEqual([
+      {
+        path: JSON_RPC_WS_PATH,
+        origin: 'same-origin',
+        query: { ticket: 'ticket-1' }
+      }
+    ]);
+  });
+
+  it('uses exact prompt, interrupt, approval, and clarification methods with opaque source payloads', async () => {
     const events: JsonRpcChatEvent[] = [];
     const harness = makeHarness();
     harness.transport.subscribe((event) => events.push(event));
     const socket = await connectHarness(harness);
-
-    const request = harness.transport.sendPrompt('synthetic prompt');
-    const prompt = frame(socket, 1);
+    const request = harness.transport.sendPrompt('synthetic prompt that is not retained');
+    const prompt = promptFrame(socket);
     expect(prompt).toMatchObject({
       jsonrpc: '2.0',
       method: JSON_RPC_PROMPT_METHOD,
-      params: { prompt: 'synthetic prompt' }
+      params: { session_id: 'session-marker-001', text: 'synthetic prompt that is not retained' }
     });
-    expect(typeof prompt.id).toBe('string');
-    emitResponse(socket, prompt.id as string);
+    const requestId = prompt.id as string;
+    emitResponse(socket, requestId, { status: 'streaming' });
 
-    emitEvent(socket, 'chat.stream', {
-      request_id: prompt.id,
-      sequence: 1,
-      delta: 'synthetic '
-    });
-    emitEvent(socket, 'chat.tool', {
-      request_id: prompt.id,
-      sequence: 2,
-      tool_call_id: 'tool-1',
-      name: 'lookup',
-      phase: 'started'
-    });
-    emitEvent(socket, 'chat.approval', {
-      request_id: prompt.id,
-      sequence: 3,
-      approval_id: 'approval-1',
-      title: 'Synthetic approval',
-      state: 'requested',
-      approved: null
-    });
-    emitEvent(socket, 'chat.clarification', {
-      request_id: prompt.id,
-      sequence: 4,
-      clarification_id: 'clarification-1',
-      question: 'Synthetic clarification?'
-    });
-    emitEvent(socket, 'chat.complete', {
-      request_id: prompt.id,
-      sequence: 5,
-      outcome: 'success'
+    emitEvent(socket, 'message.delta', { text: 'hello ' }, { request_id: requestId, sequence: 1 });
+    emitEvent(socket, 'reasoning.delta', { text: 'thinking' }, { request_id: requestId, sequence: 2 });
+    emitEvent(socket, 'thinking.delta', { text: 'private thought' }, { request_id: requestId, sequence: 3 });
+    emitEvent(socket, 'tool.start', { name: 'lookup' }, { request_id: requestId, sequence: 4 });
+    emitEvent(socket, 'tool.complete', { name: 'lookup', status: 'ok' }, { request_id: requestId, sequence: 5 });
+    emitEvent(socket, 'approval.request', { approval_id: 'approval-1', title: 'Synthetic approval' }, {
+      request_id: requestId,
+      sequence: 6
     });
 
-    await expect(request.completion).resolves.toMatchObject({
-      type: 'completion',
-      requestId: prompt.id,
-      sequence: 5,
-      outcome: 'success'
-    });
-    expect(request.state).toEqual({ id: prompt.id, status: 'completed' });
-    expect(events.map((event) => event.type)).toEqual([
-      'stream',
-      'tool',
-      'approval',
-      'clarification',
-      'completion'
-    ]);
-    expect(events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
-  });
-
-  it('sends approval and clarification responses with request IDs but no prompt replay material', async () => {
-    const harness = makeHarness();
-    const socket = await connectHarness(harness);
-    const request = harness.transport.sendPrompt('do not copy this prompt');
-    const prompt = frame(socket, 1);
-    emitResponse(socket, prompt.id as string);
-
-    const approval = harness.transport.respondToApproval(prompt.id as string, 'approval-1', true);
+    const approval = harness.transport.respondToApproval(requestId, 'approval-1', true);
     const approvalFrame = frame(socket, 2);
     expect(approvalFrame).toMatchObject({
       jsonrpc: '2.0',
-      method: 'chat.approval.respond',
-      params: { request_id: prompt.id, approval_id: 'approval-1', approved: true }
+      method: JSON_RPC_APPROVAL_METHOD,
+      params: { session_id: 'session-marker-001', choice: 'once', all: false }
     });
-    expect(JSON.stringify(approvalFrame)).not.toContain('do not copy this prompt');
+    expect(JSON.stringify(approvalFrame)).not.toContain('synthetic prompt');
     emitResponse(socket, approvalFrame.id as string);
     await approval;
 
-    const clarification = harness.transport.answerClarification(
-      prompt.id as string,
-      'clarification-1',
-      'synthetic answer'
-    );
+    emitEvent(socket, 'clarify.request', { clarification_id: 'clarification-1', question: 'Continue?' }, {
+      request_id: requestId,
+      sequence: 7
+    });
+    const clarification = harness.transport.answerClarification(requestId, 'clarification-1', 'yes');
     const clarificationFrame = frame(socket, 3);
     expect(clarificationFrame).toMatchObject({
       jsonrpc: '2.0',
-      method: 'chat.clarification.respond',
-      params: {
-        request_id: prompt.id,
-        clarification_id: 'clarification-1',
-        answer: 'synthetic answer'
-      }
+      method: JSON_RPC_CLARIFICATION_METHOD,
+      params: { request_id: requestId, answer: 'yes' }
     });
     emitResponse(socket, clarificationFrame.id as string);
     await clarification;
+
+    emitEvent(socket, 'message.complete', { text: 'done', status: 'ok' }, { request_id: requestId, sequence: 8 });
+    await expect(request.completion).resolves.toMatchObject({ type: 'message.complete', requestId });
+    expect(request.state).toEqual({ id: requestId, status: 'completed' });
+    expect(events.map((event) => event.type)).toEqual([
+      JSON_RPC_GATEWAY_READY_EVENT,
+      'session.info',
+      // No session.info was sent in this fixture; the remaining types are exact source event names.
+      'message.delta',
+      'reasoning.delta',
+      'thinking.delta',
+      'tool.start',
+      'tool.complete',
+      'approval.request',
+      'clarify.request',
+      'message.complete'
+    ].filter((type) => type !== 'session.info'));
   });
 
-  it('fails closed on malformed frames without retaining frame material', async () => {
-    const onClose = vi.fn();
-    const harness = makeHarness({ onClose });
+  it('derives blocking owners from source request_id when payloads omit local owner fields', async () => {
+    const events: JsonRpcChatEvent[] = [];
+    const harness = makeHarness();
+    harness.transport.subscribe((event) => events.push(event));
     const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt('owner fallback prompt');
+    const requestId = emitPromptAccepted(socket);
 
-    socket.emitMessage('{"jsonrpc":');
+    emitEvent(socket, 'approval.request', { title: 'Approve this action' }, { request_id: requestId });
+    expect(events.at(-1)).toMatchObject({ type: 'approval.request', requestId, approvalId: requestId });
+    const approval = harness.transport.respondToApproval(requestId, requestId, false);
+    const approvalFrame = frame(socket, 2);
+    expect(approvalFrame.params).toEqual({ session_id: 'session-marker-001', choice: 'deny', all: false });
+    emitResponse(socket, approvalFrame.id as string);
+    await approval;
 
-    expect(socket.closed?.code).toBe(1002);
-    expect(harness.transport.state.status).toBe('failed');
-    expect(onClose).toHaveBeenCalledWith('protocol-error');
-    expect(JSON.stringify(onClose.mock.calls)).not.toContain('jsonrpc');
+    emitEvent(socket, 'clarify.request', { question: 'Continue?' }, { request_id: requestId });
+    expect(events.at(-1)).toMatchObject({ type: 'clarify.request', requestId, clarificationId: requestId });
+    const clarification = harness.transport.answerClarification(requestId, requestId, 'yes');
+    const clarificationFrame = frame(socket, 3);
+    expect(clarificationFrame.params).toEqual({ request_id: requestId, answer: 'yes' });
+    emitResponse(socket, clarificationFrame.id as string);
+    await clarification;
+
+    emitEvent(socket, 'message.complete', { status: 'ok' }, { request_id: requestId });
+    await expect(request.completion).resolves.toMatchObject({ type: 'message.complete', requestId });
   });
 
-  it('rejects oversized frames before parsing them', async () => {
+  it('ignores additive noninteractive events and fails closed on unsupported interactive events', async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    emitEvent(socket, 'tool.progress', { percent: 50, additive: true });
+    expect(socket.closed).toBeUndefined();
+    expect(harness.transport.state.status).toBe('ready');
+
+    emitEvent(socket, 'secret.request', { prompt: 'never expose this' });
+    expect(socket.closed?.code).toBe(1000);
+    expect(harness.transport.state.status).toBe('incompatible');
+  });
+
+  it('accepts additive fields in responses and rejects malformed or oversized frames without raw retention', async () => {
     const harness = makeHarness({ maxFrameBytes: 256 });
     const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt('redaction marker prompt');
+    const prompt = promptFrame(socket);
+    emitResponse(socket, prompt.id as string, { status: 'streaming', additive: { safe: true } });
+    expect(harness.transport.state.status).toBe('ready');
 
-    socket.emitMessage('x'.repeat(257));
-
+    socket.emitMessage('{"jsonrpc":');
+    await expect(request.completion).rejects.toMatchObject({ code: 'uncertain-delivery' });
     expect(socket.closed?.code).toBe(1002);
     expect(harness.transport.state.status).toBe('failed');
+    expect(JSON.stringify(harness.transport.state)).not.toContain('redaction marker prompt');
+
+    const second = makeHarness({ maxFrameBytes: 256 });
+    const secondSocket = await connectHarness(second);
+    secondSocket.emitMessage('x'.repeat(257));
+    expect(secondSocket.closed?.code).toBe(1002);
+    expect(second.transport.state.status).toBe('failed');
   });
 
-  it('rejects out-of-order events and marks an accepted prompt as uncertain', async () => {
+  it('enforces optional ordered fixture sequences and marks the operation uncertain', async () => {
     const harness = makeHarness();
     const socket = await connectHarness(harness);
     const request = harness.transport.sendPrompt('out-of-order prompt');
-    const prompt = frame(socket, 1);
-    emitResponse(socket, prompt.id as string);
-
-    emitEvent(socket, 'chat.stream', {
-      request_id: prompt.id,
-      sequence: 2,
-      delta: 'late'
-    });
+    const requestId = emitPromptAccepted(socket);
+    emitEvent(socket, 'message.delta', { text: 'late' }, { request_id: requestId, sequence: 2 });
 
     await expect(request.completion).rejects.toMatchObject({ code: 'uncertain-delivery' });
     expect(request.state.status).toBe('uncertain-delivery');
@@ -267,72 +363,35 @@ describe('createJsonRpcChatTransport', () => {
     expect(harness.transport.state.status).toBe('failed');
   });
 
-  it('marks a disconnect before prompt acknowledgement uncertain and never replays it after reconnect', async () => {
-    const onUncertainDelivery = vi.fn();
+  it('marks disconnect uncertainty before and after acknowledgement and never replays prompt text', async () => {
+    const before = makeHarness();
+    const beforeSocket = await connectHarness(before);
+    const beforeRequest = before.transport.sendPrompt('before acknowledgement prompt');
+    beforeSocket.emitClose();
+    await expect(beforeRequest.completion).rejects.toMatchObject({ code: 'uncertain-delivery' });
+    const replacementBefore = await reconnectHarness(before);
+    expect(before.tickets).toEqual(['ticket-1', 'ticket-2']);
+    expect(JSON.stringify(replacementBefore.sent)).not.toContain('before acknowledgement prompt');
+
+    const after = makeHarness();
+    const afterSocket = await connectHarness(after);
+    const afterRequest = after.transport.sendPrompt('after acknowledgement prompt');
+    emitPromptAccepted(afterSocket);
+    afterSocket.emitClose();
+    await expect(afterRequest.completion).rejects.toMatchObject({ code: 'uncertain-delivery' });
+    const replacementAfter = await reconnectHarness(after);
+    expect(JSON.stringify(replacementAfter.sent)).not.toContain('after acknowledgement prompt');
+  });
+
+  it('invalidates the old generation before reconnect callbacks and suppresses stale frames', async () => {
     const onReconnect = vi.fn();
-    const harness = makeHarness({ onUncertainDelivery, onReconnect });
-    const socket = await connectHarness(harness);
-    const request = harness.transport.sendPrompt('one-shot prompt');
-    const prompt = frame(socket, 1);
-
-    socket.emitClose();
-    await expect(request.completion).rejects.toMatchObject({ code: 'uncertain-delivery' });
-    expect(request.state.status).toBe('uncertain-delivery');
-    expect(onUncertainDelivery).toHaveBeenCalledWith(prompt.id);
-
-    const reconnect = harness.transport.reconnect();
-    await flush();
-    const replacement = harness.sockets.at(-1);
-    if (!replacement) {
-      throw new Error('replacement socket was not created');
-    }
-    replacement.emitOpen();
-    const handshake = frame(replacement, 0);
-    replacement.emitMessage({ jsonrpc: '2.0', id: handshake.id, result: { accepted: true } });
-    await reconnect;
-
-    expect(harness.tickets).toEqual(['ticket-1', 'ticket-2']);
-    expect(replacement.sent).toHaveLength(1);
-    expect(onReconnect).toHaveBeenCalledTimes(1);
-    expect(JSON.stringify(replacement.sent)).not.toContain('one-shot prompt');
-  });
-
-  it('marks a disconnect after prompt acknowledgement uncertain and still does not replay it', async () => {
-    const harness = makeHarness();
-    const socket = await connectHarness(harness);
-    const request = harness.transport.sendPrompt('acknowledged but incomplete');
-    const prompt = frame(socket, 1);
-    emitResponse(socket, prompt.id as string);
-
-    socket.emitClose();
-    await expect(request.completion).rejects.toMatchObject({ code: 'uncertain-delivery' });
-    expect(request.state.status).toBe('uncertain-delivery');
-
-    const reconnect = harness.transport.reconnect();
-    await flush();
-    const replacement = harness.sockets.at(-1);
-    if (!replacement) {
-      throw new Error('replacement socket was not created');
-    }
-    replacement.emitOpen();
-    const handshake = frame(replacement, 0);
-    replacement.emitMessage({ jsonrpc: '2.0', id: handshake.id, result: { accepted: true } });
-    await reconnect;
-
-    expect(replacement.sent).toHaveLength(1);
-    expect(JSON.stringify(replacement.sent)).not.toContain('acknowledged but incomplete');
-  });
-
-  it('suppresses stale frames during rapid reconnect and uses a fresh ticket', async () => {
-    const onOpen = vi.fn();
-    const harness = makeHarness({ onOpen });
+    const harness = makeHarness({ onReconnect });
     const firstConnect = harness.transport.connect();
     await flush();
     const first = harness.sockets[0];
     if (!first) {
       throw new Error('first socket was not created');
     }
-
     const secondConnect = harness.transport.reconnect();
     await flush();
     const second = harness.sockets[1];
@@ -341,48 +400,172 @@ describe('createJsonRpcChatTransport', () => {
     }
 
     first.emitOpen();
-    first.emitMessage({ jsonrpc: '2.0', id: 'rpc-1', result: { accepted: true } });
+    emitEvent(first, JSON_RPC_GATEWAY_READY_EVENT, { stale: true });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+    expect(second.sent).toHaveLength(0);
     second.emitOpen();
-    const secondHandshake = frame(second, 0);
-    second.emitMessage({
-      jsonrpc: '2.0',
-      id: secondHandshake.id,
-      result: { accepted: true }
-    });
+    emitEvent(second, JSON_RPC_GATEWAY_READY_EVENT, { current: true });
+    await flush();
+    const resume = frame(second, 0);
+    emitResponse(second, resume.id as string, { restored: true });
 
     await expect(firstConnect).rejects.toMatchObject({ code: 'aborted' });
     await secondConnect;
-    expect(harness.transport.state).toMatchObject({ status: 'connected', generation: 2 });
+    expect(harness.transport.state.status).toBe('ready');
+    expect(harness.transport.state.generation).toBeGreaterThan(1);
     expect(harness.tickets).toEqual(['ticket-1', 'ticket-2']);
-    expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
-  it('cancels without replaying prompt text or forwarding an abort reason', async () => {
-    const onAbort = vi.fn();
-    const harness = makeHarness({ onAbort });
-    const socket = await connectHarness(harness);
+  it('closes the socket and settles an attached connection abort while waiting for gateway.ready', async () => {
+    const harness = makeHarness();
     const controller = new AbortController();
-    const marker = 'Bearer synthetic-secret-prompt';
-    const request = harness.transport.sendPrompt(marker, { signal: controller.signal });
-    const prompt = frame(socket, 1);
+    const connection = harness.transport.connect(controller.signal);
+    await flush();
+    const socket = harness.sockets[0];
+    if (!socket) {
+      throw new Error('fake socket was not created');
+    }
+    socket.emitOpen();
+    controller.abort('secret-shaped abort reason');
+    await expect(connection).rejects.toMatchObject({ code: 'aborted' });
+    expect(socket.closed).toBeDefined();
+    expect(harness.transport.state.status).toBe('offline');
+    expect(JSON.stringify(harness.transport.state)).not.toContain('secret-shaped');
+  });
 
-    controller.abort(marker);
-    await expect(request.completion).rejects.toMatchObject({ code: 'cancelled', name: 'AbortError' });
-    expect(request.state.status).toBe('cancelled');
-    expect(onAbort).toHaveBeenCalledWith(prompt.id);
+  it('cleans up every pending operation when the socket send fails', async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    socket.throwOnSend = true;
+    expect(() => harness.transport.sendPrompt('send failure prompt')).toThrowError(
+      expect.objectContaining({ code: 'connection-failed' })
+    );
+    expect(socket.closed).toBeDefined();
+    expect(harness.transport.state.status).toBe('delivery_uncertain');
+  });
 
-    const cancel = frame(socket, 2);
-    expect(cancel).toMatchObject({
+  it('ignores a late control acknowledgement after local abort and rejects duplicate owners', async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt('control owner prompt');
+    const requestId = emitPromptAccepted(socket);
+    emitEvent(socket, 'approval.request', { approval_id: 'approval-owner' }, { request_id: requestId });
+    const controller = new AbortController();
+    const response = harness.transport.respondToApproval(requestId, 'approval-owner', false, controller.signal);
+    const control = frame(socket, 2);
+    controller.abort('do not forward');
+    await expect(response).rejects.toMatchObject({ code: 'aborted' });
+    expect(() => harness.transport.respondToApproval(requestId, 'approval-owner', true)).toThrowError(
+      expect.objectContaining({ code: 'invalid-input' })
+    );
+    emitResponse(socket, control.id as string);
+    expect(harness.transport.state.status).toBe('ready');
+    harness.transport.abort(requestId);
+    await expect(request.completion).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it('sends session.interrupt as the explicit stop operation', async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt('interrupt me');
+    const requestId = emitPromptAccepted(socket);
+    const interruption = harness.transport.interrupt(requestId);
+    const interruptFrame = frame(socket, 2);
+    expect(interruptFrame).toMatchObject({
       jsonrpc: '2.0',
-      method: 'chat.cancel',
-      params: { request_id: prompt.id }
+      method: JSON_RPC_INTERRUPT_METHOD,
+      params: { session_id: 'session-marker-001' }
     });
-    expect(JSON.stringify(cancel)).not.toContain(marker);
-    expect(JSON.stringify(request.state)).not.toContain(marker);
+    emitResponse(socket, interruptFrame.id as string, { interrupted: true });
+    await interruption;
+    expect(request.state.status).toBe('interrupting');
+    harness.transport.abort(requestId);
+    await expect(request.completion).rejects.toMatchObject({ code: 'cancelled' });
+  });
 
-    // A prompt acknowledgement racing with local cancellation is ignored, not
-    // treated as a reason to replay or expose the original input.
-    emitResponse(socket, prompt.id as string);
-    expect(harness.transport.state.status).toBe('connected');
+  it('times out gateway.ready and control acknowledgements with semantic cleanup', async () => {
+    vi.useFakeTimers();
+    try {
+      const handshake = makeHarness({ gatewayReadyTimeoutMs: 5 });
+        const connection = handshake.transport.connect();
+      void connection.catch(() => undefined);
+      await flush();
+      const socket = handshake.sockets[0];
+      if (!socket) {
+        throw new Error('fake socket was not created');
+      }
+      socket.emitOpen();
+      await vi.advanceTimersByTimeAsync(5);
+      await expect(connection).rejects.toMatchObject({ code: 'gateway-ready-timeout' });
+      expect(socket.closed?.code).toBe(1002);
+      expect(handshake.transport.state.status).toBe('failed');
+
+      const controlHarness = makeHarness({ acknowledgementTimeoutMs: 5 });
+      const controlSocket = await connectHarness(controlHarness);
+      const request = controlHarness.transport.sendPrompt('ack timeout');
+      const requestId = emitPromptAccepted(controlSocket);
+      emitEvent(controlSocket, 'approval.request', { approval_id: 'approval-timeout' }, { request_id: requestId });
+      const response = controlHarness.transport.respondToApproval(requestId, 'approval-timeout', true);
+      void response.catch(() => undefined);
+      void request.completion.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(5);
+      await expect(response).rejects.toMatchObject({ code: 'ack-timeout' });
+      expect(controlHarness.transport.state.status).toBe('delivery_uncertain');
+      await expect(request.completion).rejects.toMatchObject({ code: 'uncertain-delivery' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('classifies every pinned close code and rejects unknown codes as incompatible', async () => {
+    const cases: Array<[number, string]> = [
+      [4401, 'auth_required'],
+      [4403, 'incompatible'],
+      [4404, 'incompatible'],
+      [4408, 'failed'],
+      [4409, 'failed'],
+      [4410, 'failed'],
+      [1011, 'failed'],
+      [4999, 'incompatible']
+    ];
+    for (const [code, expected] of cases) {
+      const harness = makeHarness();
+      const socket = await connectHarness(harness);
+      socket.emitClose(code, 'redacted');
+      expect(harness.transport.state.status).toBe(expected);
+      expect(harness.transport.state.closeCode).toBe(code);
+      expect(harness.transport.state.closeClassification).toBeDefined();
+    }
+  });
+
+  it('enforces the exact bounded JSON container depth, including empty containers', () => {
+    const atLimit = `${'['.repeat(16)}${']'.repeat(16)}`;
+    const overLimit = `${'['.repeat(17)}${']'.repeat(17)}`;
+    expect(parseBoundedJsonFrame(atLimit)).toEqual(expect.any(Array));
+    expect(() => parseBoundedJsonFrame(overLimit)).toThrowError(
+      expect.objectContaining({ code: 'malformed-frame' })
+    );
+  });
+
+  it('imports in a no-network browser-like boundary without touching fetch or WebSocket globals', async () => {
+    const fetchSpy = vi.fn();
+    const existingFetch = globalThis.fetch;
+    const existingWebSocket = globalThis.WebSocket;
+    vi.stubGlobal('fetch', fetchSpy);
+    vi.stubGlobal('WebSocket', undefined);
+    try {
+      const imported = await import('./json-rpc-chat');
+      expect(typeof imported.createJsonRpcChatTransport).toBe('function');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(globalThis.WebSocket).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+      if (existingFetch) {
+        vi.stubGlobal('fetch', existingFetch);
+      }
+      if (existingWebSocket) {
+        vi.stubGlobal('WebSocket', existingWebSocket);
+      }
+    }
   });
 });
