@@ -22,7 +22,10 @@ import validate
 # Independent source trust anchor for the aggregate validator. This constant is
 # reviewed outside validate.py, whose own baseline line is normalized before the
 # canonical source digest is computed.
-TRUSTED_VALIDATE_SOURCE_SHA256 = "729b66d33fade50c616c124504c5b78a62c3931b9b63c22fc99b360c093acee4"
+TRUSTED_VALIDATE_SOURCE_SHA256 = "240d02062453f6932e4c706ca3d237ddcc9857c7ea880e8c8c564c5bcb9777c2"
+# This full-byte digest is outside the baseline manifest. It is the reviewed,
+# non-circular root for the baseline bytes and the validator anchor they carry.
+TRUSTED_BASELINE_SHA256 = "10c20d377bf6ee1293806e65049032d3e3c0aa7c2686315ac443763a2a43716b"
 
 
 class StrictJsonTests(unittest.TestCase):
@@ -199,6 +202,11 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(validate._canonical_validator_source_digest(source), TRUSTED_VALIDATE_SOURCE_SHA256)
         self.assertEqual(validate._trusted_validator_source_digest(validate.REPO_ROOT), TRUSTED_VALIDATE_SOURCE_SHA256)
 
+    def test_external_baseline_anchor_matches_exact_checked_in_bytes(self) -> None:
+        digest = hashlib.sha256(validate.BASELINE_PATH.read_bytes()).hexdigest()
+        self.assertEqual(digest, TRUSTED_BASELINE_SHA256)
+        self.assertEqual(validate._trusted_baseline_digest(validate.REPO_ROOT), TRUSTED_BASELINE_SHA256)
+
 
 class CliTests(unittest.TestCase):
     def _run(
@@ -239,8 +247,13 @@ class CliTests(unittest.TestCase):
         repo_root: Path,
         *,
         refresh_anchor: bool = False,
+        refresh_external_trust: bool = True,
     ) -> tuple[dict[str, object], dict[str, object]]:
-        """Refresh integrity records in an isolated synthetic copy."""
+        """Refresh copied integrity records so semantic mutations reach validation.
+
+        Trust-boundary tests can retain the checked-in external anchors to prove a
+        coordinated local manifest refresh still fails closed.
+        """
         fixtures_root = repo_root / "contracts/fixtures"
         index_path = fixtures_root / "index.json"
         baseline_path = fixtures_root / "validator/validation-baseline.json"
@@ -279,6 +292,23 @@ class CliTests(unittest.TestCase):
                     record["sha256"] = hashlib.sha256(data).hexdigest()
             baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
             baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        if refresh_external_trust:
+            trust_path = repo_root / validate.VALIDATOR_TRUST_ANCHOR_PATH
+            trust_source = trust_path.read_text(encoding="utf-8")
+            validator_path = repo_root / validate.BASELINE_SELF_MANIFEST_PATH
+            source_digest = validate._canonical_validator_source_digest(validator_path.read_bytes())
+            trust_source = validate.TRUST_ANCHOR_PATTERN.sub(
+                f'TRUSTED_VALIDATE_SOURCE_SHA256 = "{source_digest}"',
+                trust_source,
+                count=1,
+            )
+            baseline_digest = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
+            trust_source = validate.BASELINE_TRUST_ANCHOR_PATTERN.sub(
+                f'TRUSTED_BASELINE_SHA256 = "{baseline_digest}"',
+                trust_source,
+                count=1,
+            )
+            trust_path.write_text(trust_source, encoding="utf-8")
         return index, baseline
 
     def _assert_blocked_in_both_modes(self, repo_root: Path, *args: str) -> None:
@@ -356,6 +386,23 @@ class CliTests(unittest.TestCase):
         alternate.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
         self._assert_blocked_in_both_modes(repo_root, "--baseline", str(alternate))
 
+    def test_alternate_index_and_schema_paths_are_rejected_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        fixtures_root = repo_root / "contracts/fixtures"
+        # Keep alternates outside the fixture inventory so rejection proves CLI
+        # path binding rather than the unrelated unindexed-artifact check.
+        alternate_index = repo_root / "alternate-index.json"
+        index = json.loads((fixtures_root / "index.json").read_text(encoding="utf-8"))
+        index["coverage"][0]["notes"] += " alternate"
+        alternate_index.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+        self._assert_blocked_in_both_modes(repo_root, "--index", str(alternate_index))
+
+        alternate_schema = repo_root / "alternate-schema.json"
+        schema = json.loads((fixtures_root / "schema.json").read_text(encoding="utf-8"))
+        schema["$defs"]["file"]["additionalProperties"] = True
+        alternate_schema.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
+        self._assert_blocked_in_both_modes(repo_root, "--schema", str(alternate_schema))
+
     def test_registered_python_sensitive_value_is_rejected_in_both_modes(self) -> None:
         repo_root = self._copy_fixture_repo()
         python_artifact = repo_root / "contracts/fixtures/connection-restoration/validate.py"
@@ -430,15 +477,29 @@ class CliTests(unittest.TestCase):
             'regex.compile("Authorization: Basic AAAAAAAAAAAAAAAA")\n',
             're.compile(r"https://live.example.net/v1/[A-Za-z]+")\n',
             're.compile(r"https://live\\.example\\.net/v1/.*")\n',
+            're.compile(r"https://live[.]example[.]net/v1/.*")\n',
+            're.compile(r"https://live\\x2eexample\\x2enet/v1/.*")\n',
+            're.compile(r"https://live\\u002eexample\\u002enet/v1/.*")\n',
+            're.compile(r"https://live\\U0000002eexample\\U0000002enet/v1/.*")\n',
+            're.compile(r"https://live\\056example\\056net/v1/.*")\n',
             'FORGED_PLUS = "Authorization: " + "Basic AAAAAAAAAAAAAAAA"\n',
             'FORGED_RUNTIME_PLUS = "Authorization: Basic " + runtime_secret\n',
+            'FORGED_RUNTIME_SCHEME_PLUS = "Authorization: " + runtime_scheme + " AAAAAAAAAAAAAAAA"\n',
+            'FORGED_SPLIT_SCHEME_PLUS = "Authorization" + ": " + runtime_scheme + " AAAAAAAAAAAAAAAA"\n',
             'FORGED_FSTRING = f"Authorization: Basic {\'AAAAAAAAAAAAAAAA\'}"\n',
             'FORGED_RUNTIME_FSTRING = f"Authorization: Basic {runtime_secret}"\n',
+            'FORGED_RUNTIME_SCHEME_FSTRING = f"Authorization: {runtime_scheme} AAAAAAAAAAAAAAAA"\n',
+            'FORGED_PARTS = {"scheme": "Basic", "token": "AAAAAAAAAAAAAAAA"}\nFORGED_SUBSCRIPT = f"Authorization: {FORGED_PARTS[\'scheme\']} {FORGED_PARTS[\'token\']}"\n',
+            'FORGED_SEQUENCE = ("Basic", "AAAAAAAAAAAAAAAA")\nFORGED_SEQUENCE_SUBSCRIPT = f"Authorization: {FORGED_SEQUENCE[0]} {FORGED_SEQUENCE[1]}"\n',
             'FORGED_FORMAT = "Authorization: Basic {}".format("AAAAAAAAAAAAAAAA")\n',
             'FORGED_RUNTIME_FORMAT = "Authorization: Basic {}".format(runtime_secret)\n',
+            'FORGED_RUNTIME_SCHEME_FORMAT = "Authorization: {} AAAAAAAAAAAAAAAA".format(runtime_scheme)\n',
             'FORGED_JOIN = "".join(["Authorization: ", "Basic ", "AAAAAAAAAAAAAAAA"])\n',
             'FORGED_PERCENT = "Authorization: Basic %s" % runtime_secret\n',
             'FORGED_PERCENT_SCHEME = "Authorization: %s AAAAAAAAAAAAAAAA" % runtime_scheme\n',
+            'FORGED_PERCENT_MAPPING = "Authorization: %(scheme)s %(token)s" % {"scheme": runtime_scheme, "token": runtime_secret}\n',
+            'FORGED_MAPPING_PARTS = {"scheme": runtime_scheme, "token": runtime_secret}\nFORGED_PERCENT_BOUND_MAPPING = "Authorization: %(scheme)s %(token)s" % FORGED_MAPPING_PARTS\n',
+            'FORGED_PERCENT_MIXED_MAPPING = "Authorization: %(scheme)s %(secret)s" % {"scheme": "Basic", "secret": runtime_secret}\n',
             'FORGED_PERCENT_LITERAL = "Authorization: Basic %s" % "AAAAAAAAAAAAAAAA"\n',
             'FORGED_STALE = "<redacted>"\nFORGED_STALE = runtime_secret\nFORGED_STALE_HEADER = f"Authorization: Bearer {FORGED_STALE}"\n',
         )
@@ -535,6 +596,23 @@ class CliTests(unittest.TestCase):
                 self._rebind_copy(repo_root, refresh_anchor=True)
                 self._assert_blocked_in_both_modes(repo_root)
 
+    def test_sensitive_json_values_still_receive_generic_scanning(self) -> None:
+        for value in (
+            "ghp_liveprovider123456789",
+            "Authorization: Basic AAAAAAAAAAAAAAAA",
+            "https://live.example.net/v1/token",
+            "token=unredacted-secret-value-123456",
+            "synthetic-unreviewed-marker",
+        ):
+            with self.subTest(value=value):
+                repo_root = self._copy_fixture_repo()
+                json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
+                document = json.loads(json_path.read_text(encoding="utf-8"))
+                self._add_json_expected_value(document, "token", value)
+                json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+                self._rebind_copy(repo_root, refresh_anchor=True)
+                self._assert_blocked_in_both_modes(repo_root)
+
     def test_central_validator_sources_must_remain_in_baseline_binding(self) -> None:
         repo_root = self._copy_fixture_repo()
         baseline_path = repo_root / "contracts/fixtures/validator/validation-baseline.json"
@@ -542,12 +620,35 @@ class CliTests(unittest.TestCase):
         baseline["artifact_manifest"] = [
             record
             for record in baseline["artifact_manifest"]
-            if record["path"] != "contracts/fixtures/validator/test_validate.py"
+            if record["path"] != "contracts/fixtures/validator/validate.py"
         ]
         baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
         self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
+
+    def test_unreviewed_central_validator_artifacts_are_rejected_in_both_modes(self) -> None:
+        for relative_path, payload in (
+            ("validator/unindexed.bin", b"synthetic\n"),
+            ("validator/.DS_Store", b"synthetic\n"),
+            ("validator/__pycache__/unindexed.pyc", b"synthetic\n"),
+        ):
+            with self.subTest(relative_path=relative_path):
+                repo_root = self._copy_fixture_repo()
+                artifact = repo_root / "contracts/fixtures" / relative_path
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_bytes(payload)
+                self._assert_blocked_in_both_modes(repo_root)
+
+        for kind in ("symlink", "fifo"):
+            with self.subTest(kind=kind):
+                repo_root = self._copy_fixture_repo()
+                artifact = repo_root / "contracts/fixtures/validator" / f"unindexed-{kind}"
+                if kind == "symlink":
+                    artifact.symlink_to("validate.py")
+                else:
+                    os.mkfifo(artifact)
+                self._assert_blocked_in_both_modes(repo_root)
 
     def test_registered_unknown_extension_is_rejected_in_both_modes(self) -> None:
         repo_root = self._copy_fixture_repo()
@@ -605,18 +706,11 @@ class CliTests(unittest.TestCase):
     def test_canonical_baseline_sample_distribution_manifest_replacement_is_rejected_in_both_modes(self) -> None:
         repo_root = self._copy_fixture_repo()
         baseline_path = repo_root / "contracts/fixtures/validator/validation-baseline.json"
-        artifact = repo_root / "contracts/fixtures/validator/test_validate.py"
-        artifact.write_text(artifact.read_text(encoding="utf-8") + "\n# coordinated evidence replacement marker\n", encoding="utf-8")
         baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
         samples = list(baseline["normal"]["samples_ms"])
         samples[0] += 1.0
         baseline["normal"]["samples_ms"] = samples
         baseline["normal"]["distribution_ms"] = self._distribution(samples)
-        for record in baseline["artifact_manifest"]:
-            if record["path"] == "contracts/fixtures/validator/test_validate.py":
-                data = artifact.read_bytes()
-                record["size_bytes"] = len(data)
-                record["sha256"] = hashlib.sha256(data).hexdigest()
         baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
         self._assert_blocked_in_both_modes(repo_root)
@@ -629,8 +723,26 @@ class CliTests(unittest.TestCase):
             + "\n# coordinated validator source mutation\n",
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_external_trust=False)
         self._assert_blocked_in_both_modes(repo_root)
+
+    def test_coverage_links_and_support_must_match_referenced_roots(self) -> None:
+        mutations = ("reciprocity", "platform", "state")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                repo_root = self._copy_fixture_repo()
+                index_path = repo_root / "contracts/fixtures/index.json"
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                coverage = next(item for item in index["coverage"] if item["id"] == "browser-cookie-auth")
+                if mutation == "reciprocity":
+                    coverage["fixture_ids"] = []
+                elif mutation == "platform":
+                    coverage["platforms"] = ["web", "ios"]
+                else:
+                    coverage["required_states"] = ["pending", "success", "failure"]
+                index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+                self._rebind_copy(repo_root, refresh_anchor=True)
+                self._assert_blocked_in_both_modes(repo_root)
 
     def test_ready_coverage_cannot_reference_pending_root_in_both_modes(self) -> None:
         repo_root = self._copy_fixture_repo()

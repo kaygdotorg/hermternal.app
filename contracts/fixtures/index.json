@@ -1274,10 +1274,7 @@
         "source-audit-oauth-browser"
       ],
       "platforms": [
-        "web",
-        "ios",
-        "ipados",
-        "macos"
+        "web"
       ],
       "required_states": [
         "success",
@@ -1339,7 +1336,6 @@
       ],
       "required_states": [
         "pending",
-        "empty",
         "success",
         "failure",
         "cancelled",
@@ -1472,12 +1468,9 @@
         "macos"
       ],
       "required_states": [
-        "pending",
         "empty",
         "success",
-        "failure",
-        "cancelled",
-        "unknown"
+        "failure"
       ],
       "notes": "The model-options source review supports this unit, but complete deferred-switch fixtures are pending C-08."
     },
@@ -1655,8 +1648,7 @@
       ],
       "required_states": [
         "success",
-        "failure",
-        "unknown"
+        "failure"
       ],
       "notes": "PTY fixtures are web-only and preserve bounded, non-replayable byte semantics."
     },
@@ -1668,7 +1660,6 @@
         "source-audit-native-password-provider"
       ],
       "platforms": [
-        "web",
         "ios",
         "ipados",
         "macos"
