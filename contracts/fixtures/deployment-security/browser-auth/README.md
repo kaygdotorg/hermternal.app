@@ -24,15 +24,22 @@ attestation or a claim that a provider is compatible.
 - logout with a symbolic session cookie and a missing-CSRF failure;
 - restoration of an expired or invalid symbolic session cookie;
 - wrong-origin callback rejection;
-- external and traversal return-target rejection; and
-- browser-storage denial before provider exchange.
+- external and traversal return-target rejection;
+- browser-storage denial before provider exchange;
+- cancellation during a pending callback, preserving the last verified session
+  state without a provider exchange or outward change; and
+- an idempotent restore retry that re-reads stale source state, plus rejection of
+  a retry that would repeat a non-idempotent callback.
 
 The model emits only fixed status, reason, state, cleanup, and provider-exchange
 markers. It never copies callback text, cookie contents, a return URL, or an
 input diagnostic into its output. A successful callback redirects only to the
 reviewed synthetic paths `/`, `/app`, `/app/chat`, `/settings`, or
 `/signed-out`. Provider exchange is a symbolic `called`/`not_called` marker; no
-HTTP request is made.
+HTTP request is made. Cancellation and retry diagnostics are fixed markers: a
+cancellation preserves the last verified state, while a retry must re-read a
+stale source marker and cannot repeat non-idempotent work or duplicate provider,
+session, or outward side effects.
 
 ## Symbolic cookie and CSRF contract
 
@@ -64,7 +71,11 @@ The security invariants are:
 5. Return targets are same-origin path markers only. Absolute targets, scheme
    relative targets, encoded targets, controls, and traversal are rejected.
 6. Storage denial is a controlled failure and never silently continues.
-7. Diagnostics are fixed or redacted and capped at 240 characters.
+7. Cancellation preserves the last verified session or signed-out boundary and
+   creates no new provider exchange, session, redirect, or other outward change.
+8. Retry re-reads stale source state and is allowed only for idempotent discovery
+   or restore work; a callback retry is rejected before any duplicate side effect.
+9. Diagnostics are fixed or redacted and capped at 240 characters.
 
 ## Strict validation and regressions
 
@@ -74,7 +85,9 @@ the bounded digit limit, malformed UTF-8, excessive nesting, excessive nodes,
 oversized strings, and control characters. Closed schemas use exact key order,
 exact scalar types, bounded arrays, and independent outcome comparison. The
 validator uses explicit exceptions rather than executable assertions, so normal
-and optimized (`-O`) runs retain the same checks.
+and optimized (`-O`) runs retain the same checks. Baseline validation recomputes
+`min`, `p50`, `p95`, `p99`, `max`, and `mean` from all 30 raw samples with fixed
+linear interpolation and binds each run to its exact approved command.
 
 Run from the repository root:
 
@@ -102,9 +115,12 @@ python3 contracts/fixtures/deployment-security/browser-auth/validate.py \
   --skip-baseline
 ```
 
-A failure is one JSON line, status `2`, with a bounded `validation_error`
-message and no traceback. The diagnostic redactor removes credential-shaped
-assignments, bearer-shaped text, private-key markers, and common live-token
+A failure is one JSON line, status `2`, with a bounded
+`browser_auth_fixture_validation_error` message and no traceback or argparse
+usage text. Invalid or unknown CLI arguments use the same controlled object and
+do not echo argument values. The diagnostic redactor removes credential-shaped
+assignments, including cookie, ticket, CSRF, session, state, PKCE, and token
+names, plus bearer-shaped text, private-key markers, and common live-token
 prefixes before applying the output cap. The checked-in JSON and baseline
 contain no credentials, raw cookies, tokens, provider data, transcripts, user
 data, or public hosts.
@@ -117,10 +133,12 @@ fixture. It names:
 - fixture: `cases.json`;
 - metric: validator wall-clock duration in milliseconds;
 - environment: the measured local platform and Python version;
+- exact commands: `python3 contracts/fixtures/deployment-security/browser-auth/validate.py`
+  and `python3 -O contracts/fixtures/deployment-security/browser-auth/validate.py`;
 - build modes: normal and optimized;
 - repetitions: exactly 30 samples per mode;
-- distribution: `min`, `p50`, `p95`, `p99`, `max`, and `mean`;
-- trace: the 30 raw samples for each mode; and
+- distribution: `min`, `p50`, `p95`, `p99`, `max`, and `mean`, recomputed from the
+  raw trace with fixed inclusive linear interpolation; and
 - threshold: `null`, because issue `#207` defines no reviewed performance
   budget.
 

@@ -65,9 +65,32 @@ class BrowserAuthBoundaryTests(unittest.TestCase):
                 self.assertLessEqual(len(payload["error"]["message"]), validate.MAX_ERROR_OUTPUT)
                 self.assertNotIn("Traceback", completed.stdout + completed.stderr)
 
+    def test_invalid_cli_arguments_are_one_bounded_redacted_json_error(self) -> None:
+        for optimized in (False, True):
+            for argument, secret in (
+                ("--token=synthetic-secret", "synthetic-secret"),
+                ("--unknown=untrusted-value", "untrusted-value"),
+            ):
+                with self.subTest(optimized=optimized, argument=argument):
+                    command = [sys.executable]
+                    if optimized:
+                        command.append("-O")
+                    command.extend([str(FIXTURE_DIR / "validate.py"), argument])
+                    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertEqual(completed.stderr, "")
+                    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+                    self.assertEqual(len(lines), 1)
+                    payload = json.loads(lines[0])
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["error"]["code"], validate.ERROR_CODE)
+                    self.assertNotIn(secret, completed.stdout)
+                    self.assertNotIn("usage:", completed.stdout.lower())
+                    self.assertLessEqual(len(completed.stdout), validate.MAX_ERROR_OUTPUT + 128)
+
     def test_checked_in_fixture_has_expected_case_order(self) -> None:
         self.assertEqual(tuple(self.cases), validate.EXPECTED_CASE_IDS)
-        self.assertEqual(len(self.cases), 18)
+        self.assertEqual(len(self.cases), 21)
 
     def test_every_case_matches_independent_boundary_model(self) -> None:
         for case in self.document["cases"]:
@@ -80,6 +103,17 @@ class BrowserAuthBoundaryTests(unittest.TestCase):
         validate.validate_baseline(baseline)
         self.assertEqual(baseline["threshold"], None)
         self.assertEqual([run["repetitions"] for run in baseline["runs"]], [30, 30])
+
+    def test_baseline_recomputes_distributions_and_binds_commands(self) -> None:
+        baseline = validate.load_json(validate.BASELINE_PATH)
+        forged_distribution = copy.deepcopy(baseline)
+        forged_distribution["runs"][0]["distribution"]["p50_ms"] += 1
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_baseline(forged_distribution)
+        forged_command = copy.deepcopy(baseline)
+        forged_command["runs"][1]["command"] = "echo fabricated"
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_baseline(forged_command)
 
     def test_provider_discovery_is_synthetic_and_filters_non_session_entries(self) -> None:
         self.assertEqual(self.cases["provider-discovery"]["expected"]["providers"], ["synthetic-browser"])
@@ -134,13 +168,68 @@ class BrowserAuthBoundaryTests(unittest.TestCase):
         self.assertEqual(result["state"], "blocked")
         self.assertEqual(result["provider_exchange"], "not_called")
 
+    def test_cancellation_preserves_last_verified_state_without_side_effects(self) -> None:
+        case = self.cases["interruption-cancelled"]
+        result = case["expected"]
+        self.assertEqual(validate.evaluate_case(case), result)
+        self.assertEqual(result["state"], "authenticated")
+        self.assertEqual(result["session_cookie"], "present")
+        self.assertIsNone(result["redirect"])
+        self.assertEqual(result["provider_exchange"], "not_called")
+        self.assertEqual(result["diagnostic"], "cancellation preserved last verified state; no new side effects")
+
+    def test_retry_rereads_stale_source_and_does_not_duplicate_side_effects(self) -> None:
+        case = self.cases["retry-source-reread"]
+        result = case["expected"]
+        self.assertEqual(validate.evaluate_case(case), result)
+        self.assertEqual(case["input"]["source_before"], "stale")
+        self.assertEqual(case["input"]["source_after_reread"], "verified")
+        self.assertEqual(result["reason"], "retry_source_reread")
+        self.assertEqual(result["provider_exchange"], "not_called")
+        self.assertEqual(result["session_cookie"], "present")
+        self.assertIsNone(result["redirect"])
+        self.assertEqual(
+            result["diagnostic"],
+            "retry reread source; no duplicate provider, session, or outward side effects",
+        )
+
+    def test_retry_rejects_non_idempotent_callback_before_side_effects(self) -> None:
+        result = self.cases["retry-non-idempotent"]["expected"]
+        self.assertEqual(result["status"], 409)
+        self.assertEqual(result["reason"], "retry_not_idempotent")
+        self.assertEqual(result["provider_exchange"], "not_called")
+        self.assertEqual(result["session_cookie"], "absent")
+        self.assertIsNone(result["redirect"])
+
+    def test_retry_rejects_unverified_reread(self) -> None:
+        mutated = copy.deepcopy(self.cases["retry-source-reread"])
+        mutated["input"]["source_after_reread"] = "changed"
+        result = validate.evaluate_case(mutated)
+        self.assertEqual(result["status"], 409)
+        self.assertEqual(result["reason"], "source_reread_unverified")
+        self.assertEqual(result["provider_exchange"], "not_called")
+        self.assertEqual(result["session_cookie"], "absent")
+
     def test_redaction_covers_assignment_shaped_diagnostics(self) -> None:
-        message = "authorization=Bearer synthetic-bearer password=synthetic-password token='synthetic-token'"
+        message = (
+            "authorization=Bearer synthetic-bearer password=synthetic-password "
+            "token='synthetic-token' cookie=rawcookie ticket=rawticket csrf=rawcsrf "
+            "session=rawsession state=rawstate pkce_verifier=rawpkce"
+        )
         redacted = validate.compact_error(message)
         self.assertIn("[REDACTED]", redacted)
-        self.assertNotIn("synthetic-bearer", redacted)
-        self.assertNotIn("synthetic-password", redacted)
-        self.assertNotIn("synthetic-token", redacted)
+        for secret in (
+            "synthetic-bearer",
+            "synthetic-password",
+            "synthetic-token",
+            "rawcookie",
+            "rawticket",
+            "rawcsrf",
+            "rawsession",
+            "rawstate",
+            "rawpkce",
+        ):
+            self.assertNotIn(secret, redacted)
         self.assertLessEqual(len(redacted), validate.MAX_ERROR_OUTPUT)
 
     def test_redaction_rejects_sensitive_fixture_field(self) -> None:
@@ -199,7 +288,7 @@ class BrowserAuthBoundaryTests(unittest.TestCase):
                 self.assertEqual(completed.stderr, "")
                 payload = json.loads(completed.stdout)
                 self.assertTrue(payload["ok"])
-                self.assertEqual(payload["cases"], 18)
+                self.assertEqual(payload["cases"], 21)
                 self.assertIsNone(payload["threshold"])
 
     def test_only_standard_library_boundary_module_is_used(self) -> None:

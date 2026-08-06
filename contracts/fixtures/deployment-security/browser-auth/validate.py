@@ -94,6 +94,9 @@ EXPECTED_CASE_IDS = (
     "external-return-target",
     "traversal-return-target",
     "storage-denied",
+    "interruption-cancelled",
+    "retry-source-reread",
+    "retry-non-idempotent",
 )
 
 EXPECTED_INPUT_KEYS = {
@@ -110,6 +113,21 @@ EXPECTED_INPUT_KEYS = {
     ),
     "logout": ("action", "callback", "cookies", "origin", "storage"),
     "restore": ("action", "cookies", "origin", "storage"),
+    "interrupt": ("action", "origin", "operation", "last_verified_artifact", "last_verified_state", "storage"),
+    "retry": (
+        "action",
+        "attempt",
+        "last_verified_artifact",
+        "last_verified_state",
+        "operation",
+        "origin",
+        "prior_outward_change",
+        "prior_provider_exchange",
+        "prior_session_creation",
+        "source_after_reread",
+        "source_before",
+        "storage",
+    ),
 }
 EXPECTED_ACTIONS = {
     "discover": "discover",
@@ -117,6 +135,8 @@ EXPECTED_ACTIONS = {
     "callback": "callback",
     "logout": "logout",
     "restore": "restore",
+    "interrupt": "interrupt",
+    "retry": "retry",
 }
 COOKIE_STATES = frozenset({"present", "absent", "expired", "invalid"})
 STORAGE_STATES = frozenset({"available", "denied"})
@@ -127,6 +147,12 @@ CALLBACK_ERROR_STATES = frozenset({"absent", "provider"})
 CLEANUP_STATES = frozenset({"none", "clear_ephemeral", "clear_session", "clear_all"})
 EXCHANGE_STATES = frozenset({"not_applicable", "not_called", "called"})
 OUTPUT_STATES = frozenset({"authenticated", "login_pending", "provider_available", "signed_out", "blocked"})
+BROWSER_AUTH_OPERATIONS = frozenset({"discover", "login_start", "callback", "logout", "restore"})
+VERIFIED_ARTIFACTS = frozenset({"authenticated_session", "signed_out_boundary"})
+VERIFIED_STATES = frozenset({"authenticated", "signed_out"})
+RETRY_SOURCE_STATES = frozenset({"stale", "verified", "changed", "malformed"})
+PRIOR_OUTWARD_CHANGES = frozenset({"none", "redirected", "session_created", "session_invalidated"})
+IDEMPOTENT_RETRY_OPERATIONS = frozenset({"discover", "restore"})
 PROVIDER_ID_RE = re.compile(r"^[a-z][a-z0-9-]{2,31}$")
 SYNTHETIC_ORIGIN_RE = re.compile(r"^https://[a-z0-9.-]+\.hermternal\.test(?::[0-9]{1,5})?$")
 SYNTHETIC_URL_RE = re.compile(
@@ -137,21 +163,27 @@ SENSITIVE_KEY_RE = re.compile(
     r"^(?:password|token|secret|authorization|bearer|access[_-]?key|cookie[_-]?value|client[_-]?secret)$",
     re.IGNORECASE,
 )
+SENSITIVE_ASSIGNMENT_NAMES = (
+    r"password|token|authorization|api[_ -]?key|client[_ -]?secret|bearer|"
+    r"cookie(?:[_ -]?value)?|ticket|csrf(?:[_ -]?token)?|"
+    r"session(?:[_ -]?(?:cookie|token|value))?|state(?:[_ -]?(?:token|value))?|"
+    r"(?:access|refresh|id)[_ -]?token|pkce(?:[_ -]?(?:token|verifier|challenge))?"
+)
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    rf"\b(?P<name>{SENSITIVE_ASSIGNMENT_NAMES})\s*[:=]\s*"
+    rf"(?P<value>(?:Bearer\s+)?(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,}}\]]+))",
+    re.IGNORECASE,
+)
 SECRET_VALUE_PATTERNS = (
     re.compile(r"\b(?:ghp|github_pat|sk_live|AKIA)[A-Za-z0-9_\-]+\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[^\s,}\]]+", re.IGNORECASE),
     re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----", re.IGNORECASE),
-    re.compile(
-        r"\b(?:password|token|authorization|api[_ -]?key|client[_ -]?secret)\s*[:=]\s*"
-        r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,}\]]+)",
-        re.IGNORECASE,
-    ),
+    SENSITIVE_ASSIGNMENT_RE,
 )
-SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"\b(?P<name>password|token|authorization|api[_ -]?key|client[_ -]?secret|bearer)\s*[:=]\s*"
-    r"(?P<value>(?:Bearer\s+)?(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,}\]]+))",
-    re.IGNORECASE,
-)
+BASELINE_COMMANDS = {
+    "normal": "python3 contracts/fixtures/deployment-security/browser-auth/validate.py",
+    "optimized": "python3 -O contracts/fixtures/deployment-security/browser-auth/validate.py",
+}
 
 BASELINE_ROOT_KEYS = (
     "schema",
@@ -457,6 +489,27 @@ def validate_case(case: Any, index: int) -> None:
         _validate_cookies(input_row["cookies"], f"cases[{index}].input.cookies")
     if kind == "restore":
         _validate_cookies(input_row["cookies"], f"cases[{index}].input.cookies")
+    if kind == "interrupt":
+        operation = _text(input_row["operation"], f"cases[{index}].input.operation", max_length=32)
+        require(operation in BROWSER_AUTH_OPERATIONS, f"cases[{index}].input.operation is unsupported")
+        artifact = _enum(input_row["last_verified_artifact"], VERIFIED_ARTIFACTS, f"cases[{index}].input.last_verified_artifact")
+        state = _enum(input_row["last_verified_state"], VERIFIED_STATES, f"cases[{index}].input.last_verified_state")
+        expected_artifact = "authenticated_session" if state == "authenticated" else "signed_out_boundary"
+        require(artifact == expected_artifact, f"cases[{index}].input.last_verified_artifact does not match its state")
+    if kind == "retry":
+        operation = _text(input_row["operation"], f"cases[{index}].input.operation", max_length=32)
+        require(operation in BROWSER_AUTH_OPERATIONS, f"cases[{index}].input.operation is unsupported")
+        attempt = input_row["attempt"]
+        require(type(attempt) is int and type(attempt) is not bool and attempt == 2, f"cases[{index}].input.attempt must be the second attempt")
+        artifact = _enum(input_row["last_verified_artifact"], VERIFIED_ARTIFACTS, f"cases[{index}].input.last_verified_artifact")
+        state = _enum(input_row["last_verified_state"], VERIFIED_STATES, f"cases[{index}].input.last_verified_state")
+        expected_artifact = "authenticated_session" if state == "authenticated" else "signed_out_boundary"
+        require(artifact == expected_artifact, f"cases[{index}].input.last_verified_artifact does not match its state")
+        _enum(input_row["source_before"], RETRY_SOURCE_STATES, f"cases[{index}].input.source_before")
+        _enum(input_row["source_after_reread"], RETRY_SOURCE_STATES, f"cases[{index}].input.source_after_reread")
+        _enum(input_row["prior_provider_exchange"], EXCHANGE_STATES, f"cases[{index}].input.prior_provider_exchange")
+        _enum(input_row["prior_session_creation"], frozenset({"not_created", "created"}), f"cases[{index}].input.prior_session_creation")
+        _enum(input_row["prior_outward_change"], PRIOR_OUTWARD_CHANGES, f"cases[{index}].input.prior_outward_change")
     _validate_expected(row["expected"], f"cases[{index}].expected")
 
 
@@ -549,6 +602,60 @@ def evaluate_case(case: Any) -> dict[str, Any]:
         return _origin_failure()
     if request["storage"] == "denied":
         return _storage_failure()
+
+    if kind == "interrupt":
+        state = request["last_verified_state"]
+        if state == "authenticated":
+            return _outcome(
+                status=200,
+                state="authenticated",
+                reason="cancelled",
+                session_cookie="present",
+                provider_exchange="not_called",
+                diagnostic="cancellation preserved last verified state; no new side effects",
+            )
+        return _outcome(
+            status=204,
+            state="signed_out",
+            reason="cancelled",
+            provider_exchange="not_called",
+            diagnostic="cancellation preserved last verified state; no new side effects",
+        )
+
+    if kind == "retry":
+        operation = request["operation"]
+        if operation not in IDEMPOTENT_RETRY_OPERATIONS:
+            return _outcome(
+                status=409,
+                state="blocked",
+                reason="retry_not_idempotent",
+                provider_exchange="not_called",
+                diagnostic="retry rejected: operation is not idempotent",
+            )
+        if request["source_before"] != "stale" or request["source_after_reread"] != "verified":
+            return _outcome(
+                status=409,
+                state="blocked",
+                reason="source_reread_unverified",
+                provider_exchange="not_called",
+                diagnostic="retry rejected: source reread was not verified",
+            )
+        if request["last_verified_state"] == "authenticated":
+            return _outcome(
+                status=200,
+                state="authenticated",
+                reason="retry_source_reread",
+                session_cookie="present",
+                provider_exchange="not_called",
+                diagnostic="retry reread source; no duplicate provider, session, or outward side effects",
+            )
+        return _outcome(
+            status=204,
+            state="signed_out",
+            reason="retry_source_reread",
+            provider_exchange="not_called",
+            diagnostic="retry reread source; no duplicate provider, session, or outward side effects",
+        )
 
     if kind == "discover":
         providers = _supported_providers(request["registry"])
@@ -679,6 +786,37 @@ def _finite_number(value: Any, label: str) -> float:
     return result
 
 
+def _round_milliseconds(value: float) -> float:
+    """Normalize observed durations to the fixture's three-decimal precision."""
+
+    return float(f"{value:.3f}")
+
+
+def _percentile(values: list[float], percentage: float) -> float:
+    """Compute an inclusive linear-interpolation percentile deterministically."""
+
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * (percentage / 100)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return _round_milliseconds(ordered[lower])
+    fraction = position - lower
+    interpolated = ordered[lower] + ((ordered[upper] - ordered[lower]) * fraction)
+    return _round_milliseconds(interpolated)
+
+
+def _expected_distribution(values: list[float]) -> dict[str, float]:
+    return {
+        "min_ms": _round_milliseconds(min(values)),
+        "p50_ms": _percentile(values, 50),
+        "p95_ms": _percentile(values, 95),
+        "p99_ms": _percentile(values, 99),
+        "max_ms": _round_milliseconds(max(values)),
+        "mean_ms": _round_milliseconds(sum(values) / len(values)),
+    }
+
+
 def validate_baseline(baseline: Any, root: Path = ROOT) -> None:
     """Validate 30-run normal/optimized observations without a budget."""
 
@@ -698,7 +836,8 @@ def validate_baseline(baseline: Any, root: Path = ROOT) -> None:
         mode = _enum(run["mode"], frozenset({"normal", "optimized"}), f"baseline.runs[{index}].mode")
         require(mode not in seen_modes, "baseline run mode is duplicated")
         seen_modes.add(mode)
-        _text(run["command"], f"baseline.runs[{index}].command", max_length=240)
+        command = _text(run["command"], f"baseline.runs[{index}].command", max_length=240)
+        require(command == BASELINE_COMMANDS[mode], f"baseline.runs[{index}].command is not the approved benchmark command")
         repetitions = run["repetitions"]
         require(type(repetitions) is int and type(repetitions) is not bool and repetitions == MAX_BASELINE_TRACE, f"baseline.runs[{index}].repetitions must be 30")
         distribution = _strict_keys(run["distribution"], BASELINE_DISTRIBUTION_KEYS, f"baseline.runs[{index}].distribution")
@@ -706,12 +845,11 @@ def validate_baseline(baseline: Any, root: Path = ROOT) -> None:
         require(type(trace) is list and len(trace) == MAX_BASELINE_TRACE, f"baseline.runs[{index}].trace must contain 30 samples")
         values = [_finite_number(value, f"baseline.runs[{index}].trace[{sample}]") for sample, value in enumerate(trace)]
         require(all(value > 0 for value in values), f"baseline.runs[{index}].trace must be positive")
+        expected_distribution = _expected_distribution(values)
         for key in BASELINE_DISTRIBUTION_KEYS:
-            _finite_number(distribution[key], f"baseline.runs[{index}].distribution.{key}")
+            actual = _finite_number(distribution[key], f"baseline.runs[{index}].distribution.{key}")
+            require(actual == expected_distribution[key], f"baseline.runs[{index}].distribution.{key} does not match the raw trace")
         require(distribution["min_ms"] <= distribution["p50_ms"] <= distribution["p95_ms"] <= distribution["p99_ms"] <= distribution["max_ms"], f"baseline.runs[{index}] distribution order changed")
-        require(distribution["min_ms"] <= min(values) + 1e-9, f"baseline.runs[{index}] min is not bounded by trace")
-        require(distribution["max_ms"] >= max(values) - 1e-9, f"baseline.runs[{index}] max is not bounded by trace")
-        require(distribution["mean_ms"] >= distribution["min_ms"] - 1e-9 and distribution["mean_ms"] <= distribution["max_ms"] + 1e-9, f"baseline.runs[{index}] mean is outside range")
     require(seen_modes == {"normal", "optimized"}, "baseline modes are incomplete")
     artifact = _strict_keys(record["artifact"], BASELINE_ARTIFACT_KEYS, "baseline.artifact")
     require(type(artifact["files"]) is list, "baseline artifact files must be an array")
@@ -753,7 +891,7 @@ def _success_payload(case_count: int, artifact_bytes: int) -> str:
     )
 
 
-def _failure_payload(error: Exception) -> str:
+def _failure_payload(error: object) -> str:
     return json.dumps(
         {"ok": False, "error": {"code": ERROR_CODE, "message": compact_error(error)}},
         separators=(",", ":"),
@@ -761,15 +899,29 @@ def _failure_payload(error: Exception) -> str:
     )
 
 
+class ControlledArgumentParser(argparse.ArgumentParser):
+    """Keep argparse failures inside the bounded JSON error contract."""
+
+    def error(self, message: str) -> None:
+        del message
+        raise ValidationError("invalid command-line arguments")
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        del message
+        if status:
+            raise ValidationError("invalid command-line arguments")
+        raise ValidationError("command-line help is not part of the validator output contract")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the local validator and emit exactly one bounded JSON line."""
 
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cases", type=Path, default=CASES_PATH)
-    parser.add_argument("--baseline", type=Path, default=BASELINE_PATH)
-    parser.add_argument("--skip-baseline", action="store_true")
-    args = parser.parse_args(argv)
     try:
+        parser = ControlledArgumentParser(add_help=False)
+        parser.add_argument("--cases", type=Path, default=CASES_PATH)
+        parser.add_argument("--baseline", type=Path, default=BASELINE_PATH)
+        parser.add_argument("--skip-baseline", action="store_true")
+        args = parser.parse_args(argv)
         document = load_json(args.cases)
         validate_redaction(document)
         validate_cases_document(document)
@@ -784,7 +936,7 @@ def main(argv: list[str] | None = None) -> int:
             artifact_bytes = baseline["artifact"]["bytes"]
         sys.stdout.write(_success_payload(case_count, artifact_bytes) + "\n")
         return 0
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         sys.stdout.write(_failure_payload(exc) + "\n")
         return 2
 
