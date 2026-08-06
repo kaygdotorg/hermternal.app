@@ -136,12 +136,16 @@ capability escalation requires `privileged`, `capability_escalation`,
 
 The validator never echoes raw logs, paths, URLs, credentials, cookies,
 headers, tokens, PTY bytes, or hostile JSON keys. The public redaction helper
-also removes `Authorization: Token`, `X-API-Key`, `api_key`/`access_key`/`token`
-assignments, Base64-shaped blobs, and POSIX, Windows, or UNC absolute paths.
-Errors are one bounded JSON line and remain redacted under normal and optimized
-Python execution. Each case kind has an exact top-level schema; fields from a
-runtime, harness, policy, or cleanup variant cannot be carried into another
-variant.
+also removes `Authorization: Token` and `Authorization=Bearer`, `X-API-Key`,
+quoted JSON or assignment forms of `api_key`/`access_key`/`token`,
+`password`/`client_secret`, Base64-shaped blobs including short URL-safe forms,
+and POSIX, Windows, or UNC absolute paths even when path components contain
+spaces. Errors are one bounded JSON line and remain redacted under normal and
+optimized Python execution. Each case kind has an exact top-level schema;
+fields from a runtime, harness, policy, or cleanup variant cannot be carried
+into another variant. The approved-boundary object is schema-checked before
+any nested key is indexed, so every key deletion returns the same bounded JSON
+failure in both CLI modes.
 
 ## Offline verification
 
@@ -159,9 +163,11 @@ python3 -m py_compile \
 
 The regression suite runs the real validator CLI in both normal and optimized
 Python modes. Its table-driven nearby mutations cover duplicate or missing
-Docker/Podman matrix entries, Docker-only fields, wrong/reordered/missing/extra
-policy reason codes, irrelevant case-variant fields, unsafe live claims, and
-sensitive diagnostic shapes.
+Docker/Podman matrix entries, Docker-only fields, approved-boundary key
+deletions, wrong/reordered/missing/extra policy reason codes, irrelevant
+case-variant fields, unsafe live claims, and sensitive diagnostic shapes
+including spaced paths, quoted credentials, Authorization assignments, and
+short or URL-safe Base64.
 
 This is a non-UI protocol fixture. Accessibility verification is N/A because
 it creates no controls, focus order, semantic names, screen-reader or

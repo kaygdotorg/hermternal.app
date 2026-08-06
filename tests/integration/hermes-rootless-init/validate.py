@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import json
 import math
 import re
@@ -667,15 +668,16 @@ def validate_fixture(data: dict[str, Any]) -> dict[str, Any]:
     if _bool(data["synthetic_only"]) is not True or _bool(data["live_execution"]) is not False:
         raise ValidationError("live_execution_claim")
     _validate_source(data)
-    approved = data["approved_boundary"]
-    if not isinstance(approved, dict):
-        raise ValidationError("approved_boundary_object")
+    # Validate the complete nested schema before indexing any member. This
+    # keeps every deletion mutation on the stable redacted CLI failure path.
+    approved = _exact_keys(
+        data["approved_boundary"],
+        set(APPROVED_BOUNDARY) | {"resource_limits"},
+    )
     _validate_boundary(
         {key: approved[key] for key in APPROVED_BOUNDARY},
         exact=True,
     )
-    if set(approved) != set(APPROVED_BOUNDARY) | {"resource_limits"}:
-        raise ValidationError("approved_boundary_keys")
     limits = _exact_keys(approved["resource_limits"], {"cpus", "memory", "pids"})
     if (_string(limits["cpus"]), _string(limits["memory"]), _integer(limits["pids"])) != ("0.50", "512m", 256):
         raise ValidationError("resource_limits_mismatch")
@@ -713,20 +715,43 @@ def validate_fixture(data: dict[str, Any]) -> dict[str, Any]:
 # secret query parameter or credential cannot be exposed by a later rewrite.
 _REDACTION_PATTERNS = (
     (re.compile(r"https?://[^\s]+"), "[REDACTED_URL]"),
-    (re.compile(r"(?i)\bauthorization\s*:\s*(?:basic|bearer|token)\s+[^\s,;]+"), "Authorization: [REDACTED]"),
-    (re.compile(r"(?i)\bx-api-key\s*:\s*[^\s,;]+"), "X-API-Key: [REDACTED]"),
-    (re.compile(r"(?i)\bcookie\s*:\s*[^\r\n]+"), "Cookie: [REDACTED]"),
     (
         re.compile(
-            r'''(?i)\b(?:api[_-]?key|access[_-]?key|token)\s*[:=]\s*(?:"[^"\\r\\n]*"|'[^'\\r\\n]*'|[^\s,;]+)'''
+            r"(?i)\bauthorization\s*(?::|=)\s*(?:(?:basic|bearer|token)\s+)?"
+            r"(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|[^\s,;}\]]+)"
+        ),
+        "Authorization: [REDACTED]",
+    ),
+    (re.compile(r"(?i)\bx-api-key\s*(?::|=)\s*[^\s,;}\]]+"), "X-API-Key: [REDACTED]"),
+    (re.compile(r"(?i)\bcookie\s*(?::|=)\s*[^\r\n]+"), "Cookie: [REDACTED]"),
+    (
+        re.compile(
+            r'''(?i)(?:\"|')?\b(?:api[_-]?key|access[_-]?key|token|password|client[_-]?secret)'''
+            r'''(?:\"|')?\s*(?::|=)\s*(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|[^\s,;}\]]+)'''
         ),
         "[REDACTED_ASSIGNMENT]",
     ),
-    (re.compile(r"(?i)\b[A-Z]:[\\/][^\s,;]+"), "[REDACTED_PATH]"),
-    (re.compile(r"(?<![A-Za-z0-9_])\\\\[^\s,;]+"), "[REDACTED_PATH]"),
-    (re.compile(r"(?<![A-Za-z0-9_])/(?!/)[^\s,;]+"), "[REDACTED_PATH]"),
-    (re.compile(r"\b(?:[A-Za-z0-9+/]{32,}={0,2})\b"), "[REDACTED_BLOB]"),
+    # A path may contain spaces. Consume through the next structural delimiter
+    # rather than stopping at whitespace and leaking the suffix.
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/][^\\r\\n,;]+|\\\\[^\\r\\n,;]+|/(?!/)[^\\r\\n,;]+)"
+        ),
+        "[REDACTED_PATH]",
+    ),
 )
+_BASE64_CANDIDATE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{8,}={0,2}(?![A-Za-z0-9+/_-])")
+
+
+def _redact_base64_match(match: re.Match[str]) -> str:
+    token = match.group(0)
+    normalized = token.replace("-", "+").replace("_", "/")
+    normalized += "=" * (-len(normalized) % 4)
+    try:
+        base64.b64decode(normalized, validate=True)
+    except (ValueError, binascii.Error):
+        return token
+    return "[REDACTED_BLOB]"
 
 
 def redact_diagnostic(value: str) -> str:
@@ -736,13 +761,9 @@ def redact_diagnostic(value: str) -> str:
     redacted = value
     for pattern, replacement in _REDACTION_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
-    # Exercise the base64 decoder only as a shape check; never retain bytes.
-    for token in re.findall(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,}={0,2}", redacted):
-        try:
-            base64.b64decode(token, validate=True)
-        except Exception:
-            continue
-        redacted = redacted.replace(token, "[REDACTED_BLOB]")
+    # Decode only to recognize standard, URL-safe, padded, or short Base64;
+    # decoded bytes are never retained in diagnostics.
+    redacted = _BASE64_CANDIDATE.sub(_redact_base64_match, redacted)
     redacted = " ".join(redacted.split())
     return redacted.encode("utf-8")[:MAX_ERROR_MESSAGE_BYTES].decode("utf-8", "ignore")
 

@@ -165,6 +165,41 @@ class RootlessInitValidatorTests(unittest.TestCase):
                         self.assertEqual(parsed["errors"], ["validation_failed"])
                         self.assertNotIn(str(path), result.stdout)
 
+    def test_real_cli_rejects_every_approved_boundary_key_deletion(self) -> None:
+        boundary_keys = tuple(validate.APPROVED_BOUNDARY) + ("resource_limits",)
+        resource_keys = ("cpus", "memory", "pids")
+        mutations: list[tuple[str, tuple[str, ...]]] = [(key, (key,)) for key in boundary_keys]
+        mutations.extend((f"resource_limits.{key}", ("resource_limits", key)) for key in resource_keys)
+        for label, key_path in mutations:
+            mutated = copy.deepcopy(self.fixture)
+            cursor = mutated["approved_boundary"]
+            for key in key_path[:-1]:
+                cursor = cursor[key]
+            del cursor[key_path[-1]]
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / f"boundary-delete-{label.replace('.', '-')}.json"
+                path.write_text(json.dumps(mutated), encoding="utf-8")
+                for mode, optimized in PYTHON_MODES:
+                    with self.subTest(field=label, mode=mode):
+                        result = self.run_cli(path, optimized=optimized)
+                        self.assertEqual(result.returncode, 1, (label, mode, result.stderr))
+                        self.assertNotIn("Traceback", result.stdout + result.stderr)
+                        self.assertNotIn(str(path), result.stdout)
+                        self.assertEqual(
+                            json.loads(result.stdout),
+                            {
+                                "candidate_status": "unknown",
+                                "case_count": 0,
+                                "classifications": {},
+                                "cleanup_complete": False,
+                                "errors": ["validation_failed"],
+                                "live_execution": False,
+                                "ok": False,
+                                "redacted": True,
+                                "schema": validate.SCHEMA,
+                            },
+                        )
+
     def test_duplicate_keys_are_rejected_before_schema_validation(self) -> None:
         with self.assertRaises(validate.DuplicateKeyError):
             validate._load_fixture_bytes(b'{"schema":"one","schema":"two"}')
@@ -271,17 +306,23 @@ class RootlessInitValidatorTests(unittest.TestCase):
         samples = (
             ("authorization_token", "Authorization: Token live-secret-token", ("live-secret-token",)),
             ("authorization_bearer", "Authorization: Bearer live-bearer-token", ("live-bearer-token",)),
+            ("authorization_assignment", "Authorization=Bearer live-assignment-token", ("live-assignment-token",)),
             ("api_header", "X-API-Key: live-api-key", ("live-api-key",)),
             ("api_assignment", "api_key=live-api-key", ("live-api-key",)),
+            ("quoted_json_api_key", '\"api_key\": \"live-json-key\"', ("live-json-key",)),
             ("access_assignment", "access_key: 'live-access-key'", ("live-access-key",)),
             ("token_assignment", "token=\"live-assignment-token\"", ("live-assignment-token",)),
+            ("password_assignment", "password=live-password", ("live-password",)),
+            ("client_secret_assignment", "client_secret=live-client-secret", ("live-client-secret",)),
             ("cookie", "Cookie: session=private-cookie", ("private-cookie",)),
             ("url", "https://private.example.test/path?token=secret", ("https://private.example.test", "secret")),
-            ("mac_path", "/Applications/Private.app/data", ("/Applications/Private.app",)),
-            ("unix_path", "/Users/operator/private/transcript.txt", ("/Users/operator",)),
-            ("windows_path", r"C:\\Users\\operator\\private\\token.txt", (r"C:\\Users\\operator",)),
-            ("unc_path", r"\\\\server\\share\\private.txt", (r"\\\\server\\share",)),
+            ("mac_spaced_path", "/Applications/Private App/data", ("/Applications/Private App/data",)),
+            ("unix_spaced_path", "/Users/operator/Private Folder/transcript.txt", ("/Users/operator/Private Folder/transcript.txt",)),
+            ("windows_spaced_path", r"C:\Users\operator\Private Folder\token.txt", (r"C:\Users\operator\Private Folder\token.txt",)),
+            ("unc_spaced_path", r"\\server\share\Private Folder\secret.txt", (r"\\server\share\Private Folder\secret.txt",)),
             ("base64_blob", "QWxhZGRpbjpvcGVuIHNlc2FtZQ==", ("QWxhZGRpbjpvcGVu",)),
+            ("short_base64", "c2VjcmV0", ("c2VjcmV0",)),
+            ("urlsafe_base64", "c2VjcmV0LXNlY3JldA", ("c2VjcmV0LXNlY3JldA",)),
         )
         for label, hostile, forbidden_values in samples:
             with self.subTest(shape=label):
@@ -295,6 +336,30 @@ class RootlessInitValidatorTests(unittest.TestCase):
         redacted = validate.redact_diagnostic(combined)
         self.assertLessEqual(len(redacted.encode("utf-8")), validate.MAX_ERROR_MESSAGE_BYTES)
         self.assertIn("[REDACTED", redacted)
+
+    def test_real_cli_rejects_sensitive_mutations_without_echoing_them(self) -> None:
+        hostile_values = (
+            "Authorization=Bearer live-cli-token",
+            '"api_key": "live-cli-key"',
+            "password=live-cli-password",
+            "client_secret=live-cli-secret",
+            "/Applications/Private App/secret.txt",
+            r"C:\Users\operator\Private Folder\secret.txt",
+            "c2VjcmV0LXNlY3JldA",
+        )
+        for hostile in hostile_values:
+            mutated = copy.deepcopy(self.fixture)
+            mutated["approved_boundary"]["volume_kind"] = hostile
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "sensitive-boundary.json"
+                path.write_text(json.dumps(mutated), encoding="utf-8")
+                for mode, optimized in PYTHON_MODES:
+                    with self.subTest(value=hostile, mode=mode):
+                        result = self.run_cli(path, optimized=optimized)
+                        self.assertEqual(result.returncode, 1, (hostile, mode, result.stderr))
+                        self.assertNotIn("Traceback", result.stdout + result.stderr)
+                        self.assertNotIn(hostile, result.stdout)
+                        self.assertEqual(json.loads(result.stdout)["errors"], ["validation_failed"])
 
     def test_proposed_run_is_rootless_podman_and_preserves_boundary(self) -> None:
         proposal = self.fixture["proposed_one_run"]
