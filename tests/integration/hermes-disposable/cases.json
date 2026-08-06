@@ -1,0 +1,405 @@
+{
+  "schema": "hermternal.integration.hermes-disposable.v1",
+  "operation": "R-02A",
+  "contract": "hermes-disposable-v1",
+  "pinned_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "pinned_source_tree": "886db5eb1150f819344d67fedc81aef0caab09ff",
+  "synthetic_only": true,
+  "network_access": false,
+  "live_run": false,
+  "compatible": false,
+  "proof_status": "not_run",
+  "executor_policy": {
+    "default": "podman",
+    "podman": {
+      "mode": "rootless_preferred",
+      "compose_command": "podman compose",
+      "storage": "overlay",
+      "network": "netavark",
+      "cgroup": "v2",
+      "smoke": "one_live_no_provider_stack",
+      "renderer_scope": "offline_renderer",
+      "runtime_observation": "authorized_rootless_vm_smoke"
+    },
+    "docker": {
+      "mode": "compatibility_config_only",
+      "compose_command": "docker compose",
+      "storage": "engine_selected",
+      "network": "engine_selected",
+      "cgroup": "engine_selected",
+      "smoke": "recorded_root_compatibility_observation",
+      "renderer_scope": "offline_config_only",
+      "runtime_observation": "recorded_root_only_compatibility"
+    }
+  },
+  "stack_policy": {
+    "compose_format": "yaml",
+    "service_name": "gateway",
+    "internal_network": true,
+    "named_volume": true,
+    "container_name": false,
+    "network_mode_host": false,
+    "published_ports": false,
+    "host_profile_bind": false,
+    "preserve_image_entrypoint": true,
+    "explicit_uid_gid": true,
+    "restart": "no",
+    "cpu_limit": "0.50",
+    "memory_limit": "512m",
+    "pid_limit": 256,
+    "tmpfs": [
+      "tmpfs_tmp_64m",
+      "tmpfs_run_16m"
+    ],
+    "shm_size": "64m",
+    "log_max_size": "1m",
+    "log_max_files": 2,
+    "cap_drop": [
+      "ALL"
+    ],
+    "no_new_privileges": true,
+    "host_environment": false,
+    "provider_auto_discovery": false,
+    "api_default": "disabled",
+    "pty_public": false,
+    "dashboard_public": false,
+    "teardown": "project_volumes_orphans_only"
+  },
+  "lanes": [
+    {
+      "id": "no-provider",
+      "provider": "none",
+      "dashboard": "disabled",
+      "api": "disabled",
+      "pty": "disabled",
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "scope": "smoke"
+    },
+    {
+      "id": "browser",
+      "provider": "none",
+      "dashboard": "internal_disposable_basic_auth",
+      "api": "disabled",
+      "pty": "disabled",
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "scope": "render_only"
+    },
+    {
+      "id": "model",
+      "provider": "synthetic-local",
+      "dashboard": "disabled",
+      "api": "disabled",
+      "pty": "disabled",
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "scope": "render_only"
+    }
+  ],
+  "cases": [
+    {
+      "id": "render-podman-no-provider",
+      "kind": "positive",
+      "input": {
+        "action": "render",
+        "stack_id": "smoke",
+        "instance": "one",
+        "other_instance": null,
+        "lane": "no-provider",
+        "executor": "podman",
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "allow",
+        "reason": "rendered_safe_stack",
+        "project_unique": true,
+        "network_internal": true,
+        "volume_named": true,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": true,
+        "logs_bounded": true,
+        "live_claim": false
+      },
+      "notes": "The preferred rootless smoke lane renders a no-provider stack without host exposure."
+    },
+    {
+      "id": "render-docker-no-provider",
+      "kind": "compatibility",
+      "input": {
+        "action": "render",
+        "stack_id": "docker",
+        "instance": "config",
+        "other_instance": null,
+        "lane": "no-provider",
+        "executor": "docker",
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "allow",
+        "reason": "rendered_safe_stack",
+        "project_unique": true,
+        "network_internal": true,
+        "volume_named": true,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": true,
+        "logs_bounded": true,
+        "live_claim": false
+      },
+      "notes": "Docker renderer/config is offline-only; the separately recorded root-only compatibility observation is not a second readiness or release-proof stack."
+    },
+    {
+      "id": "render-browser-disposable",
+      "kind": "security",
+      "input": {
+        "action": "render",
+        "stack_id": "browser",
+        "instance": "internal",
+        "other_instance": null,
+        "lane": "browser",
+        "executor": "podman",
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "allow",
+        "reason": "rendered_safe_stack",
+        "project_unique": true,
+        "network_internal": true,
+        "volume_named": true,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": true,
+        "logs_bounded": true,
+        "live_claim": false
+      },
+      "notes": "Browser values are deterministic disposable render-only values and never become evidence."
+    },
+    {
+      "id": "render-model-synthetic",
+      "kind": "security",
+      "input": {
+        "action": "render",
+        "stack_id": "model",
+        "instance": "local",
+        "other_instance": null,
+        "lane": "model",
+        "executor": "podman",
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "allow",
+        "reason": "rendered_safe_stack",
+        "project_unique": true,
+        "network_internal": true,
+        "volume_named": true,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": true,
+        "logs_bounded": true,
+        "live_claim": false
+      },
+      "notes": "Model policy is synthetic-local with provider auto-discovery disabled and no live turn."
+    },
+    {
+      "id": "unique-project-and-volume",
+      "kind": "security",
+      "input": {
+        "action": "unique",
+        "stack_id": "parallel",
+        "instance": "first",
+        "other_instance": "second",
+        "lane": null,
+        "executor": null,
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "allow",
+        "reason": "unique_generated_names",
+        "project_unique": true,
+        "network_internal": true,
+        "volume_named": true,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": true,
+        "logs_bounded": true,
+        "live_claim": false
+      },
+      "notes": "Distinct instances cannot share generated project, network, or volume names."
+    },
+    {
+      "id": "reject-stack-path-traversal",
+      "kind": "security",
+      "input": {
+        "action": "render",
+        "stack_id": "..-escape",
+        "instance": "one",
+        "other_instance": null,
+        "lane": "no-provider",
+        "executor": "podman",
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "deny",
+        "reason": "unsafe_stack_id",
+        "project_unique": false,
+        "network_internal": false,
+        "volume_named": false,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": false,
+        "logs_bounded": false,
+        "live_claim": false
+      },
+      "notes": "Path traversal never reaches project or volume rendering."
+    },
+    {
+      "id": "reject-stack-uppercase",
+      "kind": "security",
+      "input": {
+        "action": "render",
+        "stack_id": "Unsafe",
+        "instance": "one",
+        "other_instance": null,
+        "lane": "no-provider",
+        "executor": "podman",
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "deny",
+        "reason": "unsafe_stack_id",
+        "project_unique": false,
+        "network_internal": false,
+        "volume_named": false,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": false,
+        "logs_bounded": false,
+        "live_claim": false
+      },
+      "notes": "Stack identifiers use a lowercase bounded grammar."
+    },
+    {
+      "id": "reject-instance-path-traversal",
+      "kind": "security",
+      "input": {
+        "action": "render",
+        "stack_id": "safe",
+        "instance": "..-escape",
+        "other_instance": null,
+        "lane": "no-provider",
+        "executor": "podman",
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "deny",
+        "reason": "unsafe_instance",
+        "project_unique": false,
+        "network_internal": false,
+        "volume_named": false,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": false,
+        "logs_bounded": false,
+        "live_claim": false
+      },
+      "notes": "Instance identifiers cannot escape the generated naming domain."
+    },
+    {
+      "id": "reject-unknown-lane",
+      "kind": "security",
+      "input": {
+        "action": "render",
+        "stack_id": "safe",
+        "instance": "lane",
+        "other_instance": null,
+        "lane": "provider-auto",
+        "executor": "podman",
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "deny",
+        "reason": "unknown_lane",
+        "project_unique": false,
+        "network_internal": false,
+        "volume_named": false,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": false,
+        "logs_bounded": false,
+        "live_claim": false
+      },
+      "notes": "Provider auto-discovery is not an accepted lane."
+    },
+    {
+      "id": "reject-unknown-executor",
+      "kind": "compatibility",
+      "input": {
+        "action": "render",
+        "stack_id": "safe",
+        "instance": "executor",
+        "other_instance": null,
+        "lane": "no-provider",
+        "executor": "unknown",
+        "teardown_target": null
+      },
+      "expected": {
+        "decision": "deny",
+        "reason": "unknown_executor",
+        "project_unique": false,
+        "network_internal": false,
+        "volume_named": false,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": false,
+        "logs_bounded": false,
+        "live_claim": false
+      },
+      "notes": "The caller must choose rootless Podman or the controlled Docker config lane."
+    },
+    {
+      "id": "reject-unrecognized-teardown",
+      "kind": "security",
+      "input": {
+        "action": "teardown",
+        "stack_id": null,
+        "instance": null,
+        "other_instance": null,
+        "lane": null,
+        "executor": null,
+        "teardown_target": "hermes-disposable-untrusted"
+      },
+      "expected": {
+        "decision": "deny",
+        "reason": "unrecognized_teardown",
+        "project_unique": false,
+        "network_internal": false,
+        "volume_named": false,
+        "ports_published": false,
+        "host_profile_bind": false,
+        "entrypoint_override": false,
+        "resource_caps": false,
+        "logs_bounded": false,
+        "live_claim": false
+      },
+      "notes": "Teardown refuses any project not generated by the current harness invocation."
+    }
+  ]
+}
