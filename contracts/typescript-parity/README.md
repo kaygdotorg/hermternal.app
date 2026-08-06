@@ -19,20 +19,30 @@ The offline runner checks representative semantic outcomes for:
 - matching and missing deployment attestation, plus the aggregate compatibility
   record's blocked status.
 
-The registry remains authoritative for readiness. A `pending` row is reported as
-`blocked`; it is never promoted to a successful parity result. The report uses
-semantic outcomes rather than platform-specific wire bytes, and it returns a
-bounded JSON object suitable for CI logs. The CLI accepts only an optional
-`--repo-root <path>` pair; unknown options, positional values, and duplicate
-roots return bounded JSON errors instead of guessing.
+The registry remains authoritative for readiness. A `pending`, `empty`,
+`failure`, `cancelled`, or `unknown` row is reported as `blocked`; it is never
+promoted to a successful parity result. Pending roots must use `validator: null`
+and `files: []`. The report uses semantic outcomes rather than platform-specific
+wire bytes, and it returns a bounded JSON object suitable for CI logs. The CLI
+accepts only an optional `--repo-root <path>` pair; unknown options, positional
+values, and duplicate roots return bounded JSON errors instead of guessing.
+
+Before representatives run, the checker validates the complete registry
+inventory. Every ready root must have the exact sorted file manifest, every
+registered digest and byte size must verify, and every non-metadata file under
+`contracts/fixtures` must be indexed. An unindexed artifact blocks parity before
+any representative can claim evidence.
 
 ## Input and output safety
 
-Every input is read through a regular-file handle after a pre-read size check.
-The registry and each registered artifact are capped at 256 KiB; the artifact
-must also match the registry's exact `size_bytes` and lowercase SHA-256 digest
-before it is decoded or semantically inspected. Symlinks, directories, changed
-file sizes, stale manifests, and digest mismatches fail closed.
+Every artifact is opened descriptor-first with `O_NONBLOCK | O_NOFOLLOW`, then
+checked as a regular file. Descriptor and pathname device/inode/size identities
+are compared before and after the bounded read; a read has a fixed completion
+deadline so a FIFO replacement cannot hang the CLI. The registry and each
+registered artifact are capped at 256 KiB; the artifact must also match the
+registry's exact `size_bytes` and lowercase SHA-256 digest before it is decoded
+or semantically inspected. Symlinks, directories, special files, changed file
+identities or sizes, stale manifests, and digest mismatches fail closed.
 
 The JSON reader is a bounded parser rather than `JSON.parse`. It rejects
 duplicate object keys and enforces limits on depth, nodes, array items, object
@@ -82,7 +92,10 @@ bun run compile
 bun run parity
 ```
 
-`bun run parity` prints one JSON result. In the current checked-in registry it
-reports 11 proven representative cases and blocked coverage for
-`chat-stream-and-completion`, `connection-restoration`, and the other registry
-pending rows. No network access is part of any command above.
+`bun run parity` prints one JSON result when the registry inventory is complete.
+The current worktree intentionally fails closed with bounded
+`fixture_inventory_invalid` output because the unchanged aggregate registry has
+unindexed `deployment-security/external-allowlist` artifacts. The test suite
+also runs the same CLI against a complete temporary registry tree and proves 11
+ready representative cases, blocked coverage, and zero network calls. No
+network access is part of any command above.

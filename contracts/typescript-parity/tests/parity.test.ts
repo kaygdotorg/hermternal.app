@@ -33,7 +33,9 @@ async function writeRawRegistry(contents: string): Promise<string> {
   return temporaryRoot;
 }
 
-function runCli(...args: string[]): { exitCode: number; stdout: string; stderr: string } {
+type CliResult = { exitCode: number; stdout: string; stderr: string };
+
+function runCli(...args: string[]): CliResult {
   const completed = Bun.spawnSync(
     ["bun", join(repoRoot, "contracts/typescript-parity/src/cli.ts"), ...args],
     {
@@ -49,34 +51,77 @@ function runCli(...args: string[]): { exitCode: number; stdout: string; stderr: 
   };
 }
 
-const PARITY_ARTIFACTS = [
-  "deployment-security/browser-auth/cases.json",
-  "connection-restoration/cases.json",
-  "session-persistence/cases.json",
-  "image-attachment-lifecycle/cases.json",
-  "pty-contract/pty-contract-fixtures.json",
-  "deep-link-grammar/cases.json",
-  "compatibility-attestation/cases.json",
-  "source-audit/compatibility-gate/compatibility_record.json",
-] as const;
+async function runCliWithTimeout(...args: string[]): Promise<CliResult & { timedOut: boolean }> {
+  const child = Bun.spawn(
+    ["bun", join(repoRoot, "contracts/typescript-parity/src/cli.ts"), ...args],
+    {
+      cwd: join(repoRoot, "contracts/typescript-parity"),
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const completed = await Promise.race([
+    child.exited.then((exitCode) => ({ exitCode, timedOut: false as const })),
+    new Promise<{ exitCode: number; timedOut: true }>((resolve) => {
+      timer = setTimeout(() => {
+        child.kill();
+        resolve({ exitCode: -1, timedOut: true });
+      }, 1_500);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (completed.timedOut) {
+    await Promise.race([child.exited, new Promise((resolve) => setTimeout(resolve, 100))]);
+    return { exitCode: completed.exitCode, stdout: "", stderr: "", timedOut: true };
+  }
+  return {
+    exitCode: completed.exitCode,
+    stdout: await new Response(child.stdout).text(),
+    stderr: await new Response(child.stderr).text(),
+    timedOut: false,
+  };
+}
 
 async function writeParityFixtureTree(): Promise<string> {
   const temporaryRoot = join("/tmp", `hermternal-c20-${crypto.randomUUID()}`);
   const fixturesDirectory = join(temporaryRoot, "contracts/fixtures");
   await mkdir(fixturesDirectory, { recursive: true });
+  const registry = await Bun.file(join(repoRoot, "contracts/fixtures/index.json")).json() as {
+    fixture_roots: Array<{ files: Array<{ path: string }> }>;
+  };
   await Bun.write(
     join(fixturesDirectory, "index.json"),
     await Bun.file(join(repoRoot, "contracts/fixtures/index.json")).arrayBuffer(),
   );
-  for (const artifact of PARITY_ARTIFACTS) {
-    const destination = join(fixturesDirectory, artifact);
-    await mkdir(dirname(destination), { recursive: true });
-    await Bun.write(
-      destination,
-      await Bun.file(join(repoRoot, "contracts/fixtures", artifact)).arrayBuffer(),
-    );
+  for (const root of registry.fixture_roots) {
+    for (const file of root.files) {
+      const destination = join(fixturesDirectory, file.path);
+      await mkdir(dirname(destination), { recursive: true });
+      await Bun.write(
+        destination,
+        await Bun.file(join(repoRoot, "contracts/fixtures", file.path)).arrayBuffer(),
+      );
+    }
   }
   return temporaryRoot;
+}
+
+async function mutateParityRegistry(
+  temporaryRoot: string,
+  mutate: (registry: Record<string, unknown>) => void,
+): Promise<void> {
+  const indexPath = join(temporaryRoot, "contracts/fixtures/index.json");
+  const registry = await Bun.file(indexPath).json() as Record<string, unknown>;
+  mutate(registry);
+  await Bun.write(indexPath, `${JSON.stringify(registry)}\n`);
+}
+
+function createFifo(path: string): void {
+  const result = Bun.spawnSync(["mkfifo", path], { stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) {
+    throw new Error(`mkfifo failed with exit code ${result.exitCode}`);
+  }
 }
 
 function cliError(result: { stderr: string }): { code: string; message: string } {
@@ -110,22 +155,27 @@ async function refreshManifest(root: string, artifact: string): Promise<void> {
 
 describe("C-20 TypeScript contract parity", () => {
   it("proves shared semantic outcomes for representative contract families offline", async () => {
-    const report = await runParity(repoRoot);
-    expect(report.ok).toBe(true);
-    expect(report.contract).toBe("dashboard-v0.0.1");
-    expect(report.hermesSourceSha).toBe("f5be9236e00ddf2f2a412697f267078fc4ee068e");
-    expect(report.syntheticOnly).toBe(true);
-    expect(report.liveClaim).toBe(false);
-    expect(report.networkCalls).toBe(0);
-    expect(report.readyCaseCount).toBeGreaterThanOrEqual(11);
-    expect(report.blockedCoverageIds).toContain("chat-stream-and-completion");
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const report = await runParity(temporaryRoot);
+      expect(report.ok).toBe(true);
+      expect(report.contract).toBe("dashboard-v0.0.1");
+      expect(report.hermesSourceSha).toBe("f5be9236e00ddf2f2a412697f267078fc4ee068e");
+      expect(report.syntheticOnly).toBe(true);
+      expect(report.liveClaim).toBe(false);
+      expect(report.networkCalls).toBe(0);
+      expect(report.readyCaseCount).toBeGreaterThanOrEqual(11);
+      expect(report.blockedCoverageIds).toContain("chat-stream-and-completion");
 
-    const families = new Set(report.cases.map((entry) => entry.family));
-    expect(families).toEqual(new Set(["auth", "connection", "session", "chat", "image", "pty", "deep-link", "compatibility"]));
-    expect(report.cases.filter((entry) => entry.family === "chat").every((entry) => entry.status === "blocked")).toBe(true);
-    expect(report.cases.filter((entry) => entry.family === "pty").every((entry) => entry.appleDecision === "blocked_platform")).toBe(true);
-    expect(report.compatibility.compatible).toBe(false);
-    expect(report.compatibility.liveRun).toBe(false);
+      const families = new Set(report.cases.map((entry) => entry.family));
+      expect(families).toEqual(new Set(["auth", "connection", "session", "chat", "image", "pty", "deep-link", "compatibility"]));
+      expect(report.cases.filter((entry) => entry.family === "chat").every((entry) => entry.status === "blocked")).toBe(true);
+      expect(report.cases.filter((entry) => entry.family === "pty").every((entry) => entry.appleDecision === "blocked_platform")).toBe(true);
+      expect(report.compatibility.compatible).toBe(false);
+      expect(report.compatibility.liveRun).toBe(false);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   });
 
   it("rejects unknown fixture and case selectors instead of guessing", async () => {
@@ -168,19 +218,88 @@ describe("C-20 TypeScript contract parity", () => {
   });
 
   it("keeps pending evidence blocked and does not promote a pending chat row", async () => {
-    const registry = await loadRegistry(repoRoot);
-    const chat = registry.coverage.find((entry) => entry.id === "chat-stream-and-completion");
-    expect(chat?.status).toBe("pending");
-    const report = await runParity(repoRoot);
-    const chatResults = report.cases.filter((entry) => entry.family === "chat");
-    expect(chatResults.length).toBe(2);
-    expect(chatResults.every((entry) => entry.status === "blocked")).toBe(true);
-    expect(chatResults.every((entry) => entry.webDecision === undefined && entry.appleDecision === undefined)).toBe(true);
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const registry = await loadRegistry(temporaryRoot);
+      const chat = registry.coverage.find((entry) => entry.id === "chat-stream-and-completion");
+      expect(chat?.status).toBe("pending");
+      const report = await runParity(temporaryRoot);
+      const chatResults = report.cases.filter((entry) => entry.family === "chat");
+      expect(chatResults.length).toBe(2);
+      expect(chatResults.every((entry) => entry.status === "blocked")).toBe(true);
+      expect(chatResults.every((entry) => entry.webDecision === undefined && entry.appleDecision === undefined)).toBe(true);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   });
 
   it("has no network-capable calls in the parity implementation", async () => {
     const source = await Bun.file(resolve(import.meta.dir, "../src/parity.ts")).text();
     expect(() => assertNoNetworkImports(source)).not.toThrow();
+  });
+
+  it("treats authoritative non-success coverage states as bounded blocked evidence", async () => {
+    for (const status of ["empty", "failure", "cancelled", "unknown"] as const) {
+      const temporaryRoot = await writeParityFixtureTree();
+      try {
+        await mutateParityRegistry(temporaryRoot, (registry) => {
+          const coverage = registry.coverage as Array<Record<string, unknown>>;
+          const row = coverage.find((entry) => entry.id === "image-attachment-lifecycle");
+          if (!row) throw new Error("image coverage row is missing");
+          row.status = status;
+        });
+        const report = await runParity(temporaryRoot);
+        const imageResults = report.cases.filter((entry) => entry.family === "image");
+        expect(report.blockedCoverageIds).toContain("image-attachment-lifecycle");
+        expect(imageResults.length).toBe(3);
+        expect(imageResults.every((entry) => entry.status === "blocked")).toBe(true);
+        expect(imageResults.every((entry) => entry.webDecision === undefined && entry.appleDecision === undefined)).toBe(true);
+      } finally {
+        await rm(temporaryRoot, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("supports pending roots without validator or artifact claims", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const pendingRoot = join(temporaryRoot, "contracts/fixtures/provider-discovery");
+      await rm(pendingRoot, { recursive: true, force: true });
+      await mutateParityRegistry(temporaryRoot, (registry) => {
+        const roots = registry.fixture_roots as Array<Record<string, unknown>>;
+        const root = roots.find((entry) => entry.id === "provider-discovery");
+        if (!root) throw new Error("provider-discovery root is missing");
+        root.status = "pending";
+        root.validator = null;
+        root.files = [];
+        const coverage = registry.coverage as Array<Record<string, unknown>>;
+        const row = coverage.find((entry) => entry.id === "provider-discovery");
+        if (!row) throw new Error("provider-discovery coverage row is missing");
+        row.status = "pending";
+      });
+      const report = await runParity(temporaryRoot);
+      expect(report.blockedCoverageIds).toContain("provider-discovery");
+      expect(report.readyCaseCount).toBe(11);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a deterministic FIFO replacement without hanging the CLI", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const replacement = join(temporaryRoot, "contracts/fixtures/deployment-security/browser-auth/cases.json");
+      await rm(replacement, { force: true });
+      createFifo(replacement);
+      const result = await runCliWithTimeout("--repo-root", temporaryRoot);
+      expect(result.timedOut).toBe(false);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(cliError(result).code).toBe("unsafe_artifact");
+      expect(result.stderr.length).toBeLessThan(1_024);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   });
 
   it("returns bounded JSON errors for unknown or positional CLI input", () => {
@@ -201,15 +320,38 @@ describe("C-20 TypeScript contract parity", () => {
     });
   });
 
-  it("executes the normal CLI through Bun with bounded JSON output", () => {
-    const result = runCli("--repo-root", repoRoot);
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    const report = JSON.parse(result.stdout) as { ok: boolean; readyCaseCount: number; cases: unknown[] };
-    expect(report.ok).toBe(true);
-    expect(report.readyCaseCount).toBe(11);
-    expect(report.cases.length).toBe(17);
-    expect(result.stdout.length).toBeLessThan(16_384);
+  it("executes the normal Bun CLI on a complete inventory and blocks an incomplete one", async () => {
+    const completeRoot = await writeParityFixtureTree();
+    try {
+      const result = runCli("--repo-root", completeRoot);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      const report = JSON.parse(result.stdout) as { ok: boolean; readyCaseCount: number; cases: unknown[] };
+      expect(report.ok).toBe(true);
+      expect(report.readyCaseCount).toBe(11);
+      expect(report.cases.length).toBe(17);
+      expect(result.stdout.length).toBeLessThan(16_384);
+    } finally {
+      await rm(completeRoot, { recursive: true, force: true });
+    }
+
+    const unindexedRoot = await writeParityFixtureTree();
+    try {
+      await Bun.write(join(unindexedRoot, "contracts/fixtures/pty-contract/unindexed.txt"), "not registered\n");
+      const unindexed = runCli("--repo-root", unindexedRoot);
+      expect(unindexed.exitCode).not.toBe(0);
+      expect(unindexed.stdout).toBe("");
+      expect(cliError(unindexed).code).toBe("fixture_inventory_invalid");
+      expect(unindexed.stderr.length).toBeLessThan(1_024);
+    } finally {
+      await rm(unindexedRoot, { recursive: true, force: true });
+    }
+
+    const incomplete = runCli("--repo-root", repoRoot);
+    expect(incomplete.exitCode).not.toBe(0);
+    expect(incomplete.stdout).toBe("");
+    expect(cliError(incomplete).code).toBe("fixture_inventory_invalid");
+    expect(incomplete.stderr.length).toBeLessThan(1_024);
   });
 
   it("rejects malformed, duplicate-key, deep, oversized, and unknown-field CLI input", async () => {

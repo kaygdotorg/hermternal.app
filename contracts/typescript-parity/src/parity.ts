@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, open, type FileHandle } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open, opendir, type FileHandle } from "node:fs/promises";
 import { resolve, normalize, isAbsolute, join } from "node:path";
 
 export const HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e";
@@ -22,7 +23,21 @@ const MAX_JSON_STRING_LENGTH = 1_024;
 const MAX_OUTPUT_STRING_LENGTH = 256;
 const MAX_OUTPUT_CASES = 64;
 const MAX_OUTPUT_COVERAGE_IDS = 64;
+const MAX_REGISTRY_FILES = 512;
+const MAX_TOTAL_ARTIFACT_BYTES = 8 * 1024 * 1024;
+const MAX_READ_DURATION_MS = 1_000;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const READ_FLAGS =
+  fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW;
+const FIXTURE_METADATA_FILES = new Set(["README.md", "index.json", "schema.json"]);
+const FIXTURE_VALIDATOR_DIRECTORY = "validator";
+const NON_SUCCESS_COVERAGE_STATUSES = [
+  "pending",
+  "empty",
+  "failure",
+  "cancelled",
+  "unknown",
+] as const;
 
 export const PLATFORMS = ["web", "ios", "ipados", "macos"] as const;
 export type Platform = (typeof PLATFORMS)[number];
@@ -56,10 +71,13 @@ interface RegistryFile {
   readonly sizeBytes: number;
 }
 
+type FixtureRootStatus = "ready" | "pending";
+type CoverageStatus = "ready" | (typeof NON_SUCCESS_COVERAGE_STATUSES)[number];
+
 interface FixtureRoot {
   readonly id: string;
   readonly path: string;
-  readonly status: "ready" | "pending";
+  readonly status: FixtureRootStatus;
   readonly contract: string;
   readonly hermesSourceSha: string;
   readonly syntheticOnly: true;
@@ -67,13 +85,13 @@ interface FixtureRoot {
   readonly platforms: readonly Platform[];
   readonly states: readonly string[];
   readonly coverageIds: readonly string[];
-  readonly validator: string;
+  readonly validator: string | null;
   readonly files: readonly RegistryFile[];
 }
 
 interface CoverageRow {
   readonly id: string;
-  readonly status: "ready" | "pending";
+  readonly status: CoverageStatus;
   readonly fixtureIds: readonly string[];
   readonly platforms: readonly Platform[];
   readonly requiredStates: readonly string[];
@@ -614,55 +632,116 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-// Check both the path and the opened handle. This closes the common replacement
-// race without allocating or hashing bytes from an oversized or unregistered file.
+interface FileIdentity {
+  readonly dev: number;
+  readonly ino: number;
+  readonly size: number;
+}
+
+function fileIdentity(stats: { dev: number; ino: number; size: number }): FileIdentity {
+  return { dev: stats.dev, ino: stats.ino, size: stats.size };
+}
+
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size;
+}
+
+async function readWithDeadline(
+  handle: FileHandle,
+  bytes: Uint8Array,
+  offset: number,
+  length: number,
+  position: number,
+  timeoutMs: number,
+  label: string,
+): Promise<{ bytesRead: number }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      handle.read(bytes, offset, length, position),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new ContractInputError("artifact_read_timeout", `${label} did not finish reading`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Open the descriptor before trusting any pathname metadata. O_NONBLOCK prevents a
+// FIFO replacement from waiting for a writer, O_NOFOLLOW blocks symlink traversal,
+// and descriptor/path identity checks reject swaps before bytes become evidence.
 async function readBoundedBytes(path: string, label: string, registered?: RegistryFile): Promise<Uint8Array> {
   let handle: FileHandle | undefined;
   try {
+    try {
+      handle = await open(path, READ_FLAGS);
+    } catch {
+      fail("artifact_read_failed", `${label} could not be opened`);
+    }
+
+    const descriptorStatsRaw = await handle.stat();
+    if (!descriptorStatsRaw.isFile()) {
+      fail("unsafe_artifact", `${label} is not a regular file`);
+    }
+    const descriptorStats = fileIdentity(descriptorStatsRaw);
+    if (!Number.isSafeInteger(descriptorStats.size) || descriptorStats.size < 0) {
+      fail("artifact_read_failed", `${label} has an unsafe descriptor size`);
+    }
+    if (registered && descriptorStats.size !== registered.sizeBytes) {
+      fail("artifact_size_mismatch", `${label} does not match its registered byte size`);
+    }
+    if (descriptorStats.size > MAX_JSON_BYTES) {
+      fail("json_too_large", `${label} exceeds the bounded artifact size`);
+    }
+
     let pathStats;
     try {
       pathStats = await lstat(path);
     } catch {
-      fail("missing_artifact", `${label} is not checked in`);
+      fail("artifact_changed", `${label} disappeared while it was being opened`);
     }
-    if (!pathStats.isFile()) {
-      fail("unsafe_artifact", `${label} is not a regular file`);
-    }
-    if (registered && pathStats.size !== registered.sizeBytes) {
-      fail("artifact_size_mismatch", `${label} does not match its registered byte size`);
-    }
-    if (pathStats.size > MAX_JSON_BYTES) {
-      fail("json_too_large", `${label} exceeds the bounded artifact size`);
+    if (!pathStats.isFile() || !sameFileIdentity(descriptorStats, fileIdentity(pathStats))) {
+      fail("artifact_changed", `${label} changed while it was being opened`);
     }
 
-    try {
-      handle = await open(path, "r");
-    } catch {
-      fail("artifact_read_failed", `${label} could not be opened`);
-    }
-    const stats = await handle.stat();
-    if (!stats.isFile()) {
-      fail("unsafe_artifact", `${label} is not a regular file`);
-    }
-    if (registered && stats.size !== registered.sizeBytes) {
-      fail("artifact_size_mismatch", `${label} does not match its registered byte size`);
-    }
-    if (stats.size > MAX_JSON_BYTES) {
-      fail("json_too_large", `${label} exceeds the bounded artifact size`);
-    }
-
-    const bytes = new Uint8Array(stats.size);
+    const bytes = new Uint8Array(descriptorStats.size);
     let offset = 0;
+    const deadline = Date.now() + MAX_READ_DURATION_MS;
     while (offset < bytes.length) {
-      const result = await handle.read(bytes, offset, bytes.length - offset, offset);
+      const timeoutMs = deadline - Date.now();
+      if (timeoutMs <= 0) {
+        fail("artifact_read_timeout", `${label} did not finish reading`);
+      }
+      const result = await readWithDeadline(
+        handle,
+        bytes,
+        offset,
+        bytes.length - offset,
+        offset,
+        timeoutMs,
+        label,
+      );
       if (result.bytesRead === 0) {
         fail("artifact_changed", `${label} ended before its declared byte size`);
       }
       offset += result.bytesRead;
     }
-    const finalStats = await handle.stat();
-    if (finalStats.size !== stats.size) {
+
+    const finalStats = fileIdentity(await handle.stat());
+    if (!sameFileIdentity(descriptorStats, finalStats)) {
       fail("artifact_changed", `${label} changed while it was being read`);
+    }
+    let finalPathStats;
+    try {
+      finalPathStats = await lstat(path);
+    } catch {
+      fail("artifact_changed", `${label} disappeared after it was read`);
+    }
+    if (!finalPathStats.isFile() || !sameFileIdentity(finalStats, fileIdentity(finalPathStats))) {
+      fail("artifact_changed", `${label} changed after it was read`);
     }
     if (registered && sha256(bytes) !== registered.sha256) {
       fail("artifact_hash_mismatch", `${label} does not match its registered SHA-256`);
@@ -716,6 +795,15 @@ function parseFixtureRoot(value: JsonValue | undefined, index: number): FixtureR
   if (new Set(files.map((file) => file.path)).size !== files.length) {
     fail("malformed_input", `fixture_roots[${index}].files contains a duplicate path`);
   }
+  const validator = entry.validator === null
+    ? null
+    : string(entry.validator, `fixture_roots[${index}].validator`);
+  if (status === "pending" && (validator !== null || files.length !== 0)) {
+    fail("fixture_inventory_invalid", "pending fixture roots must not claim artifacts");
+  }
+  if (status === "ready" && (validator === null || files.length === 0)) {
+    fail("fixture_inventory_invalid", "ready fixture roots must list artifacts and a validator");
+  }
   return {
     id: string(entry.id, `fixture_roots[${index}].id`),
     path: safeRelativePath(string(entry.path, `fixture_roots[${index}].path`), `fixture_roots[${index}].path`),
@@ -727,7 +815,7 @@ function parseFixtureRoot(value: JsonValue | undefined, index: number): FixtureR
     platforms: platforms(entry.platforms, `fixture_roots[${index}].platforms`),
     states: strings(entry.states, `fixture_roots[${index}].states`),
     coverageIds: strings(entry.coverage_ids, `fixture_roots[${index}].coverage_ids`),
-    validator: string(entry.validator, `fixture_roots[${index}].validator`),
+    validator,
     files,
   };
 }
@@ -735,12 +823,12 @@ function parseFixtureRoot(value: JsonValue | undefined, index: number): FixtureR
 function parseCoverage(value: JsonValue | undefined, index: number): CoverageRow {
   const entry = exactRecord(value, `coverage[${index}]`, COVERAGE_KEYS);
   const status = string(entry.status, `coverage[${index}].status`);
-  if (status !== "ready" && status !== "pending") {
+  if (status !== "ready" && !NON_SUCCESS_COVERAGE_STATUSES.includes(status as (typeof NON_SUCCESS_COVERAGE_STATUSES)[number])) {
     fail("unknown_status", `coverage[${index}].status is unknown`);
   }
   return {
     id: string(entry.id, `coverage[${index}].id`),
-    status,
+    status: status as CoverageStatus,
     fixtureIds: strings(entry.fixture_ids, `coverage[${index}].fixture_ids`),
     platforms: platforms(entry.platforms, `coverage[${index}].platforms`),
     requiredStates: strings(entry.required_states, `coverage[${index}].required_states`),
@@ -796,15 +884,148 @@ export async function loadRegistry(repoRoot: string): Promise<FixtureRegistry> {
   }
   const rootIds = new Set(fixtureRoots.map((entry) => entry.id));
   for (const entry of coverage) {
-    if (entry.status === "ready" && entry.fixtureIds.some((id) => !rootIds.has(id))) {
-      fail("unknown_fixture", "ready coverage references an unknown fixture root");
+    if (entry.fixtureIds.some((id) => !rootIds.has(id))) {
+      fail("unknown_fixture", "coverage references an unknown fixture root");
+    }
+    if (entry.status === "ready" && entry.fixtureIds.some((id) => fixtureRoots.find((rootEntry) => rootEntry.id === id)?.status !== "ready")) {
+      fail("fixture_inventory_invalid", "ready coverage references a pending fixture root");
     }
   }
   const parity = parseParity(raw.parity);
   if (parity.liveClaim !== false || parity.fixtureSource !== "one_shared_registry") {
     fail("incompatible_input", "parity policy is not the shared synthetic policy");
   }
+  const coverageIds = new Set(coverage.map((entry) => entry.id));
+  for (const rootEntry of fixtureRoots) {
+    if (rootEntry.coverageIds.some((id) => !coverageIds.has(id))) {
+      fail("fixture_inventory_invalid", "fixture root references an unknown coverage row");
+    }
+  }
+  const referencedRootIds = new Set<string>();
+  for (const coverageEntry of coverage) {
+    for (const fixtureId of coverageEntry.fixtureIds) {
+      if (!rootIds.has(fixtureId)) {
+        fail("unknown_fixture", "coverage references an unknown fixture root");
+      }
+      referencedRootIds.add(fixtureId);
+    }
+  }
+  if ([...rootIds].some((id) => !referencedRootIds.has(id))) {
+    fail("fixture_inventory_invalid", "every fixture root must be connected to coverage");
+  }
   return { fixtureRoots, coverage, parity };
+}
+
+interface FixtureWalkOptions {
+  readonly skipMetadata: boolean;
+}
+
+async function walkFixtureFiles(
+  directoryPath: string,
+  relativeDirectory: string,
+  output: string[],
+  options: FixtureWalkOptions,
+): Promise<void> {
+  let directory;
+  try {
+    directory = await opendir(directoryPath);
+  } catch {
+    fail("fixture_inventory_invalid", "fixture inventory directory could not be opened");
+  }
+  try {
+    for await (const entry of directory) {
+      if (entry.name === ".DS_Store" || entry.name === "__pycache__") continue;
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      if (entry.isSymbolicLink()) {
+        fail("unsafe_artifact", "fixture inventory contains a symbolic link");
+      }
+      if (entry.isDirectory()) {
+        if (options.skipMetadata && relativeDirectory === "" && entry.name === FIXTURE_VALIDATOR_DIRECTORY) {
+          continue;
+        }
+        await walkFixtureFiles(join(directoryPath, entry.name), relativePath, output, options);
+        continue;
+      }
+      if (!entry.isFile()) {
+        // Keep the path in the inventory so a registered FIFO/device reaches the
+        // descriptor-first reader, while an unregistered special file remains an
+        // inventory mismatch. The reader itself performs the regular-file check.
+        output.push(relativePath);
+        if (output.length > MAX_REGISTRY_FILES) {
+          fail("fixture_inventory_invalid", "fixture inventory exceeds the bounded file count");
+        }
+        continue;
+      }
+      if (entry.name.endsWith(".pyc")) continue;
+      if (options.skipMetadata && relativeDirectory === "" && FIXTURE_METADATA_FILES.has(entry.name)) {
+        continue;
+      }
+      output.push(relativePath);
+      if (output.length > MAX_REGISTRY_FILES) {
+        fail("fixture_inventory_invalid", "fixture inventory exceeds the bounded file count");
+      }
+    }
+  } catch (error) {
+    if (error instanceof ContractInputError) throw error;
+    fail("fixture_inventory_invalid", "fixture inventory could not be enumerated");
+  }
+}
+
+function sameStringList(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+// The Python aggregate validator treats the registry as an inventory, not merely a
+// source for the eight representatives. Recheck every ready root, every digest, and
+// every non-metadata file before any semantic representative can claim parity.
+async function validateRegistryInventory(repoRoot: string, registry: FixtureRegistry): Promise<void> {
+  const fixturesRoot = join(resolve(repoRoot), "contracts/fixtures");
+  const ownedFiles = new Set<string>();
+  let totalBytes = 0;
+
+  for (const root of registry.fixtureRoots) {
+    if (root.status === "pending") {
+      if (root.validator !== null || root.files.length !== 0) {
+        fail("fixture_inventory_invalid", "pending fixture roots must not claim artifacts");
+      }
+      continue;
+    }
+
+    const actualFiles: string[] = [];
+    await walkFixtureFiles(join(fixturesRoot, root.path), root.path, actualFiles, { skipMetadata: false });
+    actualFiles.sort();
+    const listedFiles = root.files.map((file) => file.path);
+    if (!sameStringList(listedFiles, [...listedFiles].sort()) || !sameStringList(actualFiles, listedFiles)) {
+      fail("fixture_inventory_invalid", "fixture file manifest is incomplete or stale");
+    }
+    const validatorPath = `${root.path}/${root.validator}`;
+    if (!root.files.some((file) => file.path === validatorPath)) {
+      fail("fixture_inventory_invalid", "fixture validator is not listed by the registry");
+    }
+
+    for (const file of root.files) {
+      if (!file.path.startsWith(`${root.path}/`)) {
+        fail("fixture_inventory_invalid", "fixture artifact escapes its registered root");
+      }
+      if (ownedFiles.has(file.path)) {
+        fail("fixture_inventory_invalid", "fixture artifact is listed by multiple roots");
+      }
+      ownedFiles.add(file.path);
+      totalBytes += file.sizeBytes;
+      if (totalBytes > MAX_TOTAL_ARTIFACT_BYTES) {
+        fail("fixture_inventory_invalid", "fixture artifacts exceed the bounded aggregate size");
+      }
+      await readBoundedBytes(join(fixturesRoot, file.path), `fixture artifact ${file.path}`, file);
+    }
+  }
+
+  const actualInventory: string[] = [];
+  await walkFixtureFiles(fixturesRoot, "", actualInventory, { skipMetadata: true });
+  actualInventory.sort();
+  const ownedInventory = [...ownedFiles].sort();
+  if (!sameStringList(actualInventory, ownedInventory)) {
+    fail("fixture_inventory_invalid", "unindexed fixture artifact exists");
+  }
 }
 
 function validateArtifactShape(rootId: string, artifact: JsonRecord): void {
@@ -1019,12 +1240,15 @@ async function runRepresentative(
   if (!coverage.fixtureIds.includes(representative.rootId)) {
     fail("incompatible_input", "coverage row does not own its representative fixture root");
   }
-  if (coverage.status === "pending") {
+  const root = rootById(registry, representative.rootId);
+  if (coverage.status !== "ready") {
     const results: ParityCaseResult[] = [];
     for (const caseId of representative.caseIds) {
-      const fixtureCase = await loadCase(repoRoot, registry, representative.rootId, caseId);
-      if (representative.family === "chat" && !["delivery_uncertain", "automatic_prompt_retry_blocked"].includes(decision(fixtureCase.expected))) {
-        fail("incompatible_input", "pending chat coverage contains an unexpected success decision");
+      if (coverage.status === "pending" && root.status === "ready") {
+        const fixtureCase = await loadCase(repoRoot, registry, representative.rootId, caseId);
+        if (representative.family === "chat" && !["delivery_uncertain", "automatic_prompt_retry_blocked"].includes(decision(fixtureCase.expected))) {
+          fail("incompatible_input", "pending chat coverage contains an unexpected success decision");
+        }
       }
       results.push({
         family: representative.family,
@@ -1037,7 +1261,6 @@ async function runRepresentative(
     return results;
   }
 
-  const root = rootById(registry, representative.rootId);
   if (root.status !== "ready") {
     fail("coverage_pending", "ready coverage references a pending fixture root");
   }
@@ -1082,6 +1305,7 @@ async function runRepresentative(
 
 export async function runParity(repoRoot: string): Promise<ParityReport> {
   const registry = await loadRegistry(repoRoot);
+  await validateRegistryInventory(repoRoot, registry);
   literal(registry.parity.ptyPolicy, "web_only_apple_blocked", "parity PTY policy");
   literal(registry.parity.missingResultPolicy, "block", "parity missing-result policy");
   literal(registry.parity.resultEquivalence, "semantic_outcomes_not_platform_specific_wire_bytes", "parity equivalence policy");
@@ -1094,7 +1318,7 @@ export async function runParity(repoRoot: string): Promise<ParityReport> {
   if (cases.length > MAX_OUTPUT_CASES) {
     fail("output_limit", "parity report contains too many case results");
   }
-  const blockedCoverage = registry.coverage.filter((entry) => entry.status === "pending");
+  const blockedCoverage = registry.coverage.filter((entry) => entry.status !== "ready");
   if (blockedCoverage.length > MAX_OUTPUT_COVERAGE_IDS) {
     fail("output_limit", "parity report contains too many blocked coverage IDs");
   }
