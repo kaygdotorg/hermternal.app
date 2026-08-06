@@ -85,6 +85,62 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(self.index["evidence_status"], "partial")
         self.assertFalse(self.index["live_claim"])
 
+    def test_target_roots_are_complete_and_connected(self) -> None:
+        expected = {
+            "deployment-security/external-allowlist": {
+                "id": "deployment-security-external-allowlist",
+                "coverage_id": "external-allowlist",
+                "states": ["failure", "success"],
+                "files": [
+                    "deployment-security/external-allowlist/README.md",
+                    "deployment-security/external-allowlist/cases.json",
+                    "deployment-security/external-allowlist/test_validate.py",
+                    "deployment-security/external-allowlist/validate.py",
+                    "deployment-security/external-allowlist/validation-baseline.json",
+                ],
+            },
+            "session-lineage": {
+                "id": "session-lineage",
+                "coverage_id": "session-lineage",
+                "states": ["cancelled", "empty", "failure", "pending", "success", "unknown"],
+                "files": [
+                    "session-lineage/README.md",
+                    "session-lineage/baseline-evidence.json",
+                    "session-lineage/cases.json",
+                    "session-lineage/test_validate.py",
+                    "session-lineage/validate.py",
+                    "session-lineage/validation-baseline.json",
+                ],
+            },
+        }
+        roots = {item["path"]: item for item in self.index["fixture_roots"]}
+        coverage = {item["id"]: item for item in self.index["coverage"]}
+        for path, details in expected.items():
+            self.assertIn(path, roots)
+            fixture = roots[path]
+            self.assertEqual(fixture["id"], details["id"])
+            self.assertEqual(fixture["status"], "ready")
+            self.assertEqual(fixture["states"], details["states"])
+            self.assertEqual(fixture["coverage_ids"], [details["coverage_id"]])
+            self.assertEqual([item["path"] for item in fixture["files"]], details["files"])
+            self.assertIn(details["coverage_id"], coverage)
+            self.assertEqual(coverage[details["coverage_id"]]["status"], "ready")
+            self.assertEqual(coverage[details["coverage_id"]]["fixture_ids"], [details["id"]])
+
+    def test_pr_260_compatibility_gate_manifest_is_current(self) -> None:
+        fixture = next(item for item in self.index["fixture_roots"] if item["id"] == "source-audit-compatibility-gate")
+        expected = {
+            "source-audit/compatibility-gate/README.md": ("485412e75c266383232aaae47403fbdbbabe6b6aa2571b0a9c7ed9e7e8371a10", 11907),
+            "source-audit/compatibility-gate/compatibility_record.json": ("baddfc67cb92cfe024dc64310a4f9b6f6ea28dab26652a1965fcf7579084559f", 11030),
+            "source-audit/compatibility-gate/test_validate.py": ("1541c22f8025c0363c519cd8bea3adf713a8a42f6b886635247b83275435756f", 30144),
+            "source-audit/compatibility-gate/validate.py": ("fd9a2aeb331063ff35c02852b0b1ea011ee11ff4827071e928ccb7cb14e13ee7", 41766),
+        }
+        manifest = {item["path"]: item for item in fixture["files"]}
+        self.assertEqual(set(manifest), set(expected))
+        for path, (digest, size) in expected.items():
+            self.assertEqual(manifest[path]["sha256"], digest)
+            self.assertEqual(manifest[path]["size_bytes"], size)
+
     def test_digest_mutation_fails_closed(self) -> None:
         mutated = copy.deepcopy(self.index)
         mutated["fixture_roots"][0]["files"][0]["sha256"] = "0" * 64
@@ -255,8 +311,8 @@ class CliTests(unittest.TestCase):
             completed = self._run(optimized=optimized, repo_root=repo_root)
             self.assertEqual(completed.returncode, 0)
             payload = json.loads(completed.stdout)
-            self.assertEqual(payload["fixture_count"], 22)
-            self.assertEqual(payload["coverage_count"], 22)
+            self.assertEqual(payload["fixture_count"], 24)
+            self.assertEqual(payload["coverage_count"], 24)
             self.assertEqual(payload["evidence_status"], "partial")
             self.assertEqual(completed.stderr, "")
 

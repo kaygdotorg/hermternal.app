@@ -136,7 +136,7 @@ BASELINE_REPETITIONS = 30
 # canonicalizer omits only this validator's own manifest digest and derived byte
 # total, which would otherwise create a self-referential hash cycle.
 BASELINE_SELF_MANIFEST_PATH = "contracts/fixtures/validator/validate.py"
-BASELINE_CANONICAL_SHA256 = "71ea8ffd7a7fc57f3f3140d0b8e2adb1fc9381b5385a8ebb9320720d33759351"
+BASELINE_CANONICAL_SHA256 = "d6107ca3feb66f8d5ceb1599fe8b14e40e4d150dcec8fe60d32b50926e2bed78"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -248,6 +248,9 @@ STRUCTURAL_SENSITIVE_MARKERS = frozenset({
     "session=secret",
     "sid=qwertyui",
     "super-secret-value",
+    # RFC 7617's synthetic Basic-auth negative-test sample is retained only
+    # inside registered fixture tests; it is never accepted in JSON evidence.
+    "qwxhzgrpbjpvcgvuihnlc2ftzq==",
 })
 
 SAFE_ERROR_MESSAGE = "fixture registry input rejected"
