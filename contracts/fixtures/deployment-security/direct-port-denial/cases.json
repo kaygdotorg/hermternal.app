@@ -1,0 +1,554 @@
+{
+  "schema": "hermternal.deployment-security.direct-port-denial.v1",
+  "operation": "DEP-11",
+  "contract": "dashboard-v0.0.1",
+  "pinned_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "network_access": false,
+  "socket_operations": false,
+  "firewall_changes": false,
+  "live_infrastructure": false,
+  "compatible": false,
+  "proof_status": "bounded_synthetic_model_pass",
+  "cleanup": "not_applicable_no_state_created",
+  "boundary": {
+    "transport": "tcp",
+    "configured_proxy_identity": "configured_proxy",
+    "configured_proxy_interface": "proxy_egress",
+    "private_bind_identity": "hermes_private_bind",
+    "private_bind_interface": "private_service",
+    "private_bind_port": 9119,
+    "required_proxy_hops": ["configured_proxy"],
+    "default_action": "deny"
+  },
+  "redaction": {
+    "contains_credentials": false,
+    "contains_real_hosts": false,
+    "contains_real_addresses": false,
+    "contains_live_urls": false,
+    "contains_firewall_commands": false,
+    "contains_user_data": false,
+    "retained_hostile_values": false
+  },
+  "cases": [
+    {
+      "id": "configured-proxy-path-allowed",
+      "kind": "positive",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": ["configured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "allow",
+        "network_action": "represent_proxy_forward",
+        "upstream_call": true,
+        "observed_boundary": "offline_model",
+        "reason": "configured_proxy_path_exact",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "Only the exact configured proxy egress path and narrow rule may be represented as allowed."
+    },
+    {
+      "id": "public-direct-path-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "public_gateway",
+        "source_interface": "public_ingress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": [],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "synthetic_firewall",
+        "reason": "public_source_direct_denied",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "A public source cannot address the private Hermes bind directly."
+    },
+    {
+      "id": "browser-direct-path-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "browser_runtime",
+        "source_interface": "browser_client",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": [],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "synthetic_firewall",
+        "reason": "browser_source_direct_denied",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "A browser runtime cannot bypass the configured proxy."
+    },
+    {
+      "id": "client-network-direct-path-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "client_network",
+        "source_interface": "client_ingress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": [],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "synthetic_firewall",
+        "reason": "client_network_direct_denied",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "A client network cannot become the approved proxy source."
+    },
+    {
+      "id": "wrong-source-interface-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "public_ingress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": ["configured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "synthetic_firewall",
+        "reason": "source_interface_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "The configured proxy identity on the wrong source interface is denied."
+    },
+    {
+      "id": "wrong-destination-interface-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "public_service",
+        "destination_port": 9119,
+        "proxy_hops": ["configured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "offline_model",
+        "reason": "destination_interface_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "The private bind is not accepted on a public-facing interface."
+    },
+    {
+      "id": "wrong-destination-port-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9120,
+        "proxy_hops": ["configured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "offline_model",
+        "reason": "destination_port_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "The model does not move the fixed Hermes service port."
+    },
+    {
+      "id": "broad-firewall-source-denied",
+      "kind": "security",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": ["configured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "any_source",
+          "source_interface": "any_interface",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "offline_model",
+        "reason": "firewall_source_not_exact",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "A broad source rule cannot authorize the private bind."
+    },
+    {
+      "id": "missing-firewall-evidence-denied",
+      "kind": "malformed_evidence",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": ["configured_proxy"],
+        "firewall_rule": null
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "offline_model",
+        "reason": "firewall_evidence_missing",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "Absent firewall evidence fails closed."
+    },
+    {
+      "id": "wrong-transport-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "udp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": ["configured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "offline_model",
+        "reason": "transport_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "Only the reviewed TCP path is representable."
+    },
+    {
+      "id": "unconfigured-proxy-identity-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "unconfigured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": ["unconfigured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "synthetic_firewall",
+        "reason": "source_identity_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "A proxy-shaped but unconfigured source remains denied."
+    },
+    {
+      "id": "missing-proxy-hop-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": [],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "offline_model",
+        "reason": "proxy_path_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "Approved source fields do not replace proof of the configured proxy hop."
+    },
+    {
+      "id": "extra-proxy-hop-denied",
+      "kind": "negative",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": ["configured_proxy", "unconfigured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "offline_model",
+        "reason": "proxy_path_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "An additional unreviewed hop changes the path and fails closed."
+    },
+    {
+      "id": "public-destination-bind-denied",
+      "kind": "security",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "public_service_bind",
+        "destination_interface": "public_service",
+        "destination_port": 9119,
+        "proxy_hops": ["configured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "offline_model",
+        "reason": "destination_identity_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "A public service bind is not equivalent to the fixed private bind."
+    },
+    {
+      "id": "loopback-destination-bind-denied",
+      "kind": "incompatible",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "configured_proxy",
+        "source_interface": "proxy_egress",
+        "destination_identity": "loopback_service_bind",
+        "destination_interface": "loopback_service",
+        "destination_port": 9119,
+        "proxy_hops": ["configured_proxy"],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "offline_model",
+        "reason": "destination_identity_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "Loopback is intentionally not accepted by the current proof matrix."
+    },
+    {
+      "id": "unknown-source-denied",
+      "kind": "malformed_evidence",
+      "raw_network": {
+        "transport": "tcp",
+        "source_identity": "unknown_source",
+        "source_interface": "unknown_interface",
+        "destination_identity": "hermes_private_bind",
+        "destination_interface": "private_service",
+        "destination_port": 9119,
+        "proxy_hops": [],
+        "firewall_rule": {
+          "present": true,
+          "action": "allow",
+          "protocol": "tcp",
+          "source_identity": "configured_proxy",
+          "source_interface": "proxy_egress",
+          "destination_identity": "hermes_private_bind",
+          "destination_interface": "private_service",
+          "destination_port": 9119
+        }
+      },
+      "expected": {
+        "decision": "deny",
+        "network_action": "drop_without_upstream",
+        "upstream_call": false,
+        "observed_boundary": "synthetic_firewall",
+        "reason": "source_identity_mismatch",
+        "retained_hostile_values": false,
+        "live_claim": false
+      },
+      "notes": "Unknown source evidence never selects an allow fallback."
+    }
+  ]
+}
