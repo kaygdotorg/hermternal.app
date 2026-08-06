@@ -603,10 +603,17 @@ export function createCompatibilityAttestationGate(
       }
       pairedAttestationGates.add(gate);
       pairedBehavioralProbeGates.add(probe);
+      let consumed = false;
 
       return Object.freeze({
         kind: 'compatibility-transport-factory' as const,
         createTransport(options: CompatibilityTransportOptions) {
+          if (consumed) {
+            throw new TypeError('Compatibility transport factory has already been consumed.');
+          }
+          // Consume before reading options. A concurrent or reentrant call must
+          // fail before it can create a transport or expose either role callback.
+          consumed = true;
           // The role callbacks never cross the module boundary. Supplying gates
           // last also prevents cast JavaScript options from replacing either role.
           return createJsonRpcChatTransport({

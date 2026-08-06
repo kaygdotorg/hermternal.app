@@ -35,6 +35,9 @@ installs both callbacks inside this module, so an extracted attestation callback
 cannot be registered, bound, wrapped, proxied, or reused as a probe. A private
 function-identity registry also rejects any exact cross-role registration if the
 boundary changes later. Forged probe objects and repeated pairings are rejected.
+The returned transport factory is also single-use: it marks itself consumed before
+reading options, so repeated, concurrent, or reentrant calls fail synchronously
+before transport or socket creation and expose only a fixed redacted error.
 The source-backed transport tests prove pending, passed, failed, and cancelled
 probe states and prove that attestation alone never reaches `ready`. This focused
 change does not wire a live connection or implement the independent behavioral

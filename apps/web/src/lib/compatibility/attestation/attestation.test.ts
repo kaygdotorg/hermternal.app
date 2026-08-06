@@ -271,6 +271,107 @@ describe('fixture-driven compatibility attestation', () => {
     }
   });
 
+  it('consumes the transport factory before concurrent or reentrant reuse', async () => {
+    let attestationCalls = 0;
+    const input = new Proxy(cloneAttestation(), {
+      ownKeys(target) {
+        attestationCalls += 1;
+        return Reflect.ownKeys(target);
+      }
+    });
+    const probe = vi.fn(async () => true);
+    const factory = createCompatibilityAttestationGate(
+      input,
+      createCanonicalFixtureTrustContext()
+    ).pairWithBehavioralProbe(createBehavioralProbeGate(probe));
+    const sockets: FakeWebSocket[] = [];
+    const options = {
+      ticketProvider: async () => 'synthetic-ticket',
+      createWebSocket: () => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      compatibilityEvidence: COMPATIBILITY_EVIDENCE,
+      compatibilityGateTimeoutMs: 10_000
+    };
+
+    const attempts = await Promise.allSettled([
+      Promise.resolve().then(() => factory.createTransport(options)),
+      Promise.resolve().then(() => factory.createTransport(options))
+    ]);
+    const fulfilled = attempts.filter(
+      (attempt): attempt is PromiseFulfilledResult<JsonRpcChatTransport> =>
+        attempt.status === 'fulfilled'
+    );
+    const rejected = attempts.filter(
+      (attempt): attempt is PromiseRejectedResult => attempt.status === 'rejected'
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0]?.reason)).toBe(
+      'TypeError: Compatibility transport factory has already been consumed.'
+    );
+    expect(String(rejected[0]?.reason)).not.toContain('synthetic-ticket');
+    expect(String(rejected[0]?.reason)).not.toContain('verifyAttestation');
+    expect(String(rejected[0]?.reason)).not.toContain('runBehavioralProbe');
+    expect(sockets).toHaveLength(0);
+    expect(probe).not.toHaveBeenCalled();
+    expect(attestationCalls).toBe(0);
+
+    const transport = fulfilled[0]!.value;
+    const connection = transport.connect();
+    await flush();
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.emitOpen();
+    sockets[0]!.emitGatewayReady();
+    await expect(connection).resolves.toBeUndefined();
+    expect(transport.state.status).toBe('ready');
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(attestationCalls).toBe(1);
+    expect(() => factory.createTransport(options)).toThrowError(
+      'Compatibility transport factory has already been consumed.'
+    );
+    expect(sockets).toHaveLength(1);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(attestationCalls).toBe(1);
+
+    const reentrantProbe = vi.fn(async () => true);
+    const reentrantFactory = createCompatibilityAttestationGate(
+      CANONICAL_ATTESTATION_TEXT,
+      createCanonicalFixtureTrustContext()
+    ).pairWithBehavioralProbe(createBehavioralProbeGate(reentrantProbe));
+    let reentrantSockets = 0;
+    const reentrantOptions = {
+      createWebSocket: () => {
+        reentrantSockets += 1;
+        return new FakeWebSocket();
+      },
+      compatibilityEvidence: COMPATIBILITY_EVIDENCE
+    } as Record<string, unknown>;
+    Object.defineProperty(reentrantOptions, 'ticketProvider', {
+      enumerable: true,
+      get() {
+        reentrantFactory.createTransport(
+          reentrantOptions as Parameters<typeof reentrantFactory.createTransport>[0]
+        );
+        return async () => 'synthetic-ticket';
+      }
+    });
+    expect(() =>
+      reentrantFactory.createTransport(
+        reentrantOptions as Parameters<typeof reentrantFactory.createTransport>[0]
+      )
+    ).toThrowError('Compatibility transport factory has already been consumed.');
+    expect(reentrantSockets).toBe(0);
+    expect(reentrantProbe).not.toHaveBeenCalled();
+    expect(() =>
+      reentrantFactory.createTransport(
+        reentrantOptions as Parameters<typeof reentrantFactory.createTransport>[0]
+      )
+    ).toThrowError('Compatibility transport factory has already been consumed.');
+  });
+
   it('cancels a pending separate probe without claiming readiness', async () => {
     const controller = new AbortController();
     const harness = makeTransport(
