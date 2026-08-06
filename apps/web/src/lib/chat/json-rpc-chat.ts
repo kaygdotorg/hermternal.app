@@ -1,15 +1,16 @@
-export const JSON_RPC_VERSION = '2.0' as const;
-export const DASHBOARD_CONTRACT = 'dashboard-v0.0.1' as const;
-export const HERMES_SOURCE_SHA = 'f5be9236e00ddf2f2a412697f267078fc4ee068e' as const;
-export const JSON_RPC_WS_PATH = '/api/ws' as const;
-export const JSON_RPC_WS_ORIGIN = 'same-origin' as const;
-export const JSON_RPC_EVENT_METHOD = 'event' as const;
-export const JSON_RPC_GATEWAY_READY_EVENT = 'gateway.ready' as const;
-export const JSON_RPC_SESSION_RESUME_METHOD = 'session.resume' as const;
-export const JSON_RPC_PROMPT_METHOD = 'prompt.submit' as const;
-export const JSON_RPC_INTERRUPT_METHOD = 'session.interrupt' as const;
-export const JSON_RPC_APPROVAL_METHOD = 'approval.respond' as const;
-export const JSON_RPC_CLARIFICATION_METHOD = 'clarify.respond' as const;
+export const JSON_RPC_VERSION = "2.0" as const;
+export const DASHBOARD_CONTRACT = "dashboard-v0.0.1" as const;
+export const HERMES_SOURCE_SHA =
+  "f5be9236e00ddf2f2a412697f267078fc4ee068e" as const;
+export const JSON_RPC_WS_PATH = "/api/ws" as const;
+export const JSON_RPC_WS_ORIGIN = "same-origin" as const;
+export const JSON_RPC_EVENT_METHOD = "event" as const;
+export const JSON_RPC_GATEWAY_READY_EVENT = "gateway.ready" as const;
+export const JSON_RPC_SESSION_RESUME_METHOD = "session.resume" as const;
+export const JSON_RPC_PROMPT_METHOD = "prompt.submit" as const;
+export const JSON_RPC_INTERRUPT_METHOD = "session.interrupt" as const;
+export const JSON_RPC_APPROVAL_METHOD = "approval.respond" as const;
+export const JSON_RPC_CLARIFICATION_METHOD = "clarify.respond" as const;
 
 export const MAX_JSON_RPC_FRAME_BYTES = 64 * 1024;
 export const MAX_JSON_RPC_PROMPT_LENGTH = 16 * 1024;
@@ -21,6 +22,7 @@ export const MAX_JSON_RPC_PENDING_CONTROLS = 32;
 export const MAX_JSON_RPC_DEPTH = 16;
 export const DEFAULT_GATEWAY_READY_TIMEOUT_MS = 5_000;
 export const DEFAULT_ACKNOWLEDGEMENT_TIMEOUT_MS = 5_000;
+export const DEFAULT_COMPATIBILITY_GATE_TIMEOUT_MS = 5_000;
 
 const MIN_FRAME_BYTES = 256;
 const MAX_JSON_NODES = 512;
@@ -32,34 +34,38 @@ const MAX_APPROVAL_ID_LENGTH = 128;
 const MAX_CLARIFICATION_ID_LENGTH = 128;
 const MAX_EVENT_TYPE_LENGTH = 128;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
+const SESSION_ID_PATTERN =
+  /^(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9._~-]{0,126}[A-Za-z0-9])$/u;
 const TICKET_PATTERN = /^[A-Za-z0-9._~-]+$/u;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
 const KNOWN_EVENT_NAMES = [
   JSON_RPC_GATEWAY_READY_EVENT,
-  'session.info',
-  'message.delta',
-  'reasoning.delta',
-  'thinking.delta',
-  'message.complete',
-  'tool.start',
-  'tool.complete',
-  'approval.request',
-  'clarify.request',
-  'error'
+  "session.info",
+  "message.delta",
+  "reasoning.delta",
+  "thinking.delta",
+  "message.complete",
+  "tool.start",
+  "tool.complete",
+  "approval.request",
+  "clarify.request",
+  "error",
 ] as const;
 
 type JsonRpcKnownEventName = (typeof KNOWN_EVENT_NAMES)[number];
 
 const SENSITIVE_INTERACTIVE_EVENT_NAMES = new Set([
-  'sudo.request',
-  'secret.request',
-  'terminal.read.request',
-  'file.attach',
-  'browser.request'
+  "sudo.request",
+  "secret.request",
+  "terminal.read.request",
+  "file.attach",
+  "browser.request",
 ]);
 
 type JsonPrimitive = null | boolean | number | string;
-export type BoundedJsonValue = JsonPrimitive | BoundedJsonValue[] | { [key: string]: BoundedJsonValue };
+export type BoundedJsonValue =
+  JsonPrimitive | BoundedJsonValue[] | { [key: string]: BoundedJsonValue };
 
 export type JsonRpcFrameData = string | ArrayBuffer | Uint8Array;
 
@@ -100,60 +106,89 @@ export type FreshChatTicketProvider = (signal: AbortSignal) => Promise<string>;
 
 export type JsonRpcWebSocketFactory = (
   upgrade: JsonRpcWebSocketUpgradeRequest,
-  signal: AbortSignal
+  signal: AbortSignal,
 ) => JsonRpcWebSocket | Promise<JsonRpcWebSocket>;
+
+export interface JsonRpcDeploymentEvidence {
+  readonly identity: string;
+  readonly trustChannel: string;
+  readonly scope: "fixture_only";
+}
+
+export interface JsonRpcArtifactEvidence {
+  readonly path: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+}
+
+export interface JsonRpcRouteManifestEvidence extends JsonRpcArtifactEvidence {
+  readonly revision: typeof DASHBOARD_CONTRACT;
+}
 
 export interface JsonRpcCompatibilityEvidence {
   readonly contract: typeof DASHBOARD_CONTRACT;
   readonly hermesSourceSha: typeof HERMES_SOURCE_SHA;
   readonly websocketPath: typeof JSON_RPC_WS_PATH;
+  readonly deployment: JsonRpcDeploymentEvidence;
+  readonly routeManifest: JsonRpcRouteManifestEvidence;
+  readonly sourceReview: JsonRpcArtifactEvidence;
+  readonly proxyProof: JsonRpcArtifactEvidence;
   readonly gatewayReadyPayload: BoundedJsonValue;
 }
 
-export type JsonRpcCompatibilityGateResult = boolean | { readonly passed: boolean };
+export type JsonRpcCompatibilityEvidenceInput = Omit<
+  JsonRpcCompatibilityEvidence,
+  "contract" | "hermesSourceSha" | "websocketPath" | "gatewayReadyPayload"
+>;
+
+export type JsonRpcCompatibilityGateResult =
+  boolean | { readonly passed: boolean };
 
 export type JsonRpcCompatibilityGate = (
   evidence: JsonRpcCompatibilityEvidence,
-  signal: AbortSignal
+  signal: AbortSignal,
 ) => JsonRpcCompatibilityGateResult | Promise<JsonRpcCompatibilityGateResult>;
 
 export type JsonRpcChatErrorCode =
-  | 'aborted'
-  | 'ack-timeout'
-  | 'cancelled'
-  | 'closed'
-  | 'connection-failed'
-  | 'frame-too-large'
-  | 'gateway-ready-timeout'
-  | 'handshake-failed'
-  | 'incompatible'
-  | 'invalid-input'
-  | 'invalid-options'
-  | 'invalid-ticket'
-  | 'malformed-frame'
-  | 'not-connected'
-  | 'protocol-violation'
-  | 'server-rejected'
-  | 'uncertain-delivery';
+  | "aborted"
+  | "ack-timeout"
+  | "cancelled"
+  | "closed"
+  | "connection-failed"
+  | "frame-too-large"
+  | "gateway-ready-timeout"
+  | "handshake-failed"
+  | "incompatible"
+  | "invalid-input"
+  | "invalid-options"
+  | "invalid-ticket"
+  | "malformed-frame"
+  | "not-connected"
+  | "protocol-violation"
+  | "server-rejected"
+  | "uncertain-delivery";
 
 const ERROR_MESSAGES: Record<JsonRpcChatErrorCode, string> = {
-  aborted: 'The chat connection attempt was cancelled.',
-  'ack-timeout': 'The chat operation acknowledgement timed out.',
-  cancelled: 'The chat request was cancelled.',
-  closed: 'The chat connection is closing.',
-  'connection-failed': 'The chat WebSocket connection failed.',
-  'frame-too-large': 'The chat WebSocket frame exceeded the bounded limit.',
-  'gateway-ready-timeout': 'The chat gateway did not become ready before the deadline.',
-  'handshake-failed': 'The chat gateway readiness handshake failed.',
-  incompatible: 'The Dashboard deployment is outside the pinned chat contract.',
-  'invalid-input': 'The chat request input was outside the bounded contract.',
-  'invalid-options': 'The chat transport options were outside the bounded contract.',
-  'invalid-ticket': 'The chat WebSocket ticket was invalid.',
-  'malformed-frame': 'The chat WebSocket frame was not valid bounded JSON.',
-  'not-connected': 'The chat WebSocket is not ready.',
-  'protocol-violation': 'The chat WebSocket violated the JSON-RPC contract.',
-  'server-rejected': 'The chat server rejected the request.',
-  'uncertain-delivery': 'The chat request delivery is uncertain and was not replayed.'
+  aborted: "The chat connection attempt was cancelled.",
+  "ack-timeout": "The chat operation acknowledgement timed out.",
+  cancelled: "The chat request was cancelled.",
+  closed: "The chat connection is closing.",
+  "connection-failed": "The chat WebSocket connection failed.",
+  "frame-too-large": "The chat WebSocket frame exceeded the bounded limit.",
+  "gateway-ready-timeout":
+    "The chat gateway did not become ready before the deadline.",
+  "handshake-failed": "The chat gateway readiness handshake failed.",
+  incompatible: "The Dashboard deployment is outside the pinned chat contract.",
+  "invalid-input": "The chat request input was outside the bounded contract.",
+  "invalid-options":
+    "The chat transport options were outside the bounded contract.",
+  "invalid-ticket": "The chat WebSocket ticket was invalid.",
+  "malformed-frame": "The chat WebSocket frame was not valid bounded JSON.",
+  "not-connected": "The chat WebSocket is not ready.",
+  "protocol-violation": "The chat WebSocket violated the JSON-RPC contract.",
+  "server-rejected": "The chat server rejected the request.",
+  "uncertain-delivery":
+    "The chat request delivery is uncertain and was not replayed.",
 };
 
 export class JsonRpcChatError extends Error {
@@ -162,34 +197,37 @@ export class JsonRpcChatError extends Error {
 
   constructor(code: JsonRpcChatErrorCode, generation?: number) {
     super(ERROR_MESSAGES[code]);
-    this.name = code === 'aborted' || code === 'cancelled' ? 'AbortError' : 'JsonRpcChatError';
+    this.name =
+      code === "aborted" || code === "cancelled"
+        ? "AbortError"
+        : "JsonRpcChatError";
     this.code = code;
     this.generation = generation;
   }
 }
 
 export type JsonRpcConnectionStatus =
-  | 'offline'
-  | 'auth_required'
-  | 'connecting'
-  | 'handshaking'
-  | 'ready'
-  | 'restoring'
-  | 'reconnecting'
-  | 'delivery_uncertain'
-  | 'incompatible'
-  | 'failed'
-  | 'closing';
+  | "offline"
+  | "auth_required"
+  | "connecting"
+  | "handshaking"
+  | "ready"
+  | "restoring"
+  | "reconnecting"
+  | "delivery_uncertain"
+  | "incompatible"
+  | "failed"
+  | "closing";
 
 export type JsonRpcCloseClassification =
-  | 'authentication-rejected'
-  | 'host-or-origin-rejected'
-  | 'embedded-chat-disabled'
-  | 'peer-rejected'
-  | 'attachment-superseded'
-  | 'pty-process-exited'
-  | 'backend-failure'
-  | 'unsupported';
+  | "authentication-rejected"
+  | "host-or-origin-rejected"
+  | "embedded-chat-disabled"
+  | "peer-rejected"
+  | "attachment-superseded"
+  | "pty-process-exited"
+  | "backend-failure"
+  | "unsupported";
 
 export interface JsonRpcCloseObservation {
   readonly code: number | undefined;
@@ -204,16 +242,16 @@ export interface JsonRpcConnectionState {
 }
 
 export type JsonRpcDeliveryStatus =
-  | 'submitting'
-  | 'accepted'
-  | 'streaming'
-  | 'awaiting_approval'
-  | 'awaiting_clarification'
-  | 'interrupting'
-  | 'completed'
-  | 'cancelled'
-  | 'failed'
-  | 'uncertain-delivery';
+  | "submitting"
+  | "accepted"
+  | "streaming"
+  | "awaiting_approval"
+  | "awaiting_clarification"
+  | "interrupting"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "uncertain-delivery";
 
 export interface JsonRpcChatRequestState {
   readonly id: string;
@@ -228,24 +266,26 @@ export interface JsonRpcChatEventBase<T extends JsonRpcKnownEventName> {
   readonly payload: BoundedJsonValue;
 }
 
-export interface JsonRpcGatewayReadyEvent extends JsonRpcChatEventBase<typeof JSON_RPC_GATEWAY_READY_EVENT> {}
-export interface JsonRpcSessionInfoEvent extends JsonRpcChatEventBase<'session.info'> {}
-export interface JsonRpcMessageDeltaEvent extends JsonRpcChatEventBase<'message.delta'> {}
-export interface JsonRpcReasoningDeltaEvent extends JsonRpcChatEventBase<'reasoning.delta'> {}
-export interface JsonRpcThinkingDeltaEvent extends JsonRpcChatEventBase<'thinking.delta'> {}
-export interface JsonRpcMessageCompleteEvent extends JsonRpcChatEventBase<'message.complete'> {}
-export interface JsonRpcToolStartEvent extends JsonRpcChatEventBase<'tool.start'> {}
-export interface JsonRpcToolCompleteEvent extends JsonRpcChatEventBase<'tool.complete'> {}
+export interface JsonRpcGatewayReadyEvent extends JsonRpcChatEventBase<
+  typeof JSON_RPC_GATEWAY_READY_EVENT
+> {}
+export interface JsonRpcSessionInfoEvent extends JsonRpcChatEventBase<"session.info"> {}
+export interface JsonRpcMessageDeltaEvent extends JsonRpcChatEventBase<"message.delta"> {}
+export interface JsonRpcReasoningDeltaEvent extends JsonRpcChatEventBase<"reasoning.delta"> {}
+export interface JsonRpcThinkingDeltaEvent extends JsonRpcChatEventBase<"thinking.delta"> {}
+export interface JsonRpcMessageCompleteEvent extends JsonRpcChatEventBase<"message.complete"> {}
+export interface JsonRpcToolStartEvent extends JsonRpcChatEventBase<"tool.start"> {}
+export interface JsonRpcToolCompleteEvent extends JsonRpcChatEventBase<"tool.complete"> {}
 
-export interface JsonRpcApprovalRequestEvent extends JsonRpcChatEventBase<'approval.request'> {
+export interface JsonRpcApprovalRequestEvent extends JsonRpcChatEventBase<"approval.request"> {
   readonly approvalId: string;
 }
 
-export interface JsonRpcClarificationRequestEvent extends JsonRpcChatEventBase<'clarify.request'> {
+export interface JsonRpcClarificationRequestEvent extends JsonRpcChatEventBase<"clarify.request"> {
   readonly clarificationId: string;
 }
 
-export interface JsonRpcErrorEvent extends JsonRpcChatEventBase<'error'> {}
+export interface JsonRpcErrorEvent extends JsonRpcChatEventBase<"error"> {}
 
 export type JsonRpcChatEvent =
   | JsonRpcGatewayReadyEvent
@@ -263,15 +303,15 @@ export type JsonRpcChatEvent =
 export type JsonRpcCompletionEvent = JsonRpcMessageCompleteEvent;
 
 export type JsonRpcCloseReason =
-  | 'client-close'
-  | 'reconnect'
-  | 'socket-close'
-  | 'socket-error'
-  | 'protocol-error'
-  | 'handshake-error'
-  | 'gateway-ready-timeout'
-  | 'incompatible'
-  | 'ack-timeout';
+  | "client-close"
+  | "reconnect"
+  | "socket-close"
+  | "socket-error"
+  | "protocol-error"
+  | "handshake-error"
+  | "gateway-ready-timeout"
+  | "incompatible"
+  | "ack-timeout";
 
 export interface JsonRpcChatRequest {
   readonly id: string;
@@ -284,16 +324,21 @@ export interface JsonRpcChatOptions {
   readonly ticketProvider: FreshChatTicketProvider;
   readonly createWebSocket: JsonRpcWebSocketFactory;
   readonly selectedSessionId?: string;
+  readonly compatibilityEvidence: JsonRpcCompatibilityEvidenceInput;
   readonly verifyAttestation?: JsonRpcCompatibilityGate;
   readonly runBehavioralProbe?: JsonRpcCompatibilityGate;
   readonly requestIdFactory?: () => string;
   readonly maxFrameBytes?: number;
   readonly gatewayReadyTimeoutMs?: number;
   readonly acknowledgementTimeoutMs?: number;
+  readonly compatibilityGateTimeoutMs?: number;
   readonly onEvent?: (event: JsonRpcChatEvent) => void;
   readonly onStateChange?: (state: JsonRpcConnectionState) => void;
   readonly onOpen?: () => void;
-  readonly onClose?: (reason: JsonRpcCloseReason, observation?: JsonRpcCloseObservation) => void;
+  readonly onClose?: (
+    reason: JsonRpcCloseReason,
+    observation?: JsonRpcCloseObservation,
+  ) => void;
   readonly onCloseCode?: (observation: JsonRpcCloseObservation) => void;
   readonly onReconnect?: () => void;
   readonly onAbort?: (requestId: string) => void;
@@ -307,45 +352,49 @@ export interface JsonRpcChatTransport {
   reconnect(signal?: AbortSignal): Promise<void>;
   restore(sessionId?: string, signal?: AbortSignal): Promise<void>;
   close(): void;
-  sendPrompt(prompt: string, options?: { readonly signal?: AbortSignal }): JsonRpcChatRequest;
+  sendPrompt(
+    prompt: string,
+    options?: { readonly signal?: AbortSignal },
+  ): JsonRpcChatRequest;
   interrupt(requestId: string, signal?: AbortSignal): Promise<void>;
   respondToApproval(
     requestId: string,
     approvalId: string,
     approved: boolean,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<void>;
   answerClarification(
     requestId: string,
     clarificationId: string,
     answer: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<void>;
   abort(requestId: string): void;
   subscribe(listener: (event: JsonRpcChatEvent) => void): () => void;
 }
 
 interface JsonRpcRequestMessage {
-  readonly kind: 'request';
+  readonly kind: "request";
   readonly id: string;
   readonly method: string;
   readonly params: BoundedJsonValue;
 }
 
 interface JsonRpcResponseMessage {
-  readonly kind: 'response';
+  readonly kind: "response";
   readonly id: string | null;
   readonly result?: BoundedJsonValue;
   readonly error?: JsonRpcErrorShape;
 }
 
 interface JsonRpcNotificationMessage {
-  readonly kind: 'notification';
+  readonly kind: "notification";
   readonly method: string;
   readonly params: BoundedJsonValue;
 }
 
-type ParsedWireMessage = JsonRpcResponseMessage | JsonRpcNotificationMessage | JsonRpcRequestMessage;
+type ParsedWireMessage =
+  JsonRpcResponseMessage | JsonRpcNotificationMessage | JsonRpcRequestMessage;
 
 interface JsonRpcErrorShape {
   readonly code: number;
@@ -363,7 +412,8 @@ interface ParsedEventEnvelope {
 interface OperationRecord {
   readonly id: string;
   status: JsonRpcDeliveryStatus;
-  sequenceMode: 'unknown' | 'present' | 'absent';
+  acknowledgementReceived: boolean;
+  sequenceMode: "unknown" | "present" | "absent";
   nextSequence: number;
   readonly resolveCompletion: (event: JsonRpcCompletionEvent) => void;
   readonly rejectCompletion: (error: JsonRpcChatError) => void;
@@ -372,7 +422,7 @@ interface OperationRecord {
   acknowledgementTimer?: ReturnType<typeof setTimeout>;
 }
 
-type ControlKind = 'restore' | 'interrupt' | 'approval' | 'clarification';
+type ControlKind = "restore" | "interrupt" | "approval" | "clarification";
 
 interface ControlRecord {
   readonly id: string;
@@ -384,7 +434,7 @@ interface ControlRecord {
 }
 
 interface PendingInteraction {
-  readonly kind: 'approval' | 'clarification';
+  readonly kind: "approval" | "clarification";
   readonly ownerId: string;
   responded: boolean;
 }
@@ -417,10 +467,17 @@ interface ConnectionAttempt {
  * Gates are intentionally injected because this planning-only prototype cannot
  * attest a deployment or perform a live behavioral probe itself.
  */
-export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpcChatTransport {
+export function createJsonRpcChatTransport(
+  options: JsonRpcChatOptions,
+): JsonRpcChatTransport {
   const maxFrameBytes = normalizeFrameLimit(options.maxFrameBytes);
   const gatewayReadyTimeoutMs = normalizeTimeout(options.gatewayReadyTimeoutMs);
-  const acknowledgementTimeoutMs = normalizeTimeout(options.acknowledgementTimeoutMs);
+  const acknowledgementTimeoutMs = normalizeTimeout(
+    options.acknowledgementTimeoutMs,
+  );
+  const compatibilityGateTimeoutMs = normalizeTimeout(
+    options.compatibilityGateTimeoutMs,
+  );
   const listeners = new Set<(event: JsonRpcChatEvent) => void>();
   const activeRequests = new Map<string, OperationRecord>();
   const pendingControls = new Map<string, ControlRecord>();
@@ -429,15 +486,22 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
   let nextGeneratedId = 0;
   let currentGeneration = 0;
   let selectedSessionId = options.selectedSessionId;
-  let currentState: JsonRpcConnectionState = { status: 'offline', generation: 0 };
+  let currentState: JsonRpcConnectionState = {
+    status: "offline",
+    generation: 0,
+  };
   let activeContext: SocketContext | undefined;
   let activeAttempt: ConnectionAttempt | undefined;
+  let userClosed = false;
 
   if (selectedSessionId !== undefined) {
     validateSessionId(selectedSessionId);
   }
 
-  const safeCall = <T extends unknown[]>(callback: ((...args: T) => void) | undefined, ...args: T): void => {
+  const safeCall = <T extends unknown[]>(
+    callback: ((...args: T) => void) | undefined,
+    ...args: T
+  ): void => {
     if (!callback) {
       return;
     }
@@ -451,13 +515,17 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
   const setState = (
     status: JsonRpcConnectionStatus,
     generation = currentGeneration,
-    observation?: JsonRpcCloseObservation
+    observation?: JsonRpcCloseObservation,
   ): void => {
     const next: JsonRpcConnectionState = {
       status,
       generation,
-      ...(observation?.code !== undefined ? { closeCode: observation.code } : {}),
-      ...(observation ? { closeClassification: observation.classification } : {})
+      ...(observation?.code !== undefined
+        ? { closeCode: observation.code }
+        : {}),
+      ...(observation
+        ? { closeClassification: observation.classification }
+        : {}),
     };
     if (
       currentState.status === next.status &&
@@ -483,36 +551,46 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     try {
       id = options.requestIdFactory?.() ?? `rpc-${++nextGeneratedId}`;
     } catch {
-      throw new JsonRpcChatError('invalid-options', currentGeneration);
+      throw new JsonRpcChatError("invalid-options", currentGeneration);
     }
-    if (!isSafeId(id) || isIdReserved(id, activeRequests, pendingControls) || ignoredResponseIds.has(id)) {
-      throw new JsonRpcChatError('invalid-options', currentGeneration);
+    if (
+      !isSafeId(id) ||
+      isIdReserved(id, activeRequests, pendingControls) ||
+      ignoredResponseIds.has(id)
+    ) {
+      throw new JsonRpcChatError("invalid-options", currentGeneration);
     }
     return id;
   };
 
-  const sendFrame = (context: SocketContext, payload: Record<string, unknown>): void => {
+  const sendFrame = (
+    context: SocketContext,
+    payload: Record<string, unknown>,
+  ): void => {
     const frame = JSON.stringify(payload);
     if (byteLength(frame) > maxFrameBytes) {
-      throw new JsonRpcChatError('frame-too-large', context.generation);
+      throw new JsonRpcChatError("frame-too-large", context.generation);
     }
     try {
       context.socket.send(frame);
     } catch {
-      throw new JsonRpcChatError('connection-failed', context.generation);
+      throw new JsonRpcChatError("connection-failed", context.generation);
     }
   };
 
-  const assertOutboundFrame = (payload: Record<string, unknown>, generation: number): void => {
+  const assertOutboundFrame = (
+    payload: Record<string, unknown>,
+    generation: number,
+  ): void => {
     if (byteLength(JSON.stringify(payload)) > maxFrameBytes) {
-      throw new JsonRpcChatError('frame-too-large', generation);
+      throw new JsonRpcChatError("frame-too-large", generation);
     }
   };
 
   const rememberIgnoredResponse = (id: string): void => {
     if (ignoredResponseIds.size >= MAX_JSON_RPC_ACTIVE_REQUESTS * 4) {
       const oldest = ignoredResponseIds.values().next().value;
-      if (typeof oldest === 'string') {
+      if (typeof oldest === "string") {
         ignoredResponseIds.delete(oldest);
       }
     }
@@ -529,15 +607,21 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     }
     clearTimeoutIfPresent(record.acknowledgementTimer);
     record.acknowledgementTimer = undefined;
-    record.status = 'uncertain-delivery';
+    record.status = "uncertain-delivery";
     activeRequests.delete(record.id);
+    rememberIgnoredResponse(record.id);
     clearInteraction(record.id);
     record.removeAbortListener?.();
-    record.rejectCompletion(new JsonRpcChatError('uncertain-delivery', currentGeneration));
+    record.rejectCompletion(
+      new JsonRpcChatError("uncertain-delivery", currentGeneration),
+    );
     safeCall(options.onUncertainDelivery, record.id);
   };
 
-  const settleControl = (record: ControlRecord, error?: JsonRpcChatError): void => {
+  const settleControl = (
+    record: ControlRecord,
+    error?: JsonRpcChatError,
+  ): void => {
     clearTimeoutIfPresent(record.acknowledgementTimer);
     record.acknowledgementTimer = undefined;
     pendingControls.delete(record.id);
@@ -550,7 +634,11 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     }
   };
 
-  const closeSocketWithoutCallbacks = (socket: JsonRpcWebSocket, code: number, reason: string): void => {
+  const closeSocketWithoutCallbacks = (
+    socket: JsonRpcWebSocket,
+    code: number,
+    reason: string,
+  ): void => {
     try {
       socket.close(code, reason);
     } catch {
@@ -564,7 +652,11 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     error: JsonRpcChatError,
     status: JsonRpcConnectionStatus,
     observation?: JsonRpcCloseObservation,
-    closeCode = reason === 'protocol-error' || reason === 'handshake-error' || reason === 'gateway-ready-timeout' ? 1002 : 1000
+    closeCode = reason === "protocol-error" ||
+    reason === "handshake-error" ||
+    reason === "gateway-ready-timeout"
+      ? 1002
+      : 1000,
   ): void => {
     if (context.closed) {
       return;
@@ -592,14 +684,24 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
       markUncertain(record);
     }
     for (const record of [...pendingControls.values()]) {
-      settleControl(record, new JsonRpcChatError('uncertain-delivery', currentGeneration));
+      settleControl(
+        record,
+        new JsonRpcChatError("uncertain-delivery", currentGeneration),
+      );
     }
     pendingInteractions.clear();
-    closeSocketWithoutCallbacks(context.socket, closeCode, reason === 'reconnect' ? 'replaced' : 'closed');
+    closeSocketWithoutCallbacks(
+      context.socket,
+      closeCode,
+      reason === "reconnect" ? "replaced" : "closed",
+    );
 
-    if (status === 'delivery_uncertain') {
+    if (status === "delivery_uncertain") {
       setState(status, currentGeneration, observation);
-    } else if (activeContext === undefined || context.generation === currentGeneration - 1) {
+    } else if (
+      activeContext === undefined ||
+      context.generation === currentGeneration - 1
+    ) {
       setState(status, currentGeneration, observation);
     }
     if (observation) {
@@ -612,7 +714,9 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     context: SocketContext,
     code: JsonRpcChatErrorCode,
     reason: JsonRpcCloseReason,
-    status: JsonRpcConnectionStatus = code === 'incompatible' ? 'incompatible' : 'failed'
+    status: JsonRpcConnectionStatus = code === "incompatible"
+      ? "incompatible"
+      : "failed",
   ): void => {
     if (context.closed) {
       return;
@@ -623,17 +727,31 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     invalidateContext(context, reason, error, status);
   };
 
-  const handleSendFailure = (context: SocketContext, error: unknown): JsonRpcChatError => {
-    const sanitized = error instanceof JsonRpcChatError ? error : new JsonRpcChatError('connection-failed', context.generation);
+  const handleSendFailure = (
+    context: SocketContext,
+    error: unknown,
+  ): JsonRpcChatError => {
+    const sanitized =
+      error instanceof JsonRpcChatError
+        ? error
+        : new JsonRpcChatError("connection-failed", context.generation);
     if (!context.closed) {
-      invalidateContext(context, 'socket-error', sanitized, 'delivery_uncertain');
+      invalidateContext(
+        context,
+        "socket-error",
+        sanitized,
+        "delivery_uncertain",
+      );
     }
     return sanitized;
   };
 
-  const eventSessionId = (event: ParsedEventEnvelope): string | undefined => event.sessionId ?? selectedSessionId;
+  const eventSessionId = (event: ParsedEventEnvelope): string | undefined =>
+    event.sessionId ?? selectedSessionId;
 
-  const findOperationForEvent = (event: ParsedEventEnvelope): OperationRecord | undefined => {
+  const findOperationForEvent = (
+    event: ParsedEventEnvelope,
+  ): OperationRecord | undefined => {
     if (event.requestId) {
       const operation = activeRequests.get(event.requestId);
       if (operation) {
@@ -643,49 +761,75 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     }
     const sessionId = eventSessionId(event);
     const matches = [...activeRequests.values()].filter(
-      (record) => sessionId === undefined || selectedSessionId === undefined || sessionId === selectedSessionId
+      (record) =>
+        sessionId === undefined ||
+        selectedSessionId === undefined ||
+        sessionId === selectedSessionId,
     );
     return matches.length === 1 ? matches[0] : undefined;
   };
 
-  const updateSequence = (operation: OperationRecord, sequence: number | undefined): void => {
+  const updateSequence = (
+    operation: OperationRecord,
+    sequence: number | undefined,
+  ): void => {
     if (sequence === undefined) {
-      if (operation.sequenceMode === 'present') {
-        throw new JsonRpcChatError('protocol-violation', currentGeneration);
+      if (operation.sequenceMode === "present") {
+        throw new JsonRpcChatError("protocol-violation", currentGeneration);
       }
-      operation.sequenceMode = 'absent';
+      operation.sequenceMode = "absent";
       return;
     }
-    if (operation.sequenceMode === 'absent' || sequence !== operation.nextSequence) {
-      throw new JsonRpcChatError('protocol-violation', currentGeneration);
+    if (
+      operation.sequenceMode === "absent" ||
+      sequence !== operation.nextSequence
+    ) {
+      throw new JsonRpcChatError("protocol-violation", currentGeneration);
     }
-    operation.sequenceMode = 'present';
+    operation.sequenceMode = "present";
     operation.nextSequence += 1;
   };
 
-  const isSuccessfulCompletion = (event: JsonRpcMessageCompleteEvent): boolean => {
-    if (event.payload === null || typeof event.payload !== 'object' || Array.isArray(event.payload)) {
+  const isSuccessfulCompletion = (
+    event: JsonRpcMessageCompleteEvent,
+  ): boolean => {
+    if (
+      event.payload === null ||
+      typeof event.payload !== "object" ||
+      Array.isArray(event.payload)
+    ) {
       return true;
     }
     const payload = event.payload as Record<string, BoundedJsonValue>;
     const status = payload.status ?? payload.outcome;
-    return status !== 'error' && status !== 'failed' && status !== 'cancelled';
+    return status !== "error" && status !== "failed" && status !== "cancelled";
   };
 
-  const finishOperation = (operation: OperationRecord, event: JsonRpcMessageCompleteEvent): void => {
+  const finishOperation = (
+    operation: OperationRecord,
+    event: JsonRpcMessageCompleteEvent,
+  ): void => {
     clearTimeoutIfPresent(operation.acknowledgementTimer);
     operation.acknowledgementTimer = undefined;
+    if (!operation.acknowledgementReceived) {
+      // Events and JSON-RPC replies share one channel. Keep a bounded tombstone
+      // so a valid response that follows completion cannot become a protocol
+      // failure or be mistaken for a new request.
+      rememberIgnoredResponse(operation.id);
+    }
     activeRequests.delete(operation.id);
     clearInteraction(operation.id);
     operation.removeAbortListener?.();
     emitEvent(event);
     if (isSuccessfulCompletion(event)) {
-      operation.status = 'completed';
+      operation.status = "completed";
       operation.resolveCompletion(event);
       return;
     }
-    operation.status = 'failed';
-    operation.rejectCompletion(new JsonRpcChatError('server-rejected', currentGeneration));
+    operation.status = "failed";
+    operation.rejectCompletion(
+      new JsonRpcChatError("server-rejected", currentGeneration),
+    );
   };
 
   const parseAndHandleFrame = (context: SocketContext, data: unknown): void => {
@@ -696,27 +840,35 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     try {
       message = parseWireMessage(parseBoundedJsonFrame(data, maxFrameBytes));
     } catch (error) {
-      const code = error instanceof JsonRpcChatError ? error.code : 'malformed-frame';
-      failContext(context, code, context.gatewayReady ? 'protocol-error' : 'handshake-error');
+      const code =
+        error instanceof JsonRpcChatError ? error.code : "malformed-frame";
+      failContext(
+        context,
+        code,
+        context.gatewayReady ? "protocol-error" : "handshake-error",
+      );
       return;
     }
-    if (message.kind === 'request') {
-      failContext(context, 'protocol-violation', 'protocol-error');
+    if (message.kind === "request") {
+      failContext(context, "protocol-violation", "protocol-error");
       return;
     }
-    if (message.kind === 'response') {
+    if (message.kind === "response") {
       handleResponse(context, message);
       return;
     }
     handleNotification(context, message);
   };
 
-  const handleResponse = (context: SocketContext, message: JsonRpcResponseMessage): void => {
+  const handleResponse = (
+    context: SocketContext,
+    message: JsonRpcResponseMessage,
+  ): void => {
     if (message.id === null) {
       if (message.error?.code === -32700 || message.error?.code === -32603) {
-        failContext(context, 'server-rejected', 'protocol-error');
+        failContext(context, "server-rejected", "protocol-error");
       } else {
-        failContext(context, 'protocol-violation', 'protocol-error');
+        failContext(context, "protocol-violation", "protocol-error");
       }
       return;
     }
@@ -726,35 +878,47 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
 
     const operation = activeRequests.get(message.id);
     if (operation) {
+      operation.acknowledgementReceived = true;
       clearTimeoutIfPresent(operation.acknowledgementTimer);
       operation.acknowledgementTimer = undefined;
       if (message.error) {
-        operation.status = 'failed';
+        operation.status = "failed";
         activeRequests.delete(operation.id);
         clearInteraction(operation.id);
         operation.removeAbortListener?.();
-        operation.rejectCompletion(new JsonRpcChatError('server-rejected', context.generation));
-        setState('failed', currentGeneration);
+        operation.rejectCompletion(
+          new JsonRpcChatError("server-rejected", context.generation),
+        );
+        setState("failed", currentGeneration);
         return;
       }
-      if (isTerminalStatus(operation.status)) {
+      if (
+        isTerminalStatus(operation.status) ||
+        operation.status !== "submitting"
+      ) {
+        // A streaming, approval, clarification, or completed event may have
+        // crossed the acknowledgement on this shared channel. The response
+        // records delivery but never regresses the event-derived lifecycle.
         return;
       }
-      operation.status = 'accepted';
+      operation.status = "accepted";
       return;
     }
 
     const control = pendingControls.get(message.id);
     if (control) {
       if (message.error) {
-        settleControl(control, new JsonRpcChatError('server-rejected', context.generation));
+        settleControl(
+          control,
+          new JsonRpcChatError("server-rejected", context.generation),
+        );
       } else {
         settleControl(control);
       }
       return;
     }
 
-    failContext(context, 'protocol-violation', 'protocol-error');
+    failContext(context, "protocol-violation", "protocol-error");
   };
 
   const createPublicEvent = (event: ParsedEventEnvelope): JsonRpcChatEvent => {
@@ -763,20 +927,31 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
       ...(event.sessionId ? { sessionId: event.sessionId } : {}),
       ...(event.requestId ? { requestId: event.requestId } : {}),
       ...(event.sequence !== undefined ? { sequence: event.sequence } : {}),
-      payload: event.payload
+      payload: event.payload,
     };
-    if (event.type === 'approval.request') {
-      return { ...base, type: event.type, approvalId: findInteractionOwner(event, 'approval') };
+    if (event.type === "approval.request") {
+      return {
+        ...base,
+        type: event.type,
+        approvalId: findInteractionOwner(event, "approval"),
+      };
     }
-    if (event.type === 'clarify.request') {
-      return { ...base, type: event.type, clarificationId: findInteractionOwner(event, 'clarification') };
+    if (event.type === "clarify.request") {
+      return {
+        ...base,
+        type: event.type,
+        clarificationId: findInteractionOwner(event, "clarification"),
+      };
     }
     return base as JsonRpcChatEvent;
   };
 
-  const handleGatewayReady = (context: SocketContext, envelope: ParsedEventEnvelope): void => {
+  const handleGatewayReady = (
+    context: SocketContext,
+    envelope: ParsedEventEnvelope,
+  ): void => {
     if (context.gatewayReady || context.compatibilityRunning) {
-      failContext(context, 'protocol-violation', 'handshake-error');
+      failContext(context, "protocol-violation", "handshake-error");
       return;
     }
     context.gatewayReady = true;
@@ -788,10 +963,13 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     void runCompatibilityGates(context, envelope.payload);
   };
 
-  const handleNotification = (context: SocketContext, message: JsonRpcNotificationMessage): void => {
+  const handleNotification = (
+    context: SocketContext,
+    message: JsonRpcNotificationMessage,
+  ): void => {
     if (message.method !== JSON_RPC_EVENT_METHOD) {
       if (isInteractiveEventName(message.method)) {
-        failContext(context, 'incompatible', 'incompatible', 'incompatible');
+        failContext(context, "incompatible", "incompatible", "incompatible");
       }
       // Unknown additive non-interactive notifications are ignored by design.
       return;
@@ -801,109 +979,145 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     try {
       envelope = parseEventEnvelope(message.params);
     } catch {
-      failContext(context, 'protocol-violation', context.gatewayReady ? 'protocol-error' : 'handshake-error');
+      failContext(
+        context,
+        "protocol-violation",
+        context.gatewayReady ? "protocol-error" : "handshake-error",
+      );
       return;
     }
 
     if (!KNOWN_EVENT_NAMES.includes(envelope.type as JsonRpcKnownEventName)) {
       if (!context.gatewayReady) {
-        failContext(context, 'handshake-failed', 'handshake-error');
+        failContext(context, "handshake-failed", "handshake-error");
       } else if (isInteractiveEventName(envelope.type)) {
-        failContext(context, 'incompatible', 'incompatible', 'incompatible');
+        failContext(context, "incompatible", "incompatible", "incompatible");
       }
       return;
     }
-    if (!context.gatewayReady && envelope.type !== JSON_RPC_GATEWAY_READY_EVENT) {
-      failContext(context, 'handshake-failed', 'handshake-error');
+    if (
+      !context.gatewayReady &&
+      envelope.type !== JSON_RPC_GATEWAY_READY_EVENT
+    ) {
+      failContext(context, "handshake-failed", "handshake-error");
       return;
     }
     if (envelope.type === JSON_RPC_GATEWAY_READY_EVENT) {
       handleGatewayReady(context, envelope);
       return;
     }
-    if (envelope.type === 'session.info') {
+    if (envelope.type === "session.info") {
       emitEvent(createPublicEvent(envelope));
       return;
     }
 
     const operation = findOperationForEvent(envelope);
     if (!operation) {
-      failContext(context, 'protocol-violation', 'protocol-error');
+      failContext(context, "protocol-violation", "protocol-error");
       return;
     }
-    if (envelope.sessionId && selectedSessionId && envelope.sessionId !== selectedSessionId) {
-      failContext(context, 'protocol-violation', 'protocol-error');
+    if (
+      envelope.sessionId &&
+      selectedSessionId &&
+      envelope.sessionId !== selectedSessionId
+    ) {
+      failContext(context, "protocol-violation", "protocol-error");
       return;
     }
     try {
       updateSequence(operation, envelope.sequence);
     } catch {
-      failContext(context, 'protocol-violation', 'protocol-error');
+      failContext(context, "protocol-violation", "protocol-error");
       return;
     }
 
     const event = createPublicEvent(envelope);
-    if (envelope.type === 'approval.request') {
+    if (envelope.type === "approval.request") {
       if (pendingInteractions.has(operation.id)) {
-        failContext(context, 'protocol-violation', 'protocol-error');
+        failContext(context, "protocol-violation", "protocol-error");
         return;
       }
       pendingInteractions.set(operation.id, {
-        kind: 'approval',
+        kind: "approval",
         ownerId: (event as JsonRpcApprovalRequestEvent).approvalId,
-        responded: false
+        responded: false,
       });
-      operation.status = 'awaiting_approval';
+      operation.status = "awaiting_approval";
       emitEvent(event);
       return;
     }
-    if (envelope.type === 'clarify.request') {
+    if (envelope.type === "clarify.request") {
       if (pendingInteractions.has(operation.id)) {
-        failContext(context, 'protocol-violation', 'protocol-error');
+        failContext(context, "protocol-violation", "protocol-error");
         return;
       }
       pendingInteractions.set(operation.id, {
-        kind: 'clarification',
+        kind: "clarification",
         ownerId: (event as JsonRpcClarificationRequestEvent).clarificationId,
-        responded: false
+        responded: false,
       });
-      operation.status = 'awaiting_clarification';
+      operation.status = "awaiting_clarification";
       emitEvent(event);
       return;
     }
-    if (envelope.type === 'error') {
+    if (envelope.type === "error") {
       emitEvent(event);
-      operation.status = 'failed';
+      operation.status = "failed";
+      if (!operation.acknowledgementReceived) {
+        rememberIgnoredResponse(operation.id);
+      }
       activeRequests.delete(operation.id);
       clearInteraction(operation.id);
       operation.removeAbortListener?.();
-      operation.rejectCompletion(new JsonRpcChatError('server-rejected', currentGeneration));
-      setState('failed', currentGeneration);
+      operation.rejectCompletion(
+        new JsonRpcChatError("server-rejected", currentGeneration),
+      );
+      setState("failed", currentGeneration);
       return;
     }
-    if (envelope.type === 'message.complete') {
+    if (envelope.type === "message.complete") {
       finishOperation(operation, event as JsonRpcMessageCompleteEvent);
       return;
     }
-    operation.status = 'streaming';
+    operation.status = "streaming";
     emitEvent(event);
   };
 
-  const runCompatibilityGates = async (context: SocketContext, gatewayReadyPayload: BoundedJsonValue): Promise<void> => {
+  const runCompatibilityGates = async (
+    context: SocketContext,
+    gatewayReadyPayload: BoundedJsonValue,
+  ): Promise<void> => {
+    const suppliedEvidence = options.compatibilityEvidence;
+    if (!isCompleteCompatibilityEvidence(suppliedEvidence)) {
+      failContext(context, "incompatible", "incompatible", "incompatible");
+      return;
+    }
     const evidence: JsonRpcCompatibilityEvidence = {
       contract: DASHBOARD_CONTRACT,
       hermesSourceSha: HERMES_SOURCE_SHA,
       websocketPath: JSON_RPC_WS_PATH,
-      gatewayReadyPayload
+      ...suppliedEvidence,
+      gatewayReadyPayload,
     };
+    const compatibilitySignal = activeAttempt?.controller.signal;
     try {
-      const attestation = await evaluateGate(options.verifyAttestation, evidence, activeAttempt?.controller.signal);
+      const attestation = await evaluateGate(
+        options.verifyAttestation,
+        evidence,
+        compatibilitySignal,
+        compatibilityGateTimeoutMs,
+      );
       if (!attestation) {
-        throw new JsonRpcChatError('incompatible', context.generation);
+        throw new JsonRpcChatError("incompatible", context.generation);
       }
-      const probe = await evaluateGate(options.runBehavioralProbe, evidence, activeAttempt?.controller.signal);
+      const probe = await evaluateGate(
+        options.runBehavioralProbe,
+        evidence,
+        compatibilitySignal,
+        compatibilityGateTimeoutMs,
+      );
       if (!probe) {
-        throw new JsonRpcChatError('incompatible', context.generation);
+        throw new JsonRpcChatError("incompatible", context.generation);
       }
       if (!isCurrentContext(context)) {
         return;
@@ -913,18 +1127,29 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
         context.readySettled = true;
         context.readyResolve();
       }
-      setState('ready', currentGeneration);
+      setState("ready", currentGeneration);
       safeCall(options.onOpen);
     } catch (error) {
       if (!isCurrentContext(context)) {
         return;
       }
-      const code = error instanceof JsonRpcChatError && error.code === 'aborted' ? 'aborted' : 'incompatible';
-      failContext(context, code, code === 'aborted' ? 'socket-error' : 'incompatible', code === 'aborted' ? 'offline' : 'incompatible');
+      const code =
+        error instanceof JsonRpcChatError && error.code === "aborted"
+          ? "aborted"
+          : "incompatible";
+      failContext(
+        context,
+        code,
+        code === "aborted" ? "socket-error" : "incompatible",
+        code === "aborted" ? "offline" : "incompatible",
+      );
     }
   };
 
-  const attachContext = (socket: JsonRpcWebSocket, generation: number): SocketContext => {
+  const attachContext = (
+    socket: JsonRpcWebSocket,
+    generation: number,
+  ): SocketContext => {
     let readyResolve!: () => void;
     let readyReject!: (error: JsonRpcChatError) => void;
     const readyPromise = new Promise<void>((resolve, reject) => {
@@ -941,7 +1166,7 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
       gatewayReady: false,
       readySettled: false,
       closed: false,
-      compatibilityRunning: false
+      compatibilityRunning: false,
     };
 
     socket.onopen = () => {
@@ -949,17 +1174,21 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
         return;
       }
       context.opened = true;
-      setState('handshaking', generation);
+      setState("handshaking", generation);
       context.readyTimer = setTimeout(() => {
         if (isCurrentContext(context) && !context.gatewayReady) {
-          failContext(context, 'gateway-ready-timeout', 'gateway-ready-timeout');
+          failContext(
+            context,
+            "gateway-ready-timeout",
+            "gateway-ready-timeout",
+          );
         }
       }, gatewayReadyTimeoutMs);
     };
     socket.onmessage = (event) => parseAndHandleFrame(context, event.data);
     socket.onerror = () => {
       if (isCurrentContext(context)) {
-        failContext(context, 'connection-failed', 'socket-error');
+        failContext(context, "connection-failed", "socket-error");
       }
     };
     socket.onclose = (event) => {
@@ -968,14 +1197,19 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
       }
       const observation = classifyCloseCode(event?.code);
       const status = statusForClose(observation);
-      const errorCode = status === 'auth_required' ? 'connection-failed' : status === 'incompatible' ? 'incompatible' : 'connection-failed';
+      const errorCode =
+        status === "auth_required"
+          ? "connection-failed"
+          : status === "incompatible"
+            ? "incompatible"
+            : "connection-failed";
       invalidateContext(
         context,
-        'socket-close',
+        "socket-close",
         new JsonRpcChatError(errorCode, generation),
         status,
         observation,
-        1000
+        1000,
       );
     };
 
@@ -991,25 +1225,35 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     method: string,
     params: Record<string, BoundedJsonValue>,
     kind: ControlKind,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<void> => {
     if (pendingControls.size >= MAX_JSON_RPC_PENDING_CONTROLS) {
-      return Promise.reject(new JsonRpcChatError('invalid-options', currentGeneration));
+      return Promise.reject(
+        new JsonRpcChatError("invalid-options", currentGeneration),
+      );
     }
     if (signal?.aborted) {
-      return Promise.reject(new JsonRpcChatError('aborted', currentGeneration));
+      return Promise.reject(new JsonRpcChatError("aborted", currentGeneration));
     }
     let id: string;
     try {
       id = allocateId();
     } catch (error) {
-      return Promise.reject(error instanceof JsonRpcChatError ? error : new JsonRpcChatError('invalid-options'));
+      return Promise.reject(
+        error instanceof JsonRpcChatError
+          ? error
+          : new JsonRpcChatError("invalid-options"),
+      );
     }
     const payload = { jsonrpc: JSON_RPC_VERSION, id, method, params };
     try {
       assertOutboundFrame(payload, context.generation);
     } catch (error) {
-      return Promise.reject(error instanceof JsonRpcChatError ? error : new JsonRpcChatError('frame-too-large'));
+      return Promise.reject(
+        error instanceof JsonRpcChatError
+          ? error
+          : new JsonRpcChatError("frame-too-large"),
+      );
     }
 
     let resolve!: () => void;
@@ -1024,16 +1268,29 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
       if (pendingControls.get(id) !== record) {
         return;
       }
-      settleControl(record, new JsonRpcChatError('ack-timeout', currentGeneration));
+      settleControl(
+        record,
+        new JsonRpcChatError("ack-timeout", currentGeneration),
+      );
       if (isCurrentContext(context)) {
-        invalidateContext(context, 'ack-timeout', new JsonRpcChatError('ack-timeout', currentGeneration), 'delivery_uncertain');
+        invalidateContext(
+          context,
+          "ack-timeout",
+          new JsonRpcChatError("ack-timeout", currentGeneration),
+          "delivery_uncertain",
+        );
       }
     }, acknowledgementTimeoutMs);
 
     if (signal) {
-      const onAbort = (): void => settleControl(record, new JsonRpcChatError('aborted', currentGeneration));
-      signal.addEventListener('abort', onAbort, { once: true });
-      record.removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+      const onAbort = (): void =>
+        settleControl(
+          record,
+          new JsonRpcChatError("aborted", currentGeneration),
+        );
+      signal.addEventListener("abort", onAbort, { once: true });
+      record.removeAbortListener = () =>
+        signal.removeEventListener("abort", onAbort);
     }
 
     try {
@@ -1044,80 +1301,124 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     return promise;
   };
 
-  const restoreInternal = (context: SocketContext, sessionId: string, signal?: AbortSignal): Promise<void> => {
-    setState('restoring', currentGeneration);
-    return sendRequest(context, JSON_RPC_SESSION_RESUME_METHOD, { session_id: sessionId }, 'restore', signal).then(
+  const restoreInternal = (
+    context: SocketContext,
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    setState("restoring", currentGeneration);
+    return sendRequest(
+      context,
+      JSON_RPC_SESSION_RESUME_METHOD,
+      { session_id: sessionId },
+      "restore",
+      signal,
+    ).then(
       () => {
         if (isCurrentContext(context)) {
-          setState('ready', currentGeneration);
+          setState("ready", currentGeneration);
         }
       },
       (error: JsonRpcChatError) => {
-        if (isCurrentContext(context) && error.code !== 'aborted') {
-          setState('failed', currentGeneration);
+        if (isCurrentContext(context) && error.code !== "aborted") {
+          setState("failed", currentGeneration);
         }
         throw error;
-      }
+      },
     );
   };
 
-  const startConnection = (signal: AbortSignal | undefined, reconnecting: boolean): Promise<void> => {
+  const startConnection = (
+    signal: AbortSignal | undefined,
+    reconnecting: boolean,
+  ): Promise<void> => {
     if (activeAttempt) {
       return activeAttempt.promise;
     }
     const generation = ++currentGeneration;
     const controller = new AbortController();
     const unlinkAbort = linkAbort(signal, controller);
-    setState(reconnecting ? 'reconnecting' : 'connecting', generation);
+    setState(reconnecting ? "reconnecting" : "connecting", generation);
     let context: SocketContext | undefined;
     let unlinkContextAbort = (): void => undefined;
 
     const promise = (async (): Promise<void> => {
       try {
         throwIfAborted(controller.signal);
-        let ticket = await awaitWithAbort(Promise.resolve(options.ticketProvider(controller.signal)), controller.signal);
+        let ticket = await awaitWithAbort(
+          Promise.resolve(options.ticketProvider(controller.signal)),
+          controller.signal,
+        );
         validateTicket(ticket);
         const upgrade: JsonRpcWebSocketUpgradeRequest = {
           path: JSON_RPC_WS_PATH,
           origin: JSON_RPC_WS_ORIGIN,
-          query: { ticket }
+          query: { ticket },
         };
         const socket = await awaitWithAbort(
           Promise.resolve(options.createWebSocket(upgrade, controller.signal)),
           controller.signal,
-          safeClose
+          safeClose,
         );
-        ticket = '';
+        ticket = "";
         throwIfAborted(controller.signal);
         if (generation !== currentGeneration) {
-          throw new JsonRpcChatError('aborted', generation);
+          throw new JsonRpcChatError("aborted", generation);
         }
         context = attachContext(socket, generation);
         const onAbort = (): void => {
           if (context && isCurrentContext(context)) {
-            invalidateContext(context, 'socket-error', new JsonRpcChatError('aborted', generation), 'offline');
+            invalidateContext(
+              context,
+              "socket-error",
+              new JsonRpcChatError("aborted", generation),
+              "offline",
+            );
           }
         };
-        controller.signal.addEventListener('abort', onAbort, { once: true });
-        unlinkContextAbort = () => controller.signal.removeEventListener('abort', onAbort);
+        controller.signal.addEventListener("abort", onAbort, { once: true });
+        unlinkContextAbort = () =>
+          controller.signal.removeEventListener("abort", onAbort);
         await awaitWithAbort(context.readyPromise, controller.signal);
         throwIfAborted(controller.signal);
         if (!isCurrentContext(context)) {
-          throw new JsonRpcChatError('connection-failed', generation);
+          throw new JsonRpcChatError("connection-failed", generation);
         }
         if (selectedSessionId !== undefined) {
           await restoreInternal(context, selectedSessionId, controller.signal);
         }
       } catch (error) {
-        const sanitized = sanitizeConnectionError(error, controller.signal, generation);
+        const sanitized = sanitizeConnectionError(
+          error,
+          controller.signal,
+          generation,
+        );
         if (context && !context.closed) {
-          const status = sanitized.code === 'incompatible' ? 'incompatible' : sanitized.code === 'aborted' ? 'offline' : 'failed';
-          invalidateContext(context, sanitized.code === 'incompatible' ? 'incompatible' : 'handshake-error', sanitized, status);
+          const status =
+            sanitized.code === "incompatible"
+              ? "incompatible"
+              : sanitized.code === "aborted"
+                ? "offline"
+                : "failed";
+          invalidateContext(
+            context,
+            sanitized.code === "incompatible"
+              ? "incompatible"
+              : "handshake-error",
+            sanitized,
+            status,
+          );
         }
-        if (generation === currentGeneration && sanitized.code !== 'aborted') {
-          setState(sanitized.code === 'incompatible' ? 'incompatible' : 'failed', generation);
-        } else if (generation === currentGeneration && sanitized.code === 'aborted') {
-          setState('offline', generation);
+        if (generation === currentGeneration && sanitized.code !== "aborted") {
+          setState(
+            sanitized.code === "incompatible" ? "incompatible" : "failed",
+            generation,
+          );
+        } else if (
+          generation === currentGeneration &&
+          sanitized.code === "aborted"
+        ) {
+          setState("offline", generation);
         }
         throw sanitized;
       } finally {
@@ -1134,20 +1435,34 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
   };
 
   const connect = (signal?: AbortSignal): Promise<void> => {
-    if (currentState.status === 'ready' && activeContext?.gatewayReady) {
+    if (currentState.status === "closing") {
+      return Promise.reject(new JsonRpcChatError("closed", currentGeneration));
+    }
+    if (userClosed) {
+      // A fresh explicit connect is the only user action that reopens a
+      // transport after close; callbacks running during `closing` are blocked.
+      userClosed = false;
+    }
+    if (currentState.status === "ready" && activeContext?.gatewayReady) {
       return Promise.resolve();
     }
-    if (currentState.status === 'restoring' && activeAttempt) {
+    if (currentState.status === "restoring" && activeAttempt) {
       return activeAttempt.promise;
     }
     return startConnection(signal, false);
   };
 
   const reconnect = (signal?: AbortSignal): Promise<void> => {
+    if (userClosed || currentState.status === "closing") {
+      return Promise.reject(new JsonRpcChatError("closed", currentGeneration));
+    }
     const previousAttempt = activeAttempt;
     const previousContext = activeContext;
     if (previousAttempt) {
-      currentGeneration = Math.max(currentGeneration, previousAttempt.generation + 1);
+      currentGeneration = Math.max(
+        currentGeneration,
+        previousAttempt.generation + 1,
+      );
       previousAttempt.controller.abort();
       void previousAttempt.promise.catch(() => undefined);
       activeAttempt = undefined;
@@ -1155,68 +1470,93 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     if (previousContext) {
       invalidateContext(
         previousContext,
-        'reconnect',
-        new JsonRpcChatError('uncertain-delivery', previousContext.generation),
-        'reconnecting'
+        "reconnect",
+        new JsonRpcChatError("uncertain-delivery", previousContext.generation),
+        "reconnecting",
       );
     } else {
-      setState('reconnecting', currentGeneration);
+      setState("reconnecting", currentGeneration);
     }
     // This callback runs only after the old generation and handlers are stale.
     safeCall(options.onReconnect);
     return startConnection(signal, true);
   };
 
-  const restore = (sessionId = selectedSessionId, signal?: AbortSignal): Promise<void> => {
+  const restore = (
+    sessionId = selectedSessionId,
+    signal?: AbortSignal,
+  ): Promise<void> => {
     if (sessionId === undefined) {
-      return Promise.reject(new JsonRpcChatError('invalid-input', currentGeneration));
+      return Promise.reject(
+        new JsonRpcChatError("invalid-input", currentGeneration),
+      );
     }
     validateSessionId(sessionId);
     const context = activeContext;
-    if (!context?.gatewayReady || currentState.status !== 'ready') {
-      return Promise.reject(new JsonRpcChatError('not-connected', currentGeneration));
+    if (!context?.gatewayReady || currentState.status !== "ready") {
+      return Promise.reject(
+        new JsonRpcChatError("not-connected", currentGeneration),
+      );
     }
     selectedSessionId = sessionId;
     return restoreInternal(context, sessionId, signal);
   };
 
   const close = (): void => {
-    setState('closing', currentGeneration);
+    userClosed = true;
+    setState("closing", currentGeneration);
     const previousAttempt = activeAttempt;
     if (previousAttempt) {
-      currentGeneration = Math.max(currentGeneration, previousAttempt.generation + 1);
+      currentGeneration = Math.max(
+        currentGeneration,
+        previousAttempt.generation + 1,
+      );
       previousAttempt.controller.abort();
       void previousAttempt.promise.catch(() => undefined);
       activeAttempt = undefined;
     }
     const previousContext = activeContext;
     if (previousContext) {
-      invalidateContext(previousContext, 'client-close', new JsonRpcChatError('closed', previousContext.generation), 'closing');
+      invalidateContext(
+        previousContext,
+        "client-close",
+        new JsonRpcChatError("closed", previousContext.generation),
+        "closing",
+      );
     } else {
       for (const record of [...activeRequests.values()]) {
         markUncertain(record);
       }
       for (const record of [...pendingControls.values()]) {
-        settleControl(record, new JsonRpcChatError('uncertain-delivery', currentGeneration));
+        settleControl(
+          record,
+          new JsonRpcChatError("uncertain-delivery", currentGeneration),
+        );
       }
-      setState('closing', currentGeneration);
+      setState("closing", currentGeneration);
     }
+    // `closing` is observable during cleanup, but an explicit user close must
+    // settle deterministically so callers never remain in a half-closed state.
+    setState("offline", currentGeneration);
   };
 
-  const sendPrompt = (prompt: string, requestOptions: { readonly signal?: AbortSignal } = {}): JsonRpcChatRequest => {
+  const sendPrompt = (
+    prompt: string,
+    requestOptions: { readonly signal?: AbortSignal } = {},
+  ): JsonRpcChatRequest => {
     const context = activeContext;
-    if (!context?.gatewayReady || (currentState.status !== 'ready' && currentState.status !== 'restoring')) {
-      throw new JsonRpcChatError('not-connected', currentGeneration);
+    if (!context?.gatewayReady || currentState.status !== "ready") {
+      throw new JsonRpcChatError("not-connected", currentGeneration);
     }
     validatePrompt(prompt);
     if (selectedSessionId === undefined) {
-      throw new JsonRpcChatError('invalid-input', currentGeneration);
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
     if (requestOptions.signal?.aborted) {
-      throw new JsonRpcChatError('cancelled', currentGeneration);
+      throw new JsonRpcChatError("cancelled", currentGeneration);
     }
     if (activeRequests.size >= MAX_JSON_RPC_ACTIVE_REQUESTS) {
-      throw new JsonRpcChatError('invalid-options', currentGeneration);
+      throw new JsonRpcChatError("invalid-options", currentGeneration);
     }
 
     const id = allocateId();
@@ -1224,39 +1564,51 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
       jsonrpc: JSON_RPC_VERSION,
       id,
       method: JSON_RPC_PROMPT_METHOD,
-      params: { session_id: selectedSessionId, text: prompt }
+      params: { session_id: selectedSessionId, text: prompt },
     };
     assertOutboundFrame(promptPayload, context.generation);
     let resolveCompletion!: (event: JsonRpcCompletionEvent) => void;
     let rejectCompletion!: (error: JsonRpcChatError) => void;
-    const completion = new Promise<JsonRpcCompletionEvent>((resolve, reject) => {
-      resolveCompletion = resolve;
-      rejectCompletion = reject;
-    });
+    const completion = new Promise<JsonRpcCompletionEvent>(
+      (resolve, reject) => {
+        resolveCompletion = resolve;
+        rejectCompletion = reject;
+      },
+    );
     const record: OperationRecord = {
       id,
-      status: 'submitting',
-      sequenceMode: 'unknown',
+      status: "submitting",
+      acknowledgementReceived: false,
+      sequenceMode: "unknown",
       nextSequence: 1,
       resolveCompletion,
       rejectCompletion,
-      signal: requestOptions.signal
+      signal: requestOptions.signal,
     };
     activeRequests.set(id, record);
     record.acknowledgementTimer = setTimeout(() => {
-      if (activeRequests.get(id) !== record || isTerminalStatus(record.status)) {
+      if (
+        activeRequests.get(id) !== record ||
+        isTerminalStatus(record.status)
+      ) {
         return;
       }
       markUncertain(record);
       if (isCurrentContext(context)) {
-        invalidateContext(context, 'ack-timeout', new JsonRpcChatError('ack-timeout', currentGeneration), 'delivery_uncertain');
+        invalidateContext(
+          context,
+          "ack-timeout",
+          new JsonRpcChatError("ack-timeout", currentGeneration),
+          "delivery_uncertain",
+        );
       }
     }, acknowledgementTimeoutMs);
 
     if (requestOptions.signal) {
       const onAbort = (): void => handlePromptAbort(record, context);
-      requestOptions.signal.addEventListener('abort', onAbort, { once: true });
-      record.removeAbortListener = () => requestOptions.signal?.removeEventListener('abort', onAbort);
+      requestOptions.signal.addEventListener("abort", onAbort, { once: true });
+      record.removeAbortListener = () =>
+        requestOptions.signal?.removeEventListener("abort", onAbort);
     }
 
     try {
@@ -1267,7 +1619,9 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
       // unhandled rejection when the caller only needs the synchronous error.
       void completion.catch(() => undefined);
       handleSendFailure(context, error);
-      throw error instanceof JsonRpcChatError ? error : new JsonRpcChatError('uncertain-delivery', context.generation);
+      throw error instanceof JsonRpcChatError
+        ? error
+        : new JsonRpcChatError("uncertain-delivery", context.generation);
     }
 
     return {
@@ -1276,50 +1630,74 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
       get state(): JsonRpcChatRequestState {
         return { id: record.id, status: record.status };
       },
-      abort: () => handlePromptAbort(record, context)
+      abort: () => handlePromptAbort(record, context),
     };
   };
 
-  const interrupt = (requestId: string, signal?: AbortSignal): Promise<void> => {
+  const interrupt = (
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
     validateOpaqueInput(requestId, MAX_JSON_RPC_ID_LENGTH);
     const record = activeRequests.get(requestId);
     if (!record || isTerminalStatus(record.status)) {
-      return Promise.reject(new JsonRpcChatError('invalid-input', currentGeneration));
+      return Promise.reject(
+        new JsonRpcChatError("invalid-input", currentGeneration),
+      );
     }
     const context = activeContext;
     if (!context?.gatewayReady || selectedSessionId === undefined) {
-      return Promise.reject(new JsonRpcChatError('not-connected', currentGeneration));
+      return Promise.reject(
+        new JsonRpcChatError("not-connected", currentGeneration),
+      );
     }
-    record.status = 'interrupting';
-    return sendRequest(context, JSON_RPC_INTERRUPT_METHOD, { session_id: selectedSessionId }, 'interrupt', signal);
+    record.status = "interrupting";
+    return sendRequest(
+      context,
+      JSON_RPC_INTERRUPT_METHOD,
+      { session_id: selectedSessionId },
+      "interrupt",
+      signal,
+    );
   };
 
   const respondToApproval = (
     requestId: string,
     approvalId: string,
     approved: boolean,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<void> => {
     validateOpaqueInput(requestId, MAX_JSON_RPC_ID_LENGTH);
     validateOpaqueInput(approvalId, MAX_APPROVAL_ID_LENGTH);
-    if (typeof approved !== 'boolean') {
-      throw new JsonRpcChatError('invalid-input', currentGeneration);
+    if (typeof approved !== "boolean") {
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
     const pending = pendingInteractions.get(requestId);
-    if (!pending || pending.kind !== 'approval' || pending.ownerId !== approvalId || pending.responded) {
-      throw new JsonRpcChatError('invalid-input', currentGeneration);
+    if (
+      !pending ||
+      pending.kind !== "approval" ||
+      pending.ownerId !== approvalId ||
+      pending.responded
+    ) {
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
     const context = activeContext;
     if (!context?.gatewayReady || selectedSessionId === undefined) {
-      return Promise.reject(new JsonRpcChatError('not-connected', currentGeneration));
+      return Promise.reject(
+        new JsonRpcChatError("not-connected", currentGeneration),
+      );
     }
     pending.responded = true;
     const promise = sendRequest(
       context,
       JSON_RPC_APPROVAL_METHOD,
-      { session_id: selectedSessionId, choice: approved ? 'once' : 'deny', all: false },
-      'approval',
-      signal
+      {
+        session_id: selectedSessionId,
+        choice: approved ? "once" : "deny",
+        all: false,
+      },
+      "approval",
+      signal,
     );
     return promise.finally(() => pendingInteractions.delete(requestId));
   };
@@ -1328,26 +1706,33 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     requestId: string,
     clarificationId: string,
     answer: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<void> => {
     validateOpaqueInput(requestId, MAX_JSON_RPC_ID_LENGTH);
     validateOpaqueInput(clarificationId, MAX_CLARIFICATION_ID_LENGTH);
     validatePrompt(answer);
     const pending = pendingInteractions.get(requestId);
-    if (!pending || pending.kind !== 'clarification' || pending.ownerId !== clarificationId || pending.responded) {
-      throw new JsonRpcChatError('invalid-input', currentGeneration);
+    if (
+      !pending ||
+      pending.kind !== "clarification" ||
+      pending.ownerId !== clarificationId ||
+      pending.responded
+    ) {
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
     const context = activeContext;
     if (!context?.gatewayReady || selectedSessionId === undefined) {
-      return Promise.reject(new JsonRpcChatError('not-connected', currentGeneration));
+      return Promise.reject(
+        new JsonRpcChatError("not-connected", currentGeneration),
+      );
     }
     pending.responded = true;
     const promise = sendRequest(
       context,
       JSON_RPC_CLARIFICATION_METHOD,
       { request_id: requestId, answer },
-      'clarification',
-      signal
+      "clarification",
+      signal,
     );
     return promise.finally(() => pendingInteractions.delete(requestId));
   };
@@ -1360,7 +1745,9 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     }
   };
 
-  const subscribe = (listener: (event: JsonRpcChatEvent) => void): (() => void) => {
+  const subscribe = (
+    listener: (event: JsonRpcChatEvent) => void,
+  ): (() => void) => {
     listeners.add(listener);
     return () => listeners.delete(listener);
   };
@@ -1381,36 +1768,53 @@ export function createJsonRpcChatTransport(options: JsonRpcChatOptions): JsonRpc
     respondToApproval,
     answerClarification,
     abort,
-    subscribe
+    subscribe,
   };
 
   function isCurrentContext(context: SocketContext): boolean {
-    return context.generation === currentGeneration && activeContext === context && !context.closed;
+    return (
+      context.generation === currentGeneration &&
+      activeContext === context &&
+      !context.closed
+    );
   }
 
-  function handlePromptAbort(record: OperationRecord, context: SocketContext | undefined): void {
+  function handlePromptAbort(
+    record: OperationRecord,
+    context: SocketContext | undefined,
+  ): void {
     if (isTerminalStatus(record.status)) {
       return;
     }
     clearTimeoutIfPresent(record.acknowledgementTimer);
     record.acknowledgementTimer = undefined;
-    record.status = 'cancelled';
+    record.status = "cancelled";
     activeRequests.delete(record.id);
     clearInteraction(record.id);
     rememberIgnoredResponse(record.id);
     record.removeAbortListener?.();
-    record.rejectCompletion(new JsonRpcChatError('cancelled', currentGeneration));
+    record.rejectCompletion(
+      new JsonRpcChatError("cancelled", currentGeneration),
+    );
     safeCall(options.onAbort, record.id);
 
     // Aborting a prompt closes the socket rather than sending a best-effort
     // replayable cancel frame. The next connection must restore server state.
     if (context && isCurrentContext(context)) {
-      invalidateContext(context, 'client-close', new JsonRpcChatError('cancelled', currentGeneration), 'offline');
+      invalidateContext(
+        context,
+        "client-close",
+        new JsonRpcChatError("cancelled", currentGeneration),
+        "offline",
+      );
     }
   }
 }
 
-export function parseBoundedJsonFrame(data: unknown, maxFrameBytes = MAX_JSON_RPC_FRAME_BYTES): BoundedJsonValue {
+export function parseBoundedJsonFrame(
+  data: unknown,
+  maxFrameBytes = MAX_JSON_RPC_FRAME_BYTES,
+): BoundedJsonValue {
   const limit = normalizeFrameLimit(maxFrameBytes);
   const text = decodeFrame(data, limit);
   try {
@@ -1419,205 +1823,332 @@ export function parseBoundedJsonFrame(data: unknown, maxFrameBytes = MAX_JSON_RP
       maxNodes: MAX_JSON_NODES,
       maxArrayLength: MAX_JSON_ARRAY_LENGTH,
       maxObjectKeys: MAX_JSON_OBJECT_KEYS,
-      maxStringLength: MAX_JSON_RPC_TEXT_LENGTH * 2
+      maxStringLength: MAX_JSON_RPC_TEXT_LENGTH * 2,
     }).parse(text);
   } catch {
-    throw new JsonRpcChatError('malformed-frame');
+    throw new JsonRpcChatError("malformed-frame");
   }
 }
 
 function parseWireMessage(value: BoundedJsonValue): ParsedWireMessage {
-  const object = requireObject(value, ['jsonrpc']);
+  const object = requireObject(value, ["jsonrpc"]);
   if (object.jsonrpc !== JSON_RPC_VERSION) {
-    throw new JsonRpcChatError('protocol-violation');
+    throw new JsonRpcChatError("protocol-violation");
   }
-  const hasMethod = Object.prototype.hasOwnProperty.call(object, 'method');
-  const hasId = Object.prototype.hasOwnProperty.call(object, 'id');
+  const hasMethod = Object.prototype.hasOwnProperty.call(object, "method");
+  const hasId = Object.prototype.hasOwnProperty.call(object, "id");
   if (hasMethod) {
     const method = requireString(object.method, MAX_JSON_RPC_TEXT_LENGTH);
     if (hasId) {
       return {
-        kind: 'request',
+        kind: "request",
         id: requireSafeId(object.id),
         method,
-        params: object.params ?? null
+        params: object.params ?? null,
       };
     }
-    return { kind: 'notification', method, params: object.params ?? null };
+    return { kind: "notification", method, params: object.params ?? null };
   }
   if (!hasId) {
-    throw new JsonRpcChatError('protocol-violation');
+    throw new JsonRpcChatError("protocol-violation");
   }
-  const hasResult = Object.prototype.hasOwnProperty.call(object, 'result');
-  const hasError = Object.prototype.hasOwnProperty.call(object, 'error');
+  const hasResult = Object.prototype.hasOwnProperty.call(object, "result");
+  const hasError = Object.prototype.hasOwnProperty.call(object, "error");
   if (hasResult === hasError) {
-    throw new JsonRpcChatError('protocol-violation');
+    throw new JsonRpcChatError("protocol-violation");
   }
   const id = object.id === null ? null : requireSafeId(object.id);
   return {
-    kind: 'response',
+    kind: "response",
     id,
-    ...(hasResult ? { result: object.result } : { error: parseErrorShape(object.error) })
+    ...(hasResult
+      ? { result: object.result }
+      : { error: parseErrorShape(object.error) }),
   };
 }
 
 function parseEventEnvelope(value: BoundedJsonValue): ParsedEventEnvelope {
-  const object = requireObject(value, ['type']);
+  const object = requireObject(value, ["type"]);
   const type = requireString(object.type, MAX_EVENT_TYPE_LENGTH);
   const payload = object.payload ?? null;
-  const payloadObject = payload !== null && typeof payload === 'object' && !Array.isArray(payload)
-    ? (payload as Record<string, BoundedJsonValue>)
-    : undefined;
-  const sessionId = optionalSafeId(
-    object.session_id ?? object.sessionId ?? payloadObject?.session_id ?? payloadObject?.sessionId,
-    MAX_SESSION_ID_LENGTH
+  const payloadObject =
+    payload !== null && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, BoundedJsonValue>)
+      : undefined;
+  const sessionId = optionalSessionId(
+    object.session_id ??
+      object.sessionId ??
+      payloadObject?.session_id ??
+      payloadObject?.sessionId,
   );
   const requestId = optionalSafeId(
-    object.request_id ?? object.requestId ?? payloadObject?.request_id ?? payloadObject?.requestId,
-    MAX_JSON_RPC_ID_LENGTH
+    object.request_id ??
+      object.requestId ??
+      payloadObject?.request_id ??
+      payloadObject?.requestId,
+    MAX_JSON_RPC_ID_LENGTH,
   );
   const sequenceValue = object.sequence ?? payloadObject?.sequence;
-  const sequence = sequenceValue === undefined ? undefined : requireSequence(sequenceValue);
+  const sequence =
+    sequenceValue === undefined ? undefined : requireSequence(sequenceValue);
   return {
     type,
     ...(sessionId ? { sessionId } : {}),
     ...(requestId ? { requestId } : {}),
     ...(sequence !== undefined ? { sequence } : {}),
-    payload
+    payload,
   };
 }
 
-function parseErrorShape(value: BoundedJsonValue | undefined): JsonRpcErrorShape {
-  const object = requireObject(value ?? null, ['code', 'message']);
+function parseErrorShape(
+  value: BoundedJsonValue | undefined,
+): JsonRpcErrorShape {
+  const object = requireObject(value ?? null, ["code", "message"]);
   if (
-    typeof object.code !== 'number' ||
+    typeof object.code !== "number" ||
     !Number.isInteger(object.code) ||
     object.code < -32_768 ||
     object.code > -32_000 ||
-    typeof object.message !== 'string' ||
+    typeof object.message !== "string" ||
     object.message.length > MAX_JSON_RPC_TEXT_LENGTH
   ) {
-    throw new JsonRpcChatError('protocol-violation');
+    throw new JsonRpcChatError("protocol-violation");
   }
   return { code: object.code, message: object.message };
 }
 
-function requireObject(value: BoundedJsonValue, requiredKeys: readonly string[]): Record<string, BoundedJsonValue> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new JsonRpcChatError('protocol-violation');
+function requireObject(
+  value: BoundedJsonValue,
+  requiredKeys: readonly string[],
+): Record<string, BoundedJsonValue> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new JsonRpcChatError("protocol-violation");
   }
   const object = value as Record<string, BoundedJsonValue>;
   for (const key of requiredKeys) {
     if (!(key in object)) {
-      throw new JsonRpcChatError('protocol-violation');
+      throw new JsonRpcChatError("protocol-violation");
     }
   }
   return object;
 }
 
-function requireString(value: BoundedJsonValue | undefined, maxLength: number): string {
-  if (typeof value !== 'string' || value.length > maxLength || containsDisallowedControl(value)) {
-    throw new JsonRpcChatError('protocol-violation');
+function requireString(
+  value: BoundedJsonValue | undefined,
+  maxLength: number,
+): string {
+  if (
+    typeof value !== "string" ||
+    value.length > maxLength ||
+    containsDisallowedControl(value)
+  ) {
+    throw new JsonRpcChatError("protocol-violation");
   }
   return value;
 }
 
 function requireSafeId(value: BoundedJsonValue | undefined): string {
-  if (typeof value !== 'string' || !isSafeId(value)) {
-    throw new JsonRpcChatError('protocol-violation');
+  if (typeof value !== "string" || !isSafeId(value)) {
+    throw new JsonRpcChatError("protocol-violation");
   }
   return value;
 }
 
-function optionalSafeId(value: BoundedJsonValue | undefined, maxLength: number): string | undefined {
+function optionalSafeId(
+  value: BoundedJsonValue | undefined,
+  maxLength: number,
+): string | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
-  if (typeof value !== 'string' || value.length > maxLength || !isSafeId(value)) {
-    throw new JsonRpcChatError('protocol-violation');
+  if (
+    typeof value !== "string" ||
+    value.length > maxLength ||
+    !isSafeId(value)
+  ) {
+    throw new JsonRpcChatError("protocol-violation");
+  }
+  return value;
+}
+
+function optionalSessionId(
+  value: BoundedJsonValue | undefined,
+): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !isSafeSessionId(value)) {
+    throw new JsonRpcChatError("protocol-violation");
   }
   return value;
 }
 
 function requireSequence(value: BoundedJsonValue | undefined): number {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > MAX_JSON_RPC_SEQUENCE) {
-    throw new JsonRpcChatError('protocol-violation');
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_JSON_RPC_SEQUENCE
+  ) {
+    throw new JsonRpcChatError("protocol-violation");
   }
   return value;
 }
 
-function findInteractionOwner(event: ParsedEventEnvelope, kind: 'approval' | 'clarification'): string {
-  const payload = event.payload !== null && typeof event.payload === 'object' && !Array.isArray(event.payload)
-    ? (event.payload as Record<string, BoundedJsonValue>)
-    : undefined;
-  const key = kind === 'approval' ? 'approval_id' : 'clarification_id';
-  const aliases = kind === 'approval'
-    ? ['approval_id', 'approvalId', 'id', 'request_id']
-    : ['clarification_id', 'clarificationId', 'request_id', 'id'];
+function findInteractionOwner(
+  event: ParsedEventEnvelope,
+  kind: "approval" | "clarification",
+): string {
+  const payload =
+    event.payload !== null &&
+    typeof event.payload === "object" &&
+    !Array.isArray(event.payload)
+      ? (event.payload as Record<string, BoundedJsonValue>)
+      : undefined;
+  const key = kind === "approval" ? "approval_id" : "clarification_id";
+  const aliases =
+    kind === "approval"
+      ? ["approval_id", "approvalId", "id", "request_id"]
+      : ["clarification_id", "clarificationId", "request_id", "id"];
   for (const alias of aliases) {
     const value =
-      (alias === 'request_id' ? event.requestId : undefined) ??
+      (alias === "request_id" ? event.requestId : undefined) ??
       payload?.[alias] ??
       payload?.[key];
     if (value !== undefined) {
-      return requireOpaqueString(value, kind === 'approval' ? MAX_APPROVAL_ID_LENGTH : MAX_CLARIFICATION_ID_LENGTH);
+      return requireOpaqueString(
+        value,
+        kind === "approval"
+          ? MAX_APPROVAL_ID_LENGTH
+          : MAX_CLARIFICATION_ID_LENGTH,
+      );
     }
   }
   // The source owns the detailed approval/clarification payload shape. When it
   // omits an owner ID, derive a local opaque owner from the active request and
   // optional sequence; it is never echoed on the wire.
-  const fallback = `${kind}-${event.requestId ?? 'session'}-${event.sequence ?? 1}`;
-  if (!isSafeId(fallback)) {
-    throw new JsonRpcChatError('protocol-violation');
-  }
-  return fallback;
+  const requestPart = (event.requestId ?? "session").slice(0, 96);
+  const fallback = `${kind}-${requestPart}-${event.sequence ?? 1}`;
+  return requireOpaqueString(
+    fallback,
+    kind === "approval" ? MAX_APPROVAL_ID_LENGTH : MAX_CLARIFICATION_ID_LENGTH,
+  );
 }
 
-function requireOpaqueString(value: BoundedJsonValue | undefined, maxLength: number): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || !isSafeId(value)) {
-    throw new JsonRpcChatError('protocol-violation');
+function requireOpaqueString(
+  value: BoundedJsonValue | undefined,
+  maxLength: number,
+): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maxLength ||
+    !isSafeId(value)
+  ) {
+    throw new JsonRpcChatError("protocol-violation");
   }
   return value;
 }
 
+function isCompleteCompatibilityEvidence(
+  value: JsonRpcCompatibilityEvidenceInput | undefined,
+): value is JsonRpcCompatibilityEvidenceInput {
+  if (value === undefined || value === null || typeof value !== "object") {
+    return false;
+  }
+  const deployment = value.deployment;
+  const routeManifest = value.routeManifest;
+  const sourceReview = value.sourceReview;
+  const proxyProof = value.proxyProof;
+  return (
+    deployment !== null &&
+    typeof deployment === "object" &&
+    isBoundedEvidenceText(deployment.identity) &&
+    isBoundedEvidenceText(deployment.trustChannel) &&
+    deployment.scope === "fixture_only" &&
+    routeManifest !== null &&
+    typeof routeManifest === "object" &&
+    routeManifest.revision === DASHBOARD_CONTRACT &&
+    isArtifactEvidence(routeManifest) &&
+    isArtifactEvidence(sourceReview) &&
+    isArtifactEvidence(proxyProof)
+  );
+}
+
+function isArtifactEvidence(value: unknown): value is JsonRpcArtifactEvidence {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const artifact = value as JsonRpcArtifactEvidence;
+  return (
+    isBoundedEvidenceText(artifact.path) &&
+    typeof artifact.sha256 === "string" &&
+    SHA256_PATTERN.test(artifact.sha256) &&
+    Number.isInteger(artifact.sizeBytes) &&
+    artifact.sizeBytes >= 0 &&
+    artifact.sizeBytes <= 10_000_000
+  );
+}
+
+function isBoundedEvidenceText(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    !containsDisallowedControl(value)
+  );
+}
+
 function validateTicket(ticket: unknown): asserts ticket is string {
-  if (typeof ticket !== 'string' || ticket.length === 0 || ticket.length > MAX_TICKET_LENGTH || !TICKET_PATTERN.test(ticket)) {
-    throw new JsonRpcChatError('invalid-ticket');
+  if (
+    typeof ticket !== "string" ||
+    ticket.length === 0 ||
+    ticket.length > MAX_TICKET_LENGTH ||
+    !TICKET_PATTERN.test(ticket)
+  ) {
+    throw new JsonRpcChatError("invalid-ticket");
   }
 }
 
 function validatePrompt(prompt: unknown): asserts prompt is string {
   if (
-    typeof prompt !== 'string' ||
+    typeof prompt !== "string" ||
     prompt.length === 0 ||
     prompt.length > MAX_JSON_RPC_PROMPT_LENGTH ||
     containsDisallowedControl(prompt)
   ) {
-    throw new JsonRpcChatError('invalid-input');
+    throw new JsonRpcChatError("invalid-input");
   }
 }
 
 function validateSessionId(sessionId: unknown): asserts sessionId is string {
-  if (
-    typeof sessionId !== 'string' ||
-    sessionId.length === 0 ||
-    sessionId.length > MAX_SESSION_ID_LENGTH ||
-    !isSafeId(sessionId)
-  ) {
-    throw new JsonRpcChatError('invalid-input');
+  if (typeof sessionId !== "string" || !isSafeSessionId(sessionId)) {
+    throw new JsonRpcChatError("invalid-input");
   }
 }
 
-function validateOpaqueInput(value: unknown, maxLength: number): asserts value is string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || !isSafeId(value)) {
-    throw new JsonRpcChatError('invalid-input');
+function validateOpaqueInput(
+  value: unknown,
+  maxLength: number,
+): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maxLength ||
+    !isSafeId(value)
+  ) {
+    throw new JsonRpcChatError("invalid-input");
   }
 }
 
 function normalizeFrameLimit(value: number | undefined): number {
   const limit = value ?? MAX_JSON_RPC_FRAME_BYTES;
-  if (!Number.isInteger(limit) || limit < MIN_FRAME_BYTES || limit > MAX_JSON_RPC_FRAME_BYTES) {
-    throw new JsonRpcChatError('invalid-options');
+  if (
+    !Number.isInteger(limit) ||
+    limit < MIN_FRAME_BYTES ||
+    limit > MAX_JSON_RPC_FRAME_BYTES
+  ) {
+    throw new JsonRpcChatError("invalid-options");
   }
   return limit;
 }
@@ -1625,64 +2156,95 @@ function normalizeFrameLimit(value: number | undefined): number {
 function normalizeTimeout(value: number | undefined): number {
   const timeout = value ?? DEFAULT_GATEWAY_READY_TIMEOUT_MS;
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 120_000) {
-    throw new JsonRpcChatError('invalid-options');
+    throw new JsonRpcChatError("invalid-options");
   }
   return timeout;
 }
 
 function isSafeId(value: string): boolean {
-  return value.length > 0 && value.length <= MAX_JSON_RPC_ID_LENGTH && REQUEST_ID_PATTERN.test(value);
+  return (
+    value.length > 0 &&
+    value.length <= MAX_JSON_RPC_ID_LENGTH &&
+    REQUEST_ID_PATTERN.test(value)
+  );
 }
 
-function isIdReserved(id: string, requests: Map<string, OperationRecord>, controls: Map<string, ControlRecord>): boolean {
+function isSafeSessionId(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= MAX_SESSION_ID_LENGTH &&
+    SESSION_ID_PATTERN.test(value)
+  );
+}
+
+function isIdReserved(
+  id: string,
+  requests: Map<string, OperationRecord>,
+  controls: Map<string, ControlRecord>,
+): boolean {
   return requests.has(id) || controls.has(id);
 }
 
 function isTerminalStatus(status: JsonRpcDeliveryStatus): boolean {
-  return status === 'completed' || status === 'cancelled' || status === 'failed' || status === 'uncertain-delivery';
+  return (
+    status === "completed" ||
+    status === "cancelled" ||
+    status === "failed" ||
+    status === "uncertain-delivery"
+  );
 }
 
 function isInteractiveEventName(name: string): boolean {
-  return SENSITIVE_INTERACTIVE_EVENT_NAMES.has(name) || name.endsWith('.request');
+  return (
+    SENSITIVE_INTERACTIVE_EVENT_NAMES.has(name) || name.endsWith(".request")
+  );
 }
 
 function classifyCloseCode(code: number | undefined): JsonRpcCloseObservation {
   const classification: JsonRpcCloseClassification =
     code === 4401
-      ? 'authentication-rejected'
+      ? "authentication-rejected"
       : code === 4403
-        ? 'host-or-origin-rejected'
+        ? "host-or-origin-rejected"
         : code === 4404
-          ? 'embedded-chat-disabled'
+          ? "embedded-chat-disabled"
           : code === 4408
-            ? 'peer-rejected'
+            ? "peer-rejected"
             : code === 4409
-              ? 'attachment-superseded'
+              ? "attachment-superseded"
               : code === 4410
-                ? 'pty-process-exited'
+                ? "pty-process-exited"
                 : code === 1011
-                  ? 'backend-failure'
-                  : 'unsupported';
+                  ? "backend-failure"
+                  : "unsupported";
   return { code, classification };
 }
 
-function statusForClose(observation: JsonRpcCloseObservation): JsonRpcConnectionStatus {
+function statusForClose(
+  observation: JsonRpcCloseObservation,
+): JsonRpcConnectionStatus {
   switch (observation.classification) {
-    case 'authentication-rejected':
-      return 'auth_required';
-    case 'host-or-origin-rejected':
-    case 'embedded-chat-disabled':
-    case 'unsupported':
-      return 'incompatible';
+    case "authentication-rejected":
+      return "auth_required";
+    case "host-or-origin-rejected":
+    case "embedded-chat-disabled":
+    case "unsupported":
+      return "incompatible";
     default:
-      return 'failed';
+      return "failed";
   }
 }
 
 function containsDisallowedControl(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0);
-    if (codePoint !== undefined && codePoint < 0x20 && codePoint !== 0x09 && codePoint !== 0x0a && codePoint !== 0x0d) {
+    if (
+      codePoint !== undefined &&
+      codePoint < 0x20 &&
+      codePoint !== 0x09 &&
+      codePoint !== 0x0a &&
+      codePoint !== 0x0d
+    ) {
       return true;
     }
   }
@@ -1694,9 +2256,9 @@ function byteLength(value: string): number {
 }
 
 function decodeFrame(data: unknown, maxFrameBytes: number): string {
-  if (typeof data === 'string') {
+  if (typeof data === "string") {
     if (byteLength(data) > maxFrameBytes) {
-      throw new JsonRpcChatError('frame-too-large');
+      throw new JsonRpcChatError("frame-too-large");
     }
     return data;
   }
@@ -1706,25 +2268,30 @@ function decodeFrame(data: unknown, maxFrameBytes: number): string {
   } else if (data instanceof Uint8Array) {
     bytes = data;
   } else {
-    throw new JsonRpcChatError('malformed-frame');
+    throw new JsonRpcChatError("malformed-frame");
   }
   if (bytes.byteLength > maxFrameBytes) {
-    throw new JsonRpcChatError('frame-too-large');
+    throw new JsonRpcChatError("frame-too-large");
   }
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    throw new JsonRpcChatError('malformed-frame');
+    throw new JsonRpcChatError("malformed-frame");
   }
 }
 
-function clearTimeoutIfPresent(timer: ReturnType<typeof setTimeout> | undefined): void {
+function clearTimeoutIfPresent(
+  timer: ReturnType<typeof setTimeout> | undefined,
+): void {
   if (timer !== undefined) {
     clearTimeout(timer);
   }
 }
 
-function linkAbort(signal: AbortSignal | undefined, controller: AbortController): () => void {
+function linkAbort(
+  signal: AbortSignal | undefined,
+  controller: AbortController,
+): () => void {
   if (!signal) {
     return () => undefined;
   }
@@ -1733,24 +2300,31 @@ function linkAbort(signal: AbortSignal | undefined, controller: AbortController)
     controller.abort();
     return () => undefined;
   }
-  signal.addEventListener('abort', onAbort, { once: true });
-  return () => signal.removeEventListener('abort', onAbort);
+  signal.addEventListener("abort", onAbort, { once: true });
+  return () => signal.removeEventListener("abort", onAbort);
 }
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) {
-    throw new JsonRpcChatError('aborted');
+    throw new JsonRpcChatError("aborted");
   }
 }
 
-function sanitizeConnectionError(error: unknown, signal: AbortSignal, generation: number): JsonRpcChatError {
-  if (signal.aborted || (error instanceof JsonRpcChatError && error.code === 'aborted')) {
-    return new JsonRpcChatError('aborted', generation);
+function sanitizeConnectionError(
+  error: unknown,
+  signal: AbortSignal,
+  generation: number,
+): JsonRpcChatError {
+  if (
+    signal.aborted ||
+    (error instanceof JsonRpcChatError && error.code === "aborted")
+  ) {
+    return new JsonRpcChatError("aborted", generation);
   }
   if (error instanceof JsonRpcChatError) {
     return new JsonRpcChatError(error.code, generation);
   }
-  return new JsonRpcChatError('connection-failed', generation);
+  return new JsonRpcChatError("connection-failed", generation);
 }
 
 function safeClose(socket: JsonRpcWebSocket): void {
@@ -1759,7 +2333,7 @@ function safeClose(socket: JsonRpcWebSocket): void {
 
 function closeSocketForAwait(socket: JsonRpcWebSocket): void {
   try {
-    socket.close(1000, 'cancelled');
+    socket.close(1000, "cancelled");
   } catch {
     // The late adapter result is discarded without retaining its error.
   }
@@ -1768,31 +2342,44 @@ function closeSocketForAwait(socket: JsonRpcWebSocket): void {
 function evaluateGate(
   gate: JsonRpcCompatibilityGate | undefined,
   evidence: JsonRpcCompatibilityEvidence,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
 ): Promise<boolean> {
   if (!gate || !signal) {
     return Promise.resolve(false);
   }
-  try {
-    return Promise.resolve(gate(evidence, signal)).then((result) =>
-      result === true || (result !== null && typeof result === 'object' && result.passed === true)
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const gateResult = Promise.resolve()
+    .then(() => gate(evidence, signal))
+    .then(
+      (result) =>
+        result === true ||
+        (result !== null &&
+          typeof result === "object" &&
+          result.passed === true),
+      () => false,
     );
-  } catch {
-    return Promise.resolve(false);
-  }
+  const deadline = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  return awaitWithAbort(Promise.race([gateResult, deadline]), signal).finally(
+    () => {
+      clearTimeoutIfPresent(timer);
+    },
+  );
 }
 
 function awaitWithAbort<T>(
   promise: Promise<T>,
   signal: AbortSignal,
-  onLateResolve?: (value: T) => void
+  onLateResolve?: (value: T) => void,
 ): Promise<T> {
   if (signal.aborted) {
-    return Promise.reject(new JsonRpcChatError('aborted'));
+    return Promise.reject(new JsonRpcChatError("aborted"));
   }
   return new Promise<T>((resolve, reject) => {
     let settled = false;
-    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
+    const cleanup = (): void => signal.removeEventListener("abort", onAbort);
     const settle = (callback: () => void): void => {
       if (settled) {
         return;
@@ -1801,8 +2388,9 @@ function awaitWithAbort<T>(
       cleanup();
       callback();
     };
-    const onAbort = (): void => settle(() => reject(new JsonRpcChatError('aborted')));
-    signal.addEventListener('abort', onAbort, { once: true });
+    const onAbort = (): void =>
+      settle(() => reject(new JsonRpcChatError("aborted")));
+    signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
       (value) => {
         if (settled) {
@@ -1811,7 +2399,7 @@ function awaitWithAbort<T>(
         }
         settle(() => resolve(value));
       },
-      (error: unknown) => settle(() => reject(error))
+      (error: unknown) => settle(() => reject(error)),
     );
   });
 }
@@ -1839,12 +2427,12 @@ class BoundedJsonParser {
 
   parse(text: string): BoundedJsonValue {
     if (text.length === 0) {
-      throw new Error('empty');
+      throw new Error("empty");
     }
     const value = this.parseValue(text, 0);
     this.skipWhitespace(text);
     if (this.index !== text.length) {
-      throw new Error('trailing');
+      throw new Error("trailing");
     }
     return value;
   }
@@ -1852,34 +2440,34 @@ class BoundedJsonParser {
   private parseValue(text: string, depth: number): BoundedJsonValue {
     this.skipWhitespace(text);
     const character = text[this.index];
-    if (character === '{') {
+    if (character === "{") {
       const containerDepth = depth + 1;
       if (containerDepth > this.limits.maxDepth) {
-        throw new Error('depth');
+        throw new Error("depth");
       }
       return this.parseObject(text, containerDepth);
     }
-    if (character === '[') {
+    if (character === "[") {
       const containerDepth = depth + 1;
       if (containerDepth > this.limits.maxDepth) {
-        throw new Error('depth');
+        throw new Error("depth");
       }
       return this.parseArray(text, containerDepth);
     }
     if (character === '"') {
       return this.parseString(text);
     }
-    if (character === 't' && text.startsWith('true', this.index)) {
+    if (character === "t" && text.startsWith("true", this.index)) {
       this.index += 4;
       this.countNode();
       return true;
     }
-    if (character === 'f' && text.startsWith('false', this.index)) {
+    if (character === "f" && text.startsWith("false", this.index)) {
       this.index += 5;
       this.countNode();
       return false;
     }
-    if (character === 'n' && text.startsWith('null', this.index)) {
+    if (character === "n" && text.startsWith("null", this.index)) {
       this.index += 4;
       this.countNode();
       return null;
@@ -1887,7 +2475,10 @@ class BoundedJsonParser {
     return this.parseNumber(text);
   }
 
-  private parseObject(text: string, depth: number): { [key: string]: BoundedJsonValue } {
+  private parseObject(
+    text: string,
+    depth: number,
+  ): { [key: string]: BoundedJsonValue } {
     this.index += 1;
     this.countNode();
     const result: { [key: string]: BoundedJsonValue } = Object.create(null) as {
@@ -1895,37 +2486,37 @@ class BoundedJsonParser {
     };
     const keys = new Set<string>();
     this.skipWhitespace(text);
-    if (text[this.index] === '}') {
+    if (text[this.index] === "}") {
       this.index += 1;
       return result;
     }
     while (this.index < text.length) {
       if (keys.size >= this.limits.maxObjectKeys || text[this.index] !== '"') {
-        throw new Error('object');
+        throw new Error("object");
       }
       const key = this.parseString(text);
       if (keys.has(key)) {
-        throw new Error('duplicate');
+        throw new Error("duplicate");
       }
       keys.add(key);
       this.skipWhitespace(text);
-      if (text[this.index] !== ':') {
-        throw new Error('colon');
+      if (text[this.index] !== ":") {
+        throw new Error("colon");
       }
       this.index += 1;
       result[key] = this.parseValue(text, depth);
       this.skipWhitespace(text);
-      if (text[this.index] === '}') {
+      if (text[this.index] === "}") {
         this.index += 1;
         return result;
       }
-      if (text[this.index] !== ',') {
-        throw new Error('comma');
+      if (text[this.index] !== ",") {
+        throw new Error("comma");
       }
       this.index += 1;
       this.skipWhitespace(text);
     }
-    throw new Error('object-end');
+    throw new Error("object-end");
   }
 
   private parseArray(text: string, depth: number): BoundedJsonValue[] {
@@ -1933,32 +2524,32 @@ class BoundedJsonParser {
     this.countNode();
     const result: BoundedJsonValue[] = [];
     this.skipWhitespace(text);
-    if (text[this.index] === ']') {
+    if (text[this.index] === "]") {
       this.index += 1;
       return result;
     }
     while (this.index < text.length) {
       if (result.length >= this.limits.maxArrayLength) {
-        throw new Error('array');
+        throw new Error("array");
       }
       result.push(this.parseValue(text, depth));
       this.skipWhitespace(text);
-      if (text[this.index] === ']') {
+      if (text[this.index] === "]") {
         this.index += 1;
         return result;
       }
-      if (text[this.index] !== ',') {
-        throw new Error('comma');
+      if (text[this.index] !== ",") {
+        throw new Error("comma");
       }
       this.index += 1;
       this.skipWhitespace(text);
     }
-    throw new Error('array-end');
+    throw new Error("array-end");
   }
 
   private parseString(text: string): string {
     if (text[this.index] !== '"') {
-      throw new Error('string');
+      throw new Error("string");
     }
     const start = this.index;
     this.index += 1;
@@ -1971,40 +2562,40 @@ class BoundedJsonParser {
         try {
           value = JSON.parse(raw) as unknown;
         } catch {
-          throw new Error('string');
+          throw new Error("string");
         }
         if (
-          typeof value !== 'string' ||
+          typeof value !== "string" ||
           value.length > this.limits.maxStringLength ||
           containsDisallowedControl(value)
         ) {
-          throw new Error('string');
+          throw new Error("string");
         }
         this.countNode();
         return value;
       }
-      if (character === '\\') {
+      if (character === "\\") {
         this.index += 1;
         const escape = text[this.index];
         if (!escape || !'"\\/bfnrtu'.includes(escape)) {
-          throw new Error('escape');
+          throw new Error("escape");
         }
-        if (escape === 'u') {
+        if (escape === "u") {
           const codePoint = text.slice(this.index + 1, this.index + 5);
           if (!/^[0-9a-fA-F]{4}$/u.test(codePoint)) {
-            throw new Error('unicode');
+            throw new Error("unicode");
           }
           this.index += 4;
         }
-      } else if (character < ' ') {
-        throw new Error('control');
+      } else if (character < " ") {
+        throw new Error("control");
       }
       this.index += 1;
       if (this.index - start > this.limits.maxStringLength * 6 + 2) {
-        throw new Error('string-size');
+        throw new Error("string-size");
       }
     }
-    throw new Error('string-end');
+    throw new Error("string-end");
   }
 
   private parseNumber(text: string): number {
@@ -2012,12 +2603,15 @@ class BoundedJsonParser {
       .slice(this.index)
       .match(/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u);
     if (!match) {
-      throw new Error('number');
+      throw new Error("number");
     }
     const literal = match[0];
     const value = Number(literal);
-    if (!Number.isFinite(value) || (Number.isInteger(value) && Math.abs(value) > Number.MAX_SAFE_INTEGER)) {
-      throw new Error('number');
+    if (
+      !Number.isFinite(value) ||
+      (Number.isInteger(value) && Math.abs(value) > Number.MAX_SAFE_INTEGER)
+    ) {
+      throw new Error("number");
     }
     this.index += literal.length;
     this.countNode();
@@ -2037,7 +2631,7 @@ class BoundedJsonParser {
   private countNode(): void {
     this.nodes += 1;
     if (this.nodes > this.limits.maxNodes) {
-      throw new Error('nodes');
+      throw new Error("nodes");
     }
   }
 }

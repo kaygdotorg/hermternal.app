@@ -18,7 +18,7 @@ The caller injects two boundaries:
 
 - `ticketProvider(signal)` returns one fresh short-lived ticket;
 - `createWebSocket(upgrade, signal)` consumes the explicit `{ path: "/api/ws",
-  origin: "same-origin", query: { ticket } }` seam for one upgrade.
+origin: "same-origin", query: { ticket } }` seam for one upgrade.
 
 The transport does not build a URL, read cookies, add an Authorization header,
 retain a ticket, or reuse a ticket after the factory call. Every explicit
@@ -57,19 +57,29 @@ After `gateway.ready`, the transport invokes two injected, non-network gates in
 order:
 
 1. deployment attestation against `dashboard-v0.0.1`, the pinned Hermes SHA,
-   the reviewed route-manifest revision, and proxy proof;
+   the synthetic deployment identity, the reviewed route-manifest revision and
+   digest, the source-review artifact, and the reviewed proxy proof;
 2. the non-destructive behavioral probe.
 
-`ready` is exposed only after both gates pass. Missing callbacks fail closed as
-`incompatible`; a matching attestation never replaces the independent probe.
-The gate evidence is static contract metadata plus the transient bounded
-`gateway.ready` payload. It contains no ticket, prompt, credential, transcript,
-host, or user data.
+The typed evidence record binds the complete synthetic proof boundary:
+`deployment.identity`, `deployment.trustChannel`, `deployment.scope`,
+`routeManifest.path`, `routeManifest.revision`, `routeManifest.sha256`,
+`sourceReview.path`, `sourceReview.sha256`, `proxyProof.path`, and
+`proxyProof.sha256`, in addition to the fixed contract, Hermes SHA, WebSocket
+path, and transient bounded `gateway.ready` payload. Artifact sizes are bounded
+as metadata only. Missing or malformed evidence fails closed as `incompatible`.
+
+`ready` is exposed only after both gates pass. Missing callbacks and gates that
+do not settle before the bounded compatibility-gate deadline fail closed;
+a matching attestation never replaces the independent probe. The evidence
+contains no ticket, prompt, credential, transcript, host, or user data.
 
 If a selected server session is configured, readiness enters `restoring` and
 sends the source method `session.resume` with the selected opaque
 `session_id`. The connection promise resolves only after the resume result is
-received. The server owns the durable history; the transport does not mirror it.
+received. `sendPrompt()` requires `ready` after this response; `restoring` is a
+strict barrier that permits waiting or cancellation only. The server owns the
+durable history; the transport does not mirror it.
 
 ## Reviewed wire methods and events
 
@@ -109,6 +119,13 @@ Server replies and events share the channel. A reply is correlated only by the
 JSON-RPC request `id`. The event `request_id` field is optional source data; it
 is checked when present and otherwise correlated to the one active selected
 session operation. An event is never interpreted as a request result.
+
+Acknowledgement receipt is tracked separately from operation lifecycle. If a
+stream, approval, clarification, or completion event arrives before the reply,
+the later acknowledgement cannot regress that event-derived state. If
+completion removes an operation before its valid acknowledgement arrives, a
+bounded late-ack tombstone consumes that response without reopening the
+operation or failing the connection.
 
 The pinned source uses JSON-RPC parse error `-32700` and dispatch error `-32603`.
 Both are surfaced as transport failures, not successful results. Raw server
@@ -190,25 +207,29 @@ retry and no automatic new-session fallback.
 
 The source-defined close observations are classified as follows:
 
-| Code | Classification | Connection state |
-| --- | --- | --- |
-| `4401` | authentication rejected | `auth_required` |
-| `4403` | host or origin rejected | `incompatible` |
-| `4404` | embedded chat disabled | `incompatible` |
-| `4408` | peer rejected | `failed` |
-| `4409` | attachment superseded | `failed` |
-| `4410` | PTY process exited | `failed` |
-| `1011` | backend failure | `failed` |
-| other or missing | unsupported | `incompatible` |
+| Code             | Classification          | Connection state |
+| ---------------- | ----------------------- | ---------------- |
+| `4401`           | authentication rejected | `auth_required`  |
+| `4403`           | host or origin rejected | `incompatible`   |
+| `4404`           | embedded chat disabled  | `incompatible`   |
+| `4408`           | peer rejected           | `failed`         |
+| `4409`           | attachment superseded   | `failed`         |
+| `4410`           | PTY process exited      | `failed`         |
+| `1011`           | backend failure         | `failed`         |
+| other or missing | unsupported             | `incompatible`   |
 
 Unknown close codes never schedule unsafe automatic retry. A user close enters
-`closing` and does not reconnect.
+`closing` during cleanup, then settles at `offline`. `reconnect()` is rejected
+until a new explicit `connect()` call reopens the user-closed transport; no
+callback or stale attempt can start a replacement socket during close.
 
 ## Bounded parser and safety boundary
 
 The parser bounds frame bytes, JSON depth, JSON nodes, object keys, array length,
 string length, prompt length, IDs, sequence values, active requests, and pending
-controls. It rejects duplicate object keys, invalid UTF-8, non-finite or unsafe
+controls. Session IDs use the route-manifest grammar: one ASCII letter or digit,
+or 2–128 ASCII characters with an ASCII letter or digit at both ends and only
+`.`, `_`, `-`, or `~` internally. It rejects duplicate object keys, invalid UTF-8, non-finite or unsafe
 numbers, trailing JSON, and empty-container nesting beyond the exact configured
 depth. Additive object fields remain valid after required-field validation.
 
@@ -254,11 +275,16 @@ The unit suite uses a deterministic fake WebSocket and covers:
 - exact prompt/control method names and source-shaped parameters;
 - additive fields and unknown noninteractive/interactive event policy;
 - ordered fixture sequences and malformed/oversized frames;
+- the strict restore barrier, event-before-ack state preservation, and
+  completion-before-ack tombstones;
 - disconnect before and after acknowledgement;
-- fresh-ticket reconnect, stale-generation suppression, and no prompt replay;
+- fresh-ticket reconnect, stale-generation suppression, explicit close/offline
+  cleanup, reconnect suppression, and no prompt replay;
 - abort-triggered socket closure, send-failure cleanup, and late control-ack
   suppression;
-- approval/clarification owner validation and acknowledgement deadlines;
+- complete compatibility evidence, missing-evidence failure, bounded gate
+  timeout, route-manifest session-ID validation, approval/clarification owner
+  validation, and acknowledgement deadlines;
 - all pinned close-code classifications and the exact JSON depth bound;
 - a browser-like no-network module import that does not touch `fetch` or
   `WebSocket` globals.
