@@ -13,13 +13,18 @@ remain unchanged.
 ## Fail-closed behavior
 
 `evaluateBehavioralProbeGate` accepts only the pinned contract, Hermes source
-SHA, route-manifest digest, exact evidence fields, known case IDs, and the full
-reviewed requirement inventory. A `success` state must reproduce all 64
-canonical case outcomes and pass every required evidence row.
+SHA, canonical fixture digest, exact route-manifest path and bytes, exact
+evidence fields, the ordered 64 case IDs, their complete request/kind/surface/
+expected semantics, and the ordered 11 requirement IDs. A `success` state must
+reproduce all canonical case outcomes and pass every required evidence row.
+The production gate verifies those bindings itself; it does not rely on the
+Python validator at runtime.
 
 All results remain blocked. Canonical synthetic success reports
 `blocked_live_compatibility`, `compatible: false`, and `liveRun: false`; it is
-fixture evidence, not deployment proof. Missing, malformed, additive,
+fixture evidence, not deployment proof. Evidence is copied exactly once from
+own enumerable data descriptors into inert structures before any decision.
+Accessors, symbols, non-enumerable additions, missing, malformed, additive,
 duplicated, unknown, incompatible, cyclic, or mismatched evidence returns one
 bounded `incompatible` result without reflecting the supplied content.
 `cancelled` and `unknown` preserve the source-state-reread recovery rule. The

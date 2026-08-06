@@ -1,10 +1,25 @@
+import behavioralProbeFixture from '../../../../../../contracts/fixtures/behavioral-probe/probe-fixtures.json';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  behavioralProbeFixtureDigestForTest,
   createBehavioralProbeFixtureEvidence,
   evaluateBehavioralProbeGate,
+  sha256ForTest,
+  validateBehavioralProbeFixtureForTest,
   type BehavioralProbeEvidence,
   type BehavioralProbeStateId
 } from './behavioral-probe-gate';
+import { CANONICAL_ROUTE_MANIFEST_BYTES } from './canonical-route-manifest';
+
+const repositoryRoot = process.cwd().endsWith('/apps/web')
+  ? resolve(process.cwd(), '../..')
+  : process.cwd();
+const routeManifestBytes = readFileSync(
+  resolve(repositoryRoot, 'contracts/hermes-dashboard/manifest.md'),
+  'utf8'
+);
 
 function cloneEvidence(evidence: BehavioralProbeEvidence): BehavioralProbeEvidence {
   return structuredClone(evidence);
@@ -173,7 +188,87 @@ describe('evaluateBehavioralProbeGate', () => {
 
     expect(evaluateBehavioralProbeGate(hostile)).toEqual(incompatibleResult());
   });
+
+  it('rejects a state getter that changes from pending to success without reading it', () => {
+    const evidence = createBehavioralProbeFixtureEvidence('pending') as unknown as Record<string, unknown>;
+    let reads = 0;
+    Object.defineProperty(evidence, 'state', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        reads += 1;
+        return reads === 1 ? 'pending' : 'success';
+      }
+    });
+
+    expect(evaluateBehavioralProbeGate(evidence)).toEqual(incompatibleResult());
+    expect(reads).toBe(0);
+  });
+
+  it.each(['top', 'case', 'requirement', 'case-array'])(
+    'rejects symbol and non-enumerable additions at the %s evidence level',
+    (level) => {
+      for (const hiddenKey of [Symbol('hidden'), 'hidden']) {
+        const evidence = cloneEvidence(createBehavioralProbeFixtureEvidence('success'));
+        const target =
+          level === 'top'
+            ? evidence
+            : level === 'case'
+              ? evidence.caseResults[0]
+              : level === 'requirement'
+                ? evidence.requirementResults[0]
+                : evidence.caseResults;
+        if (!target) throw new Error('Expected canonical evidence target.');
+        Object.defineProperty(target, hiddenKey, {
+          value: 'unreviewed',
+          enumerable: false,
+          configurable: true
+        });
+        expect(evaluateBehavioralProbeGate(evidence)).toEqual(incompatibleResult());
+      }
+    }
+  );
 });
+
+describe('canonical fixture bindings', () => {
+  it('uses the reviewed SHA-256 implementation', () => {
+    expect(CANONICAL_ROUTE_MANIFEST_BYTES).toBe(routeManifestBytes);
+    expect(sha256ForTest('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+    expect(sha256ForTest(routeManifestBytes)).toBe('3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197');
+    expect(behavioralProbeFixtureDigestForTest(behavioralProbeFixture)).toBe('293756e6b2573f59b7747c38cc0cda0f6602236ed93aae442f0022ad850d40e7');
+  });
+
+  it('accepts only the checked-in fixture and exact route-manifest bytes', () => {
+    expect(validateBehavioralProbeFixtureForTest(behavioralProbeFixture, routeManifestBytes)).toBe(true);
+    expect(validateBehavioralProbeFixtureForTest(behavioralProbeFixture, `${routeManifestBytes}\n`)).toBe(false);
+  });
+
+  it.each([
+    ['case id', (fixture: FixtureDocument) => { fixture.cases[0].id = 'changed-case-id'; }],
+    ['case kind', (fixture: FixtureDocument) => { fixture.cases[0].kind = 'negative'; }],
+    ['case surface', (fixture: FixtureDocument) => { fixture.cases[0].surface = 'edge'; }],
+    ['request route', (fixture: FixtureDocument) => { fixture.cases[0].request.path = '/api/changed'; }],
+    ['allow decision', (fixture: FixtureDocument) => { fixture.cases[0].expected.decision = 'deny'; }],
+    ['requirement id', (fixture: FixtureDocument) => { fixture.evidence_requirements[0] = 'changed_requirement'; }],
+    ['manifest path', (fixture: FixtureDocument) => { fixture.route_manifest = 'contracts/changed.md'; }]
+  ])('rejects a coordinated %s mutation even when the rest remains internally consistent', (_label, mutate) => {
+    const fixture = structuredClone(behavioralProbeFixture) as unknown as FixtureDocument;
+    mutate(fixture);
+    expect(validateBehavioralProbeFixtureForTest(fixture, routeManifestBytes)).toBe(false);
+  });
+});
+
+type FixtureDocument = {
+  route_manifest: string;
+  evidence_requirements: string[];
+  cases: Array<{
+    id: string;
+    kind: string;
+    surface: string;
+    request: { path: string };
+    expected: { decision: string };
+  }>;
+};
 
 function incompatibleResult() {
   return {
