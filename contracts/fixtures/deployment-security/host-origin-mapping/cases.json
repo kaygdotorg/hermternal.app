@@ -1,0 +1,273 @@
+{
+  "schema": "hermternal.deployment.host-origin-mapping.v1",
+  "fixture_id": "host-origin-mapping-dep-03-f5be9236",
+  "issue": "DEP-03",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "live_claim": false,
+  "proof_mode": "offline_disposable_mapping_model",
+  "mapping": {
+    "configured_public_scheme": "https",
+    "configured_public_host": "configured_public_host",
+    "configured_public_origin": "configured_public_https_origin",
+    "hermes_bound_authority": "fixed_private_non_loopback_9119",
+    "hermes_required_origin": "mapped_private_http_origin",
+    "mapping_source": "trusted_edge_configuration_only",
+    "request_values_never_select_upstream": true
+  },
+  "policy": {
+    "route": "/hermes/api/ws",
+    "method": "GET",
+    "transport": "websocket",
+    "host_rejection_status": 421,
+    "origin_rejection_status": 403,
+    "host_precedes_origin": true,
+    "rejection_upstream_called": false,
+    "accepted_action": "forward_with_configured_mapping"
+  },
+  "evidence_contract": {
+    "retained_fields": [
+      "case_id",
+      "decision",
+      "responding_layer",
+      "upstream_called",
+      "public_host_result",
+      "public_origin_result",
+      "mapped_host_marker",
+      "mapped_origin_marker"
+    ],
+    "forbidden_retained_classes": [
+      "raw_header_values",
+      "credentials",
+      "cookies",
+      "bearer_values",
+      "ticket_values",
+      "live_hosts",
+      "private_addresses",
+      "user_data",
+      "transcripts"
+    ],
+    "maximum_failure_line_characters": 240,
+    "maximum_retained_evidence_bytes": 4096,
+    "failure_output": "one_bounded_semantic_json_line"
+  },
+  "cases": [
+    {
+      "id": "accept-exact-browser-mapping",
+      "request": {
+        "public_host": "exact_configured",
+        "public_origin": "exact_configured_https",
+        "upstream_override": "absent"
+      },
+      "expected": {
+        "decision": "forward_with_configured_mapping",
+        "status": null,
+        "responding_layer": "upstream",
+        "upstream_called": true,
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "accepted_exact",
+        "mapped_host_marker": "fixed_private_non_loopback_9119",
+        "mapped_origin_marker": "mapped_private_http_origin"
+      }
+    },
+    {
+      "id": "reject-mismatched-host",
+      "request": {
+        "public_host": "mismatched_public_host",
+        "public_origin": "exact_configured_https",
+        "upstream_override": "absent"
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "rejected_mismatch",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-hostile-host-syntax",
+      "request": {
+        "public_host": "hostile_host_syntax",
+        "public_origin": "exact_configured_https",
+        "upstream_override": "absent"
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "rejected_hostile",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-missing-host",
+      "request": {
+        "public_host": "missing",
+        "public_origin": "exact_configured_https",
+        "upstream_override": "absent"
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "rejected_missing",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-mismatched-origin",
+      "request": {
+        "public_host": "exact_configured",
+        "public_origin": "mismatched_public_origin",
+        "upstream_override": "absent"
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_mismatch",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-hostile-origin-syntax",
+      "request": {
+        "public_host": "exact_configured",
+        "public_origin": "hostile_origin_syntax",
+        "upstream_override": "absent"
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_hostile",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-null-origin",
+      "request": {
+        "public_host": "exact_configured",
+        "public_origin": "null_origin",
+        "upstream_override": "absent"
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_null",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-wildcard-origin",
+      "request": {
+        "public_host": "exact_configured",
+        "public_origin": "wildcard_origin",
+        "upstream_override": "absent"
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_wildcard",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-missing-browser-origin",
+      "request": {
+        "public_host": "exact_configured",
+        "public_origin": "missing",
+        "upstream_override": "absent"
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_missing",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-request-host-override",
+      "request": {
+        "public_host": "exact_configured",
+        "public_origin": "exact_configured_https",
+        "upstream_override": "request_supplied_host"
+      },
+      "expected": {
+        "decision": "reject_upstream_override",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "accepted_exact",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-request-origin-override",
+      "request": {
+        "public_host": "exact_configured",
+        "public_origin": "exact_configured_https",
+        "upstream_override": "request_supplied_origin"
+      },
+      "expected": {
+        "decision": "reject_upstream_override",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "accepted_exact",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    },
+    {
+      "id": "reject-host-and-origin-before-mapping",
+      "request": {
+        "public_host": "hostile_host_syntax",
+        "public_origin": "hostile_origin_syntax",
+        "upstream_override": "request_supplied_both"
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_host_result": "rejected_hostile",
+        "public_origin_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null
+      }
+    }
+  ]
+}
