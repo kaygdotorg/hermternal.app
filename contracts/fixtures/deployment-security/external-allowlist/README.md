@@ -146,9 +146,11 @@ tracebacks, usage text, untrusted argument values, or request material.
 ### Retained-output redaction
 
 The retained-output scanner rejects data URLs, padded and unpadded Base64-like
-runs (including short unpadded uppercase samples, URL-safe `-`/`_` forms, and
-embedded runs), absolute POSIX and Windows paths, relative paths, filenames,
-hostnames, email or IPv4 host-shaped values, and Basic, Cookie, Bearer, and
+runs (including short unpadded standard and URL-safe forms, URL-safe
+`-`/`_` samples, and embedded runs), absolute POSIX and Windows paths
+(including `/tmp`),
+relative paths, filenames, hostnames (including `localhost:3000`), email or
+IPv4 host-shaped values, and Basic, Cookie, Bearer, and
 sensitive-assignment payloads. It scans both values and object keys.
 Diagnostic locations use fixed semantic labels such as `$.<field>` and `$[]`;
 attacker-controlled keys never become error paths.

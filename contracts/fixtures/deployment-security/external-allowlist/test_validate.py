@@ -338,12 +338,16 @@ class ExternalAllowlistTests(unittest.TestCase):
             "data:image/png;base64,iVBORw0KGgo=",
             "short unpadded QUJDREVG value",
             "URL-safe padded AQIDBAUG-_== value",
+            "short unpadded YWJjZGVm value",
+            "URL-safe unpadded YWJjZGVm-_ value",
             "embedded padded AQIDBAUGBwgJ== value",
             "embedded unpadded AQIDBAUGBwgJ value",
             "artifact at /Users/alice/private/report.txt",
             r"artifact at C:\\Users\\Alice\\private\\report.txt",
             "artifact at ../local/report.txt",
             "uploaded filename report.txt",
+            "artifact at /tmp",
+            "artifact for localhost:3000",
             "artifact for evil.example.com",
             "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
             "Cookie: session=synthetic-cookie-value",
@@ -354,17 +358,21 @@ class ExternalAllowlistTests(unittest.TestCase):
                 with self.assertRaises(validate.ValidationError):
                     validate.validate_redaction({"message": message})
 
-    def test_error_compaction_redacts_short_and_url_safe_base64_in_normal_and_optimized_modes(self) -> None:
+    def test_error_compaction_redacts_retained_edge_shapes_in_normal_and_optimized_modes(self) -> None:
         checks = (
             ("retained=QUJDREVG", ("QUJDREVG",)),
             ("retained=AQIDBAUG-_==", ("AQIDBAUG-_==",)),
+            ("retained=YWJjZGVm", ("YWJjZGVm",)),
+            ("retained=YWJjZGVm-_", ("YWJjZGVm-_",)),
+            ("retained=/tmp", ("/tmp",)),
+            ("retained=localhost:3000", ("localhost:3000",)),
         )
         for message, markers in checks:
             with self.subTest(message=message):
                 self._assert_helper_redaction(message, markers)
 
-    def test_real_cli_rejects_short_and_url_safe_base64_in_normal_and_optimized_modes(self) -> None:
-        for value in ("QUJDREVG", "AQIDBAUG-_=="):
+    def test_real_cli_rejects_retained_edge_shapes_in_normal_and_optimized_modes(self) -> None:
+        for value in ("QUJDREVG", "AQIDBAUG-_==", "YWJjZGVm", "YWJjZGVm-_", "/tmp", "localhost:3000"):
             with self.subTest(value=value):
                 mutated = copy.deepcopy(self.document)
                 mutated["cases"][0]["request"]["headers"]["X-Note"] = value
@@ -375,7 +383,11 @@ class ExternalAllowlistTests(unittest.TestCase):
             "data:image/png;base64,iVBORw0KGgo=",
             "AQIDBAUGBwgJ==",
             "AQIDBAUGBwgJ",
+            "YWJjZGVm",
+            "YWJjZGVm-_",
             "/Users/alice/private/report.txt",
+            "/tmp",
+            "localhost:3000",
             r"C:\\Users\\Alice\\private\\report.txt",
             "../local/report.txt",
             "report.txt",
@@ -388,7 +400,11 @@ class ExternalAllowlistTests(unittest.TestCase):
             "data:image/png;base64,iVBORw0KGgo=",
             "embedded padded AQIDBAUGBwgJ== value",
             "embedded unpadded AQIDBAUGBwgJ value",
+            "embedded short YWJjZGVm value",
+            "embedded URL-safe YWJjZGVm-_ value",
             "artifact at /Users/alice/private/report.txt",
+            "artifact at /tmp",
+            "artifact for localhost:3000",
             r"artifact at C:\\Users\\Alice\\private\\report.txt",
             "artifact at ../local/report.txt",
             "uploaded filename report.txt",
@@ -406,7 +422,11 @@ class ExternalAllowlistTests(unittest.TestCase):
         hostile_keys = (
             "data:image/png;base64,iVBORw0KGgo=",
             "AQIDBAUGBwgJ==",
+            "YWJjZGVm",
+            "YWJjZGVm-_",
             "/Users/alice/private/report.txt",
+            "/tmp",
+            "localhost:3000",
             r"C:\\Users\\Alice\\private\\report.txt",
             "report.txt",
             "evil.example.com",
@@ -439,7 +459,11 @@ class ExternalAllowlistTests(unittest.TestCase):
             "data:image/png;base64,iVBORw0KGgo=",
             "AQIDBAUGBwgJ==",
             "AQIDBAUGBwgJ",
+            "YWJjZGVm",
+            "YWJjZGVm-_",
             "/Users/alice/private/report.txt",
+            "/tmp",
+            "localhost:3000",
             r"C:\\Users\\Alice\\private\\report.txt",
             "../local/report.txt",
             "report.txt",

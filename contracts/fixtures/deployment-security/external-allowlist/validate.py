@@ -35,8 +35,8 @@ PREFIX = "/hermes"
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py")
 # Evidence is pinned after the fixture is reviewed; a copied baseline cannot
 # self-rebind its digest to a mutated README, manifest, or validator.
-EXPECTED_ARTIFACT_BYTES = 114343
-EXPECTED_ARTIFACT_SHA256 = "81260771d6b4e422dc21019c3b666ce9c80e37da8b45317b0fade289a9dd33a9"
+EXPECTED_ARTIFACT_BYTES = 115142
+EXPECTED_ARTIFACT_SHA256 = "a0c7006975f230e7ffc0704526ffcd4a9f8da6ea54a0bde9f67b385ae355e4fe"
 
 MAX_JSON_BYTES = 512 * 1024
 MAX_JSON_DEPTH = 64
@@ -114,6 +114,8 @@ REDACTION_STRUCTURAL_FIELDS = frozenset(
         "fixture",
         "command",
         "path",
+        "prefix",
+        "platform",
         "files",
         "sha256",
     }
@@ -142,18 +144,36 @@ RETAINED_VALUE_PATTERNS = (
     (
         "base64",
         # Keep the lexical boundary broad enough for short unpadded samples
-        # and URL-safe '-'/'_' payloads without decoding or validating them.
+        # and URL-safe payloads without decoding or validating them.  Standard
+        # tokens use a digit/symbol or a strong mixed-case signal; URL-safe
+        # tokens require mixed case plus '-'/'_' so ordinary contract labels
+        # and method-override aliases are not classified as retained payloads.
         re.compile(
-            r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{8,}={1,2}(?![A-Za-z0-9+/_=-])"
-            r"|(?<![A-Za-z0-9+/])(?=[A-Z]{8,}(?![A-Za-z0-9+/]))[A-Z]{8,}(?![A-Za-z0-9+/])"
-            r"|(?<![A-Za-z0-9+/])(?=[A-Za-z0-9+/]{12,}(?![A-Za-z0-9+/]))"
-            r"(?:(?=[A-Za-z0-9+/]*[0-9+/])|(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z]))"
-            r"(?![0-9A-Fa-f]{12,}(?![A-Za-z0-9+/]))[A-Za-z0-9+/]{12,}(?![A-Za-z0-9+/])"
+            r"(?<![A-Za-z0-9+/_%-])"
+            r"(?:"
+            r"[A-Za-z0-9+/_-]{8,}={1,2}(?![A-Za-z0-9+/_=-])"
+            r"|"
+            r"(?<![A-Za-z0-9+/_%-])(?=[A-Za-z0-9+/]{8,}(?![A-Za-z0-9+/]))"
+            r"(?:"
+            r"(?=[A-Za-z0-9+/]*[0-9+/])"
+            r"|(?=(?:[A-Za-z0-9+/]*[A-Z]){3})(?=(?:[A-Za-z0-9+/]*[a-z]){2})"
+            r"|(?=[A-Z]{8,}(?![A-Za-z0-9+/]))"
+            r")"
+            r"(?![0-9A-Fa-f]{8,}(?![A-Za-z0-9+/]))"
+            r"[A-Za-z0-9+/]{8,}(?![A-Za-z0-9+/_-])"
+            r"|"
+            r"(?<![A-Za-z0-9+/_%-])(?=[A-Za-z0-9+/_-]{8,}(?![A-Za-z0-9+/_-]))"
+            r"(?!(?:[A-Za-z0-9_]*-){2})"
+            r"(?=[A-Za-z0-9+/_-]*[-_])"
+            r"(?=(?:[A-Za-z0-9+/_-]*[A-Z]){2})"
+            r"(?=(?:[A-Za-z0-9+/_-]*[a-z]){2})"
+            r"[A-Za-z0-9+/_-]{8,}(?![A-Za-z0-9+/_-])"
+            r")"
         ),
     ),
     (
         "absolute_path",
-        re.compile(r"(?<![A-Za-z0-9])/(?:[^\s<>\"']+/)+[^\s<>\"']+"),
+        re.compile(r"(?<![A-Za-z0-9])/(?:[^\s<>\"'/]+(?:/[^\s<>\"']+)*)"),
     ),
     (
         "windows_path",
@@ -175,8 +195,9 @@ RETAINED_VALUE_PATTERNS = (
         "hostname",
         re.compile(
             r"(?<![A-Za-z0-9._-])"
-            r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-            r"[A-Za-z]{2,63}(?::[0-9]{1,5})?"
+            r"(?:localhost|(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+            r"[A-Za-z]{2,63})"
+            r"(?::[0-9]{1,5})?"
             r"(?![A-Za-z0-9._/-])",
             re.IGNORECASE,
         ),
