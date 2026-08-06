@@ -16,6 +16,58 @@ import validate
 FIXTURE_DIR = Path(__file__).resolve().parent
 FIXTURE_PATH = FIXTURE_DIR / "cases.json"
 PYTHON_MODES = (("normal", False), ("optimized", True))
+REDACTION_SAMPLES = (
+    ("authorization_token", "Authorization: Token live-secret-token", ("live-secret-token",)),
+    ("authorization_bearer", "Authorization: Bearer live-bearer-token", ("live-bearer-token",)),
+    ("authorization_assignment", "Authorization=Bearer live-assignment-token", ("live-assignment-token",)),
+    ("api_header", "X-API-Key: live-api-key", ("live-api-key",)),
+    ("api_assignment", "api_key=live-api-key", ("live-api-key",)),
+    ("quoted_json_api_key", '\"api_key\": \"live-json-key\"', ("live-json-key",)),
+    ("access_assignment", "access_key: 'live-access-key'", ("live-access-key",)),
+    ("token_assignment", "token=\"live-assignment-token\"", ("live-assignment-token",)),
+    ("password_assignment", "password=live-password", ("live-password",)),
+    ("client_secret_assignment", "client_secret=live-client-secret", ("live-client-secret",)),
+    ("cookie", "Cookie: session=private-cookie", ("private-cookie",)),
+    ("url", "https://private.example.test/path?token=secret", ("https://private.example.test", "secret")),
+    (
+        "mac_spaced_path",
+        "/Applications/Private App/data",
+        ("/Applications/Private App/data", "Private App/data", "App/data", "data"),
+    ),
+    (
+        "unix_spaced_path",
+        "/Users/operator/Private Folder/transcript.txt",
+        (
+            "/Users/operator/Private Folder/transcript.txt",
+            "Private Folder/transcript.txt",
+            "Folder/transcript.txt",
+            "transcript.txt",
+        ),
+    ),
+    (
+        "windows_spaced_path",
+        r"C:\Users\operator\Private Folder\token.txt",
+        (
+            r"C:\Users\operator\Private Folder\token.txt",
+            r"Private Folder\token.txt",
+            r"Folder\token.txt",
+            "token.txt",
+        ),
+    ),
+    (
+        "unc_spaced_path",
+        r"\\server\share\Private Folder\secret.txt",
+        (
+            r"\\server\share\Private Folder\secret.txt",
+            r"share\Private Folder\secret.txt",
+            r"Private Folder\secret.txt",
+            "secret.txt",
+        ),
+    ),
+    ("base64_blob", "QWxhZGRpbjpvcGVuIHNlc2FtZQ==", ("QWxhZGRpbjpvcGVu",)),
+    ("short_base64", "c2VjcmV0", ("c2VjcmV0",)),
+    ("urlsafe_base64", "c2VjcmV0LXNlY3JldA", ("c2VjcmV0LXNlY3JldA",)),
+)
 
 
 class RootlessInitValidatorTests(unittest.TestCase):
@@ -303,28 +355,7 @@ class RootlessInitValidatorTests(unittest.TestCase):
         self.assertFalse(self.fixture["approved_boundary"]["host_profile_bind"])
 
     def test_redaction_is_bounded_and_removes_sensitive_shapes(self) -> None:
-        samples = (
-            ("authorization_token", "Authorization: Token live-secret-token", ("live-secret-token",)),
-            ("authorization_bearer", "Authorization: Bearer live-bearer-token", ("live-bearer-token",)),
-            ("authorization_assignment", "Authorization=Bearer live-assignment-token", ("live-assignment-token",)),
-            ("api_header", "X-API-Key: live-api-key", ("live-api-key",)),
-            ("api_assignment", "api_key=live-api-key", ("live-api-key",)),
-            ("quoted_json_api_key", '\"api_key\": \"live-json-key\"', ("live-json-key",)),
-            ("access_assignment", "access_key: 'live-access-key'", ("live-access-key",)),
-            ("token_assignment", "token=\"live-assignment-token\"", ("live-assignment-token",)),
-            ("password_assignment", "password=live-password", ("live-password",)),
-            ("client_secret_assignment", "client_secret=live-client-secret", ("live-client-secret",)),
-            ("cookie", "Cookie: session=private-cookie", ("private-cookie",)),
-            ("url", "https://private.example.test/path?token=secret", ("https://private.example.test", "secret")),
-            ("mac_spaced_path", "/Applications/Private App/data", ("/Applications/Private App/data",)),
-            ("unix_spaced_path", "/Users/operator/Private Folder/transcript.txt", ("/Users/operator/Private Folder/transcript.txt",)),
-            ("windows_spaced_path", r"C:\Users\operator\Private Folder\token.txt", (r"C:\Users\operator\Private Folder\token.txt",)),
-            ("unc_spaced_path", r"\\server\share\Private Folder\secret.txt", (r"\\server\share\Private Folder\secret.txt",)),
-            ("base64_blob", "QWxhZGRpbjpvcGVuIHNlc2FtZQ==", ("QWxhZGRpbjpvcGVu",)),
-            ("short_base64", "c2VjcmV0", ("c2VjcmV0",)),
-            ("urlsafe_base64", "c2VjcmV0LXNlY3JldA", ("c2VjcmV0LXNlY3JldA",)),
-        )
-        for label, hostile, forbidden_values in samples:
+        for label, hostile, forbidden_values in REDACTION_SAMPLES:
             with self.subTest(shape=label):
                 redacted = validate.redact_diagnostic(hostile)
                 self.assertLessEqual(len(redacted.encode("utf-8")), validate.MAX_ERROR_MESSAGE_BYTES)
@@ -332,33 +363,30 @@ class RootlessInitValidatorTests(unittest.TestCase):
                     self.assertNotIn(forbidden, redacted)
                 self.assertIn("[REDACTED", redacted)
 
-        combined = " ".join(sample[1] for sample in samples)
+        combined = " ".join(sample[1] for sample in REDACTION_SAMPLES)
         redacted = validate.redact_diagnostic(combined)
         self.assertLessEqual(len(redacted.encode("utf-8")), validate.MAX_ERROR_MESSAGE_BYTES)
+        for _, _, forbidden_values in REDACTION_SAMPLES:
+            for forbidden in forbidden_values:
+                self.assertNotIn(forbidden, redacted)
         self.assertIn("[REDACTED", redacted)
 
     def test_real_cli_rejects_sensitive_mutations_without_echoing_them(self) -> None:
-        hostile_values = (
-            "Authorization=Bearer live-cli-token",
-            '"api_key": "live-cli-key"',
-            "password=live-cli-password",
-            "client_secret=live-cli-secret",
-            "/Applications/Private App/secret.txt",
-            r"C:\Users\operator\Private Folder\secret.txt",
-            "c2VjcmV0LXNlY3JldA",
-        )
-        for hostile in hostile_values:
+        for label, hostile, forbidden_values in REDACTION_SAMPLES:
             mutated = copy.deepcopy(self.fixture)
             mutated["approved_boundary"]["volume_kind"] = hostile
             with tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "sensitive-boundary.json"
+                path = Path(directory) / f"sensitive-boundary-{label}.json"
                 path.write_text(json.dumps(mutated), encoding="utf-8")
                 for mode, optimized in PYTHON_MODES:
-                    with self.subTest(value=hostile, mode=mode):
+                    with self.subTest(shape=label, mode=mode):
                         result = self.run_cli(path, optimized=optimized)
-                        self.assertEqual(result.returncode, 1, (hostile, mode, result.stderr))
-                        self.assertNotIn("Traceback", result.stdout + result.stderr)
-                        self.assertNotIn(hostile, result.stdout)
+                        output = result.stdout + result.stderr
+                        self.assertEqual(result.returncode, 1, (label, mode, result.stderr))
+                        self.assertNotIn("Traceback", output)
+                        self.assertNotIn(str(path), output)
+                        for forbidden in forbidden_values:
+                            self.assertNotIn(forbidden, output)
                         self.assertEqual(json.loads(result.stdout)["errors"], ["validation_failed"])
 
     def test_proposed_run_is_rootless_podman_and_preserves_boundary(self) -> None:

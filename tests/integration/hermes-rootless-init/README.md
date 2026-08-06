@@ -167,7 +167,8 @@ Docker/Podman matrix entries, Docker-only fields, approved-boundary key
 deletions, wrong/reordered/missing/extra policy reason codes, irrelevant
 case-variant fields, unsafe live claims, and sensitive diagnostic shapes
 including spaced paths, quoted credentials, Authorization assignments, and
-short or URL-safe Base64.
+short or URL-safe Base64. Path cases assert removal of the complete path and
+all sensitive suffixes in both the exported helper and real CLI output.
 
 This is a non-UI protocol fixture. Accessibility verification is N/A because
 it creates no controls, focus order, semantic names, screen-reader or

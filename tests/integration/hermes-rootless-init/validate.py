@@ -735,7 +735,7 @@ _REDACTION_PATTERNS = (
     # rather than stopping at whitespace and leaking the suffix.
     (
         re.compile(
-            r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/][^\\r\\n,;]+|\\\\[^\\r\\n,;]+|/(?!/)[^\\r\\n,;]+)"
+            r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/][^\r\n,;]+|\\\\[^\r\n,;]+|/(?!/)[^\r\n,;]+)"
         ),
         "[REDACTED_PATH]",
     ),
