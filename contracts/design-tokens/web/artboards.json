@@ -1,0 +1,585 @@
+{
+  "schema": "hermternal.web-paper-artboard-manifest.v1",
+  "contract": "dashboard-v0.0.1",
+  "evidence_status": "complete",
+  "live_claim": false,
+  "paper": {
+    "file_id": "01KZ6BB66KCWR2C4J2TSWQGDM7",
+    "file_name": "Hermternal",
+    "token_content_hash": "cb15f2b1",
+    "pages": [
+      {
+        "id": "3-0",
+        "name": "Web states — Authentication",
+        "artboard_count": 34
+      },
+      {
+        "id": "4-0",
+        "name": "Web states — Runtime",
+        "artboard_count": 68
+      }
+    ]
+  },
+  "scope": {
+    "release": "v0.0.1",
+    "platform": "web",
+    "appearances": ["light", "dark"],
+    "viewports": [
+      {
+        "id": "desktop",
+        "width": 1440,
+        "height_policy": "paper_exact"
+      },
+      {
+        "id": "narrow",
+        "width": 390,
+        "height_policy": "paper_exact"
+      }
+    ],
+    "variant_order": ["light.desktop", "light.narrow", "dark.desktop", "dark.narrow"],
+    "excluded": [
+      {
+        "id": "private-deep-links",
+        "status": "deferred",
+        "target_release": "v0.0.2",
+        "reason": "The existing private deep-link UI is intentionally excluded from the v0.0.1 client and remains a future Paper reference."
+      },
+      {
+        "id": "session-search",
+        "status": "deferred",
+        "target_release": "v0.0.2",
+        "reason": "The existing Session Search UI is intentionally excluded from the v0.0.1 client and remains a future Paper reference."
+      }
+    ]
+  },
+  "tokens": [
+    {"name": "--color-canvas", "value": "#F3F5F8", "scope": "shipped"},
+    {"name": "--color-paper", "value": "#FFFFFF", "scope": "shipped"},
+    {"name": "--color-ink", "value": "#16181D", "scope": "shipped"},
+    {"name": "--color-muted", "value": "#667080", "scope": "shipped"},
+    {"name": "--color-line", "value": "#D8DDE5", "scope": "shipped"},
+    {"name": "--color-signal", "value": "#4C6FFF", "scope": "shipped"},
+    {"name": "--color-courier", "value": "#E88A2A", "scope": "shipped"},
+    {"name": "--color-success", "value": "#2DA568", "scope": "shipped"},
+    {"name": "--color-danger", "value": "#D94A4A", "scope": "shipped"},
+    {"name": "--color-dark-canvas", "value": "#0D1117", "scope": "shipped"},
+    {"name": "--color-dark-paper", "value": "#171C24", "scope": "shipped"},
+    {"name": "--color-dark-ink", "value": "#F4F6FA", "scope": "shipped"},
+    {"name": "--color-dark-muted", "value": "#A7B0BF", "scope": "shipped"},
+    {"name": "--color-dark-line", "value": "#343C49", "scope": "shipped"},
+    {"name": "--color-dark-signal", "value": "#6F88FF", "scope": "shipped"},
+    {"name": "--color-dark-courier", "value": "#F0A451", "scope": "shipped"},
+    {"name": "--color-dark-success", "value": "#4CC989", "scope": "shipped"},
+    {"name": "--color-dark-danger", "value": "#F06A6A", "scope": "shipped"},
+    {"name": "--color-auth-signal", "value": "#3157C7", "scope": "shipped"},
+    {"name": "--color-auth-danger", "value": "#AB3838", "scope": "shipped"},
+    {"name": "--color-gate-light-action", "value": "#2748C8", "scope": "shipped"},
+    {"name": "--color-gate-light-action-ink", "value": "var(--color-paper)", "scope": "shipped"},
+    {"name": "--color-gate-light-state-surface", "value": "#EEF2FF", "scope": "shipped"},
+    {"name": "--color-gate-light-state-ink", "value": "#2340A8", "scope": "shipped"},
+    {"name": "--color-gate-light-focus", "value": "#2348C7", "scope": "shipped"},
+    {"name": "--color-gate-light-error-surface", "value": "#FFF1F2", "scope": "shipped"},
+    {"name": "--color-gate-light-error-ink", "value": "#A52B38", "scope": "shipped"},
+    {"name": "--color-gate-light-error-border", "value": "#C44B57", "scope": "shipped"},
+    {"name": "--color-gate-dark-action", "value": "#3B57D0", "scope": "shipped"},
+    {"name": "--color-gate-dark-action-ink", "value": "var(--color-dark-ink)", "scope": "shipped"},
+    {"name": "--color-gate-dark-state-surface", "value": "#202A50", "scope": "shipped"},
+    {"name": "--color-gate-dark-state-ink", "value": "#C2CCFF", "scope": "shipped"},
+    {"name": "--color-gate-dark-focus", "value": "#C2CCFF", "scope": "shipped"},
+    {"name": "--color-gate-dark-error-surface", "value": "#351F26", "scope": "shipped"},
+    {"name": "--color-gate-dark-error-ink", "value": "#FFB7C0", "scope": "shipped"},
+    {"name": "--color-gate-dark-error-border", "value": "#FF7581", "scope": "shipped"},
+    {"name": "--color-deeplink-light-courier", "value": "#8A4B00", "scope": "deferred"},
+    {"name": "--color-deeplink-light-success", "value": "#0B6B4B", "scope": "deferred"},
+    {"name": "--color-deeplink-light-signal", "value": "#2348C7", "scope": "deferred"},
+    {"name": "--color-deeplink-light-danger", "value": "#A52B38", "scope": "deferred"},
+    {"name": "--color-deeplink-light-muted", "value": "#4D5765", "scope": "deferred"},
+    {"name": "--color-deeplink-light-action", "value": "#2748C8", "scope": "deferred"},
+    {"name": "--color-deeplink-light-action-ink", "value": "var(--color-paper)", "scope": "deferred"},
+    {"name": "--color-deeplink-dark-courier", "value": "var(--color-dark-courier)", "scope": "deferred"},
+    {"name": "--color-deeplink-dark-success", "value": "var(--color-dark-success)", "scope": "deferred"},
+    {"name": "--color-deeplink-dark-signal", "value": "var(--color-dark-signal)", "scope": "deferred"},
+    {"name": "--color-deeplink-dark-danger", "value": "var(--color-dark-danger)", "scope": "deferred"},
+    {"name": "--color-deeplink-dark-muted", "value": "var(--color-dark-muted)", "scope": "deferred"},
+    {"name": "--color-deeplink-dark-action", "value": "var(--color-dark-signal)", "scope": "deferred"},
+    {"name": "--color-deeplink-dark-action-ink", "value": "var(--color-dark-paper)", "scope": "deferred"},
+    {"name": "--color-search-light-courier", "value": "#8A4B00", "scope": "deferred"},
+    {"name": "--color-search-light-success", "value": "#0B6B4B", "scope": "deferred"},
+    {"name": "--color-search-light-signal", "value": "#2348C7", "scope": "deferred"},
+    {"name": "--font-ui", "value": "Instrument Sans", "scope": "shipped"},
+    {"name": "--text-meta", "value": "12px", "scope": "shipped"},
+    {"name": "--text-control", "value": "14px", "scope": "shipped"},
+    {"name": "--text-body", "value": "15px", "scope": "shipped"},
+    {"name": "--text-title", "value": "20px", "scope": "shipped"},
+    {"name": "--weight-regular", "value": 400, "scope": "shipped"},
+    {"name": "--weight-medium", "value": 500, "scope": "shipped"},
+    {"name": "--weight-semibold", "value": 600, "scope": "shipped"},
+    {"name": "--leading-meta", "value": "16px", "scope": "shipped"},
+    {"name": "--leading-control", "value": "18px", "scope": "shipped"},
+    {"name": "--leading-body", "value": "23px", "scope": "shipped"},
+    {"name": "--leading-title", "value": "26px", "scope": "shipped"},
+    {"name": "--space-1", "value": "4px", "scope": "shipped"},
+    {"name": "--space-2", "value": "8px", "scope": "shipped"},
+    {"name": "--space-3", "value": "12px", "scope": "shipped"},
+    {"name": "--space-4", "value": "16px", "scope": "shipped"},
+    {"name": "--space-6", "value": "24px", "scope": "shipped"},
+    {"name": "--space-8", "value": "32px", "scope": "shipped"},
+    {"name": "--radius-nested", "value": "var(--radius-nested-glass)", "scope": "shipped"},
+    {"name": "--radius-structural", "value": "var(--radius-glass)", "scope": "shipped"},
+    {"name": "--radius-pill", "value": "999px", "scope": "shipped"},
+    {"name": "--radius-input", "value": "12px", "scope": "shipped"},
+    {"name": "--radius-nested-glass", "value": "14px", "scope": "shipped"},
+    {"name": "--radius-card", "value": "17px", "scope": "shipped"},
+    {"name": "--radius-popover", "value": "18px", "scope": "shipped"},
+    {"name": "--radius-glass", "value": "22px", "scope": "shipped"}
+  ],
+  "token_sets": [
+    {
+      "id": "runtime",
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+    },
+    {
+      "id": "runtime-gate",
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--font-ui", "--color-gate-light-action", "--color-gate-light-action-ink", "--color-gate-light-state-surface", "--color-gate-light-state-ink", "--color-gate-light-focus", "--color-gate-light-error-surface", "--color-gate-light-error-ink", "--color-gate-light-error-border", "--color-gate-dark-action", "--color-gate-dark-action-ink", "--color-gate-dark-state-surface", "--color-gate-dark-state-ink", "--color-gate-dark-focus", "--color-gate-dark-error-surface", "--color-gate-dark-error-ink", "--color-gate-dark-error-border", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+    },
+    {
+      "id": "auth",
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-auth-signal", "--color-auth-danger", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+    },
+    {
+      "id": "auth-gate",
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-auth-signal", "--color-auth-danger", "--color-gate-light-action", "--color-gate-light-action-ink", "--color-gate-light-state-surface", "--color-gate-light-state-ink", "--color-gate-light-focus", "--color-gate-light-error-surface", "--color-gate-light-error-ink", "--color-gate-light-error-border", "--color-gate-dark-action", "--color-gate-dark-action-ink", "--color-gate-dark-state-surface", "--color-gate-dark-state-ink", "--color-gate-dark-focus", "--color-gate-dark-error-surface", "--color-gate-dark-error-ink", "--color-gate-dark-error-border", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+    },
+    {
+      "id": "deep-link-deferred",
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-deeplink-light-courier", "--color-deeplink-light-success", "--color-deeplink-light-signal", "--color-deeplink-light-danger", "--color-deeplink-light-muted", "--color-deeplink-light-action", "--color-deeplink-light-action-ink", "--color-deeplink-dark-courier", "--color-deeplink-dark-success", "--color-deeplink-dark-signal", "--color-deeplink-dark-danger", "--color-deeplink-dark-muted", "--color-deeplink-dark-action", "--color-deeplink-dark-action-ink", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+    },
+    {
+      "id": "search-deferred",
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-search-light-courier", "--color-search-light-success", "--color-search-light-signal", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+    }
+  ],
+  "states": [
+    {
+      "id": "runtime.interrupted-response",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "59J-0", "name": "Light / Desktop — interrupted response", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "5M9-0", "name": "Light / Mobile — interrupted response", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "5QL-0", "name": "Dark / Desktop — interrupted response", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "63B-0", "name": "Dark / Mobile — interrupted response", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete light/dark desktop/narrow set for the shipped interrupted-response surface."
+    },
+    {
+      "id": "runtime.loading-session",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "3RD-0", "name": "Light / Desktop — loading session", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "BAX-0", "name": "Light / Mobile — loading session", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "3ZW-0", "name": "Dark / Desktop — loading session", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "BDA-0", "name": "Dark / Mobile — loading session", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete loading/restoring session coverage for the shipped client."
+    },
+    {
+      "id": "runtime.offline",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "5FW-0", "name": "Light / Desktop — offline", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "5OF-0", "name": "Light / Mobile — offline", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "5WY-0", "name": "Dark / Desktop — offline", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "65H-0", "name": "Dark / Mobile — offline", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete offline coverage for the shipped client."
+    },
+    {
+      "id": "runtime.empty-session",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "A7H-0", "name": "Light / Desktop — empty session", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "3XQ-0", "name": "Light / Mobile — empty session", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "AE1-0", "name": "Dark / Desktop — empty session", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "469-0", "name": "Dark / Mobile — empty session", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete empty-session coverage for the shipped client."
+    },
+    {
+      "id": "runtime.retryable-failure",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "AKL-0", "name": "Light / Desktop — retryable failure", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "4L5-0", "name": "Light / Mobile — retryable failure", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "AR6-0", "name": "Dark / Desktop — retryable failure", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "527-0", "name": "Dark / Mobile — retryable failure", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete retryable-failure coverage for the shipped client."
+    },
+    {
+      "id": "runtime.permanent-failure",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "AXR-0", "name": "Light / Desktop — permanent failure", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "4NB-0", "name": "Light / Mobile — permanent failure", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "B4C-0", "name": "Dark / Desktop — permanent failure", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "54D-0", "name": "Dark / Mobile — permanent failure", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete permanent-failure coverage for the shipped client."
+    },
+    {
+      "id": "runtime.compatibility-check-failed",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime-gate",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "7I1-0", "name": "Light / Desktop — compatibility check failed", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "7V7-0", "name": "Light / Mobile — compatibility check failed", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "7OM-0", "name": "Dark / Desktop — compatibility check failed", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "7XM-0", "name": "Dark / Mobile — compatibility check failed", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete fail-closed compatibility gate coverage."
+    },
+    {
+      "id": "runtime.unsupported-version",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime-gate",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "6JF-0", "name": "Light / Desktop — unsupported version", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "6WL-0", "name": "Light / Mobile — unsupported version", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "6Q0-0", "name": "Dark / Desktop — unsupported version", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "6Z0-0", "name": "Dark / Mobile — unsupported version", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete unsupported-version gate coverage."
+    },
+    {
+      "id": "runtime.streaming-response",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "48F-0", "name": "Light / Desktop — streaming response", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "BFN-0", "name": "Light / Mobile — streaming response", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "4PH-0", "name": "Dark / Desktop — streaming response", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "BI0-0", "name": "Dark / Mobile — streaming response", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete streaming-response coverage, including the visible stop action."
+    },
+    {
+      "id": "runtime.reconnecting",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "4ES-0", "name": "Light / Desktop — reconnecting", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "BKD-0", "name": "Light / Mobile — reconnecting", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "4VU-0", "name": "Dark / Desktop — reconnecting", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "BMQ-0", "name": "Dark / Mobile — reconnecting", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete reconnecting coverage for the shipped client."
+    },
+    {
+      "id": "auth.provider-selection",
+      "family": "authentication",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "auth",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "3JJ-0", "name": "Light / Desktop — provider selection", "width": 1440, "height": 900},
+        {"id": "light.narrow", "artboard_id": "3JN-0", "name": "Light / Mobile — provider selection", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "3NU-0", "name": "Dark / Desktop — provider selection", "width": 1440, "height": 900},
+        {"id": "dark.narrow", "artboard_id": "3PU-0", "name": "Dark / Mobile — provider selection", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete provider-selection coverage."
+    },
+    {
+      "id": "auth.password-sign-in",
+      "family": "authentication",
+      "status": "blocked",
+      "release": "v0.0.1",
+      "token_set": "auth",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "3JK-0", "name": "Light / Desktop — password sign in", "width": 1440, "height": 900},
+        {"id": "dark.desktop", "artboard_id": "3OH-0", "name": "Dark / Desktop — password sign in", "width": 1440, "height": 900}
+      ],
+      "missing_variants": ["light.narrow", "dark.narrow"],
+      "notes": "Blocked: Paper has desktop password sign-in boards but no narrow password sign-in boards."
+    },
+    {
+      "id": "auth.oauth-callback",
+      "family": "authentication",
+      "status": "blocked",
+      "release": "v0.0.1",
+      "token_set": "auth",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "3JL-0", "name": "Light / Desktop — OAuth callback", "width": 1440, "height": 900},
+        {"id": "dark.desktop", "artboard_id": "3P1-0", "name": "Dark / Desktop — OAuth callback", "width": 1440, "height": 900}
+      ],
+      "missing_variants": ["light.narrow", "dark.narrow"],
+      "notes": "Blocked: Paper has desktop OAuth callback boards but no narrow callback boards."
+    },
+    {
+      "id": "auth.authentication-failure",
+      "family": "authentication",
+      "status": "blocked",
+      "release": "v0.0.1",
+      "token_set": "auth-gate",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "3JM-0", "name": "Light / Desktop — authentication failure", "width": 1440, "height": 900},
+        {"id": "dark.desktop", "artboard_id": "3PE-0", "name": "Dark / Desktop — authentication failure", "width": 1440, "height": 900}
+      ],
+      "missing_variants": ["light.narrow", "dark.narrow"],
+      "notes": "Blocked: Paper has desktop authentication-failure boards but no narrow failure boards."
+    },
+    {
+      "id": "auth.session-expired",
+      "family": "authentication",
+      "status": "blocked",
+      "release": "v0.0.1",
+      "token_set": "auth-gate",
+      "variants": [
+        {"id": "light.narrow", "artboard_id": "3JO-0", "name": "Light / Mobile — session expired", "width": 390, "height": 844},
+        {"id": "dark.narrow", "artboard_id": "3QO-0", "name": "Dark / Mobile — session expired", "width": 390, "height": 844}
+      ],
+      "missing_variants": ["light.desktop", "dark.desktop"],
+      "notes": "Blocked: Paper has narrow session-expired boards but no desktop session-expired boards."
+    },
+    {
+      "id": "auth.provider-discovery-retry",
+      "family": "authentication",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "auth-gate",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "C2A-0", "name": "Light / Desktop — provider discovery retry", "width": 1440, "height": 900},
+        {"id": "light.narrow", "artboard_id": "C36-0", "name": "Light / Mobile — provider discovery retry", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "C2Q-0", "name": "Dark / Desktop — provider discovery retry", "width": 1440, "height": 900},
+        {"id": "dark.narrow", "artboard_id": "C40-0", "name": "Dark / Mobile — provider discovery retry", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete retry-after-unknown provider-discovery coverage."
+    },
+    {
+      "id": "auth.provider-unavailable-fail-closed",
+      "family": "authentication",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "auth-gate",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "BZQ-0", "name": "Light / Desktop — provider unavailable / fail closed", "width": 1440, "height": 900},
+        {"id": "light.narrow", "artboard_id": "C0M-0", "name": "Light / Mobile — provider unavailable / fail closed", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "C06-0", "name": "Dark / Desktop — provider unavailable / fail closed", "width": 1440, "height": 900},
+        {"id": "dark.narrow", "artboard_id": "C1G-0", "name": "Dark / Mobile — provider unavailable / fail closed", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete provider-unavailable fail-closed coverage."
+    },
+    {
+      "id": "auth.provider-discovery-pending",
+      "family": "authentication",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "auth-gate",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "BWS-0", "name": "Light / Desktop — provider discovery pending", "width": 1440, "height": 900},
+        {"id": "light.narrow", "artboard_id": "BY2-0", "name": "Light / Mobile — provider discovery pending", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "BXF-0", "name": "Dark / Desktop — provider discovery pending", "width": 1440, "height": 900},
+        {"id": "dark.narrow", "artboard_id": "BYW-0", "name": "Dark / Mobile — provider discovery pending", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete pending provider-discovery coverage with controls withheld."
+    },
+    {
+      "id": "auth.password-submitting",
+      "family": "authentication",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "auth",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "C94-0", "name": "Light / Desktop — password submitting", "width": 1440, "height": 900},
+        {"id": "light.narrow", "artboard_id": "C96-0", "name": "Light / Mobile — password submitting", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "C95-0", "name": "Dark / Desktop — password submitting", "width": 1440, "height": 900},
+        {"id": "dark.narrow", "artboard_id": "C97-0", "name": "Dark / Mobile — password submitting", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Paper provides the complete submitting-state coverage, including the disabled action and cancellation path."
+    },
+    {
+      "id": "auth.interaction-states",
+      "family": "authentication",
+      "status": "blocked",
+      "release": "v0.0.1",
+      "token_set": "auth",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "69V-0", "name": "Light / Desktop — authentication interaction states", "width": 1440, "height": 900},
+        {"id": "dark.desktop", "artboard_id": "69W-0", "name": "Dark / Desktop — authentication interaction states", "width": 1440, "height": 900}
+      ],
+      "missing_variants": ["light.narrow", "dark.narrow"],
+      "notes": "Blocked: Paper interaction-state sheets cover desktop only; narrow interaction-state evidence is not supplied."
+    },
+    {
+      "id": "auth.provider-selection-200-percent-zoom",
+      "family": "authentication",
+      "status": "blocked",
+      "release": "v0.0.1",
+      "token_set": "auth",
+      "variants": [
+        {"id": "light.narrow", "artboard_id": "6G3-0", "name": "Light / Mobile — provider selection at 200% zoom", "width": 390, "height": 844},
+        {"id": "dark.narrow", "artboard_id": "6HR-0", "name": "Dark / Mobile — provider selection at 200% zoom", "width": 390, "height": 844}
+      ],
+      "missing_variants": ["light.desktop", "dark.desktop"],
+      "notes": "Blocked as a complete four-variant evidence group: Paper supplies narrow 200% zoom references only."
+    },
+    {
+      "id": "auth.provider-localization-growth",
+      "family": "authentication",
+      "status": "blocked",
+      "release": "v0.0.1",
+      "token_set": "auth",
+      "variants": [
+        {"id": "light.narrow", "artboard_id": "6GX-0", "name": "Light / Mobile — provider localization growth", "width": 390, "height": 844},
+        {"id": "dark.narrow", "artboard_id": "6IL-0", "name": "Dark / Mobile — provider localization growth", "width": 390, "height": 844}
+      ],
+      "missing_variants": ["light.desktop", "dark.desktop"],
+      "notes": "Blocked as a complete four-variant evidence group: Paper supplies narrow localization-growth references only."
+    },
+    {
+      "id": "runtime.private-deep-link-primary",
+      "family": "runtime",
+      "status": "deferred",
+      "release": "v0.0.2",
+      "token_set": "deep-link-deferred",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "71F-0", "name": "Light / Desktop — private deep link / primary", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "71J-0", "name": "Light / Mobile — private deep link / primary", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "71G-0", "name": "Dark / Desktop — private deep link / primary", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "71K-0", "name": "Dark / Mobile — private deep link / primary", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Deferred to v0.0.2 with the private deep-link UI family."
+    },
+    {
+      "id": "runtime.private-deep-link-failures",
+      "family": "runtime",
+      "status": "deferred",
+      "release": "v0.0.2",
+      "token_set": "deep-link-deferred",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "71H-0", "name": "Light / Desktop — private deep link / failures", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "71L-0", "name": "Light / Mobile — private deep link / failures", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "71I-0", "name": "Dark / Desktop — private deep link / failures", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "71M-0", "name": "Dark / Mobile — private deep link / failures", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Deferred to v0.0.2 with the private deep-link UI family."
+    },
+    {
+      "id": "runtime.session-search-results",
+      "family": "runtime",
+      "status": "deferred",
+      "release": "v0.0.2",
+      "token_set": "search-deferred",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "71N-0", "name": "Light / Desktop — Session Search · results", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "85I-0", "name": "Light / Mobile — Session Search · results", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "96O-0", "name": "Dark / Desktop — Session Search · results", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "9AG-0", "name": "Dark / Mobile — Session Search · results", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Deferred to v0.0.2 with the Session Search UI family."
+    },
+    {
+      "id": "runtime.session-search-query",
+      "family": "runtime",
+      "status": "deferred",
+      "release": "v0.0.2",
+      "token_set": "search-deferred",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "8IG-0", "name": "Light / Desktop — Session Search · query", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "8XK-0", "name": "Light / Mobile — Session Search · query", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "9F1-0", "name": "Dark / Desktop — Session Search · query", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "9YD-0", "name": "Dark / Mobile — Session Search · query", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Deferred to v0.0.2 with the Session Search UI family."
+    },
+    {
+      "id": "runtime.session-search-loading",
+      "family": "runtime",
+      "status": "deferred",
+      "release": "v0.0.2",
+      "token_set": "search-deferred",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "8M8-0", "name": "Light / Desktop — Session Search · loading", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "8ZU-0", "name": "Light / Mobile — Session Search · loading", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "9IT-0", "name": "Dark / Desktop — Session Search · loading", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "A0N-0", "name": "Dark / Mobile — Session Search · loading", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Deferred to v0.0.2 with the Session Search UI family."
+    },
+    {
+      "id": "runtime.session-search-no-results",
+      "family": "runtime",
+      "status": "deferred",
+      "release": "v0.0.2",
+      "token_set": "search-deferred",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "8Q0-0", "name": "Light / Desktop — Session Search · no results", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "924-0", "name": "Light / Mobile — Session Search · no results", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "9ML-0", "name": "Dark / Desktop — Session Search · no results", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "A2X-0", "name": "Dark / Mobile — Session Search · no results", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Deferred to v0.0.2 with the Session Search UI family."
+    },
+    {
+      "id": "runtime.session-search-failure",
+      "family": "runtime",
+      "status": "deferred",
+      "release": "v0.0.2",
+      "token_set": "search-deferred",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "8TS-0", "name": "Light / Desktop — Session Search · failure", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "94E-0", "name": "Light / Mobile — Session Search · failure", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "9QD-0", "name": "Dark / Desktop — Session Search · failure", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "A57-0", "name": "Dark / Mobile — Session Search · failure", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Deferred to v0.0.2 with the Session Search UI family."
+    }
+  ]
+}
