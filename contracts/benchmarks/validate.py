@@ -234,10 +234,10 @@ EXPECTED_REVISIONS = {
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: {
-        "commit_sha": "246399acd8c6ce4d70a0a415a4600c0ca612eb82",
+        "commit_sha": "e3db0441a32f9f5ba80ec148cfec91886d2c9cd9",
         "fixture_id": "web-production-build",
         "fixture_version": "1.0.0",
-        "fixture_sha256": "fc03f051b77e1d78996679cda381acf8842439647bf9bf80d61996bcd9d5a225",
+        "fixture_sha256": "36b391786b8b8a8d8524c8be8514f31364091ce13126f35599b6703213e41e6d",
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
 }
@@ -287,8 +287,11 @@ EXPECTED_ARTIFACT_METADATA = {
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: (
-        ("workload.json", 1021, "fc03f051b77e1d78996679cda381acf8842439647bf9bf80d61996bcd9d5a225"),
-        ("evidence/raw-trace.json", 17150, "2b77654cd704638cef48cdd9d38fd51d6da3bcb35317e9b9a8d18aa27c5a2da3"),
+        ("workload.json", 1002, "36b391786b8b8a8d8524c8be8514f31364091ce13126f35599b6703213e41e6d"),
+        ("run.ts", 49795, "d9d973f2826593e4ca34b2a52718dad76fc76393080480a78bb6686418dcc30b"),
+        ("sandbox-runner.py", 6676, "f60e98a4a66baa2b4fce41b930e4768863522747d1d50f7ff09b80bef0e0a14c"),
+        ("artifact-scanner.py", 5994, "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb"),
+        ("evidence/raw-trace.json", 17600, "aa77567fd1b0dbaa8b8b45dce2f6319c6fca8a55074e773af3d4b46f96727c4c"),
     ),
 }
 SELF_AUTHENTICATED_ARTIFACT_PATHS = {
