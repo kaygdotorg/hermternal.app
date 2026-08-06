@@ -16,7 +16,7 @@ The source SHA binds the planning contract to the reviewed manifest. It is not a
 
 ## What the fixture proves
 
-`cases.json` contains a closed 45-case inventory. Each case has an initial state and safe local context, an ordered synthetic event sequence, and an expected result. `validate.py` keeps the case inventory and semantics in code, then requires the checked-in JSON to match those definitions exactly. This prevents a mutated fixture from changing both its input and its claimed result together.
+`cases.json` contains a closed 47-case inventory. Each case has an initial state and safe local context, an ordered synthetic event sequence, and an expected result. `validate.py` keeps the case inventory and semantics in code, then requires the checked-in JSON to match those definitions exactly. This prevents a mutated fixture from changing both its input and its claimed result together.
 
 The inventory covers every C-05 connection state:
 
@@ -41,7 +41,9 @@ It also covers these ordering and recovery rules:
 - reconnect requires a fresh ticket generation;
 - a new transport is not a new server session;
 - the selected server session, configured profile, active profile, and local draft remain stable through transport loss and safe reconnect cancellation;
+- selected and active profiles must match at initialization, transport opening, and the final readiness gate;
 - restore rejects an active profile that drifts from the selected configured profile and preserves the selected profile marker in the result;
+- profile drift before readiness and at initialization are executable negative cases, not metadata-only claims;
 - server-owned session restoration is a barrier before an idempotent retry;
 - only `session.resume`, `session.history`, `session.status`, and `model.options` are retryable read operations;
 - `prompt.submit` is never automatically retried;
@@ -58,7 +60,9 @@ The focused unknown-event rule is intentional. The broader manifest permits igno
 
 The validator uses only Python’s standard library and a bounded JSON loader. It rejects duplicate object keys, `NaN`, `Infinity`, exponent overflow, oversized integers, invalid UTF-8, excessive nesting, oversized objects or arrays, oversized strings, and excessive node counts. Root and nested object key order is closed. Required fields use exact built-in types, so booleans are not accepted where integers are required.
 
-CLI failures are one redacted JSON line with a stable semantic message. They do not include paths, tickets, prompts, credentials, host names, transcript content, or malformed payloads. The fixture is synthetic-only and its redaction metadata is checked as part of validation.
+The baseline artifact hashes are checked against the focused directory, while the benchmark record and approved commands are additionally bound to an immutable canonical identity pinned in `validate.py`. Forged 1ms/999ms samples, recomputed distributions, and command replacement therefore fail in both normal and optimized modes.
+
+CLI failures are one redacted JSON line with a stable semantic message. Retained values reject URLs, paths, bare hostnames, host assignments, bearer/basic credentials, token-shaped values, and short base64-shaped values while allowing the fixture’s known semantic event vocabulary. They do not include tickets, prompts, credentials, host names, transcript content, or malformed payloads. The fixture is synthetic-only and its redaction metadata is checked as part of validation.
 
 ## Commands
 
@@ -82,7 +86,7 @@ Compile the implementation without importing or running a live service:
 python3 -m py_compile contracts/fixtures/connection-restoration/validate.py
 ```
 
-The baseline records 30 normal and 30 optimized validator samples with raw samples and distributions. `threshold` is deliberately `null`; this planning fixture does not invent a performance budget.
+The baseline records 30 normal and 30 optimized validator samples with raw samples and distributions. The approved commands are exactly `python3 contracts/fixtures/connection-restoration/validate.py` and `python3 -O contracts/fixtures/connection-restoration/validate.py`. `threshold` is deliberately `null`; this planning fixture does not invent a performance budget.
 
 ## Scope boundary
 

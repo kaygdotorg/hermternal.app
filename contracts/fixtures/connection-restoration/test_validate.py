@@ -56,9 +56,39 @@ print(json.dumps(validate.evaluate_case(case), sort_keys=True))
         self.assertEqual(result.stderr, "")
         return json.loads(result.stdout)
 
+    def redaction_probe_subprocess(self, values: list[str], optimized: bool = False) -> list[bool]:
+        script = """
+import importlib.util
+import json
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+values = json.loads(sys.argv[2])
+spec = importlib.util.spec_from_file_location("validate", root / "validate.py")
+validate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(validate)
+results = []
+for value in values:
+    try:
+        validate._validate_redaction({"value": value})
+    except validate.ContractError:
+        results.append(False)
+    else:
+        results.append(True)
+print(json.dumps(results))
+"""
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(["-c", script, str(ROOT), json.dumps(values)])
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        return json.loads(result.stdout)
+
     def test_checked_in_document_and_baseline_validate(self) -> None:
         case_count, artifact_bytes = validate.validate_all(self.document, self.baseline)
-        self.assertEqual(case_count, 45)
+        self.assertEqual(case_count, 47)
         self.assertGreater(artifact_bytes, 0)
         self.assertEqual(len(self.document["states"]), 11)
         self.assertIsNone(self.baseline["threshold"])
@@ -72,7 +102,7 @@ print(json.dumps(validate.evaluate_case(case), sort_keys=True))
         self.assertEqual(normal.stdout, optimized.stdout)
         self.assertEqual(normal.stderr, "")
         self.assertEqual(optimized.stderr, "")
-        self.assertIn("states=11 cases=45", normal.stdout)
+        self.assertIn("states=11 cases=47", normal.stdout)
 
     def test_gateway_and_compatibility_barriers(self) -> None:
         ready = self.cases["initial-connect-ready"]["expected"]
@@ -135,7 +165,12 @@ print(json.dumps(validate.evaluate_case(case), sort_keys=True))
                 self.assertIn("gateway_ready_timeout", timeout["effects"])
                 self.assertIn("handshake_failed", timeout["effects"])
 
-            for case_id in ("reconnect-profile-drift-rejected", "restore-profile-drift-rejected"):
+            for case_id in (
+                "reconnect-profile-drift-rejected",
+                "restore-profile-drift-rejected",
+                "profile-drift-at-initialization-blocked",
+                "profile-drift-before-readiness-blocked",
+            ):
                 with self.subTest(optimized=optimized, case_id=case_id):
                     drift = self.evaluate_case_subprocess(case_id, optimized)
                     self.assertEqual(drift["final_state"], "incompatible")
@@ -192,6 +227,57 @@ print(json.dumps(validate.evaluate_case(case), sort_keys=True))
             with self.subTest(case_id=case_id):
                 self.assertEqual(self.cases[case_id]["expected"]["final_state"], state)
         self.assertIn("unknown_close_code_blocked", self.cases["unknown-close-fails-closed"]["expected"]["effects"])
+
+    def test_baseline_identity_rejects_forged_timings_and_commands_in_both_modes(self) -> None:
+        mutations: list[tuple[str, dict[str, object]]] = []
+        for mode, sample in (("normal", 1.0), ("normal", 999.0), ("optimized", 1.0), ("optimized", 999.0)):
+            forged = copy.deepcopy(self.baseline)
+            forged[mode]["samples_ms"] = [sample] * validate.BASELINE_REPETITIONS
+            forged[mode]["distribution"] = validate._dist(forged[mode]["samples_ms"])
+            mutations.append((f"{mode}-{sample:g}-ms", forged))
+
+        for mode in ("normal", "optimized"):
+            forged = copy.deepcopy(self.baseline)
+            forged[mode]["command"] = "python3 fabricated-validator.py"
+            mutations.append((f"{mode}-command-replacement", forged))
+        forged = copy.deepcopy(self.baseline)
+        forged["command"] = "python3 fabricated-validator.py"
+        mutations.append(("top-level-command-replacement", forged))
+
+        with tempfile.TemporaryDirectory() as directory:
+            for name, forged in mutations:
+                with self.subTest(name=name):
+                    path = Path(directory) / f"{name}.json"
+                    path.write_text(json.dumps(forged), encoding="utf-8")
+                    for optimized in (False, True):
+                        with self.subTest(optimized=optimized):
+                            result = self.run_cli(optimized, "--baseline", str(path))
+                            self.assertEqual(result.returncode, 1)
+                            self.assertEqual(result.stderr, "")
+                            self.assertNotIn(str(path), result.stdout)
+                            self.assertEqual(
+                                json.loads(result.stdout),
+                                {"error": {"code": "contract", "message": "connection restoration fixture rejected"}},
+                            )
+
+    def test_retained_redaction_rejects_hosts_credentials_paths_and_base64_in_both_modes(self) -> None:
+        rejected = [
+            "Bearer synthetic-token",
+            "Basic c2VjcmV0",
+            "host=internal.example",
+            "hostname: internal.example",
+            "internal.example",
+            "localhost:3000",
+            "/Users/alice/private.txt",
+            "~/private.txt",
+            "iVBORw0KGgo",
+            "c2VjcmV0",
+        ]
+        accepted = ["gateway.ready", "session-marker-001", validate.HERMES_SOURCE_SHA]
+        for optimized in (False, True):
+            with self.subTest(optimized=optimized):
+                self.assertEqual(self.redaction_probe_subprocess(rejected, optimized), [False] * len(rejected))
+                self.assertEqual(self.redaction_probe_subprocess(accepted, optimized), [True] * len(accepted))
 
     def test_strict_json_rejects_duplicate_nonfinite_overflow_and_bounded_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

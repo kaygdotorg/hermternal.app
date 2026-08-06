@@ -573,6 +573,94 @@
       "notes": "Ready is observable only after the compatibility gate has passed."
     },
     {
+      "id": "profile-drift-at-initialization-blocked",
+      "initial_state": "ready",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-002",
+        "draft": "present",
+        "attestation": "passed",
+        "probe": "passed",
+        "gateway_ready": true,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [],
+      "expected": {
+        "decision": "profile_mismatch",
+        "final_state": "incompatible",
+        "trace": [
+          "incompatible"
+        ],
+        "effects": [
+          "profile_drift_observed",
+          "profile_drift_rejected",
+          "transport_closed"
+        ],
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-002",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "blocked",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "transport_closed": true,
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A selected/active profile mismatch is rejected before a ready context can exist."
+    },
+    {
+      "id": "profile-drift-before-readiness-blocked",
+      "initial_state": "connecting",
+      "initial_context": {
+        "authenticated": true,
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-001",
+        "draft": "present",
+        "attestation": "pending",
+        "probe": "pending",
+        "gateway_ready": false,
+        "ticket_generation": 1,
+        "prompt_delivery": "none"
+      },
+      "events": [
+        "profile.drift",
+        "transport.open"
+      ],
+      "expected": {
+        "decision": "profile_mismatch",
+        "final_state": "incompatible",
+        "trace": [
+          "connecting",
+          "incompatible"
+        ],
+        "effects": [
+          "profile_drift_observed",
+          "profile_drift_rejected",
+          "transport_closed"
+        ],
+        "selected_session": "session-marker-001",
+        "selected_profile": "profile-marker-001",
+        "active_profile": "profile-marker-002",
+        "draft": "present",
+        "ticket_generations": [
+          1
+        ],
+        "restore_barrier": "blocked",
+        "prompt_retry": "none",
+        "compatibility_gate": "blocked",
+        "transport_closed": true,
+        "prompt_auto_resubmitted": false
+      },
+      "notes": "A profile that drifts before transport readiness cannot reach ready."
+    },
+    {
       "id": "restore-selected-session",
       "initial_state": "ready",
       "initial_context": {
@@ -938,7 +1026,7 @@
           1,
           2
         ],
-        "restore_barrier": "pending",
+        "restore_barrier": "blocked",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
         "transport_closed": true,
@@ -1080,7 +1168,7 @@
         "ticket_generations": [
           1
         ],
-        "restore_barrier": "pending",
+        "restore_barrier": "blocked",
         "prompt_retry": "none",
         "compatibility_gate": "blocked",
         "transport_closed": true,

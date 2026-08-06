@@ -66,6 +66,25 @@ MAX_STRING_LENGTH = 16 * 1024
 MAX_INTEGER_DIGITS = 4096
 MAX_ERROR_MESSAGE_LENGTH = 240
 BASELINE_REPETITIONS = 30
+APPROVED_BASELINE_COMMAND = "python3 contracts/fixtures/connection-restoration/validate.py"
+APPROVED_BENCHMARK_COMMANDS = {
+    "normal": APPROVED_BASELINE_COMMAND,
+    "optimized": "python3 -O contracts/fixtures/connection-restoration/validate.py",
+}
+# This digest pins the benchmark evidence and command identity in executable code;
+# mutable baseline JSON cannot replace the timing trace or command it claims to run.
+BASELINE_CANONICAL_IDENTITY_SHA256 = "ca242b5b4684b9c6b30c313c4b8e645715cc6a00c221df5e4aece3ff9c7d4eb0"
+BASELINE_IDENTITY_KEYS = (
+    "schema",
+    "validator",
+    "command",
+    "build_mode",
+    "repetitions",
+    "normal",
+    "optimized",
+    "threshold",
+)
+PROFILE_DRIFT_MARKER = "profile-marker-002"
 
 ROOT_KEYS = (
     "schema",
@@ -413,9 +432,55 @@ def _validate_redaction(value: Any) -> None:
     """Reject live-looking values while allowing semantic state vocabulary."""
     import re
 
+    hostname_pattern = re.compile(
+        r"(?<![A-Za-z0-9._-])(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?::\d{1,5})?(?![A-Za-z0-9._-])",
+        re.IGNORECASE,
+    )
+    semantic_dotted_tokens = {
+        "auth.required",
+        "auth.success",
+        "attestation.fail",
+        "attestation.pass",
+        "close.complete",
+        "event.unknown",
+        "gateway.ready",
+        "gateway.ready.timeout",
+        "model.options",
+        "network.offline",
+        "probe.fail",
+        "probe.pass",
+        "profile.drift",
+        "prompt.auto_retry",
+        "prompt.sent",
+        "retry.prompt.submit",
+        "retry.session.history",
+        "retry.session.status",
+        "session.empty",
+        "session.history",
+        "session.resume",
+        "session.resume.ok",
+        "session.resume.start",
+        "session.status",
+        "ticket.fresh",
+        "ticket.reuse",
+        "transport.loss",
+        "transport.open",
+        "user.cancel",
+        "user.sign_out",
+    }
     patterns = (
         re.compile(r"\b(?:https?|wss?|ftp)://", re.IGNORECASE),
         re.compile(r"\b(?:bearer|authorization|cookie|password|secret|api[_ -]?key)\s*[:=]", re.IGNORECASE),
+        re.compile(r"\b(?:bearer|basic)\s+\S+", re.IGNORECASE),
+        re.compile(r"\b(?:host|hostname)\s*[:=]\s*\S+", re.IGNORECASE),
+        re.compile(r"(?:^|[\s=(])/[^\s\"'<>]+"),
+        hostname_pattern,
+        re.compile(
+            r"(?<![A-Za-z0-9+/])"
+            r"(?=[A-Za-z0-9+/]{8,24}={0,2}(?![A-Za-z0-9+/]))"
+            r"(?=[A-Za-z0-9+/]*[0-9=])"
+            r"[A-Za-z0-9+/]{8,24}={0,2}(?![A-Za-z0-9+/])"
+        ),
         re.compile(r"\b(?:ghp|github_pat|sk|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
         re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
@@ -423,7 +488,10 @@ def _validate_redaction(value: Any) -> None:
     for text in _iter_text(value):
         _require("\x00" not in text and "\x1f" not in text, "control character is not allowed")
         for pattern in patterns:
-            _require(pattern.search(text) is None, "redaction boundary changed")
+            for match in pattern.finditer(text):
+                if pattern is hostname_pattern and match.group(0).lower() in semantic_dotted_tokens:
+                    continue
+                raise ContractError("redaction boundary changed")
 
 
 def _context(
@@ -473,6 +541,8 @@ CASE_DEFINITIONS = (
     _case("attestation-mismatch-blocks", "handshaking", _context(attestation="pending", probe="pending"), ("gateway.ready", "attestation.fail"), "A missing or mismatched attestation blocks the surface."),
     _case("probe-failure-blocks", "handshaking", _context(attestation="pending", probe="pending"), ("gateway.ready", "attestation.pass", "probe.fail"), "A failed behavioral probe blocks the surface."),
     _case("state-ready", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), (), "Ready is observable only after the compatibility gate has passed."),
+    _case("profile-drift-at-initialization-blocked", "ready", _context(attestation="passed", probe="passed", gateway_ready=True, active_profile=PROFILE_DRIFT_MARKER), (), "A selected/active profile mismatch is rejected before a ready context can exist."),
+    _case("profile-drift-before-readiness-blocked", "connecting", _context(attestation="pending", probe="pending"), ("profile.drift", "transport.open"), "A profile that drifts before transport readiness cannot reach ready."),
     _case("restore-selected-session", "ready", _context(attestation="passed", probe="passed", gateway_ready=True), ("session.resume.start", "session.resume.ok"), "Restoration resolves the selected server-owned session."),
     _case("restore-empty-session", "ready", _context(selected_session=None, draft="empty", attestation="passed", probe="passed", gateway_ready=True), ("session.resume.start", "session.empty"), "An empty restore result returns to ready without inventing a session."),
     _case("state-restoring", "restoring", _context(attestation="passed", probe="passed", gateway_ready=True), (), "Restoring is a barrier and does not permit prompt retry."),
@@ -518,7 +588,7 @@ def _initial_state_context(initial_state: str, context: dict[str, Any]) -> dict[
     restore_barrier = "passed" if state == "ready" and context["prompt_delivery"] == "none" and context["selected_session"] is not None else "pending" if state in {"restoring", "reconnecting", "delivery_uncertain"} else "not_required"
     if state == "ready" and context["selected_session"] is None:
         restore_barrier = "not_required"
-    return {
+    runtime = {
         "state": state,
         "authenticated": context["authenticated"],
         "selected_session": context["selected_session"],
@@ -540,6 +610,15 @@ def _initial_state_context(initial_state: str, context: dict[str, Any]) -> dict[
         "auto_resubmitted": False,
         "transport_closed": False,
     }
+    if runtime["selected_profile"] != runtime["active_profile"]:
+        # Profile identity is an initialization barrier, not optional metadata.
+        runtime["state"] = "incompatible"
+        runtime["restore_barrier"] = "blocked"
+        runtime["compatibility_gate"] = "blocked"
+        runtime["decision"] = "profile_mismatch"
+        runtime["transport_closed"] = True
+        runtime["effects"].extend(["profile_drift_observed", "profile_drift_rejected", "transport_closed"])
+    return runtime
 
 
 def _fail_closed(runtime: dict[str, Any], effect: str) -> None:
@@ -552,14 +631,21 @@ def _fail_closed(runtime: dict[str, Any], effect: str) -> None:
 def _reject_profile_drift(runtime: dict[str, Any]) -> None:
     """Reject a transport whose active profile differs from the configured selection."""
     runtime["state"] = "incompatible"
+    runtime["restore_barrier"] = "blocked"
     runtime["compatibility_gate"] = "blocked"
     runtime["decision"] = "profile_mismatch"
     runtime["transport_closed"] = True
-    runtime["effects"].extend(["profile_drift_observed", "profile_drift_rejected", "transport_closed"])
+    if "profile_drift_observed" not in runtime["effects"]:
+        runtime["effects"].append("profile_drift_observed")
+    runtime["effects"].extend(["profile_drift_rejected", "transport_closed"])
 
 
 def _maybe_ready(runtime: dict[str, Any]) -> None:
+    if runtime["active_profile"] != runtime["selected_profile"]:
+        _reject_profile_drift(runtime)
+        return
     if runtime["state"] == "handshaking" and runtime["gateway_ready"] and runtime["attestation"] == "passed" and runtime["probe"] == "passed":
+
         runtime["state"] = "ready"
         runtime["compatibility_gate"] = "passed"
         runtime["restore_barrier"] = "not_required"
@@ -617,6 +703,9 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
             runtime["state"] = "auth_required"
             runtime["decision"] = "auth_required"
             runtime["effects"].append("fresh_ticket_required")
+            return
+        if runtime["active_profile"] != runtime["selected_profile"]:
+            _reject_profile_drift(runtime)
             return
         runtime["state"] = "handshaking"
         runtime["gateway_ready"] = False
@@ -713,11 +802,14 @@ def _transition(runtime: dict[str, Any], event: str) -> None:
         runtime["effects"].append("server_session_empty")
         return
     if event == "profile.drift":
-        if state != "restoring":
+        if state not in {"connecting", "reconnecting", "handshaking", "restoring"}:
             _fail_closed(runtime, "profile_drift_out_of_order")
             return
-        runtime["active_profile"] = "profile-marker-002"
-        _reject_profile_drift(runtime)
+        runtime["active_profile"] = PROFILE_DRIFT_MARKER
+        if state in {"handshaking", "restoring"}:
+            _reject_profile_drift(runtime)
+        else:
+            runtime["effects"].append("profile_drift_observed")
         return
     if event == "transport.loss":
         if state not in {"ready", "restoring", "handshaking"}:
@@ -949,11 +1041,20 @@ def _validate_samples(value: Any, label: str) -> list[float]:
     return samples
 
 
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+
+def _baseline_identity_digest(baseline: dict[str, Any]) -> str:
+    identity = {key: baseline[key] for key in BASELINE_IDENTITY_KEYS}
+    return hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
+
+
 def _validate_baseline(baseline: dict[str, Any]) -> int:
     _strict_keys(baseline, BASELINE_KEYS, "baseline")
     _require(baseline["schema"] == BASELINE_SCHEMA, "baseline schema changed")
     _require(baseline["validator"] == "contracts/fixtures/connection-restoration/validate.py", "baseline validator changed")
-    _require(baseline["command"] == "python3 contracts/fixtures/connection-restoration/validate.py", "baseline command changed")
+    _require(baseline["command"] == APPROVED_BASELINE_COMMAND, "baseline command changed")
     _require(baseline["build_mode"] == "N/A", "baseline build mode changed")
     _strict_int(baseline["repetitions"], "baseline repetitions")
     _require(baseline["repetitions"] == BASELINE_REPETITIONS, "baseline repetitions changed")
@@ -984,9 +1085,11 @@ def _validate_baseline(baseline: dict[str, Any]) -> int:
     for mode in ("normal", "optimized"):
         benchmark = _strict_keys(baseline[mode], BENCHMARK_KEYS, f"baseline.{mode}")
         _strict_string(benchmark["command"], f"baseline.{mode}.command")
+        _require(benchmark["command"] == APPROVED_BENCHMARK_COMMANDS[mode], f"baseline.{mode}.command changed")
         samples = _validate_samples(benchmark["samples_ms"], f"baseline.{mode}")
         _strict_keys(benchmark["distribution"], DISTRIBUTION_KEYS, f"baseline.{mode}.distribution")
         _strict_equal(benchmark["distribution"], _dist(samples), f"baseline.{mode}.distribution")
+    _require(_baseline_identity_digest(baseline) == BASELINE_CANONICAL_IDENTITY_SHA256, "baseline canonical identity changed")
     return artifact_bytes
 
 
