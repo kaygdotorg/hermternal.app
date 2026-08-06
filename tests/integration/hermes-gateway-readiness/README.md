@@ -27,6 +27,8 @@ The fixture freezes:
 - Command `gateway run --no-supervise`.
 - Exact readiness line `HERMES_BACKEND_READY port=<port>` on stdout.
 - Rootless Podman, cgroup v2, netavark, and overlay as the executor policy.
+  The runner pins Podman's external compose provider to `podman-compose` so a
+  Docker Compose plugin cannot become the correctness executor by precedence.
 - A unique-per-run generated internal network and named volume with no host
   ports. Teardown uses the exact generated project name.
 - No host profile bind, socket mount, provider, browser auth, PTY, or live data.
@@ -36,11 +38,12 @@ The fixture freezes:
 - Exact project-only teardown: `down --volumes --remove-orphans`.
 - Zero leftover containers, networks, and volumes after teardown.
 
-The checked-in fixture is synthetic-only and records `proof_status: not_run`.
-The live runner fails closed while issue #250's reviewed minimal capability
-policy is pending. It must not invent a capability addition to make startup
-pass. No VM, Podman stack, port, provider, browser, or PTY is started by the
-normal validator or its tests.
+`cases.json` remains synthetic-only and records `proof_status: not_run`.
+The separately recorded first live attempt is blocked at the strict image
+identity gate. The active capability policy is exactly issue #250's reviewed
+`CAP_CHOWN`, `CAP_SETGID`, and `CAP_SETUID` set, with all other capabilities
+dropped and no-new-privileges enabled. The normal validator and its tests never
+start a VM, Podman stack, port, provider, browser, or PTY.
 
 ## Command and readiness evidence boundary
 
@@ -58,11 +61,28 @@ classifies a missing marker as timeout or exit-before-ready; it does not infer
 readiness from container creation, an open port, a dashboard message, or a
 successful `podman compose up` return code.
 
-`evidence.json` is intentionally a redacted no-run record. It records the
-candidate command, the source/readiness distinction, the pending capability
-policy, and `not_run` for start, readiness, exit, teardown, and leftovers. It
-contains no raw logs, credentials, host paths, provider values, browser data,
-or live resource names.
+`evidence.json` is the bounded, redacted record of the first live attempt. It
+records `blocked/cleanup_failed` with the image-identity gate failing first,
+the exact approved capability policy, `not_run` for container start, readiness,
+and exit, and the exact teardown attempt with zero leftover containers,
+networks, and volumes. `rerun-evidence.json` separately records the only
+provider-pinned rerun as `blocked/image_identity_mismatch` with successful exact
+teardown and the same zero-leftover proof.
+The first runner result also records `cleanup_failed` because the VM's default
+`podman compose` delegation selected a Docker Compose plugin; the fixture now
+pins `PODMAN_COMPOSE_PROVIDER=podman-compose` for future runs. It contains no
+raw logs, credentials, host paths, provider values, browser data, or live
+resource names. The observed adapter-built image did not satisfy the reviewed
+tag/digest/label binding, so the runner did not start a container and did not
+claim readiness.
+The `72ab...` value in the reviewed fixture is the SHA-256 of the frozen source,
+tree, Dockerfile, and image-reference manifest; it is a synthetic review
+binding, not the OCI repository digest emitted by the adapter build. The VM
+image exposed a different `localhost` repository digest and lacked the required
+provenance labels. Producing and independently attesting an exact rootless OCI
+image binding is tracked separately; this fixture does not weaken its identity
+gate to bridge that gap. Producing and independently attesting the exact
+rootless image binding is tracked in child issue #261.
 
 ## Files
 
@@ -70,7 +90,8 @@ or live resource names.
   validator independently pins each semantic kind, adversarial input, and
   expected outcome so changing a parser path or both payloads cannot silently
   weaken coverage.
-- `evidence.json` contains the bounded, redacted `not_run` evidence record.
+- `evidence.json` contains the bounded, redacted first-attempt evidence record;
+  `rerun-evidence.json` records the provider-pinned rerun separately.
 - `validate.py` contains the strict JSON loader, redaction boundary,
   canonical unique-project Compose renderer, exact reviewed image/source
   checks, readiness parser, timeout/exit classifier, bounded rootless runner,
@@ -78,10 +99,12 @@ or live resource names.
   image-inspect JSON record for mutation testing without running a container.
 - `test_validate.py` covers normal and optimized CLI execution, parser and
   classification regressions, synthetic fake-executor flow, redaction, strict
-  JSON limits, identity, isolation, capability gating, and cleanup. The live
-  entrypoint regression uses a temporary synthetic source with mocked local
-  identity reads; it proves the reviewed image digest reaches the executor
-  boundary while the pending capability policy prevents any executor call.
+  JSON limits, identity, isolation, the exact approved capability set, and
+  cleanup. Preflight regressions prove that Compose and image-identity failures
+  run exact project teardown, enumerate zero leftovers, and never start a
+  container. The live entrypoint regression uses a temporary synthetic source
+  with mocked local identity reads and records the blocked image-identity
+  boundary without invoking a real executor.
 
 ## Local checks
 
@@ -102,9 +125,10 @@ python3 -O -m unittest discover \
 ```
 
 The optional live command requires both `--allow-live` and a checkout whose
-source identity exactly matches the frozen values. It remains blocked by the
-checked-in capability policy until issue #250 is reviewed and the operator
-receives explicit clearance from main. Do not run it before that clearance.
+source identity exactly matches the frozen values. The reviewed capability set
+is approved for this separately gated attempt, but the strict image tag,
+digest, and source-label binding remains mandatory. Do not retag, relabel, or
+substitute an adapter-built image that fails that binding.
 
 ```sh
 ssh -T -o ClearAllForwardings=yes hermternal-test@hermternal-dev -- \

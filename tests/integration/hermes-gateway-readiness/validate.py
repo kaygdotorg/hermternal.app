@@ -2,10 +2,10 @@
 """Validate and run the isolated rootless-Podman Hermes gateway probe.
 
 The default command is an offline contract check.  The live runner is an
-explicit opt-in and is intentionally blocked while issue #250's reviewed
-minimal capability policy is pending.  It uses only ``podman compose`` with a
-project-derived network and volume, never a shell, host ports, a provider, a
-browser, a PTY, or a retained raw log.
+explicit opt-in and activates only issue #250's reviewed CAP_CHOWN,
+CAP_SETGID, and CAP_SETUID capability set.  It uses only ``podman compose``
+with a project-derived network and volume, never a shell, host ports, a
+provider, a browser, a PTY, or a retained raw log.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from typing import Any, Callable, Mapping, Sequence
 ROOT = Path(__file__).resolve().parent
 CASES_PATH = ROOT / "cases.json"
 EVIDENCE_PATH = ROOT / "evidence.json"
+RERUN_EVIDENCE_PATH = ROOT / "rerun-evidence.json"
 SCHEMA = "hermternal.integration.hermes-gateway-readiness.v1"
 EVIDENCE_SCHEMA = "hermternal.integration.hermes-gateway-readiness.evidence.v1"
 OPERATION = "R-02C"
@@ -90,10 +91,18 @@ DEFAULT_POLL_INTERVAL_SECONDS = 0.25
 ERROR_CODE = "hermes_gateway_readiness_validation_error"
 PROBE_ERROR_CODE = "hermes_gateway_readiness_probe_blocked"
 
-# This remains pending until #250 records the smallest source-reviewed policy.
-# Keeping the policy explicit prevents an operator from silently adding a broad
-# capability merely to make a readiness probe pass.
+# Issue #250's exact source-reviewed set is now approved for this one live
+# readiness attempt. Keeping the set duplicated here and in the validator makes
+# a broad or reordered capability addition fail closed before the executor.
+APPROVED_CAPABILITIES = ("CAP_CHOWN", "CAP_SETGID", "CAP_SETUID")
 CAPABILITY_POLICY = {
+    "status": "approved",
+    "cap_drop": ["ALL"],
+    "cap_add": list(APPROVED_CAPABILITIES),
+    "no_new_privileges": True,
+    "dependency": "issue_250_review",
+}
+PENDING_CAPABILITY_POLICY = {
     "status": "awaiting_issue_250",
     "cap_drop": ["ALL"],
     "cap_add": [],
@@ -183,6 +192,8 @@ EVIDENCE_KEYS = (
     "synthetic_only",
     "live_run",
     "status",
+    "classification",
+    "teardown_exit_code",
     "correctness_executor",
     "ssh_target",
     "pinned_identity",
@@ -192,10 +203,12 @@ EVIDENCE_KEYS = (
     "readiness_source_status",
     "capability_policy",
     "observations",
+    "diagnostic",
     "limitations",
 )
 EVIDENCE_OBSERVATION_KEYS = (
     "compose_config",
+    "image_identity",
     "container_start",
     "readiness",
     "exit",
@@ -217,7 +230,7 @@ EXPECTED_CASE_IDS = (
     "identity-drift-rejected",
     "isolation-rendered",
     "isolation-published-port-rejected",
-    "capability-policy-pending",
+    "capability-policy-approved",
     "cleanup-canonical-project",
     "cleanup-unrecognized-project",
     "cleanup-zero-leftovers",
@@ -240,7 +253,7 @@ PINNED_CASE_KINDS = {
     "identity-drift-rejected": "identity",
     "isolation-rendered": "isolation",
     "isolation-published-port-rejected": "isolation",
-    "capability-policy-pending": "capability",
+    "capability-policy-approved": "capability",
     "cleanup-canonical-project": "cleanup",
     "cleanup-unrecognized-project": "cleanup",
     "cleanup-zero-leftovers": "leftovers",
@@ -316,9 +329,9 @@ PINNED_CASE_CONTRACTS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
         {"mutation": "published_port"},
         {"accepted": False, "reason": "published_port_rejected"},
     ),
-    "capability-policy-pending": (
+    "capability-policy-approved": (
         {"policy": "checked_in"},
-        {"status": "awaiting_issue_250", "live_allowed": False},
+        {"status": "approved", "live_allowed": True},
     ),
     "cleanup-canonical-project": (
         {"target": "canonical"},
@@ -454,6 +467,7 @@ class RenderedProbe:
     stack_id: str
     instance: str
     compose: str
+    cap_add: tuple[str, ...] = APPROVED_CAPABILITIES
 
     def public_metadata(self) -> dict[str, Any]:
         return {
@@ -464,6 +478,7 @@ class RenderedProbe:
             "ssh_target": SSH_TARGET,
             "service": "gateway",
             "command": list(PROBE_COMMAND),
+            "cap_add": list(self.cap_add),
         }
 
 
@@ -785,27 +800,46 @@ def _yaml_string(value: str) -> str:
 
 
 def validate_capability_policy(policy: Mapping[str, Any]) -> None:
-    """Allow only the pending or later reviewed minimal policy, never a broad set."""
+    """Allow only the pending policy or issue #250's exact reviewed set."""
 
     keys = ("status", "cap_drop", "cap_add", "no_new_privileges", "dependency")
     value = strict_keys(dict(policy), keys, "capability policy")
-    _enum(value["status"], frozenset({"awaiting_issue_250", "approved"}), "capability status")
+    status = _enum(
+        value["status"],
+        frozenset({"awaiting_issue_250", "approved"}),
+        "capability status",
+    )
     require(value["cap_drop"] == ["ALL"], "capability drop policy must remain ALL")
     require(type(value["cap_add"]) is list, "capability add policy must be a list")
-    require(value["cap_add"] == [], "capability additions require the reviewed issue 250 policy")
+    expected_caps = [] if status == "awaiting_issue_250" else list(APPROVED_CAPABILITIES)
+    require(value["cap_add"] == expected_caps, "capability additions are not the reviewed set")
     _bool(value["no_new_privileges"], "no-new-privileges policy")
     require(value["no_new_privileges"], "no-new-privileges must remain enabled")
     require(value["dependency"] == "issue_250_review", "capability policy dependency changed")
 
 
-def _canonical_compose(project: str, network: str, volume: str) -> str:
+def _canonical_compose(
+    project: str,
+    network: str,
+    volume: str,
+    cap_add: Sequence[str],
+) -> str:
     """Render the sole accepted Compose document for the probe policy."""
 
+    additions = tuple(cap_add)
+    require(
+        additions in {(), APPROVED_CAPABILITIES},
+        "Compose capability additions are not the reviewed set",
+    )
     lines = [
         "services:",
         "  gateway:",
         f"    image: {_yaml_string(IMAGE_REFERENCE)}",
         '    restart: "no"',
+    ]
+    if additions:
+        lines.extend(["    cap_add:", *[f'      - "{capability}"' for capability in additions]])
+    lines.extend([
         "    cap_drop:",
         '      - "ALL"',
         "    security_opt:",
@@ -840,7 +874,7 @@ def _canonical_compose(project: str, network: str, volume: str) -> str:
         "volumes:",
         "  data:",
         f'    name: "{volume}"',
-    ]
+    ])
     return "\n".join(lines) + "\n"
 
 
@@ -859,8 +893,9 @@ def render_probe(
     project = project_name(stack_id, instance)
     network = f"{project}_internal"
     volume = f"{project}_data"
-    compose = _canonical_compose(project, network, volume)
-    result = RenderedProbe(project, network, volume, stack_id, instance, compose)
+    cap_add = tuple(policy["cap_add"])
+    compose = _canonical_compose(project, network, volume, cap_add)
+    result = RenderedProbe(project, network, volume, stack_id, instance, compose, cap_add)
     validate_rendered_probe(result)
     return result
 
@@ -877,12 +912,16 @@ def validate_rendered_probe(result: RenderedProbe) -> None:
     )
     require(result.network == f"{result.project}_internal", "network name is not canonical")
     require(result.volume == f"{result.project}_data", "volume name is not canonical")
+    require(
+        result.cap_add in {(), APPROVED_CAPABILITIES},
+        "capability additions are not the reviewed set",
+    )
     text = result.compose
     # Validate the complete document, not merely required substrings.  This
     # rejects appended duplicate keys and any new volume, capability, PTY, or
     # resource field that could otherwise override an earlier safe value.
     require(
-        text == _canonical_compose(result.project, result.network, result.volume),
+        text == _canonical_compose(result.project, result.network, result.volume, result.cap_add),
         "Compose document is not the canonical policy",
     )
     require(len(text.encode("utf-8")) <= MAX_JSON_BYTES, "rendered Compose exceeds the bounded size")
@@ -1094,10 +1133,15 @@ def summarize_result(result: CommandResult) -> str:
 
 
 def _executor_environment() -> dict[str, str]:
-    """Pass only runtime basics; provider and host profile variables are excluded."""
+    """Pin Podman's compose provider and exclude host/provider credentials."""
 
     allowed = {"PATH", "HOME", "XDG_RUNTIME_DIR", "TMPDIR", "LANG", "LC_ALL"}
-    return {key: value for key, value in os.environ.items() if key in allowed}
+    environment = {key: value for key, value in os.environ.items() if key in allowed}
+    # ``podman compose`` delegates to an external provider.  Podman prefers a
+    # Docker Compose plugin when both providers exist, which would violate the
+    # rootless-Podman correctness boundary even if the argv still says podman.
+    environment["PODMAN_COMPOSE_PROVIDER"] = "podman-compose"
+    return environment
 
 
 def _bounded_bytes(value: bytes) -> str:
@@ -1307,6 +1351,49 @@ def _call_runner(runner: Runner, command: Sequence[str], timeout: float) -> Comm
     return result
 
 
+def _finalize_preflight_failure(
+    rendered: RenderedProbe,
+    compose_path: Path,
+    *,
+    status: str,
+    classification: str,
+    exit_code: int | None,
+    timed_out: bool,
+    diagnostic: str,
+    runner: Runner,
+) -> ProbeResult:
+    """Teardown and inspect even when config or image preflight blocks startup."""
+
+    teardown_result = _call_runner(runner, teardown_command(rendered.project, compose_path), 20)
+    leftovers: dict[str, int] = {}
+    for resource_name, command in zip(("containers", "networks", "volumes"), _leftover_commands(rendered.project)):
+        listing = _call_runner(runner, command, 10)
+        if listing.returncode != 0 or listing.timed_out:
+            leftovers[resource_name] = -1
+            continue
+        try:
+            leftovers[resource_name] = parse_resource_listing(listing.output)
+        except (FixtureJSONError, ValidationError, ValueError, TypeError) as exc:
+            leftovers[resource_name] = -1
+            diagnostic = compact_error(exc)
+    if not zero_leftovers(leftovers):
+        status = "blocked"
+        classification = "cleanup_leftovers"
+    if teardown_result.returncode != 0 or teardown_result.timed_out:
+        status = "blocked"
+        classification = "cleanup_failed"
+    return ProbeResult(
+        status,
+        classification,
+        None,
+        exit_code,
+        timed_out,
+        teardown_result.returncode,
+        leftovers,
+        diagnostic,
+    )
+
+
 def run_probe(
     rendered: RenderedProbe,
     compose_path: Path,
@@ -1342,15 +1429,15 @@ def run_probe(
 
     config_result = _call_runner(runner, compose_command(rendered.project, compose_path, "config"), 10)
     if config_result.timed_out or config_result.returncode != 0:
-        return ProbeResult(
-            "blocked",
-            "compose_config_failed",
-            None,
-            config_result.returncode,
-            config_result.timed_out,
-            None,
-            {"containers": 0, "networks": 0, "volumes": 0},
-            summarize_result(config_result),
+        return _finalize_preflight_failure(
+            rendered,
+            compose_path,
+            status="blocked",
+            classification="compose_config_failed",
+            exit_code=config_result.returncode,
+            timed_out=config_result.timed_out,
+            diagnostic=summarize_result(config_result),
+            runner=runner,
         )
 
     image_result = _call_runner(
@@ -1359,28 +1446,28 @@ def run_probe(
         10,
     )
     if image_result.timed_out or image_result.returncode != 0:
-        return ProbeResult(
-            "blocked",
-            "image_identity_unavailable",
-            None,
-            image_result.returncode,
-            image_result.timed_out,
-            None,
-            {"containers": 0, "networks": 0, "volumes": 0},
-            summarize_result(image_result),
+        return _finalize_preflight_failure(
+            rendered,
+            compose_path,
+            status="blocked",
+            classification="image_identity_unavailable",
+            exit_code=image_result.returncode,
+            timed_out=image_result.timed_out,
+            diagnostic=summarize_result(image_result),
+            runner=runner,
         )
     try:
         validate_image_binding(_image_inspect_from_output(image_result.output))
     except (FixtureJSONError, ValidationError) as exc:
-        return ProbeResult(
-            "blocked",
-            "image_identity_mismatch",
-            None,
-            image_result.returncode,
-            False,
-            None,
-            {"containers": 0, "networks": 0, "volumes": 0},
-            compact_error(exc),
+        return _finalize_preflight_failure(
+            rendered,
+            compose_path,
+            status="blocked",
+            classification="image_identity_mismatch",
+            exit_code=image_result.returncode,
+            timed_out=False,
+            diagnostic=compact_error(exc),
+            runner=runner,
         )
 
     readiness_port: int | None = None
@@ -1687,15 +1774,29 @@ def validate_cases_document(document: Any) -> None:
         strict_equal(expected, row["expected"], f"case {row['id']} outcome")
 
 
-def validate_evidence_document(evidence: Any, cases_document: Mapping[str, Any]) -> None:
-    """Validate the checked-in no-run evidence record without live claims."""
+def _validate_attempt_evidence_document(
+    evidence: Any,
+    cases_document: Mapping[str, Any],
+    *,
+    expected_classification: str,
+    expected_teardown_exit: int,
+    expected_teardown_observation: str,
+    expected_limitations: list[str],
+    label: str,
+) -> None:
+    """Validate one bounded live attempt without readiness overclaims."""
 
-    record = strict_keys(evidence, EVIDENCE_KEYS, "evidence")
+    record = strict_keys(evidence, EVIDENCE_KEYS, label)
     require(record["schema"] == EVIDENCE_SCHEMA, "evidence schema changed")
     require(record["operation"] == OPERATION, "evidence operation changed")
-    require(record["synthetic_only"] is True, "evidence is not synthetic-only")
-    require(record["live_run"] is False, "evidence cannot claim a live run")
-    require(record["status"] == "not_run", "evidence status changed")
+    require(record["synthetic_only"] is False, "live evidence must not be synthetic-only")
+    require(record["live_run"] is True, "live evidence must identify the live run")
+    require(record["status"] == "blocked", "live evidence must remain blocked")
+    require(record["classification"] == expected_classification, "live attempt classification changed")
+    # bool is an int subclass, so enforce the JSON evidence schema's exact
+    # built-in integer type before comparing cleanup semantics.
+    teardown_exit_code = _int(record["teardown_exit_code"], "evidence teardown exit code")
+    require(teardown_exit_code == expected_teardown_exit, "live attempt teardown result changed")
     require(record["correctness_executor"] == "rootless_podman", "evidence executor changed")
     require(record["ssh_target"] == SSH_TARGET, "evidence SSH boundary changed")
     validate_pinned_identity(record["pinned_identity"])
@@ -1708,19 +1809,60 @@ def validate_evidence_document(evidence: Any, cases_document: Mapping[str, Any])
     require(record["readiness_source_status"] == "headless_backend_path_only", "readiness source claim changed")
     strict_equal(record["capability_policy"], cases_document["capability_policy"], "evidence capability policy")
     observations = strict_keys(record["observations"], EVIDENCE_OBSERVATION_KEYS, "evidence observations")
-    for key in EVIDENCE_OBSERVATION_KEYS[:-1]:
-        require(observations[key] == "not_run", f"evidence observation {key} changed")
+    require(observations["compose_config"] == "passed", "Compose config must be recorded as passed")
+    require(observations["image_identity"] == "failed", "image identity must be recorded as failed")
+    require(observations["container_start"] == "not_run", "container startup must not be claimed")
+    require(observations["readiness"] == "not_run", "readiness must not be claimed")
+    require(observations["exit"] == "not_run", "container exit must not be claimed")
+    require(observations["teardown"] == expected_teardown_observation, "live attempt teardown result changed")
     leftovers = strict_keys(observations["leftover_resources"], ("containers", "networks", "volumes"), "evidence leftovers")
-    require(all(value is None for value in leftovers.values()), "evidence cannot claim cleanup")
+    # Validate every count before the aggregate comparison; otherwise JSON
+    # booleans would compare equal to the integer zero in Python.
+    for resource_name, count in leftovers.items():
+        _int(count, f"evidence leftovers.{resource_name}")
+    require(leftovers == {"containers": 0, "networks": 0, "volumes": 0}, "cleanup must prove zero leftovers")
+    _text(record["diagnostic"], "evidence diagnostic", max_length=MAX_ERROR_OUTPUT)
     require(type(record["limitations"]) is list, "evidence limitations must be an array")
-    require(
-        record["limitations"] == [
-            "no_live_run",
-            "capability_policy_pending",
-            "gateway_command_readiness_candidate",
+    require(record["limitations"] == expected_limitations, "evidence limitations changed")
+
+
+def validate_evidence_document(evidence: Any, cases_document: Mapping[str, Any]) -> None:
+    """Validate the first live attempt, including its cleanup failure."""
+
+    _validate_attempt_evidence_document(
+        evidence,
+        cases_document,
+        expected_classification="cleanup_failed",
+        expected_teardown_exit=1,
+        expected_teardown_observation="failed",
+        expected_limitations=[
+            "image_identity_mismatch",
+            "compose_provider_docker_precedence",
+            "teardown_command_failed",
+            "container_start_not_run",
+            "readiness_not_proven",
             "no_provider_or_browser_auth",
         ],
-        "evidence limitations changed",
+        label="first-attempt evidence",
+    )
+
+
+def validate_rerun_evidence_document(evidence: Any, cases_document: Mapping[str, Any]) -> None:
+    """Validate the provider-pinned rerun without claiming startup or readiness."""
+
+    _validate_attempt_evidence_document(
+        evidence,
+        cases_document,
+        expected_classification="image_identity_mismatch",
+        expected_teardown_exit=0,
+        expected_teardown_observation="passed",
+        expected_limitations=[
+            "image_identity_mismatch",
+            "container_start_not_run",
+            "readiness_not_proven",
+            "no_provider_or_browser_auth",
+        ],
+        label="provider-pinned rerun evidence",
     )
 
 
@@ -1728,6 +1870,7 @@ def _success_payload(
     document: Mapping[str, Any],
     *,
     evidence: Mapping[str, Any],
+    rerun_evidence: Mapping[str, Any],
     rendered: RenderedProbe | None = None,
     image_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1738,6 +1881,7 @@ def _success_payload(
         "live_run": False,
         "proof_status": document["proof_status"],
         "evidence_status": evidence["status"],
+        "rerun_evidence_status": rerun_evidence["status"],
         "case_count": len(document["cases"]),
     }
     if rendered is not None:
@@ -1788,10 +1932,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = _parse_args(sys.argv[1:] if argv is None else argv)
         document = load_json(args.cases)
         evidence = load_json(EVIDENCE_PATH)
+        rerun_evidence = load_json(RERUN_EVIDENCE_PATH)
         validate_redaction(document)
         validate_redaction(evidence)
+        validate_redaction(rerun_evidence)
         validate_cases_document(document)
         validate_evidence_document(evidence, document)
+        validate_rerun_evidence_document(rerun_evidence, document)
         image_binding: dict[str, Any] | None = None
         if args.image_inspect is not None:
             image_binding = validate_image_binding(
@@ -1811,6 +1958,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _success_payload(
                         document,
                         evidence=evidence,
+                        rerun_evidence=rerun_evidence,
                         rendered=rendered,
                         image_binding=image_binding,
                     ),
