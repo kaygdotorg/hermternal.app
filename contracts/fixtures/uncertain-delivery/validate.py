@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import re
+import stat
 import statistics
 import sys
 from pathlib import Path
@@ -32,20 +33,12 @@ HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 # These identities are deliberately outside the JSON baseline.  A mutable
 # timing record or copied validator cannot authorize a different fixture,
 # source file, or benchmark trace by rebinding its own metadata.
-CANONICAL_CASES_SHA256 = "18a0224bdf0f358f477c4f7d8175654096ed9caf41ac83e8e1607f6c2df53fdd"
-CANONICAL_SOURCE_SHA256 = "0cc43d8d93650678a5290813cbdb358dbe65e8d5d171cf2febbc1563b2d7645d"
-CANONICAL_ARTIFACT_MANIFEST_SHA256 = "f6427e76a133bbf8d47d9c4a8ffa820b2c7cbb677833908e5c33543bd338a952"
-CANONICAL_BENCHMARK_IDENTITY = {
-    "normal": {
-        "samples_sha256": "b4116c46e65bc2f7f5b5ae52ac4fe1b820c0dac67756533a91715fb9a84aad45",
-        "distribution_sha256": "31e328fe5ee9915a1df40df58875e61c2cebc2c8e516ec99906ca8525ba26633",
-    },
-    "optimized": {
-        "samples_sha256": "129da99bc35da4a93a4135453a1a40f12a8fc029ce85c7c5956ebf0ee4ca757a",
-        "distribution_sha256": "add3c3fa0a6a6c150f7bddd9740c4dff29fc8221e660e555e8e791de872bbf78",
-    },
-}
+# Canonical evidence is resolved from the repository-owned fixture, not from
+# this executable or a caller-supplied directory. This keeps a copied validator
+# from rebinding its own cases, source, baseline, or artifact manifest.
 CANONICAL_ARTIFACT_NAMES = ("README.md", "cases.json", "test_validate.py")
+CANONICAL_FIXTURE_RELATIVE = Path("contracts/fixtures/uncertain-delivery")
+CANONICAL_CHAT_RELATIVE = Path("contracts/state-models/chat.md")
 EXPECTED_ENVIRONMENT = {
     "platform": "Darwin-25.5.0-arm64",
     "python": "3.14.6",
@@ -100,8 +93,9 @@ SERVER_EVENTS = (
 )
 USER_ACTIONS = ("resend", "keep_draft", "retry_after_rejection")
 EVENT_KEYS = {
+    "gateway_ready": ("kind", "contract", "source_sha", "compatibility"),
     "submit": ("kind", "request_ref", "result"),
-    "server_event": ("kind", "name"),
+    "server_event": ("kind", "name", "request_ref", "turn_ref", "session_ref"),
     "transport_loss": ("kind", "reason"),
     "restore_begin": ("kind",),
     "restore_history": ("kind", "prompt_presence"),
@@ -118,6 +112,31 @@ EVENT_KEYS = {
     "unknown_event": ("kind", "name"),
     "evidence_pending": ("kind",),
 }
+ACTION_INVENTORY = frozenset(
+    {
+        "start_session",
+        "write_draft",
+        "edit_draft",
+        "attach_images",
+        "send",
+        "restore",
+        "sign_out",
+        "wait",
+        "cancel",
+        "interrupt",
+        "answer_pending_input",
+        "approve",
+        "deny",
+        "answer",
+        "keep_draft",
+        "read",
+        "copy",
+        "new_draft",
+        "continue",
+        "explicit_retry",
+    }
+)
+
 CASE_IDS = (
     "empty-session",
     "accepted-present",
@@ -141,6 +160,10 @@ CASE_IDS = (
     "explicit-keep-draft-after-absent-idle",
     "confirmed-rejection-explicit-retry",
     "accepted-event-before-close",
+    "stale-evidence-resend-blocked",
+    "cancel-submitting",
+    "keep-draft-before-restore",
+    "restore-transient-without-recovery",
 )
 ROOT_KEYS = (
     "schema",
@@ -168,7 +191,7 @@ POLICY_KEYS = (
     "source_result_rule",
 )
 CASE_KEYS = ("id", "initial", "events", "expected", "notes")
-INITIAL_KEYS = ("chat_state", "transport_state", "session_ref", "draft_state", "submission_count")
+INITIAL_KEYS = ("chat_state", "transport_state", "session_ref", "draft_state", "submission_count", "active_request_ref", "active_turn_ref")
 EXPECTED_KEYS = (
     "trace",
     "final_state",
@@ -189,6 +212,7 @@ EXPECTED_KEYS = (
     "decision",
     "contract_error",
 )
+DISTRIBUTION_KEYS = ("count", "minimum_ms", "maximum_ms", "mean_ms", "median_ms", "p95_ms")
 REDACTION_KEYS = (
     "contains_prompt_text",
     "contains_transcript",
@@ -208,6 +232,7 @@ MAX_ARRAY_LENGTH = 256
 MAX_STRING_LENGTH = 16 * 1024
 MAX_INTEGER_DIGITS = 1024
 MAX_ERROR_LENGTH = 240
+MAX_SAMPLE_MS = 1_000_000.0
 BENCHMARK_REPETITIONS = 30
 APPROVED_COMMANDS = {
     "normal": "python3 contracts/fixtures/uncertain-delivery/validate.py",
@@ -215,11 +240,23 @@ APPROVED_COMMANDS = {
 }
 
 SYNTHETIC_REF = re.compile(r"^(?:session|request)-marker-[0-9]{3}$")
+TURN_REF = re.compile(r"^turn-marker-[0-9]{3}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 BASE64ISH = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+JWTISH = re.compile(r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}")
+API_KEYISH = re.compile(r"(?i)\b(?:api[_-]?key|api[_-]?token|access[_-]?token|secret[_-]?key|private[_-]?key|sk[-_])[=:][A-Za-z0-9._-]{8,}")
+GH_TOKENISH = re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{12,}\b")
+RELATIVE_PATH = re.compile(r"(?:^|[\s])(?:\.{1,2}/|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.[A-Za-z0-9_-]+)?)")
+ABSOLUTE_PATH = re.compile(r"(?:^|[\s])/(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
+WINDOWS_PATH = re.compile(r"(?i)(?:^|[\s])(?:[A-Z]:\\|\\\\)[^\r\n]+")
 IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+IPV6 = re.compile(r"(?<![A-Za-z0-9])(?:[0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f]{0,4}(?![A-Za-z0-9])")
 DOMAIN = re.compile(r"(?:^|[\s:=/])(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|test|local|example|invalid|internal)(?:$|[\s/:])", re.IGNORECASE)
+# These fields may carry only the exact synthetic markers already bound by the
+# schema. Allowing those markers avoids broad text heuristics without allowing
+# caller-chosen path, host, credential, or transcript material.
+SAFE_MARKER_FIELDS = frozenset({"session_ref", "selected_session", "active_request_ref", "active_turn_ref", "request_ref", "turn_ref"})
 FORBIDDEN_KEYS = frozenset(
     {
         "prompt_text",
@@ -232,9 +269,19 @@ FORBIDDEN_KEYS = frozenset(
         "credentials",
         "password",
         "authorization",
+        "authorization_header",
         "cookie",
         "cookies",
         "ticket",
+        "secret",
+        "secret_key",
+        "api_key",
+        "api_token",
+        "access_token",
+        "id_token",
+        "private_key",
+        "jwt",
+        "base64",
         "refresh_token",
         "bearer",
         "attach_handle",
@@ -318,6 +365,8 @@ def _check_bounds(value: Any, *, depth: int = 0, nodes: list[int] | None = None)
         for key, child in value.items():
             if not isinstance(key, str):
                 _fail("object_key_type")
+            if len(key) > MAX_STRING_LENGTH:
+                _fail("string_too_large")
             _check_bounds(child, depth=depth + 1, nodes=nodes)
         return
     if isinstance(value, float) and not math.isfinite(value):
@@ -326,13 +375,27 @@ def _check_bounds(value: Any, *, depth: int = 0, nodes: list[int] | None = None)
         _fail("unsupported_json_type")
 
 
-def load_json(path: Path, label: str) -> Any:
+def _bounded_read_file(path: Path, limit: int, unavailable_code: str = "input_unavailable") -> bytes:
     try:
-        raw = path.read_bytes()
+        resolved = path.resolve()
+        metadata = resolved.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            _fail("input_not_regular_file")
+        if metadata.st_size > limit:
+            _fail("input_too_large")
+        with resolved.open("rb") as stream:
+            raw = stream.read(limit + 1)
+    except ContractError:
+        raise
     except (OSError, ValueError):
-        _fail("input_unavailable")
-    if len(raw) > MAX_JSON_BYTES:
+        _fail(unavailable_code)
+    if len(raw) > limit:
         _fail("input_too_large")
+    return raw
+
+
+def load_json(path: Path, label: str) -> Any:
+    raw = _bounded_read_file(path, MAX_JSON_BYTES)
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -399,16 +462,20 @@ def _synthetic_ref(value: Any, code: str) -> str:
 
 
 def _distribution(samples: list[float]) -> dict[str, float | int]:
-    if not samples:
-        _fail("empty_benchmark")
+    if not samples or any(type(sample) is not float or not math.isfinite(sample) or not 0 < sample <= MAX_SAMPLE_MS for sample in samples):
+        _fail("benchmark_sample_bounds")
     ordered = sorted(samples)
     p95_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
+    try:
+        mean = statistics.fmean(samples)
+    except (OverflowError, ValueError, statistics.StatisticsError):
+        _fail("baseline_arithmetic")
     return {
         "count": len(samples),
         "minimum_ms": round(min(samples), 6),
         "maximum_ms": round(max(samples), 6),
-        "mean_ms": round(statistics.fmean(samples), 6),
-        "median_ms": round(statistics.median(samples), 6),
+        "mean_ms": round(mean, 6),
+        "median_ms": round(statistics.median(ordered), 6),
         "p95_ms": round(ordered[p95_index], 6),
     }
 
@@ -422,34 +489,56 @@ def _sha256_bytes(value: bytes) -> str:
 
 
 def _sha256_file(path: Path) -> str:
+    return _sha256_bytes(_bounded_read_file(path, MAX_JSON_BYTES, "artifact_unavailable"))
+
+
+def _repository_root() -> Path:
+    candidates: list[Path] = []
+    for start in (Path(__file__).resolve(), Path.cwd().resolve()):
+        candidates.extend((start, *start.parents))
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if (
+            (candidate / ".git").exists()
+            and (candidate / CANONICAL_FIXTURE_RELATIVE / "cases.json").is_file()
+            and (candidate / CANONICAL_FIXTURE_RELATIVE / "validation-baseline.json").is_file()
+            and (candidate / CANONICAL_CHAT_RELATIVE).is_file()
+        ):
+            return candidate
+    _fail("canonical_binding")
+    raise ContractError("canonical_binding")
+
+
+def _trusted_fixture_directory() -> Path:
+    return _repository_root() / CANONICAL_FIXTURE_RELATIVE
+
+
+def _require_exact_trusted_file(path: Path, trusted_path: Path, code: str) -> None:
     try:
-        return _sha256_bytes(path.read_bytes())
+        if path.resolve() != trusted_path.resolve() or _bounded_read_file(path, MAX_JSON_BYTES, code) != _bounded_read_file(trusted_path, MAX_JSON_BYTES, code):
+            _fail(code)
+    except ContractError:
+        raise
     except (OSError, ValueError):
-        _fail("artifact_unavailable")
-    raise ContractError("artifact_unavailable")
+        _fail(code)
 
 
-def _normalized_source_digest(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        _fail("source_unavailable")
-    text = re.sub(
-        r'(CANONICAL_SOURCE_SHA256\s*=\s*")[0-9a-f]{64}("?)',
-        r'\1<source-identity>\2',
-        text,
-    )
-    return _sha256_bytes(text.encode("utf-8"))
+def _load_trusted_document() -> dict[str, Any]:
+    return load_json(_trusted_fixture_directory() / "cases.json", "trusted cases")
+
+
+def _load_trusted_baseline() -> dict[str, Any]:
+    return load_json(_trusted_fixture_directory() / "validation-baseline.json", "trusted baseline")
 
 
 def _artifact_manifest(fixture_dir: Path) -> tuple[dict[str, dict[str, int | str]], str]:
     artifacts: dict[str, dict[str, int | str]] = {}
     for name in CANONICAL_ARTIFACT_NAMES:
         path = fixture_dir / name
-        try:
-            raw = path.read_bytes()
-        except (OSError, ValueError):
-            _fail("artifact_unavailable")
+        raw = _bounded_read_file(path, MAX_JSON_BYTES, "artifact_unavailable")
         artifacts[name] = {"bytes": len(raw), "sha256": _sha256_bytes(raw)}
     material = "".join(f"{name}:{artifacts[name]['bytes']}:{artifacts[name]['sha256']}\n" for name in CANONICAL_ARTIFACT_NAMES)
     return artifacts, _sha256_bytes(material.encode("utf-8"))
@@ -473,12 +562,25 @@ def _validate_redaction(value: Any, *, in_source_observation: bool = False, key:
         _fail("redaction_value")
     if in_source_observation or value == HERMES_SOURCE_SHA:
         return
+    if key in SAFE_MARKER_FIELDS and (
+        (key in ("session_ref", "selected_session") and value.startswith("session-marker-") and SYNTHETIC_REF.fullmatch(value))
+        or (key in ("request_ref", "active_request_ref") and value.startswith("request-marker-") and SYNTHETIC_REF.fullmatch(value))
+        or (key in ("turn_ref", "active_turn_ref") and value.startswith("turn-marker-") and TURN_REF.fullmatch(value))
+    ):
+        return
     lowered = value.casefold()
-    if key == "notes" and any(marker in lowered for marker in ("prompt text", "transcript", "raw payload", "tool output")):
+    if key == "notes":
+        if "?" in value or any(marker in lowered for marker in (
+            "prompt text", "raw prompt", "prompt body", "prompt bytes", "transcript", "raw payload", "tool output", "please ", "what ", "how ", "why ", "tell me", "summarize",
+        )):
+            _fail("redaction_value")
+    if any(marker in lowered for marker in (
+        "http://", "https://", "file://", "bearer ", "basic ", "cookie:", "authorization:", "password=", "api_key=", "api-key=", "api_token=", "api-token=",
+    )):
         _fail("redaction_value")
-    if any(marker in lowered for marker in ("http://", "https://", "file://", "bearer ", "basic ", "cookie:", "authorization:", "password=")):
+    if JWTISH.search(value) or API_KEYISH.search(value) or GH_TOKENISH.search(value):
         _fail("redaction_value")
-    if value.startswith(("/", "~/", "\\")) or IPV4.search(value) or DOMAIN.search(value):
+    if value.startswith(("/", "~/", "\\")) or ABSOLUTE_PATH.search(value) or WINDOWS_PATH.search(value) or RELATIVE_PATH.search(value) or IPV4.search(value) or IPV6.search(value) or DOMAIN.search(value):
         _fail("redaction_value")
     has_upper = any(character.isupper() for character in value)
     has_lower = any(character.islower() for character in value)
@@ -531,8 +633,13 @@ def validate_document(document: dict[str, Any]) -> None:
         actions = state["allowed_actions"]
         if type(actions) is not list or not actions or any(type(action) is not str for action in actions):
             _fail("state_actions")
+        if len(set(actions)) != len(actions) or any(action not in ACTION_INVENTORY for action in actions):
+            _fail("state_action_inventory")
     if tuple(state_ids) != STATES:
         _fail("state_inventory")
+    trusted_states = _load_trusted_document()["states"]
+    if states != trusted_states:
+        _fail("state_identity")
 
     policies = document["policies"]
     _keys(policies, POLICY_KEYS)
@@ -602,10 +709,25 @@ def _validate_initial(initial: Any) -> None:
     count = _int(initial["submission_count"], "submission_count")
     if count < 0 or count > 4:
         _fail("submission_count")
+    active_request = initial["active_request_ref"]
+    active_turn = initial["active_turn_ref"]
+    if active_request is not None:
+        _synthetic_ref(active_request, "active_request_ref")
+    if active_turn is not None and TURN_REF.fullmatch(active_turn) is None:
+        _fail("active_turn_ref")
+    active_state = initial["chat_state"] in ("submitting", "streaming", "awaiting_approval", "awaiting_clarification", "interrupting", "delivery_uncertain")
+    if active_state and (count < 1 or initial["session_ref"] is None or active_request is None or active_turn is None):
+        _fail("active_submission_required")
+    if not active_state and (active_request is not None or active_turn is not None):
+        _fail("inactive_submission_reference")
     if initial["chat_state"] != "empty" and initial["session_ref"] is None:
         _fail("session_required")
     if initial["chat_state"] == "empty" and initial["session_ref"] is not None:
         _fail("empty_session_reference")
+    if initial["chat_state"] == "ready" and initial["transport_state"] != "ready":
+        _fail("ready_transport")
+    if initial["chat_state"] == "empty" and initial["transport_state"] not in ("offline", "ready"):
+        _fail("empty_transport")
 
 
 def _validate_events(events: Any) -> None:
@@ -619,7 +741,11 @@ def _validate_events(events: Any) -> None:
         if kind not in EVENT_KEYS:
             _fail("event_kind")
         _keys(event, EVENT_KEYS[kind])
-        if kind == "submit":
+        if kind == "gateway_ready":
+            if event["contract"] != CONTRACT or event["source_sha"] != HERMES_SOURCE_SHA:
+                _fail("gateway_identity")
+            _enum(event["compatibility"], ("passed",), "gateway_compatibility")
+        elif kind == "submit":
             ref = _synthetic_ref(event["request_ref"], "request_ref")
             if ref in request_refs:
                 _fail("duplicate_request_ref")
@@ -627,6 +753,10 @@ def _validate_events(events: Any) -> None:
             _enum(event["result"], SUBMIT_RESULTS, "submit_result")
         elif kind == "server_event":
             _enum(event["name"], SERVER_EVENTS, "server_event_name")
+            _synthetic_ref(event["request_ref"], "server_request_ref")
+            if TURN_REF.fullmatch(event["turn_ref"]) is None:
+                _fail("server_turn_ref")
+            _synthetic_ref(event["session_ref"], "server_session_ref")
         elif kind == "transport_loss":
             _enum(event["reason"], UNCERTAIN_REASONS, "transport_loss_reason")
         elif kind == "restore_history":
@@ -645,7 +775,7 @@ def _validate_events(events: Any) -> None:
         elif kind == "interrupt_result":
             _enum(event["result"], ("confirmed", "rejected", "unknown"), "interrupt_result")
         elif kind == "cancel":
-            _enum(event["where"], ("before_submit",), "cancel_where")
+            _enum(event["where"], ("before_submit", "submitting", "restoring"), "cancel_where")
         elif kind == "compatibility_failure":
             _enum(event["reason"], ("attestation_mismatch", "probe_failure", "required_surface_missing"), "compatibility_reason")
         elif kind == "unknown_event":
@@ -721,8 +851,18 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     rejection_retry_armed = False
     resend_reason: str | None = None
     duplicate_blocked = False
-    seen_requests: set[str] = set()
-    read_failed = False
+    active_request_ref = initial["active_request_ref"]
+    active_turn_ref = initial["active_turn_ref"]
+    seen_requests: set[str] = {active_request_ref} if active_request_ref is not None else set()
+    gateway_ready_seen = False
+    compatibility_state = "unknown"
+    # History and status are separate restore reads. A successful retry of one
+    # must never erase a transient failure recorded for the other.
+    history_read_failed = False
+    status_read_failed = False
+    restore_history_seen = False
+    restore_status_seen = False
+    signed_out = False
     state_trace = [state]
     transport_trace = [transport]
 
@@ -737,30 +877,94 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
         _append_transport(transport_trace, next_transport)
 
     def contract_failure(error: str) -> None:
-        nonlocal contract_error, decision, prompt_retry
+        nonlocal contract_error, decision, prompt_retry, restore_barrier
+        previous_state = state
         contract_error = error
         prompt_retry = "blocked"
-        decision = "automatic_prompt_retry_blocked" if error == "prompt_retry_requires_restore" else decision
+        if error == "prompt_retry_requires_restore":
+            decision = "automatic_prompt_retry_blocked"
+        else:
+            decision = error
+        if previous_state == "restoring":
+            restore_barrier = "inconclusive"
         transition("failed")
         change_transport("incompatible")
 
+    def reject_after_sign_out() -> None:
+        nonlocal contract_error, decision, prompt_retry, explicit_action_required
+        nonlocal resend_armed, rejection_retry_armed, restore_barrier, intent, pending_result
+        nonlocal active_request_ref, active_turn_ref, gateway_ready_seen, compatibility_state
+        nonlocal history_read_failed, status_read_failed
+        nonlocal restore_history_seen, restore_status_seen, server_prompt_presence, server_turn_state
+        contract_error = "signed_out_latch"
+        decision = "signed_out_latch"
+        prompt_retry = "blocked"
+        explicit_action_required = False
+        resend_armed = False
+        rejection_retry_armed = False
+        restore_barrier = "pending"
+        active_request_ref = None
+        active_turn_ref = None
+        gateway_ready_seen = False
+        compatibility_state = "unknown"
+        history_read_failed = False
+        status_read_failed = False
+        restore_history_seen = False
+        restore_status_seen = False
+        server_prompt_presence = "not_observed"
+        server_turn_state = "not_observed"
+        intent = None
+        pending_result = None
+        seen_requests.clear()
+
     for event in case["events"]:
         kind = event["kind"]
+        if signed_out:
+            reject_after_sign_out()
+            continue
         if contract_error is not None:
             _fail("events_after_contract_error")
-        if kind == "submit":
+        if kind == "gateway_ready":
+            if signed_out or transport in ("offline", "incompatible"):
+                contract_failure("gateway_not_allowed")
+                continue
+            if state not in ("ready", "submitting", "streaming", "delivery_uncertain", "interrupting", "restoring"):
+                contract_failure("gateway_not_allowed")
+                continue
+            gateway_ready_seen = True
+            compatibility_state = "passed"
+            change_transport("ready")
+        elif kind == "submit":
             ref = event["request_ref"]
             if ref in seen_requests:
                 _fail("duplicate_request_ref")
             seen_requests.add(ref)
-            allowed = state == "ready" and (selected_session is not None)
+            allowed = (
+                state == "ready"
+                and selected_session is not None
+                and transport == "ready"
+                and gateway_ready_seen
+                and compatibility_state == "passed"
+                and draft_state == "present"
+                and restore_barrier in ("not_required", "passed")
+            )
             if not allowed:
                 contract_failure("prompt_submit_not_ready")
                 continue
             submission_count += 1
             outward_changes += 1
+            active_request_ref = ref
+            active_turn_ref = "turn-marker-" + ref.rsplit("-", 1)[-1]
+            server_prompt_presence = "not_observed"
+            server_turn_state = "not_observed"
+            history_read_failed = False
+            status_read_failed = False
+            restore_history_seen = False
+            restore_status_seen = False
             intent = "prompt"
             pending_result = event["result"]
+            resend_armed = False
+            rejection_retry_armed = False
             transition("submitting")
             if event["result"] == "rejected":
                 server_prompt_presence = "absent"
@@ -774,15 +978,27 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
                 server_prompt_presence = "present"
             elif event["result"] == "pending":
                 server_prompt_presence = "not_observed"
-            elif server_prompt_presence not in ("absent", "present"):
+            elif event["result"] == "unknown":
                 server_prompt_presence = "unknown"
+                server_turn_state = "unknown"
         elif kind == "server_event":
             name = event["name"]
+            correlated = (
+                state in ("submitting", "streaming", "awaiting_approval", "awaiting_clarification")
+                and transport == "ready"
+                and gateway_ready_seen
+                and compatibility_state == "passed"
+                and selected_session == event["session_ref"]
+                and active_request_ref == event["request_ref"]
+                and active_turn_ref == event["turn_ref"]
+            )
+            if not correlated:
+                contract_failure("server_event_not_correlated")
+                continue
             if name in ("message.delta", "reasoning.delta", "thinking.delta", "tool.start", "tool.complete"):
                 server_prompt_presence = "present"
                 server_turn_state = "running"
-                if state in ("submitting", "delivery_uncertain", "restoring"):
-                    transition("streaming")
+                transition("streaming")
                 if decision == "pending":
                     decision = "accepted_present"
             elif name == "message.complete":
@@ -809,44 +1025,83 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
                 server_turn_state = "running"
                 transition("awaiting_clarification")
         elif kind == "transport_loss":
+            gateway_ready_seen = False
+            compatibility_state = "unknown"
+            restore_history_seen = False
+            restore_status_seen = False
+            history_read_failed = False
+            status_read_failed = False
             change_transport("reconnecting")
             if state in ("submitting", "streaming") and intent == "prompt":
                 transition("delivery_uncertain")
                 restore_barrier = "pending"
                 draft_state = "present"
-                server_prompt_presence = "unknown" if server_prompt_presence == "not_observed" else server_prompt_presence
-                server_turn_state = "unknown" if server_turn_state == "not_observed" else server_turn_state
+                server_prompt_presence = "unknown"
+                server_turn_state = "unknown"
                 pending_result = "unknown"
+                resend_armed = False
+                rejection_retry_armed = False
+                explicit_action_required = False
             elif state == "interrupting":
                 restore_barrier = "pending"
+                server_prompt_presence = "unknown"
+                server_turn_state = "unknown"
             elif state in ("awaiting_approval", "awaiting_clarification"):
                 contract_failure("interactive_result_unknown")
         elif kind == "restore_begin":
             if state not in ("delivery_uncertain", "interrupting", "restoring"):
                 contract_failure("restore_not_required")
                 continue
-            change_transport("ready")
+            if transport not in ("reconnecting", "handshaking", "offline"):
+                contract_failure("restore_transport_not_reconnecting")
+                continue
+            gateway_ready_seen = False
+            compatibility_state = "unknown"
+            restore_history_seen = False
+            restore_status_seen = False
+            history_read_failed = False
+            status_read_failed = False
+            server_prompt_presence = "not_observed"
+            server_turn_state = "not_observed"
             transition("restoring")
             restore_barrier = "pending"
         elif kind == "read_retry":
-            if state != "restoring":
+            if state != "restoring" or transport != "ready" or not gateway_ready_seen or compatibility_state != "passed":
                 contract_failure("read_retry_without_restore")
                 continue
             automatic_retry = True
+            method = event["method"]
             if event["result"] == "transient_error":
-                read_failed = True
-            elif read_failed:
+                if method == "session.history":
+                    history_read_failed = True
+                elif method == "session.status":
+                    status_read_failed = True
+            elif method == "session.history" and history_read_failed:
                 idempotent_collection_retries += 1
-                read_failed = False
+                history_read_failed = False
+            elif method == "session.status" and status_read_failed:
+                idempotent_collection_retries += 1
+                status_read_failed = False
         elif kind == "restore_history":
-            if state != "restoring":
+            if state != "restoring" or transport != "ready" or not gateway_ready_seen or compatibility_state != "passed":
                 contract_failure("history_without_restore")
                 continue
+            if history_read_failed:
+                contract_failure("restore_history_read_failed")
+                continue
+            restore_history_seen = True
             server_prompt_presence = event["prompt_presence"]
         elif kind == "restore_status":
-            if state != "restoring":
+            if state != "restoring" or transport != "ready" or not gateway_ready_seen or compatibility_state != "passed":
                 contract_failure("status_without_restore")
                 continue
+            if status_read_failed:
+                contract_failure("restore_status_read_failed")
+                continue
+            if not restore_history_seen:
+                contract_failure("history_required_before_status")
+                continue
+            restore_status_seen = True
             server_turn_state = event["turn_state"]
             if server_prompt_presence == "unknown" or server_turn_state == "unknown":
                 restore_barrier = "inconclusive"
@@ -880,18 +1135,21 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
                 contract_failure("restore_evidence_mismatch")
         elif kind == "user_decision":
             action = event["action"]
-            if action == "resend" and resend_armed:
+            if action == "resend" and resend_armed and restore_barrier == "passed" and server_prompt_presence == "absent" and server_turn_state == "idle" and transport == "ready" and gateway_ready_seen and compatibility_state == "passed":
                 resend_armed = False
                 resend_reason = "absent_idle"
                 explicit_action_required = True
                 transition("ready")
-            elif action == "retry_after_rejection" and rejection_retry_armed:
+            elif action == "retry_after_rejection" and rejection_retry_armed and state == "failed" and transport == "ready" and gateway_ready_seen and compatibility_state == "passed":
                 rejection_retry_armed = False
                 resend_reason = "rejection"
                 explicit_action_required = True
+                contract_error = None
+                prompt_retry = "explicit_user_only"
                 transition("ready")
-            elif action == "keep_draft" and resend_armed:
+            elif action == "keep_draft" and (resend_armed or state == "delivery_uncertain"):
                 resend_armed = False
+                rejection_retry_armed = False
                 explicit_action_required = True
                 decision = "user_kept_draft"
                 transition("ready")
@@ -918,14 +1176,14 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
                 continue
             automatic_retry = True
         elif kind == "interrupt_request":
-            if state != "streaming":
+            if state != "streaming" or transport != "ready" or not gateway_ready_seen or compatibility_state != "passed":
                 contract_failure("interrupt_not_active")
                 continue
             intent = "interrupt"
             outward_changes += 1
             transition("interrupting")
         elif kind == "interrupt_result":
-            if state != "interrupting":
+            if state != "interrupting" or transport != "ready" or not gateway_ready_seen or compatibility_state != "passed":
                 contract_failure("interrupt_result_not_pending")
                 continue
             if event["result"] == "confirmed":
@@ -939,18 +1197,51 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             else:
                 decision = "interrupt_unknown"
         elif kind == "cancel":
-            if event["where"] != "before_submit" or state != "ready" or submission_count != 0:
+            where = event["where"]
+            if where == "before_submit" and state == "ready" and submission_count == 0:
+                decision = "cancelled_before_submit"
+            elif where == "submitting" and state == "submitting":
+                draft_state = "present"
+                transition("ready")
+                decision = "cancelled_submission_pending"
+            elif where == "restoring" and state == "restoring":
+                transition("delivery_uncertain")
+                restore_barrier = "pending"
+                explicit_action_required = False
+                decision = "cancelled_restore"
+            else:
                 contract_failure("cancel_not_safe")
-                continue
-            decision = "cancelled_before_submit"
         elif kind == "sign_out":
+            # Signing out is a terminal local boundary for this authenticated
+            # session. Clear every armed retry/read/request reference before
+            # latching offline so stale callbacks cannot rearm a send.
+            signed_out = True
             selected_session = None
+            gateway_ready_seen = False
+            compatibility_state = "unknown"
+            resend_armed = False
+            rejection_retry_armed = False
+            explicit_action_required = False
+            prompt_retry = "blocked"
+            history_read_failed = False
+            status_read_failed = False
+            restore_history_seen = False
+            restore_status_seen = False
+            active_request_ref = None
+            active_turn_ref = None
+            server_prompt_presence = "not_observed"
+            server_turn_state = "not_observed"
+            restore_barrier = "pending"
+            intent = None
+            pending_result = None
+            seen_requests.clear()
             change_transport("offline")
             transition("empty")
             decision = "signed_out_safe"
         elif kind == "compatibility_failure":
             contract_error = "compatibility_evidence_required"
             prompt_retry = "blocked"
+            restore_barrier = "inconclusive" if state == "restoring" else restore_barrier
             decision = "incompatible_evidence"
             transition("failed")
             change_transport("incompatible")
@@ -1001,7 +1292,30 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_baseline(baseline: dict[str, Any], *, fixture_dir: Path | None = None) -> int:
+def _validate_distribution(distribution: Any, samples: list[float]) -> None:
+    _keys(distribution, DISTRIBUTION_KEYS)
+    if type(distribution["count"]) is not int or distribution["count"] != len(samples):
+        _fail("baseline_distribution")
+    for key in DISTRIBUTION_KEYS[1:]:
+        value = distribution[key]
+        if type(value) is not float or not math.isfinite(value) or not 0 < value <= MAX_SAMPLE_MS:
+            _fail("baseline_distribution")
+    try:
+        expected = _distribution(samples)
+    except ContractError:
+        raise
+    except (OverflowError, ValueError, TypeError, statistics.StatisticsError):
+        _fail("baseline_arithmetic")
+    if distribution != expected:
+        _fail("baseline_distribution")
+
+
+def validate_baseline(
+    baseline: dict[str, Any],
+    *,
+    fixture_dir: Path | None = None,
+    trusted_baseline: dict[str, Any] | None = None,
+) -> int:
     expected_keys = ("schema", "operation", "contract", "hermes_source_sha", "synthetic_only", "metric", "deterministic_fixture", "environment", "threshold", "artifacts", "artifact_manifest_sha256", "normal", "optimized")
     _keys(baseline, expected_keys)
     if baseline["schema"] != BASELINE_SCHEMA or baseline["operation"] != OPERATION or baseline["contract"] != CONTRACT:
@@ -1014,7 +1328,7 @@ def validate_baseline(baseline: dict[str, Any], *, fixture_dir: Path | None = No
     if not isinstance(environment, dict) or tuple(environment.keys()) != tuple(EXPECTED_ENVIRONMENT.keys()):
         _fail("baseline_environment")
     for key, expected in EXPECTED_ENVIRONMENT.items():
-        if environment[key] != expected:
+        if type(environment[key]) is not str or environment[key] != expected:
             _fail("baseline_environment")
     if baseline["threshold"] is not None:
         _fail("baseline_threshold")
@@ -1027,9 +1341,7 @@ def validate_baseline(baseline: dict[str, Any], *, fixture_dir: Path | None = No
             _fail("baseline_artifact_entry")
         if type(entry["bytes"]) is not int or entry["bytes"] <= 0 or not HEX64.fullmatch(str(entry["sha256"])):
             _fail("baseline_artifact_entry")
-    if baseline["artifact_manifest_sha256"] != CANONICAL_ARTIFACT_MANIFEST_SHA256:
-        _fail("baseline_artifact_manifest")
-    directory = fixture_dir or ROOT
+    directory = fixture_dir or _trusted_fixture_directory()
     actual_artifacts, actual_manifest = _artifact_manifest(directory)
     if actual_artifacts != artifacts or actual_manifest != baseline["artifact_manifest_sha256"]:
         _fail("baseline_artifacts")
@@ -1038,46 +1350,62 @@ def validate_baseline(baseline: dict[str, Any], *, fixture_dir: Path | None = No
         record = baseline[mode]
         if not isinstance(record, dict) or tuple(record.keys()) != ("command", "repetitions", "samples_ms", "distribution"):
             _fail("baseline_mode")
-        if record["command"] != APPROVED_COMMANDS[mode] or record["repetitions"] != BENCHMARK_REPETITIONS:
+        if type(record["command"]) is not str or record["command"] != APPROVED_COMMANDS[mode]:
             _fail("baseline_command")
+        if type(record["repetitions"]) is not int or record["repetitions"] != BENCHMARK_REPETITIONS:
+            _fail("baseline_repetitions")
         samples = record["samples_ms"]
         if type(samples) is not list or len(samples) != BENCHMARK_REPETITIONS:
             _fail("baseline_samples")
-        if any(type(sample) is not float or not math.isfinite(sample) or sample <= 0 for sample in samples):
+        if any(type(sample) is not float or not math.isfinite(sample) or not 0 < sample <= MAX_SAMPLE_MS for sample in samples):
             _fail("baseline_samples")
-        if record["distribution"] != _distribution(samples):
-            _fail("baseline_distribution")
-        sample_digest = _sha256_bytes(_canonical_json(samples))
-        distribution_digest = _sha256_bytes(_canonical_json(record["distribution"]))
-        identity = CANONICAL_BENCHMARK_IDENTITY[mode]
-        if sample_digest != identity["samples_sha256"] or distribution_digest != identity["distribution_sha256"]:
-            _fail("baseline_identity")
+        _validate_distribution(record["distribution"], samples)
         total_samples += len(samples)
+    trusted = trusted_baseline or _load_trusted_baseline()
+    if baseline != trusted:
+        _fail("baseline_identity")
     return total_samples
 
 
-def validate_canonical_identity(document: dict[str, Any], baseline: dict[str, Any], *, fixture_dir: Path | None = None) -> None:
-    directory = fixture_dir or ROOT
-    try:
-        cases_bytes = (directory / "cases.json").read_bytes()
-    except (OSError, ValueError):
-        _fail("cases_unavailable")
-    if _sha256_bytes(cases_bytes) != CANONICAL_CASES_SHA256:
+def validate_canonical_identity(
+    document: dict[str, Any],
+    baseline: dict[str, Any],
+    *,
+    cases_path: Path | None = None,
+    baseline_path: Path | None = None,
+    executing_path: Path | None = None,
+) -> None:
+    trusted = _trusted_fixture_directory()
+    _require_exact_trusted_file(cases_path or CASES_PATH, trusted / "cases.json", "cases_identity")
+    _require_exact_trusted_file(baseline_path or BASELINE_PATH, trusted / "validation-baseline.json", "baseline_identity")
+    _require_exact_trusted_file(executing_path or Path(__file__), trusted / "validate.py", "source_identity")
+    trusted_document = _load_trusted_document()
+    trusted_baseline = _load_trusted_baseline()
+    if document != trusted_document:
         _fail("cases_identity")
-    if _normalized_source_digest(directory / "validate.py") != CANONICAL_SOURCE_SHA256:
-        _fail("source_identity")
-    validate_baseline(baseline, fixture_dir=directory)
-    if directory == ROOT and document is not None:
-        artifacts, manifest = _artifact_manifest(directory)
-        if manifest != CANONICAL_ARTIFACT_MANIFEST_SHA256:
-            _fail("artifact_identity")
-        if baseline["artifacts"] != artifacts:
-            _fail("artifact_identity")
+    validate_baseline(baseline, fixture_dir=trusted, trusted_baseline=trusted_baseline)
+    artifacts, manifest = _artifact_manifest(trusted)
+    if baseline["artifacts"] != artifacts or baseline["artifact_manifest_sha256"] != manifest:
+        _fail("artifact_identity")
 
 
-def validate_all(document: dict[str, Any], baseline: dict[str, Any], *, fixture_dir: Path | None = None) -> int:
+def validate_all(
+    document: dict[str, Any],
+    baseline: dict[str, Any],
+    *,
+    fixture_dir: Path | None = None,
+    cases_path: Path | None = None,
+    baseline_path: Path | None = None,
+    executing_path: Path | None = None,
+) -> int:
     validate_document(document)
-    validate_canonical_identity(document, baseline, fixture_dir=fixture_dir)
+    validate_canonical_identity(
+        document,
+        baseline,
+        cases_path=cases_path or (fixture_dir / "cases.json" if fixture_dir else None),
+        baseline_path=baseline_path or (fixture_dir / "validation-baseline.json" if fixture_dir else None),
+        executing_path=executing_path,
+    )
     return len(document["cases"])
 
 
@@ -1115,14 +1443,19 @@ def main(argv: list[str] | None = None) -> int:
         baseline_path = Path(args.baseline)
         document = load_json(cases_path, "cases")
         baseline = load_json(baseline_path, "baseline")
-        directory = cases_path.parent
-        count = validate_all(document, baseline, fixture_dir=directory)
+        count = validate_all(
+            document,
+            baseline,
+            cases_path=cases_path,
+            baseline_path=baseline_path,
+            executing_path=Path(__file__),
+        )
         print(f"uncertain_delivery_validation=ok cases={count} benchmark_samples={BENCHMARK_REPETITIONS * 2}")
         return 0
     except ContractError as exc:
         sys.stderr.write(_error_line(exc.code) + "\n")
         return 1
-    except (OSError, ValueError, TypeError, RecursionError):
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError, statistics.StatisticsError):
         sys.stderr.write(_error_line("contract_rejected") + "\n")
         return 1
 

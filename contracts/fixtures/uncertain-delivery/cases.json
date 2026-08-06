@@ -31,75 +31,144 @@
       "id": "empty",
       "meaning": "No server session is selected.",
       "terminal": false,
-      "allowed_actions": ["start_session", "write_draft"]
+      "allowed_actions": [
+        "start_session",
+        "write_draft"
+      ]
     },
     {
       "id": "ready",
       "meaning": "The selected session can accept one explicit prompt send.",
       "terminal": false,
-      "allowed_actions": ["edit_draft", "send", "restore", "sign_out"]
+      "allowed_actions": [
+        "edit_draft",
+        "send",
+        "restore",
+        "sign_out"
+      ]
     },
     {
       "id": "submitting",
       "meaning": "A prompt request is in flight and its result is not final.",
       "terminal": false,
-      "allowed_actions": ["wait", "cancel", "sign_out"]
+      "allowed_actions": [
+        "wait",
+        "cancel",
+        "sign_out"
+      ]
     },
     {
       "id": "streaming",
       "meaning": "A correlated server turn is active.",
       "terminal": false,
-      "allowed_actions": ["interrupt", "answer_pending_input", "wait", "sign_out"]
+      "allowed_actions": [
+        "interrupt",
+        "answer_pending_input",
+        "wait",
+        "sign_out"
+      ]
     },
     {
       "id": "awaiting_approval",
       "meaning": "One supported approval request is pending.",
       "terminal": false,
-      "allowed_actions": ["approve", "deny", "sign_out"]
+      "allowed_actions": [
+        "approve",
+        "deny",
+        "sign_out"
+      ]
     },
     {
       "id": "awaiting_clarification",
       "meaning": "One supported clarification request is pending.",
       "terminal": false,
-      "allowed_actions": ["answer", "cancel", "sign_out"]
+      "allowed_actions": [
+        "answer",
+        "cancel",
+        "sign_out"
+      ]
     },
     {
       "id": "interrupting",
       "meaning": "An interrupt was requested but its final result is unknown.",
       "terminal": false,
-      "allowed_actions": ["wait", "restore", "sign_out"]
+      "allowed_actions": [
+        "wait",
+        "restore",
+        "sign_out"
+      ]
     },
     {
       "id": "delivery_uncertain",
       "meaning": "A prompt may have reached the server but has no known result.",
       "terminal": false,
-      "allowed_actions": ["restore", "keep_draft", "sign_out"]
+      "allowed_actions": [
+        "restore",
+        "keep_draft",
+        "sign_out"
+      ]
     },
     {
       "id": "restoring",
       "meaning": "Server history and status are being reread after an unknown result.",
       "terminal": false,
-      "allowed_actions": ["wait", "cancel", "sign_out"]
+      "allowed_actions": [
+        "wait",
+        "cancel",
+        "sign_out"
+      ]
     },
     {
       "id": "completed",
       "meaning": "The server confirmed the turn completion or interruption.",
       "terminal": true,
-      "allowed_actions": ["read", "copy", "new_draft", "continue", "sign_out"]
+      "allowed_actions": [
+        "read",
+        "copy",
+        "new_draft",
+        "continue",
+        "sign_out"
+      ]
     },
     {
       "id": "failed",
       "meaning": "A known failure or contract error stopped the affected turn.",
       "terminal": true,
-      "allowed_actions": ["keep_draft", "explicit_retry", "sign_out"]
+      "allowed_actions": [
+        "keep_draft",
+        "explicit_retry",
+        "sign_out"
+      ]
     }
   ],
   "policies": {
-    "automatic_retry_methods": ["session.resume", "session.history", "session.status", "model.options"],
-    "never_automatic_retry_methods": ["prompt.submit", "session.create", "session.interrupt"],
-    "uncertain_transport_reasons": ["timeout", "websocket_close", "app_suspension", "process_loss"],
-    "restore_evidence_order": ["session.history", "session.status"],
-    "explicit_resend_gate": ["restore_complete", "prompt_absent", "turn_idle", "user_confirmed"],
+    "automatic_retry_methods": [
+      "session.resume",
+      "session.history",
+      "session.status",
+      "model.options"
+    ],
+    "never_automatic_retry_methods": [
+      "prompt.submit",
+      "session.create",
+      "session.interrupt"
+    ],
+    "uncertain_transport_reasons": [
+      "timeout",
+      "websocket_close",
+      "app_suspension",
+      "process_loss"
+    ],
+    "restore_evidence_order": [
+      "session.history",
+      "session.status"
+    ],
+    "explicit_resend_gate": [
+      "restore_complete",
+      "prompt_absent",
+      "turn_idle",
+      "user_confirmed"
+    ],
     "draft_policy": "preserve_original_until_server_presence_or_user_discard",
     "duplicate_policy": "one_submission_per_explicit_send",
     "source_result_rule": "correlate_reply_by_request_identifier_and_events_by_event_name"
@@ -112,13 +181,19 @@
         "transport_state": "ready",
         "session_ref": null,
         "draft_state": "absent",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [],
       "expected": {
-        "trace": ["empty"],
+        "trace": [
+          "empty"
+        ],
         "final_state": "empty",
-        "transport_trace": ["ready"],
+        "transport_trace": [
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": null,
         "draft_state": "absent",
@@ -144,17 +219,48 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "accepted"},
-        {"kind": "server_event", "name": "message.delta"},
-        {"kind": "server_event", "name": "message.complete"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "accepted"
+        },
+        {
+          "kind": "server_event",
+          "name": "message.delta",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "session_ref": "session-marker-001"
+        },
+        {
+          "kind": "server_event",
+          "name": "message.complete",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "session_ref": "session-marker-001"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "streaming", "completed"],
+        "trace": [
+          "ready",
+          "submitting",
+          "streaming",
+          "completed"
+        ],
         "final_state": "completed",
-        "transport_trace": ["ready"],
+        "transport_trace": [
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -180,20 +286,66 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
-        {"kind": "transport_loss", "reason": "timeout"},
-        {"kind": "restore_begin"},
-        {"kind": "restore_history", "prompt_presence": "present"},
-        {"kind": "restore_status", "turn_state": "running"},
-        {"kind": "server_event", "name": "message.complete"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "timeout"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "present"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "running"
+        },
+        {
+          "kind": "server_event",
+          "name": "message.complete",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "session_ref": "session-marker-001"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "streaming", "completed"],
+        "trace": [
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "streaming",
+          "completed"
+        ],
         "final_state": "completed",
-        "transport_trace": ["ready", "reconnecting", "ready"],
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -219,19 +371,58 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
-        {"kind": "transport_loss", "reason": "websocket_close"},
-        {"kind": "restore_begin"},
-        {"kind": "restore_history", "prompt_presence": "absent"},
-        {"kind": "restore_status", "turn_state": "idle"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "websocket_close"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "absent"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "idle"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "ready"],
+        "trace": [
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "ready"
+        ],
         "final_state": "ready",
-        "transport_trace": ["ready", "reconnecting", "ready"],
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "present",
@@ -257,22 +448,82 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
-        {"kind": "transport_loss", "reason": "app_suspension"},
-        {"kind": "restore_begin"},
-        {"kind": "restore_history", "prompt_presence": "absent"},
-        {"kind": "restore_status", "turn_state": "idle"},
-        {"kind": "user_decision", "action": "resend"},
-        {"kind": "submit", "request_ref": "request-marker-002", "result": "accepted"},
-        {"kind": "server_event", "name": "message.complete"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "app_suspension"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "absent"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "idle"
+        },
+        {
+          "kind": "user_decision",
+          "action": "resend"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-002",
+          "result": "accepted"
+        },
+        {
+          "kind": "server_event",
+          "name": "message.complete",
+          "request_ref": "request-marker-002",
+          "turn_ref": "turn-marker-002",
+          "session_ref": "session-marker-001"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "ready", "submitting", "completed"],
+        "trace": [
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "ready",
+          "submitting",
+          "completed"
+        ],
         "final_state": "completed",
-        "transport_trace": ["ready", "reconnecting", "ready"],
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -298,20 +549,66 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
-        {"kind": "transport_loss", "reason": "process_loss"},
-        {"kind": "restore_begin"},
-        {"kind": "restore_history", "prompt_presence": "present"},
-        {"kind": "restore_status", "turn_state": "running"},
-        {"kind": "server_event", "name": "message.complete"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "process_loss"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "present"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "running"
+        },
+        {
+          "kind": "server_event",
+          "name": "message.complete",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "session_ref": "session-marker-001"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "streaming", "completed"],
+        "trace": [
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "streaming",
+          "completed"
+        ],
         "final_state": "completed",
-        "transport_trace": ["ready", "reconnecting", "ready"],
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -337,15 +634,33 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "rejected"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "rejected"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "failed"],
+        "trace": [
+          "ready",
+          "submitting",
+          "failed"
+        ],
         "final_state": "failed",
-        "transport_trace": ["ready"],
+        "transport_trace": [
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "present",
@@ -371,19 +686,58 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
-        {"kind": "transport_loss", "reason": "timeout"},
-        {"kind": "restore_begin"},
-        {"kind": "restore_history", "prompt_presence": "unknown"},
-        {"kind": "restore_status", "turn_state": "unknown"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "timeout"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "unknown"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "unknown"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "delivery_uncertain"],
+        "trace": [
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "delivery_uncertain"
+        ],
         "final_state": "delivery_uncertain",
-        "transport_trace": ["ready", "reconnecting", "ready"],
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "present",
@@ -409,19 +763,50 @@
         "transport_state": "reconnecting",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 1
+        "submission_count": 1,
+        "active_request_ref": "request-marker-001",
+        "active_turn_ref": "turn-marker-001"
       },
       "events": [
-        {"kind": "restore_begin"},
-        {"kind": "read_retry", "method": "session.history", "result": "transient_error"},
-        {"kind": "read_retry", "method": "session.history", "result": "success"},
-        {"kind": "restore_history", "prompt_presence": "absent"},
-        {"kind": "restore_status", "turn_state": "idle"}
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "read_retry",
+          "method": "session.history",
+          "result": "transient_error"
+        },
+        {
+          "kind": "read_retry",
+          "method": "session.history",
+          "result": "success"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "absent"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "idle"
+        }
       ],
       "expected": {
-        "trace": ["delivery_uncertain", "restoring", "ready"],
+        "trace": [
+          "delivery_uncertain",
+          "restoring",
+          "ready"
+        ],
         "final_state": "ready",
-        "transport_trace": ["reconnecting", "ready"],
+        "transport_trace": [
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "present",
@@ -447,15 +832,26 @@
         "transport_state": "reconnecting",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 1
+        "submission_count": 1,
+        "active_request_ref": "request-marker-001",
+        "active_turn_ref": "turn-marker-001"
       },
       "events": [
-        {"kind": "automatic_retry", "method": "prompt.submit"}
+        {
+          "kind": "automatic_retry",
+          "method": "prompt.submit"
+        }
       ],
       "expected": {
-        "trace": ["delivery_uncertain", "failed"],
+        "trace": [
+          "delivery_uncertain",
+          "failed"
+        ],
         "final_state": "failed",
-        "transport_trace": ["reconnecting", "incompatible"],
+        "transport_trace": [
+          "reconnecting",
+          "incompatible"
+        ],
         "final_transport_state": "incompatible",
         "selected_session": "session-marker-001",
         "draft_state": "present",
@@ -481,17 +877,43 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "pending"},
-        {"kind": "duplicate_submit"},
-        {"kind": "server_event", "name": "message.complete"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "pending"
+        },
+        {
+          "kind": "duplicate_submit"
+        },
+        {
+          "kind": "server_event",
+          "name": "message.complete",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "session_ref": "session-marker-001"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "completed"],
+        "trace": [
+          "ready",
+          "submitting",
+          "completed"
+        ],
         "final_state": "completed",
-        "transport_trace": ["ready"],
+        "transport_trace": [
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -517,23 +939,86 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
-        {"kind": "transport_loss", "reason": "websocket_close"},
-        {"kind": "restore_begin"},
-        {"kind": "restore_history", "prompt_presence": "absent"},
-        {"kind": "restore_status", "turn_state": "idle"},
-        {"kind": "user_decision", "action": "resend"},
-        {"kind": "submit", "request_ref": "request-marker-002", "result": "unknown"},
-        {"kind": "transport_loss", "reason": "timeout"},
-        {"kind": "automatic_retry", "method": "prompt.submit"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "websocket_close"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "absent"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "idle"
+        },
+        {
+          "kind": "user_decision",
+          "action": "resend"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-002",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "timeout"
+        },
+        {
+          "kind": "automatic_retry",
+          "method": "prompt.submit"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "ready", "submitting", "delivery_uncertain", "failed"],
+        "trace": [
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "failed"
+        ],
         "final_state": "failed",
-        "transport_trace": ["ready", "reconnecting", "ready", "reconnecting", "incompatible"],
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready",
+          "reconnecting",
+          "incompatible"
+        ],
         "final_transport_state": "incompatible",
         "selected_session": "session-marker-001",
         "draft_state": "present",
@@ -545,8 +1030,8 @@
         "explicit_action_required": false,
         "outward_changes": 2,
         "idempotent_collection_retries": 0,
-        "server_prompt_presence": "absent",
-        "server_turn_state": "idle",
+        "server_prompt_presence": "unknown",
+        "server_turn_state": "unknown",
         "decision": "automatic_prompt_retry_blocked",
         "contract_error": "prompt_retry_requires_restore"
       },
@@ -559,16 +1044,35 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "absent",
-        "submission_count": 1
+        "submission_count": 1,
+        "active_request_ref": "request-marker-001",
+        "active_turn_ref": "turn-marker-001"
       },
       "events": [
-        {"kind": "interrupt_request"},
-        {"kind": "interrupt_result", "result": "confirmed"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "interrupt_request"
+        },
+        {
+          "kind": "interrupt_result",
+          "result": "confirmed"
+        }
       ],
       "expected": {
-        "trace": ["streaming", "interrupting", "completed"],
+        "trace": [
+          "streaming",
+          "interrupting",
+          "completed"
+        ],
         "final_state": "completed",
-        "transport_trace": ["ready"],
+        "transport_trace": [
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -594,19 +1098,55 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "absent",
-        "submission_count": 1
+        "submission_count": 1,
+        "active_request_ref": "request-marker-001",
+        "active_turn_ref": "turn-marker-001"
       },
       "events": [
-        {"kind": "interrupt_request"},
-        {"kind": "transport_loss", "reason": "websocket_close"},
-        {"kind": "restore_begin"},
-        {"kind": "restore_history", "prompt_presence": "present"},
-        {"kind": "restore_status", "turn_state": "running"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "interrupt_request"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "websocket_close"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "present"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "running"
+        }
       ],
       "expected": {
-        "trace": ["streaming", "interrupting", "restoring", "streaming"],
+        "trace": [
+          "streaming",
+          "interrupting",
+          "restoring",
+          "streaming"
+        ],
         "final_state": "streaming",
-        "transport_trace": ["ready", "reconnecting", "ready"],
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -632,15 +1172,24 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "cancel", "where": "before_submit"}
+        {
+          "kind": "cancel",
+          "where": "before_submit"
+        }
       ],
       "expected": {
-        "trace": ["ready"],
+        "trace": [
+          "ready"
+        ],
         "final_state": "ready",
-        "transport_trace": ["ready"],
+        "transport_trace": [
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "present",
@@ -666,30 +1215,48 @@
         "transport_state": "reconnecting",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 1
+        "submission_count": 1,
+        "active_request_ref": "request-marker-001",
+        "active_turn_ref": "turn-marker-001"
       },
       "events": [
-        {"kind": "sign_out"}
+        {
+          "kind": "sign_out"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "websocket_close"
+        },
+        {
+          "kind": "user_decision",
+          "action": "resend"
+        }
       ],
       "expected": {
-        "trace": ["delivery_uncertain", "empty"],
+        "trace": [
+          "delivery_uncertain",
+          "empty"
+        ],
         "final_state": "empty",
-        "transport_trace": ["reconnecting", "offline"],
+        "transport_trace": [
+          "reconnecting",
+          "offline"
+        ],
         "final_transport_state": "offline",
         "selected_session": null,
         "draft_state": "present",
         "submission_count": 1,
         "duplicate_attempts": 0,
         "restore_barrier": "pending",
-        "prompt_retry": "none",
+        "prompt_retry": "blocked",
         "automatic_retry": false,
         "explicit_action_required": false,
         "outward_changes": 1,
         "idempotent_collection_retries": 0,
         "server_prompt_presence": "not_observed",
         "server_turn_state": "not_observed",
-        "decision": "signed_out_safe",
-        "contract_error": null
+        "decision": "signed_out_latch",
+        "contract_error": "signed_out_latch"
       },
       "notes": "Sign-out clears the selected session and suppresses reconnect while preserving the draft."
     },
@@ -700,16 +1267,34 @@
         "transport_state": "reconnecting",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 1
+        "submission_count": 1,
+        "active_request_ref": "request-marker-001",
+        "active_turn_ref": "turn-marker-001"
       },
       "events": [
-        {"kind": "restore_begin"},
-        {"kind": "evidence_pending"}
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "evidence_pending"
+        }
       ],
       "expected": {
-        "trace": ["delivery_uncertain", "restoring"],
+        "trace": [
+          "delivery_uncertain",
+          "restoring"
+        ],
         "final_state": "restoring",
-        "transport_trace": ["reconnecting", "ready"],
+        "transport_trace": [
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "present",
@@ -735,21 +1320,32 @@
         "transport_state": "handshaking",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "compatibility_failure", "reason": "attestation_mismatch"}
+        {
+          "kind": "compatibility_failure",
+          "reason": "attestation_mismatch"
+        }
       ],
       "expected": {
-        "trace": ["restoring", "failed"],
+        "trace": [
+          "restoring",
+          "failed"
+        ],
         "final_state": "failed",
-        "transport_trace": ["handshaking", "incompatible"],
+        "transport_trace": [
+          "handshaking",
+          "incompatible"
+        ],
         "final_transport_state": "incompatible",
         "selected_session": "session-marker-001",
         "draft_state": "present",
         "submission_count": 0,
         "duplicate_attempts": 0,
-        "restore_barrier": "not_required",
+        "restore_barrier": "inconclusive",
         "prompt_retry": "blocked",
         "automatic_retry": false,
         "explicit_action_required": false,
@@ -769,15 +1365,26 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "absent",
-        "submission_count": 1
+        "submission_count": 1,
+        "active_request_ref": "request-marker-001",
+        "active_turn_ref": "turn-marker-001"
       },
       "events": [
-        {"kind": "unknown_event", "name": "unknown.interactive"}
+        {
+          "kind": "unknown_event",
+          "name": "unknown.interactive"
+        }
       ],
       "expected": {
-        "trace": ["streaming", "failed"],
+        "trace": [
+          "streaming",
+          "failed"
+        ],
         "final_state": "failed",
-        "transport_trace": ["ready", "incompatible"],
+        "transport_trace": [
+          "ready",
+          "incompatible"
+        ],
         "final_transport_state": "incompatible",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -803,20 +1410,62 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "unknown"},
-        {"kind": "transport_loss", "reason": "websocket_close"},
-        {"kind": "restore_begin"},
-        {"kind": "restore_history", "prompt_presence": "absent"},
-        {"kind": "restore_status", "turn_state": "idle"},
-        {"kind": "user_decision", "action": "keep_draft"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "websocket_close"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "absent"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "idle"
+        },
+        {
+          "kind": "user_decision",
+          "action": "keep_draft"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "delivery_uncertain", "restoring", "ready"],
+        "trace": [
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "ready"
+        ],
         "final_state": "ready",
-        "transport_trace": ["ready", "reconnecting", "ready"],
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "present",
@@ -842,18 +1491,52 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "rejected"},
-        {"kind": "user_decision", "action": "retry_after_rejection"},
-        {"kind": "submit", "request_ref": "request-marker-002", "result": "accepted"},
-        {"kind": "server_event", "name": "message.complete"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "rejected"
+        },
+        {
+          "kind": "user_decision",
+          "action": "retry_after_rejection"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-002",
+          "result": "accepted"
+        },
+        {
+          "kind": "server_event",
+          "name": "message.complete",
+          "request_ref": "request-marker-002",
+          "turn_ref": "turn-marker-002",
+          "session_ref": "session-marker-001"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "failed", "ready", "submitting", "completed"],
+        "trace": [
+          "ready",
+          "submitting",
+          "failed",
+          "ready",
+          "submitting",
+          "completed"
+        ],
         "final_state": "completed",
-        "transport_trace": ["ready"],
+        "transport_trace": [
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -879,20 +1562,66 @@
         "transport_state": "ready",
         "session_ref": "session-marker-001",
         "draft_state": "present",
-        "submission_count": 0
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
       },
       "events": [
-        {"kind": "submit", "request_ref": "request-marker-001", "result": "pending"},
-        {"kind": "server_event", "name": "message.delta"},
-        {"kind": "transport_loss", "reason": "websocket_close"},
-        {"kind": "restore_begin"},
-        {"kind": "restore_history", "prompt_presence": "present"},
-        {"kind": "restore_status", "turn_state": "completed"}
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "pending"
+        },
+        {
+          "kind": "server_event",
+          "name": "message.delta",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "session_ref": "session-marker-001"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "websocket_close"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "present"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "completed"
+        }
       ],
       "expected": {
-        "trace": ["ready", "submitting", "streaming", "delivery_uncertain", "restoring", "completed"],
+        "trace": [
+          "ready",
+          "submitting",
+          "streaming",
+          "delivery_uncertain",
+          "restoring",
+          "completed"
+        ],
         "final_state": "completed",
-        "transport_trace": ["ready", "reconnecting", "ready"],
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready"
+        ],
         "final_transport_state": "ready",
         "selected_session": "session-marker-001",
         "draft_state": "absent",
@@ -910,6 +1639,295 @@
         "contract_error": null
       },
       "notes": "A visible correlated event is evidence of acceptance even when completion arrives after reconnect."
+    },
+    {
+      "id": "stale-evidence-resend-blocked",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
+      },
+      "events": [
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "websocket_close"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "absent"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "idle"
+        },
+        {
+          "kind": "user_decision",
+          "action": "resend"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-002",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "timeout"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "restore_status",
+          "turn_state": "idle"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "failed"
+        ],
+        "final_state": "failed",
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready",
+          "reconnecting",
+          "ready",
+          "incompatible"
+        ],
+        "final_transport_state": "incompatible",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 2,
+        "duplicate_attempts": 0,
+        "restore_barrier": "inconclusive",
+        "prompt_retry": "blocked",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 2,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "history_required_before_status",
+        "contract_error": "history_required_before_status"
+      },
+      "notes": "A second uncertain send must reread fresh history before any new resend decision."
+    },
+    {
+      "id": "cancel-submitting",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
+      },
+      "events": [
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "pending"
+        },
+        {
+          "kind": "cancel",
+          "where": "submitting"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "ready",
+          "submitting",
+          "ready"
+        ],
+        "final_state": "ready",
+        "transport_trace": [
+          "ready"
+        ],
+        "final_transport_state": "ready",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "not_required",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "cancelled_submission_pending",
+        "contract_error": null
+      },
+      "notes": "The declared local cancel action returns to the draft without claiming a server result."
+    },
+    {
+      "id": "keep-draft-before-restore",
+      "initial": {
+        "chat_state": "delivery_uncertain",
+        "transport_state": "reconnecting",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "active_request_ref": "request-marker-001",
+        "active_turn_ref": "turn-marker-001"
+      },
+      "events": [
+        {
+          "kind": "user_decision",
+          "action": "keep_draft"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "delivery_uncertain",
+          "ready"
+        ],
+        "final_state": "ready",
+        "transport_trace": [
+          "reconnecting"
+        ],
+        "final_transport_state": "reconnecting",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "pending",
+        "prompt_retry": "none",
+        "automatic_retry": false,
+        "explicit_action_required": true,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "user_kept_draft",
+        "contract_error": null
+      },
+      "notes": "Keep draft is executable while delivery remains uncertain and does not invent server evidence."
+    },
+    {
+      "id": "restore-transient-without-recovery",
+      "initial": {
+        "chat_state": "ready",
+        "transport_state": "ready",
+        "session_ref": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 0,
+        "active_request_ref": null,
+        "active_turn_ref": null
+      },
+      "events": [
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "submit",
+          "request_ref": "request-marker-001",
+          "result": "unknown"
+        },
+        {
+          "kind": "transport_loss",
+          "reason": "timeout"
+        },
+        {
+          "kind": "restore_begin"
+        },
+        {
+          "kind": "gateway_ready",
+          "contract": "dashboard-v0.0.1",
+          "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+          "compatibility": "passed"
+        },
+        {
+          "kind": "read_retry",
+          "method": "session.history",
+          "result": "transient_error"
+        },
+        {
+          "kind": "restore_history",
+          "prompt_presence": "absent"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "ready",
+          "submitting",
+          "delivery_uncertain",
+          "restoring",
+          "failed"
+        ],
+        "final_state": "failed",
+        "transport_trace": [
+          "ready",
+          "reconnecting",
+          "ready",
+          "incompatible"
+        ],
+        "final_transport_state": "incompatible",
+        "selected_session": "session-marker-001",
+        "draft_state": "present",
+        "submission_count": 1,
+        "duplicate_attempts": 0,
+        "restore_barrier": "inconclusive",
+        "prompt_retry": "blocked",
+        "automatic_retry": true,
+        "explicit_action_required": false,
+        "outward_changes": 1,
+        "idempotent_collection_retries": 0,
+        "server_prompt_presence": "not_observed",
+        "server_turn_state": "not_observed",
+        "decision": "restore_history_read_failed",
+        "contract_error": "restore_history_read_failed"
+      },
+      "notes": "A transient restore read must recover before its history can authorize any resend decision."
     }
   ],
   "redaction": {

@@ -42,11 +42,24 @@ Hermes owns the transcript. Hermternal renders a server projection. A local memo
 The client must not blindly retry a prompt.
 
 - A timeout, WebSocket close, app suspension, or process crash after send is an unknown outcome.
-- Reconnect and restore the server session before any resend decision.
-- Inspect server-owned history and status. If the prompt is present, render the server result and do not duplicate it.
+- Reconnect and restore the server session before any resend decision. Observe
+  `gateway.ready` and matching compatibility evidence before `session.history`,
+  `session.status`, or another prompt operation.
+- Inspect fresh server-owned history and status for every uncertainty cycle. A
+  transient history or status read failure invalidates that read's current
+  evidence until a successful retry of the same idempotent read completes;
+  stale `absent`/`idle` evidence cannot authorize a later resend.
+- If the prompt is present, render the server result and do not duplicate it.
 - If the prompt is absent and the server confirms that no turn is running, ask the user whether to resend.
 - Keep the original draft and a user-visible uncertainty notice until the decision is complete.
 - Do not create a new session as an automatic workaround.
+- A send requires a selected session, a non-empty draft, ready transport,
+  gateway readiness, and compatible evidence. A `ready` label alone is not a
+  transport or compatibility proof.
+- Sign-out clears selected session, active request/turn references, restore
+  evidence, and armed retry decisions. It latches offline and rejects stale
+  transport, event, or user-decision input until a new authenticated session
+  starts.
 
 ## C-06 uncertain-delivery contract
 
@@ -116,4 +129,8 @@ The UI may show the pending model during a stream, but it must not claim that th
 - Drafts, attachment progress, selected session identity, and lightweight UI preferences may persist locally. Message bodies and tool output may not be persisted as a transcript mirror.
 - Every turn has one visible lifecycle. A reconnect must not create duplicate user or assistant messages.
 - Unknown event names do not create an interactive control.
+- Recognized server events must carry correlated request, turn, and session
+  identity and are accepted only for an active turn on a ready compatible
+  transport. Events received in `empty`, `failed`, `completed`, or another
+  inactive state fail closed.
 - The send, stop, approval, clarification, attachment, and model controls must remain usable while the connection reports progress. Reduced-motion mode changes presentation only, not state rules.

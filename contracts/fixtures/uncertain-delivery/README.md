@@ -28,12 +28,16 @@ The fixture proves these rules as executable traces:
   second time.
 - A timeout, WebSocket close, app suspension, or process loss after send is
   `delivery_uncertain`, not rejection.
-- Restore is a barrier. The client rereads server-owned history and status
-  before making any resend decision.
+- Restore is a barrier. The client must observe `gateway.ready` with matching
+  contract/source compatibility, then reread fresh server-owned history and
+  status before making any resend decision. History and status keep independent
+  current-attempt failure latches; each transient read requires a successful
+  retry of that same read before its evidence can pass.
 - Present history or a running/completed turn wins over the local draft; the
-  client renders that server result and does not resend.
+  client renders that correlated server result and does not resend.
 - Absent history plus idle server status keeps the original draft and waits for
-  an explicit user decision. Only that decision may create one new send.
+  an explicit user decision. Only that decision may create one new send, and a
+  later uncertain send must start a new history read.
 - A confirmed request rejection preserves the draft and permits one later
   explicit retry. It does not authorize automatic resend.
 - A second uncertain send never receives an automatic third send.
@@ -42,9 +46,13 @@ The fixture proves these rules as executable traces:
   session creation, and interruption are never automatically retried.
 - Duplicate send while `submitting` or `streaming` is locally blocked and does
   not increase the outward submission count.
+- Every server event carries request, turn, and session markers and is accepted
+  only in an active compatible state on a ready transport. Empty, failed,
+  terminal, stale, or uncorrelated events fail closed.
 - An uncertain interrupt remains unconfirmed until restored server status
-  proves its result. Sign-out clears the selected session and suppresses
-  reconnect while preserving the local draft.
+  proves its result. Sign-out clears every armed retry, request, and restore
+  reference, latches the client offline, preserves the local draft, and rejects
+  all stale events until a new authenticated session starts.
 - Pending compatibility evidence remains pending. Mismatched evidence and
   unknown interactive events fail closed; they are not converted into an
   approval or clarification control.
@@ -63,15 +71,20 @@ not used for contract guards, so normal and optimized Python modes enforce the
 same checks.
 
 The loader and retained-marker scan reject credential-shaped keys, raw prompt
-or transcript fields, URLs, paths, hosts, cookie and authorization material,
-JWT-like values, and base64-like payloads. CLI failures are one fixed JSON line
-on standard error, capped at 240 characters. They do not echo paths, flags,
-keys, values, parser details, or tracebacks.
+or transcript fields, URLs, relative and absolute paths, Windows paths, IPv4
+and IPv6 hosts, cookie and authorization material, JWT/API-key-like values,
+and base64-like payloads. CLI failures are one fixed JSON line on standard
+error, capped at 240 characters. They do not echo paths, flags, keys, values,
+parser details, or tracebacks. Regular-file stat bounds run before every JSON or
+artifact read, so oversized files and special paths fail without an unbounded
+read or FIFO/device block.
 
-The checked-in case bytes, normalized validator source, owned artifact manifest,
-and both benchmark sample/distribution identities are pinned outside the
-mutable baseline object. Rebinding a baseline or copying a mutated case file
-therefore fails closed instead of replacing reviewed evidence.
+The checked-in case, baseline, executing-source, chat-contract, and artifact
+files are bound to the repository-owned canonical paths outside any
+caller-supplied fixture directory. The validator also freezes state meanings,
+terminal flags, action order, case order, and baseline key/type/order rules.
+Copying or rebinding a mutated case, baseline, source, or validator therefore
+fails closed instead of replacing reviewed evidence.
 
 ## Reproduce the proof
 
@@ -90,7 +103,10 @@ modes. They cover accepted/present, absent-and-idle, confirmed rejection,
 timeout, WebSocket close, app suspension, process loss, restore, explicit
 resend, duplicate prevention, interruption, cancellation, sign-out, pending
 proof, compatibility failure, unknown interactive events, strict JSON, bounded
-redaction, canonical artifact rebinding, and forged benchmark evidence.
+redaction, canonical artifact rebinding, forged benchmark evidence, gateway,
+transport, draft, initial-state, state-identity, and event-correlation
+mutations. Oversized files, long keys, directories, and FIFOs fail through the
+same bounded error path without opening unbounded or special-file streams.
 
 `validation-baseline.json` records 30 raw subprocess samples for each normal
 and optimized command, with min/mean/median/p95/max distributions and the

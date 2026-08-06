@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -26,12 +27,12 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         cls.baseline = validate.load_json(BASELINE_PATH, "baseline")
         cls.cases = {case["id"]: case for case in cls.document["cases"]}
 
-    def run_cli(self, optimized: bool = False, *arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def run_cli(self, optimized: bool = False, *arguments: str, cwd: Path | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         command = [sys.executable]
         if optimized:
             command.append("-O")
         command.extend([str(ROOT / "validate.py"), *arguments])
-        return subprocess.run(command, capture_output=True, text=True, check=False, cwd=cwd)
+        return subprocess.run(command, capture_output=True, text=True, check=False, cwd=cwd, timeout=timeout)
 
     def assert_cli_success_both_modes(self) -> None:
         for optimized in (False, True):
@@ -39,7 +40,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             with self.subTest(optimized=optimized):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stderr, "")
-                self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=22 benchmark_samples=60\n")
+                self.assertEqual(result.stdout, "uncertain_delivery_validation=ok cases=26 benchmark_samples=60\n")
 
     def assert_cli_failure_both_modes(self, *arguments: str, forbidden: str | None = None) -> None:
         for optimized in (False, True):
@@ -58,8 +59,13 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
         return path
 
+    def assert_cases_mutation_fails_both_modes(self, candidate: dict[str, object], name: str = "mutated-cases.json") -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cases_path = self.write_json(Path(directory), name, candidate)
+            self.assert_cli_failure_both_modes("--cases", str(cases_path))
+
     def test_canonical_document_and_baseline_validate(self) -> None:
-        self.assertEqual(validate.validate_all(self.document, self.baseline), 22)
+        self.assertEqual(validate.validate_all(self.document, self.baseline), 26)
         self.assertEqual(self.baseline["threshold"], None)
         self.assertEqual(self.baseline["normal"]["repetitions"], 30)
         self.assertEqual(self.baseline["optimized"]["repetitions"], 30)
@@ -132,6 +138,7 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
                 "infinity.json": '{"value":Infinity}',
                 "overflow.json": '{"value":1e9999}',
                 "huge-int.json": '{"value":' + ("9" * (validate.MAX_INTEGER_DIGITS + 1)) + '}',
+                "long-key.json": '{"' + ("k" * (validate.MAX_STRING_LENGTH + 1)) + '":1}',
                 "deep.json": "[" * (validate.MAX_JSON_DEPTH + 2) + "0" + "]" * (validate.MAX_JSON_DEPTH + 2),
             }
             for name, text in mutations.items():
@@ -164,11 +171,16 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
 
     def test_redaction_rejects_raw_material_and_sensitive_keys(self) -> None:
         mutations = (
-            ("prompt text", "synthetic prompt text", "redaction_value"),
+            ("ordinary prompt prose", "Please summarize this private conversation.", "redaction_value"),
+            ("dotted JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature", "redaction_value"),
+            ("ghp token", "ghp_1234567890abcdefghijk", "redaction_value"),
             ("host", "internal.example", "redaction_value"),
             ("credential", "Bearer synthetic-token", "redaction_value"),
             ("base64", "iVBORw0KGgo", "redaction_value"),
-            ("path", "/private/synthetic", "redaction_value"),
+            ("relative path", "../private/prompt.txt", "redaction_value"),
+            ("windows path", "C:\\private\\prompt.txt", "redaction_value"),
+            ("ipv6 host", "2001:db8::1", "redaction_value"),
+            ("api key", "api_key=sk_test_123456789", "redaction_value"),
         )
         for name, value, code in mutations:
             candidate = copy.deepcopy(self.document)
@@ -192,14 +204,173 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
             cases_path = self.write_json(Path(directory), "cases.json", candidate)
             self.assert_cli_failure_both_modes("--cases", str(cases_path), forbidden=marker)
 
+    def test_real_cli_rejects_long_keys_and_special_paths_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            long_key = root / "long-key.json"
+            long_key.write_text(json.dumps({"k" * (validate.MAX_STRING_LENGTH + 1): 1}), encoding="utf-8")
+            self.assert_cli_failure_both_modes("--cases", str(long_key))
+            oversized = root / "oversized.json"
+            oversized.write_bytes(b"x" * (validate.MAX_JSON_BYTES + 1))
+            self.assert_cli_failure_both_modes("--cases", str(oversized))
+            special_directory = root / "cases-directory"
+            special_directory.mkdir()
+            self.assert_cli_failure_both_modes("--cases", str(special_directory))
+            fifo = root / "cases.fifo"
+            os.mkfifo(fifo)
+            for optimized in (False, True):
+                with self.subTest(kind="fifo", optimized=optimized):
+                    try:
+                        result = self.run_cli(optimized, "--cases", str(fifo), timeout=2)
+                    except subprocess.TimeoutExpired as exc:
+                        self.fail(f"special path blocked: {exc}")
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n')
+
     def test_real_cli_rejects_semantic_mutations_in_both_modes(self) -> None:
         candidate = copy.deepcopy(self.document)
-        candidate["cases"][3]["events"][4]["turn_state"] = "running"
-        with tempfile.TemporaryDirectory() as directory:
-            cases_path = self.write_json(Path(directory), "mutated.json", candidate)
-            self.assert_cli_failure_both_modes("--cases", str(cases_path))
+        candidate["cases"][3]["events"][5]["prompt_presence"] = "present"
+        self.assert_cases_mutation_fails_both_modes(candidate)
 
         self.assert_cli_failure_both_modes("--unknown-secret-flag")
+
+    def test_real_cli_rejects_gateway_transport_draft_and_initial_mutations(self) -> None:
+        mutations: list[dict[str, object]] = []
+
+        missing_gateway = copy.deepcopy(self.document)
+        missing_gateway["cases"][1]["events"].pop(0)
+        mutations.append(missing_gateway)
+
+        incompatible_ready = copy.deepcopy(self.document)
+        incompatible_ready["cases"][1]["initial"]["transport_state"] = "reconnecting"
+        mutations.append(incompatible_ready)
+
+        absent_draft = copy.deepcopy(self.document)
+        absent_draft["cases"][1]["initial"]["draft_state"] = "absent"
+        mutations.append(absent_draft)
+
+        missing_active_request = copy.deepcopy(self.document)
+        missing_active_request["cases"][2]["initial"]["active_request_ref"] = None
+        mutations.append(missing_active_request)
+
+        empty_active_session = copy.deepcopy(self.document)
+        empty_active_session["cases"][0]["initial"]["transport_state"] = "handshaking"
+        mutations.append(empty_active_session)
+
+        status_read_not_recovered = copy.deepcopy(self.document)
+        status_read_not_recovered["cases"][8]["events"][2]["method"] = "session.status"
+        status_read_not_recovered["cases"][8]["events"][3]["method"] = "session.history"
+        mutations.append(status_read_not_recovered)
+
+        for index, candidate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                self.assert_cases_mutation_fails_both_modes(candidate, f"gateway-state-{index}.json")
+
+    def test_real_cli_rejects_state_identity_and_correlated_event_mutations(self) -> None:
+        state_mutations: list[dict[str, object]] = []
+
+        changed_meaning = copy.deepcopy(self.document)
+        changed_meaning["states"][0]["meaning"] = "A different meaning."
+        state_mutations.append(changed_meaning)
+
+        changed_terminal = copy.deepcopy(self.document)
+        changed_terminal["states"][0]["terminal"] = True
+        state_mutations.append(changed_terminal)
+
+        changed_action_order = copy.deepcopy(self.document)
+        actions = changed_action_order["states"][0]["allowed_actions"]
+        actions[:] = list(reversed(actions))
+        state_mutations.append(changed_action_order)
+
+        changed_action_inventory = copy.deepcopy(self.document)
+        changed_action_inventory["states"][0]["allowed_actions"] = ["not-a-contract-action"]
+        state_mutations.append(changed_action_inventory)
+
+        for index, candidate in enumerate(state_mutations):
+            with self.subTest(kind="state", mutation=index):
+                self.assert_cases_mutation_fails_both_modes(candidate, f"state-identity-{index}.json")
+
+        stale_empty_event = copy.deepcopy(self.document)
+        stale_empty_event["cases"][0]["events"] = [
+            {
+                "kind": "server_event",
+                "name": "message.complete",
+                "request_ref": "request-marker-001",
+                "turn_ref": "turn-marker-001",
+                "session_ref": "session-marker-001",
+            }
+        ]
+        self.assert_cases_mutation_fails_both_modes(stale_empty_event, "stale-empty-event.json")
+
+        stale_completed_event = copy.deepcopy(self.document)
+        stale_completed_event["cases"][1]["events"].append(
+            {
+                "kind": "server_event",
+                "name": "message.delta",
+                "request_ref": "request-marker-001",
+                "turn_ref": "turn-marker-001",
+                "session_ref": "session-marker-001",
+            }
+        )
+        self.assert_cases_mutation_fails_both_modes(stale_completed_event, "stale-completed-event.json")
+
+        stale_failed_event = copy.deepcopy(self.document)
+        stale_failed_event["cases"][6]["events"].append(
+            {
+                "kind": "server_event",
+                "name": "message.complete",
+                "request_ref": "request-marker-001",
+                "turn_ref": "turn-marker-001",
+                "session_ref": "session-marker-001",
+            }
+        )
+        self.assert_cases_mutation_fails_both_modes(stale_failed_event, "stale-failed-event.json")
+
+        mismatched_request = copy.deepcopy(self.document)
+        mismatched_request["cases"][1]["events"][2]["request_ref"] = "request-marker-002"
+        self.assert_cases_mutation_fails_both_modes(mismatched_request, "mismatched-request.json")
+
+        mismatched_turn = copy.deepcopy(self.document)
+        mismatched_turn["cases"][1]["events"][2]["turn_ref"] = "turn-marker-002"
+        self.assert_cases_mutation_fails_both_modes(mismatched_turn, "mismatched-turn.json")
+
+        mismatched_session = copy.deepcopy(self.document)
+        mismatched_session["cases"][1]["events"][2]["session_ref"] = "session-marker-002"
+        self.assert_cases_mutation_fails_both_modes(mismatched_session, "mismatched-session.json")
+
+    def test_sign_out_latch_and_transient_restore_recovery_are_regressions(self) -> None:
+        signed_out_case = self.cases["sign-out-during-uncertainty"]
+        signed_out_result = validate.evaluate_case(signed_out_case)
+        self.assertEqual(signed_out_result, signed_out_case["expected"])
+        self.assertEqual(signed_out_result["submission_count"], 1)
+        self.assertEqual(signed_out_result["outward_changes"], 1)
+        self.assertEqual(signed_out_result["selected_session"], None)
+        self.assertEqual(signed_out_result["final_transport_state"], "offline")
+        self.assertEqual(signed_out_result["contract_error"], "signed_out_latch")
+        self.assertEqual(signed_out_result["decision"], "signed_out_latch")
+
+        sign_out_only = copy.deepcopy(signed_out_case)
+        sign_out_only["events"] = [{"kind": "sign_out"}]
+        sign_out_only_result = validate.evaluate_case(sign_out_only)
+        self.assertEqual(sign_out_only_result["final_state"], "empty")
+        self.assertEqual(sign_out_only_result["final_transport_state"], "offline")
+        self.assertFalse(sign_out_only_result["explicit_action_required"])
+        self.assertEqual(sign_out_only_result["prompt_retry"], "blocked")
+
+        recovered_case = self.cases["idempotent-read-retry"]
+        recovered_result = validate.evaluate_case(recovered_case)
+        self.assertEqual(recovered_result, recovered_case["expected"])
+        self.assertEqual(recovered_result["idempotent_collection_retries"], 1)
+        self.assertEqual(recovered_result["restore_barrier"], "passed")
+        self.assertEqual(recovered_result["prompt_retry"], "explicit_user_only")
+
+        unrecovered_case = self.cases["restore-transient-without-recovery"]
+        unrecovered_result = validate.evaluate_case(unrecovered_case)
+        self.assertEqual(unrecovered_result["restore_barrier"], "inconclusive")
+        self.assertEqual(unrecovered_result["contract_error"], "restore_history_read_failed")
+        self.assertEqual(unrecovered_result["prompt_retry"], "blocked")
+        self.assert_cli_success_both_modes()
 
     def test_forged_baseline_samples_commands_and_environment_fail(self) -> None:
         mutations: list[dict[str, object]] = []
@@ -216,6 +387,31 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
         forged_environment["environment"]["python"] = "3.13.0"
         mutations.append(forged_environment)
 
+        forged_repetitions = copy.deepcopy(self.baseline)
+        forged_repetitions["normal"]["repetitions"] = 30.0
+        mutations.append(forged_repetitions)
+
+        forged_distribution_order = copy.deepcopy(self.baseline)
+        distribution = forged_distribution_order["optimized"]["distribution"]
+        forged_distribution_order["optimized"]["distribution"] = {key: distribution[key] for key in reversed(tuple(distribution.keys()))}
+        mutations.append(forged_distribution_order)
+
+        forged_overflow = copy.deepcopy(self.baseline)
+        forged_overflow["normal"]["samples_ms"] = [1e308] * 30
+        forged_overflow["normal"]["distribution"] = {
+            "count": 30,
+            "minimum_ms": 1e308,
+            "maximum_ms": 1e308,
+            "mean_ms": 1e308,
+            "median_ms": 1e308,
+            "p95_ms": 1e308,
+        }
+        mutations.append(forged_overflow)
+
+        forged_distribution_value = copy.deepcopy(self.baseline)
+        forged_distribution_value["optimized"]["distribution"]["mean_ms"] = 0.0
+        mutations.append(forged_distribution_value)
+
         with tempfile.TemporaryDirectory() as directory:
             for index, baseline in enumerate(mutations):
                 baseline_path = self.write_json(Path(directory), f"baseline-{index}.json", baseline)
@@ -223,10 +419,24 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
 
     def test_canonical_fixture_and_validator_rebinding_fail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            copied = Path(directory) / "uncertain-delivery"
+            root = Path(directory)
+            copied = root / "uncertain-delivery"
             copied.mkdir()
             for name in ("README.md", "cases.json", "validate.py", "test_validate.py", "validation-baseline.json"):
                 shutil.copy2(ROOT / name, copied / name)
+
+            copied_cases = root / "copied-cases.json"
+            shutil.copy2(ROOT / "cases.json", copied_cases)
+            copied_baseline = root / "copied-baseline.json"
+            shutil.copy2(ROOT / "validation-baseline.json", copied_baseline)
+            for arguments, kind in ((("--cases", str(copied_cases)), "cases-path"), (("--baseline", str(copied_baseline)), "baseline-path")):
+                for optimized in (False, True):
+                    result = self.run_cli(optimized, *arguments)
+                    with self.subTest(kind=kind, optimized=optimized):
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(result.stdout, "")
+                        self.assertEqual(result.stderr, '{"error":{"code":"contract","message":"uncertain delivery fixture rejected"}}\n')
+
             mutated_cases = json.loads((copied / "cases.json").read_text(encoding="utf-8"))
             mutated_cases["cases"][0]["notes"] = "changed-but-schema-valid"
             (copied / "cases.json").write_text(json.dumps(mutated_cases), encoding="utf-8")
