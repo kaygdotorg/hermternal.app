@@ -1,0 +1,851 @@
+{
+  "schema": "hermternal.deployment-security.ws-ticket.v1",
+  "issue": "DEP-07M/#208",
+  "operation": "ticket_boundary_proof",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "route_manifest": "contracts/hermes-dashboard/manifest.md",
+  "route_manifest_sha256": "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197",
+  "synthetic_only": true,
+  "purpose": "Prove ticket acquisition, ephemeral upgrade-query use, rejection, expiry, reuse, error-layer distinction, and redaction with local semantic adapters only.",
+  "proof": {
+    "status": "synthetic_only",
+    "live_run": false,
+    "compatible": false,
+    "network_access": "forbidden",
+    "hermes_process": "not_started",
+    "proxy_process": "not_started",
+    "credential_material": "absent",
+    "real_ticket_values": "absent"
+  },
+  "source_evidence": [
+    {
+      "id": "dashboard-manifest",
+      "path": "contracts/hermes-dashboard/manifest.md",
+      "kind": "normative_manifest",
+      "markers": [
+        "POST",
+        "/api/auth/ws-ticket",
+        "WS /api/ws",
+        "single-use",
+        "30-second time-to-live",
+        "?ticket=...",
+        "Neither the cookie nor bearer credential directly authenticates the gated upgrade"
+      ]
+    },
+    {
+      "id": "planning-auth-bootstrap",
+      "path": "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
+      "kind": "source_audit_claim",
+      "claim_id": "auth-bootstrap"
+    },
+    {
+      "id": "planning-ticket-lifecycle",
+      "path": "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
+      "kind": "source_audit_claim",
+      "claim_id": "ticket-lifecycle"
+    },
+    {
+      "id": "existing-ticket-fixtures",
+      "path": "contracts/fixtures/behavioral-probe/probe-fixtures.json",
+      "kind": "existing_synthetic_fixture",
+      "case_ids": [
+        "ws-chat-browser-fresh-ticket-approved",
+        "ws-chat-missing-ticket-denied",
+        "ws-chat-reused-ticket-denied",
+        "ws-chat-expired-ticket-denied"
+      ]
+    },
+    {
+      "id": "existing-error-layer-fixtures",
+      "path": "contracts/fixtures/behavioral-probe/probe-fixtures.json",
+      "kind": "existing_synthetic_fixture",
+      "case_ids": [
+        "edge-wrong-public-origin-denied",
+        "edge-unsupported-host-denied",
+        "edge-unknown-path-404",
+        "upstream-hermes-400-preserved",
+        "upstream-hermes-4403-preserved"
+      ]
+    }
+  ],
+  "counts": {
+    "states": 5,
+    "cases": 21,
+    "redaction_surfaces": 3,
+    "error_layers": 2
+  },
+  "ticket_policy": {
+    "acquisition": {
+      "method": "POST",
+      "path": "/api/auth/ws-ticket",
+      "credential_context": "authenticated_session_without_stored_value",
+      "result": "ephemeral_ticket_class_only",
+      "failure_policy": "fail_closed"
+    },
+    "upgrade": {
+      "method": "GET",
+      "path": "/api/ws",
+      "query_key": "ticket",
+      "query_value_representation": "synthetic_placeholder_only",
+      "cookie_direct_auth": "forbidden",
+      "bearer_direct_auth": "forbidden",
+      "rest_ticket_use": "forbidden",
+      "required_headers": ["Upgrade: websocket", "Connection: upgrade"]
+    },
+    "ttl_seconds": 30,
+    "expiry_boundary": "age_seconds_less_than_30_is_fresh_age_seconds_at_or_above_30_is_expired",
+    "single_use": true,
+    "reuse_policy": "deny_and_mint_fresh_after_explicit_recovery",
+    "fallback": "none"
+  },
+  "states": [
+    {
+      "id": "pending",
+      "meaning": "Acquisition or validation is incomplete.",
+      "automatic_action": "none",
+      "retry_policy": "wait_or_cancel"
+    },
+    {
+      "id": "success",
+      "meaning": "A synthetic semantic result passed the reviewed ticket boundary.",
+      "automatic_action": "none",
+      "retry_policy": "no_duplicate_use"
+    },
+    {
+      "id": "failure",
+      "meaning": "A known acquisition, upgrade, REST, edge, or upstream result was recorded safely.",
+      "automatic_action": "none",
+      "retry_policy": "explicit_idempotent_only"
+    },
+    {
+      "id": "interrupted",
+      "meaning": "The user or local adapter stopped before a result was complete.",
+      "automatic_action": "preserve_last_verified_artifact",
+      "retry_policy": "explicit_reread_then_retry"
+    },
+    {
+      "id": "retry",
+      "meaning": "An explicit retry reread the fixture and starts at most one idempotent local attempt.",
+      "automatic_action": "none",
+      "retry_policy": "coalesce_duplicate_activation"
+    }
+  ],
+  "cases": [
+    {
+      "id": "acquisition-pending",
+      "state": "pending",
+      "kind": "pending",
+      "surface": "ticket_acquisition",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "layer": "synthetic_adapter",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "not_created",
+        "ticket_age_seconds": null,
+        "credential_context": "authenticated_session_without_stored_value",
+        "upgrade_headers": "not_applicable",
+        "user_action": "wait_or_cancel"
+      },
+      "expected": {
+        "decision": "hold",
+        "route_result": "acquisition_pending",
+        "ticket_action": "none",
+        "rest_status": null,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["state_class"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "none",
+        "raw_value_retained": false
+      },
+      "notes": "Pending evidence cannot be presented as a minted ticket or successful upgrade."
+    },
+    {
+      "id": "acquisition-success",
+      "state": "success",
+      "kind": "positive",
+      "surface": "ticket_acquisition",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "layer": "synthetic_adapter",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "fresh_single_use",
+        "ticket_age_seconds": 0,
+        "credential_context": "authenticated_session_without_stored_value",
+        "upgrade_headers": "not_applicable",
+        "user_action": "none"
+      },
+      "expected": {
+        "decision": "record_success",
+        "route_result": "reviewed_acquisition",
+        "ticket_action": "create_ephemeral_class",
+        "rest_status": null,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["ticket_state", "ttl_seconds", "route_class"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "none",
+        "raw_value_retained": false
+      },
+      "notes": "Only the semantic class is retained; no ticket value is generated or stored."
+    },
+    {
+      "id": "acquisition-failure",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "ticket_acquisition",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "layer": "synthetic_adapter",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "not_created",
+        "ticket_age_seconds": null,
+        "credential_context": "authentication_rejected",
+        "upgrade_headers": "not_applicable",
+        "user_action": "explicit_retry_only"
+      },
+      "expected": {
+        "decision": "record_failure",
+        "route_result": "acquisition_rejected",
+        "ticket_action": "none",
+        "rest_status": 401,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "http_status"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "auth_boundary",
+        "raw_value_retained": false
+      },
+      "notes": "A rejected acquisition does not create a substitute ticket or use a legacy query."
+    },
+    {
+      "id": "acquisition-interrupted",
+      "state": "interrupted",
+      "kind": "interruption",
+      "surface": "ticket_acquisition",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "layer": "synthetic_adapter",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "not_created",
+        "ticket_age_seconds": null,
+        "credential_context": "not_observed",
+        "upgrade_headers": "not_applicable",
+        "user_action": "cancelled"
+      },
+      "expected": {
+        "decision": "record_interruption",
+        "route_result": "acquisition_cancelled",
+        "ticket_action": "discard_unverified_result",
+        "rest_status": null,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["state_class"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "none",
+        "raw_value_retained": false
+      },
+      "notes": "Cancellation preserves the last verified artifact and makes no outward retry."
+    },
+    {
+      "id": "acquisition-explicit-retry",
+      "state": "retry",
+      "kind": "retry",
+      "surface": "ticket_acquisition",
+      "request": {
+        "method": "POST",
+        "path": "/api/auth/ws-ticket",
+        "layer": "synthetic_adapter",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "not_created",
+        "ticket_age_seconds": null,
+        "credential_context": "reread_fixture_before_retry",
+        "upgrade_headers": "not_applicable",
+        "user_action": "explicit_retry"
+      },
+      "expected": {
+        "decision": "start_one_attempt",
+        "route_result": "retry_started",
+        "ticket_action": "create_at_most_one_ephemeral_class",
+        "rest_status": null,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["state_class", "attempt_class"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "none",
+        "raw_value_retained": false
+      },
+      "notes": "Repeated activation while the local attempt is active is a no-op."
+    },
+    {
+      "id": "upgrade-query-only-success",
+      "state": "success",
+      "kind": "positive",
+      "surface": "websocket_upgrade",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "upgrade_boundary",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "fresh_single_use",
+        "ticket_age_seconds": 1,
+        "credential_context": "ticket_only_on_upgrade_query",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "none"
+      },
+      "expected": {
+        "decision": "allow_upgrade",
+        "route_result": "reviewed_upgrade_query_only",
+        "ticket_action": "consume_once",
+        "rest_status": null,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["route_class", "ticket_state", "upgrade_result"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "none",
+        "raw_value_retained": false
+      },
+      "notes": "The ticket class is accepted only at the synthetic WebSocket upgrade boundary."
+    },
+    {
+      "id": "rest-ticket-query-rejected",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions",
+        "layer": "rest_boundary",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "fresh_single_use",
+        "ticket_age_seconds": 1,
+        "credential_context": "ticket_in_rest_query_forbidden",
+        "upgrade_headers": "not_applicable",
+        "user_action": "none"
+      },
+      "expected": {
+        "decision": "deny_rest",
+        "route_result": "ticket_not_rest_auth",
+        "ticket_action": "do_not_consume",
+        "rest_status": 403,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "http_status", "layer"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "client_boundary",
+        "raw_value_retained": false
+      },
+      "notes": "A ticket query on REST is denied without cookie or bearer fallback."
+    },
+    {
+      "id": "rest-ticket-header-rejected",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/api/sessions",
+        "layer": "rest_boundary",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "fresh_single_use",
+        "ticket_age_seconds": 1,
+        "credential_context": "ticket_in_authorization_header_forbidden",
+        "upgrade_headers": "not_applicable",
+        "user_action": "none"
+      },
+      "expected": {
+        "decision": "deny_rest",
+        "route_result": "ticket_not_bearer_credential",
+        "ticket_action": "do_not_consume",
+        "rest_status": 403,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "http_status", "layer"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "client_boundary",
+        "raw_value_retained": false
+      },
+      "notes": "The ephemeral upgrade class cannot be promoted to a reusable REST credential."
+    },
+    {
+      "id": "missing-ticket-rejected",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "websocket_upgrade",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "upgrade_boundary",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "missing",
+        "ticket_age_seconds": null,
+        "credential_context": "no_upgrade_credential",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "explicit_recovery_only"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "route_result": "ticket_missing",
+        "ticket_action": "mint_fresh_after_explicit_recovery",
+        "rest_status": null,
+        "close_code": 4401,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "close_code"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "upgrade_boundary",
+        "raw_value_retained": false
+      },
+      "notes": "Missing input does not trigger a cookie, bearer, or legacy-token fallback."
+    },
+    {
+      "id": "malformed-ticket-rejected",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "websocket_upgrade",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "upgrade_boundary",
+        "query_keys": ["ticket"],
+        "query_value_representation": "malformed_placeholder",
+        "ticket_state": "malformed",
+        "ticket_age_seconds": null,
+        "credential_context": "ticket_syntax_invalid",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "explicit_recovery_only"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "route_result": "ticket_malformed",
+        "ticket_action": "discard_without_log_value",
+        "rest_status": null,
+        "close_code": 4401,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "close_code"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "upgrade_boundary",
+        "raw_value_retained": false
+      },
+      "notes": "Malformed syntax is rejected and the supplied value is never retained."
+    },
+    {
+      "id": "expired-ticket-rejected",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "websocket_upgrade",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "upgrade_boundary",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "expired",
+        "ticket_age_seconds": 31,
+        "credential_context": "ticket_ttl_elapsed",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "mint_fresh_after_explicit_recovery"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "route_result": "ticket_expired",
+        "ticket_action": "discard_without_reuse",
+        "rest_status": null,
+        "close_code": 4401,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "close_code", "ttl_seconds"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "upgrade_boundary",
+        "raw_value_retained": false
+      },
+      "notes": "An expired class is never retried; a later explicit recovery must acquire a fresh class."
+    },
+    {
+      "id": "reused-ticket-rejected",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "websocket_upgrade",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "upgrade_boundary",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "already_consumed",
+        "ticket_age_seconds": 2,
+        "credential_context": "single_use_violation",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "mint_fresh_after_explicit_recovery"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "route_result": "ticket_reused",
+        "ticket_action": "discard_without_reuse",
+        "rest_status": null,
+        "close_code": 4401,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "close_code", "single_use"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "upgrade_boundary",
+        "raw_value_retained": false
+      },
+      "notes": "A consumed class cannot authenticate a second upgrade."
+    },
+    {
+      "id": "expiry-boundary-fresh",
+      "state": "success",
+      "kind": "positive",
+      "surface": "websocket_upgrade",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "upgrade_boundary",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "fresh_single_use",
+        "ticket_age_seconds": 29,
+        "credential_context": "within_ttl",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "none"
+      },
+      "expected": {
+        "decision": "allow_upgrade",
+        "route_result": "ticket_within_ttl",
+        "ticket_action": "consume_once",
+        "rest_status": null,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["ttl_seconds", "ticket_state"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "none",
+        "raw_value_retained": false
+      },
+      "notes": "The boundary records the final fresh second without storing a timestamp or value."
+    },
+    {
+      "id": "expiry-boundary-expired",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "websocket_upgrade",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "upgrade_boundary",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "expired",
+        "ticket_age_seconds": 30,
+        "credential_context": "ttl_boundary_reached",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "mint_fresh_after_explicit_recovery"
+      },
+      "expected": {
+        "decision": "deny_upgrade",
+        "route_result": "ticket_expired_at_boundary",
+        "ticket_action": "discard_without_reuse",
+        "rest_status": null,
+        "close_code": 4401,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "close_code", "ttl_seconds"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "upgrade_boundary",
+        "raw_value_retained": false
+      },
+      "notes": "At the exact 30-second TTL boundary the class is expired and must not be reused."
+    },
+    {
+      "id": "history-redaction",
+      "state": "success",
+      "kind": "security",
+      "surface": "history",
+      "request": {
+        "method": "GET",
+        "path": "/api/auth/ws-ticket",
+        "layer": "history",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "semantic_marker_only",
+        "ticket_age_seconds": null,
+        "credential_context": "redacted",
+        "upgrade_headers": "not_applicable",
+        "user_action": "none"
+      },
+      "expected": {
+        "decision": "redact",
+        "route_result": "history_semantic_marker_only",
+        "ticket_action": "remove_raw_value",
+        "rest_status": null,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["route_class", "result_class", "status_class"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "history",
+        "raw_value_retained": false
+      },
+      "notes": "History retains only semantic route and result classes, never a ticket or credential value."
+    },
+    {
+      "id": "log-redaction",
+      "state": "success",
+      "kind": "security",
+      "surface": "logs",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "logs",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "malformed",
+        "ticket_age_seconds": null,
+        "credential_context": "redacted",
+        "upgrade_headers": "not_applicable",
+        "user_action": "none"
+      },
+      "expected": {
+        "decision": "redact",
+        "route_result": "log_semantic_marker_only",
+        "ticket_action": "retain_bounded_reason_class",
+        "rest_status": null,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "layer", "close_code"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "logs",
+        "raw_value_retained": false
+      },
+      "notes": "Logs may retain only a bounded semantic reason and never the query, cookie, or bearer value."
+    },
+    {
+      "id": "dom-redaction",
+      "state": "success",
+      "kind": "security",
+      "surface": "dom",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "dom",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "expired",
+        "ticket_age_seconds": null,
+        "credential_context": "redacted",
+        "upgrade_headers": "not_applicable",
+        "user_action": "none"
+      },
+      "expected": {
+        "decision": "redact",
+        "route_result": "dom_error_state_only",
+        "ticket_action": "never_render_raw_value",
+        "rest_status": null,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["error_state_label", "retry_action_label"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "dom",
+        "raw_value_retained": false
+      },
+      "notes": "A future UI may show a semantic error state, but not a ticket, credential, URL, or raw payload."
+    },
+    {
+      "id": "edge-origin-error-distinct",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "edge",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "edge",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "fresh_single_use",
+        "ticket_age_seconds": 1,
+        "credential_context": "synthetic_edge_policy_rejection",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "explicit_retry_only"
+      },
+      "expected": {
+        "decision": "deny_edge",
+        "route_result": "edge_origin_denied",
+        "ticket_action": "do_not_consume",
+        "rest_status": 403,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "http_status", "layer"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "edge",
+        "raw_value_retained": false
+      },
+      "notes": "An edge policy result is not reported as an upstream Hermes result."
+    },
+    {
+      "id": "edge-not-found-error-distinct",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "edge",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws-unknown",
+        "layer": "edge",
+        "query_keys": [],
+        "query_value_representation": "not_applicable",
+        "ticket_state": "not_observed",
+        "ticket_age_seconds": null,
+        "credential_context": "synthetic_edge_not_found",
+        "upgrade_headers": "not_applicable",
+        "user_action": "explicit_retry_only"
+      },
+      "expected": {
+        "decision": "deny_edge",
+        "route_result": "edge_not_found",
+        "ticket_action": "not_applicable",
+        "rest_status": 404,
+        "close_code": null,
+        "upstream_called": false,
+        "retained_fields": ["error_class", "http_status", "layer"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "edge",
+        "raw_value_retained": false
+      },
+      "notes": "An edge 404 is preserved as an edge result and never inferred to be an upstream auth failure."
+    },
+    {
+      "id": "upstream-auth-error-distinct",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "upstream",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "upstream",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "invalid",
+        "ticket_age_seconds": null,
+        "credential_context": "upstream_auth_rejection",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "mint_fresh_after_explicit_recovery"
+      },
+      "expected": {
+        "decision": "preserve_upstream",
+        "route_result": "upstream_auth_rejected",
+        "ticket_action": "discard_without_reuse",
+        "rest_status": null,
+        "close_code": 4403,
+        "upstream_called": true,
+        "retained_fields": ["error_class", "close_code", "layer"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "upstream",
+        "raw_value_retained": false
+      },
+      "notes": "An upstream authentication close is preserved separately from an edge denial."
+    },
+    {
+      "id": "upstream-handler-error-distinct",
+      "state": "failure",
+      "kind": "negative",
+      "surface": "upstream",
+      "request": {
+        "method": "GET",
+        "path": "/api/ws",
+        "layer": "upstream",
+        "query_keys": ["ticket"],
+        "query_value_representation": "synthetic_placeholder_only",
+        "ticket_state": "fresh_single_use",
+        "ticket_age_seconds": 1,
+        "credential_context": "upstream_handler_failure",
+        "upgrade_headers": "required_headers_present",
+        "user_action": "explicit_retry_only"
+      },
+      "expected": {
+        "decision": "preserve_upstream",
+        "route_result": "upstream_handler_error",
+        "ticket_action": "do_not_reuse_without_source_result",
+        "rest_status": 400,
+        "close_code": null,
+        "upstream_called": true,
+        "retained_fields": ["error_class", "http_status", "layer"],
+        "automatic_retry": false,
+        "interruption_safe": true,
+        "error_layer": "upstream",
+        "raw_value_retained": false
+      },
+      "notes": "An upstream 400 is not relabeled as an edge 4xx or hidden by a fallback."
+    }
+  ],
+  "redaction": {
+    "synthetic_markers_only": true,
+    "forbidden_data_classes": ["raw_ticket_values", "cookies", "bearer_values", "authorization_values", "credentials", "prompt_text", "transcript_bytes", "hostnames", "user_data"],
+    "retained_marker_classes": ["ticket_state", "ttl_seconds", "route_class", "result_class", "error_class", "http_status", "close_code", "layer"],
+    "history_policy": "semantic_marker_only",
+    "log_policy": "bounded_semantic_reason_only",
+    "dom_policy": "semantic_error_state_only",
+    "max_controlled_error_length": 240,
+    "no_raw_input_echo": true,
+    "no_traceback": true
+  },
+  "error_layers": [
+    {
+      "id": "edge",
+      "statuses": [403, 404],
+      "upstream_called": false,
+      "meaning": "Public-origin, host, or route policy result before Hermes."
+    },
+    {
+      "id": "upstream",
+      "statuses": [400, 4403],
+      "upstream_called": true,
+      "meaning": "Synthetic result returned by the reviewed upstream boundary."
+    }
+  ],
+  "evidence_requirements": [
+    "acquisition_route_is_reviewed",
+    "ticket_is_upgrade_query_only",
+    "rest_ticket_use_is_rejected",
+    "missing_malformed_expired_and_reused_cases_are_present",
+    "exact_30_second_expiry_boundary_is_recorded",
+    "edge_and_upstream_results_remain_distinct",
+    "history_log_and_dom_redaction_are_recorded",
+    "pending_success_failure_interruption_and_retry_states_are_present",
+    "unknown_or_malformed_fixture_input_fails_closed",
+    "no_real_ticket_or_credential_value_is_retained",
+    "normal_and_optimized_baselines_have_no_threshold"
+  ],
+  "accessibility": {
+    "status": "not_applicable",
+    "reason": "This is a non-UI security fixture and standard-library validator; later web and Apple surfaces must still preserve their accessibility contracts.",
+    "preserved_requirements": ["keyboard_and_focus", "screen_reader_and_voiceover", "switch_control", "dynamic_type_and_browser_zoom", "contrast", "reduced_motion", "reduced_transparency", "44px_effective_touch_targets"]
+  }
+}
