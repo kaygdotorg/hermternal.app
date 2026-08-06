@@ -31,15 +31,15 @@
       "sha256": "8c7bdf74d81cec36709fa45b8d0d0d5df9365d193d3929ebe3f07acd334cdad3"
     },
     "test_validate.py": {
-      "bytes": 69564,
-      "sha256": "eeb25a3848b0582ec392a69dfc2b2398be23604468a0d9c3b8b60c9ea0f75299"
+      "bytes": 69746,
+      "sha256": "d19840026d9d913e9943bd333baaf07551950fba95d555ff083ba6a523871a93"
     },
     "chat.md": {
       "bytes": 12056,
       "sha256": "9f8d8a229361267cb50ecd724794da0854bc8af0fb677385bdc740319e90a252"
     }
   },
-  "artifact_manifest_sha256": "056e6ae0ff6cf6712ee7a88945e4c3bd569316fe86b3b4ea56969a3a3b3888b6",
+  "artifact_manifest_sha256": "7b765d788bbe390a4f8a49712916c53270b4c475e93e35410feceff940521234",
   "normal": {
     "command": "HERMTERNAL_C06_EXPECTED_COMMIT=<reviewed-commit> python3 -I -B -c 'import json,os,pathlib,sys\nE=json.dumps({\"error\":{\"code\":\"contract\",\"message\":\"uncertain delivery fixture rejected\"}},separators=(\",\",\":\"))+chr(10)\ntry:\n r=pathlib.Path.cwd();p=pathlib.Path(sys.argv[1]);p=r/p if not p.is_absolute() else p;g=r/\".git\"\n bad=lambda x:(not x.is_absolute() or x.is_symlink() or x.resolve()!=x)\n q=(\"objects/info/alternates\",\"objects/info/http-alternates\",\"info/grafts\",\"shallow\");w=os.environ.get(\"PWD\")\n if g.is_dir():\n  metadata_ok=not bad(g) and not (g/\"commondir\").exists() and not (g/\"commondir\").is_symlink()\n elif g.is_file() and not bad(g) and g.stat().st_size<=4096:\n  line=g.read_text(encoding=\"ascii\").splitlines();gd=pathlib.Path(line[0][7:].strip()) if len(line)==1 and line[0].startswith(\"gitdir:\") else pathlib.Path(\"/\")\n  gd=gd if gd.is_absolute() else r/gd;c=gd.parent.parent\n  metadata_ok=(not bad(gd) and gd.parent==c/\"worktrees\" and c.name==\".git\" and not bad(c) and r.resolve().is_relative_to(c.parent.resolve()) and (gd/\"commondir\").is_file() and (gd/\"gitdir\").is_file() and not any((c/x).is_symlink() for x in (\"objects\",\"refs\",\"config\")) and not any((c/x).exists() or (c/x).is_symlink() for x in q))\n else: metadata_ok=False\n ok=(not bad(r) and p==r/pathlib.Path(\"contracts/fixtures/uncertain-delivery/validate.py\") and not bad(p) and metadata_ok and not any((g/x).exists() or (g/x).is_symlink() for x in q) and (not w or (not bad(pathlib.Path(w)) and pathlib.Path(w)==r)))\nexcept BaseException:\n ok=False\nif not ok:\n sys.stderr.write(E);raise SystemExit(1)\n' contracts/fixtures/uncertain-delivery/validate.py && /usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git --no-replace-objects --no-lazy-fetch -C . show \"$HERMTERNAL_C06_EXPECTED_COMMIT:contracts/fixtures/uncertain-delivery/preflight.py\" 2>/dev/null | python3 -I -B - contracts/fixtures/uncertain-delivery/validate.py",
     "repetitions": 30,

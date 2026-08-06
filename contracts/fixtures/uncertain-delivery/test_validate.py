@@ -1001,7 +1001,8 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
 
     def test_fresh_clone_no_tags_and_shallow_lifecycle_both_modes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
+            # macOS exposes /tmp through /private; valid clones use a canonical path.
+            base = Path(directory).resolve()
             cases = (
                 ("fresh", ["--no-local"], True),
                 ("no-tags", ["--no-local", "--no-tags"], False),
@@ -1035,7 +1036,8 @@ class UncertainDeliveryValidationTests(unittest.TestCase):
 
     def test_merge_and_later_unchanged_commits_use_external_expectation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            repository = Path(directory) / "merged-repository"
+            # Keep the synthetic valid checkout outside macOS's /tmp alias.
+            repository = Path(directory).resolve() / "merged-repository"
             clone = subprocess.run(
                 ["git", "clone", "--no-local", str(REPOSITORY_ROOT), str(repository)],
                 capture_output=True,
