@@ -35,17 +35,21 @@ The source-backed boundary is intentionally narrow.
 The manifest and existing source-audit references are checked locally by the
 validator. The issue-owned fixture does not duplicate the broader behavioral
 probe. It references the existing ticket and edge/upstream cases only to keep
-this security seam aligned with the approved contract.
+this security seam aligned with the approved contract. A pinned source-anchor
+record also checks the `ticket[:8]` ellipsis fragment in
+`hermes_cli/dashboard_auth/ws_tickets.py:90-95` and the forwarding audit-log
+surface in `hermes_cli/web_server.py:14708-14716`.
 
 ## Fixture inventory
 
-`ticket-fixtures.json` has 21 deterministic cases:
+`ticket-fixtures.json` has 24 deterministic cases:
 
 - `pending`, `success`, `failure`, `interrupted`, and `retry` acquisition states;
 - successful upgrade-query-only use;
 - REST query and header rejection;
 - missing, malformed, expired, reused, and exact-boundary ticket denial;
 - history, log, and DOM redaction;
+- separate bounded-fragment removal cases for history, logs, and DOM;
 - separate edge-origin/edge-404 and upstream-auth/upstream-handler outcomes.
 
 Edge and upstream results remain distinct:
@@ -65,9 +69,18 @@ The checked-in values are semantic markers only. History retains route/result
 classes, logs retain a bounded reason class, and a future DOM may show only a
 semantic error state and retry action label. None may retain or render raw
 cookies, bearer values, authorization values, credentials, ticket values,
-prompt text, transcript bytes, hostnames, or user data. Controlled CLI failures
-are one JSON object, have a maximum length of 240 characters, do not echo input,
-and do not include a traceback.
+bounded `ticket[:8]` fragments, prompt text, transcript bytes, hostnames, or
+user data. Retained text also rejects raw data URLs, file URLs, absolute or
+punctuation-delimited paths, path-shaped filenames, and padded or unpadded
+base64-looking values. Controlled CLI failures are one JSON object, have a
+maximum length of 240 characters, do not echo input, and do not include a
+traceback.
+
+Before parsing, `validate.py` bounds raw bytes, tokens, nodes, nesting,
+object keys, array items, string bytes, integer digits, and float tokens. The
+baseline includes `probe-baseline.json` in its artifact manifest and binds its
+samples and summaries to a fixed canonical evidence SHA; recomputing mutable
+sample metadata cannot authorize a different baseline.
 
 Accessibility is N/A for this non-UI security fixture and standard-library
 validator. It creates no focus, semantic control, screen-reader, VoiceOver,

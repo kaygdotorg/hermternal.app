@@ -23,7 +23,7 @@ class WsTicketValidatorTests(unittest.TestCase):
         self.baseline = validate.load_json(validate.BASELINE_PATH)
 
     def test_fixture_and_baseline_validate(self) -> None:
-        self.assertEqual(validate.validate_fixture(self.fixture), {"case_count": 21, "state_count": 5})
+        self.assertEqual(validate.validate_fixture(self.fixture), {"case_count": 24, "state_count": 5})
         self.assertEqual(validate.validate_baseline(self.baseline), {"normal_samples": 30, "optimized_samples": 30})
 
     def test_ticket_boundary_is_upgrade_only(self) -> None:
@@ -63,9 +63,24 @@ class WsTicketValidatorTests(unittest.TestCase):
         for case in self.fixture["cases"]:
             if case["surface"] in {"history", "logs", "dom"}:
                 self.assertFalse(case["expected"]["raw_value_retained"])
+                self.assertFalse(case["expected"]["bounded_fragment_retained"])
         self.assertEqual(self.fixture["redaction"]["max_controlled_error_length"], 240)
         self.assertTrue(self.fixture["redaction"]["no_raw_input_echo"])
         self.assertTrue(self.fixture["redaction"]["no_traceback"])
+
+    def test_bounded_fragment_source_and_cases_are_explicit(self) -> None:
+        evidence = next(item for item in self.fixture["source_evidence"] if item["id"] == "ticket-fragment-source-anchor")
+        self.assertEqual(evidence["ticket_source_file"], "hermes_cli/dashboard_auth/ws_tickets.py")
+        self.assertEqual(evidence["ticket_lines"], [90, 95])
+        self.assertIn("truncated = (ticket[:8] + \"…\") if ticket else \"<empty>\"", evidence["ticket_markers"])
+        self.assertEqual(evidence["forwarding_source_file"], "hermes_cli/web_server.py")
+        self.assertEqual(evidence["forwarding_lines"], [14708, 14716])
+        by_id = {item["id"]: item for item in self.fixture["cases"]}
+        for case_id in ("history-bounded-fragment-redaction", "log-bounded-fragment-redaction", "dom-bounded-fragment-redaction"):
+            self.assertEqual(by_id[case_id]["request"]["ticket_state"], "bounded_fragment_candidate")
+            self.assertFalse(by_id[case_id]["expected"]["bounded_fragment_retained"])
+            self.assertFalse(by_id[case_id]["expected"]["raw_value_retained"])
+            self.assertIn("source-bounded ticket fragment", by_id[case_id]["notes"])
 
     def test_source_audit_references_are_checked(self) -> None:
         ids = [item["id"] for item in self.fixture["source_evidence"]]
@@ -109,11 +124,48 @@ class WsTicketValidatorTests(unittest.TestCase):
             with self.assertRaises(validate.ContractError):
                 validate.load_json(deep)
 
+    def test_preparse_byte_token_container_node_integer_and_float_limits(self) -> None:
+        def reject(directory: str, name: str, payload: bytes) -> None:
+            candidate = Path(directory) / name
+            candidate.write_bytes(payload)
+            with self.assertRaises(validate.ContractError):
+                validate.load_json(candidate)
+
+        with tempfile.TemporaryDirectory() as directory:
+            reject(directory, "bytes.json", b" " * (validate.MAX_JSON_BYTES + 1) + b"0")
+            reject(directory, "array-items.json", b"[" + b",".join(b"0" for _ in range(validate.MAX_JSON_ARRAY_ITEMS + 1)) + b"]")
+            object_items = b"{" + b",".join((f'\"k{index}\":0'.encode("ascii") for index in range(validate.MAX_JSON_OBJECT_KEYS + 1))) + b"}"
+            reject(directory, "object-keys.json", object_items)
+            def tree(depth: int):
+                return 0 if depth == 0 else [tree(depth - 1), tree(depth - 1)]
+            reject(directory, "nodes.json", json.dumps(tree(12)).encode("ascii"))
+            reject(directory, "integer-digits.json", b"{\"a\":" + b"9" * (validate.MAX_JSON_INTEGER_DIGITS + 1) + b"}")
+            reject(directory, "float-token.json", b"{\"a\":1e309}")
+
     def test_sensitive_key_and_jwt_like_value_fail_closed(self) -> None:
         with self.assertRaises(validate.ContractError):
             validate._scan_redaction({"raw_ticket_value": "not-retained"})
         with self.assertRaises(validate.ContractError):
             validate._scan_redaction({"marker": "abcdefghijk.lmnopqrstuv.wxyz0123456"})
+
+    def test_retained_text_bypasses_are_rejected(self) -> None:
+        bypasses = (
+            "data:image/png;base64,SGVsbG8=",
+            "data:text/plain,hello",
+            "/etc/passwd",
+            "prefix=/srv/secret",
+            "file:///srv/secret",
+            "SGVsbG8",
+            "aGVsbG8",
+            "YWJjZGVm",
+            "aaaaaaaa",
+            "00000000",
+            "secret.txt",
+        )
+        for value in bypasses:
+            with self.subTest(value=value):
+                with self.assertRaises(validate.ContractError):
+                    validate._scan_redaction({"notes": value})
 
     def test_uniform_fabricated_baseline_fails(self) -> None:
         fabricated = copy.deepcopy(self.baseline)
@@ -122,6 +174,32 @@ class WsTicketValidatorTests(unittest.TestCase):
         fabricated["observations"]["normal"]["summary"] = {"min": 1.0, "p50": 1.0, "p95": 1.0, "max": 1.0, "mean": 1.0}
         with self.assertRaises(validate.ContractError):
             validate.validate_baseline(fabricated)
+
+    def test_nonuniform_fabricated_baseline_cannot_validate_after_recomputed_metadata(self) -> None:
+        mutated = copy.deepcopy(self.baseline)
+        for mode in ("normal", "optimized"):
+            samples = [100.0 + index / 10 for index in range(30)]
+            mutated["observations"][mode]["samples_ms"] = samples
+            mutated["observations"][mode]["summary"] = validate._summary(samples)
+        with self.assertRaises(validate.ContractError):
+            validate.validate_baseline(mutated)
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_path = Path(directory) / "fabricated-baseline.json"
+            for _ in range(4):
+                baseline_path.write_text(json.dumps(mutated, indent=2) + "\n", encoding="utf-8")
+                manifest = copy.deepcopy(mutated["integrity"]["artifact_manifest"])
+                baseline_record = next(item for item in manifest if item["path"] == "probe-baseline.json")
+                baseline_record["size_bytes"] = baseline_path.stat().st_size
+                mutated["integrity"]["artifact_manifest"] = manifest
+                mutated["integrity"]["artifact_manifest_sha256"] = validate.canonical_sha256(manifest)
+                mutated["integrity"]["baseline_file_size_bytes"] = baseline_path.stat().st_size
+            baseline_path.write_text(json.dumps(mutated, indent=2) + "\n", encoding="utf-8")
+            for optimized in (False, True):
+                command = [sys.executable] + (["-O"] if optimized else []) + [str(ROOT / "validate.py"), "--baseline", str(baseline_path)]
+                completed = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+                self.assertEqual(completed.returncode, 1)
+                self.assertNotIn(str(baseline_path), completed.stdout)
+                self.assertEqual(json.loads(completed.stdout)["compatible"], False)
 
     def test_baseline_artifact_manifest_is_bound(self) -> None:
         mutated = copy.deepcopy(self.baseline)
@@ -165,6 +243,54 @@ class WsTicketValidatorTests(unittest.TestCase):
                 check=False,
             ).stdout
         ))
+
+    def test_retained_text_bypasses_fail_closed_in_normal_and_optimized_cli(self) -> None:
+        bypasses = (
+            "data:image/png;base64,SGVsbG8=",
+            "data:text/plain,hello",
+            "/etc/passwd",
+            "prefix=/srv/secret",
+            "file:///srv/secret",
+            "SGVsbG8",
+            "aGVsbG8",
+            "YWJjZGVm",
+            "aaaaaaaa",
+            "00000000",
+            "secret.txt",
+        )
+        for value in bypasses:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                mutated = copy.deepcopy(self.fixture)
+                mutated["cases"][0]["notes"] = value
+                fixture_path = Path(directory) / "adversarial-fixture.json"
+                fixture_path.write_text(json.dumps(mutated, indent=2) + "\n", encoding="utf-8")
+                for optimized in (False, True):
+                    command = [sys.executable] + (["-O"] if optimized else []) + [str(ROOT / "validate.py"), "--fixture", str(fixture_path)]
+                    completed = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+                    self.assertEqual(completed.returncode, 1)
+                    self.assertNotIn(value, completed.stdout)
+                    self.assertNotIn(str(fixture_path), completed.stdout)
+                    self.assertEqual(json.loads(completed.stdout)["live_run"], False)
+
+    def test_preparse_limits_fail_closed_in_normal_and_optimized_cli(self) -> None:
+        payloads = {
+            "bytes.json": b" " * (validate.MAX_JSON_BYTES + 1) + b"0",
+            "array.json": b"[" + b",".join(b"0" for _ in range(validate.MAX_JSON_ARRAY_ITEMS + 1)) + b"]",
+            "object.json": b"{" + b",".join((f'\"k{index}\":0'.encode("ascii") for index in range(validate.MAX_JSON_OBJECT_KEYS + 1))) + b"}",
+            "integer.json": b"{\"a\":" + b"9" * (validate.MAX_JSON_INTEGER_DIGITS + 1) + b"}",
+            "float.json": b"{\"a\":1e309}",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for name, payload in payloads.items():
+                fixture_path = Path(directory) / name
+                fixture_path.write_bytes(payload)
+                for optimized in (False, True):
+                    command = [sys.executable] + (["-O"] if optimized else []) + [str(ROOT / "validate.py"), "--fixture", str(fixture_path)]
+                    completed = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+                    self.assertEqual(completed.returncode, 1)
+                    self.assertNotIn(str(fixture_path), completed.stdout)
+                    self.assertNotIn("Traceback", completed.stdout)
+                    self.assertLessEqual(len(completed.stdout.strip()), 240)
 
     def test_malformed_fixture_cli_is_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -32,11 +32,25 @@ CONTRACT = "dashboard-v0.0.1"
 HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 MANIFEST_RELATIVE = "contracts/hermes-dashboard/manifest.md"
 MANIFEST_SHA256 = "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197"
-EXPECTED_FIXTURE_CANONICAL_SHA256 = "c525e092dd9987a01444e3ae223c44048b5682393e88fd7a8609575868f333ea"
+EXPECTED_FIXTURE_CANONICAL_SHA256 = "cfbbb8b85f6c13dd2f8080d18337dd171404ea318b34f58bd3d04a3f47910d08"
+EXPECTED_BASELINE_CANONICAL_SHA256 = "f0d0c8d1e5a953bd5fdb265a4f9631f8e7a4d50d34028a820cc5d2560d905726"
 BASELINE_REPETITIONS = 30
+# These limits are enforced by the byte scanner before json.loads allocates a
+# Python tree. The approved source-audit JSON is well below them; the limits
+# exist to make malformed fixture input fail closed without parser amplification.
+MAX_JSON_BYTES = 256 * 1024
 MAX_JSON_DEPTH = 48
-MAX_JSON_INTEGER = 10**100
+MAX_JSON_TOKENS = 8192
+MAX_JSON_NODES = 4096
+MAX_JSON_OBJECT_KEYS = 128
+MAX_JSON_ARRAY_ITEMS = 512
+MAX_JSON_INTEGER_DIGITS = 100
+MAX_JSON_INTEGER = 10**MAX_JSON_INTEGER_DIGITS - 1
+MAX_JSON_FLOAT_TOKEN_LENGTH = 128
+MAX_JSON_FLOAT_DIGITS = 64
+MAX_JSON_FLOAT_EXPONENT = 308
 MAX_STRING_LENGTH = 1024
+MAX_JSON_STRING_BYTES = MAX_STRING_LENGTH * 4
 MAX_ERROR_LENGTH = 240
 SAFE_ERROR_MESSAGE = "WebSocket ticket input rejected"
 
@@ -59,6 +73,9 @@ CASE_IDS = (
     "history-redaction",
     "log-redaction",
     "dom-redaction",
+    "history-bounded-fragment-redaction",
+    "log-bounded-fragment-redaction",
+    "dom-bounded-fragment-redaction",
     "edge-origin-error-distinct",
     "edge-not-found-error-distinct",
     "upstream-auth-error-distinct",
@@ -70,6 +87,7 @@ SOURCE_EVIDENCE_IDS = (
     "dashboard-manifest",
     "planning-auth-bootstrap",
     "planning-ticket-lifecycle",
+    "ticket-fragment-source-anchor",
     "existing-ticket-fixtures",
     "existing-error-layer-fixtures",
 )
@@ -100,6 +118,21 @@ EXPECTED_SOURCE_EVIDENCE = [
         "path": "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
         "kind": "source_audit_claim",
         "claim_id": "ticket-lifecycle",
+    },
+    {
+        "id": "ticket-fragment-source-anchor",
+        "path": "contracts/fixtures/route-allowlist/source_audit.json",
+        "kind": "source_audit_anchor",
+        "source_ids": ["ticket-lifecycle", "websocket-auth"],
+        "ticket_source_file": "hermes_cli/dashboard_auth/ws_tickets.py",
+        "ticket_lines": [90, 95],
+        "ticket_markers": [
+            "entry = _tickets.pop(ticket, None)",
+            "truncated = (ticket[:8] + \"…\") if ticket else \"<empty>\"",
+        ],
+        "forwarding_source_file": "hermes_cli/web_server.py",
+        "forwarding_lines": [14708, 14716],
+        "forwarding_markers": ["audit_log(", "path=ws.url.path"],
     },
     {
         "id": "existing-ticket-fixtures",
@@ -177,6 +210,9 @@ EXPECTED_CASE_META = {
     "history-redaction": ("success", "security", "history"),
     "log-redaction": ("success", "security", "logs"),
     "dom-redaction": ("success", "security", "dom"),
+    "history-bounded-fragment-redaction": ("success", "security", "history"),
+    "log-bounded-fragment-redaction": ("success", "security", "logs"),
+    "dom-bounded-fragment-redaction": ("success", "security", "dom"),
     "edge-origin-error-distinct": ("failure", "negative", "edge"),
     "edge-not-found-error-distinct": ("failure", "negative", "edge"),
     "upstream-auth-error-distinct": ("failure", "negative", "upstream"),
@@ -201,6 +237,9 @@ EXPECTED_CASE_RESULTS = {
     "history-redaction": {"decision": "redact", "route_result": "history_semantic_marker_only", "ticket_action": "remove_raw_value", "rest_status": None, "close_code": None, "upstream_called": False, "retained_fields": ["route_class", "result_class", "status_class"], "automatic_retry": False, "interruption_safe": True, "error_layer": "history", "raw_value_retained": False},
     "log-redaction": {"decision": "redact", "route_result": "log_semantic_marker_only", "ticket_action": "retain_bounded_reason_class", "rest_status": None, "close_code": None, "upstream_called": False, "retained_fields": ["error_class", "layer", "close_code"], "automatic_retry": False, "interruption_safe": True, "error_layer": "logs", "raw_value_retained": False},
     "dom-redaction": {"decision": "redact", "route_result": "dom_error_state_only", "ticket_action": "never_render_raw_value", "rest_status": None, "close_code": None, "upstream_called": False, "retained_fields": ["error_state_label", "retry_action_label"], "automatic_retry": False, "interruption_safe": True, "error_layer": "dom", "raw_value_retained": False},
+    "history-bounded-fragment-redaction": {"decision": "redact", "route_result": "history_bounded_fragment_removed", "ticket_action": "remove_bounded_fragment", "rest_status": None, "close_code": None, "upstream_called": False, "retained_fields": ["route_class", "result_class", "status_class"], "automatic_retry": False, "interruption_safe": True, "error_layer": "history", "raw_value_retained": False},
+    "log-bounded-fragment-redaction": {"decision": "redact", "route_result": "log_bounded_fragment_removed", "ticket_action": "remove_bounded_fragment", "rest_status": None, "close_code": None, "upstream_called": False, "retained_fields": ["error_class", "layer", "close_code"], "automatic_retry": False, "interruption_safe": True, "error_layer": "logs", "raw_value_retained": False},
+    "dom-bounded-fragment-redaction": {"decision": "redact", "route_result": "dom_bounded_fragment_removed", "ticket_action": "remove_bounded_fragment", "rest_status": None, "close_code": None, "upstream_called": False, "retained_fields": ["error_state_label", "retry_action_label"], "automatic_retry": False, "interruption_safe": True, "error_layer": "dom", "raw_value_retained": False},
     "edge-origin-error-distinct": {"decision": "deny_edge", "route_result": "edge_origin_denied", "ticket_action": "do_not_consume", "rest_status": 403, "close_code": None, "upstream_called": False, "retained_fields": ["error_class", "http_status", "layer"], "automatic_retry": False, "interruption_safe": True, "error_layer": "edge", "raw_value_retained": False},
     "edge-not-found-error-distinct": {"decision": "deny_edge", "route_result": "edge_not_found", "ticket_action": "not_applicable", "rest_status": 404, "close_code": None, "upstream_called": False, "retained_fields": ["error_class", "http_status", "layer"], "automatic_retry": False, "interruption_safe": True, "error_layer": "edge", "raw_value_retained": False},
     "upstream-auth-error-distinct": {"decision": "preserve_upstream", "route_result": "upstream_auth_rejected", "ticket_action": "discard_without_reuse", "rest_status": None, "close_code": 4403, "upstream_called": True, "retained_fields": ["error_class", "close_code", "layer"], "automatic_retry": False, "interruption_safe": True, "error_layer": "upstream", "raw_value_retained": False},
@@ -238,13 +277,29 @@ def _reject_constant(_value: str) -> None:
 
 
 def _parse_int(value: str) -> int:
+    digits = value[1:] if value.startswith("-") else value
+    require(bool(digits) and len(digits) <= MAX_JSON_INTEGER_DIGITS)
     parsed = int(value)
-    if abs(parsed) > MAX_JSON_INTEGER:
-        raise ContractError()
+    require(abs(parsed) <= MAX_JSON_INTEGER)
+    return parsed
+
+
+def _parse_float(value: str) -> float:
+    require(len(value) <= MAX_JSON_FLOAT_TOKEN_LENGTH)
+    mantissa, separator, exponent_text = value.lower().partition("e")
+    digit_count = sum(character.isdigit() for character in mantissa)
+    require(0 < digit_count <= MAX_JSON_FLOAT_DIGITS)
+    if separator:
+        require(bool(exponent_text))
+        exponent = int(exponent_text)
+        require(abs(exponent) <= MAX_JSON_FLOAT_EXPONENT)
+    parsed = float(value)
+    require(math.isfinite(parsed))
     return parsed
 
 
 def _reject_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    require(len(pairs) <= MAX_JSON_OBJECT_KEYS)
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
@@ -253,13 +308,183 @@ def _reject_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+class _BoundedJSONScanner:
+    """Scan JSON syntax and resource bounds before the stdlib builds a tree."""
+
+    _HEX = frozenset(b"0123456789abcdefABCDEF")
+    _WHITESPACE = frozenset(b" \t\r\n")
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.index = 0
+        self.tokens = 0
+        self.nodes = 0
+
+    def _token(self) -> None:
+        self.tokens += 1
+        require(self.tokens <= MAX_JSON_TOKENS)
+
+    def _node(self) -> None:
+        self.nodes += 1
+        require(self.nodes <= MAX_JSON_NODES)
+
+    def _skip_whitespace(self) -> None:
+        while self.index < len(self.data) and self.data[self.index] in self._WHITESPACE:
+            self.index += 1
+
+    def scan(self) -> None:
+        self._skip_whitespace()
+        require(self.index < len(self.data))
+        self._parse_value(0)
+        self._skip_whitespace()
+        require(self.index == len(self.data))
+
+    def _parse_value(self, depth: int) -> None:
+        require(depth <= MAX_JSON_DEPTH and self.index < len(self.data))
+        self._node()
+        self._token()
+        marker = self.data[self.index]
+        if marker == ord("{"):
+            self._parse_object(depth)
+        elif marker == ord("["):
+            self._parse_array(depth)
+        elif marker == ord('"'):
+            self._parse_string()
+        elif marker in (ord("t"), ord("f"), ord("n")):
+            self._parse_literal()
+        elif marker == ord("-") or 48 <= marker <= 57:
+            self._parse_number()
+        else:
+            raise ContractError()
+
+    def _parse_object(self, depth: int) -> None:
+        self.index += 1
+        self._skip_whitespace()
+        if self.index < len(self.data) and self.data[self.index] == ord("}"):
+            self.index += 1
+            return
+        key_count = 0
+        while True:
+            key_count += 1
+            require(key_count <= MAX_JSON_OBJECT_KEYS)
+            self._skip_whitespace()
+            require(self.index < len(self.data) and self.data[self.index] == ord('"'))
+            self._token()
+            self._parse_string()
+            self._skip_whitespace()
+            require(self.index < len(self.data) and self.data[self.index] == ord(":"))
+            self.index += 1
+            self._skip_whitespace()
+            self._parse_value(depth + 1)
+            self._skip_whitespace()
+            require(self.index < len(self.data))
+            delimiter = self.data[self.index]
+            if delimiter == ord("}"):
+                self.index += 1
+                return
+            require(delimiter == ord(","))
+            self.index += 1
+
+    def _parse_array(self, depth: int) -> None:
+        self.index += 1
+        self._skip_whitespace()
+        if self.index < len(self.data) and self.data[self.index] == ord("]"):
+            self.index += 1
+            return
+        item_count = 0
+        while True:
+            item_count += 1
+            require(item_count <= MAX_JSON_ARRAY_ITEMS)
+            self._skip_whitespace()
+            self._parse_value(depth + 1)
+            self._skip_whitespace()
+            require(self.index < len(self.data))
+            delimiter = self.data[self.index]
+            if delimiter == ord("]"):
+                self.index += 1
+                return
+            require(delimiter == ord(","))
+            self.index += 1
+
+    def _parse_string(self) -> None:
+        require(self.data[self.index] == ord('"'))
+        self.index += 1
+        start = self.index
+        while True:
+            require(self.index < len(self.data))
+            marker = self.data[self.index]
+            if marker == ord('"'):
+                require(self.index - start <= MAX_JSON_STRING_BYTES)
+                self.index += 1
+                return
+            require(marker >= 0x20)
+            if marker == ord("\\"):
+                self.index += 1
+                require(self.index < len(self.data))
+                escaped = self.data[self.index]
+                require(escaped in b'"\\/bfnrtu')
+                if escaped == ord("u"):
+                    require(self.index + 4 < len(self.data))
+                    for offset in range(1, 5):
+                        require(self.data[self.index + offset] in self._HEX)
+                    self.index += 4
+            self.index += 1
+            require(self.index - start <= MAX_JSON_STRING_BYTES)
+
+    def _parse_literal(self) -> None:
+        for literal in (b"true", b"false", b"null"):
+            if self.data.startswith(literal, self.index):
+                self.index += len(literal)
+                return
+        raise ContractError()
+
+    def _parse_number(self) -> None:
+        start = self.index
+        if self.data[self.index] == ord("-"):
+            self.index += 1
+            require(self.index < len(self.data))
+        if self.data[self.index] == ord("0"):
+            self.index += 1
+            if self.index < len(self.data) and 48 <= self.data[self.index] <= 57:
+                raise ContractError()
+        else:
+            require(49 <= self.data[self.index] <= 57)
+            while self.index < len(self.data) and 48 <= self.data[self.index] <= 57:
+                self.index += 1
+        is_float = False
+        if self.index < len(self.data) and self.data[self.index] == ord("."):
+            is_float = True
+            self.index += 1
+            require(self.index < len(self.data) and 48 <= self.data[self.index] <= 57)
+            while self.index < len(self.data) and 48 <= self.data[self.index] <= 57:
+                self.index += 1
+        if self.index < len(self.data) and self.data[self.index] in (ord("e"), ord("E")):
+            is_float = True
+            self.index += 1
+            if self.index < len(self.data) and self.data[self.index] in (ord("+"), ord("-")):
+                self.index += 1
+            require(self.index < len(self.data) and 48 <= self.data[self.index] <= 57)
+            while self.index < len(self.data) and 48 <= self.data[self.index] <= 57:
+                self.index += 1
+        token = self.data[start:self.index].decode("ascii")
+        if is_float:
+            _parse_float(token)
+        else:
+            _parse_int(token)
+
+
 def load_json(path: Path) -> Any:
     try:
+        raw = path.read_bytes()
+        require(len(raw) <= MAX_JSON_BYTES)
+        _BoundedJSONScanner(raw).scan()
+        text = raw.decode("utf-8")
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            text,
             object_pairs_hook=_reject_duplicate,
             parse_constant=_reject_constant,
             parse_int=_parse_int,
+            parse_float=_parse_float,
         )
     except ContractError:
         raise
@@ -273,16 +498,18 @@ def _validate_json_tree(value: Any, depth: int) -> None:
     if depth > MAX_JSON_DEPTH:
         raise ContractError()
     if type(value) is dict:
+        require(len(value) <= MAX_JSON_OBJECT_KEYS)
         for key, item in value.items():
             require(type(key) is str and bool(key) and len(key) <= MAX_STRING_LENGTH)
             _validate_json_tree(item, depth + 1)
     elif type(value) is list:
+        require(len(value) <= MAX_JSON_ARRAY_ITEMS)
         for item in value:
             _validate_json_tree(item, depth + 1)
     elif type(value) is str:
-        require(len(value) <= MAX_STRING_LENGTH and "\x00" not in value)
+        require(len(value) <= MAX_STRING_LENGTH and len(value.encode("utf-8")) <= MAX_JSON_STRING_BYTES and "\x00" not in value)
     elif type(value) is int:
-        require(abs(value) <= MAX_JSON_INTEGER)
+        require(len(str(abs(value))) <= MAX_JSON_INTEGER_DIGITS and abs(value) <= MAX_JSON_INTEGER)
     elif type(value) is float:
         require(math.isfinite(value))
     else:
@@ -358,6 +585,21 @@ def _validate_source_evidence(value: Any) -> None:
             require(type(review) is dict and type(review.get("claims")) is list)
             claim_ids = [item.get("id") for item in review["claims"] if type(item) is dict]
             require(entry["claim_id"] in claim_ids)
+        elif entry["kind"] == "source_audit_anchor":
+            audit = load_json(resolved)
+            require(type(audit) is dict and audit.get("hermes_source_sha") == HERMES_SOURCE_SHA)
+            citations = {item.get("id"): item for item in audit.get("source_citations", []) if type(item) is dict}
+            require(tuple(entry["source_ids"]) == ("ticket-lifecycle", "websocket-auth"))
+            ticket = citations.get("ticket-lifecycle")
+            forwarding = citations.get("websocket-auth")
+            require(type(ticket) is dict and type(forwarding) is dict)
+            require(ticket["path"] == entry["ticket_source_file"])
+            require(forwarding["path"] == entry["forwarding_source_file"])
+            require(entry["ticket_lines"] == [90, 95] and entry["forwarding_lines"] == [14708, 14716])
+            require(90 >= ticket["lines"][0] and 95 <= ticket["lines"][1])
+            require(14708 >= forwarding["lines"][0] and 14716 <= forwarding["lines"][1])
+            require(all(marker in ticket["markers"] for marker in entry["ticket_markers"]))
+            require(all(marker in forwarding["markers"] for marker in entry["forwarding_markers"]))
         else:
             existing = load_json(resolved)
             require(type(existing) is dict and type(existing.get("cases")) is list)
@@ -365,7 +607,60 @@ def _validate_source_evidence(value: Any) -> None:
             require(set(entry["case_ids"]) <= existing_ids)
 
 
-def _scan_redaction(value: Any) -> None:
+RETAINED_TEXT_KEYS = frozenset({
+    "claim",
+    "dom",
+    "errorreason",
+    "history",
+    "log",
+    "logs",
+    "meaning",
+    "message",
+    "notes",
+    "purpose",
+    "reason",
+    "retainedtext",
+    "summary",
+    "text",
+})
+
+
+def _is_base64_token(value: str) -> bool:
+    if len(value) < 7 or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value):
+        return False
+    core = value.rstrip("=")
+    padding = value[len(core):]
+    if len(core) % 4 == 1:
+        return False
+    if padding and len(value) % 4 != 0:
+        return False
+    return True
+
+
+def _scan_retained_text(value: str) -> None:
+    data_url_pattern = re.compile(r"(?i)(?:^|[\s(\"'=,:;|])data:[^\s,]+,")
+    file_url_pattern = re.compile(r"(?i)\bfile://")
+    absolute_path_pattern = re.compile(r"(?:^|(?<=[\s(\"'=,:;|]))/(?:[A-Za-z0-9._~+\-]+/)*[A-Za-z0-9._~+\-]+")
+    windows_path_pattern = re.compile(r"(?:^|(?<=[\s(\"'=,:;|]))[A-Za-z]:[\\/][^\s,;|]+")
+    relative_path_pattern = re.compile(r"(?:^|(?<=[\s(\"'=,:;|]))(?:\./|\.\./)?[A-Za-z0-9._~-]+(?:[/\\][A-Za-z0-9._~-]+)+")
+    filename_pattern = re.compile(r"(?:^|(?<=[\s(\"'=,:;|]))(?:[A-Za-z0-9_-]+\.)+[A-Za-z0-9]{1,16}(?=$|[\s\"'),;|])")
+    require(not data_url_pattern.search(value))
+    require(not file_url_pattern.search(value))
+    require(not absolute_path_pattern.search(value))
+    require(not windows_path_pattern.search(value))
+    require(not relative_path_pattern.search(value))
+    require(not filename_pattern.search(value))
+
+    stripped = value.strip()
+    if not any(character.isspace() for character in stripped):
+        # Retained text carries semantic copy only; arbitrary base64-shaped
+        # payloads are forbidden even when padding or case makes them subtle.
+        require(not _is_base64_token(stripped))
+    for match in re.finditer(r"(?<=[=:])[A-Za-z0-9+/]{7,}={0,2}", value):
+        require(not _is_base64_token(match.group(0)))
+
+
+def _scan_redaction(value: Any, *, retained_text: bool = False) -> None:
     forbidden_keys = {
         "rawticket",
         "rawticketvalue",
@@ -387,13 +682,16 @@ def _scan_redaction(value: Any) -> None:
         for key, item in value.items():
             normalized = re.sub(r"[^a-z0-9]", "", key.lower())
             require(normalized not in forbidden_keys)
-            _scan_redaction(item)
+            item_is_retained_text = retained_text or normalized in RETAINED_TEXT_KEYS or "retained" in normalized
+            _scan_redaction(item, retained_text=item_is_retained_text)
     elif type(value) is list:
         for item in value:
-            _scan_redaction(item)
+            _scan_redaction(item, retained_text=retained_text)
     elif type(value) is str:
         require(not jwt_pattern.fullmatch(value))
         require(not secret_pattern.search(value))
+        if retained_text:
+            _scan_retained_text(value)
 
 
 def _validate_manifest_digest() -> None:
@@ -450,8 +748,10 @@ def _validate_case(item: Any) -> None:
     string(item["request"]["credential_context"])
     string(item["request"]["upgrade_headers"])
     string(item["request"]["user_action"])
-    exact_keys(item["expected"], ("decision", "route_result", "ticket_action", "rest_status", "close_code", "upstream_called", "retained_fields", "automatic_retry", "interruption_safe", "error_layer", "raw_value_retained"))
-    require(item["expected"] == EXPECTED_CASE_RESULTS[case_id])
+    exact_keys(item["expected"], ("decision", "route_result", "ticket_action", "rest_status", "close_code", "upstream_called", "retained_fields", "automatic_retry", "interruption_safe", "error_layer", "raw_value_retained", "bounded_fragment_retained"))
+    expected_result = dict(EXPECTED_CASE_RESULTS[case_id])
+    expected_result["bounded_fragment_retained"] = False
+    require(item["expected"] == expected_result)
     nullable_string(item["expected"]["route_result"])
     for key in ("rest_status", "close_code"):
         value = item["expected"][key]
@@ -462,6 +762,8 @@ def _validate_case(item: Any) -> None:
     boolean(item["expected"]["interruption_safe"])
     string(item["expected"]["error_layer"])
     boolean(item["expected"]["raw_value_retained"])
+    boolean(item["expected"]["bounded_fragment_retained"])
+    require(item["expected"]["bounded_fragment_retained"] is False)
     string(item["notes"])
 
 
@@ -495,7 +797,7 @@ def _validate_fixture_shape(fixture: Any) -> None:
     exact_keys(fixture["counts"], ("states", "cases", "redaction_surfaces", "error_layers"))
     for count_key in ("states", "cases", "redaction_surfaces", "error_layers"):
         integer(fixture["counts"][count_key])
-    require(fixture["counts"] == {"states": 5, "cases": 21, "redaction_surfaces": 3, "error_layers": 2})
+    require(fixture["counts"] == {"states": 5, "cases": 24, "redaction_surfaces": 3, "error_layers": 2})
     _validate_ticket_policy(fixture["ticket_policy"])
     require(fixture["states"] == EXPECTED_STATES)
     for state in fixture["states"]:
@@ -512,7 +814,7 @@ def _validate_fixture_shape(fixture: Any) -> None:
     integer(fixture["redaction"]["max_controlled_error_length"])
     require(fixture["redaction"] == {
         "synthetic_markers_only": True,
-        "forbidden_data_classes": ["raw_ticket_values", "cookies", "bearer_values", "authorization_values", "credentials", "prompt_text", "transcript_bytes", "hostnames", "user_data"],
+        "forbidden_data_classes": ["raw_ticket_values", "cookies", "bearer_values", "authorization_values", "credentials", "prompt_text", "transcript_bytes", "hostnames", "user_data", "bounded_ticket_fragments"],
         "retained_marker_classes": ["ticket_state", "ttl_seconds", "route_class", "result_class", "error_class", "http_status", "close_code", "layer"],
         "history_policy": "semantic_marker_only",
         "log_policy": "bounded_semantic_reason_only",
@@ -541,6 +843,7 @@ def _validate_fixture_shape(fixture: Any) -> None:
         "exact_30_second_expiry_boundary_is_recorded",
         "edge_and_upstream_results_remain_distinct",
         "history_log_and_dom_redaction_are_recorded",
+        "bounded_ticket_fragments_are_removed_from_history_logs_and_dom",
         "pending_success_failure_interruption_and_retry_states_are_present",
         "unknown_or_malformed_fixture_input_fails_closed",
         "no_real_ticket_or_credential_value_is_retained",
@@ -589,15 +892,31 @@ def _validate_samples(value: Any) -> list[float]:
     return samples
 
 
+def _baseline_canonical_payload(baseline: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": baseline["schema"],
+        "fixture": baseline["fixture"],
+        "threshold": baseline["threshold"],
+        "workload": baseline["workload"],
+        "observations": baseline["observations"],
+        "environment": baseline["environment"],
+        "integrity": {"fixture_canonical_sha256": baseline["integrity"]["fixture_canonical_sha256"]},
+        "redaction": baseline["redaction"],
+    }
+
+
 def _artifact_manifest() -> list[dict[str, Any]]:
-    paths = ("README.md", "ticket-fixtures.json", "test_validate.py", "validate.py")
+    paths = ("README.md", "probe-baseline.json", "ticket-fixtures.json", "test_validate.py", "validate.py")
     records: list[dict[str, Any]] = []
     for relative in paths:
         try:
             data = (ROOT / relative).read_bytes()
         except OSError as exc:
             raise ContractError() from exc
-        records.append({"path": relative, "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)})
+        if relative == "probe-baseline.json":
+            records.append({"path": relative, "sha256": EXPECTED_BASELINE_CANONICAL_SHA256, "size_bytes": len(data)})
+        else:
+            records.append({"path": relative, "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)})
     return records
 
 
@@ -622,8 +941,10 @@ def validate_baseline(baseline: dict[str, Any] | None = None) -> dict[str, int]:
         string(baseline["environment"][key])
     require(baseline["environment"]["build_mode"] == "N/A")
     require(baseline["environment"]["live_run"] is False)
-    exact_keys(baseline["integrity"], ("fixture_canonical_sha256", "artifact_manifest_sha256", "artifact_manifest", "baseline_file_size_bytes"))
+    exact_keys(baseline["integrity"], ("fixture_canonical_sha256", "baseline_canonical_sha256", "artifact_manifest_sha256", "artifact_manifest", "baseline_file_size_bytes"))
     require(baseline["integrity"]["fixture_canonical_sha256"] == EXPECTED_FIXTURE_CANONICAL_SHA256)
+    require(baseline["integrity"]["baseline_canonical_sha256"] == EXPECTED_BASELINE_CANONICAL_SHA256)
+    require(canonical_sha256(_baseline_canonical_payload(baseline)) == EXPECTED_BASELINE_CANONICAL_SHA256)
     manifest = baseline["integrity"]["artifact_manifest"]
     require(manifest == _artifact_manifest())
     require(baseline["integrity"]["artifact_manifest_sha256"] == canonical_sha256(manifest))
