@@ -68,7 +68,7 @@ class ExternalAllowlistTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_expected_order_and_case_count(self) -> None:
         self.assertEqual(tuple(self.cases), validate.EXPECTED_CASE_IDS)
-        self.assertEqual(len(self.cases), 61)
+        self.assertEqual(len(self.cases), 71)
         self.assertEqual(len(self.document["static_routes"]), 6)
         self.assertEqual(len(self.document["external_routes"]), 19)
 
@@ -125,7 +125,7 @@ class ExternalAllowlistTests(unittest.TestCase):
             "path": "/hermes/api/sessions/a7",
             "client": "browser",
             "transport": "http",
-            "auth": "session",
+            "auth": "browser_cookie",
             "headers": {},
             "query": {},
         }
@@ -156,7 +156,7 @@ class ExternalAllowlistTests(unittest.TestCase):
             "path": "/hermes/api/sessions",
             "client": "browser",
             "transport": "http",
-            "auth": "session",
+            "auth": "browser_cookie",
             "headers": {},
             "query": {},
         }
@@ -168,12 +168,58 @@ class ExternalAllowlistTests(unittest.TestCase):
         for headers in header_cases:
             with self.subTest(headers=headers):
                 self.assertEqual(validate.evaluate_request(dict(base, headers=headers))["reason"], "method_override_denied")
-        for key in ("_method", "METHOD", "method_override", "X-Method-Override", "X_HTTP_METHOD_OVERRIDE"):
+        query_aliases = (
+            "_method",
+            "METHOD",
+            "method_override",
+            "X-Method-Override",
+            "X_HTTP_METHOD_OVERRIDE",
+            "x-http-method",
+            "X-HTTP-METHOD",
+            "x_http_method",
+            "x%2Dhttp%2Dmethod",
+            "%78%252Dhttp%252Dmethod",
+        )
+        for key in query_aliases:
             with self.subTest(query_key=key):
                 self.assertEqual(
                     validate.evaluate_request(dict(base, query={key: "POST"}))["reason"],
                     "method_override_denied",
                 )
+
+    def test_c01_client_auth_bindings_do_not_cross_containers(self) -> None:
+        checks = (
+            (
+                "external-logout-native-cookie",
+                "allow",
+                "dashboard_route_allowed",
+            ),
+            (
+                "deny-logout-native-bearer",
+                "deny",
+                "auth_not_allowlisted",
+            ),
+            (
+                "deny-auth-me-native-cookie",
+                "deny",
+                "auth_not_allowlisted",
+            ),
+            (
+                "deny-session-browser-native-bearer",
+                "deny",
+                "auth_not_allowlisted",
+            ),
+            (
+                "deny-session-native-browser-cookie",
+                "deny",
+                "auth_not_allowlisted",
+            ),
+        )
+        for case_id, decision, reason in checks:
+            with self.subTest(case=case_id):
+                result = validate.evaluate_case(self.cases[case_id])
+                self.assertEqual(result["decision"], decision)
+                self.assertEqual(result["reason"], reason)
 
     def test_management_and_source_sidecar_routes_are_denied(self) -> None:
         management_cases = {
@@ -210,7 +256,7 @@ class ExternalAllowlistTests(unittest.TestCase):
                 self.assertEqual(len(lines), 1)
                 payload = json.loads(lines[0])
                 self.assertTrue(payload["ok"])
-                self.assertEqual(payload["cases"], 61)
+                self.assertEqual(payload["cases"], 71)
                 self.assertIsNone(payload["threshold"])
 
     def test_cli_rejects_duplicate_nonfinite_overflow_deep_and_oversized_inputs(self) -> None:
@@ -253,7 +299,7 @@ class ExternalAllowlistTests(unittest.TestCase):
             "path": "/hermes/api/sessions",
             "client": "browser",
             "transport": "http",
-            "auth": "session",
+            "auth": "browser_cookie",
             "headers": {},
             "query": {},
         }

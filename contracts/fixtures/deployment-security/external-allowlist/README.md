@@ -28,7 +28,9 @@ do not widen it.
 The manifest duplicates the frozen route tuples in the validator. This is
 intentional: changing `cases.json` alone cannot authorize a new route. A route
 needs the exact method, exact raw path shape, approved client, approved
-transport, and symbolic authentication mode.
+transport, the exact C-01 source authentication mode, and that client's exact
+synthetic authentication marker. Marker names classify reviewed credential
+containers only; they never carry credential values.
 
 ## Public static shell
 
@@ -52,25 +54,25 @@ instruction to serve arbitrary files.
 Every Dashboard route below has exactly one `/hermes` prefix. The external
 contract does not authorize the unprefixed C-01 path.
 
-| Method | External path | Client | Auth marker |
-| --- | --- | --- | --- |
-| `GET` | `/hermes/login` | browser | public |
-| `GET` | `/hermes/api/auth/providers` | browser, native | public |
-| `GET` | `/hermes/auth/login` | browser | public |
-| `GET` | `/hermes/auth/callback` | browser | public |
-| `POST` | `/hermes/auth/password-login` | browser, native | public |
-| `POST` | `/hermes/auth/logout` | browser, native | session |
-| `GET` | `/hermes/api/auth/me` | browser, native | session |
-| `POST` | `/hermes/api/auth/ws-ticket` | browser, native | session |
-| `GET` | `/hermes/auth/native/authorize` | native | public |
-| `POST` | `/hermes/auth/native/token` | native | native code plus PKCE |
-| `POST` | `/hermes/auth/native/refresh` | native | native refresh material |
-| `GET` | `/hermes/api/sessions` | browser, native | session |
-| `GET` | `/hermes/api/sessions/search` | browser, native | session |
-| `GET` | `/hermes/api/sessions/{session_id}` | browser, native | session |
-| `GET` | `/hermes/api/sessions/{session_id}/messages` | browser, native | session |
-| `PATCH` | `/hermes/api/sessions/{session_id}` | browser, native | session |
-| `POST` | `/hermes/api/chat/image-upload` | browser, native | session |
+| Method | External path | Client | C-01 source mode | Exact client marker |
+| --- | --- | --- | --- | --- |
+| `GET` | `/hermes/login` | browser | public | `public` |
+| `GET` | `/hermes/api/auth/providers` | browser, native | public | `public` for both |
+| `GET` | `/hermes/auth/login` | browser | public | `public` |
+| `GET` | `/hermes/auth/callback` | browser | public | `public` |
+| `POST` | `/hermes/auth/password-login` | browser, native | public | `public` for both |
+| `POST` | `/hermes/auth/logout` | browser, native | browser_cookie_or_native_cookie | browser `browser_cookie`; native `native_cookie` |
+| `GET` | `/hermes/api/auth/me` | browser, native | browser_cookie_or_native_bearer | browser `browser_cookie`; native `native_bearer` |
+| `POST` | `/hermes/api/auth/ws-ticket` | browser, native | browser_cookie_or_native_bearer | browser `browser_cookie`; native `native_bearer` |
+| `GET` | `/hermes/auth/native/authorize` | native | public_native_authorize | `public_native_authorize` |
+| `POST` | `/hermes/auth/native/token` | native | public_native_loopback_code_pkce | `public_native_loopback_code_pkce` |
+| `POST` | `/hermes/auth/native/refresh` | native | public_native_refresh_material | `public_native_refresh_material` |
+| `GET` | `/hermes/api/sessions` | browser, native | browser_cookie_or_native_bearer | browser `browser_cookie`; native `native_bearer` |
+| `GET` | `/hermes/api/sessions/search` | browser, native | browser_cookie_or_native_bearer | browser `browser_cookie`; native `native_bearer` |
+| `GET` | `/hermes/api/sessions/{session_id}` | browser, native | browser_cookie_or_native_bearer | browser `browser_cookie`; native `native_bearer` |
+| `GET` | `/hermes/api/sessions/{session_id}/messages` | browser, native | browser_cookie_or_native_bearer | browser `browser_cookie`; native `native_bearer` |
+| `PATCH` | `/hermes/api/sessions/{session_id}` | browser, native | browser_cookie_or_native_bearer | browser `browser_cookie`; native `native_bearer` |
+| `POST` | `/hermes/api/chat/image-upload` | browser, native | browser_cookie_or_native_bearer | browser `browser_cookie`; native `native_bearer` |
 
 The `session_id` marker is one opaque ASCII segment. It is one character, or
 2–128 characters with an ASCII letter or digit at each end and only ASCII
@@ -92,16 +94,19 @@ The WebSocket handshake is represented as an exact `GET` request with
 `transport` set to `websocket`:
 
 - `/hermes/api/ws` is the structured chat surface for browser and native
-  clients. The auth marker is either `fresh_ticket` for gated mode or
-  `local_query_token` for the source-defined local mode.
+  clients. Its C-01 source mode is
+  `gated_ticket_or_non_gated_local_query_token`; the exact markers are
+  `fresh_single_use_ticket` for gated mode and `source_defined_query_token`
+  for the source-defined local mode, for either client.
 - `/hermes/api/pty` is the full Hermes TUI surface for browser clients only. It
-  has the same symbolic auth choices and requires an attested POSIX or WSL
-  Hermes host. Native clients are denied.
+  has the same source mode and exact markers, and requires an attested POSIX or
+  WSL Hermes host. Native clients are denied.
 
 The fixture never carries a ticket, bearer, cookie, PTY handle, transcript,
-provider value, host name, or user data. It records only symbolic auth modes.
-It does not prove that a ticket is fresh or that a host is attested; those are
-later runtime responsibilities at the boundary represented here.
+provider value, host name, or user data. It records only exact source modes and
+synthetic marker names. It does not prove that a ticket is fresh or that a host
+is attested; those are later runtime responsibilities at the boundary
+represented here.
 
 ## Default-deny and mutation cases
 
@@ -113,7 +118,9 @@ Unknown paths and methods deny. The ordered cases include:
   session markers;
 - plain traversal, encoded slash, encoded dot, encoded prefix, and other
   encoded-path attempts;
-- method mutation and the standard header/query method-override aliases;
+- method mutation and method-override aliases, including header aliases plus
+  raw, case, hyphen/underscore-normalized, percent-encoded, and bounded
+  double-encoded `x-http-method` query spellings;
 - HTTP requests sent to the chat WebSocket path;
 - native use of the web-only PTY path and browser use of native-only auth;
 - missing protected auth markers; and

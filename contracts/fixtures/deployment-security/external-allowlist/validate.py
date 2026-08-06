@@ -16,6 +16,7 @@ import math
 import platform
 import re
 import sys
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Any
 
@@ -34,8 +35,8 @@ PREFIX = "/hermes"
 ARTIFACT_FILES = ("README.md", "cases.json", "validate.py")
 # Evidence is pinned after the fixture is reviewed; a copied baseline cannot
 # self-rebind its digest to a mutated README, manifest, or validator.
-EXPECTED_ARTIFACT_BYTES = 87017
-EXPECTED_ARTIFACT_SHA256 = "a183a24233a4807e7c61cb811812a6b593da1bac1183e51279d7e9b061a3c952"
+EXPECTED_ARTIFACT_BYTES = 109063
+EXPECTED_ARTIFACT_SHA256 = "1191a77a5ddf8cdf8e8c10af509cbd09a26734392952bc1437769d1d163ad927"
 
 MAX_JSON_BYTES = 512 * 1024
 MAX_JSON_DEPTH = 64
@@ -365,11 +366,25 @@ KNOWN_TRANSPORTS = frozenset({"http", "websocket"})
 KNOWN_AUTH_MODES = frozenset(
     {
         "public",
-        "session",
-        "native_code_pkce",
-        "native_refresh_material",
-        "fresh_ticket",
-        "local_query_token",
+        "browser_cookie",
+        "native_cookie",
+        "native_bearer",
+        "public_native_authorize",
+        "public_native_loopback_code_pkce",
+        "public_native_refresh_material",
+        "fresh_single_use_ticket",
+        "source_defined_query_token",
+    }
+)
+C01_SOURCE_AUTH_MODES = frozenset(
+    {
+        "public",
+        "browser_cookie_or_native_cookie",
+        "browser_cookie_or_native_bearer",
+        "public_native_authorize",
+        "public_native_loopback_code_pkce",
+        "public_native_refresh_material",
+        "gated_ticket_or_non_gated_local_query_token",
     }
 )
 KNOWN_SURFACES = frozenset({"static_shell", "spa_deep_link", "dashboard_rest", "chat_websocket", "pty_websocket"})
@@ -403,7 +418,8 @@ def _route(
     surface: str,
     transport: str,
     clients: tuple[str, ...],
-    auth_modes: tuple[str, ...],
+    source_auth_mode: str,
+    auth_bindings: tuple[tuple[str, tuple[str, ...]], ...],
     host_requirement: str,
     source_citation_id: str,
 ) -> dict[str, Any]:
@@ -414,7 +430,8 @@ def _route(
         "surface": surface,
         "transport": transport,
         "clients": list(clients),
-        "auth_modes": list(auth_modes),
+        "source_auth_mode": source_auth_mode,
+        "auth_bindings": {client: list(markers) for client, markers in auth_bindings},
         "host_requirement": host_requirement,
         "source_citation_id": source_citation_id,
     }
@@ -424,33 +441,33 @@ def _route(
 # manifest edit cannot authorize a new route without changing this validator
 # and its tests, which keeps DEP-02 default-deny and reviewable.
 EXPECTED_STATIC_ROUTES = (
-    _route("static-root-get", "GET", "/", "static_shell", "http", ("browser",), ("public",), "none", "static-spa-shell"),
-    _route("static-root-head", "HEAD", "/", "static_shell", "http", ("browser",), ("public",), "none", "static-spa-shell"),
-    _route("static-app", "GET", "/app", "spa_deep_link", "http", ("browser",), ("public",), "none", "static-spa-shell"),
-    _route("static-app-chat", "GET", "/app/chat", "spa_deep_link", "http", ("browser",), ("public",), "none", "static-spa-shell"),
-    _route("static-settings", "GET", "/settings", "spa_deep_link", "http", ("browser",), ("public",), "none", "static-spa-shell"),
-    _route("static-signed-out", "GET", "/signed-out", "spa_deep_link", "http", ("browser",), ("public",), "none", "static-spa-shell"),
+    _route("static-root-get", "GET", "/", "static_shell", "http", ("browser",), "public", (("browser", ("public",)),), "none", "static-spa-shell"),
+    _route("static-root-head", "HEAD", "/", "static_shell", "http", ("browser",), "public", (("browser", ("public",)),), "none", "static-spa-shell"),
+    _route("static-app", "GET", "/app", "spa_deep_link", "http", ("browser",), "public", (("browser", ("public",)),), "none", "static-spa-shell"),
+    _route("static-app-chat", "GET", "/app/chat", "spa_deep_link", "http", ("browser",), "public", (("browser", ("public",)),), "none", "static-spa-shell"),
+    _route("static-settings", "GET", "/settings", "spa_deep_link", "http", ("browser",), "public", (("browser", ("public",)),), "none", "static-spa-shell"),
+    _route("static-signed-out", "GET", "/signed-out", "spa_deep_link", "http", ("browser",), "public", (("browser", ("public",)),), "none", "static-spa-shell"),
 )
 EXPECTED_EXTERNAL_ROUTES = (
-    _route("hermes-login-get", "GET", "/hermes/login", "dashboard_rest", "http", ("browser",), ("public",), "none", "rest-auth-routes"),
-    _route("hermes-auth-providers-get", "GET", "/hermes/api/auth/providers", "dashboard_rest", "http", ("browser", "native"), ("public",), "none", "rest-auth-routes"),
-    _route("hermes-auth-login-get", "GET", "/hermes/auth/login", "dashboard_rest", "http", ("browser",), ("public",), "none", "rest-auth-routes"),
-    _route("hermes-auth-callback-get", "GET", "/hermes/auth/callback", "dashboard_rest", "http", ("browser",), ("public",), "none", "rest-auth-routes"),
-    _route("hermes-auth-password-login-post", "POST", "/hermes/auth/password-login", "dashboard_rest", "http", ("browser", "native"), ("public",), "none", "rest-auth-routes"),
-    _route("hermes-auth-logout-post", "POST", "/hermes/auth/logout", "dashboard_rest", "http", ("browser", "native"), ("session",), "none", "rest-auth-routes"),
-    _route("hermes-auth-me-get", "GET", "/hermes/api/auth/me", "dashboard_rest", "http", ("browser", "native"), ("session",), "none", "rest-auth-routes"),
-    _route("hermes-auth-ws-ticket-post", "POST", "/hermes/api/auth/ws-ticket", "dashboard_rest", "http", ("browser", "native"), ("session",), "none", "rest-auth-routes"),
-    _route("hermes-auth-native-authorize-get", "GET", "/hermes/auth/native/authorize", "dashboard_rest", "http", ("native",), ("public",), "none", "rest-auth-routes"),
-    _route("hermes-auth-native-token-post", "POST", "/hermes/auth/native/token", "dashboard_rest", "http", ("native",), ("native_code_pkce",), "none", "rest-auth-routes"),
-    _route("hermes-auth-native-refresh-post", "POST", "/hermes/auth/native/refresh", "dashboard_rest", "http", ("native",), ("native_refresh_material",), "none", "rest-auth-routes"),
-    _route("hermes-sessions-get", "GET", "/hermes/api/sessions", "dashboard_rest", "http", ("browser", "native"), ("session",), "none", "rest-session-routes"),
-    _route("hermes-sessions-search-get", "GET", "/hermes/api/sessions/search", "dashboard_rest", "http", ("browser", "native"), ("session",), "none", "rest-session-routes"),
-    _route("hermes-session-get", "GET", "/hermes/api/sessions/{session_id}", "dashboard_rest", "http", ("browser", "native"), ("session",), "none", "rest-session-routes"),
-    _route("hermes-session-messages-get", "GET", "/hermes/api/sessions/{session_id}/messages", "dashboard_rest", "http", ("browser", "native"), ("session",), "none", "rest-session-routes"),
-    _route("hermes-session-patch", "PATCH", "/hermes/api/sessions/{session_id}", "dashboard_rest", "http", ("browser", "native"), ("session",), "none", "rest-session-routes"),
-    _route("hermes-image-upload-post", "POST", "/hermes/api/chat/image-upload", "dashboard_rest", "http", ("browser", "native"), ("session",), "none", "rest-image-upload"),
-    _route("hermes-chat-ws", "GET", "/hermes/api/ws", "chat_websocket", "websocket", ("browser", "native"), ("fresh_ticket", "local_query_token"), "none", "chat-websocket"),
-    _route("hermes-pty-ws", "GET", "/hermes/api/pty", "pty_websocket", "websocket", ("browser",), ("fresh_ticket", "local_query_token"), "attested_posix_or_wsl", "pty-websocket"),
+    _route("hermes-login-get", "GET", "/hermes/login", "dashboard_rest", "http", ("browser",), "public", (("browser", ("public",)),), "none", "rest-auth-routes"),
+    _route("hermes-auth-providers-get", "GET", "/hermes/api/auth/providers", "dashboard_rest", "http", ("browser", "native"), "public", (("browser", ("public",)), ("native", ("public",))), "none", "rest-auth-routes"),
+    _route("hermes-auth-login-get", "GET", "/hermes/auth/login", "dashboard_rest", "http", ("browser",), "public", (("browser", ("public",)),), "none", "rest-auth-routes"),
+    _route("hermes-auth-callback-get", "GET", "/hermes/auth/callback", "dashboard_rest", "http", ("browser",), "public", (("browser", ("public",)),), "none", "rest-auth-routes"),
+    _route("hermes-auth-password-login-post", "POST", "/hermes/auth/password-login", "dashboard_rest", "http", ("browser", "native"), "public", (("browser", ("public",)), ("native", ("public",))), "none", "rest-auth-routes"),
+    _route("hermes-auth-logout-post", "POST", "/hermes/auth/logout", "dashboard_rest", "http", ("browser", "native"), "browser_cookie_or_native_cookie", (("browser", ("browser_cookie",)), ("native", ("native_cookie",))), "none", "rest-auth-routes"),
+    _route("hermes-auth-me-get", "GET", "/hermes/api/auth/me", "dashboard_rest", "http", ("browser", "native"), "browser_cookie_or_native_bearer", (("browser", ("browser_cookie",)), ("native", ("native_bearer",))), "none", "rest-auth-routes"),
+    _route("hermes-auth-ws-ticket-post", "POST", "/hermes/api/auth/ws-ticket", "dashboard_rest", "http", ("browser", "native"), "browser_cookie_or_native_bearer", (("browser", ("browser_cookie",)), ("native", ("native_bearer",))), "none", "rest-auth-routes"),
+    _route("hermes-auth-native-authorize-get", "GET", "/hermes/auth/native/authorize", "dashboard_rest", "http", ("native",), "public_native_authorize", (("native", ("public_native_authorize",)),), "none", "rest-auth-routes"),
+    _route("hermes-auth-native-token-post", "POST", "/hermes/auth/native/token", "dashboard_rest", "http", ("native",), "public_native_loopback_code_pkce", (("native", ("public_native_loopback_code_pkce",)),), "none", "rest-auth-routes"),
+    _route("hermes-auth-native-refresh-post", "POST", "/hermes/auth/native/refresh", "dashboard_rest", "http", ("native",), "public_native_refresh_material", (("native", ("public_native_refresh_material",)),), "none", "rest-auth-routes"),
+    _route("hermes-sessions-get", "GET", "/hermes/api/sessions", "dashboard_rest", "http", ("browser", "native"), "browser_cookie_or_native_bearer", (("browser", ("browser_cookie",)), ("native", ("native_bearer",))), "none", "rest-session-routes"),
+    _route("hermes-sessions-search-get", "GET", "/hermes/api/sessions/search", "dashboard_rest", "http", ("browser", "native"), "browser_cookie_or_native_bearer", (("browser", ("browser_cookie",)), ("native", ("native_bearer",))), "none", "rest-session-routes"),
+    _route("hermes-session-get", "GET", "/hermes/api/sessions/{session_id}", "dashboard_rest", "http", ("browser", "native"), "browser_cookie_or_native_bearer", (("browser", ("browser_cookie",)), ("native", ("native_bearer",))), "none", "rest-session-routes"),
+    _route("hermes-session-messages-get", "GET", "/hermes/api/sessions/{session_id}/messages", "dashboard_rest", "http", ("browser", "native"), "browser_cookie_or_native_bearer", (("browser", ("browser_cookie",)), ("native", ("native_bearer",))), "none", "rest-session-routes"),
+    _route("hermes-session-patch", "PATCH", "/hermes/api/sessions/{session_id}", "dashboard_rest", "http", ("browser", "native"), "browser_cookie_or_native_bearer", (("browser", ("browser_cookie",)), ("native", ("native_bearer",))), "none", "rest-session-routes"),
+    _route("hermes-image-upload-post", "POST", "/hermes/api/chat/image-upload", "dashboard_rest", "http", ("browser", "native"), "browser_cookie_or_native_bearer", (("browser", ("browser_cookie",)), ("native", ("native_bearer",))), "none", "rest-image-upload"),
+    _route("hermes-chat-ws", "GET", "/hermes/api/ws", "chat_websocket", "websocket", ("browser", "native"), "gated_ticket_or_non_gated_local_query_token", (("browser", ("fresh_single_use_ticket", "source_defined_query_token")), ("native", ("fresh_single_use_ticket", "source_defined_query_token"))), "none", "chat-websocket"),
+    _route("hermes-pty-ws", "GET", "/hermes/api/pty", "pty_websocket", "websocket", ("browser",), "gated_ticket_or_non_gated_local_query_token", (("browser", ("fresh_single_use_ticket", "source_defined_query_token")),), "attested_posix_or_wsl", "pty-websocket"),
 )
 ALL_ROUTES = EXPECTED_STATIC_ROUTES + EXPECTED_EXTERNAL_ROUTES
 ROUTE_BY_ID = {route["id"]: route for route in ALL_ROUTES}
@@ -516,6 +533,16 @@ EXPECTED_CASE_IDS = (
     "deny-session-too-long",
     "deny-chat-wrong-method",
     "deny-native-token-browser",
+    "external-logout-native-cookie",
+    "deny-logout-native-bearer",
+    "deny-auth-me-native-cookie",
+    "deny-session-browser-native-bearer",
+    "deny-session-native-browser-cookie",
+    "deny-method-override-query-x-http-method",
+    "deny-method-override-query-x-http-method-case",
+    "deny-method-override-query-x-http-method-underscore",
+    "deny-method-override-query-x-http-method-encoded",
+    "deny-method-override-query-x-http-method-double-encoded",
 )
 
 UNPREFIXED_PATHS = frozenset(
@@ -592,7 +619,8 @@ ROUTE_KEYS = (
     "surface",
     "transport",
     "clients",
-    "auth_modes",
+    "source_auth_mode",
+    "auth_bindings",
     "host_requirement",
     "source_citation_id",
 )
@@ -618,8 +646,11 @@ def _validate_route(route: Any, expected: dict[str, Any], label: str) -> None:
     path = _text(row["path"], f"{label}.path", max_length=256)
     _enum(row["surface"], KNOWN_SURFACES, f"{label}.surface")
     _enum(row["transport"], KNOWN_TRANSPORTS, f"{label}.transport")
-    _string_list(row["clients"], KNOWN_CLIENTS, f"{label}.clients")
-    _string_list(row["auth_modes"], KNOWN_AUTH_MODES, f"{label}.auth_modes")
+    clients = _string_list(row["clients"], KNOWN_CLIENTS, f"{label}.clients")
+    _enum(row["source_auth_mode"], C01_SOURCE_AUTH_MODES, f"{label}.source_auth_mode")
+    bindings = _strict_keys(row["auth_bindings"], clients, f"{label}.auth_bindings")
+    for client in clients:
+        _string_list(bindings[client], KNOWN_AUTH_MODES, f"{label}.auth_bindings.{client}")
     _enum(row["host_requirement"], frozenset({"none", "attested_posix_or_wsl"}), f"{label}.host_requirement")
     _enum(row["source_citation_id"], SOURCE_CITATIONS, f"{label}.source_citation_id")
     require("*" not in path, f"{label}.path cannot be a wildcard")
@@ -658,7 +689,8 @@ def _validate_query(value: Any, label: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for key, child in value.items():
         _text(key, f"{label} key", max_length=64)
-        require(QUERY_KEY_RE.fullmatch(key) is not None, f"{label} key is malformed")
+        if QUERY_KEY_RE.fullmatch(key) is None:
+            require(_query_override_alias(key), f"{label} key is malformed")
         result[key] = _text(child, f"{label}.{key}", max_length=256)
     return result
 
@@ -732,15 +764,64 @@ def _path_candidates(path: str) -> list[dict[str, Any]]:
     return [route for route in ALL_ROUTES if _path_template_matches(route["path"], path)]
 
 
+QUERY_METHOD_OVERRIDE_ALIASES = frozenset(
+    {
+        "method",
+        "_method",
+        "method_override",
+        "x_method_override",
+        "x_http_method",
+        "x_http_method_override",
+    }
+)
+HEADER_METHOD_OVERRIDE_ALIASES = frozenset({"x-http-method-override", "x-method-override", "x-http-method"})
+
+
+def _query_key_variants(key: str) -> frozenset[str]:
+    """Return bounded raw/percent-decoded spellings for deny-before-match checks."""
+
+    variants = {key}
+    current = key
+    for _ in range(3):
+        if "%" not in current:
+            break
+        decoded = unquote(current)
+        if decoded == current:
+            break
+        variants.add(decoded)
+        current = decoded
+    return frozenset(variants)
+
+
+def _query_override_alias(key: str) -> bool:
+    return any(candidate.casefold().replace("-", "_") in QUERY_METHOD_OVERRIDE_ALIASES for candidate in _query_key_variants(key))
+
+
+def _header_override_alias(key: str) -> bool:
+    return key.casefold().replace("_", "-") in HEADER_METHOD_OVERRIDE_ALIASES
+
+
 def _override_present(request: dict[str, Any]) -> bool:
-    header_aliases = frozenset({"x-http-method-override", "x-method-override", "x-http-method"})
-    query_aliases = frozenset({"method", "_method", "method_override", "x_method_override", "x_http_method_override"})
     for key in request["headers"]:
-        if key.casefold().replace("_", "-") in header_aliases:
+        if _header_override_alias(key):
             return True
     for key in request["query"]:
-        if key.casefold().replace("-", "_") in query_aliases:
+        if _query_override_alias(key):
             return True
+    return False
+
+
+def _raw_override_present(request: Any) -> bool:
+    """Catch encoded or non-schema alias spellings before strict query parsing."""
+
+    if type(request) is not dict:
+        return False
+    headers = request.get("headers")
+    if type(headers) is dict and any(type(key) is str and _header_override_alias(key) for key in headers):
+        return True
+    query = request.get("query")
+    if type(query) is dict and any(type(key) is str and _query_override_alias(key) for key in query):
+        return True
     return False
 
 
@@ -789,6 +870,8 @@ def _allow(route: dict[str, Any]) -> dict[str, Any]:
 def evaluate_request(request: Any) -> dict[str, Any]:
     """Evaluate one synthetic request with default-deny semantics."""
 
+    if _raw_override_present(request):
+        return _deny("method_override_denied")
     row = _validate_request(request, "request")
     if _override_present(row):
         return _deny("method_override_denied")
@@ -808,7 +891,11 @@ def evaluate_request(request: Any) -> dict[str, Any]:
     client_candidates = [route for route in transport_candidates if row["client"] in route["clients"]]
     if not client_candidates:
         return _deny("client_not_allowlisted")
-    auth_candidates = [route for route in client_candidates if row["auth"] in route["auth_modes"]]
+    auth_candidates = [
+        route
+        for route in client_candidates
+        if row["auth"] in route["auth_bindings"][row["client"]]
+    ]
     if not auth_candidates:
         return _deny("auth_not_allowlisted")
     return _allow(auth_candidates[0])
