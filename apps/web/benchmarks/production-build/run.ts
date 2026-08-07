@@ -1026,7 +1026,7 @@ export function sourceCommit(): string {
   // HEAD alone is not provenance: a modified tracked runner, helper, workload,
   // or web input can execute while rev-parse still reports the same commit.
   // Bind the entire measured web tree to that commit before and after samples.
-  const clean = Bun.spawnSync(['/usr/bin/git', '-C', repositoryRoot, 'diff-index', '--quiet', 'HEAD', '--', 'apps/web'], {
+  const clean = Bun.spawnSync(['/usr/bin/git', '-C', repositoryRoot, 'diff', '--quiet', 'HEAD', '--', 'apps/web'], {
     stdout: 'ignore',
     stderr: 'ignore'
   });
