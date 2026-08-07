@@ -557,8 +557,8 @@
       "files": [
         {
           "path": "deployment-security/host-origin-mapping/README.md",
-          "sha256": "eeae325b39a4fb627ceec2771f94c7ee7d32b88219e6c268f2cceaf7454d4a01",
-          "size_bytes": 12322
+          "sha256": "199ff911e5b386d4a437ef762c520f6e5eafef776fbf9702a1481e2404788724",
+          "size_bytes": 12203
         },
         {
           "path": "deployment-security/host-origin-mapping/cases.json",

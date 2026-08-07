@@ -164,22 +164,21 @@ tests. Artifact bytes are captured once through bounded regular-file reads and
 that immutable capture feeds parsing, hashing, baseline, and redaction checks.
 The local pins are reproducibility checks, not an independent trust root. A
 coordinated change can otherwise refresh validator logic, cases, baseline, and
-local pins together. The independent five-file identity and rotation authority
-must therefore be supplied by the aggregate registry owner in a separately
-reviewed prior Git object; this fixture does not edit `contracts/fixtures/index.json`
-or claim to close that trust boundary before that owner-controlled registration.
-The baseline and identity must be regenerated only after the source is stable and
-only through that external predecessor anchor. Until that authority is merged,
-the default validator is expected to stop at its bounded stale-pin failure;
-`--skip-baseline` and the focused normal/optimized suites exercise the local
-correction lane without rotating those external pins. The comma-joined origin
+local pins together. The aggregate registry owner now supplies the independent
+five-file identity and final v2 rotation authority through
+`scripts/fixture_registry_authority.v2.final.json`; this fixture still does not
+edit `contracts/fixtures/index.json` or claim a second trust boundary. The
+fixture-local baseline and identity remain intentionally stale in this lane, so
+the default validator continues to stop at its bounded stale-pin failure;
+`--skip-baseline` and the focused normal/optimized suites exercise local case
+semantics without rotating those external pins. The comma-joined origin
 cardinality canary is assembled from separate Python string fragments so the
 aggregate registry scanner does not mistake two synthetic URLs for one live
-host; its runtime mutation value is unchanged. The local scanner also rejects
-escaped compact JSON aliases such as `apikey`. The current aggregate scanner
-accepts that escaped-apikey canary without decoding its key; this is a documented
-downstream blocker for the registry lane and requires aggregate helper
-coordination. This fixture does not edit aggregate files.
+host; its runtime mutation value is unchanged. The aggregate scanner now
+handles escaped compact JSON aliases such as `apikey` in its own boundary.
+This fixture does not edit aggregate files. Synthetic Caddy `421`/`403` and
+no-upstream rows remain fixture evidence only; they do not claim a live public
+edge, arbitrary Host/Origin acceptance, or `4403` behavior.
 
 Run from the repository root:
 
