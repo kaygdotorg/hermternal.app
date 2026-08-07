@@ -1,14 +1,18 @@
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   BenchmarkError,
   assertMeasuredInputsTracked,
+  assertEvidenceEnvironment,
   assertRuntimeIdentity,
   assertSourceIdentityUnchanged,
+  assertToolchainRuntimeAnchor,
+  assertToolchainVersions,
+  bindDependencySnapshot,
   captureInputSnapshot,
   distribution,
   inputIdentity,
@@ -25,6 +29,7 @@ import {
   runBuildSeries,
   sandboxLauncher,
   terminateProcessGroup,
+  treeIdentity,
   validateWorkload,
   type BoundedFileOpener,
   type Workload
@@ -178,6 +183,7 @@ describe('production-build benchmark contract', () => {
     candidate.build.input_files = [relativePath];
     candidate.build.input_roots = [];
     try {
+      await mkdir(join(resolve(benchmarkRoot, '../..'), '.svelte-kit'), { recursive: true });
       await writeFile(absolutePath, 'ignored');
       expect(() => assertMeasuredInputsTracked(candidate)).toThrow(new BenchmarkError('source_input_tree_dirty'));
     } finally {
@@ -192,6 +198,7 @@ describe('production-build benchmark contract', () => {
     candidate.build.input_files = [];
     candidate.build.input_roots = ['.svelte-kit'];
     try {
+      await mkdir(join(resolve(benchmarkRoot, '../..'), '.svelte-kit'), { recursive: true });
       await writeFile(absolutePath, 'ignored');
       expect(() => assertMeasuredInputsTracked(candidate)).toThrow(new BenchmarkError('source_input_tree_dirty'));
     } finally {
@@ -209,6 +216,82 @@ describe('production-build benchmark contract', () => {
     const changed = structuredClone(linuxAnchor);
     changed.node.bytes += 1;
     expect(() => assertRuntimeIdentity(changed, linuxAnchor)).toThrow(new BenchmarkError('runtime_identity_mismatch'));
+  });
+
+  test('binds emitted toolchain runtime identities to the selected platform anchor', async () => {
+    const candidate = await workload();
+    const darwin = candidate.integrity.runtime.darwin;
+    if (!darwin) throw new Error('Darwin runtime anchor missing from reviewed workload');
+    const toolchain = {
+      node_executable: darwin.node,
+      bun_executable: darwin.bun,
+      python_executable: darwin.python,
+      sandbox_executable: darwin.sandbox
+    };
+    expect(() => assertToolchainRuntimeAnchor(toolchain, candidate, 'darwin')).not.toThrow();
+    const changed = structuredClone(toolchain);
+    changed.node_executable.bytes += 1;
+    expect(() => assertToolchainRuntimeAnchor(changed, candidate, 'darwin')).toThrow(
+      new BenchmarkError('runtime_identity_mismatch')
+    );
+
+    const linuxCandidate = structuredClone(candidate);
+    linuxCandidate.integrity.runtime.linux = structuredClone(darwin);
+    expect(() => assertToolchainRuntimeAnchor(toolchain, linuxCandidate, 'linux')).not.toThrow();
+  });
+
+  test('pins Bun and Node inputs and gates evidence to Darwin arm64', async () => {
+    const candidate = await workload();
+    expect(() => assertToolchainVersions(candidate, 'v26.7.0')).not.toThrow();
+    expect(() => assertToolchainVersions(candidate, 'v25.0.0')).toThrow(
+      new BenchmarkError('toolchain_version_mismatch')
+    );
+    expect(() => assertEvidenceEnvironment(candidate, 'v26.7.0', 'darwin', 'arm64')).not.toThrow();
+    expect(() => assertEvidenceEnvironment(candidate, 'v26.7.0', 'darwin', 'x64')).toThrow(
+      new BenchmarkError('evidence_environment_unsupported')
+    );
+    expect(() => assertEvidenceEnvironment(candidate, 'v26.7.0', 'linux', 'arm64')).toThrow(
+      new BenchmarkError('evidence_environment_unsupported')
+    );
+  });
+
+  test('excludes only root dependency caches from identity and binding', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-dependency-cache-'));
+    const dependencyRoot = join(root, 'dependencies');
+    const workspace = join(root, 'workspace');
+    try {
+      await mkdir(join(dependencyRoot, '.vite'), { recursive: true });
+      await mkdir(join(dependencyRoot, '.vite-temp'), { recursive: true });
+      await mkdir(join(dependencyRoot, '.bin'), { recursive: true });
+      await mkdir(join(dependencyRoot, 'package', 'nested', '.vite'), { recursive: true });
+      await mkdir(join(workspace, '.artifact-output', '.vite-temp'), { recursive: true });
+      await writeFile(join(dependencyRoot, '.vite', 'root-cache'), 'ignore me');
+      await writeFile(join(dependencyRoot, '.vite-temp', 'root-cache'), 'ignore me');
+      await writeFile(join(dependencyRoot, '.bin', 'cli'), 'bin payload');
+      await writeFile(join(dependencyRoot, 'package', 'package.json'), '{}');
+      await writeFile(join(dependencyRoot, 'package', 'nested', '.vite', 'payload'), 'keep me');
+      await symlink(join(dependencyRoot, 'package'), join(dependencyRoot, '.bin', 'package-link'), 'dir');
+
+      const before = await treeIdentity(dependencyRoot, ['.vite', '.vite-temp']);
+      await writeFile(join(dependencyRoot, '.vite', 'root-cache'), 'changed root cache');
+      await writeFile(join(dependencyRoot, '.vite-temp', 'root-cache'), 'changed root cache');
+      const afterRootCacheChange = await treeIdentity(dependencyRoot, ['.vite', '.vite-temp']);
+      expect(afterRootCacheChange).toEqual(before);
+
+      await writeFile(join(dependencyRoot, 'package', 'nested', '.vite', 'payload'), 'changed nested payload');
+      const nestedChanged = await treeIdentity(dependencyRoot, ['.vite', '.vite-temp']);
+      expect(nestedChanged).not.toEqual(before);
+
+      await bindDependencySnapshot(workspace, dependencyRoot);
+      expect(await Bun.file(join(workspace, 'node_modules', '.vite', 'root-cache')).exists()).toBe(false);
+      expect((await lstat(join(workspace, 'node_modules', '.vite-temp'))).isSymbolicLink()).toBe(true);
+      expect(await readlink(join(workspace, 'node_modules', '.vite-temp'))).toBe('../.artifact-output/.vite-temp');
+      expect(await Bun.file(join(workspace, 'node_modules', '.bin', 'cli')).exists()).toBe(true);
+      expect(await Bun.file(join(workspace, 'node_modules', 'package', 'nested', '.vite', 'payload')).exists()).toBe(true);
+      expect((await lstat(join(workspace, 'node_modules', '.bin', 'package-link'))).isSymbolicLink()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test('reads Vite version metadata without executing the package bin', async () => {

@@ -66,10 +66,15 @@ remain the normative deep-link references.
 
 ## Run and verify
 
-Run these commands from this directory:
+Run these commands from this directory. The repository pins Bun `1.3.14`
+through `.bun-version`, `packageManager`, and `engines`, and pins Node `v26.7.0`.
+Use a fresh frozen install rather than a reused dependency tree:
 
 ```sh
-bun install
+test "$(bun --version)" = "1.3.14"
+test "$(node --version)" = "v26.7.0"
+rm -rf node_modules
+bun install --frozen-lockfile
 bun run typecheck:version
 bun run typecheck
 bun run check

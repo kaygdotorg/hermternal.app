@@ -16,6 +16,7 @@ import math
 import os
 import re
 import stat
+import subprocess
 import sys
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
@@ -121,14 +122,14 @@ REDACTION_KEYS = (
     "contains_transcripts",
 )
 WEB_WORKLOAD_KEYS = (
-    "schema", "fixture_id", "fixture_version", "build", "repetitions", "limits", "network", "launcher", "integrity", "hermes_source_sha"
+    "schema", "fixture_id", "fixture_version", "build", "repetitions", "limits", "network", "launcher", "package_manager", "toolchain", "integrity", "hermes_source_sha"
 )
 WEB_TRACE_KEYS = (
     "schema", "recorded_at_utc", "source_commit_sha", "fixture_sha256", "environment", "build_input", "toolchain",
     "network_mode", "limits", "warmup_excluded_from_distribution", "runs"
 )
 WEB_TOOLCHAIN_KEYS = (
-    "package_json", "bun_lock", "benchmark_runner", "sandbox_runner", "artifact_scanner", "node_executable",
+    "package_manager", "node_version", "package_json", "bun_lock", "benchmark_runner", "sandbox_runner", "artifact_scanner", "node_executable",
     "bun_executable", "python_executable", "sandbox_executable", "dependencies", "vite", "sveltekit",
     "vite_svelte_plugin", "svelte", "typescript_native"
 )
@@ -277,6 +278,18 @@ EXPECTED_ARTIFACT_PATHS = {
 # Its submitted metadata is still checked against the local file when artifact
 # verification is enabled; every other artifact, including the synthetic trace,
 # must match this immutable anchor exactly.
+WEB_EVIDENCE_ALLOWED_DESCENDANT_PATHS = (
+    "apps/web/README.md",
+    "apps/web/benchmarks/production-build/README.md",
+    "apps/web/benchmarks/production-build/evidence/",
+    "apps/web/benchmarks/production-build/run.test.ts",
+    "contracts/benchmarks/README.md",
+    "contracts/benchmarks/sample-provenance.json",
+    "contracts/benchmarks/test_validate.py",
+    "contracts/benchmarks/validate.py",
+    "contracts/benchmarks/validation-baseline.json",
+)
+
 EXPECTED_ARTIFACT_METADATA = {
     EVIDENCE_ID: (
         ("synthetic/workload.json", 4042, "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"),
@@ -493,27 +506,41 @@ def _parse_json_bytes(raw: bytes) -> Any:
     return value
 
 
+def _read_bounded_descriptor(descriptor: int, label: str) -> bytes:
+    """Read one regular file to EOF with a bounded sentinel and stability check."""
+
+    initial = os.fstat(descriptor)
+    require(stat.S_ISREG(initial.st_mode), f"{label} is not a regular file")
+    require(initial.st_size <= MAX_JSON_BYTES, f"{label} exceeds the bounded byte limit")
+    chunks: list[bytes] = []
+    total = 0
+    read_limit = MAX_JSON_BYTES + 1
+    while total < read_limit:
+        chunk = os.read(descriptor, min(65536, read_limit - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    final = os.fstat(descriptor)
+    require(final.st_size == initial.st_size, f"{label} changed while reading")
+    require(total == final.st_size, f"{label} changed while reading")
+    require(total <= MAX_JSON_BYTES, f"{label} exceeds the bounded byte limit")
+    return b"".join(chunks)
+
+
 def load_json(path: Path) -> Any:
     """Read bounded UTF-8 JSON with duplicate-key and numeric checks.
 
-    Read through one no-follow descriptor and stop after MAX_JSON_BYTES + 1
-    bytes. This keeps allocation bounded even if a file grows after opening.
+    The no-follow descriptor is measured before and after a cap-plus-one read.
+    This rejects an append, truncation, or torn EOF observation without ever
+    allocating more than the reviewed JSON bound plus one rejection byte.
     """
 
     descriptor: int | None = None
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        chunks: list[bytes] = []
-        remaining = MAX_JSON_BYTES + 1
-        while remaining:
-            chunk = os.read(descriptor, min(65536, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-        return _parse_json_bytes(raw)
-    except OSError:
+        return _parse_json_bytes(_read_bounded_descriptor(descriptor, "input"))
+    except (OSError, ValidationError):
         raise ValidationError("input could not be read") from None
     finally:
         if descriptor is not None:
@@ -850,17 +877,7 @@ def _read_local_file(root: Path, portable_path: str, label: str) -> bytes:
             descriptors.append(current)
         file_descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
         descriptors.append(file_descriptor)
-        metadata = os.fstat(file_descriptor)
-        require(stat.S_ISREG(metadata.st_mode), f"{label} is not a regular file")
-        require(metadata.st_size <= MAX_JSON_BYTES, f"{label} exceeds the bounded byte limit")
-        chunks: list[bytes] = []
-        remaining = metadata.st_size
-        while remaining:
-            chunk = os.read(file_descriptor, min(65536, remaining))
-            require(bool(chunk), f"{label} changed while reading")
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
+        return _read_bounded_descriptor(file_descriptor, label)
     except (OSError, ValidationError):
         raise ValidationError(f"{label} could not be read safely") from None
     finally:
@@ -914,7 +931,77 @@ def _validate_web_observation(value: Any, label: str, *, expected_sequence: int 
     return observation
 
 
+def _web_evidence_path_is_allowed(path: str) -> bool:
+    """Keep descendant evidence changes outside measured source paths."""
+
+    return any(
+        path.startswith(allowed) if allowed.endswith("/") else path == allowed
+        for allowed in WEB_EVIDENCE_ALLOWED_DESCENDANT_PATHS
+    )
+
+
+def _validate_web_evidence_revision(record: dict[str, Any], root: Path) -> None:
+    """Require current-head evidence or a reviewed evidence-only descendant."""
+
+    # Copied fixture roots are used by the regression suite and cannot be
+    # related to the repository's Git history.  Canonical checked-in evidence
+    # is the only evidence subject to this ancestry check.
+    if root.resolve() != WEB_BENCHMARK_ROOT.resolve():
+        return
+    source = record["revision"]["commit_sha"]
+    try:
+        head_result = subprocess.run(
+            ["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "--verify", "HEAD"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        head = head_result.stdout.decode("ascii").strip()
+        require(
+            head_result.returncode == 0 and COMMIT_RE.fullmatch(head) is not None,
+            "web repository head is unavailable",
+        )
+        if source == head:
+            return
+        ancestor = subprocess.run(
+            ["git", "-C", str(REPOSITORY_ROOT), "merge-base", "--is-ancestor", source, head],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        require(ancestor.returncode == 0, "web evidence source is not an ancestor of repository head")
+        changed_result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPOSITORY_ROOT),
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                "--no-ext-diff",
+                f"{source}..{head}",
+                "--",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        require(changed_result.returncode == 0, "web evidence descendant scope is unavailable")
+        changed = [path for path in changed_result.stdout.decode("utf-8").split("\0") if path]
+        require(
+            all(_web_evidence_path_is_allowed(path) for path in changed),
+            "web evidence descendant contains unreviewed source changes",
+        )
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        raise ValidationError("web evidence revision could not be checked") from None
+
+
 def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
+    _validate_web_evidence_revision(record, root)
     workload = _load_reviewed_json(root, WEB_PRODUCTION_BUILD_EVIDENCE_ID, "workload.json", "web workload")
     workload = _strict_keys(workload, WEB_WORKLOAD_KEYS, "web workload")
     require(workload["schema"] == EXPECTED_FIXTURE_SCHEMAS[WEB_PRODUCTION_BUILD_EVIDENCE_ID], "web workload schema changed")
@@ -925,18 +1012,24 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     require(build == {
         "entrypoint": "node_modules/vite/bin/vite.js",
         "arguments": ["build", "--configLoader", "runner"],
-        "input_files": ["package.json", "bun.lock", "svelte.config.js", "tsconfig.json", "vite.config.ts"],
+        "input_files": ["package.json", ".bun-version", "bun.lock", "svelte.config.js", "tsconfig.json", "vite.config.ts"],
         "input_roots": ["src", "static"],
         "output_root": ".artifact-output/build",
         "version_name": "hermternal-web-production-build-v1",
     }, "web workload build changed")
+    package_manager = _strict_keys(workload["package_manager"], ("name", "version", "install_args"), "web workload.package_manager")
+    require(package_manager == {"name": "bun", "version": "1.3.14", "install_args": ["install", "--frozen-lockfile"]}, "web workload package manager changed")
+    toolchain_pin = _strict_keys(workload["toolchain"], ("bun_version", "node_version"), "web workload.toolchain")
+    require(toolchain_pin == {"bun_version": "1.3.14", "node_version": "v26.7.0"}, "web workload toolchain changed")
     integrity = _strict_keys(workload["integrity"], WEB_INTEGRITY_KEYS, "web workload.integrity")
     for key in WEB_INTEGRITY_KEYS[:-1]:
         if key in {"package_json", "bun_lock"}:
             _strict_keys(integrity[key], WEB_FILE_IDENTITY_KEYS, f"web workload.integrity.{key}")
         else:
             _strict_keys(integrity[key], WEB_TREE_IDENTITY_KEYS, f"web workload.integrity.{key}")
-    runtime = _strict_keys(integrity["runtime"], ("darwin",), "web workload.integrity.runtime")
+    runtime = integrity["runtime"]
+    require(type(runtime) is dict, "web workload.integrity.runtime must be an object")
+    require(tuple(runtime.keys()) in (("darwin",), ("darwin", "linux")), "web workload.integrity.runtime keys changed")
     runtime_anchors = {
         platform_key: _strict_keys(
             anchor,
@@ -948,24 +1041,29 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     for platform_key, anchor in runtime_anchors.items():
         for key in WEB_RUNTIME_ANCHOR_KEYS:
             _strict_keys(anchor[key], WEB_FILE_IDENTITY_KEYS, f"web workload.integrity.runtime.{platform_key}.{key}")
-    require(integrity == {
-        "package_json": {"bytes": 1546, "sha256": "bb6f27b61e87d4cd3af84a54b52ec3c0d78c4018a903114fc5cfb7887875f113"},
+    expected_integrity = {
+        "package_json": {"bytes": 1642, "sha256": "564cf2bc4ff5600ad8d1ce83a4b34d2199f8787e0e7d8a7db33331a3fc62e43b"},
         "bun_lock": {"bytes": 46368, "sha256": "f9999f93386967986d0393b34b008af2f71472fb4eb825062575fb9f822f8d3e"},
-        "dependencies": {"files": 5790, "symlinks": 15, "bytes": 156657114, "sha256": "a5f2903bdd8c2dd0a2654fb039e632cd053b1235f91afff2d21f77513cd70ad1"},
+        "dependencies": {"files": 5727, "symlinks": 15, "bytes": 150511188, "sha256": "ddf2c47880cf0899e6e5ad71787e2e63b8a2f566c44955f2c5122b96588ad709"},
         "vite": {"files": 42, "symlinks": 0, "bytes": 2500530, "sha256": "50fae63c7384b51a88596f83fbef112bfcf119371164e1817f383ab77a024145"},
         "sveltekit": {"files": 194, "symlinks": 0, "bytes": 1295253, "sha256": "0ec64b01924815c0fc77e956a89751182da0ca44314723183fc48fae96e208cc"},
         "vite_svelte_plugin": {"files": 38, "symlinks": 0, "bytes": 145592, "sha256": "909f391b0a3b76eb71c1d9b82538fface1ca76cad9e4c96ab4cb5dfb27c1f542"},
         "svelte": {"files": 546, "symlinks": 0, "bytes": 3049600, "sha256": "2f9abf26cca39a363d037b2bb8e6194828e4dfb4168a8a48b870afbfee6e1b62"},
         "typescript_native": {"files": 416, "symlinks": 0, "bytes": 2497498, "sha256": "d32f5c97c4752aa2d962de11058d4cda2737d0b92e5d1cb381a880f0e5fa28ad"},
-        "runtime": {
-            "darwin": {
-                "node": {"bytes": 50320, "sha256": "1ef99ea25fe70c9b67e7efe768ef8ee22148d3cabc703db6131b57aeb617d040"},
-                "bun": {"bytes": 61512816, "sha256": "fb46ac6497104821512b67a3b3157c9fbbab8a99e311fb38da5b7039a373d860"},
-                "python": {"bytes": 118928, "sha256": "179301dcb41ea78accc3fa0048a7e6f6710d891945a751a34addd622020c1818"},
-                "sandbox": {"bytes": 102560, "sha256": "8290e4be7387a0df83cd1559e86afd880464f269450573d012795761fe298f16"},
-            },
+    }
+    require(
+        {key: integrity[key] for key in WEB_INTEGRITY_KEYS[:-1]} == expected_integrity,
+        "web workload integrity anchors changed",
+    )
+    require(
+        runtime["darwin"] == {
+            "node": {"bytes": 50320, "sha256": "1ef99ea25fe70c9b67e7efe768ef8ee22148d3cabc703db6131b57aeb617d040"},
+            "bun": {"bytes": 61512816, "sha256": "fb46ac6497104821512b67a3b3157c9fbbab8a99e311fb38da5b7039a373d860"},
+            "python": {"bytes": 118928, "sha256": "179301dcb41ea78accc3fa0048a7e6f6710d891945a751a34addd622020c1818"},
+            "sandbox": {"bytes": 102560, "sha256": "8290e4be7387a0df83cd1559e86afd880464f269450573d012795761fe298f16"},
         },
-    }, "web workload integrity anchors changed")
+        "web workload Darwin runtime anchor changed",
+    )
     repetitions = _strict_keys(workload["repetitions"], ("cold", "warm", "maximum"), "web workload.repetitions")
     require(repetitions == {"cold": 30, "warm": 30, "maximum": 100}, "web workload repetitions changed")
     limits = _strict_keys(workload["limits"], ("build_timeout_ms", "stdout_bytes", "stderr_bytes", "workspace_input_bytes", "artifact_files", "artifact_bytes", "node_heap_megabytes"), "web workload.limits")
@@ -974,7 +1072,7 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     require(network == {"mode": "deny", "boundary": "os_sandbox"}, "web workload network boundary changed")
     launcher = _strict_keys(workload["launcher"], ("supervisor_sha256", "scanner_sha256"), "web workload.launcher")
     require(launcher == {
-        "supervisor_sha256": "e12eb3f7ec3e499802a27027cab6d188d4d60af544920b58be7fd48b8ff6c44b",
+        "supervisor_sha256": "240719c214b74ca097cf545f697a64aedcec9b2477470ce96248bebc89687865",
         "scanner_sha256": "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb",
     }, "web workload protected helper identities changed")
 
@@ -992,17 +1090,23 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     _integer(build_input["bytes"], "web trace.build_input.bytes", minimum=1, maximum=16777216)
     _text(build_input["sha256"], "web trace.build_input.sha256", pattern=SHA256_RE)
     toolchain = _strict_keys(trace["toolchain"], WEB_TOOLCHAIN_KEYS, "web trace.toolchain")
-    for key in WEB_TOOLCHAIN_KEYS[:9]:
+    trace_package_manager = _strict_keys(toolchain["package_manager"], ("name", "version", "install_args"), "web trace.toolchain.package_manager")
+    require(trace_package_manager == package_manager, "web trace package manager changed")
+    require(toolchain["node_version"] == toolchain_pin["node_version"], "web trace Node version changed")
+    _text(toolchain["node_version"], "web trace.toolchain.node_version")
+    for key in WEB_TOOLCHAIN_KEYS[2:11]:
         identity = _strict_keys(toolchain[key], WEB_FILE_IDENTITY_KEYS, f"web trace.toolchain.{key}")
         _integer(identity["bytes"], f"web trace.toolchain.{key}.bytes", minimum=1)
         _text(identity["sha256"], f"web trace.toolchain.{key}.sha256", pattern=SHA256_RE)
-    for key in WEB_TOOLCHAIN_KEYS[9:]:
+    for key in WEB_TOOLCHAIN_KEYS[11:]:
         identity = _strict_keys(toolchain[key], WEB_TREE_IDENTITY_KEYS, f"web trace.toolchain.{key}")
         _integer(identity["files"], f"web trace.toolchain.{key}.files", minimum=1)
         _integer(identity["symlinks"], f"web trace.toolchain.{key}.symlinks", minimum=0)
         _integer(identity["bytes"], f"web trace.toolchain.{key}.bytes", minimum=1)
         _text(identity["sha256"], f"web trace.toolchain.{key}.sha256", pattern=SHA256_RE)
     anchored_toolchain = {
+        "package_manager": package_manager,
+        "node_version": toolchain_pin["node_version"],
         "package_json": integrity["package_json"],
         "bun_lock": integrity["bun_lock"],
         "node_executable": runtime_anchor["node"],

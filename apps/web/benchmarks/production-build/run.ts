@@ -18,6 +18,7 @@ const ARTIFACT_SCANNER_PATH = join(BENCHMARK_ROOT, 'artifact-scanner.py');
 const SYSTEM_PYTHON_PATH = '/usr/bin/python3';
 const MACOS_SANDBOX_PATH = '/usr/bin/sandbox-exec';
 const LINUX_SANDBOX_PATH = '/usr/bin/bwrap';
+const TRANSIENT_DEPENDENCY_ENTRIES = ['.vite', '.vite-temp'] as const;
 const SIGNAL_CLEANUP_DEADLINE_MS = 10_000;
 const SERIES_CLEANUP_GRACE_MS = 2_000;
 export const MAX_JSON_BYTES = 16 * 1024;
@@ -102,6 +103,17 @@ interface IntegrityAnchors {
   runtime: Partial<Record<'darwin' | 'linux', RuntimeIdentity>>;
 }
 
+interface PackageManagerPin {
+  name: string;
+  version: string;
+  install_args: string[];
+}
+
+interface ToolchainPin {
+  bun_version: string;
+  node_version: string;
+}
+
 export interface Workload {
   schema: string;
   fixture_id: string;
@@ -126,6 +138,8 @@ export interface Workload {
   };
   network: { mode: string; boundary: string };
   launcher: { supervisor_sha256: string; scanner_sha256: string };
+  package_manager: PackageManagerPin;
+  toolchain: ToolchainPin;
   integrity: IntegrityAnchors;
   hermes_source_sha: string;
 }
@@ -244,16 +258,18 @@ export function validateWorkload(untrusted: unknown): Workload {
   const limits = candidate.limits;
   const network = candidate.network;
   const launcher = candidate.launcher;
+  const packageManager = candidate.package_manager;
+  const toolchain = candidate.toolchain;
   const integrity = candidate.integrity;
   if (
     !isRecord(build) || !isRecord(repetitions) || !isRecord(limits) || !isRecord(network) ||
-    !isRecord(launcher) || !isRecord(integrity) || !isRecord(integrity.runtime)
+    !isRecord(launcher) || !isRecord(packageManager) || !isRecord(toolchain) || !isRecord(integrity) || !isRecord(integrity.runtime)
   ) {
     throw new BenchmarkError('workload_shape_invalid');
   }
   requireExactKeys(
     candidate,
-    ['schema', 'fixture_id', 'fixture_version', 'build', 'repetitions', 'limits', 'network', 'launcher', 'integrity', 'hermes_source_sha'],
+    ['schema', 'fixture_id', 'fixture_version', 'build', 'repetitions', 'limits', 'network', 'launcher', 'package_manager', 'toolchain', 'integrity', 'hermes_source_sha'],
     'workload_keys_invalid'
   );
   requireExactKeys(build, ['entrypoint', 'arguments', 'input_files', 'input_roots', 'output_root', 'version_name'], 'build_keys_invalid');
@@ -265,12 +281,20 @@ export function validateWorkload(untrusted: unknown): Workload {
   );
   requireExactKeys(network, ['mode', 'boundary'], 'network_keys_invalid');
   requireExactKeys(launcher, ['supervisor_sha256', 'scanner_sha256'], 'launcher_keys_invalid');
+  requireExactKeys(packageManager, ['name', 'version', 'install_args'], 'package_manager_keys_invalid');
+  requireExactKeys(toolchain, ['bun_version', 'node_version'], 'toolchain_keys_invalid');
   requireExactKeys(
     integrity,
     ['package_json', 'bun_lock', 'dependencies', 'vite', 'sveltekit', 'vite_svelte_plugin', 'svelte', 'typescript_native', 'runtime'],
     'integrity_keys_invalid'
   );
-  requireExactKeys(integrity.runtime, ['darwin'], 'runtime_anchor_keys_invalid');
+  const runtimeKeys = Reflect.ownKeys(integrity.runtime);
+  if (
+    runtimeKeys.some((key) => typeof key !== 'string' || (key !== 'darwin' && key !== 'linux')) ||
+    !runtimeKeys.includes('darwin') || runtimeKeys.length > 2
+  ) {
+    throw new BenchmarkError('runtime_anchor_keys_invalid');
+  }
   const fileAnchors = [integrity.package_json, integrity.bun_lock];
   const treeAnchors = [
     integrity.dependencies,
@@ -283,7 +307,7 @@ export function validateWorkload(untrusted: unknown): Workload {
   if (
     fileAnchors.some((value) => !isRecord(value)) ||
     treeAnchors.some((value) => !isRecord(value)) ||
-    !isRecord(integrity.runtime.darwin)
+    Object.values(integrity.runtime).some((value) => !isRecord(value))
   ) {
     throw new BenchmarkError('integrity_shape_invalid');
   }
@@ -304,12 +328,14 @@ export function validateWorkload(untrusted: unknown): Workload {
       throw new BenchmarkError('tree_integrity_invalid');
     }
   }
-  requireExactKeys(integrity.runtime.darwin, ['node', 'bun', 'python', 'sandbox'], 'runtime_integrity_keys_invalid');
-  for (const anchor of Object.values(integrity.runtime.darwin)) {
-    if (!isRecord(anchor)) throw new BenchmarkError('runtime_integrity_invalid');
-    requireExactKeys(anchor, ['bytes', 'sha256'], 'runtime_integrity_keys_invalid');
-    if (!Number.isSafeInteger(anchor.bytes) || anchor.bytes <= 0 || typeof anchor.sha256 !== 'string' || !SHA256_PATTERN.test(anchor.sha256)) {
-      throw new BenchmarkError('runtime_integrity_invalid');
+  for (const runtimeAnchor of Object.values(integrity.runtime)) {
+    requireExactKeys(runtimeAnchor, ['node', 'bun', 'python', 'sandbox'], 'runtime_integrity_keys_invalid');
+    for (const anchor of Object.values(runtimeAnchor)) {
+      if (!isRecord(anchor)) throw new BenchmarkError('runtime_integrity_invalid');
+      requireExactKeys(anchor, ['bytes', 'sha256'], 'runtime_integrity_keys_invalid');
+      if (!Number.isSafeInteger(anchor.bytes) || anchor.bytes <= 0 || typeof anchor.sha256 !== 'string' || !SHA256_PATTERN.test(anchor.sha256)) {
+        throw new BenchmarkError('runtime_integrity_invalid');
+      }
     }
   }
   const pathLists = [build.input_files, build.input_roots, build.arguments];
@@ -322,8 +348,14 @@ export function validateWorkload(untrusted: unknown): Workload {
     pathLists.some((list) => !Array.isArray(list) || list.some((item) => typeof item !== 'string')) ||
     JSON.stringify(build.arguments) !== JSON.stringify(['build', '--configLoader', 'runner']) ||
     JSON.stringify(build.input_files) !==
-      JSON.stringify(['package.json', 'bun.lock', 'svelte.config.js', 'tsconfig.json', 'vite.config.ts']) ||
+      JSON.stringify(['package.json', '.bun-version', 'bun.lock', 'svelte.config.js', 'tsconfig.json', 'vite.config.ts']) ||
     JSON.stringify(build.input_roots) !== JSON.stringify(['src', 'static']) ||
+    packageManager.name !== 'bun' ||
+    packageManager.version !== '1.3.14' ||
+    JSON.stringify(packageManager.install_args) !== JSON.stringify(['install', '--frozen-lockfile']) ||
+    toolchain.bun_version !== '1.3.14' ||
+    toolchain.node_version !== 'v26.7.0' ||
+    packageManager.version !== toolchain.bun_version ||
     network.mode !== 'deny' ||
     network.boundary !== 'os_sandbox' ||
     typeof launcher.supervisor_sha256 !== 'string' || !SHA256_PATTERN.test(launcher.supervisor_sha256) ||
@@ -491,6 +523,13 @@ async function cloneDependencySnapshot(runRoot: string): Promise<string> {
     : ['/bin/cp', '-a', '--reflink=auto', source, destination];
   const copied = spawnSync(copyCommand[0], copyCommand.slice(1), { stdio: 'ignore' });
   if (copied.status !== 0) throw new BenchmarkError('dependency_snapshot_failed');
+  // Root caches are generated by Vitest/Vite, not resolved packages. Remove
+  // them from the private clone so a fresh frozen install and a checkout that
+  // has run tests produce the same dependency snapshot.
+  for (const entry of TRANSIENT_DEPENDENCY_ENTRIES) {
+    const generatedCache = spawnSync('/bin/rm', ['-rf', join(destination, entry)], { stdio: 'ignore' });
+    if (generatedCache.status !== 0) throw new BenchmarkError('dependency_snapshot_failed');
+  }
   const protectedSnapshot = spawnSync('/bin/chmod', ['-R', 'a-w', destination], { stdio: 'ignore' });
   if (protectedSnapshot.status !== 0) throw new BenchmarkError('dependency_snapshot_failed');
   return destination;
@@ -519,7 +558,7 @@ export async function mountArtifactQuota(workspace: string, artifactBytes: numbe
   quotaDevices.set(workspace, `/dev/${deviceMatch[1]}`);
 }
 
-async function bindDependencySnapshot(workspace: string, dependencySnapshot: string): Promise<void> {
+export async function bindDependencySnapshot(workspace: string, dependencySnapshot: string): Promise<void> {
   const bindingRoot = join(workspace, 'node_modules');
   await mkdir(bindingRoot, { recursive: true });
   const entries = await readdir(dependencySnapshot, { withFileTypes: true });
@@ -527,7 +566,7 @@ async function bindDependencySnapshot(workspace: string, dependencySnapshot: str
   for (const entry of entries) {
     // Vite owns this cache directory during config loading. Keep it local and
     // writable instead of binding the immutable snapshot's prior cache bytes.
-    if (entry.name === '.vite-temp') continue;
+    if ((TRANSIENT_DEPENDENCY_ENTRIES as readonly string[]).includes(entry.name)) continue;
     const source = join(dependencySnapshot, entry.name);
     const destination = join(bindingRoot, entry.name);
     if (entry.name.startsWith('@') && entry.isDirectory()) {
@@ -1044,6 +1083,24 @@ function commandVersion(command: string, args: string[]): string {
   return new TextDecoder().decode(result.stdout).trim();
 }
 
+export function assertToolchainVersions(workload: Workload, nodeVersion: string): void {
+  if (Bun.version !== workload.toolchain.bun_version || nodeVersion !== workload.toolchain.node_version) {
+    throw new BenchmarkError('toolchain_version_mismatch');
+  }
+}
+
+export function assertEvidenceEnvironment(
+  workload: Workload,
+  nodeVersion: string,
+  targetPlatform = platform(),
+  targetArchitecture = arch()
+): void {
+  assertToolchainVersions(workload, nodeVersion);
+  if (targetPlatform !== 'darwin' || targetArchitecture !== 'arm64') {
+    throw new BenchmarkError('evidence_environment_unsupported');
+  }
+}
+
 export type BoundedFileHandle = Pick<FileHandle, 'read' | 'close'>;
 export type BoundedFileOpener = (path: string, flags: number) => Promise<BoundedFileHandle>;
 
@@ -1157,13 +1214,15 @@ export function assertSourceIdentityUnchanged(
   }
 }
 
-export async function treeIdentity(root: string): Promise<TreeIdentity> {
+export async function treeIdentity(root: string, excludedRootEntries: readonly string[] = []): Promise<TreeIdentity> {
   const resolvedRoot = await realpath(root);
+  const excluded = new Set(excludedRootEntries);
   const records: Array<{ path: string; type: 'file' | 'symlink'; bytes: number; sha256: string }> = [];
   async function visit(directory: string): Promise<void> {
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
+      if ((directory === root || directory === resolvedRoot) && excluded.has(entry.name)) continue;
       const path = join(directory, entry.name);
       const metadata = await lstat(path);
       if (metadata.isDirectory()) await visit(path);
@@ -1234,6 +1293,26 @@ export function assertRuntimeIdentity(actual: RuntimeIdentity, expected: Runtime
   }
 }
 
+export function assertToolchainRuntimeAnchor(
+  toolchain: Record<string, unknown>,
+  workload: Workload,
+  targetPlatform = platform()
+): void {
+  const anchor = requireRuntimeAnchor(workload, targetPlatform);
+  const mappings = [
+    ['node_executable', 'node'],
+    ['bun_executable', 'bun'],
+    ['python_executable', 'python'],
+    ['sandbox_executable', 'sandbox']
+  ] as const;
+  for (const [toolchainKey, anchorKey] of mappings) {
+    const actual = toolchain[toolchainKey];
+    if (!isRecord(actual) || !sameIdentity(actual as unknown as FileIdentity, anchor[anchorKey])) {
+      throw new BenchmarkError('runtime_identity_mismatch');
+    }
+  }
+}
+
 async function verifyDependencySnapshot(
   workload: Workload,
   dependencySnapshot: string,
@@ -1249,7 +1328,7 @@ async function verifyDependencySnapshot(
     throw new BenchmarkError('dependency_identity_mismatch');
   }
   const actualTrees = {
-    dependencies: await treeIdentity(dependencySnapshot),
+    dependencies: await treeIdentity(dependencySnapshot, TRANSIENT_DEPENDENCY_ENTRIES),
     vite: await treeIdentity(join(dependencySnapshot, 'vite')),
     sveltekit: await treeIdentity(join(dependencySnapshot, '@sveltejs', 'kit')),
     vite_svelte_plugin: await treeIdentity(join(dependencySnapshot, '@sveltejs', 'vite-plugin-svelte')),
@@ -1269,8 +1348,19 @@ async function verifyDependencySnapshot(
   assertRuntimeIdentity(actualRuntime, runtimeAnchor);
 }
 
-async function toolchainIdentity(dependencySnapshot: string, inputSnapshot: string, runtime: ProtectedRuntime): Promise<Record<string, unknown>> {
+async function toolchainIdentity(
+  dependencySnapshot: string,
+  inputSnapshot: string,
+  runtime: ProtectedRuntime,
+  workload: Workload
+): Promise<Record<string, unknown>> {
   return {
+    package_manager: {
+      name: workload.package_manager.name,
+      version: Bun.version,
+      install_args: [...workload.package_manager.install_args]
+    },
+    node_version: commandVersion(runtime.nodePath, ['--version']),
     package_json: await fileIdentity(join(inputSnapshot, 'package.json')),
     bun_lock: await fileIdentity(join(inputSnapshot, 'bun.lock')),
     benchmark_runner: await fileIdentity(import.meta.path),
@@ -1280,7 +1370,7 @@ async function toolchainIdentity(dependencySnapshot: string, inputSnapshot: stri
     bun_executable: await fileIdentity(process.execPath),
     python_executable: await fileIdentity(runtime.pythonPath),
     sandbox_executable: await fileIdentity(runtime.sandboxPath),
-    dependencies: await treeIdentity(dependencySnapshot),
+    dependencies: await treeIdentity(dependencySnapshot, TRANSIENT_DEPENDENCY_ENTRIES),
     vite: await treeIdentity(join(dependencySnapshot, 'vite')),
     sveltekit: await treeIdentity(join(dependencySnapshot, '@sveltejs', 'kit')),
     vite_svelte_plugin: await treeIdentity(join(dependencySnapshot, '@sveltejs', 'vite-plugin-svelte')),
@@ -1329,6 +1419,7 @@ async function writeEvidenceFiles(
 ): Promise<void> {
   const nodePath = runtime.nodePath;
   const nodeVersion = commandVersion(nodePath, ['--version']);
+  assertToolchainRuntimeAnchor(toolchain, workload);
   const viteVersion = await readPackageVersion(dependencySnapshot);
   const artifactIdentities = [warmup, ...cold, ...warm].map((sample) => sample.artifact_sha256);
   if (new Set(artifactIdentities).size !== 1) throw new BenchmarkError('artifact_identity_drift');
@@ -1534,6 +1625,10 @@ async function main(): Promise<void> {
   // Do not begin copying or measuring on a platform whose executable bytes are
   // not independently anchored by the reviewed workload fixture.
   requireRuntimeAnchor(workload);
+  const runtime = await protectedRuntime(workload);
+  const nodeVersion = commandVersion(runtime.nodePath, ['--version']);
+  assertToolchainVersions(workload, nodeVersion);
+  if (options.writeEvidence) assertEvidenceEnvironment(workload, nodeVersion);
   // Synchronous creation and registration form one signal-free JavaScript turn;
   // SIGINT/SIGTERM can no longer observe an unregistered on-disk run root.
   const runRoot = mkdtempSync(join(tmpdir(), 'hermternal-web-benchmark-'));
@@ -1560,9 +1655,8 @@ async function main(): Promise<void> {
       throw new BenchmarkError('source_input_mutated');
     }
     const dependencySnapshot = await cloneDependencySnapshot(runRoot);
-    const runtime = await protectedRuntime(workload);
     await verifyDependencySnapshot(workload, dependencySnapshot, inputSnapshot.root, runtime);
-    const toolchain = await toolchainIdentity(dependencySnapshot, inputSnapshot.root, runtime);
+    const toolchain = await toolchainIdentity(dependencySnapshot, inputSnapshot.root, runtime, workload);
     const readinessFile = process.env.HERMTERNAL_BENCHMARK_READY_FILE;
     if (readinessFile) {
       const readinessPath = resolve(readinessFile);
@@ -1577,7 +1671,7 @@ async function main(): Promise<void> {
     const warmResult = await runWarm(workload, dependencySnapshot, inputSnapshot.root, runtime, options.warmRepetitions);
     const artifactIdentities = [warmResult.warmup, ...cold, ...warmResult.observations].map((sample) => sample.artifact_sha256);
     if (new Set(artifactIdentities).size !== 1) throw new BenchmarkError('artifact_identity_drift');
-    const finalToolchain = await toolchainIdentity(dependencySnapshot, inputSnapshot.root, runtime);
+    const finalToolchain = await toolchainIdentity(dependencySnapshot, inputSnapshot.root, runtime, workload);
     if (JSON.stringify(toolchain) !== JSON.stringify(finalToolchain)) throw new BenchmarkError('dependency_snapshot_mutated');
     assertMeasuredInputsTracked(workload);
     const finalSourceCommit = sourceCommit();

@@ -51,11 +51,25 @@ The checked-in observation used an Apple M2 Max with Bun 1.3.14, Node 26.7.0, an
 
 ## Run and verify
 
-Install pinned web dependencies once from `apps/web/`:
+Create evidence only from a fresh clone on Darwin arm64. The checked-in
+`.bun-version`, `packageManager`, and `engines` fields require Bun `1.3.14` and
+Node `v26.7.0`; do not reuse a prior `node_modules` tree or generated root caches.
+Verify the toolchain before installing from `apps/web/`:
 
 ```sh
+test "$(bun --version)" = "1.3.14"
+test "$(node --version)" = "v26.7.0"
+test "$(uname -s)" = "Darwin"
+test "$(uname -m)" = "arm64"
+rm -rf node_modules
 bun install --frozen-lockfile
 ```
+
+The runner excludes only root-level `.vite` and `.vite-temp` cache entries from
+the dependency identity. Nested package payloads, `.bin`, package symlinks, and
+all resolved lockfile bytes remain measured. The runner also rejects a missing
+platform runtime anchor, so Linux can execute only when a genuine reviewed
+`runtime.linux` identity is present.
 
 Run focused tests and TypeScript 7 from `apps/web/`:
 

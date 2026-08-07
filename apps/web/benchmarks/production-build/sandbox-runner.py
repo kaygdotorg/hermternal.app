@@ -37,6 +37,24 @@ def _signal_handler(signum: int, _frame: object) -> None:
     _stop_signal = signum
 
 
+def _linux_parent_pid(stat_line: str) -> int:
+    """Extract ppid after Linux's variable-width comm field.
+
+    `/proc/<pid>/stat` permits spaces and right parentheses inside `comm`, so
+    positional splitting from the beginning can mistake those bytes for the
+    state and parent fields. The final `)` terminates `comm`; the suffix starts
+    with state and then ppid.
+    """
+
+    closing = stat_line.rfind(")")
+    if closing < 0:
+        raise ValueError("malformed proc stat")
+    suffix = stat_line[closing + 1 :].split()
+    if len(suffix) < 2:
+        raise ValueError("malformed proc stat")
+    return int(suffix[1])
+
+
 def _children(parent_pid: int) -> set[int]:
     """Read direct children without executing PATH or set-id process tools."""
 
@@ -64,8 +82,8 @@ def _children(parent_pid: int) -> set[int]:
             if not entry.isdigit():
                 continue
             try:
-                fields = Path(f"/proc/{entry}/stat").read_text(encoding="ascii").split()
-                if len(fields) > 3 and int(fields[3]) == parent_pid:
+                stat_line = Path(f"/proc/{entry}/stat").read_text(encoding="ascii")
+                if _linux_parent_pid(stat_line) == parent_pid:
                     result.add(int(entry))
             except (OSError, ValueError, UnicodeError):
                 continue
