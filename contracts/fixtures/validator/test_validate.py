@@ -161,7 +161,7 @@ class RegistryTests(unittest.TestCase):
                 details.get("coverage_fixture_ids", [details["id"]]),
             )
 
-    def test_current_index_is_complete_before_authority_rotation(self) -> None:
+    def test_current_index_is_complete_after_authority_rotation(self) -> None:
         self.assertEqual(
             validate.validate_index_document(self.index, validate.REPO_ROOT),
             (30, 29),
@@ -228,11 +228,13 @@ class RegistryTests(unittest.TestCase):
     def test_canonical_baseline_anchor_matches_checked_in_content(self) -> None:
         self.assertEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
 
-    def test_git_object_authority_matches_approved_v2_predecessor(self) -> None:
+    def test_git_object_authority_matches_direct_v2_predecessor(self) -> None:
         authority = validate._trusted_authority(validate.REPO_ROOT)
         self.assertEqual(authority["schema"], validate.VALIDATOR_AUTHORITY_SCHEMA)
         self.assertEqual(authority["role"], validate.VALIDATOR_AUTHORITY_ROLE)
-        self.assertEqual(authority["source_commit"], validate.APPROVED_AUTHORITY_SOURCE_COMMIT)
+        introduction = validate._authority_commit(validate.REPO_ROOT)
+        first_parent = validate._git(validate.REPO_ROOT, "rev-parse", f"{introduction}^1").decode("ascii").strip()
+        self.assertEqual(authority["source_commit"], first_parent)
         records = {record["path"]: record for record in authority["artifact_manifest"]}
         self.assertEqual(tuple(records), validate.AUTHORITY_ARTIFACT_PATHS)
         for path in validate.AUTHORITY_ARTIFACT_PATHS:
@@ -400,8 +402,8 @@ class CliTests(unittest.TestCase):
             completed = self._run(optimized=optimized, repo_root=repo_root)
             self.assertEqual(completed.returncode, 0)
             payload = json.loads(completed.stdout)
-            self.assertEqual(payload["fixture_count"], 28)
-            self.assertEqual(payload["coverage_count"], 28)
+            self.assertEqual(payload["fixture_count"], 30)
+            self.assertEqual(payload["coverage_count"], 29)
             self.assertEqual(payload["evidence_status"], "partial")
             self.assertEqual(completed.stderr, "")
 

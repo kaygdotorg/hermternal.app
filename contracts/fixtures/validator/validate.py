@@ -155,15 +155,15 @@ INTENTIONALLY_SEPARATE_ARTIFACTS = frozenset({
     "review-anchors/deep-link-resolution.sha256",
 })
 # The authority manifest is outside the fixture tree and is loaded from the one
-# immutable Git commit that introduced it. Checkout edits cannot rewrite those
-# object-database bytes, while later reviewed commits may update implementation
-# files without silently moving the authority root. The v2 bootstrap is a
-# multi-artifact predecessor: the source commit and every manifest record are
-# checked against immutable Git objects before checkout bytes are compared.
-VALIDATOR_AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.json"
+# immutable Git commit that introduced its distinct path. Checkout edits cannot
+# rewrite those object-database bytes. The final v2 predecessor is introduced in
+# a commit after the finalized scanner, index, tests, and baseline; its explicit
+# source commit must be that authority commit's first parent before checkout bytes
+# are compared. The historical bootstrap path remains readable in Git history,
+# but this lane consumes only the final path below.
+VALIDATOR_AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.final.json"
 VALIDATOR_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
-VALIDATOR_AUTHORITY_ROLE = "bootstrap_predecessor"
-APPROVED_AUTHORITY_SOURCE_COMMIT = "abb6754bddd1cf18927b0172ed9fa3456235b035"
+VALIDATOR_AUTHORITY_ROLE = "aggregate_predecessor"
 AUTHORITY_KEYS = (
     "schema",
     "role",
@@ -180,7 +180,7 @@ AUTHORITY_ARTIFACT_PATHS = (
     "contracts/fixtures/validator/validate.py",
     "contracts/fixtures/validator/validation-baseline.json",
 )
-BASELINE_CANONICAL_SHA256 = "de657e69397fa635f493aa021be12dafa55b3dce2bf684d54924daf40733f035"
+BASELINE_CANONICAL_SHA256 = "5e2b18b29aa1c5a7645dab58225dd00c1a3e3c29cfb557c06690640a5e43209a"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -1968,14 +1968,13 @@ def _git_blob(repo_root: Path, revision: str, path: str) -> tuple[str, bytes]:
 
 
 def _validate_authority_manifest(authority: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
-    """Validate the exact v2 bootstrap shape without accepting a v1 fallback."""
+    """Validate the exact final v2 predecessor shape without a v1 fallback."""
 
     strict_keys(authority, AUTHORITY_KEYS, "validator authority")
     require(authority["schema"] == VALIDATOR_AUTHORITY_SCHEMA, "validator authority schema changed")
     require(authority["role"] == VALIDATOR_AUTHORITY_ROLE, "validator authority role changed")
     source_commit = authority["source_commit"]
     require(type(source_commit) is str and HEX40.fullmatch(source_commit) is not None, "validator authority source is invalid")
-    require(source_commit == APPROVED_AUTHORITY_SOURCE_COMMIT, "validator authority source changed")
     require(authority["canonicalization"] == "exact_bytes", "validator authority canonicalization changed")
     require(authority["synthetic_only"] is True and authority["live_claim"] is False, "validator authority live boundary changed")
     manifest = authority["artifact_manifest"]
@@ -2011,9 +2010,15 @@ def _trusted_authority(repo_root: Path) -> dict[str, Any]:
     source_commit, records = _validate_authority_manifest(authority)
     require(source_commit != introduction, "validator authority source is self-referential")
     require(_git(root, "cat-file", "-t", source_commit) == b"commit\n", "validator authority source is not a commit")
-    # A self-consistent descendant or unrelated commit must not become the
-    # predecessor. Git's exit status is the check; the command emits no data on
-    # success, preserving the bounded authority read contract.
+    try:
+        first_parent = _git(root, "rev-parse", f"{introduction}^1").decode("ascii").strip()
+    except UnicodeError as exc:
+        raise ValidationError() from exc
+    require(first_parent == source_commit, "validator authority source is not the direct predecessor")
+    # Requiring the authority introduction's first parent, rather than merely
+    # any ancestor, keeps the final binding explicit while allowing this source
+    # commit to be identified from the immutable authority bytes without a
+    # cyclic hash constant inside the authorized validator itself.
     _git(root, "merge-base", "--is-ancestor", source_commit, introduction)
     for record in records:
         blob_oid, data = _git_blob(root, source_commit, record["path"])
