@@ -41,6 +41,20 @@ class FakeWebSocket implements JsonRpcWebSocket {
   }
 }
 
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 async function waitForAttachedSocket(
   sockets: readonly FakeWebSocket[],
   index: number,
@@ -208,6 +222,40 @@ describe("createBrowserChatTransport", () => {
       code: "connection-failed",
     });
     expect(transport.state.status).toBe("failed");
+  });
+
+  it("gets a fresh ticket when reconnect aborts a pending ticket request", async () => {
+    const firstResponse = deferred<Response>();
+    let requestCount = 0;
+    const socket = new FakeWebSocket();
+    const fetcher = vi.fn(async () => {
+      requestCount += 1;
+      if (requestCount === 1) return firstResponse.promise;
+      return new Response('{"ticket":"fresh-ticket-2","ttl_seconds":30}', {
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const transport = createBrowserChatTransport({
+      fetch: fetcher,
+      createSocket: () => socket,
+    });
+
+    const first = transport.connect();
+    void first.catch(() => undefined);
+    await Promise.resolve();
+    const replacement = transport.reconnect();
+
+    await waitForAttachedSocket([socket], 0);
+    socket.emitOpen();
+    socket.emitGatewayReady();
+    await replacement;
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(requestCount).toBe(2);
+
+    firstResponse.resolve(new Response('{"ticket":"stale-ticket","ttl_seconds":30}', {
+      headers: { "content-type": "application/json" },
+    }));
   });
 
   it("fails closed when gateway.ready omits source-backed behavior keys", async () => {

@@ -455,25 +455,37 @@ export class LiveWorkspaceSession {
     if (this.activeRequest !== request) return;
     this.activeRequest = undefined;
     const uncertain = error instanceof JsonRpcChatError && error.code === 'uncertain-delivery';
+    const authenticationRequired = this.snapshot.state === 'permanent-error';
     this.publish({
       ...this.snapshot,
-      state: 'retryable-error',
+      // A close-code 4401 callback can publish permanent auth state before the
+      // rejected completion reaches this handler. Never downgrade that terminal
+      // state while removing the stale streaming item.
+      state: authenticationRequired ? 'permanent-error' : 'retryable-error',
       timeline: [
         ...withoutStreamingItem(this.snapshot.timeline, request.id),
         {
           kind: 'error',
           id: `${request.id}:error`,
-          title: uncertain ? 'Delivery is uncertain' : 'Response interrupted',
-          detail: uncertain
-            ? 'Hermes may have received this prompt. Reconnect and inspect server history before sending again.'
-            : 'Reconnect before sending another prompt. No prompt was replayed.'
+          title: authenticationRequired
+            ? 'Authentication required'
+            : uncertain
+              ? 'Delivery is uncertain'
+              : 'Response interrupted',
+          detail: authenticationRequired
+            ? 'Sign in again before sending another prompt.'
+            : uncertain
+              ? 'Hermes may have received this prompt. Reconnect and inspect server history before sending again.'
+              : 'Reconnect before sending another prompt. No prompt was replayed.'
         }
       ]
     });
   }
 
   private publishUncertainDelivery(generation: number): void {
-    if (this.isCurrent(generation)) this.publish({ ...this.snapshot, state: 'retryable-error' });
+    if (this.isCurrent(generation) && this.snapshot.state !== 'permanent-error') {
+      this.publish({ ...this.snapshot, state: 'retryable-error' });
+    }
   }
 
   private publishLoadFailure(error: unknown, generation: number): void {

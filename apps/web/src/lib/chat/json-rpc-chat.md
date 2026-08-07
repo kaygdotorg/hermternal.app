@@ -45,7 +45,9 @@ consumption, it owns the prepared socket. Abort or provider failure clears and
 closes that socket exactly once. Successful `createWebSocket` consumption
 removes the browser abort listener before transferring ownership to JSON-RPC;
 this prevents a cancellation race from double-closing the underlying socket or
-poisoning the next explicit retry.
+poisoning the next explicit retry. If the signal aborts after a factory result
+arrives but before JSON-RPC adopts it, the acquired socket is closed exactly once
+and is never attached to a stale generation.
 
 The `official_image` evidence scope binds the immutable upstream image reference
 to the reviewed route manifest, source review, and proxy proof. The behavioral
@@ -348,7 +350,8 @@ The unit suite uses a deterministic fake WebSocket and covers:
 - fresh-ticket reconnect, stale-generation suppression, explicit close/offline
   cleanup, reconnect suppression, and no prompt replay;
 - abort-triggered socket closure, send-failure cleanup, late control-ack
-  suppression, and genuine-401 `auth_required` publication;
+  suppression, pre-adoption socket cleanup, reconnect ticket replacement, and
+  genuine-401 `auth_required` publication;
 - complete compatibility evidence, missing-evidence failure, bounded gate
   timeout, route-manifest session-ID validation, approval/clarification owner
   validation, and acknowledgement deadlines;

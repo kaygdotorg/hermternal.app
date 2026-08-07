@@ -381,6 +381,31 @@ describe("createWsTicketClient", () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it("starts a fresh attempt when reconnect aborts the coalesced request before it settles", async () => {
+    const firstRequest = deferred<{ ticket: string }>();
+    const controller = new AbortController();
+    const request = vi.fn(async () => {
+      if (request.mock.calls.length === 1) {
+        return firstRequest.promise;
+      }
+      return { ticket: opaqueTicket() };
+    });
+    const connect = vi.fn(async () => "connected");
+    const client = createWsTicketClient({ request, connect });
+
+    const first = client.open(controller.signal);
+    await Promise.resolve();
+    controller.abort();
+
+    const replacement = client.retry();
+    await expect(replacement).resolves.toBe("connected");
+    await expect(first).rejects.toMatchObject({ code: "cancelled" });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenCalledTimes(1);
+
+    firstRequest.resolve({ ticket: opaqueTicket() });
+  });
+
   it("requires an explicit retry after authentication failure and redacts arbitrary boundary errors", async () => {
     const rawErrorMarker = opaqueTicket();
     const freshTicket = opaqueTicket();

@@ -1382,6 +1382,9 @@ export function createJsonRpcChatTransport(
     setState(reconnecting ? "reconnecting" : "connecting", generation);
     let context: SocketContext | undefined;
     let unlinkContextAbort = (): void => undefined;
+    let acquiredSocket: JsonRpcWebSocket | undefined;
+    let adoptedSocket = false;
+    const closeUnadoptedSocket = createIdempotentSocketCloser();
 
     const promise = (async (): Promise<void> => {
       try {
@@ -1396,17 +1399,18 @@ export function createJsonRpcChatTransport(
           origin: JSON_RPC_WS_ORIGIN,
           query: { ticket },
         };
-        const socket = await awaitWithAbort(
+        acquiredSocket = await awaitWithAbort(
           Promise.resolve(options.createWebSocket(upgrade, controller.signal)),
           controller.signal,
-          safeClose,
+          closeUnadoptedSocket,
         );
         ticket = "";
         throwIfAborted(controller.signal);
         if (generation !== currentGeneration) {
           throw new JsonRpcChatError("aborted", generation);
         }
-        context = attachContext(socket, generation);
+        context = attachContext(acquiredSocket, generation);
+        adoptedSocket = true;
         const onAbort = (): void => {
           if (context && isCurrentContext(context)) {
             invalidateContext(
@@ -1429,6 +1433,9 @@ export function createJsonRpcChatTransport(
           await restoreInternal(context, selectedSessionId, controller.signal);
         }
       } catch (error) {
+        if (acquiredSocket && !adoptedSocket) {
+          closeUnadoptedSocket(acquiredSocket);
+        }
         const sanitized = sanitizeConnectionError(
           error,
           controller.signal,
@@ -2447,8 +2454,13 @@ function sanitizeConnectionError(
   return new JsonRpcChatError("connection-failed", generation);
 }
 
-function safeClose(socket: JsonRpcWebSocket): void {
-  closeSocketForAwait(socket);
+function createIdempotentSocketCloser(): (socket: JsonRpcWebSocket) => void {
+  const closedSockets = new WeakSet<object>();
+  return (socket: JsonRpcWebSocket): void => {
+    if (closedSockets.has(socket)) return;
+    closedSockets.add(socket);
+    closeSocketForAwait(socket);
+  };
 }
 
 function closeSocketForAwait(socket: JsonRpcWebSocket): void {
@@ -2494,7 +2506,18 @@ function awaitWithAbort<T>(
   signal: AbortSignal,
   onLateResolve?: (value: T) => void,
 ): Promise<T> {
+  const handleLateResolve = (value: T): void => {
+    try {
+      onLateResolve?.(value);
+    } catch {
+      // Late cleanup cannot replace the bounded cancellation result.
+    }
+  };
+
   if (signal.aborted) {
+    // The factory may have produced a socket before the already-aborted signal
+    // was observed. Attach the late hook so that result is closed and discarded.
+    promise.then(handleLateResolve, () => undefined);
     return Promise.reject(new JsonRpcChatError("aborted"));
   }
   return new Promise<T>((resolve, reject) => {
@@ -2514,7 +2537,7 @@ function awaitWithAbort<T>(
     promise.then(
       (value) => {
         if (settled) {
-          onLateResolve?.(value);
+          handleLateResolve(value);
           return;
         }
         settle(() => resolve(value));

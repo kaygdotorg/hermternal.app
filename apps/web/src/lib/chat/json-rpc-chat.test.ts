@@ -951,6 +951,27 @@ describe("createJsonRpcChatTransport", () => {
     }
   });
 
+  it("closes a socket resolved before the outer abort continuation exactly once", async () => {
+    const caller = new AbortController();
+    const socket = new FakeWebSocket();
+    const close = vi.spyOn(socket, "close");
+    const harness = makeHarness({
+      ticketProvider: async () => "ticket-1",
+      createWebSocket: () => {
+        // The first microtask lets awaitWithAbort adopt the resolved value;
+        // the second aborts before the outer async continuation runs.
+        queueMicrotask(() => queueMicrotask(() => caller.abort()));
+        return socket;
+      },
+    });
+
+    const connection = harness.transport.connect(caller.signal);
+    await expect(connection).rejects.toMatchObject({ code: "aborted" });
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith(1000, "cancelled");
+    expect(harness.transport.state.status).toBe("offline");
+  });
+
   it("publishes authentication-required ticket failures as auth_required", async () => {
     const harness = makeHarness({
       ticketProvider: async () => {

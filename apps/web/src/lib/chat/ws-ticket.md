@@ -25,7 +25,10 @@ integration.
 - Coalesce duplicate calls while one attempt is active. Every attempt also has
   an internal five-second deadline, including calls without a caller signal, so a
   stuck request or connector clears the coalescing slot and an explicit retry can
-  acquire a fresh ticket. A connector result that arrives after cancellation is
+  acquire a fresh ticket. If a caller aborts before the old request or connector
+  promise settles, a replacement attempt does not coalesce into that canceled
+  slot; the old bounded cleanup and the new ticket request run independently. A
+  connector result that arrives after cancellation is
   closed through an idempotent late-resolution cleanup. The browser adapter shares
   that idempotent close boundary with its own abort listener, owns a prepared
   socket until JSON-RPC consumes it, and clears/closes it before retry when abort

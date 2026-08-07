@@ -324,24 +324,33 @@ async function awaitCleanupBounded(cleanup: Promise<unknown>): Promise<void> {
  * assembled and is never copied to client state, storage, DOM, history, logs,
  * fixtures, reports, or error text.
  */
+interface ActiveTicketAttempt<Connection> {
+  readonly controller: AbortController;
+  readonly promise: Promise<Connection>;
+}
+
 export function createWsTicketClient<Connection>(
   options: WsTicketClientOptions<Connection>,
 ): WsTicketClient<Connection> {
-  let activeAttempt: Promise<Connection> | undefined;
+  let activeAttempt: ActiveTicketAttempt<Connection> | undefined;
 
   const startAttempt = (callerSignal?: AbortSignal): Promise<Connection> => {
-    if (activeAttempt) {
-      return activeAttempt;
+    // A reconnect can abort the caller signal while the old request or
+    // connector still has promise work pending. Do not coalesce a replacement
+    // into that canceled attempt; its bounded abort path will finish separately.
+    if (activeAttempt && !activeAttempt.controller.signal.aborted) {
+      return activeAttempt.promise;
     }
 
-    const attempt = runAttempt(options, callerSignal).finally(() => {
-      if (activeAttempt === attempt) {
+    const controller = new AbortController();
+    const promise = runAttempt(options, callerSignal, controller).finally(() => {
+      if (activeAttempt?.promise === promise) {
         activeAttempt = undefined;
       }
     });
 
-    activeAttempt = attempt;
-    return attempt;
+    activeAttempt = { controller, promise };
+    return promise;
   };
 
   return {
@@ -352,10 +361,10 @@ export function createWsTicketClient<Connection>(
 
 async function runAttempt<Connection>(
   options: WsTicketClientOptions<Connection>,
-  callerSignal?: AbortSignal,
+  callerSignal: AbortSignal | undefined,
+  controller: AbortController,
 ): Promise<Connection> {
   const origin = resolveOrigin();
-  const controller = new AbortController();
   const unlinkAbort = linkAbort(callerSignal, controller);
   const closeLateConnection = createIdempotentConnectionCloser<Connection>();
   // The coalescing slot must not be held forever when a custom request or
