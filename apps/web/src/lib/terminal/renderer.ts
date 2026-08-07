@@ -43,6 +43,13 @@ export type TerminalAdapterOptions = Readonly<{
   initialSize: TerminalSize;
   scrollbackLimitBytes: number;
   onInput: (data: string) => void;
+  /** Lets a lazy adapter stop before constructing into a released host. */
+  isCurrent?: () => boolean;
+}>;
+
+export type MountedTerminalDisposeOptions = Readonly<{
+  /** Preserve the host because a stale async mount no longer owns it. */
+  preserveHost?: boolean;
 }>;
 
 export type MountedTerminal = Readonly<{
@@ -50,7 +57,7 @@ export type MountedTerminal = Readonly<{
   resize(cols: number, rows: number): void;
   focus(): void;
   paste(data: string): void;
-  dispose(): void;
+  dispose(options?: MountedTerminalDisposeOptions): void;
 }>;
 
 /**
@@ -95,6 +102,7 @@ type WTermModules = Readonly<{
 }>;
 
 let wTermModulesPromise: Promise<WTermModules> | null = null;
+const wTermHostTokens = new WeakMap<HTMLElement, symbol>();
 
 function loadWTermModules(): Promise<WTermModules> {
   if (wTermModulesPromise) return wTermModulesPromise;
@@ -251,6 +259,80 @@ function relockWTermHeight(host: HTMLElement, rows: number): void {
   host.style.height = `${rows * rowHeight + extra}px`;
 }
 
+type WTermInputRuntime = {
+  textarea?: HTMLTextAreaElement;
+  _onKeyDown?: EventListener;
+  _onPaste?: EventListener;
+  _onCompositionStart?: EventListener;
+  _onCompositionEnd?: EventListener;
+  _onInput?: EventListener;
+  _onFocus?: EventListener;
+  _onBlur?: EventListener;
+};
+
+type WTermRuntime = {
+  input?: WTermInputRuntime | null;
+  resizeObserver?: ResizeObserver | null;
+  _renderTimer?: number | null;
+  rafId?: number | null;
+  _container?: HTMLElement | null;
+  _onClickFocus?: EventListener;
+  _destroyed?: boolean;
+  _coreOption?: unknown;
+  renderer?: unknown;
+  debug?: unknown;
+};
+
+/**
+ * Dispose a stale W-Term instance without allowing its upstream `destroy()`
+ * method to clear a host that a later mount or another owner may have reused.
+ * The renderer has already removed its owned children when it released the
+ * host; this path only removes the stale instance's own node/listeners.
+ */
+function disposeWTermPreservingHost(term: WTerm, host: HTMLElement, hostToken: symbol): void {
+  const runtime = term as unknown as WTermRuntime;
+  runtime._destroyed = true;
+  if (runtime._renderTimer != null) clearTimeout(runtime._renderTimer);
+  if (runtime.rafId != null) cancelAnimationFrame(runtime.rafId);
+  runtime._renderTimer = null;
+  runtime.rafId = null;
+  runtime.resizeObserver?.disconnect();
+  runtime.resizeObserver = null;
+
+  const input = runtime.input;
+  const textarea = input?.textarea;
+  if (textarea) {
+    const listeners: ReadonlyArray<readonly [string, EventListener | undefined]> = [
+      ['keydown', input?._onKeyDown],
+      ['paste', input?._onPaste],
+      ['compositionstart', input?._onCompositionStart],
+      ['compositionend', input?._onCompositionEnd],
+      ['input', input?._onInput],
+      ['focus', input?._onFocus],
+      ['blur', input?._onBlur]
+    ];
+    for (const [type, listener] of listeners) {
+      if (listener) textarea.removeEventListener(type, listener);
+    }
+    textarea.remove();
+  }
+  runtime.input = null;
+  if (runtime._onClickFocus) host.removeEventListener('click', runtime._onClickFocus);
+  runtime._onClickFocus = undefined;
+  runtime._container?.remove();
+  runtime._container = null;
+  runtime.renderer = null;
+  runtime.debug = null;
+  runtime._coreOption = undefined;
+  if (wTermHostTokens.get(host) === hostToken) {
+    wTermHostTokens.delete(host);
+    host.classList.remove('wterm', 'cursor-blink', 'has-scrollback', 'focused');
+    host.style.removeProperty('height');
+    host.style.removeProperty('--term-row-height');
+  }
+  term.bridge = null;
+}
+
 function safeStateChange(
   callback: ((state: TerminalRendererState) => void) | undefined,
   state: TerminalRendererState
@@ -263,9 +345,9 @@ function safeStateChange(
   }
 }
 
-function safeDispose(backend: MountedTerminal | null): void {
+function safeDispose(backend: MountedTerminal | null, preserveHost = false): void {
   try {
-    backend?.dispose();
+    backend?.dispose(preserveHost ? { preserveHost: true } : undefined);
   } catch {
     // Disposal is best effort and remains idempotent even after a failed WASM
     // initialization or a DOM teardown race.
@@ -280,6 +362,12 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         wasmPath,
         scrollbackLimit: options.scrollbackLimitBytes
       });
+      if (options.isCurrent && !options.isCurrent()) {
+        // Avoid constructing W-Term into a host released while WASM loaded.
+        // The core API has no deterministic release hook; dropping this local
+        // reference is the safest available behavior for the stale operation.
+        throw new Error('terminal mount became stale');
+      }
       const termOptions: WTermOptions = {
         core,
         cols: options.initialSize.cols,
@@ -288,8 +376,14 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         cursorBlink: true,
         onData: options.onInput
       };
+      const hostToken = Symbol('wterm-host');
+      wTermHostTokens.set(host, hostToken);
       const term = new WTerm(host, termOptions);
       await term.init();
+      if (options.isCurrent && !options.isCurrent()) {
+        disposeWTermPreservingHost(term, host, hostToken);
+        throw new Error('terminal mount became stale');
+      }
       normalizeWTermInputAccessibility(host);
       relockWTermHeight(host, options.initialSize.rows);
 
@@ -312,13 +406,18 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
           const payload = bracketed ? `\x1b[200~${safe}\x1b[201~` : safe;
           options.onInput(payload);
         },
-        dispose() {
+        dispose(disposeOptions) {
+          if (disposeOptions?.preserveHost) {
+            disposeWTermPreservingHost(term, host, hostToken);
+            return;
+          }
           try {
             term.destroy();
           } finally {
             // @wterm/ghostty@0.3.2 has no core disposal API. Drop the active
             // bridge reference after DOM cleanup; deterministic WASM release
             // remains an upstream limitation documented by this boundary.
+            if (wTermHostTokens.get(host) === hostToken) wTermHostTokens.delete(host);
             term.bridge = null;
           }
         }
@@ -493,10 +592,14 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       const backend = await this.adapter.mount(host, {
         initialSize: this.initialSize,
         scrollbackLimitBytes: this.scrollbackLimitBytes,
-        onInput: this.onInput
+        onInput: this.onInput,
+        isCurrent: () => generation === this.mountGeneration && this.host === host && this.state !== 'disposed'
       });
       if (generation !== this.mountGeneration || this.state === 'disposed' || this.host !== host) {
-        safeDispose(backend);
+        // The async adapter may have constructed W-Term after this renderer
+        // released the host. Never let the upstream destructor clear reused
+        // content; production W-Term uses its host-preserving cleanup path.
+        safeDispose(backend, true);
         this.restoreErrorIfOwned(host);
         return;
       }

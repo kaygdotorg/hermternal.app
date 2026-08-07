@@ -11,6 +11,7 @@ export {
 
 export type {
   MountedTerminal,
+  MountedTerminalDisposeOptions,
   PasteRequest,
   TerminalAdapterOptions,
   TerminalRenderer,

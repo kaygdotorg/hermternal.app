@@ -192,8 +192,8 @@ function createDeterministicAdapter(options: { fail?: boolean } = {}): {
         paste(data) {
           operations.push({ type: 'paste', text: data });
         },
-        dispose() {
-          host.replaceChildren();
+        dispose(disposeOptions) {
+          if (!disposeOptions?.preserveHost) host.replaceChildren();
         },
         snapshot() {
           const graphemes = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (entry) => entry.segment);
@@ -320,6 +320,41 @@ describe('TerminalRenderer', () => {
     await mounting;
     expect(host.querySelector('[role="status"]')).not.toBeInTheDocument();
     expect(renderer.state).toBe('ready');
+  });
+
+  it('does not let stale async teardown erase a host reused after dispose', async () => {
+    let resolveMount!: (terminal: MountedTerminal) => void;
+    const host = document.createElement('div');
+    const dispose = vi.fn((disposeOptions?: { preserveHost?: boolean }) => {
+      if (!disposeOptions?.preserveHost) host.replaceChildren();
+    });
+    const backend: MountedTerminal = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      focus: vi.fn(),
+      paste: vi.fn(),
+      dispose
+    };
+    const adapter: TerminalRendererAdapter = {
+      mount: vi.fn(() => new Promise<MountedTerminal>((resolve) => {
+        resolveMount = resolve;
+      }))
+    };
+    const renderer = createTerminalRenderer({ adapter });
+    const mounting = renderer.mount(host);
+
+    await vi.waitFor(() => expect(adapter.mount).toHaveBeenCalledTimes(1));
+    renderer.dispose();
+    const replacement = document.createElement('p');
+    replacement.textContent = 'owned by the next host owner';
+    host.appendChild(replacement);
+
+    resolveMount(backend);
+    await mounting;
+
+    expect(renderer.state).toBe('disposed');
+    expect(host).toContainElement(replacement);
+    expect(dispose).toHaveBeenCalledWith({ preserveHost: true });
   });
 
   it('does not paste into a remounted backend after an old confirmation resolves', async () => {
@@ -540,6 +575,23 @@ describe('TerminalRenderer', () => {
     }
   });
 
+  it('does not construct W-Term into a released host after core loading', async () => {
+    moduleMocks.MockGhosttyCore.load.mockResolvedValue(new moduleMocks.MockGhosttyCore());
+    const adapter = createWTermGhosttyAdapter();
+    const host = document.createElement('div');
+    const before = moduleMocks.MockWTerm.instances.length;
+
+    await expect(adapter.mount(host, {
+      initialSize: { cols: 80, rows: 24 },
+      scrollbackLimitBytes: 64 * 1024,
+      onInput: vi.fn(),
+      isCurrent: () => false
+    })).rejects.toThrow('terminal mount became stale');
+
+    expect(moduleMocks.MockWTerm.instances).toHaveLength(before);
+    expect(host).toBeEmptyDOMElement();
+  });
+
   it('frames accepted bracketed paste and strips escape bytes in the W-Term adapter', async () => {
     const core = { bracketedPaste: vi.fn(() => true) };
     moduleMocks.MockGhosttyCore.load.mockResolvedValue(core as never);
@@ -562,6 +614,11 @@ describe('TerminalRenderer', () => {
 
     mounted.resize(80, 30);
     expect(host.style.height).toBe('510px');
+    const reusedContent = document.createElement('p');
+    reusedContent.textContent = 'reused host content';
+    host.appendChild(reusedContent);
+    mounted.dispose({ preserveHost: true });
+    expect(host).toContainElement(reusedContent);
     mounted.dispose();
   });
 });
