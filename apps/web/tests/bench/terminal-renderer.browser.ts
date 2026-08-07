@@ -117,6 +117,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
     confirmPaste: () => true
   });
   const samples: Record<string, Samples> = {};
+  let workloadPhase = 'initialization';
 
   try {
     const coldMountSamples: number[] = [];
@@ -127,6 +128,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
   const mountDisposeSamples: number[] = [];
 
   for (let index = 0; index < 5; index += 1) {
+    workloadPhase = `cold-initialization-${index}`;
     renderer.dispose();
     const started = performance.now();
     await renderer.mount(host);
@@ -140,6 +142,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
   }
 
   for (let index = 0; index < 10; index += 1) {
+    workloadPhase = `sustained-output-${index}`;
     const started = performance.now();
     renderer.write(replay.subarray(0, 64 * 1024));
     await waitForRendererIdle(renderer);
@@ -150,6 +153,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
 
   const beforeReplay = memoryBytes();
   for (let index = 0; index < 5; index += 1) {
+    workloadPhase = `replay-1-mib-${index}`;
     const started = performance.now();
     for (let offset = 0; offset < replay.byteLength; offset += 64 * 1024) {
       renderer.write(replay.subarray(offset, Math.min(replay.byteLength, offset + 64 * 1024)));
@@ -162,6 +166,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
   const afterReplay = memoryBytes();
 
   for (let index = 0; index < 10; index += 1) {
+    workloadPhase = `resize-settling-${index}`;
     const started = performance.now();
     renderer.resize(100 + (index % 3), 28 + (index % 2));
     await waitForRendererIdle(renderer);
@@ -171,6 +176,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
   }
 
   for (let index = 0; index < 10; index += 1) {
+    workloadPhase = `repeated-mount-dispose-${index}`;
     const started = performance.now();
     renderer.dispose();
     await renderer.mount(host);
@@ -218,6 +224,9 @@ async function run(): Promise<BrowserBenchmarkResult> {
   };
     browserWindow[resultKey] = result;
     return result;
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`terminal renderer workload failed during ${workloadPhase}: ${message}`);
   } finally {
     longTaskObserver?.disconnect();
     renderer.dispose();
