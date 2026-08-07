@@ -249,10 +249,10 @@ EXPECTED_REVISIONS = {
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: {
-        "commit_sha": "f82af5a9e1ed76fe0f2321dc50229c3998101543",
+        "commit_sha": "67f9aab40722826d043e8e8e20a25c345b434f05",
         "fixture_id": "web-production-build",
         "fixture_version": "1.0.0",
-        "fixture_sha256": "97ec619893b5bd6520f76c031371c19719d4bc7185f82b249f113f12222c04a0",
+        "fixture_sha256": "b9833cf2df3aeb4c54212af4560c28935057c324a545f7243cd20e841d685d9e",
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
 }
@@ -314,11 +314,11 @@ EXPECTED_ARTIFACT_METADATA = {
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: (
-        ("workload.json", 2600, "97ec619893b5bd6520f76c031371c19719d4bc7185f82b249f113f12222c04a0"),
-        ("run.ts", 73957, "c6cece69662a026ec68f54a0f31cc1531db5e1a993bce93cf7bf1dbd747587f9"),
+        ("workload.json", 2600, "b9833cf2df3aeb4c54212af4560c28935057c324a545f7243cd20e841d685d9e"),
+        ("run.ts", 76318, "de0e3dbc0249483c721f5b7497cc3e8fbed972f2a28762fc99ec1e6473b6fff8"),
         ("sandbox-runner.py", 13629, "240719c214b74ca097cf545f697a64aedcec9b2477470ce96248bebc89687865"),
         ("artifact-scanner.py", 5994, "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb"),
-        ("evidence/raw-trace.json", 17721, "2b14730104485f71100267dc5402921f32225795ec3033323b3d8a05eac47faf"),
+        ("evidence/raw-trace.json", 17733, "a975d8c25ff97907acd108e30c818e0fc5f989915fba48a3328a2bb747a0a62f"),
     ),
 }
 SELF_AUTHENTICATED_ARTIFACT_PATHS = {
@@ -1117,7 +1117,7 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
         for key in WEB_RUNTIME_ANCHOR_KEYS:
             _strict_keys(anchor[key], WEB_FILE_IDENTITY_KEYS, f"web workload.integrity.runtime.{platform_key}.{key}")
     expected_integrity = {
-        "package_json": {"bytes": 1642, "sha256": "564cf2bc4ff5600ad8d1ce83a4b34d2199f8787e0e7d8a7db33331a3fc62e43b"},
+        "package_json": {"bytes": 1768, "sha256": "03fa003069e5f4f2a317b26757bd3cee1c3913332f87307aff58198e59c59c86"},
         "bun_lock": {"bytes": 46368, "sha256": "f9999f93386967986d0393b34b008af2f71472fb4eb825062575fb9f822f8d3e"},
         "dependencies": {"files": 5727, "symlinks": 15, "bytes": 150511188, "sha256": "ddf2c47880cf0899e6e5ad71787e2e63b8a2f566c44955f2c5122b96588ad709"},
         "vite": {"files": 42, "symlinks": 0, "bytes": 2500530, "sha256": "50fae63c7384b51a88596f83fbef112bfcf119371164e1817f383ab77a024145"},
