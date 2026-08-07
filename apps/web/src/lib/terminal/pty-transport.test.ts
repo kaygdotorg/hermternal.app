@@ -512,6 +512,52 @@ describe("PTY transport", () => {
     await fresh;
   });
 
+  it("closes a synchronous socket returned after connecting cancellation", async () => {
+    let harness!: Harness;
+    let created!: FakeSocket;
+    harness = makeHarness({
+      createWebSocket: () => {
+        created = new FakeSocket();
+        return created;
+      },
+      onStateChange: (state) => {
+        if (state.status === "connecting") harness.transport.close();
+      },
+    });
+
+    const pending = harness.transport.connect(ATTACH_INPUT);
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    await flush();
+    expect(created.closes).toEqual([{ code: 1000, reason: "client-detach" }]);
+    created.open();
+    await flush();
+    expect(harness.transport.state.status).toBe("detached");
+  });
+
+  it("closes a delayed socket resolved after connecting cancellation", async () => {
+    let harness!: Harness;
+    let resolveSocket!: (socket: FakeSocket) => void;
+    const created = new FakeSocket();
+    harness = makeHarness({
+      createWebSocket: () =>
+        new Promise<PtyWebSocket>((resolve) => {
+          resolveSocket = resolve as (socket: FakeSocket) => void;
+        }),
+      onStateChange: (state) => {
+        if (state.status === "connecting") harness.transport.close();
+      },
+    });
+
+    const pending = harness.transport.connect(ATTACH_INPUT);
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    resolveSocket(created);
+    await flush();
+    expect(created.closes).toEqual([{ code: 1000, reason: "client-detach" }]);
+    created.open();
+    await flush();
+    expect(harness.transport.state.status).toBe("detached");
+  });
+
   it("replaces sessions without allowing stale callbacks to affect the active socket", async () => {
     const harness = makeHarness({
       validateAttachment: async () => true,
@@ -591,6 +637,39 @@ describe("PTY transport", () => {
     expect(attached.ticketProvider).toHaveBeenCalledTimes(2);
   });
 
+  it("emits immutable state transitions before reentrant Close transitions", async () => {
+    let harness!: Harness;
+    let closed = false;
+    harness = makeHarness({
+      onStateChange: (state) => {
+        if (state.status === "attached" && !closed) {
+          closed = true;
+          harness.transport.close();
+        }
+      },
+    });
+
+    const pending = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    const socket = harness.sockets[0]!;
+    socket.open();
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    expect(
+      harness.events
+        .filter((event) => event.type === "state")
+        .map((event) => `${event.state.status}:${event.state.generation}`),
+    ).toEqual([
+      "ticket_pending:1",
+      "connecting:1",
+      "starting:1",
+      "attached:1",
+      "closing:2",
+      "detached:2",
+    ]);
+    expect(socket.closes).toEqual([{ code: 1000, reason: "client-detach" }]);
+    expect(harness.transport.state.status).toBe("detached");
+  });
+
   it("does not emit a stale reattach notice after an attached observer closes", async () => {
     let attachedCount = 0;
     let harness!: Harness;
@@ -612,6 +691,35 @@ describe("PTY transport", () => {
     await expect(reattachPending).rejects.toMatchObject({ code: "aborted" });
     expect(harness.events.filter((event) => event.type === "notice")).toHaveLength(0);
     expect(harness.transport.state.status).toBe("detached");
+  });
+
+  it("does not publish truncation after a reattach observer aborts", async () => {
+    let attachedCount = 0;
+    let harness!: Harness;
+    const controller = new AbortController();
+    harness = makeHarness({
+      onStateChange: (state) => {
+        if (state.status === "attached") {
+          attachedCount += 1;
+          if (attachedCount === 2) controller.abort();
+        }
+      },
+    });
+
+    await open(harness);
+    harness.transport.detach();
+    const pending = harness.transport.reconnect(controller.signal);
+    await flush();
+    const socket = harness.sockets[1]!;
+    socket.open();
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    await flush();
+    expect(harness.events.filter((event) => event.type === "notice")).toHaveLength(0);
+    expect(harness.transport.state).toMatchObject({
+      status: "detached",
+      outputMayBeTruncated: false,
+    });
+    expect(socket.closes).toEqual([{ code: 1000, reason: "client-detach" }]);
   });
 
   it("clears a failed pre-open attempt before synchronous retry observers run", async () => {

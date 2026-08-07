@@ -39,7 +39,10 @@ operations:
   Cleanup and state observers are generation-guarded so a synchronous retry or
   replacement cannot be overwritten by the old failure or Close path. A new
   attempt claims its generation and active slot before aborting the old adapter,
-  and reattach notices/readiness are rechecked after observer callbacks.
+  and reattach notices/readiness are rechecked after observer callbacks. Late
+  socket-factory values are closed even when cancellation wins before the abort
+  listener is installed. State events capture the intended transition before
+  reentrant observers can publish a newer one.
 
 The transport never queues input or resize frames. It has no prompt or tool
 action method, so reconnect cannot replay those actions. The structured

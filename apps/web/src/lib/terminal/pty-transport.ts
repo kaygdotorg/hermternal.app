@@ -332,7 +332,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     truncated = currentState.outputMayBeTruncated,
   ): void => {
     const mode = modeFor(input);
-    currentState = Object.freeze({
+    const nextState = Object.freeze({
       status,
       generation,
       mode,
@@ -344,12 +344,16 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       ...(observation ? { closeClassification: observation.classification } : {}),
       outputMayBeTruncated: truncated,
     });
+    currentState = nextState;
+    // Publish the immutable transition before observers can synchronously
+    // replace it. The observer still receives the same intended value, while
+    // currentState remains owned by the newest reentrant transition.
+    emit({ type: "state", state: nextState });
     observe(
       options.onStateChange
-        ? () => options.onStateChange?.(currentState)
+        ? () => options.onStateChange?.(nextState)
         : undefined,
     );
-    emit({ type: "state", state: currentState });
   };
 
   const isCurrent = (context: SocketContext): boolean =>
@@ -390,6 +394,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     generation: number,
     input: PtyConnectionInput,
     reattaching: boolean,
+    signal: AbortSignal,
   ): SocketContext => {
     let resolveReady!: () => void;
     let rejectReady!: (error: PtyTransportError) => void;
@@ -412,11 +417,11 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     };
     socket.binaryType = "arraybuffer";
     socket.onopen = () => {
-      if (!isCurrent(context)) return;
+      if (!isCurrent(context) || signal.aborted) return;
       context.opened = true;
       clearDetachedFor(input);
       setState("attached", generation, input, undefined, reattaching);
-      if (!isCurrent(context)) return;
+      if (!isCurrent(context) || signal.aborted) return;
       if (reattaching) {
         emit({
           type: "notice",
@@ -424,8 +429,9 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
           notice: "output-may-be-truncated",
           replayCapacityBytes: PTY_REPLAY_CAPACITY_BYTES,
         });
-        if (!isCurrent(context)) return;
+        if (!isCurrent(context) || signal.aborted) return;
       }
+      if (!isCurrent(context) || signal.aborted) return;
       context.resolveReady();
     };
     socket.onmessage = (event) => {
@@ -562,7 +568,13 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
           safeClose(socket);
           throw new PtyTransportError("aborted", generation);
         }
-        const context = attachContext(socket, generation, normalized, reattaching);
+        const context = attachContext(
+          socket,
+          generation,
+          normalized,
+          reattaching,
+          controller.signal,
+        );
         attemptContext = context;
         activeContext = context;
         setState(reattaching ? "reattaching" : "starting", generation, normalized, undefined, reattaching);
@@ -591,7 +603,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
             generation,
             normalized,
             undefined,
-            reattaching,
+            sanitized.code === "aborted" ? false : reattaching,
           );
         }
         rejectAttempt(sanitized);
@@ -960,7 +972,16 @@ function awaitWithAbort<T>(
   generation: number,
   onLateValue?: (value: T) => void,
 ): Promise<T> {
-  if (signal.aborted) return Promise.reject(new PtyTransportError("aborted", generation));
+  if (signal.aborted) {
+    // The value promise may already own a socket even though this attempt was
+    // cancelled before the abort listener could be installed. Keep late-value
+    // cleanup attached so synchronous and delayed factories cannot leak it.
+    promise.then(
+      (value) => onLateValue?.(value),
+      () => undefined,
+    );
+    return Promise.reject(new PtyTransportError("aborted", generation));
+  }
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const cleanup = (): void => signal.removeEventListener("abort", onAbort);
