@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants as fsConstants, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises';
@@ -25,7 +25,7 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const activeWorkspaces = new Set<string>();
 const activeRunRoots = new Set<string>();
 const quotaDevices = new Map<string, string>();
-let activeChild: ChildProcessWithoutNullStreams | undefined;
+let activeChild: ChildProcess | undefined;
 let handlingSignal = false;
 
 export interface Workload {
@@ -330,11 +330,11 @@ async function cloneDependencySnapshot(runRoot: string): Promise<string> {
   if (!(await stat(source)).isDirectory()) throw new BenchmarkError('dependencies_missing');
   const destination = join(runRoot, 'node_modules');
   const copyCommand = platform() === 'darwin'
-    ? ['cp', '-cR', source, destination]
-    : ['cp', '-a', '--reflink=auto', source, destination];
+    ? ['/bin/cp', '-cR', source, destination]
+    : ['/bin/cp', '-a', '--reflink=auto', source, destination];
   const copied = spawnSync(copyCommand[0], copyCommand.slice(1), { stdio: 'ignore' });
   if (copied.status !== 0) throw new BenchmarkError('dependency_snapshot_failed');
-  const protectedSnapshot = spawnSync('chmod', ['-R', 'a-w', destination], { stdio: 'ignore' });
+  const protectedSnapshot = spawnSync('/bin/chmod', ['-R', 'a-w', destination], { stdio: 'ignore' });
   if (protectedSnapshot.status !== 0) throw new BenchmarkError('dependency_snapshot_failed');
   return destination;
 }
@@ -385,7 +385,10 @@ async function bindDependencySnapshot(workspace: string, dependencySnapshot: str
       await symlink(source, destination, 'dir');
     }
   }
-  await mkdir(join(bindingRoot, '.vite-temp'), { recursive: true });
+  // Every build-writable byte must remain below the one quota boundary. Vite's
+  // config-runner cache keeps its expected path while resolving into that volume.
+  await mkdir(join(workspace, '.artifact-output', '.vite-temp'), { recursive: true });
+  await symlink('../.artifact-output/.vite-temp', join(bindingRoot, '.vite-temp'), 'dir');
 }
 
 async function createWorkspace(workload: Workload, dependencySnapshot: string): Promise<string> {
@@ -401,16 +404,15 @@ async function createWorkspace(workload: Workload, dependencySnapshot: string): 
     }
     const copiedConfig = join(workspace, 'svelte.config.js');
     await rename(copiedConfig, join(workspace, 'svelte.config.source.js'));
-    const deterministicConfig = `import adapter from '@sveltejs/adapter-static';\nimport config from './svelte.config.source.js';\n\n// The benchmark pins SvelteKit's otherwise timestamp-based version so identical\n// source inputs produce identical production artifacts across repetitions. The\n// adapter writes below the quota mount so it may replace its output directory\n// without attempting to remove the mount point itself.\nexport default {\n  ...config,\n  kit: {\n    ...config.kit,\n    adapter: adapter({ pages: '.artifact-output/build', assets: '.artifact-output/build', fallback: '200.html' }),\n    version: { name: ${JSON.stringify(workload.build.version_name)}, pollInterval: 0 }\n  }\n};\n`;
+    const deterministicConfig = `import adapter from '@sveltejs/adapter-static';\nimport config from './svelte.config.source.js';\n\n// The benchmark pins SvelteKit's otherwise timestamp-based version so identical\n// source inputs produce identical production artifacts across repetitions. The\n// adapter and SvelteKit intermediates stay below the same quota mount. Keeping\n// their configured paths real preserves generated relative imports while bounding\n// peak bytes, not only the final scanned artifact extent.\nexport default {\n  ...config,\n  kit: {\n    ...config.kit,\n    outDir: '.artifact-output/.svelte-kit',\n    adapter: adapter({ pages: '.artifact-output/build', assets: '.artifact-output/build', fallback: '200.html' }),\n    version: { name: ${JSON.stringify(workload.build.version_name)}, pollInterval: 0 }\n  }\n};\n`;
     copied.bytes += new TextEncoder().encode(deterministicConfig).byteLength;
     if (copied.bytes > workload.limits.workspace_input_bytes) throw new BenchmarkError('workspace_input_limit_exceeded');
     await writeFile(copiedConfig, deterministicConfig);
-    await bindDependencySnapshot(workspace, dependencySnapshot);
-    await mkdir(join(workspace, '.home'), { recursive: true });
-    await mkdir(join(workspace, '.tmp'), { recursive: true });
-    await mkdir(join(workspace, '.svelte-kit'), { recursive: true });
-    await mkdir(join(workspace, '.supervisor'), { recursive: true });
     await mountArtifactQuota(workspace, workload.limits.artifact_bytes);
+    await bindDependencySnapshot(workspace, dependencySnapshot);
+    await mkdir(join(workspace, '.artifact-output', '.home'), { recursive: true });
+    await mkdir(join(workspace, '.artifact-output', '.tmp'), { recursive: true });
+    await mkdir(join(workspace, '.artifact-output', '.svelte-kit'), { recursive: true });
     return workspace;
   } catch (error) {
     await removeWorkspace(workspace);
@@ -423,7 +425,7 @@ export async function removeWorkspace(workspace: string): Promise<void> {
   if (quotaDevice) {
     // Detach by device: a full HFS+ volume may lose its mount point before
     // cleanup, but the attached disk must still be released before deletion.
-    spawnSync('/usr/bin/hdiutil', ['detach', '-quiet', '-force', quotaDevice], { stdio: 'ignore', timeout: 3000 });
+    spawnSync('/usr/bin/hdiutil', ['detach', '-quiet', '-force', quotaDevice], { stdio: 'ignore', timeout: 60_000 });
     quotaDevices.delete(workspace);
   }
   spawnSync('/bin/chmod', ['-R', 'u+w', workspace], { stdio: 'ignore', timeout: 1000 });
@@ -473,17 +475,25 @@ export async function measureArtifacts(
   };
 }
 
-async function consumeBounded(stream: NodeJS.ReadableStream, limit: number, onOverflow: () => void): Promise<number> {
+async function consumeBounded(
+  stream: NodeJS.ReadableStream,
+  limit: number,
+  onOverflow: () => void,
+  tailLimit = 0
+): Promise<{ bytes: number; tail: string }> {
   let bytes = 0;
   let exceeded = false;
+  let tail = Buffer.alloc(0);
   for await (const chunk of stream) {
-    bytes += Buffer.byteLength(chunk);
+    const value = Buffer.from(chunk);
+    bytes += value.byteLength;
+    if (tailLimit > 0) tail = Buffer.concat([tail, value]).subarray(-tailLimit);
     if (!exceeded && bytes > limit) {
       exceeded = true;
       onOverflow();
     }
   }
-  return Math.min(bytes, limit + 1);
+  return { bytes: Math.min(bytes, limit + 1), tail: tail.toString('utf8') };
 }
 
 function boundedWait<T>(promise: Promise<T>, timeoutMs: number, code: string): Promise<T> {
@@ -502,7 +512,7 @@ function processGroupExists(pid: number): boolean {
   }
 }
 
-export async function terminateProcessGroup(child: ChildProcessWithoutNullStreams, graceMs = 500): Promise<void> {
+export async function terminateProcessGroup(child: ChildProcess, graceMs = 500): Promise<void> {
   if (child.pid === undefined) return;
   try {
     process.kill(-child.pid, 'SIGTERM');
@@ -560,11 +570,12 @@ export function sandboxLauncher(
   workspace: string,
   dependencySnapshot: string,
   artifactBytes: number,
-  command: string[]
+  command: string[],
+  resultFd = -1,
+  artifactFiles = 10_000
 ): { command: string; args: string[] } {
   const canonicalWorkspace = realpathSync(workspace);
   const canonicalDependencySnapshot = realpathSync(dependencySnapshot);
-  const resultPath = join(canonicalWorkspace, '.supervisor', 'result.json');
   const supervised = [
     runtime.pythonPath,
     '-I',
@@ -572,22 +583,32 @@ export function sandboxLauncher(
     SANDBOX_RUNNER_PATH,
     '--workspace',
     canonicalWorkspace,
-    '--result',
-    resultPath,
+    '--result-fd',
+    String(resultFd),
+    '--scanner',
+    ARTIFACT_SCANNER_PATH,
+    '--artifact-root',
+    '.artifact-output/build',
+    '--max-files',
+    String(artifactFiles),
+    '--max-bytes',
+    String(artifactBytes),
     '--',
     ...command
   ];
   if (platform() === 'darwin') {
-    const writableRoots = [
-      '.svelte-kit', '.artifact-output', '.home', '.tmp', 'node_modules/.vite-temp', '.supervisor'
-    ].map((path) => join(canonicalWorkspace, path).replaceAll('"', ''));
+    const writableRoot = join(canonicalWorkspace, '.artifact-output').replaceAll('"', '');
     const dependencyRoot = canonicalDependencySnapshot.replaceAll('"', '');
     const profile = [
       '(version 1)',
       '(allow default)',
       '(deny network*)',
       '(deny file-write*)',
-      ...writableRoots.map((path) => `(allow file-write* (subpath "${path}"))`),
+      // The supervisor may spawn the measured Node process and scanner. The
+      // measured executable itself cannot fork, so fast daemons cannot escape
+      // ancestry acquisition between polls.
+      `(deny process-fork (process-path "${runtime.nodePath.replaceAll('"', '')}"))`,
+      `(allow file-write* (subpath "${writableRoot}"))`,
       '(allow file-write* (literal "/dev/null"))',
       `(deny file-write* (subpath "${dependencyRoot}"))`
     ].join('');
@@ -599,15 +620,13 @@ export function sandboxLauncher(
       '--die-with-parent',
       '--unshare-net',
       '--unshare-pid',
+      '--as-pid-1',
       '--new-session',
       '--ro-bind', '/', '/',
-      '--bind', join(canonicalWorkspace, '.svelte-kit'), join(canonicalWorkspace, '.svelte-kit'),
+      // The measured process can write only to this aggregate quota. The
+      // supervisor scans it before the private mount namespace is destroyed.
       '--size', String(artifactBytes),
       '--tmpfs', join(canonicalWorkspace, '.artifact-output'),
-      '--bind', join(canonicalWorkspace, '.home'), join(canonicalWorkspace, '.home'),
-      '--bind', join(canonicalWorkspace, '.tmp'), join(canonicalWorkspace, '.tmp'),
-      '--bind', join(canonicalWorkspace, 'node_modules', '.vite-temp'), join(canonicalWorkspace, 'node_modules', '.vite-temp'),
-      '--bind', join(canonicalWorkspace, '.supervisor'), join(canonicalWorkspace, '.supervisor'),
       '--ro-bind', canonicalDependencySnapshot, canonicalDependencySnapshot,
       '--',
       ...supervised
@@ -619,8 +638,8 @@ function benchmarkEnvironment(workspace: string, workload: Workload, nodePath: s
   const executableDirectory = dirname(nodePath);
   return {
     PATH: [executableDirectory, '/usr/bin', '/bin'].join(delimiter),
-    HOME: join(workspace, '.home'),
-    TMPDIR: join(workspace, '.tmp'),
+    HOME: join(workspace, '.artifact-output', '.home'),
+    TMPDIR: join(workspace, '.artifact-output', '.tmp'),
     CI: '1',
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',
@@ -645,7 +664,15 @@ async function runBuild(
   const executedCommand = [runtime.nodePath, entrypoint, ...workload.build.arguments];
   // The first child is the fixed OS sandbox executable. Python startup and the
   // reviewed supervisor helper therefore occur only after network denial exists.
-  const launcher = sandboxLauncher(runtime, workspace, dependencySnapshot, workload.limits.artifact_bytes, executedCommand);
+  const launcher = sandboxLauncher(
+    runtime,
+    workspace,
+    dependencySnapshot,
+    workload.limits.artifact_bytes,
+    executedCommand,
+    1,
+    workload.limits.artifact_files
+  );
   const child = spawn(launcher.command, launcher.args, {
     cwd: workspace,
     env: benchmarkEnvironment(workspace, workload, runtime.nodePath),
@@ -664,7 +691,11 @@ async function runBuild(
     outputExceeded = true;
     stopTree();
   };
-  const stdoutDrain = consumeBounded(child.stdout, workload.limits.stdout_bytes, onOverflow);
+  if (!child.stdout || !child.stderr) throw new BenchmarkError('production_build_spawn_failed');
+  // The supervisor writes one canonical result line after the measured command
+  // and after descendant cleanup. Retaining only a bounded stdout tail prevents
+  // a build from forging the final authenticated observation.
+  const stdoutDrain = consumeBounded(child.stdout, workload.limits.stdout_bytes, onOverflow, 1024);
   const stderrDrain = consumeBounded(child.stderr, workload.limits.stderr_bytes, onOverflow);
   try {
     const exitCode = await new Promise<number>((resolve, reject) => {
@@ -672,32 +703,44 @@ async function runBuild(
       child.once('exit', (code) => resolve(code ?? 128));
     });
     await terminateProcessGroup(child);
-    const [stdoutBytes, stderrBytes] = await boundedWait(
+    const [stdoutResult, stderrResult] = await boundedWait(
       Promise.all([stdoutDrain, stderrDrain]),
       1000,
       'process_pipe_drain_timeout'
     );
+    const stdoutBytes = stdoutResult.bytes;
+    const stderrBytes = stderrResult.bytes;
     if (timedOut) throw new BenchmarkError('build_timeout');
     if (outputExceeded) throw new BenchmarkError('process_output_limit_exceeded');
     if (exitCode !== 0) throw new BenchmarkError('production_build_failed');
     let supervisorResult: unknown;
     try {
-      const resultBytes = await readFile(join(workspace, '.supervisor', 'result.json'));
-      if (resultBytes.byteLength > 256) throw new Error('oversized');
-      supervisorResult = JSON.parse(new TextDecoder().decode(resultBytes));
+      const resultLine = stdoutResult.tail.trimEnd().split('\n').at(-1);
+      if (!resultLine?.startsWith('HERMTERNAL_RESULT ')) throw new Error('missing');
+      supervisorResult = JSON.parse(resultLine.slice('HERMTERNAL_RESULT '.length));
     } catch {
       throw new BenchmarkError('supervisor_result_invalid');
     }
     supervisorResult = plainJsonSnapshot(supervisorResult, 'supervisor_result_invalid');
     const resultRecord = supervisorResult as Record<string, unknown>;
-    requireExactKeys(resultRecord, ['exit_code', 'duration_us'], 'supervisor_result_invalid');
-    if (resultRecord.exit_code !== 0 || !Number.isSafeInteger(resultRecord.duration_us) || (resultRecord.duration_us as number) <= 0) {
+    requireExactKeys(resultRecord, ['exit_code', 'duration_us', 'artifact_files', 'artifact_bytes', 'artifact_sha256'], 'supervisor_result_invalid');
+    if (
+      resultRecord.exit_code !== 0 ||
+      !Number.isSafeInteger(resultRecord.duration_us) || (resultRecord.duration_us as number) <= 0 ||
+      !Number.isSafeInteger(resultRecord.artifact_files) || (resultRecord.artifact_files as number) < 0 ||
+      (resultRecord.artifact_files as number) > workload.limits.artifact_files ||
+      !Number.isSafeInteger(resultRecord.artifact_bytes) || (resultRecord.artifact_bytes as number) < 0 ||
+      (resultRecord.artifact_bytes as number) > workload.limits.artifact_bytes ||
+      typeof resultRecord.artifact_sha256 !== 'string' || !SHA256_PATTERN.test(resultRecord.artifact_sha256)
+    ) {
       throw new BenchmarkError('supervisor_result_invalid');
     }
     const durationMs = (resultRecord.duration_us as number) / 1000;
-    const outputPath = join(workspace, workload.build.output_root);
-    const artifacts = await measureArtifacts(outputPath, workspace, workload.limits, true);
-    if (!artifacts.sha256) throw new BenchmarkError('artifact_digest_missing');
+    const artifacts = {
+      files: resultRecord.artifact_files as number,
+      bytes: resultRecord.artifact_bytes as number,
+      sha256: resultRecord.artifact_sha256 as string
+    };
     return {
       sequence,
       duration_ms: durationMs,
@@ -711,8 +754,8 @@ async function runBuild(
   } finally {
     clearTimeout(timer);
     await terminateProcessGroup(child);
-    child.stdout.destroy();
-    child.stderr.destroy();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
     if (activeChild === child) activeChild = undefined;
   }
 }
@@ -1046,31 +1089,44 @@ async function removeRunRoot(runRoot: string): Promise<void> {
   activeRunRoots.delete(runRoot);
 }
 
+function remainingCleanupMs(deadline: number): number {
+  return Math.max(1, Math.floor(deadline - performance.now()));
+}
+
 async function handleSignal(exitCode: number): Promise<void> {
   if (handlingSignal) return;
   handlingSignal = true;
-  const cleanup = async () => {
-    if (activeChild) await terminateProcessGroup(activeChild, 1500);
-    for (const workspace of [...activeWorkspaces]) await removeWorkspace(workspace);
-    for (const runRoot of [...activeRunRoots]) await removeRunRoot(runRoot);
-  };
+  const deadline = performance.now() + SIGNAL_CLEANUP_DEADLINE_MS;
   try {
-    await boundedWait(cleanup(), SIGNAL_CLEANUP_DEADLINE_MS, 'signal_cleanup_timeout');
-  } catch {
-    // Retry fixed-path filesystem cleanup synchronously before exit. The runner
-    // never reports signal completion while its registered roots still exist.
+    if (activeChild) await terminateProcessGroup(activeChild, Math.min(1500, remainingCleanupMs(deadline)));
     for (const workspace of [...activeWorkspaces]) {
-      spawnSync('/bin/chmod', ['-R', 'u+w', workspace], { stdio: 'ignore', timeout: 1000 });
-      spawnSync('/bin/rm', ['-rf', workspace], { stdio: 'ignore', timeout: 3000 });
+      const quotaDevice = quotaDevices.get(workspace);
+      if (quotaDevice) {
+        const detached = spawnSync('/usr/bin/hdiutil', ['detach', '-quiet', '-force', quotaDevice], {
+          stdio: 'ignore', timeout: remainingCleanupMs(deadline)
+        });
+        if (detached.status !== 0) throw new BenchmarkError('signal_cleanup_failed');
+        quotaDevices.delete(workspace);
+      }
+      spawnSync('/bin/chmod', ['-R', 'u+w', workspace], { stdio: 'ignore', timeout: remainingCleanupMs(deadline) });
+      const removed = spawnSync('/bin/rm', ['-rf', workspace], { stdio: 'ignore', timeout: remainingCleanupMs(deadline) });
+      if (removed.status !== 0) throw new BenchmarkError('signal_cleanup_failed');
       activeWorkspaces.delete(workspace);
     }
     for (const runRoot of [...activeRunRoots]) {
-      spawnSync('/bin/chmod', ['-R', 'u+w', runRoot], { stdio: 'ignore', timeout: 1000 });
-      spawnSync('/bin/rm', ['-rf', runRoot], { stdio: 'ignore', timeout: 3000 });
+      spawnSync('/bin/chmod', ['-R', 'u+w', runRoot], { stdio: 'ignore', timeout: remainingCleanupMs(deadline) });
+      const removed = spawnSync('/bin/rm', ['-rf', runRoot], { stdio: 'ignore', timeout: remainingCleanupMs(deadline) });
+      if (removed.status !== 0) throw new BenchmarkError('signal_cleanup_failed');
       activeRunRoots.delete(runRoot);
     }
+    if (performance.now() > deadline || activeWorkspaces.size || activeRunRoots.size) {
+      throw new BenchmarkError('signal_cleanup_timeout');
+    }
+    process.exit(exitCode);
+  } catch {
+    // A cleanup failure is not reported as successful signal completion.
+    process.exit(2);
   }
-  process.exit(exitCode);
 }
 
 async function main(): Promise<void> {
@@ -1082,18 +1138,20 @@ async function main(): Promise<void> {
   // SIGINT/SIGTERM can no longer observe an unregistered on-disk run root.
   const runRoot = mkdtempSync(join(tmpdir(), 'hermternal-web-benchmark-'));
   activeRunRoots.add(runRoot);
-  const readinessFile = process.env.HERMTERNAL_BENCHMARK_READY_FILE;
-  if (readinessFile) {
-    const readinessPath = resolve(readinessFile);
-    const readinessParent = realpathSync(dirname(readinessPath));
-    if (readinessParent === realpathSync(tmpdir()) && readinessPath.split(sep).at(-1)?.startsWith('hermternal-benchmark-ready-')) {
-      try { writeFileSync(readinessPath, 'ready\n', { flag: 'wx', mode: 0o600 }); } catch {}
-    }
-  }
   try {
     const dependencySnapshot = await cloneDependencySnapshot(runRoot);
     const runtime = await protectedRuntime(workload);
     const toolchain = await toolchainIdentity(dependencySnapshot, runtime);
+    const readinessFile = process.env.HERMTERNAL_BENCHMARK_READY_FILE;
+    if (readinessFile) {
+      const readinessPath = resolve(readinessFile);
+      const readinessParent = realpathSync(dirname(readinessPath));
+      if (readinessParent === realpathSync(tmpdir()) && readinessPath.split(sep).at(-1)?.startsWith('hermternal-benchmark-ready-')) {
+        // Readiness means dependency cloning, helper verification, and toolchain
+        // identity are complete. Signal tests cannot race an ordinary startup error.
+        try { writeFileSync(readinessPath, 'ready\n', { flag: 'wx', mode: 0o600 }); } catch {}
+      }
+    }
     const cold = await runCold(workload, dependencySnapshot, runtime, options.coldRepetitions);
     const warmResult = await runWarm(workload, dependencySnapshot, runtime, options.warmRepetitions);
     const artifactIdentities = [warmResult.warmup, ...cold, ...warmResult.observations].map((sample) => sample.artifact_sha256);

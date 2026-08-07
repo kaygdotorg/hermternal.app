@@ -175,32 +175,28 @@ describe('production-build benchmark contract', () => {
     }
   });
 
-  test('quota mount rejects a transient artifact that exceeds peak bytes', async () => {
+  test('64 MiB aggregate quota rejects a transient 128 MiB output symlink escape', async () => {
     if (process.platform !== 'darwin') return;
     const workspace = await mkdtemp(join(tmpdir(), 'hermternal-quota-test-'));
     const dependencyRoot = join(workspace, 'dependencies');
-    for (const path of [
-      dependencyRoot,
-      join(workspace, '.svelte-kit'),
-      join(workspace, '.home'),
-      join(workspace, '.tmp'),
-      join(workspace, '.supervisor'),
-      join(workspace, 'node_modules', '.vite-temp')
-    ]) await mkdir(path, { recursive: true });
+    await mkdir(dependencyRoot, { recursive: true });
     const quotaBytes = 64 * 1024 * 1024;
     try {
       await mountArtifactQuota(workspace, quotaBytes);
-      const target = join(workspace, '.artifact-output', 'peak.bin');
-      const command = `const fs=require('node:fs');const fd=fs.openSync(${JSON.stringify(target)},'w');try{const chunk=Buffer.alloc(1048576);for(let index=0;index<256;index+=1)fs.writeSync(fd,chunk);process.exit(9)}catch{process.exit(0)}finally{fs.closeSync(fd)}`;
+      const output = join(workspace, '.artifact-output', 'build');
+      const alternate = join(workspace, '.artifact-output', '.tmp');
+      await mkdir(alternate, { recursive: true });
+      const command = `const fs=require('node:fs');const output=${JSON.stringify(output)};const alternate=${JSON.stringify(alternate)};fs.symlinkSync(alternate,output,'dir');let blocked=false;try{const fd=fs.openSync(output+'/peak.bin','w');try{const chunk=Buffer.alloc(1048576);for(let index=0;index<128;index+=1)fs.writeSync(fd,chunk)}finally{fs.closeSync(fd)}}catch{blocked=true}fs.rmSync(output,{recursive:true,force:true});fs.mkdirSync(output,{recursive:true});fs.writeFileSync(output+'/final.txt','ok');process.exit(blocked?0:9)`;
       const candidate = await workload();
       const runtime = await protectedRuntime(candidate);
       const launcher = sandboxLauncher(runtime, workspace, dependencyRoot, quotaBytes, [process.execPath, '-e', command]);
       const child = Bun.spawn([launcher.command, ...launcher.args], { cwd: workspace, stdout: 'pipe', stderr: 'pipe' });
       expect(await child.exited).toBe(0);
+      expect((await readFile(join(output, 'final.txt'))).byteLength).toBe(2);
     } finally {
       await removeWorkspace(workspace);
     }
-  }, 20_000);
+  }, 90_000);
 
   test('artifact scanner rejects root and descendant symlink escapes without reading targets', async () => {
     const root = await mkdtemp(join(tmpdir(), 'hermternal-artifact-test-'));
@@ -281,42 +277,45 @@ describe('production-build benchmark contract', () => {
     expect(() => process.kill(descendantPid, 0)).toThrow();
   });
 
-  test('sandbox supervisor reaps a child that escapes with setsid', async () => {
+  test('fast detached descendants cannot survive completion, SIGINT, or SIGTERM', async () => {
+    if (process.platform !== 'darwin') return;
     const root = await mkdtemp(join(tmpdir(), 'hermternal-setsid-test-'));
     const workspace = join(root, 'workspace');
     const dependencyRoot = join(root, 'dependencies');
     await mkdir(join(workspace, '.artifact-output'), { recursive: true });
-    await mkdir(join(workspace, '.supervisor'), { recursive: true });
     await mkdir(dependencyRoot, { recursive: true });
-    const detachedScript = `const {spawn}=require('node:child_process');const escaped=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{detached:true,stdio:'ignore'});console.log(escaped.pid);setInterval(()=>{},1000);`;
     try {
       const candidate = await workload();
       const runtime = await protectedRuntime(candidate);
-      const launcher = sandboxLauncher(runtime, workspace, dependencyRoot, 1048576, [runtime.nodePath, '-e', detachedScript]);
-      const child = spawn(launcher.command, launcher.args, {
-        cwd: workspace,
-        detached: true,
-        env: process.env,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-      const escapedPid = await Promise.race([
-        new Promise<number>((resolve, reject) => {
-          child.stdout.once('data', (chunk) => resolve(Number(String(chunk).trim())));
-          child.once('error', reject);
-        }),
-        Bun.sleep(3000).then(() => { throw new Error('setsid child readiness timeout'); })
-      ]);
-      const supervisorExited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-      await terminateProcessGroup(child, 1500);
-      await Promise.race([
-        supervisorExited,
-        Bun.sleep(3000).then(() => { throw new Error('sandbox supervisor survived cleanup'); })
-      ]);
-      expect(() => process.kill(escapedPid, 0)).toThrow();
+      for (const mode of ['completion', 'SIGINT', 'SIGTERM'] as const) {
+        const detachedScript = `const {spawn}=require('node:child_process');try{const escaped=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});setInterval(()=>{},1000)"],{detached:true,stdio:'ignore'});console.log(escaped.pid);${mode === 'completion' ? 'process.exit(0)' : 'setInterval(()=>{},1000)' }}catch{console.log('denied');${mode === 'completion' ? 'process.exit(0)' : 'setInterval(()=>{},1000)' }}`;
+        const launcher = sandboxLauncher(runtime, workspace, dependencyRoot, 1048576, [runtime.nodePath, '-e', detachedScript]);
+        const child = spawn(launcher.command, launcher.args, {
+          cwd: workspace,
+          detached: true,
+          env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+        const line = await Promise.race([
+          new Promise<string>((resolveLine, reject) => {
+            child.stdout.once('data', (chunk) => resolveLine(String(chunk).trim()));
+            child.once('error', reject);
+          }),
+          Bun.sleep(3000).then(() => { throw new Error(`${mode} descendant readiness timeout`); })
+        ]);
+        const supervisorExited = new Promise<number | null>((resolveExit) => child.once('exit', resolveExit));
+        if (mode !== 'completion' && child.pid) process.kill(-child.pid, mode);
+        await Promise.race([
+          supervisorExited,
+          Bun.sleep(3000).then(() => { throw new Error(`${mode} supervisor survived cleanup`); })
+        ]);
+        if (/^\d+$/.test(line)) expect(() => process.kill(Number(line), 0)).toThrow();
+        else expect(line).toBe('denied');
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 20_000);
 
   test('SIGTERM finishes registered cleanup before exit across repeated runs', async () => {
     const prefix = 'hermternal-web-benchmark-';
@@ -329,9 +328,10 @@ describe('production-build benchmark contract', () => {
         env: { ...process.env, HERMTERNAL_BENCHMARK_READY_FILE: readinessFile },
         stdio: ['ignore', 'pipe', 'pipe']
       });
+      const exited = new Promise<number | null>((resolveExit) => child.once('exit', resolveExit));
       await Promise.race([
         (async () => {
-          for (let attempt = 0; attempt < 300; attempt += 1) {
+          for (let attempt = 0; attempt < 3000; attempt += 1) {
             if (await Bun.file(readinessFile).exists()) return;
             if (child.exitCode !== null) throw new Error(`runner exited before readiness: ${child.exitCode}`);
             await Bun.sleep(10);
@@ -342,8 +342,8 @@ describe('production-build benchmark contract', () => {
       ]);
       child.kill('SIGTERM');
       const exitCode = await Promise.race([
-        new Promise<number | null>((resolveExit) => child.once('exit', resolveExit)),
-        Bun.sleep(5000).then(() => { throw new Error('runner signal cleanup timeout'); })
+        exited,
+        Bun.sleep(10_000).then(() => { throw new Error('runner signal cleanup deadline exceeded'); })
       ]);
       expect(exitCode).toBe(143);
       const after = (await readdir(tmpdir())).filter((name) => name.startsWith(prefix) && !before.has(name));

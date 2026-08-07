@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Supervise the complete build descendant tree inside the OS sandbox.
+"""Supervise the complete build lifecycle inside the OS sandbox.
 
 The TypeScript parent starts the fixed sandbox executable first. Only then does
-an absolute isolated Python interpreter import and execute this reviewed helper.
-The helper continuously records descendants, including processes that call
-setsid(), and reaps every recorded process before it returns.
+an absolute isolated Python interpreter execute this reviewed helper. Linux runs
+this supervisor as PID 1 so orphan adoption is atomic. The outer macOS Seatbelt
+profile denies forks when the measured Node executable is the caller, which
+removes the polling gap that otherwise exists after a fast spawn-and-exit.
 """
 
 from __future__ import annotations
@@ -45,8 +46,6 @@ def _children(parent_pid: int) -> set[int]:
         required = list_children(parent_pid, None, 0)
         if required <= 0:
             return set()
-        # Darwin versions have returned either a PID count or a byte count for
-        # the sizing call. Over-allocation is bounded and handles both forms.
         capacity = min(max(required, 16), 65536)
         buffer = (ctypes.c_int * capacity)()
         found = list_children(parent_pid, buffer, ctypes.sizeof(buffer))
@@ -107,6 +106,16 @@ def _signal_all(pids: set[int], signum: int) -> None:
             fail()
 
 
+def _reap_adopted() -> None:
+    while True:
+        try:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid <= 0:
+            return
+
+
 def _terminate_tracked(root_pid: int, tracked: set[int]) -> None:
     tracked.update(_descendants(root_pid))
     targets = {pid for pid in tracked if _alive(pid)}
@@ -116,34 +125,73 @@ def _terminate_tracked(root_pid: int, tracked: set[int]) -> None:
         tracked.update(_descendants(root_pid))
         targets = {pid for pid in tracked if _alive(pid)}
         if not targets:
+            _reap_adopted()
             return
         time.sleep(TRACK_INTERVAL_SECONDS)
     _signal_all({pid for pid in tracked if _alive(pid)}, signal.SIGKILL)
     force_deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
-    while time.monotonic() < force_deadline and any(_alive(pid) for pid in tracked):
+    while time.monotonic() < force_deadline:
+        _reap_adopted()
+        tracked.update(_descendants(root_pid))
+        if not any(_alive(pid) for pid in tracked):
+            return
         time.sleep(TRACK_INTERVAL_SECONDS)
     if any(_alive(pid) for pid in tracked):
         fail()
 
 
-def _write_result(path: Path, exit_code: int, duration_us: int) -> None:
-    payload = json.dumps(
-        {"exit_code": exit_code, "duration_us": duration_us},
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("ascii") + b"\n"
-    temporary = path.with_name("result.tmp")
-    with temporary.open("wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+def _scan(arguments: argparse.Namespace) -> dict[str, object]:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            arguments.scanner,
+            "--workspace",
+            arguments.workspace,
+            "--root",
+            arguments.artifact_root,
+            "--max-files",
+            str(arguments.max_files),
+            "--max-bytes",
+            str(arguments.max_bytes),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        check=False,
+    )
+    if completed.returncode != 0 or len(completed.stdout) > 1024:
+        fail()
+    try:
+        result = json.loads(completed.stdout.decode("ascii"))
+    except (UnicodeError, json.JSONDecodeError):
+        fail()
+    if not isinstance(result, dict) or set(result) != {"files", "bytes", "sha256"}:
+        fail()
+    return result
+
+
+def _write_result(fd: int, payload: dict[str, object]) -> None:
+    encoded = b"HERMTERNAL_RESULT " + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+    view = memoryview(encoded)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            fail()
+        view = view[written:]
+    os.close(fd)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--workspace", required=True)
-    parser.add_argument("--result", required=True)
+    parser.add_argument("--result-fd", required=True, type=int)
+    parser.add_argument("--scanner", required=True)
+    parser.add_argument("--artifact-root", required=True)
+    parser.add_argument("--max-files", required=True, type=int)
+    parser.add_argument("--max-bytes", required=True, type=int)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     command = arguments.command
@@ -153,10 +201,15 @@ def main() -> int:
         fail()
 
     workspace = Path(arguments.workspace).resolve(strict=True)
-    result = Path(arguments.result)
-    result_parent = result.parent.resolve(strict=True)
-    if result_parent != (workspace / ".supervisor").resolve(strict=True):
+    scanner = Path(arguments.scanner).resolve(strict=True)
+    if not scanner.is_file() or arguments.max_files <= 0 or arguments.max_bytes <= 0:
         fail()
+    arguments.workspace = str(workspace)
+    arguments.scanner = str(scanner)
+    # Linux mounts an empty quota tmpfs over this path after workspace setup.
+    # Recreate every writable runtime directory inside the active quota boundary.
+    for relative in (".home", ".tmp", ".svelte-kit", ".vite-temp"):
+        (workspace / ".artifact-output" / relative).mkdir(parents=True, exist_ok=True)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -170,6 +223,7 @@ def main() -> int:
         stderr=None,
         start_new_session=True,
         close_fds=True,
+        pass_fds=(),
     )
     tracked = {child.pid}
     exit_code: int | None = None
@@ -189,7 +243,18 @@ def main() -> int:
             return 128 + _stop_signal
         assert exit_code is not None
         _terminate_tracked(os.getpid(), tracked)
-        _write_result(result, exit_code, duration_us)
+        if exit_code == 0 and arguments.result_fd >= 0:
+            artifact = _scan(arguments)
+            _write_result(
+                arguments.result_fd,
+                {
+                    "exit_code": exit_code,
+                    "duration_us": duration_us,
+                    "artifact_files": artifact["files"],
+                    "artifact_bytes": artifact["bytes"],
+                    "artifact_sha256": artifact["sha256"],
+                },
+            )
         return exit_code if 0 <= exit_code <= 125 else 125
     finally:
         if child.poll() is None:
@@ -198,6 +263,7 @@ def main() -> int:
                 child.wait(timeout=0.1)
             except subprocess.TimeoutExpired:
                 pass
+        _reap_adopted()
 
 
 if __name__ == "__main__":
