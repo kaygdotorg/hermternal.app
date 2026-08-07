@@ -234,14 +234,14 @@ EXPECTED_REVISIONS = {
         "commit_sha": "fee6accac56592249bb2a965f5ac855076824300",
         "fixture_id": "shared-benchmark-validator",
         "fixture_version": "1.0.0",
-        "fixture_sha256": "2334294567b8d578e1f99eff260ba39e5ec176c19d9264b45a53c4fe9ec52056",
+        "fixture_sha256": "6af9be30ba8597c84f73fdc767d1303347165c72b59f52699dc8d2031c2e7923",
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: {
-        "commit_sha": "e227a347d81d653f4ff3897dae6786d5f6937cf5",
+        "commit_sha": "877fe1ad99f82b8cd41b3f43a100c05dcc90bdae",
         "fixture_id": "web-production-build",
         "fixture_version": "1.0.0",
-        "fixture_sha256": "9987e6d7c5be8c70dcf0e39d1b4e3fc3289b2964cb8957cb46e9f182baf08267",
+        "fixture_sha256": "57716aa5c88e7e155ec7f99322957318052220396241bebc2cd8bded4730691a",
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
 }
@@ -285,17 +285,17 @@ EXPECTED_ARTIFACT_METADATA = {
     BASELINE_EVIDENCE_ID: (
         ("README.md", 7581, "cea7d5eae37398d0b6f4cad593be5d72b0bebb77c5a3bd73e5e08d4c835e944a"),
         ("benchmark-evidence.json", 6446, "aa652867dc336467ab07873964f54a9d5000cfb01b1d55756091be2e8797a6eb"),
-        ("test_validate.py", 24231, "1b47a4c0a0110c9a0f94f1817cce8a23069291353b6420353310dd4dc4d33e24"),
-        ("sample-provenance.json", 2303, "2334294567b8d578e1f99eff260ba39e5ec176c19d9264b45a53c4fe9ec52056"),
+        ("test_validate.py", 25503, "2b721a4ca5055fe72b898c1779e15f83d2bf79b592bb36df9c900e42dce8e08e"),
+        ("sample-provenance.json", 2304, "6af9be30ba8597c84f73fdc767d1303347165c72b59f52699dc8d2031c2e7923"),
         ("synthetic/workload.json", 4042, "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"),
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: (
-        ("workload.json", 2452, "9987e6d7c5be8c70dcf0e39d1b4e3fc3289b2964cb8957cb46e9f182baf08267"),
-        ("run.ts", 65596, "b2b48b94fef3c944daf285929de84ad2e88df6a3bea151176fb99382e834d51e"),
+        ("workload.json", 2424, "57716aa5c88e7e155ec7f99322957318052220396241bebc2cd8bded4730691a"),
+        ("run.ts", 70047, "9dbae11437dd7b17045eb7676e4aa69d01e24fc6618102b02e7f16d4615e4efb"),
         ("sandbox-runner.py", 13010, "e12eb3f7ec3e499802a27027cab6d188d4d60af544920b58be7fd48b8ff6c44b"),
         ("artifact-scanner.py", 5994, "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb"),
-        ("evidence/raw-trace.json", 17609, "940f69d108920098532c4422f8730177975f82946af7a05cb6fb8d22a2afa6cf"),
+        ("evidence/raw-trace.json", 17599, "07d6419245300701dd7dfcf5c8be1a2a4de8b3edb564465c27d0f155abb881d6"),
     ),
 }
 SELF_AUTHENTICATED_ARTIFACT_PATHS = {
