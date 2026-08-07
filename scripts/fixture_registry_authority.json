@@ -1,0 +1,9 @@
+{
+  "schema": "hermternal.fixture-registry-authority.v1",
+  "validator_path": "contracts/fixtures/validator/validate.py",
+  "validator_size_bytes": 84337,
+  "validator_sha256": "2a2f32a42ca1867ab92e5be6180cef0caca71e51c2ccae7a33cb99724ae7bffa",
+  "baseline_path": "contracts/fixtures/validator/validation-baseline.json",
+  "baseline_size_bytes": 2614,
+  "baseline_sha256": "b1b2d03037854bb8e80d2a084b09977c869d7c0ea466b248971d95c1d782b0e1"
+}

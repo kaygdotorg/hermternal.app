@@ -24,6 +24,70 @@ Fixtures must identify the pinned Hermes revision `f5be9236e00ddf2f2a412697f2670
 
 Use synthetic data only. Do not commit credentials, cookies, WebSocket tickets, ticket fragments, live transcripts, hostnames, tokens, secrets, provider data, or user data. Invalid-ticket fixtures use non-secret markers and verify that the pinned source's bounded audit fragment is removed from retained logs. Fixtures describe behavior; they do not create a transcript mirror.
 
+## C-19 authority migration
+
+The legacy aggregate authority remains readable at
+`scripts/fixture_registry_authority.json`. Its historical v1 contract was
+introduced at `a96889c` and has the schema plus six legacy fields (seven total
+keys): `validator_path`/`validator_size_bytes`/`validator_sha256` plus
+`baseline_path`/`baseline_size_bytes`/`baseline_sha256` under the schema
+`hermternal.fixture-registry-authority.v1`.
+
+The `.v2.json` filename used by commits `3600975` and `70d5963` was a
+filename-only rotation: those historical documents still declared the v1
+schema plus six legacy fields (seven total keys). The independent bootstrap commit `8dad73e` then
+introduced a multi-artifact document at the legacy path while still claiming
+v1. Its published Git object is not rewritten. The corrective bootstrap keeps
+the legacy path readable and places the new multi-artifact authority at
+`scripts/fixture_registry_authority.v2.json` with the explicit schema
+`hermternal.fixture-registry-authority.v2`.
+
+The standalone v2 verifier loads that separate path from its immutable Git
+introduction object. It can read the legacy v1 shape for migration checks, but
+it never treats the legacy path as a v2 fallback. The v2 trust root accepts
+only the approved external predecessor
+`abb6754bddd1cf18927b0172ed9fa3456235b035`; an arbitrary self-consistent
+ancestor is rejected. The trust root remains independent of the
+scanner-preparation change; after this authority is merged, that preparation
+must rebase onto the merged external predecessor before regenerating the index,
+baseline, and next authority.
+
+The verifier's object repository must be a canonical absolute plain checkout,
+not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
+`commondir`, object, ref, or config boundaries. Before any path-based Git
+command, it opens `/` and every caller ancestor through a descriptor-relative
+chain with no-follow flags, allowing only the explicit host aliases `/tmp`,
+`/var`, `/var/folders`, and `/var/tmp`; it then opens the caller root and `.git`
+directory from those held descriptors. It copies the complete Git metadata tree
+into a private mode-700 temporary snapshot. The copy is chunked and
+category-bounded: ordinary metadata and loose objects use
+`MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) for legitimate pack,
+index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
+`MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), with a `SNAPSHOT_TIMEOUT_SECONDS` (30
+second) wall-clock deadline. The 8 MiB pack cap derives from the supported
+repository's fresh single-branch remote-clone observation of a roughly 2.1 MiB
+pack; it leaves measured growth headroom while keeping individual files
+bounded. The 1 MiB non-pack cap remains above the checked-in evidence and
+metadata sizes. It rejects symlinks/non-regular entries and checks source
+metadata before and after each copy. Git then runs only against that snapshot,
+so concurrent rename or symlink replacement of nested fanout/pack/ref paths,
+config, or metadata cannot redirect reads. The snapshot also descriptor-walks
+the full `objects` and `refs` trees with no-follow descriptors as a second
+structural check. It fails closed on local grafts, shallow metadata, alternates
+and HTTP alternates,
+replacement refs, partial-clone/promisor settings, and local include or
+URL-redirection config. Git is invoked only through validated `/usr/bin/git`
+with fixed helper `PATH` `/usr/bin:/bin`; inherited Git redirects and
+system/global config are removed. This is a trusted-host boundary for
+synthetic local evidence, not a production attestation. Before object reads,
+bounded `git fsck --full --strict` verifies compressed object contents against
+their OIDs, including loose objects. Checkout artifact reads are bounded
+nonblocking regular-file reads. Git stdout and stderr are streamed into
+separate bounded buffers; reaching the cap, a timeout, or selector setup
+failure kills the isolated child session and drains both pipes. All normal and
+optimized failures remain one redacted `live_claim:false` JSON line.
+
 ## C-19 aggregate registry
 
 [`index.json`](index.json) is the language-neutral registry consumed by later
@@ -56,7 +120,10 @@ PTY local-adapter artifacts. The C-05 coverage and C-08 stream-dependent
 coverage remain pending until their dependency gates complete; C-07 is connected
 to the pending chat-stream coverage row. `live_claim` is always `false`; a
 passing validator proves only synthetic artifact integrity and registry
-consistency.
+consistency. The current blocked aggregate evidence is caused by three stale
+artifact records under `source-audit/compatibility-gate`; that current index
+problem is distinct from the three future scanner-preparation blockers listed
+in the authority migration document.
 
 The validator emits one bounded semantic JSON line. Failures do not echo
 arguments, paths, keys, values, secrets, or tracebacks. Normal and optimized
