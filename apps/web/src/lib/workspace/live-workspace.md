@@ -8,6 +8,8 @@
 - The controller replaces presentation arrays after each server read. It does not keep a secondary transcript store.
 - One JSON-RPC transport belongs to one selected session. A session change closes that transport before creating another one.
 - Generation numbers and abort signals prevent stale session reads from publishing after a newer selection.
+- A new workspace generation revokes the coordinator's PTY/session lease synchronously before the replacement snapshot is published. Coordinator callbacks are accepted only when the workspace generation, coordinator session generation, selected identity, and visible snapshot agree.
+- Chat fallback state is tagged to its workspace generation; an old transport callback cannot poison a replacement Terminal activation while Chat is being rebuilt.
 - Approval and clarification replies capture their generation, transport identity, and pending-map owner. A late completion or failure cannot mutate a replacement chat, disposed workspace, or newer interactive item.
 - `invalidate()` detaches the chat identity before close, aborts reads, and removes session and timeline references before subscribers receive the signed-out view. `dispose()` marks the workspace closed and clears subscribers before close callbacks can re-enter. The route root owns final disposal: an authenticated view borrows its injected workspace, so expiry may unmount and later remount that view without closing the reusable root session. Route teardown alone permanently disposes Chat, PTY, coordinator subscriptions, and sockets, and it is idempotent.
 
@@ -26,7 +28,9 @@ selection/copy, and accessible recovery actions. The bridge forwards raw
 `Uint8Array` output directly to that renderer and stores only redacted
 lifecycle state. The renderer-ready gate delays the first PTY connection until
 the lazy sink is mounted; reconnect keeps that mounted sink in place so a PTY
-generation change cannot open a zero-byte-loss window.
+generation change cannot open a zero-byte-loss window. An explicit Terminal
+close is a user-selected detach; an unexpected PTY exit is the failure path,
+and both revoke the coordinator lease before another Terminal action.
 
 The pinned server source does not expose a client-visible attach-token issuance
 route. The normal browser composition therefore uses a legacy PTY and labels

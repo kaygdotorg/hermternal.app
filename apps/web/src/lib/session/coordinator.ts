@@ -145,6 +145,17 @@ export interface SessionCoordinator {
   activate(mode: WorkspaceMode, signal?: AbortSignal): Promise<SessionCoordinatorState>;
   switchMode(mode: WorkspaceMode, signal?: AbortSignal): Promise<SessionCoordinatorState>;
   setSession(sessionId: string, signal?: AbortSignal): Promise<SessionCoordinatorState>;
+  /**
+   * Synchronously revoke the current session lease before a workspace replaces
+   * its visible session snapshot. This preserves one PTY owner during reloads
+   * and selection races without disposing the shared coordinator.
+   */
+  invalidateSession(): void;
+  /** Reconcile an unsolicited PTY transition before the next Terminal action. */
+  invalidateTerminalBinding(
+    status?: Extract<TerminalBindingStatus, 'detached' | 'failed'>,
+    sessionId?: string
+  ): void;
   /** Restore server-owned state after a browser refresh without transcript mirroring. */
   restore(sessionId: string, signal?: AbortSignal): Promise<SessionCoordinatorState>;
   reconnect(signal?: AbortSignal): Promise<SessionCoordinatorState>;
@@ -473,6 +484,54 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     terminalBindingFocusOwnerSequence = undefined;
     terminalStatus = 'detached';
     if (lease) cleanupBinding(lease);
+  };
+
+  /**
+   * Reconciles a transport-owned PTY failure immediately. The bridge may have
+   * already invalidated its raw binding before this callback runs, so cleanup
+   * remains lease-idempotent and never touches a newer attachment.
+   */
+  const invalidateTerminalBinding = (
+    nextStatus: Extract<TerminalBindingStatus, 'detached' | 'failed'> = 'detached',
+    sessionId?: string
+  ): void => {
+    if (disposed || loggedOut) return;
+    const lease = terminalBinding;
+    if (sessionId !== undefined && lease?.binding.sessionId !== sessionId) return;
+    if (!lease && terminalStatus !== 'attached') return;
+
+    invalidateBinding();
+    if (disposed || loggedOut) return;
+    terminalStatus = nextStatus;
+    if (nextStatus === 'failed') {
+      lastError = 'terminal-attach-failed';
+      if (mode === 'terminal') lifecycle = 'terminal-attach-failed';
+    } else if (lastError === 'terminal-attach-failed') {
+      lastError = undefined;
+      if (lifecycle === 'terminal-attach-failed') lifecycle = 'active';
+    }
+    publish();
+  };
+
+  /**
+   * Revokes the current session lease synchronously while keeping this
+   * coordinator and its Chat/Terminal façades alive for the next selection.
+   * Workspace callers invoke this before exposing a replacement snapshot.
+   */
+  const invalidateSession = (): void => {
+    if (disposed || loggedOut) return;
+    cancelSession();
+    cancelTerminal();
+    cancelReconnect();
+    invalidateBinding();
+    if (disposed || loggedOut) return;
+    activeSessionId = undefined;
+    sessionGeneration += 1;
+    terminalStatus = 'detached';
+    lastError = undefined;
+    lastFocusIntent = undefined;
+    lifecycle = compatibility === 'compatible' ? 'empty' : 'blocked';
+    publish();
   };
 
   const assertCurrent = (generation: number, sessionId: string): void => {
@@ -1014,6 +1073,8 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     activate,
     switchMode: activate,
     setSession,
+    invalidateSession,
+    invalidateTerminalBinding,
     restore,
     reconnect,
     logout,
