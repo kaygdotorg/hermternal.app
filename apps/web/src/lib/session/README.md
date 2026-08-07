@@ -123,7 +123,13 @@ The current correction evidence was measured from source commit
 `cfa619776a3b0d4ca82d6402565a836c6a66b3c7e40fbed4bf5227d908a31c60` and
 benchmark digest
 `f2a25bd9ebbfa06baa37c27f0a4dccc2b61cb25170ff265d5daf66edbc6feb19`.
-Its distribution was min/p50/p95/p99/max/mean
-`1.672625 / 4.812063 / 8.097914 / 10.225273 / 4.781762` ms per 1,000
-transitions. The evidence-only follow-up commit may change the artifact file,
-but must not relabel `head_commit` away from the measured source commit.
+The v2 `head_commit` and additive `measurement_source_commit` fields identify
+that historical measurement checkout. The separate `reviewed_head_commit`
+field records the reviewed/packaging head `b8c63ad1fb8677562f0505f776a2a8fd2bc37177`;
+it does not claim that these samples were rerun at that head. Its distribution
+was min/p50/p95/p99/max/mean
+`1.672625 / 4.812063 / 8.097914 / 10.225273 / 10.893167 / 4.781762` ms per
+1,000 transitions. A future exact-head rerun must replace the measured commit,
+source and harness digests, raw samples, and distribution together; an
+evidence-only follow-up must not relabel `head_commit` away from the measured
+source commit.

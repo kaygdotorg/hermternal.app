@@ -17,6 +17,8 @@
   "source": "apps/web/src/lib/session/coordinator.ts",
   "benchmark": "apps/web/src/lib/session/coordinator.bench.ts",
   "head_commit": "4cfcc723a85f64fb583ebb9bf18e76fcda65055c",
+  "measurement_source_commit": "4cfcc723a85f64fb583ebb9bf18e76fcda65055c",
+  "reviewed_head_commit": "b8c63ad1fb8677562f0505f776a2a8fd2bc37177",
   "source_sha256": "cfa619776a3b0d4ca82d6402565a836c6a66b3c7e40fbed4bf5227d908a31c60",
   "benchmark_sha256": "f2a25bd9ebbfa06baa37c27f0a4dccc2b61cb25170ff265d5daf66edbc6feb19",
   "pinned_dashboard_contract": "dashboard-v0.0.1",
