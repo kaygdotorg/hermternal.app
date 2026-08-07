@@ -341,11 +341,15 @@ describe('LiveWorkspaceSession current-session Terminal integration', () => {
     });
 
     const staleStates: string[] = [];
+    const staleTerminalStates: string[] = [];
     let sessionCVisible = false;
     const unsubscribe = session.subscribe((snapshot) => {
       if (snapshot.activeSessionId === SESSION_3.id) sessionCVisible = true;
       if (sessionCVisible && snapshot.coordinator?.activeSessionId === SESSION_2.id) {
         staleStates.push('session-2');
+      }
+      if (sessionCVisible && snapshot.terminal?.sessionId === SESSION_2.id) {
+        staleTerminalStates.push('session-2');
       }
     });
 
@@ -365,6 +369,7 @@ describe('LiveWorkspaceSession current-session Terminal integration', () => {
     unsubscribe();
 
     expect(staleStates).toEqual([]);
+    expect(staleTerminalStates).toEqual([]);
     expect(session.current.activeSessionId).toBe(SESSION_3.id);
     expect(session.current.coordinator?.activeSessionId).toBe(SESSION_3.id);
   });

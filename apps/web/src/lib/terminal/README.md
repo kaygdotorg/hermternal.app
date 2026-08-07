@@ -7,7 +7,10 @@
 lifecycle state into the workspace. It forwards generation-tagged raw
 `Uint8Array` views without decoding or retaining them. A renderer-ready gate may
 delay the first PTY attach until the lazy TerminalSurface has a mounted sink;
-headless coordinator tests leave that gate disabled.
+headless coordinator tests leave that gate disabled. TerminalSurface closes the
+gate before sink teardown, so a pending attach remains blocked for a later mount
+or is rejected by bridge disposal; teardown never resolves readiness, and no
+application-level byte buffer repairs a late attach.
 
 ## Runtime contract
 
