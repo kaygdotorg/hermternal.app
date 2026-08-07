@@ -11,7 +11,7 @@
     },
     {
       "path": "contracts/fixtures/compatibility-attestation/revision_attestation.json",
-      "sha256": "42f2180a804386dc51c43ebd86078f0092a4bbb15f81cea6cd398ae2742581a0",
+      "sha256": "3ea3758723d205dbbd2b0f8f2f0eb501c5c82aa1a09687c7392a2755751ae33a",
       "size_bytes": 1679
     },
     {
@@ -21,8 +21,8 @@
     },
     {
       "path": "contracts/fixtures/compatibility-attestation/validate.py",
-      "sha256": "becbba03825cf20f7bef03c7cf152d56a3321093ad87d6b03bf5b11b160b4fc5",
-      "size_bytes": 45544
+      "sha256": "11e209427c1e54c829863479f242a3621426a858461aa59d1255d1035b071434",
+      "size_bytes": 45652
     },
     {
       "path": "contracts/fixtures/compatibility-attestation/test_validate.py",
@@ -30,7 +30,7 @@
       "size_bytes": 23419
     }
   ],
-  "artifact_bytes": 85626,
+  "artifact_bytes": 85734,
   "environment": {
     "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
     "python": "3.14.6"

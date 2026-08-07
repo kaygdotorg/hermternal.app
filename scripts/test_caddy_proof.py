@@ -234,6 +234,94 @@ class CaddyProofEvidenceTests(unittest.TestCase):
             },
         )
 
+    def test_retained_evidence_nested_shapes_are_closed(self) -> None:
+        """Reject unsupported fields inside retained evidence collections."""
+
+        deployment = self.evidence["deployment"]
+        self.assertEqual(
+            set(deployment),
+            {
+                "proxy",
+                "hermes_source_sha",
+                "runtime_config_sha256",
+                "runtime_inputs_schema",
+                "runtime_inputs",
+                "runtime_inputs_sha256",
+                "parity_fixtures",
+                "hermes_listener",
+                "public_listener",
+            },
+        )
+        self.assertEqual(
+            set(deployment["runtime_inputs"]),
+            {"host", "https_port", "hermes_port", "site_root", "cert_path", "key_path", "storage_root"},
+        )
+        self.assertEqual(set(deployment["parity_fixtures"]), {"static_route_grammar", "deep_link_cases"})
+        for fixture in deployment["parity_fixtures"].values():
+            self.assertEqual(set(fixture), {"path", "sha256"})
+
+        positive_key_sets = {
+            "root_static": {"id", "status", "layer", "upstream_request"},
+            "root_scenario_static": {"id", "status", "layer", "upstream_request", "query_policy"},
+            "deep_link_session": {"id", "status", "layer", "upstream_request", "fallback"},
+            "deep_link_message": {"id", "status", "layer", "upstream_request", "fallback"},
+            "dashboard_provider_discovery": {"id", "status", "layer", "upstream_request"},
+            "password_login": {"id", "status", "layer", "upstream_request"},
+            "ws_ticket": {"id", "status", "layer", "upstream_request"},
+            "ws_upgrade": {"id", "status", "layer", "upstream_request", "query_policy"},
+            "pty_upgrade": {"id", "status", "layer", "upstream_request", "query_policy"},
+            "mock_upstream_header_rebuild": {
+                "id",
+                "status",
+                "layer",
+                "upstream_request",
+                "forwarding_policy",
+                "prefix_policy",
+            },
+        }
+        positive_cases = {item["id"]: item for item in self.evidence["positive_cases"]}
+        self.assertEqual(set(positive_cases), set(positive_key_sets))
+        self.assertEqual(len(positive_cases), len(self.evidence["positive_cases"]))
+        for case_id, expected_keys in positive_key_sets.items():
+            self.assertEqual(set(positive_cases[case_id]), expected_keys, case_id)
+
+        negative_cases = self.evidence["negative_cases"]
+        self.assertEqual(len(negative_cases), 23)
+        self.assertEqual(
+            {item["id"] for item in negative_cases},
+            {
+                "wrong_host",
+                "wrong_websocket_origin",
+                "unknown_route",
+                "unknown_method",
+                "duplicate_prefix",
+                "traversal",
+                "encoded_separator",
+                "encoded_dot",
+                "malformed_upgrade",
+                "missing_ticket",
+                "root_query_mutation",
+                "static_asset_query_mutation",
+                "client_route_query_mutation",
+                "rest_query_mutation",
+                "pty_missing_resume",
+                "pty_extra_parameter",
+                "pty_duplicate_parameter",
+                "pty_empty_value",
+                "pty_fresh_parameter",
+                "invalid_ticket",
+                "ticket_expired",
+                "ticket_reuse",
+                "direct_private_port",
+            },
+        )
+        for case in negative_cases:
+            self.assertEqual(set(case), {"id", "status", "layer", "upstream_request"}, case["id"])
+
+        self.assertEqual(set(self.evidence["black_box"]), {"scope", "route_vectors", "assertions", "request_material"})
+        self.assertIsInstance(self.evidence["black_box"]["assertions"], list)
+        self.assertTrue(all(isinstance(assertion, str) for assertion in self.evidence["black_box"]["assertions"]))
+
     def test_evidence_reconstructs_runtime_and_parity_inputs(self) -> None:
         deployment = self.evidence["deployment"]
         self.assertEqual(deployment["runtime_inputs_schema"], caddy_proof.RUNTIME_INPUT_SCHEMA)
