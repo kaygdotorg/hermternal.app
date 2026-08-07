@@ -302,9 +302,10 @@ routes under one `/hermes` prefix, and separate chat and PTY WebSocket
 contracts. Chat accepts one non-empty safe opaque ticket bounded to 512
 characters; bare query markers are denied. Canonical session and message deep links rewrite to `200.html`; only
 the reviewed root `scenario=success|empty|failure` selector accepts a query;
-static assets, client routes, and REST routes reject query mutations. PTY
-requires ticket plus resume with optional attach, accepts any key order, and
-rejects duplicate, extra, empty, and `fresh` parameters. The renderer strips
+static assets, client routes, and REST routes reject query mutations. The
+current browser PTY client sends only ticket plus resume with optional non-empty
+attach, accepts any key order, and rejects duplicate, extra, empty, and
+unsupported `fresh` parameters at the edge. The renderer strips
 all inbound `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` headers before
 rebuilding trusted public metadata, and applies the private upstream
 Host/Origin mapping and Secure cookie rewrite. Caddy's canonical formatter

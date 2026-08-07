@@ -31,9 +31,9 @@ BASELINE_SCHEMA = "hermternal.deployment-security.ws-ticket-baseline.v1"
 CONTRACT = "dashboard-v0.0.1"
 HERMES_SOURCE_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 MANIFEST_RELATIVE = "contracts/hermes-dashboard/manifest.md"
-MANIFEST_SHA256 = "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197"
-EXPECTED_FIXTURE_CANONICAL_SHA256 = "2b8cb396aa999a9d3a41a8371f38cbfcb719a7147fb52918ef29731b9ea9d7b8"
-EXPECTED_BASELINE_CANONICAL_SHA256 = "dc6699968787f36221c1575ea6ac297b0b1132f30d4e268ad1050980b9445d8c"
+MANIFEST_SHA256 = "680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5"
+EXPECTED_FIXTURE_CANONICAL_SHA256 = "ab761e28e5aee441322a5e2d63cd02fae1f280b255fe57f6d93a2000b347b03d"
+EXPECTED_BASELINE_CANONICAL_SHA256 = "215b895dffd11e7b82debba6bde30a93729739e74e4e48c994f4dd89d7ddd78a"
 BASELINE_REPETITIONS = 30
 # These limits are enforced by the byte scanner before json.loads allocates a
 # Python tree. The approved source-audit JSON is well below them; the limits

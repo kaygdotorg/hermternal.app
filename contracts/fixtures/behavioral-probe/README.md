@@ -103,7 +103,7 @@ malformed-input warning to the non-sensitive marker before retention.
 The route manifest is bound by this SHA-256 digest:
 
 ```text
-3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197
+680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5
 ```
 
 `proof_run.status` is `synthetic_observed` because the fixture contains
