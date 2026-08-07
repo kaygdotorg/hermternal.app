@@ -43,6 +43,7 @@ function deferred<T>(): {
 function neverSettlingCancelResponse(
   contentType: string,
   bodyBytes: Uint8Array = new Uint8Array(),
+  status = 200,
 ): { response: Response; wasCancelled: () => boolean } {
   let cancelled = false;
   const body = new ReadableStream<Uint8Array>({
@@ -55,7 +56,10 @@ function neverSettlingCancelResponse(
     },
   });
   return {
-    response: new Response(body, { headers: { "Content-Type": contentType } }),
+    response: new Response(body, {
+      status,
+      headers: { "Content-Type": contentType },
+    }),
     wasCancelled: () => cancelled,
   };
 }
@@ -117,6 +121,30 @@ describe("createWsTicketRequestBoundary", () => {
     ).rejects.toMatchObject({ code: "authentication-failed", status: 401 });
     expect(bodyRead).toBe(false);
   });
+
+  it.each([401, 500])(
+    "bounds cancellation of a never-settling non-2xx body for status %s",
+    async (status) => {
+      const tracked = neverSettlingCancelResponse("application/json", undefined, status);
+      const boundary = createWsTicketRequestBoundary(async () => tracked.response);
+      const startedAt = Date.now();
+
+      await expect(
+        boundary({
+          method: "POST",
+          path: WS_TICKET_PATH,
+          credentials: "same-origin",
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toMatchObject({
+        code: status === 401 ? "authentication-failed" : "request-failed",
+        status,
+      });
+
+      expect(tracked.wasCancelled()).toBe(true);
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+    },
+  );
 
   it("rejects duplicate ticket keys instead of accepting a parser overwrite", async () => {
     const first = opaqueTicket();
@@ -404,6 +432,34 @@ describe("createWsTicketClient", () => {
 
       await expect(client.retry()).resolves.toBe("connected");
       expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a connector that resolves after the internal deadline exactly once", async () => {
+    vi.useFakeTimers();
+    try {
+      const connectorGate = deferred<{ close: ReturnType<typeof vi.fn> }>();
+      const connection = { close: vi.fn() };
+      const connect = vi.fn(async () => connectorGate.promise);
+      const client = createWsTicketClient({
+        request: async () => ({ ticket: opaqueTicket() }),
+        connect,
+      });
+
+      const attempt = client.open();
+      void attempt.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(connect).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS);
+      await expect(attempt).rejects.toMatchObject({ code: "cancelled" });
+
+      connectorGate.resolve(connection);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(connection.close).toHaveBeenCalledTimes(1);
+      expect(connection.close).toHaveBeenCalledWith(1000, "cancelled");
     } finally {
       vi.useRealTimers();
     }

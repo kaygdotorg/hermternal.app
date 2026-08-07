@@ -15,7 +15,8 @@ integration.
   require the official exact object shape `{ "ticket": "<URL-safe value>",
   "ttl_seconds": 30 }`. The bounded duplicate-key-rejecting parser accepts either
   key order. Missing, duplicate, extra, mistyped, or changed-TTL fields fail closed
-  before upgrade. Body and reader cancellation are bounded, and reader locks are
+  before upgrade. Non-2xx response bodies are cancelled before status errors are
+  published. Body and reader cancellation are bounded, and reader locks are
   released after cleanup. The validated TTL is discarded before the ephemeral
   ticket is handed to the client seam.
 - Derive the upgrade authority only from the browser's current `location.origin`.
@@ -24,8 +25,9 @@ integration.
 - Coalesce duplicate calls while one attempt is active. Every attempt also has
   an internal five-second deadline, including calls without a caller signal, so a
   stuck request or connector clears the coalescing slot and an explicit retry can
-  acquire a fresh ticket. After an attempt settles, the next explicit call
-  acquires a fresh ticket instead of reusing the old one.
+  acquire a fresh ticket. A connector result that arrives after cancellation is
+  closed through an idempotent late-resolution cleanup. After an attempt settles,
+  the next explicit call acquires a fresh ticket instead of reusing the old one.
 - Propagate an `AbortSignal`; cancellation discards an unverified response and
   never starts an upgrade or an automatic retry.
 - Expose only bounded semantic errors. Response bodies, cookie or bearer values,
