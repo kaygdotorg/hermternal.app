@@ -22,7 +22,34 @@ Browser sessions use protected server-issued HttpOnly cookies. Native clients ma
 
 The supported Hermes revision is `f5be9236e00ddf2f2a412697f267078fc4ee068e`. Missing or mismatched deployment attestation, or a failed behavioral probe, blocks live operation. Private deep links use `/v1/c/...`; sharing is deferred to `v0.0.2`.
 
-## Proof matrix
+## Issue #156 Caddy proof lane
+
+The disposable Caddy proof is recorded in
+[`tests/integration/hermes-caddy/caddy-proof-evidence.json`](../../tests/integration/hermes-caddy/caddy-proof-evidence.json).
+It binds the observed edge and upstream results to the exact PR #291 build
+commit `521ede32b904a42e22eebb279fd7d404074cd318`, static build digest
+`77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21`, and
+runtime Caddyfile digest
+`b3585c4b91d7656d5bcb6adedda29af63d60ca488ec99ef162ec4f74e2611e82`.
+
+The renderer and offline regression tests are in
+[`scripts/caddy_proof.py`](../../scripts/caddy_proof.py) and
+[`scripts/test_caddy_proof.py`](../../scripts/test_caddy_proof.py). The proof
+uses exact method/path matchers at `/` and under one `/hermes` prefix. Unknown
+methods and paths, duplicate prefixes, traversal, encoded separators, and
+malformed upgrades are edge-denied without an upstream request. Wrong Host is
+`421`; wrong WebSocket Origin is `403`; missing tickets are edge `404`; and
+invalid, expired, or reused tickets remain Hermes-layer results.
+
+The official launcher intentionally publishes Hermes only on VM loopback. The
+empty durable-session state in a fresh instance prevents the PR #291 workspace
+from opening its ticket/WebSocket path, so the proof seeded one disposable
+session through the same official Dashboard contract. The browser journey then
+reached `gateway.ready`, `session.resume`, and `prompt.submit`, but the official
+launcher supplied no provider credential and the turn stopped in the observed
+provider/API-key class before `message.delta` or `message.complete`. The
+retained state is therefore `blocked_provider`; no preview URL is valid and no
+provider payload is retained. This lane does not implement or attest Traefik.
 
 Before application or live integration, prove both proxy choices for HTTPS, HttpOnly cookies, WebSocket upgrades, private `:9119` reachability, firewall behavior, and the web-only `/api/pty` path. Also prove that missing or mismatched revision attestation and failed behavioral evidence block operation. Measure the performance baseline before setting optimization claims.
 

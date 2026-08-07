@@ -19,6 +19,25 @@ Terminal mode requires Hermes to run on a POSIX or WSL host. The proof MUST reco
 
 The fixed non-loopback rule is intentional. The reviewed Hermes authentication gate is not active on loopback. Older planning text that names loopback is superseded for this proof.
 
+### Issue #156 disposable Caddy exception
+
+Issue #156 uses the official Hermes launcher on the authorized disposable VM.
+That launcher publishes the Dashboard only on `127.0.0.1:19256`; the proof does
+not change the launcher boundary, add credentials, or expose Hermes on a public
+interface. Caddy listens on its own disposable loopback listener and is reached
+through an owned SSH tunnel. This is a test-lane exception to the general
+non-loopback topology above, not a production deployment recommendation.
+
+The checked-in Caddy renderer is an exact proof fixture, not a deployable
+configuration. It serves the PR #291 static build at `/`, maps the reviewed
+Dashboard surface under exactly one `/hermes` prefix, and denies all other
+methods and paths. It does not implement Traefik. Its redacted evidence binds
+the build SHA, static build digest, and runtime Caddyfile digest. The browser
+journey remains `blocked_provider`: authentication, ticket acquisition, one
+WebSocket upgrade, `gateway.ready`, `session.resume`, and `prompt.submit` were
+observed, but the official launcher has no provider credential and the turn did
+not produce `message.delta` or `message.complete`.
+
 ## Public origin and private bind
 
 The public origin and the private Hermes bind authority are different authorities. The disposable proof MUST resolve that mismatch using the behavior accepted by the pinned Hermes source:

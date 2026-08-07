@@ -1,0 +1,152 @@
+{
+  "schema": "hermternal.caddy-proof.v1",
+  "issue": "156",
+  "contract": "dashboard-v0.0.1",
+  "deployment": {
+    "proxy": "caddy",
+    "official_image_digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+    "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "runtime_config_sha256": "b3585c4b91d7656d5bcb6adedda29af63d60ca488ec99ef162ec4f74e2611e82",
+    "hermes_listener": "loopback-only",
+    "public_listener": "loopback-only-disposable"
+  },
+  "product": {
+    "build_commit": "521ede32b904a42e22eebb279fd7d404074cd318",
+    "static_manifest_sha256": "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
+  },
+  "browser_journey": "blocked_provider",
+  "positive_cases": [
+    {
+      "id": "root_static",
+      "status": 200,
+      "layer": "static",
+      "upstream_request": false
+    },
+    {
+      "id": "dashboard_provider_discovery",
+      "status": 200,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "password_login",
+      "status": 200,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "ws_ticket",
+      "status": 200,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "ws_upgrade",
+      "status": 101,
+      "layer": "hermes",
+      "upstream_request": true
+    }
+  ],
+  "negative_cases": [
+    {
+      "id": "wrong_host",
+      "status": 421,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "wrong_websocket_origin",
+      "status": 403,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "unknown_route",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "unknown_method",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "duplicate_prefix",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "traversal",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "encoded_separator",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "encoded_dot",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "malformed_upgrade",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "missing_ticket",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "invalid_ticket",
+      "status": 400,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "ticket_expired",
+      "status": 403,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "ticket_reuse",
+      "status": 403,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "direct_private_port",
+      "status": "connection_denied",
+      "layer": "network",
+      "upstream_request": false
+    }
+  ],
+  "cookie_attributes": {
+    "secure": true,
+    "http_only": true,
+    "same_site": "lax",
+    "path": "/",
+    "value": "redacted"
+  },
+  "retention": {
+    "credentials": "redacted",
+    "cookies": "redacted",
+    "tickets": "redacted",
+    "ticket_fragments": "redacted",
+    "queries": "redacted",
+    "provider_state": "redacted",
+    "transcripts": "redacted"
+  }
+}
