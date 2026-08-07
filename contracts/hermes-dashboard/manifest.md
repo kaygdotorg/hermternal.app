@@ -55,7 +55,7 @@ The client may use these routes:
 | `GET` | `/login` | Server-rendered login entry point. |
 | `GET` | `/api/auth/providers` | Discover the providers exposed by this Dashboard. |
 | `GET` | `/auth/login` | Start the configured browser provider flow. |
-| `GET` | `/auth/callback` | Complete the browser provider flow. |
+| `GET` | `/auth/callback` | Complete the browser provider flow with exactly either `code`+`state`, or literal `error=access_denied`+`error_description`+`state`, in any key order; `code`, `state`, and `error_description` are non-empty safe ASCII (`A-Za-z0-9._~-`) values bounded to 512 characters. |
 | `POST` | `/auth/password-login` | Use the configured password provider when it is advertised. |
 | `POST` | `/auth/logout` | End the Dashboard session. |
 | `GET` | `/api/auth/me` | Verify the authenticated identity. |
