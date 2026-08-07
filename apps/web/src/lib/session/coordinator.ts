@@ -379,10 +379,13 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   const current = (generation: number, sessionId: string): boolean =>
     !disposed && !loggedOut && generation === sessionGeneration && activeSessionId === sessionId;
 
+  // Chat focus is emitted as soon as Chat is ready; deferred Terminal focus must
+  // still be owned by the active Terminal mode to avoid a late W-Term focus.
   const isCurrentModeActivation = (activation: ModeActivation): boolean =>
     current(activation.generation, activation.sessionId) &&
     latestModeActivationSequence[activation.mode] === activation.sequence &&
-    (activation.mode === 'chat' || terminalBindingFocusOwnerSequence === activation.sequence);
+    (activation.mode === 'chat' ||
+      (mode === activation.mode && terminalBindingFocusOwnerSequence === activation.sequence));
 
   const publishFocus = (activation: ModeActivation): void => {
     if (!isCurrentModeActivation(activation)) return;
@@ -741,7 +744,21 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     cancelSession();
     cancelTerminal();
     cancelReconnect();
+    const cleanupGeneration = sessionGeneration;
+    const cleanupSessionId = activeSessionId;
+    const cleanupLifecycle = lifecycle;
     invalidateBinding();
+    // Binding cleanup is adapter-owned and may synchronously log out or dispose.
+    // Recheck lifecycle, generation, and identity before installing the replacement.
+    if (
+      disposed ||
+      loggedOut ||
+      sessionGeneration !== cleanupGeneration ||
+      activeSessionId !== cleanupSessionId ||
+      lifecycle !== cleanupLifecycle
+    ) {
+      return state();
+    }
     activeSessionId = sessionId;
     sessionGeneration += 1;
     terminalStatus = 'detached';

@@ -14,10 +14,14 @@ Hermes session, or mirror transcript content.
   Terminal attach is coalesced while pending, and a completed binding is reused
   until the selected session changes. Repeated Terminal activations transfer
   focus ownership to the latest Terminal request without starting another attach.
+  A late Terminal completion may leave its binding attached after switching to
+  Chat, but it never restores W-Term focus while Chat is the active mode.
 - `setSession()` increments the session generation, invalidates and releases the
   current Terminal binding lease before awaiting Chat restoration, and ignores
-  late completions from the previous generation. Each attach gets a fresh lease,
-  so an adapter may reuse one raw binding object across sessions without
+  late completions from the previous generation. Cleanup is rechecked before the
+  replacement identity is installed because adapter invalidation or release may
+  synchronously log out or dispose the coordinator. Each attach gets a fresh
+  lease, so an adapter may reuse one raw binding object across sessions without
   suppressing later cleanup.
 - A Terminal attach failure is reported as `terminal-attach-failed`; the Chat
   transport remains open and usable. Switching back to Chat focuses the composer
@@ -41,13 +45,16 @@ and reduced-motion rendering.
 A still-current Chat activation emits a deterministic focus intent targeting the
 `composer` as soon as Chat is ready, even when a Terminal attach remains pending.
 A still-current Terminal activation emits one targeting the `w-term-input` surface
-**after** the session binding resolves. Repeated Terminal activations coalesce
-one attach and transfer focus ownership to the latest Terminal request, so a
-stale Terminal completion never emits focus. Each intent includes the opaque
-session identity, session generation, and a monotonic sequence. For example,
-a pending Terminal → Chat → Terminal sequence emits `composer` then exactly one
-`w-term-input` intent; it never emits a Terminal intent for the stale first
-request.
+**after** the session binding resolves. For deferred Terminal focus, currentness
+includes the active mode, the opaque session identity and generation, and the
+mode's latest activation sequence. Repeated Terminal activations coalesce one
+attach and transfer focus ownership to the latest Terminal request, so a stale
+Terminal completion never emits focus.
+Each intent includes the opaque session identity, session generation, and a
+monotonic sequence. For example, a pending Terminal → Chat sequence emits only
+`composer`; the late Terminal binding may remain attached, but it never emits a
+late `w-term-input` intent. A pending Terminal → Chat → Terminal sequence emits
+`composer` then exactly one `w-term-input` intent for the latest Terminal request.
 
 The renderer owns the actual DOM focus and any motion. It should treat the
 intent as immediate and interruptible, and should provide a reduced-motion
