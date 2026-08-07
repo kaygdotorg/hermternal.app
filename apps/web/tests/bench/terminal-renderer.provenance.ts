@@ -9,17 +9,45 @@ export const BENCHMARK_REPETITIONS = {
   repeated_mount_dispose: 10
 } as const;
 
-type SampleSet = Readonly<{ raw_samples: readonly number[] }>;
+type Distribution = Readonly<{
+  min: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
+  mean: number;
+}>;
 
-/** Validate that workload counts match the method metadata in the trace. */
+type SampleSet = Readonly<{
+  raw_samples: readonly number[];
+  distribution?: Distribution;
+}>;
+
+/** Validate counts and finite published values before a trace is emitted. */
 export function assertBenchmarkSampleCounts(
   samples: Readonly<Record<string, SampleSet>>,
   repetitions: Readonly<Record<string, number>>
 ): void {
   for (const [name, expected] of Object.entries(repetitions)) {
-    const actual = samples[name]?.raw_samples.length;
+    const sampleSet = samples[name];
+    const actual = sampleSet?.raw_samples.length;
     if (actual !== expected) {
       throw new Error(`benchmark sample count for ${name} was ${actual ?? 0}; expected ${expected}`);
+    }
+    if (!sampleSet || !Array.isArray(sampleSet.raw_samples)) {
+      throw new Error(`benchmark samples for ${name} were not an array`);
+    }
+    for (const value of sampleSet.raw_samples) {
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error(`benchmark sample for ${name} was not a finite non-negative number`);
+      }
+    }
+    if (sampleSet.distribution) {
+      for (const value of Object.values(sampleSet.distribution)) {
+        if (!Number.isFinite(value) || value < 0) {
+          throw new Error(`benchmark distribution for ${name} was not finite and non-negative`);
+        }
+      }
     }
   }
 }

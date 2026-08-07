@@ -155,7 +155,8 @@ async function run(): Promise<BrowserBenchmarkResult> {
   });
   const samples: Record<string, Samples> = {};
 
-  const coldMountSamples: number[] = [];
+  try {
+    const coldMountSamples: number[] = [];
   const firstGlyphSamples: number[] = [];
   const sustainedOutputSamples: number[] = [];
   const resizeSettlingSamples: number[] = [];
@@ -243,10 +244,13 @@ async function run(): Promise<BrowserBenchmarkResult> {
       scrollback_limit_bytes: 64 * 1024
     }
   };
-  browserWindow[resultKey] = result;
-  longTaskObserver?.disconnect();
-  host.remove();
-  return result;
+    browserWindow[resultKey] = result;
+    return result;
+  } finally {
+    longTaskObserver?.disconnect();
+    renderer.dispose();
+    host.remove();
+  }
 }
 
 void run().catch((error: unknown) => {

@@ -104,6 +104,10 @@ type WTermModules = Readonly<{
 let wTermModulesPromise: Promise<WTermModules> | null = null;
 const WTERM_HOST_CLASSES = ['wterm', 'cursor-blink', 'has-scrollback', 'focused'] as const;
 const wTermHostRecords = new WeakMap<HTMLElement, WTermHostRecord>();
+// One renderer generation owns host-level loading/error/restore mutations at a
+// time. This prevents an older renderer instance from clearing a newer owner's
+// content when both instances are pointed at the same host.
+const rendererHostOwners = new WeakMap<HTMLElement, object>();
 
 function loadWTermModules(): Promise<WTermModules> {
   if (wTermModulesPromise) return wTermModulesPromise;
@@ -161,11 +165,11 @@ function sanitizePaste(text: string): string {
   return text.replace(/\x1b/gu, '');
 }
 
-function isUint8Array(data: Uint8Array): boolean {
+function isUint8Array(data: unknown): data is Uint8Array {
   // Vitest, embedded webviews, and iframes can provide a Uint8Array from a
-  // different realm. Brand-check the view instead of rejecting valid bytes
-  // merely because its constructor is not this realm's constructor.
-  return Object.prototype.toString.call(data) === '[object Uint8Array]';
+  // different realm. ArrayBuffer.isView rejects Symbol.toStringTag spoofing,
+  // while the tag distinguishes Uint8Array from other typed-array views.
+  return ArrayBuffer.isView(data) && Object.prototype.toString.call(data) === '[object Uint8Array]';
 }
 
 function renderLoading(host: HTMLElement): void {
@@ -393,7 +397,12 @@ function restoreWTermHostRecord(host: HTMLElement, record: WTermHostRecord): voi
  * path removes only the instance's known nodes/listeners and conditionally
  * restores host values that this exact adapter mount changed.
  */
-function disposeWTermPreservingHost(term: WTerm, host: HTMLElement, record: WTermHostRecord): void {
+function disposeWTermPreservingHost(
+  term: WTerm,
+  host: HTMLElement,
+  record: WTermHostRecord,
+  preserveHost = false
+): void {
   if (record.disposed) return;
   record.disposed = true;
   record.classObserver?.disconnect();
@@ -436,7 +445,11 @@ function disposeWTermPreservingHost(term: WTerm, host: HTMLElement, record: WTer
   if ((globalThis as typeof globalThis & { __wterm?: WTerm }).__wterm === term) {
     delete (globalThis as typeof globalThis & { __wterm?: WTerm }).__wterm;
   }
-  restoreWTermHostRecord(host, record);
+  if (preserveHost) {
+    if (wTermHostRecords.get(host) === record) wTermHostRecords.delete(host);
+  } else {
+    restoreWTermHostRecord(host, record);
+  }
   term.bridge = null;
 }
 
@@ -519,7 +532,7 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
           record.classObserver.observe(host, { attributes: true, attributeFilter: ['class'] });
         }
         if (options.isCurrent && !options.isCurrent()) {
-          disposeWTermPreservingHost(term, host, record);
+          disposeWTermPreservingHost(term, host, record, true);
           throw new Error('terminal mount became stale');
         }
 
@@ -558,15 +571,20 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
             // class state synchronously; the observer covers async W-Term
             // render/focus mutations while the adapter is mounted.
             if (!disposeOptions?.preserveHost) recordWTermClasses(host, record);
-            disposeWTermPreservingHost(mountedTerm, host, record);
+            disposeWTermPreservingHost(mountedTerm, host, record, disposeOptions?.preserveHost === true);
           }
         };
       } catch (error) {
+        const preserveHost = options.isCurrent?.() === false;
         if (term && !record.disposed) {
           recordWTermHostState(host, record);
-          disposeWTermPreservingHost(term, host, record);
+          disposeWTermPreservingHost(term, host, record, preserveHost);
         } else if (!term && !record.disposed) {
-          restoreWTermHostRecord(host, record);
+          if (preserveHost) {
+            if (wTermHostRecords.get(host) === record) wTermHostRecords.delete(host);
+          } else {
+            restoreWTermHostRecord(host, record);
+          }
         }
         throw error;
       }
@@ -630,7 +648,12 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   async mount(host: HTMLElement): Promise<void> {
-    if (this.state === 'ready' && this.host === host && this.backend) {
+    if (
+      this.state === 'ready' &&
+      this.host === host &&
+      this.backend &&
+      rendererHostOwners.get(host) === this
+    ) {
       if (this.restoreFocusOnMount || this.focusRequested) this.backend.focus();
       this.restoreFocusOnMount = false;
       this.focusRequested = false;
@@ -648,6 +671,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     }
 
     const generation = ++this.mountGeneration;
+    rendererHostOwners.set(host, this);
     this.host = host;
     this.hostSnapshot = captureHostSnapshot(host);
     applyHostState(host, 'loading', this.label);
@@ -669,6 +693,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       throw new TypeError('terminal writes require Uint8Array data');
     }
     if (data.byteLength === 0) return;
+    if (this.state === 'ready' && this.host && rendererHostOwners.get(this.host) !== this) return;
     if (this.state === 'ready' && this.backend) {
       try {
         this.backend.write(data);
@@ -694,6 +719,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
 
   resize(cols: number, rows: number): void {
     const size = normalizeSize({ cols, rows });
+    if (this.state === 'ready' && this.host && rendererHostOwners.get(this.host) !== this) return;
     if (this.state === 'ready' && this.backend) {
       try {
         this.backend.resize(size.cols, size.rows);
@@ -716,6 +742,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   focus(): void {
+    if (this.state === 'ready' && this.host && rendererHostOwners.get(this.host) !== this) return;
     if (this.state === 'ready' && this.backend) {
       this.backend.focus();
       return;
@@ -741,9 +768,18 @@ class ManagedTerminalRenderer implements TerminalRenderer {
         initialSize: this.initialSize,
         scrollbackLimitBytes: this.scrollbackLimitBytes,
         onInput: this.onInput,
-        isCurrent: () => generation === this.mountGeneration && this.host === host && this.state !== 'disposed'
+        isCurrent: () =>
+          generation === this.mountGeneration &&
+          this.host === host &&
+          rendererHostOwners.get(host) === this &&
+          this.state !== 'disposed'
       });
-      if (generation !== this.mountGeneration || this.state === 'disposed' || this.host !== host) {
+      if (
+        generation !== this.mountGeneration ||
+        this.state === 'disposed' ||
+        this.host !== host ||
+        rendererHostOwners.get(host) !== this
+      ) {
         // The async adapter may have constructed W-Term after this renderer
         // released the host. Never let the upstream destructor clear reused
         // content; production W-Term uses its host-preserving cleanup path.
@@ -766,7 +802,11 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       this.restoreFocusOnMount = false;
       this.focusRequested = false;
     } catch {
-      if (generation !== this.mountGeneration || this.state === 'disposed') {
+      if (
+        generation !== this.mountGeneration ||
+        this.state === 'disposed' ||
+        rendererHostOwners.get(host) !== this
+      ) {
         this.restoreErrorIfOwned(host);
         return;
       }
@@ -785,7 +825,12 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   private restoreErrorIfOwned(host: HTMLElement): void {
-    if (this.state !== 'error' || !this.error || this.host !== host) return;
+    if (
+      this.state !== 'error' ||
+      !this.error ||
+      this.host !== host ||
+      rendererHostOwners.get(host) !== this
+    ) return;
     applyHostState(host, 'error', this.label);
     renderError(host);
   }
@@ -824,7 +869,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       code,
       message: code === 'pending-output-limit' ? 'Terminal output was not ready in time.' : 'Terminal could not start.'
     };
-    if (this.host) {
+    if (this.host && rendererHostOwners.get(this.host) === this) {
       applyHostState(this.host, 'error', this.label);
       renderError(this.host);
     }
@@ -834,14 +879,16 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   private teardownCurrentHost(keepHost = false): void {
     const host = this.host;
     const snapshot = this.hostSnapshot;
+    const ownsHost = host !== null && rendererHostOwners.get(host) === this;
     if (host) host.removeEventListener('paste', this.onPasteCapture, true);
-    safeDispose(this.backend);
+    safeDispose(this.backend, !ownsHost);
     this.backend = null;
-    if (host) {
+    if (host && ownsHost) {
       host.replaceChildren();
       if (snapshot) restoreHostSnapshot(host, snapshot);
     }
     if (!keepHost) {
+      if (host && ownsHost) rendererHostOwners.delete(host);
       this.host = null;
       this.hostSnapshot = null;
     }

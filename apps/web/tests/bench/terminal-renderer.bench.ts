@@ -79,11 +79,15 @@ const repoRoot = resolve(webRoot, '../..');
 const browserEntry = resolve(sourceDirectory, 'terminal-renderer.browser.ts');
 const rendererModule = resolve(webRoot, 'src/lib/terminal/renderer.ts');
 const terminalStyles = resolve(webRoot, 'src/lib/terminal/terminal.css');
+const packageManifest = resolve(webRoot, 'package.json');
+const dependencyLockfile = resolve(webRoot, 'bun.lock');
 const provenanceModule = resolve(sourceDirectory, 'terminal-renderer.provenance.ts');
 const outputDirectory = resolve(webRoot, '../../.terminal-renderer-benchmark-build');
 const executionCriticalPaths = [
   'apps/web/src/lib/terminal/renderer.ts',
   'apps/web/src/lib/terminal/terminal.css',
+  'apps/web/package.json',
+  'apps/web/bun.lock',
   'apps/web/tests/bench/terminal-renderer.browser.ts',
   'apps/web/tests/bench/terminal-renderer.bench.ts',
   'apps/web/tests/bench/terminal-renderer.provenance.ts'
@@ -107,7 +111,15 @@ function gitText(...args: string[]): string {
 }
 
 async function executionInputs(): Promise<ReadonlyArray<Readonly<{ path: string; bytes: number; sha256: string }>>> {
-  const absolutePaths = [rendererModule, terminalStyles, browserEntry, fileURLToPath(import.meta.url), provenanceModule];
+  const absolutePaths = [
+    rendererModule,
+    terminalStyles,
+    packageManifest,
+    dependencyLockfile,
+    browserEntry,
+    fileURLToPath(import.meta.url),
+    provenanceModule
+  ];
   const inputs = [];
   for (const absolutePath of absolutePaths) {
     const bytes = await fs.readFile(absolutePath);
@@ -264,7 +276,10 @@ async function run(): Promise<Trace> {
     await activePage.waitForFunction(() => {
       const value = (window as Window & { __hermternalTerminalRendererBenchmark?: BrowserBenchmarkResult })
         .__hermternalTerminalRendererBenchmark;
-      return Boolean(value?.samples && Object.keys(value.samples).length > 0);
+      return Boolean(
+        value?.samples &&
+        (Object.keys(value.samples).length > 0 || typeof value.environment.error === 'string')
+      );
     }, undefined, { timeout: 120_000 });
     const browserResult = await activePage.evaluate(() => {
       const value = (window as Window & { __hermternalTerminalRendererBenchmark?: BrowserBenchmarkResult })

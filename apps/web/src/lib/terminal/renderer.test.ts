@@ -457,6 +457,54 @@ describe('TerminalRenderer', () => {
     expect(dispose).toHaveBeenCalledWith({ preserveHost: true });
   });
 
+  it('does not let an older renderer clear a newer owner on a shared host', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const firstDispose = vi.fn();
+    const secondDispose = vi.fn();
+    const makeBackend = (dispose: ReturnType<typeof vi.fn>): MountedTerminal => ({
+      write: vi.fn(),
+      resize: vi.fn(),
+      focus: vi.fn(),
+      paste: vi.fn(),
+      dispose: dispose as MountedTerminal['dispose']
+    });
+    const firstAdapter: TerminalRendererAdapter = {
+      mount: vi.fn(async (mountHost) => {
+        const output = document.createElement('p');
+        output.textContent = 'first renderer';
+        mountHost.appendChild(output);
+        return makeBackend(firstDispose);
+      })
+    };
+    const secondAdapter: TerminalRendererAdapter = {
+      mount: vi.fn(async (mountHost) => {
+        const output = document.createElement('p');
+        output.textContent = 'second renderer';
+        mountHost.appendChild(output);
+        return makeBackend(secondDispose);
+      })
+    };
+    const first = createTerminalRenderer({ adapter: firstAdapter });
+    const second = createTerminalRenderer({ adapter: secondAdapter });
+
+    await first.mount(host);
+    await second.mount(host);
+    first.dispose();
+
+    expect(host).toHaveTextContent('second renderer');
+    expect(second.state).toBe('ready');
+    expect(firstDispose).toHaveBeenCalledWith({ preserveHost: true });
+    expect(secondDispose).not.toHaveBeenCalled();
+  });
+
+  it('rejects Symbol.toStringTag spoofed terminal byte inputs', () => {
+    const renderer = createTerminalRenderer({ adapter: createDeterministicAdapter().adapter });
+    const spoof = { byteLength: 1, [Symbol.toStringTag]: 'Uint8Array' } as unknown as Uint8Array;
+
+    expect(() => renderer.write(spoof)).toThrow('terminal writes require Uint8Array data');
+  });
+
   it('does not paste into a remounted backend after an old confirmation resolves', async () => {
     const { adapter, terminals } = createDeterministicAdapter();
     let resolveConfirmation!: (accepted: boolean) => void;
@@ -798,12 +846,25 @@ describe('TerminalRenderer', () => {
 
   it('validates per-workload benchmark sample counts', () => {
     const samples = Object.fromEntries(
-      Object.entries(BENCHMARK_REPETITIONS).map(([name, count]) => [name, { raw_samples: Array(count).fill(1) }])
+      Object.entries(BENCHMARK_REPETITIONS).map(([name, count]) => [name, {
+        raw_samples: Array(count).fill(1),
+        distribution: { min: 1, p50: 1, p95: 1, p99: 1, max: 1, mean: 1 }
+      }])
     );
     expect(() => assertBenchmarkSampleCounts(samples, BENCHMARK_REPETITIONS)).not.toThrow();
     const invalid = { ...samples, sustained_output: { raw_samples: [1] } };
     expect(() => assertBenchmarkSampleCounts(invalid, BENCHMARK_REPETITIONS)).toThrow(
       'sample count for sustained_output was 1; expected 10'
+    );
+    const nonFinite = {
+      ...samples,
+      replay_1_mib: {
+        raw_samples: Array(BENCHMARK_REPETITIONS.replay_1_mib).fill(Number.NaN),
+        distribution: { min: 1, p50: 1, p95: 1, p99: 1, max: 1, mean: 1 }
+      }
+    };
+    expect(() => assertBenchmarkSampleCounts(nonFinite, BENCHMARK_REPETITIONS)).toThrow(
+      'benchmark sample for replay_1_mib was not a finite non-negative number'
     );
   });
 });
