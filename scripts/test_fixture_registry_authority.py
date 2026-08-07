@@ -1094,6 +1094,30 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 outside = object_repo.parent / f"race-outside-{variant}"
                 if variant == "fanout":
                     target = git_dir / "objects" / verifier.APPROVED_SOURCE_COMMIT[:2] / verifier.APPROVED_SOURCE_COMMIT[2:]
+                    if not target.is_file():
+                        # Packed clones have no loose source object. Materialize
+                        # the exact verified commit as a valid loose object so
+                        # this nested fanout replacement race stays independent
+                        # of HEAD symbolicness and pack layout.
+                        object_data = subprocess.check_output(
+                            [
+                                "git",
+                                "-C",
+                                str(object_repo),
+                                "cat-file",
+                                "commit",
+                                verifier.APPROVED_SOURCE_COMMIT,
+                            ]
+                        )
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(
+                            zlib.compress(
+                                b"commit "
+                                + str(len(object_data)).encode("ascii")
+                                + b"\\x00"
+                                + object_data
+                            )
+                        )
                     self.assertTrue(target.is_file())
                     backup = target.with_name(target.name + ".saved")
                     outside.write_bytes(b"not a Git object")
