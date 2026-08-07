@@ -10,13 +10,22 @@ Token work follows the proof order: Paper first, then accessibility and performa
 
 ## Web Paper evidence
 
-[`web/artboards.json`](web/artboards.json) is the checked-in, machine-readable map from the approved Paper file to the web UI states in the `dashboard-v0.0.1` contract. It records exact Paper file and page metadata, artboard IDs and names, `1440 × 960` Runtime or `1440 × 900` Authentication desktop dimensions, `390 × 844` narrow dimensions, light/dark variant order, token values, and evidence status.
+[`web/artboards.json`](web/artboards.json) is the checked-in, machine-readable map from the approved Paper file to the web UI states in the `dashboard-v0.0.1` contract. It records exact Paper file and page metadata, artboard IDs and names, `1440 × 960` Runtime/workspace or `1440 × 900` Authentication/standalone Terminal desktop dimensions, `390 × 844` narrow dimensions, light/dark variant order, shipped token values, the current 84-record Paper token snapshot (`b5b2b8c5`), and evidence status.
 
-The map currently covers 102 Paper artboards in 29 state records:
+The generic map covers 102 Paper artboards in 29 state records:
 
 - 15 four-variant states are `ready` for v0.0.1.
 - 7 Authentication groups are `blocked` because Paper is missing desktop or narrow variants.
 - 7 deep-link or Session Search groups are `deferred` to v0.0.2.
+
+The nested Terminal evidence map covers 78 Paper artboards in 15 records:
+
+- 11 lifecycle states cover fresh through explicitly-closed Terminal sessions.
+- 1 reference record retains existing light narrow references without claiming complete coverage.
+- 1 selector record covers resting, hover, focused, pressed, selected, and keyboard states.
+- 1 accessibility record covers focus, zoom, text growth, reduced motion/transparency, forced colors, localization growth, touch targets, and focus order.
+- 1 continuity record covers the static Chat → Terminal → Chat → Terminal sequence.
+- `paper_static_only` is `true`; Paper is static evidence and does not prove runtime interaction or implementation behavior.
 
 Run the standard-library-only validator from the repository root:
 

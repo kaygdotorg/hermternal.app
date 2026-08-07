@@ -6,7 +6,7 @@
   "paper": {
     "file_id": "01KZ6BB66KCWR2C4J2TSWQGDM7",
     "file_name": "Hermternal",
-    "token_content_hash": "cb15f2b1",
+    "token_content_hash": "b5b2b8c5",
     "pages": [
       {
         "id": "3-0",
@@ -17,6 +17,26 @@
         "id": "4-0",
         "name": "Web states — Runtime",
         "artboard_count": 68
+      },
+      {
+        "id": "B-0",
+        "name": "Shared Chat–Terminal workspace",
+        "artboard_count": 25
+      },
+      {
+        "id": "E-0",
+        "name": "Terminal desktop lifecycle",
+        "artboard_count": 22
+      },
+      {
+        "id": "F-0",
+        "name": "Terminal narrow and mobile",
+        "artboard_count": 28
+      },
+      {
+        "id": "G-0",
+        "name": "Accessibility",
+        "artboard_count": 3
       }
     ]
   },
@@ -132,6 +152,344 @@
     {"name": "--radius-card", "value": "17px", "scope": "shipped"},
     {"name": "--radius-popover", "value": "18px", "scope": "shipped"},
     {"name": "--radius-glass", "value": "22px", "scope": "shipped"}
+  ],
+  "paper_tokens": [
+    {
+      "name": "--color-canvas",
+      "value": "#F3F5F8"
+    },
+    {
+      "name": "--color-paper",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "--color-ink",
+      "value": "#16181D"
+    },
+    {
+      "name": "--color-muted",
+      "value": "#667080"
+    },
+    {
+      "name": "--color-line",
+      "value": "#D8DDE5"
+    },
+    {
+      "name": "--color-signal",
+      "value": "#4C6FFF"
+    },
+    {
+      "name": "--color-courier",
+      "value": "#E88A2A"
+    },
+    {
+      "name": "--color-success",
+      "value": "#2DA568"
+    },
+    {
+      "name": "--color-danger",
+      "value": "#D94A4A"
+    },
+    {
+      "name": "--color-dark-canvas",
+      "value": "#0D1117"
+    },
+    {
+      "name": "--color-dark-paper",
+      "value": "#171C24"
+    },
+    {
+      "name": "--color-dark-ink",
+      "value": "#F4F6FA"
+    },
+    {
+      "name": "--color-dark-muted",
+      "value": "#A7B0BF"
+    },
+    {
+      "name": "--color-dark-line",
+      "value": "#343C49"
+    },
+    {
+      "name": "--color-dark-signal",
+      "value": "#6F88FF"
+    },
+    {
+      "name": "--color-dark-courier",
+      "value": "#F0A451"
+    },
+    {
+      "name": "--color-dark-success",
+      "value": "#4CC989"
+    },
+    {
+      "name": "--color-dark-danger",
+      "value": "#F06A6A"
+    },
+    {
+      "name": "--color-auth-signal",
+      "value": "#3157C7"
+    },
+    {
+      "name": "--color-auth-danger",
+      "value": "#AB3838"
+    },
+    {
+      "name": "--color-gate-light-action",
+      "value": "#2748C8"
+    },
+    {
+      "name": "--color-gate-light-action-ink",
+      "value": "var(--color-paper)"
+    },
+    {
+      "name": "--color-gate-light-state-surface",
+      "value": "#EEF2FF"
+    },
+    {
+      "name": "--color-gate-light-state-ink",
+      "value": "#2340A8"
+    },
+    {
+      "name": "--color-gate-light-focus",
+      "value": "#2348C7"
+    },
+    {
+      "name": "--color-gate-light-error-surface",
+      "value": "#FFF1F2"
+    },
+    {
+      "name": "--color-gate-light-error-ink",
+      "value": "#A52B38"
+    },
+    {
+      "name": "--color-gate-light-error-border",
+      "value": "#C44B57"
+    },
+    {
+      "name": "--color-gate-dark-action",
+      "value": "#3B57D0"
+    },
+    {
+      "name": "--color-gate-dark-action-ink",
+      "value": "var(--color-dark-ink)"
+    },
+    {
+      "name": "--color-gate-dark-state-surface",
+      "value": "#202A50"
+    },
+    {
+      "name": "--color-gate-dark-state-ink",
+      "value": "#C2CCFF"
+    },
+    {
+      "name": "--color-gate-dark-focus",
+      "value": "#C2CCFF"
+    },
+    {
+      "name": "--color-gate-dark-error-surface",
+      "value": "#351F26"
+    },
+    {
+      "name": "--color-gate-dark-error-ink",
+      "value": "#FFB7C0"
+    },
+    {
+      "name": "--color-gate-dark-error-border",
+      "value": "#FF7581"
+    },
+    {
+      "name": "--color-deeplink-light-courier",
+      "value": "#8A4B00"
+    },
+    {
+      "name": "--color-deeplink-light-success",
+      "value": "#0B6B4B"
+    },
+    {
+      "name": "--color-deeplink-light-signal",
+      "value": "#2348C7"
+    },
+    {
+      "name": "--color-deeplink-light-danger",
+      "value": "#A52B38"
+    },
+    {
+      "name": "--color-deeplink-light-muted",
+      "value": "#4D5765"
+    },
+    {
+      "name": "--color-deeplink-light-action",
+      "value": "#2748C8"
+    },
+    {
+      "name": "--color-deeplink-light-action-ink",
+      "value": "var(--color-paper)"
+    },
+    {
+      "name": "--color-deeplink-dark-courier",
+      "value": "var(--color-dark-courier)"
+    },
+    {
+      "name": "--color-deeplink-dark-success",
+      "value": "var(--color-dark-success)"
+    },
+    {
+      "name": "--color-deeplink-dark-signal",
+      "value": "var(--color-dark-signal)"
+    },
+    {
+      "name": "--color-deeplink-dark-danger",
+      "value": "var(--color-dark-danger)"
+    },
+    {
+      "name": "--color-deeplink-dark-muted",
+      "value": "var(--color-dark-muted)"
+    },
+    {
+      "name": "--color-deeplink-dark-action",
+      "value": "var(--color-dark-signal)"
+    },
+    {
+      "name": "--color-deeplink-dark-action-ink",
+      "value": "var(--color-dark-paper)"
+    },
+    {
+      "name": "--color-search-light-courier",
+      "value": "#8A4B00"
+    },
+    {
+      "name": "--color-search-light-success",
+      "value": "#0B6B4B"
+    },
+    {
+      "name": "--color-search-light-signal",
+      "value": "#2348C7"
+    },
+    {
+      "name": "--color-focus",
+      "value": "#2348C7"
+    },
+    {
+      "name": "--color-dark-focus",
+      "value": "#C2CCFF"
+    },
+    {
+      "name": "--font-ui",
+      "value": "Instrument Sans"
+    },
+    {
+      "name": "--font-mono",
+      "value": "Geist Mono"
+    },
+    {
+      "name": "--text-meta",
+      "value": "12px"
+    },
+    {
+      "name": "--text-control",
+      "value": "14px"
+    },
+    {
+      "name": "--text-body",
+      "value": "15px"
+    },
+    {
+      "name": "--text-title",
+      "value": "20px"
+    },
+    {
+      "name": "--weight-regular",
+      "value": 400
+    },
+    {
+      "name": "--weight-medium",
+      "value": 500
+    },
+    {
+      "name": "--weight-semibold",
+      "value": 600
+    },
+    {
+      "name": "--leading-meta",
+      "value": "16px"
+    },
+    {
+      "name": "--leading-control",
+      "value": "18px"
+    },
+    {
+      "name": "--leading-body",
+      "value": "23px"
+    },
+    {
+      "name": "--leading-title",
+      "value": "26px"
+    },
+    {
+      "name": "--space-1",
+      "value": "4px"
+    },
+    {
+      "name": "--space-2",
+      "value": "8px"
+    },
+    {
+      "name": "--space-3",
+      "value": "12px"
+    },
+    {
+      "name": "--space-4",
+      "value": "16px"
+    },
+    {
+      "name": "--space-6",
+      "value": "24px"
+    },
+    {
+      "name": "--space-8",
+      "value": "32px"
+    },
+    {
+      "name": "--radius-nested",
+      "value": "14px"
+    },
+    {
+      "name": "--radius-structural",
+      "value": "22px"
+    },
+    {
+      "name": "--radius-pill",
+      "value": "999px"
+    },
+    {
+      "name": "--radius-input",
+      "value": "12px"
+    },
+    {
+      "name": "--radius-nested-glass",
+      "value": "14px"
+    },
+    {
+      "name": "--radius-card",
+      "value": "17px"
+    },
+    {
+      "name": "--radius-popover",
+      "value": "18px"
+    },
+    {
+      "name": "--radius-glass",
+      "value": "22px"
+    },
+    {
+      "name": "--radius-compact",
+      "value": "8px"
+    },
+    {
+      "name": "--radius-micro",
+      "value": "5px"
+    }
   ],
   "token_sets": [
     {
@@ -581,5 +939,1025 @@
       "missing_variants": [],
       "notes": "Deferred to v0.0.2 with the Session Search UI family."
     }
-  ]
+  ],
+  "terminal":   {
+    "schema": "hermternal.web-paper-terminal-evidence.v1",
+    "paper_static_only": true,
+    "artboard_count": 78,
+    "state_count": 15,
+    "states": [
+      {
+        "id": "terminal.fresh",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CDO-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal fresh",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "EM8-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal fresh · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FKW-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal fresh · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CPA-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal fresh",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "F58-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal fresh · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FU1-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal fresh · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.open",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CCG-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal open",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "DBS-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal open · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "DIW-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal open · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CO8-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal open",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "E8V-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal open · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FVC-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal open · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.connecting",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CEQ-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal connecting",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "DPV-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal connecting · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FM7-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal connecting · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CQC-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal connecting",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "EBS-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal connecting · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FWN-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal connecting · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.detached",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CFS-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal detached",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "EPE-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal detached · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FNI-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal detached · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CRE-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal detached",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "F7U-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal detached · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FXY-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal detached · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.replaying",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CGU-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal replaying",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "ESK-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal replaying · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FOT-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal replaying · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CSG-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal replaying",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "FAG-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal replaying · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FZ9-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal replaying · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.retained-output-truncated",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CHW-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal retained output truncated",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "DW7-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal retained output truncated · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "DN9-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal retained output truncated · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CTI-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal retained output truncated",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "EH0-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal retained output truncated · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "G0K-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal retained output truncated · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.reconnecting",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CIY-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal reconnecting",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "DT1-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal reconnecting · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "DLY-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal reconnecting · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CUK-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal reconnecting",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "EEE-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal reconnecting · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "G1V-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal reconnecting · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.superseded",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CK0-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal superseded",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "EVQ-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal superseded · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FQ4-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal superseded · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CVM-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal superseded",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "FD2-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal superseded · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "G36-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal superseded · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.ended",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CL2-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal ended",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "EYW-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal ended · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FRF-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal ended · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CWO-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal ended",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "FFO-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal ended · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "G4H-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal ended · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.failed",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CM4-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal failed",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "DZD-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal failed · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "DOK-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal failed · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CXQ-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal failed",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "EJM-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal failed · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "G5S-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal failed · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.explicitly-closed",
+        "kind": "lifecycle",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CN6-0",
+            "page_id": "E-0",
+            "name": "Light / Desktop — Terminal explicitly closed",
+            "surface": "standalone",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "F22-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Terminal explicitly closed · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "FSQ-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal explicitly closed · workspace shell",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "CYS-0",
+            "page_id": "E-0",
+            "name": "Dark / Desktop — Terminal explicitly closed",
+            "surface": "standalone",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 900
+          },
+          {
+            "id": "FIA-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Terminal explicitly closed · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "G73-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Terminal explicitly closed · workspace shell",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.desktop",
+          "light.narrow",
+          "dark.desktop",
+          "dark.narrow"
+        ],
+        "notes": "Paper provides standalone desktop and shared Chat–Terminal desktop/narrow light/dark evidence for this Terminal lifecycle state; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.narrow-reference",
+        "kind": "reference",
+        "status": "reference",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "CZU-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal open",
+            "surface": "reference",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "D16-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal reconnecting",
+            "surface": "reference",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "D2C-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal retained output truncated",
+            "surface": "reference",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "D3I-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Terminal failed",
+            "surface": "reference",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "light.narrow",
+          "retained-reference"
+        ],
+        "notes": "Existing standalone light narrow references are retained without claiming complete coverage; the approved shared-shell lifecycle states supply dark narrow evidence. Paper is static evidence only."
+      },
+      {
+        "id": "terminal.selector-states",
+        "kind": "selector",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "GC2-0",
+            "page_id": "B-0",
+            "name": "Light / Desktop — Chat–Terminal selector states",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 760,
+            "height": 520
+          },
+          {
+            "id": "G8E-0",
+            "page_id": "F-0",
+            "name": "Light / Narrow — Chat–Terminal selector states",
+            "surface": "workspace",
+            "appearance": "light",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          },
+          {
+            "id": "GGD-0",
+            "page_id": "B-0",
+            "name": "Dark / Desktop — Chat–Terminal selector states",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "desktop",
+            "width": 760,
+            "height": 520
+          },
+          {
+            "id": "G8F-0",
+            "page_id": "F-0",
+            "name": "Dark / Narrow — Chat–Terminal selector states",
+            "surface": "workspace",
+            "appearance": "dark",
+            "viewport": "narrow",
+            "width": 390,
+            "height": 844
+          }
+        ],
+        "coverage": [
+          "resting",
+          "hover",
+          "focused",
+          "pressed",
+          "selected",
+          "keyboard"
+        ],
+        "notes": "Static selector sheets cover the shared Chat–Terminal control in light/dark desktop/narrow variants and expose the six approved interaction states; Paper does not prove runtime interaction."
+      },
+      {
+        "id": "terminal.accessibility",
+        "kind": "accessibility",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "E2J-0",
+            "page_id": "G-0",
+            "name": "Light / Desktop — Terminal keyboard focus",
+            "surface": "accessibility",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "E5P-0",
+            "page_id": "G-0",
+            "name": "Light / Desktop — Terminal reduced transparency",
+            "surface": "accessibility",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 960
+          },
+          {
+            "id": "GID-0",
+            "page_id": "G-0",
+            "name": "Accessibility evidence — Terminal and selector",
+            "surface": "accessibility",
+            "appearance": "multi",
+            "viewport": "multi",
+            "width": 1440,
+            "height": 960
+          }
+        ],
+        "coverage": [
+          "keyboard-focus",
+          "dark-focus",
+          "narrow-focus",
+          "200-percent-zoom",
+          "text-growth",
+          "reduced-motion",
+          "reduced-transparency",
+          "high-contrast-forced-colors",
+          "localization-growth",
+          "touch-targets",
+          "focus-order"
+        ],
+        "notes": "The approved accessibility evidence board covers dark/narrow focus, zoom and text growth, reduced motion/transparency, high contrast/forced colors, localization growth, and touch-target/focus-order checks; Paper is static evidence only."
+      },
+      {
+        "id": "terminal.continuity",
+        "kind": "continuity",
+        "status": "approved",
+        "release": "v0.0.1",
+        "boards": [
+          {
+            "id": "GL4-0",
+            "page_id": "B-0",
+            "name": "Static continuity — Chat → Terminal → Chat → Terminal",
+            "surface": "continuity",
+            "appearance": "light",
+            "viewport": "desktop",
+            "width": 1440,
+            "height": 720
+          }
+        ],
+        "coverage": [
+          "chat",
+          "terminal",
+          "chat",
+          "terminal"
+        ],
+        "notes": "The static continuity board preserves one terminal-7f3a identity and the hermes@workspace:~$ prompt across Chat → Terminal → Chat → Terminal; Paper is static evidence and does not prove runtime continuity."
+      }
+    ]
+  }
 }

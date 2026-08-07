@@ -88,7 +88,67 @@ class ManifestMutationTests(unittest.TestCase):
         self.assertEqual(counts, (15, 7, 7))
         self.assertEqual(len(self.manifest["states"]), 29)
         self.assertEqual(sum(len(state["variants"]) for state in self.manifest["states"]), 102)
+        self.assertEqual(len(self.manifest["paper_tokens"]), 84)
+        self.assertEqual(len(self.manifest["terminal"]["states"]), 15)
+        self.assertEqual(sum(len(state["boards"]) for state in self.manifest["terminal"]["states"]), 78)
         self.assertFalse(self.manifest["live_claim"])
+        self.assertTrue(self.manifest["terminal"]["paper_static_only"])
+
+    def test_stale_paper_token_hash_fails_closed(self) -> None:
+        mutated = copy.deepcopy(self.manifest)
+        mutated["paper"]["token_content_hash"] = "stale-token-hash"
+        self._assert_cli_failure(mutated)
+
+    def test_missing_terminal_page_fails_closed(self) -> None:
+        mutated = copy.deepcopy(self.manifest)
+        mutated["paper"]["pages"] = [page for page in mutated["paper"]["pages"] if page["id"] != "F-0"]
+        self._assert_cli_failure(mutated)
+
+    def test_missing_terminal_state_fails_closed(self) -> None:
+        mutated = copy.deepcopy(self.manifest)
+        mutated["terminal"]["states"].pop()
+        self._assert_cli_failure(mutated)
+
+    def test_duplicate_terminal_board_fails_closed(self) -> None:
+        mutated = copy.deepcopy(self.manifest)
+        boards = mutated["terminal"]["states"][0]["boards"]
+        boards[1]["id"] = boards[0]["id"]
+        self._assert_cli_failure(mutated)
+
+    def test_incomplete_terminal_coverage_fails_closed(self) -> None:
+        mutations = (
+            ("terminal.fresh", ("light.desktop", "light.narrow", "dark.desktop")),
+            ("terminal.fresh", ("light.desktop", "dark.desktop", "dark.narrow")),
+            ("terminal.fresh", ("light.desktop", "light.narrow", "dark.narrow")),
+            ("terminal.accessibility", ("keyboard-focus", "narrow-focus", "200-percent-zoom")),
+        )
+        for state_id, coverage in mutations:
+            with self.subTest(state_id=state_id, coverage=coverage):
+                mutated = copy.deepcopy(self.manifest)
+                state = next(item for item in mutated["terminal"]["states"] if item["id"] == state_id)
+                state["coverage"] = list(coverage)
+                self._assert_cli_failure(mutated)
+
+    def test_terminal_metadata_drift_fails_closed(self) -> None:
+        def swap(items: list[object], first: int, second: int) -> None:
+            items[first], items[second] = items[second], items[first]
+
+        mutations = (
+            ("page order", lambda doc: swap(doc["paper"]["pages"], 2, 3)),
+            ("page name", lambda doc: doc["paper"]["pages"][2].update(name="renamed Terminal page")),
+            ("page count", lambda doc: doc["paper"]["pages"][2].update(artboard_count=24)),
+            ("state order", lambda doc: swap(doc["terminal"]["states"], 0, 1)),
+            ("state id", lambda doc: doc["terminal"]["states"][0].update(id="terminal.fresh-renamed")),
+            ("board name", lambda doc: doc["terminal"]["states"][0]["boards"][0].update(name="renamed Terminal board")),
+            ("board dimensions", lambda doc: doc["terminal"]["states"][0]["boards"][0].update(width=1441)),
+            ("board page", lambda doc: doc["terminal"]["states"][0]["boards"][0].update(page_id="G-0")),
+            ("static caveat", lambda doc: doc["terminal"]["states"][0].update(notes="Paper evidence only.")),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                mutated = copy.deepcopy(self.manifest)
+                mutate(mutated)
+                self._assert_cli_failure(mutated)
 
     def test_unknown_artboard_fails_closed(self) -> None:
         mutated = copy.deepcopy(self.manifest)
