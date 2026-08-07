@@ -16,11 +16,12 @@
     "typecheck:version": "bun x --package @typescript/native tsc --version",
     "test": "vitest run",
     "benchmark:transport": "bun tests/bench/live-rest-transport.bench.ts",
+    "benchmark:terminal": "bun tests/bench/terminal-renderer.bench.ts",
     "test:watch": "vitest",
     "test:component": "vitest run src/lib/components",
     "test:e2e": "playwright test",
     "test:e2e:live": "playwright test --config playwright.live.config.ts",
-    "test:a11y": "playwright test tests/e2e/accessibility.spec.ts tests/e2e/ui-preview.spec.ts --grep \"axe violations\"",
+    "test:a11y": "playwright test tests/e2e/accessibility.spec.ts tests/e2e/ui-preview.spec.ts tests/e2e/terminal-renderer.spec.ts --grep \"axe violations\"",
     "test:no-network": "bun run test && playwright test tests/e2e/no-network.spec.ts && playwright test tests/e2e/ui-preview.spec.ts --grep \"stays local\"",
     "test:static": "bun run build && node tests/static/assert-static-build.mjs && node tests/static/assert-css-tokens.mjs && node tests/static/assert-static-routes.mjs",
     "prepare": "svelte-kit sync"
@@ -42,5 +43,9 @@
     "typescript": "5.9.3",
     "vite": "8.2.0",
     "vitest": "4.1.10"
+  },
+  "dependencies": {
+    "@wterm/dom": "0.3.2",
+    "@wterm/ghostty": "0.3.2"
   }
 }

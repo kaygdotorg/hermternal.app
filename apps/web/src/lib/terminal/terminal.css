@@ -1,0 +1,50 @@
+.terminal-renderer,
+.terminal-renderer.wterm {
+  --term-font-family: var(--font-mono, "Geist Mono", ui-monospace, monospace);
+  --term-font-size: 14px;
+  --term-line-height: 1.2;
+  --term-row-height: 17px;
+  min-width: 0;
+  min-height: 0;
+  color-scheme: dark;
+  font-family: var(--term-font-family);
+}
+
+.terminal-renderer [data-terminal-loading="true"],
+.terminal-renderer [data-terminal-error="true"] {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  color: currentColor;
+  font-family: var(--font-ui, ui-sans-serif, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.terminal-renderer [data-terminal-error="true"] {
+  border: 1px solid currentColor;
+  border-radius: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* W-Term puts cursor-blink on the terminal host, not a descendant. */
+  .terminal-renderer.wterm.cursor-blink .term-cursor {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .terminal-renderer,
+  .terminal-renderer.wterm {
+    background-image: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .terminal-renderer [data-terminal-error="true"] {
+    border-color: CanvasText;
+  }
+}
