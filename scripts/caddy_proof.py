@@ -86,12 +86,15 @@ WEBSOCKET_ROUTES = (
 # values are ASCII-safe, so a percent sign is never needed by this proof lane.
 # Dot checks are segment-bounded so opaque IDs containing two consecutive dots
 # remain valid. The shared deep-link contract separately rejects the ellipsis
-# marker, so three consecutive dots remain an explicit edge denial.
+# marker, so three consecutive dots remain an explicit edge denial. The raw URI
+# check also rejects a bare trailing query marker because Caddy's uri.query
+# placeholder is empty for both no query and a request ending in `?`.
 RAW_URI_GUARD = (
     "{http.request.orig_uri}.contains('%') || "
     "{http.request.orig_uri}.contains('\\\\') || "
     "{http.request.orig_uri}.contains('//') || "
     "{http.request.orig_uri}.contains('...') || "
+    "{http.request.orig_uri}.matches('.*\\\\?$') || "
     "{http.request.orig_uri}.matches('(?:^|/)(?:\\\\.|\\\\.\\\\.)(?:/|\\\\?|$)')"
 )
 NO_QUERY_GUARD = "{http.request.uri.query} == ''"
@@ -99,8 +102,9 @@ QUERY_PRESENT_GUARD = "{http.request.uri.query} != ''"
 ROOT_SCENARIO_QUERY_GUARD = "{http.request.uri.query}.matches('^scenario=(?:success|empty|failure)$')"
 ROOT_QUERY_GUARD = f"({NO_QUERY_GUARD} || {ROOT_SCENARIO_QUERY_GUARD})"
 REST_QUERY_GUARD = NO_QUERY_GUARD
-CHAT_TICKET_QUERY_GUARD = "{http.request.uri.query}.matches('^ticket=[A-Za-z0-9._~-]+$')"
-PTY_TICKET_VALUE_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._~-]{0,511}"
+CHAT_TICKET_VALUE_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._~-]{0,511}"
+CHAT_TICKET_QUERY_GUARD = f"{{http.request.uri.query}}.matches('^ticket={CHAT_TICKET_VALUE_PATTERN}$')"
+PTY_TICKET_VALUE_PATTERN = CHAT_TICKET_VALUE_PATTERN
 PTY_RESUME_VALUE_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}"
 PTY_ATTACH_VALUE_PATTERN = PTY_TICKET_VALUE_PATTERN
 PTY_QUERY_PARAMETER_PATTERNS = {
