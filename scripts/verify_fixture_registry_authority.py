@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Verify the stage-one aggregate fixture authority from immutable Git objects.
+"""Verify the v2 aggregate fixture authority from immutable Git objects.
 
-This verifier is intentionally separate from the aggregate scanner. Stage one
-pins the checked-in predecessor bytes only; the later scanner correction must
-rebase onto the merged predecessor and create its next authority independently.
-The checkout is compared with authority bytes read from the local Git object
+This verifier is intentionally separate from the aggregate scanner. The legacy
+six-key v1 authority remains readable at its historical path, while the new
+multi-artifact bootstrap uses the distinct v2 path and schema. Stage two pins
+the checked-in predecessor bytes only; the later scanner correction must rebase
+onto the merged predecessor and create its next authority independently. The
+checkout is compared with authority bytes read from the local Git object
 database, so replacing the visible authority file or refreshing local hashes
 cannot silently authorize different scanner inputs.
 """
@@ -20,8 +22,21 @@ from pathlib import Path
 from typing import Any
 
 
-AUTHORITY_PATH = "scripts/fixture_registry_authority.json"
-AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v1"
+LEGACY_AUTHORITY_PATH = "scripts/fixture_registry_authority.json"
+LEGACY_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v1"
+LEGACY_AUTHORITY_KEYS = (
+    "schema",
+    "validator_path",
+    "validator_size_bytes",
+    "validator_sha256",
+    "baseline_path",
+    "baseline_size_bytes",
+    "baseline_sha256",
+)
+LEGACY_VALIDATOR_PATH = "contracts/fixtures/validator/validate.py"
+LEGACY_BASELINE_PATH = "contracts/fixtures/validator/validation-baseline.json"
+AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.json"
+AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
 AUTHORITY_ROLE = "bootstrap_predecessor"
 EXPECTED_ARTIFACT_PATHS = (
     "contracts/fixtures/index.json",
@@ -155,8 +170,31 @@ def _validate_manifest(authority: dict[str, Any]) -> tuple[str, list[dict[str, A
     return source_commit, records
 
 
+def _validate_legacy_manifest(authority: dict[str, Any]) -> dict[str, Any]:
+    """Read the historical six-key v1 shape without treating it as v2 trust."""
+
+    _require(tuple(authority.keys()) == LEGACY_AUTHORITY_KEYS)
+    _require(authority["schema"] == LEGACY_AUTHORITY_SCHEMA)
+    _require(authority["validator_path"] == LEGACY_VALIDATOR_PATH)
+    _require(authority["baseline_path"] == LEGACY_BASELINE_PATH)
+    for prefix in ("validator", "baseline"):
+        size = authority[f"{prefix}_size_bytes"]
+        digest = authority[f"{prefix}_sha256"]
+        _require(type(size) is int and type(size) is not bool and 0 < size <= MAX_GIT_OUTPUT)
+        _require(type(digest) is str and HEX64.fullmatch(digest) is not None)
+    return authority
+
+
+def load_legacy_authority(checkout_root: Path) -> dict[str, Any]:
+    """Load the preserved legacy v1 authority for migration compatibility."""
+
+    return _validate_legacy_manifest(
+        _parse_json(_read_checkout_file(checkout_root.resolve(), LEGACY_AUTHORITY_PATH))
+    )
+
+
 def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
-    """Load and verify the authority from its immutable introduction object."""
+    """Load and verify the v2 authority from immutable Git history."""
 
     object_repo = object_repo.resolve()
     introduction = _authority_introduction_commit(object_repo)
@@ -171,6 +209,8 @@ def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
         _require(len(data) == record["size_bytes"])
         _require(hashlib.sha256(data).hexdigest() == record["sha256"])
     return {
+        "authority_path": AUTHORITY_PATH,
+        "schema": AUTHORITY_SCHEMA,
         "authority_commit": introduction,
         "source_commit": source_commit,
         "authority_bytes": authority_bytes,
@@ -200,7 +240,9 @@ def verify_checkout(checkout_root: Path, object_repo: Path) -> dict[str, Any]:
         _require(hashlib.sha256(data).hexdigest() == record["sha256"])
     return {
         "ok": True,
-        "stage": "bootstrap_predecessor",
+        "stage": "bootstrap_predecessor_v2",
+        "authority_path": authority["authority_path"],
+        "schema": authority["schema"],
         "authority_commit": authority["authority_commit"],
         "source_commit": authority["source_commit"],
         "artifact_count": len(authority["artifact_manifest"]),

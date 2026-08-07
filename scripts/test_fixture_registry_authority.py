@@ -22,7 +22,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "verify_fixture_registry_authority.py"
-AUTHORITY_FILE = ROOT / "scripts" / "fixture_registry_authority.json"
+LEGACY_AUTHORITY_FILE = ROOT / "scripts" / "fixture_registry_authority.json"
+V2_AUTHORITY_FILE = ROOT / "scripts" / "fixture_registry_authority.v2.json"
+LEGACY_AUTHORITY_SHA256 = "3792ee51370ec6b5cf7257d8473f71c7e810e03c7216969d079d933033734a14"
+LEGACY_AUTHORITY_SIZE = 442
 
 spec = importlib.util.spec_from_file_location("verify_fixture_registry_authority", SCRIPT)
 if spec is None or spec.loader is None:
@@ -35,8 +38,12 @@ spec.loader.exec_module(verifier)
 class FixtureRegistryAuthorityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.authority: dict[str, Any] = json.loads(AUTHORITY_FILE.read_text(encoding="utf-8"))
-        cls.checkout_paths = (verifier.AUTHORITY_PATH, *verifier.EXPECTED_ARTIFACT_PATHS)
+        cls.authority: dict[str, Any] = json.loads(V2_AUTHORITY_FILE.read_text(encoding="utf-8"))
+        cls.checkout_paths = (
+            verifier.LEGACY_AUTHORITY_PATH,
+            verifier.AUTHORITY_PATH,
+            *verifier.EXPECTED_ARTIFACT_PATHS,
+        )
 
     def run_cli(self, checkout_root: Path, *, optimized: bool) -> subprocess.CompletedProcess[str]:
         command = [sys.executable]
@@ -110,10 +117,46 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         optimized = self.run_cli(ROOT, optimized=True)
         self.assertEqual(normal.stdout, optimized.stdout)
         normal_payload = self.assert_success(normal)
-        self.assertEqual(normal_payload["stage"], "bootstrap_predecessor")
+        self.assertEqual(normal_payload["stage"], "bootstrap_predecessor_v2")
+        self.assertEqual(normal_payload["authority_path"], verifier.AUTHORITY_PATH)
+        self.assertEqual(normal_payload["schema"], verifier.AUTHORITY_SCHEMA)
         self.assertEqual(normal_payload["artifact_count"], 4)
         self.assertNotEqual(normal_payload["authority_commit"], normal_payload["source_commit"])
         self.assertEqual(normal_payload["source_commit"], self.authority["source_commit"])
+
+    def test_legacy_v1_path_and_shape_remain_readable(self) -> None:
+        legacy = verifier.load_legacy_authority(ROOT)
+        self.assertEqual(verifier.LEGACY_AUTHORITY_PATH, "scripts/fixture_registry_authority.json")
+        self.assertEqual(verifier.LEGACY_AUTHORITY_SCHEMA, "hermternal.fixture-registry-authority.v1")
+        self.assertEqual(tuple(legacy.keys()), verifier.LEGACY_AUTHORITY_KEYS)
+        self.assertEqual(legacy["validator_path"], verifier.LEGACY_VALIDATOR_PATH)
+        self.assertEqual(legacy["baseline_path"], verifier.LEGACY_BASELINE_PATH)
+        self.assertEqual(legacy["validator_size_bytes"], 84337)
+        self.assertEqual(legacy["baseline_size_bytes"], 2614)
+        self.assertEqual(
+            legacy["validator_sha256"],
+            "2a2f32a42ca1867ab92e5be6180cef0caca71e51c2ccae7a33cb99724ae7bffa",
+        )
+        self.assertEqual(
+            legacy["baseline_sha256"],
+            "b1b2d03037854bb8e80d2a084b09977c869d7c0ea466b248971d95c1d782b0e1",
+        )
+        legacy_bytes = LEGACY_AUTHORITY_FILE.read_bytes()
+        self.assertEqual(len(legacy_bytes), LEGACY_AUTHORITY_SIZE)
+        self.assertEqual(hashlib.sha256(legacy_bytes).hexdigest(), LEGACY_AUTHORITY_SHA256)
+        self.assertNotIn("artifact_manifest", legacy)
+        self.assertNotIn("source_commit", legacy)
+
+    def test_v2_path_selection_ignores_legacy_path_rewrites(self) -> None:
+        with self.copy_checkout() as temporary:
+            checkout = Path(temporary)
+            legacy_path = checkout / verifier.LEGACY_AUTHORITY_PATH
+            legacy_path.write_bytes(b'{"schema":"hermternal.fixture-registry-authority.v1"}\n')
+            normal = self.run_cli(checkout, optimized=False)
+            optimized = self.run_cli(checkout, optimized=True)
+            self.assertEqual(normal.stdout, optimized.stdout)
+            self.assert_success(normal)
+            self.assert_success(optimized)
 
     def test_authority_relationship_is_external_and_exact(self) -> None:
         trusted = verifier.load_trusted_authority(ROOT)
@@ -125,8 +168,26 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             check=True,
             capture_output=True,
         )
-        self.assertEqual(authority_commit, "8dad73e6da3922d1caa9f37c2a74d8b28e9a32bc")
+        self.assertEqual(trusted["authority_path"], verifier.AUTHORITY_PATH)
+        self.assertEqual(trusted["schema"], verifier.AUTHORITY_SCHEMA)
+        self.assertNotEqual(authority_commit, "8dad73e6da3922d1caa9f37c2a74d8b28e9a32bc")
         self.assertEqual(source_commit, "abb6754bddd1cf18927b0172ed9fa3456235b035")
+        introduced = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "log",
+                "--format=%H",
+                "--diff-filter=A",
+                "--first-parent",
+                "HEAD",
+                "--",
+                verifier.AUTHORITY_PATH,
+            ],
+            text=True,
+        ).splitlines()
+        self.assertEqual(introduced, [authority_commit])
         for record in trusted["artifact_manifest"]:
             object_bytes = subprocess.check_output(
                 ["git", "-C", str(ROOT), "show", f"{source_commit}:{record['path']}"],

@@ -24,6 +24,31 @@ Fixtures must identify the pinned Hermes revision `f5be9236e00ddf2f2a412697f2670
 
 Use synthetic data only. Do not commit credentials, cookies, WebSocket tickets, ticket fragments, live transcripts, hostnames, tokens, secrets, provider data, or user data. Invalid-ticket fixtures use non-secret markers and verify that the pinned source's bounded audit fragment is removed from retained logs. Fixtures describe behavior; they do not create a transcript mirror.
 
+## C-19 authority migration
+
+The legacy aggregate authority remains readable at
+`scripts/fixture_registry_authority.json`. Its historical v1 contract was
+introduced at `a96889c` and has the six-key shape
+`validator_path`/`validator_size_bytes`/`validator_sha256` plus
+`baseline_path`/`baseline_size_bytes`/`baseline_sha256` under the schema
+`hermternal.fixture-registry-authority.v1`.
+
+The `.v2.json` filename used by commits `3600975` and `70d5963` was a
+filename-only rotation: those historical documents still declared the v1
+schema and six legacy keys. The independent bootstrap commit `8dad73e` then
+introduced a multi-artifact document at the legacy path while still claiming
+v1. Its published Git object is not rewritten. The corrective bootstrap keeps
+the legacy path readable and places the new multi-artifact authority at
+`scripts/fixture_registry_authority.v2.json` with the explicit schema
+`hermternal.fixture-registry-authority.v2`.
+
+The standalone v2 verifier loads that separate path from its immutable Git
+introduction object. It can read the legacy v1 shape for migration checks, but
+it never treats the legacy path as a v2 fallback. The v2 trust root remains
+independent of the scanner-preparation change; after this authority is merged,
+that preparation must rebase onto the merged external predecessor before
+regenerating the index, baseline, and next authority.
+
 ## C-19 aggregate registry
 
 [`index.json`](index.json) is the language-neutral registry consumed by later
@@ -56,7 +81,10 @@ PTY local-adapter artifacts. The C-05 coverage and C-08 stream-dependent
 coverage remain pending until their dependency gates complete; C-07 is connected
 to the pending chat-stream coverage row. `live_claim` is always `false`; a
 passing validator proves only synthetic artifact integrity and registry
-consistency.
+consistency. The current blocked aggregate evidence is caused by three stale
+artifact records under `source-audit/compatibility-gate`; that current index
+problem is distinct from the three future scanner-preparation blockers listed
+in the authority migration document.
 
 The validator emits one bounded semantic JSON line. Failures do not echo
 arguments, paths, keys, values, secrets, or tracebacks. Normal and optimized
