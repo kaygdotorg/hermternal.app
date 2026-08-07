@@ -78,8 +78,11 @@ invalid artifact hashes, non-null thresholds or budgets, and secret-shaped
 values. The registered web production-build record additionally binds its exact
 workload, raw trace, complete B-01 provenance, sandbox mode, resource limits,
 resolved dependency and toolchain byte identities, and one generated artifact
-identity. Local artifact reads walk directory descriptors with `O_NOFOLLOW`, so
-root, intermediate, and file symlinks fail before an external target is read.
+identity. It independently recomputes the measured web `package.json`, `src`, and
+`static` identity from the integrated checkout, so stale workload or trace
+literals cannot stand in for the bytes actually measured. Local artifact reads
+walk directory descriptors with `O_NOFOLLOW`, so root, intermediate, and file
+symlinks fail before an external target is read.
 The baseline's `validate.py` entry is locally checked but is excluded
 from the code-pinned byte anchor to avoid a self-hash cycle. Hostnames,
 IPv4/IPv6 addresses, `localhost`, URLs, bearer values, API-key assignments,

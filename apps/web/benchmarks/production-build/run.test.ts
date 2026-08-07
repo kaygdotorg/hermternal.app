@@ -329,13 +329,96 @@ describe('production-build benchmark contract', () => {
         reads += 1;
         return { bytesRead: reads === 1 ? 1 : MAX_JSON_BYTES };
       },
-      stat: async () => ({ size: 1 }),
+      stat: async () => ({
+        isFile: () => true,
+        dev: 1,
+        ino: 2,
+        mode: 0o100644,
+        size: 1,
+        mtimeNs: 1n,
+        ctimeNs: 1n
+      }),
       close: async () => {}
     })) as unknown as BoundedFileOpener;
     await expect(readPackageVersion('/replacement-race', opener)).rejects.toThrow(
       new BenchmarkError('vite_metadata_unavailable')
     );
     expect(requestedLength).toBe(MAX_JSON_BYTES);
+  });
+
+  test('rejects an append after the opened descriptor reaches EOF', async () => {
+    const raw = new TextEncoder().encode(JSON.stringify({ name: 'vite', version: '9.9.9' }));
+    let statCalls = 0;
+    let readCalls = 0;
+    const opener = (async () => ({
+      stat: async () => ({
+        isFile: () => true,
+        dev: 1,
+        ino: 2,
+        mode: 0o100644,
+        size: statCalls++ === 0 ? raw.byteLength : raw.byteLength + 1,
+        mtimeNs: 1n,
+        ctimeNs: 1n
+      }),
+      read: async (buffer: Uint8Array, offset: number) => {
+        if (readCalls++ === 0) buffer.set(raw, offset);
+        return { bytesRead: readCalls === 1 ? raw.byteLength : 0 };
+      },
+      close: async () => {}
+    })) as unknown as BoundedFileOpener;
+    await expect(readPackageVersion('/append-after-eof', opener)).rejects.toThrow(
+      new BenchmarkError('vite_metadata_unavailable')
+    );
+  });
+
+  test('rejects growth from an initially empty metadata file', async () => {
+    const raw = new TextEncoder().encode(JSON.stringify({ name: 'vite', version: '9.9.9' }));
+    let statCalls = 0;
+    let readCalls = 0;
+    const opener = (async () => ({
+      stat: async () => ({
+        isFile: () => true,
+        dev: 1,
+        ino: 2,
+        mode: 0o100644,
+        size: statCalls++ === 0 ? 0 : raw.byteLength,
+        mtimeNs: 1n,
+        ctimeNs: 1n
+      }),
+      read: async (buffer: Uint8Array, offset: number) => {
+        if (readCalls++ === 0) buffer.set(raw, offset);
+        return { bytesRead: readCalls === 1 ? raw.byteLength : 0 };
+      },
+      close: async () => {}
+    })) as unknown as BoundedFileOpener;
+    await expect(readPackageVersion('/empty-growth', opener)).rejects.toThrow(
+      new BenchmarkError('vite_metadata_unavailable')
+    );
+  });
+
+  test('rejects same-size metadata mutation from descriptor timestamps', async () => {
+    const raw = new TextEncoder().encode(JSON.stringify({ name: 'vite', version: '9.9.9' }));
+    let statCalls = 0;
+    let readCalls = 0;
+    const opener = (async () => ({
+      stat: async () => ({
+        isFile: () => true,
+        dev: 1,
+        ino: 2,
+        mode: 0o100644,
+        size: raw.byteLength,
+        mtimeNs: statCalls++ === 0 ? 1n : 2n,
+        ctimeNs: statCalls <= 1 ? 1n : 2n
+      }),
+      read: async (buffer: Uint8Array, offset: number) => {
+        if (readCalls++ === 0) buffer.set(raw, offset);
+        return { bytesRead: readCalls === 1 ? raw.byteLength : 0 };
+      },
+      close: async () => {}
+    })) as unknown as BoundedFileOpener;
+    await expect(readPackageVersion('/same-size-mutation', opener)).rejects.toThrow(
+      new BenchmarkError('vite_metadata_unavailable')
+    );
   });
 
   test('snapshots exact plain data and rejects executable object shapes', async () => {

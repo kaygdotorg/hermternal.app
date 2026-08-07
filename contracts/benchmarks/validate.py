@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import locale
 import math
 import os
 import re
@@ -38,6 +39,7 @@ PINNED_HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 ERROR_CODE = "benchmark_evidence_validation_error"
 
 MAX_JSON_BYTES = 1024 * 1024
+MAX_MEASURED_INPUT_FILE_BYTES = 16 * 1024 * 1024
 MAX_JSON_DEPTH = 32
 MAX_JSON_INTEGER_DIGITS = 1000
 MAX_JSON_NODES = 4096
@@ -48,6 +50,14 @@ MAX_ERROR_OUTPUT = 240
 MAX_RUNS = 32
 MAX_REPETITIONS = 10_000
 MIN_REPETITIONS = 30
+
+# The TypeScript runner uses String.localeCompare for input record ordering.
+# Select the process locale before reproducing that ordering so the validator
+# hashes the same integrated checkout rather than trusting a copied literal.
+try:
+    locale.setlocale(locale.LC_COLLATE, "")
+except locale.Error:
+    pass
 
 ROOT_KEYS = (
     "schema",
@@ -506,15 +516,15 @@ def _parse_json_bytes(raw: bytes) -> Any:
     return value
 
 
-def _read_bounded_descriptor(descriptor: int, label: str) -> bytes:
+def _read_bounded_descriptor(descriptor: int, label: str, limit: int = MAX_JSON_BYTES) -> bytes:
     """Read one regular file to EOF with a bounded sentinel and stability check."""
 
     initial = os.fstat(descriptor)
     require(stat.S_ISREG(initial.st_mode), f"{label} is not a regular file")
-    require(initial.st_size <= MAX_JSON_BYTES, f"{label} exceeds the bounded byte limit")
+    require(initial.st_size <= limit, f"{label} exceeds the bounded byte limit")
     chunks: list[bytes] = []
     total = 0
-    read_limit = MAX_JSON_BYTES + 1
+    read_limit = limit + 1
     while total < read_limit:
         chunk = os.read(descriptor, min(65536, read_limit - total))
         if not chunk:
@@ -524,7 +534,7 @@ def _read_bounded_descriptor(descriptor: int, label: str) -> bytes:
     final = os.fstat(descriptor)
     require(final.st_size == initial.st_size, f"{label} changed while reading")
     require(total == final.st_size, f"{label} changed while reading")
-    require(total <= MAX_JSON_BYTES, f"{label} exceeds the bounded byte limit")
+    require(total <= limit, f"{label} exceeds the bounded byte limit")
     return b"".join(chunks)
 
 
@@ -863,7 +873,13 @@ def _reviewed_artifact_metadata(
     )
 
 
-def _read_local_file(root: Path, portable_path: str, label: str) -> bytes:
+def _read_local_file(
+    root: Path,
+    portable_path: str,
+    label: str,
+    *,
+    limit: int = MAX_JSON_BYTES,
+) -> bytes:
     """Read one reviewed file through an O_NOFOLLOW descriptor chain."""
 
     parts = portable_path.split("/")
@@ -877,7 +893,7 @@ def _read_local_file(root: Path, portable_path: str, label: str) -> bytes:
             descriptors.append(current)
         file_descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
         descriptors.append(file_descriptor)
-        return _read_bounded_descriptor(file_descriptor, label)
+        return _read_bounded_descriptor(file_descriptor, label, limit)
     except (OSError, ValidationError):
         raise ValidationError(f"{label} could not be read safely") from None
     finally:
@@ -938,6 +954,65 @@ def _web_evidence_path_is_allowed(path: str) -> bool:
         path.startswith(allowed) if allowed.endswith("/") else path == allowed
         for allowed in WEB_EVIDENCE_ALLOWED_DESCENDANT_PATHS
     )
+
+
+def _web_measured_input_identity(workload: dict[str, Any], source_root: Path) -> dict[str, Any]:
+    """Recompute the runner's package/src/static identity from the checkout.
+
+    Workload and trace fields are review anchors, not authority over the bytes
+    that the integrated benchmark would measure. This mirrors inputIdentity()
+    with no symlink following and descriptor-bounded reads, including the
+    runner's localeCompare ordering for mixed-case fixture paths.
+    """
+
+    build = workload["build"]
+    records: list[dict[str, Any]] = []
+
+    def add_file(portable_path: str) -> None:
+        raw = _read_local_file(
+            source_root,
+            portable_path,
+            "web measured input",
+            limit=MAX_MEASURED_INPUT_FILE_BYTES,
+        )
+        records.append(
+            {
+                "path": portable_path,
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+
+    def add_tree(portable_root: str) -> None:
+        directory = source_root.joinpath(*portable_root.split("/"))
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: locale.strxfrm(entry.name))
+        except OSError:
+            raise ValidationError("web measured input tree could not be read") from None
+        for entry in entries:
+            portable_path = f"{portable_root}/{entry.name}"
+            try:
+                metadata = os.lstat(entry.path)
+            except OSError:
+                raise ValidationError("web measured input changed while reading") from None
+            if stat.S_ISDIR(metadata.st_mode):
+                add_tree(portable_path)
+            elif stat.S_ISREG(metadata.st_mode):
+                add_file(portable_path)
+            else:
+                raise ValidationError("web measured input contains a non-regular entry")
+
+    for portable_path in build["input_files"]:
+        add_file(portable_path)
+    for portable_root in build["input_roots"]:
+        add_tree(portable_root)
+
+    records.sort(key=lambda record: locale.strxfrm(record["path"]))
+    payload = json.dumps(records, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
+    return {
+        "bytes": sum(record["bytes"] for record in records),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
 
 
 def _validate_web_evidence_revision(record: dict[str, Any], root: Path) -> None:
@@ -1055,6 +1130,23 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
         {key: integrity[key] for key in WEB_INTEGRITY_KEYS[:-1]} == expected_integrity,
         "web workload integrity anchors changed",
     )
+    source_root = REPOSITORY_ROOT / "apps" / "web"
+    actual_package_json = _read_local_file(source_root, "package.json", "web package metadata")
+    actual_bun_lock = _read_local_file(source_root, "bun.lock", "web lockfile")
+    require(
+        integrity["package_json"] == {
+            "bytes": len(actual_package_json),
+            "sha256": hashlib.sha256(actual_package_json).hexdigest(),
+        },
+        "web package identity does not match the integrated checkout",
+    )
+    require(
+        integrity["bun_lock"] == {
+            "bytes": len(actual_bun_lock),
+            "sha256": hashlib.sha256(actual_bun_lock).hexdigest(),
+        },
+        "web lockfile identity does not match the integrated checkout",
+    )
     require(
         runtime["darwin"] == {
             "node": {"bytes": 50320, "sha256": "1ef99ea25fe70c9b67e7efe768ef8ee22148d3cabc703db6131b57aeb617d040"},
@@ -1089,6 +1181,10 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     build_input = _strict_keys(trace["build_input"], WEB_FILE_IDENTITY_KEYS, "web trace.build_input")
     _integer(build_input["bytes"], "web trace.build_input.bytes", minimum=1, maximum=16777216)
     _text(build_input["sha256"], "web trace.build_input.sha256", pattern=SHA256_RE)
+    require(
+        build_input == _web_measured_input_identity(workload, source_root),
+        "web measured input identity does not match the integrated checkout",
+    )
     toolchain = _strict_keys(trace["toolchain"], WEB_TOOLCHAIN_KEYS, "web trace.toolchain")
     trace_package_manager = _strict_keys(toolchain["package_manager"], ("name", "version", "install_args"), "web trace.toolchain.package_manager")
     require(trace_package_manager == package_manager, "web trace package manager changed")

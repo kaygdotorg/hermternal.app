@@ -1101,8 +1101,57 @@ export function assertEvidenceEnvironment(
   }
 }
 
-export type BoundedFileHandle = Pick<FileHandle, 'read' | 'close'>;
+export type BoundedFileHandle = Pick<FileHandle, 'read' | 'stat' | 'close'>;
+export type BoundedFileStats = Awaited<ReturnType<FileHandle['stat']>>;
 export type BoundedFileOpener = (path: string, flags: number) => Promise<BoundedFileHandle>;
+
+const BOUNDED_FILE_METADATA_KEYS = [
+  'dev',
+  'ino',
+  'mode',
+  'size',
+  'mtimeNs',
+  'ctimeNs',
+  'mtimeMs',
+  'ctimeMs'
+] as const;
+
+function boundedFileMetadataValue(metadata: BoundedFileStats, key: string): unknown {
+  return (metadata as unknown as Record<string, unknown>)[key];
+}
+
+function boundedFileSize(metadata: BoundedFileStats): number {
+  const value = boundedFileMetadataValue(metadata, 'size');
+  if (typeof value === 'bigint') {
+    if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('bounded_file_metadata_invalid');
+    return Number(value);
+  }
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error('bounded_file_metadata_invalid');
+  }
+  return value;
+}
+
+function assertRegularBoundedFile(metadata: BoundedFileStats): number {
+  if (typeof metadata.isFile !== 'function' || !metadata.isFile()) {
+    throw new Error('bounded_file_not_regular');
+  }
+  for (const key of ['dev', 'ino', 'mode'] as const) {
+    if (boundedFileMetadataValue(metadata, key) === undefined) {
+      throw new Error('bounded_file_metadata_invalid');
+    }
+  }
+  return boundedFileSize(metadata);
+}
+
+function sameBoundedFileMetadata(initial: BoundedFileStats, final: BoundedFileStats): boolean {
+  return BOUNDED_FILE_METADATA_KEYS.every((key) => {
+    const initialValue = boundedFileMetadataValue(initial, key);
+    const finalValue = boundedFileMetadataValue(final, key);
+    if (initialValue === undefined && finalValue === undefined) return true;
+    return initialValue !== undefined && finalValue !== undefined && initialValue === finalValue;
+  });
+}
 
 export async function readBoundedFile(
   path: string,
@@ -1111,15 +1160,28 @@ export async function readBoundedFile(
 ): Promise<Uint8Array> {
   const handle = await openFile(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
+    // Stat the opened descriptor, not the pathname. The initial regular-file
+    // check and size cap prevent a replacement or oversized file from causing
+    // an unbounded allocation before the descriptor-bounded read begins.
+    const initial = await handle.stat();
+    const initialSize = assertRegularBoundedFile(initial);
+    if (initialSize > limit) throw new Error('bounded_file_oversized');
+
     // Read one byte beyond the accepted bound through the opened descriptor.
-    // This avoids a stat/read TOCTOU and keeps allocation bounded if a file
-    // grows or is replaced while metadata is being read.
+    // EOF is checked against final descriptor metadata so an append or growth
+    // after the first EOF observation cannot be accepted as stable content.
     const buffer = new Uint8Array(limit + 1);
     let bytesRead = 0;
     while (bytesRead < buffer.byteLength) {
       const result = await handle.read(buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead);
       if (result.bytesRead === 0) break;
       bytesRead += result.bytesRead;
+    }
+
+    const final = await handle.stat();
+    const finalSize = assertRegularBoundedFile(final);
+    if (!sameBoundedFileMetadata(initial, final) || bytesRead !== finalSize) {
+      throw new Error('bounded_file_changed');
     }
     if (bytesRead > limit) throw new Error('bounded_file_oversized');
     return buffer.slice(0, bytesRead);
