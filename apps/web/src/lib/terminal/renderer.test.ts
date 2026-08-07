@@ -1,0 +1,449 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  createTerminalRenderer,
+  createWTermGhosttyAdapter,
+  type MountedTerminal,
+  type TerminalRendererAdapter,
+  type TerminalSize
+} from './renderer';
+
+const moduleMocks = vi.hoisted(() => {
+  class MockGhosttyCore {
+    static load = vi.fn(async () => new MockGhosttyCore());
+    bracketedPaste(): boolean {
+      return false;
+    }
+  }
+
+  class MockWTerm {
+    static instances: MockWTerm[] = [];
+    readonly host: HTMLElement;
+    readonly onData: (data: string) => void;
+    bridge: MockGhosttyCore;
+    readonly writes: Uint8Array[] = [];
+    readonly resizes: TerminalSize[] = [];
+    destroyed = false;
+
+    constructor(host: HTMLElement, options: { core: MockGhosttyCore; onData: (data: string) => void }) {
+      this.host = host;
+      this.bridge = options.core;
+      this.onData = options.onData;
+      MockWTerm.instances.push(this);
+    }
+
+    async init(): Promise<this> {
+      this.host.dataset.mockWterm = 'ready';
+      return this;
+    }
+
+    write(data: Uint8Array): void {
+      this.writes.push(data);
+    }
+
+    resize(cols: number, rows: number): void {
+      this.resizes.push({ cols, rows });
+    }
+
+    focus(): void {
+      this.host.tabIndex = 0;
+      this.host.focus();
+    }
+
+    destroy(): void {
+      this.destroyed = true;
+      this.host.replaceChildren();
+    }
+  }
+
+  return { MockGhosttyCore, MockWTerm };
+});
+
+vi.mock('@wterm/ghostty', () => ({ GhosttyCore: moduleMocks.MockGhosttyCore }));
+vi.mock('@wterm/dom', () => ({ WTerm: moduleMocks.MockWTerm }));
+vi.mock('@wterm/dom/css', () => ({}));
+
+type ScreenSnapshot = Readonly<{
+  text: string;
+  graphemes: string[];
+  cursor: Readonly<{ row: number; col: number; visible: boolean }>;
+  foreground: number;
+  alternateScreen: boolean;
+}>;
+
+type TestTerminal = MountedTerminal & {
+  readonly operations: Array<
+    | Readonly<{ type: 'write'; bytes: Uint8Array }>
+    | Readonly<{ type: 'resize'; size: TerminalSize }>
+    | Readonly<{ type: 'paste'; text: string }>
+  >;
+  readonly snapshot: () => ScreenSnapshot;
+};
+
+function displayWidth(grapheme: string): number {
+  if (/^\p{Mark}+$/u.test(grapheme)) return 0;
+  if (/[\u{1100}-\u{115f}\u{2e80}-\u{a4cf}\u{ac00}-\u{d7a3}\u{f900}-\u{faff}\u{ff00}-\u{ff60}\u{ffe0}-\u{ffe6}]/u.test(grapheme)) {
+    return 2;
+  }
+  return 1;
+}
+
+function createDeterministicAdapter(options: { fail?: boolean } = {}): {
+  adapter: TerminalRendererAdapter;
+  terminals: TestTerminal[];
+} {
+  const terminals: TestTerminal[] = [];
+  const adapter: TerminalRendererAdapter = {
+    async mount(host): Promise<MountedTerminal> {
+      if (options.fail) throw new Error('synthetic WASM failure that must not reach the UI');
+
+      const output = document.createElement('pre');
+      output.dataset.testTerminalScreen = 'true';
+      output.setAttribute('aria-label', 'Terminal output');
+      host.appendChild(output);
+
+      const decoder = new TextDecoder();
+      let text = '';
+      let parserBuffer = '';
+      let cursorRow = 0;
+      let cursorCol = 0;
+      let cursorVisible = true;
+      let foreground = 256;
+      let alternateScreen = false;
+      const operations: TestTerminal['operations'] = [];
+
+      const render = (): void => {
+        output.textContent = text;
+      };
+
+      const parse = (chunk: string): void => {
+        parserBuffer += chunk;
+        let index = 0;
+        while (index < parserBuffer.length) {
+          if (parserBuffer[index] !== '\x1b') {
+            const nextEscape = parserBuffer.indexOf('\x1b', index);
+            const printableEnd = nextEscape < 0 ? parserBuffer.length : nextEscape;
+            const printable = parserBuffer.slice(index, printableEnd);
+            for (const grapheme of Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(printable), (entry) => entry.segment)) {
+              if (grapheme === '\n') {
+                cursorRow += 1;
+                cursorCol = 0;
+              } else if (grapheme === '\r') {
+                cursorCol = 0;
+              } else {
+                text += grapheme;
+                cursorCol += displayWidth(grapheme);
+              }
+            }
+            parserBuffer = parserBuffer.slice(printableEnd);
+            index = 0;
+            continue;
+          }
+
+          // The test adapter only needs the CSI sequences used by the fixture
+          // workload; keep incomplete escape bytes buffered for the next write.
+          const match = parserBuffer.slice(index).match(/^\x1b\[([?0-9;]*)([A-Za-z~])/u);
+          if (!match) {
+            if (parserBuffer.slice(index).length < 8) break;
+            index += 1;
+            continue;
+          }
+          const [sequence, parameters, final] = match;
+          const privateMode = parameters.startsWith('?');
+          const numeric = parameters.replace(/^\?/, '').split(';').filter(Boolean).map(Number);
+          if (privateMode && numeric[0] === 25 && final === 'l') cursorVisible = false;
+          if (privateMode && numeric[0] === 25 && final === 'h') cursorVisible = true;
+          if (privateMode && numeric[0] === 1049 && final === 'h') alternateScreen = true;
+          if (privateMode && numeric[0] === 1049 && final === 'l') alternateScreen = false;
+          if (!privateMode && final === 'm') foreground = numeric[0] ?? 0;
+          if (!privateMode && final === 'H') {
+            cursorRow = Math.max(0, (numeric[0] ?? 1) - 1);
+            cursorCol = Math.max(0, (numeric[1] ?? 1) - 1);
+          }
+          parserBuffer = parserBuffer.slice(index + sequence.length);
+          index = 0;
+        }
+        render();
+      };
+
+      const terminal: TestTerminal = {
+        operations,
+        write(data) {
+          const bytes = new Uint8Array(data);
+          operations.push({ type: 'write', bytes });
+          parse(decoder.decode(bytes, { stream: true }));
+        },
+        resize(cols, rows) {
+          operations.push({ type: 'resize', size: { cols, rows } });
+        },
+        focus() {
+          host.tabIndex = 0;
+          host.focus();
+        },
+        paste(data) {
+          operations.push({ type: 'paste', text: data });
+        },
+        dispose() {
+          host.replaceChildren();
+        },
+        snapshot() {
+          const graphemes = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (entry) => entry.segment);
+          return {
+            text,
+            graphemes,
+            cursor: { row: cursorRow, col: cursorCol, visible: cursorVisible },
+            foreground,
+            alternateScreen
+          };
+        }
+      };
+      terminals.push(terminal);
+      return terminal;
+    }
+  };
+  return { adapter, terminals };
+}
+
+function clipboardPaste(host: HTMLElement, text: string): Event {
+  const event = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', {
+    value: { getData: () => text }
+  });
+  host.dispatchEvent(event);
+  return event;
+}
+
+describe('TerminalRenderer', () => {
+  it('does not initialize the Ghostty backend until mount is requested', async () => {
+    moduleMocks.MockGhosttyCore.load.mockClear();
+    moduleMocks.MockWTerm.instances.length = 0;
+    const renderer = createTerminalRenderer();
+    expect(moduleMocks.MockGhosttyCore.load).not.toHaveBeenCalled();
+
+    const host = document.createElement('div');
+    await renderer.mount(host);
+
+    expect(moduleMocks.MockGhosttyCore.load).toHaveBeenCalledTimes(1);
+    expect(moduleMocks.MockWTerm.instances).toHaveLength(1);
+    expect(renderer.state).toBe('ready');
+  });
+
+  it('preserves raw byte ordering and terminal workload semantics across split writes', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter });
+    const host = document.createElement('div');
+    const encoder = new TextEncoder();
+
+    renderer.write(encoder.encode('\x1b[31mred\x1b[0m '));
+    renderer.write(encoder.encode('e'));
+    const combining = encoder.encode('́');
+    renderer.write(combining.slice(0, 1));
+    renderer.write(combining.slice(1));
+    const wide = encoder.encode(' 界');
+    renderer.write(wide.slice(0, 2));
+    renderer.write(wide.slice(2));
+    const emoji = encoder.encode(' 🙂');
+    renderer.write(emoji.slice(0, 2));
+    renderer.write(emoji.slice(2));
+    renderer.write(encoder.encode('\x1b[?25l\x1b[?1049hALT\x1b[?25h'));
+    await renderer.mount(host);
+
+    const terminal = terminals[0]!;
+    const snapshot = terminal.snapshot();
+    expect(snapshot.text).toBe('red é 界 🙂ALT');
+    expect(snapshot.graphemes).toContain('é');
+    expect(snapshot.graphemes).toContain('界');
+    expect(snapshot.graphemes).toContain('🙂');
+    expect(snapshot.foreground).toBe(0);
+    expect(snapshot.cursor.visible).toBe(true);
+    expect(snapshot.alternateScreen).toBe(true);
+
+    const writeOperations = terminal.operations.filter((operation) => operation.type === 'write');
+    const received = writeOperations.reduce((all, operation) => {
+      const next = new Uint8Array(all.byteLength + operation.bytes.byteLength);
+      next.set(all);
+      next.set(operation.bytes, all.byteLength);
+      return next;
+    }, new Uint8Array());
+    const expected = encoder.encode(
+      '\x1b[31mred\x1b[0m é 界 🙂\x1b[?25l\x1b[?1049hALT\x1b[?25h'
+    );
+    expect([...received]).toEqual([...expected]);
+  });
+
+  it('keeps resize operations ordered with pending output and forwards later resizes', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter });
+    const host = document.createElement('div');
+    renderer.write(new Uint8Array([0x41]));
+    renderer.resize(100, 30);
+    renderer.write(new Uint8Array([0x42]));
+    await renderer.mount(host);
+    renderer.resize(120, 40);
+
+    expect(terminals[0]?.operations.map((operation) => operation.type)).toEqual(['write', 'resize', 'write', 'resize']);
+    expect(terminals[0]?.operations.at(-1)).toEqual({ type: 'resize', size: { cols: 120, rows: 40 } });
+  });
+
+  it('keeps native selection and keyboard copy available without intercepting copy', async () => {
+    const { adapter } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter });
+    const host = document.createElement('div');
+    document.body.append(host);
+    await renderer.mount(host);
+
+    expect(host).toHaveAttribute('role', 'region');
+    expect(host).toHaveAttribute('aria-label', 'Terminal');
+    const screen = host.querySelector('[data-test-terminal-screen]')!;
+    const textNode = document.createTextNode('selectable output');
+    screen.appendChild(textNode);
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(textNode);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const copy = new Event('copy', { bubbles: true, cancelable: true });
+    expect(host.dispatchEvent(copy)).toBe(true);
+    expect(copy.defaultPrevented).toBe(false);
+    expect(selection.rangeCount).toBe(1);
+    expect(selection.getRangeAt(0).toString()).toBe('selectable output');
+  });
+
+  it('requires confirmation for multiline and control-character paste, then forwards accepted paste', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    const confirmPaste = vi.fn().mockResolvedValue(true);
+    const renderer = createTerminalRenderer({ adapter, confirmPaste });
+    const host = document.createElement('div');
+    await renderer.mount(host);
+
+    const multilineEvent = clipboardPaste(host, 'printf one\nprintf two');
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(1));
+    expect(multilineEvent.defaultPrevented).toBe(true);
+    expect(confirmPaste).toHaveBeenCalledWith({
+      text: 'printf one\nprintf two',
+      multiline: true,
+      hasControlCharacters: true
+    });
+    await vi.waitFor(() => expect(terminals[0]?.operations).toContainEqual({ type: 'paste', text: 'printf one\nprintf two' }));
+
+    confirmPaste.mockClear();
+    const controlEvent = clipboardPaste(host, 'safe\x03');
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(1));
+    expect(controlEvent.defaultPrevented).toBe(true);
+    expect(confirmPaste.mock.calls[0]?.[0]).toMatchObject({
+      multiline: false,
+      hasControlCharacters: true
+    });
+
+    confirmPaste.mockClear();
+    confirmPaste.mockResolvedValue(false);
+    clipboardPaste(host, 'not accepted\n');
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(1));
+    expect(terminals[0]?.operations.filter((operation) => operation.type === 'paste')).toHaveLength(2);
+  });
+
+  it('lets safe single-line paste use W-Term input without confirmation', async () => {
+    const { adapter } = createDeterministicAdapter();
+    const confirmPaste = vi.fn();
+    const renderer = createTerminalRenderer({ adapter, confirmPaste });
+    const host = document.createElement('div');
+    await renderer.mount(host);
+
+    const event = clipboardPaste(host, 'ls -la');
+    expect(event.defaultPrevented).toBe(false);
+    expect(confirmPaste).not.toHaveBeenCalled();
+  });
+
+  it('preserves focus across a safe remount and makes dispose idempotent', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter });
+    const firstHost = document.createElement('div');
+    const secondHost = document.createElement('div');
+    document.body.append(firstHost, secondHost);
+    await renderer.mount(firstHost);
+    renderer.focus();
+    expect(firstHost).toHaveFocus();
+
+    await renderer.mount(secondHost);
+    expect(secondHost).toHaveFocus();
+    renderer.dispose();
+    renderer.dispose();
+    expect(renderer.state).toBe('disposed');
+    expect(terminals).toHaveLength(2);
+
+    await renderer.mount(firstHost);
+    expect(renderer.state).toBe('ready');
+    expect(firstHost).toHaveFocus();
+  });
+
+  it('renders one controlled error state when initialization fails', async () => {
+    const { adapter } = createDeterministicAdapter({ fail: true });
+    const stateChanges: string[] = [];
+    const renderer = createTerminalRenderer({ adapter, onStateChange: (state) => stateChanges.push(state) });
+    const host = document.createElement('div');
+    await expect(renderer.mount(host)).resolves.toBeUndefined();
+
+    expect(renderer.state).toBe('error');
+    expect(renderer.error).toEqual({
+      code: 'wasm-initialization-failed',
+      message: 'Terminal could not start.'
+    });
+    expect(host.querySelector('[role="alert"]')).toHaveTextContent('Terminal unavailable. Try again.');
+    expect(host.textContent).not.toContain('synthetic WASM failure');
+    expect(stateChanges).toEqual(['loading', 'error']);
+  });
+
+  it('fails closed when pending output exceeds the bounded runtime buffer', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter, maxPendingWriteBytes: 4 });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const mount = renderer.mount(host);
+    renderer.write(new Uint8Array([1, 2, 3, 4, 5]));
+    await mount;
+
+    expect(renderer.state).toBe('error');
+    expect(renderer.error?.code).toBe('pending-output-limit');
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]?.operations).toHaveLength(0);
+    expect(host.querySelector('[role="alert"]')).toBeInTheDocument();
+  });
+
+  it('does not log terminal bytes', async () => {
+    const { adapter } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter });
+    const host = document.createElement('div');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await renderer.mount(host);
+      renderer.write(new Uint8Array([0x1b, 0x5b, 0x33, 0x31, 0x6d, 0xff, 0x00]));
+      expect(log).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it('frames accepted bracketed paste and strips escape bytes in the W-Term adapter', async () => {
+    const core = { bracketedPaste: vi.fn(() => true) };
+    moduleMocks.MockGhosttyCore.load.mockResolvedValue(core as never);
+    const input = vi.fn();
+    const adapter = createWTermGhosttyAdapter();
+    const host = document.createElement('div');
+    const mounted = await adapter.mount(host, {
+      initialSize: { cols: 80, rows: 24 },
+      scrollbackLimitBytes: 64 * 1024,
+      onInput: input
+    });
+
+    mounted.paste('echo \x1b[31munsafe');
+
+    expect(input).toHaveBeenCalledWith('\x1b[200~echo [31munsafe\x1b[201~');
+    mounted.dispose();
+  });
+});

@@ -11,6 +11,7 @@
     "typecheck:version": "bun x --package @typescript/native tsc --version",
     "test": "vitest run",
     "benchmark:transport": "bun tests/bench/live-rest-transport.bench.ts",
+    "benchmark:terminal": "bun tests/bench/terminal-renderer.bench.ts",
     "test:watch": "vitest",
     "test:component": "vitest run src/lib/components",
     "test:e2e": "playwright test",
@@ -36,5 +37,9 @@
     "typescript": "5.9.3",
     "vite": "8.2.0",
     "vitest": "4.1.10"
+  },
+  "dependencies": {
+    "@wterm/dom": "0.3.2",
+    "@wterm/ghostty": "0.3.2"
   }
 }
