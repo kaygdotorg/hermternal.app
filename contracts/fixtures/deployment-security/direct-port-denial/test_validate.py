@@ -254,6 +254,60 @@ class DirectPortDenialTests(unittest.TestCase):
             with self.assertRaises(validate.ValidationError):
                 validate._read_artifact(root, "fifo", limit=16)
 
+            device = Path("/dev/null")
+            if device.exists():
+                with self.assertRaises(validate.ValidationError):
+                    validate._read_artifact(device.parent, device.name, limit=16)
+
+            raced = root / "raced"
+            raced.write_bytes(b"safe")
+
+            def replace_with_symlink(path: Path) -> None:
+                path.unlink()
+                path.symlink_to(target)
+
+            with self.assertRaises(validate.ValidationError):
+                validate._read_artifact(root, "raced", limit=16, _before_open=replace_with_symlink)
+
+    def test_regular_file_replaced_with_fifo_before_open_never_blocks_in_either_mode(self) -> None:
+        script = """
+import os
+import sys
+import tempfile
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import validate
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    path = root / "artifact"
+    path.write_bytes(b"safe")
+    def replace_with_fifo(target):
+        target.unlink()
+        os.mkfifo(target)
+    try:
+        validate._read_artifact(root, "artifact", limit=16, _before_open=replace_with_fifo)
+    except validate.ValidationError as exc:
+        print(validate.compact_error(exc))
+    else:
+        raise SystemExit("raced FIFO was accepted")
+"""
+        for optimized in (False, True):
+            command = [sys.executable]
+            if optimized:
+                command.append("-O")
+            command.extend(["-c", script, str(FIXTURE_DIR)])
+            with self.subTest(optimized=optimized):
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                self.assertEqual(completed.stderr, "")
+                self.assertIn("regular file", completed.stdout)
+
     def test_iterative_walks_handle_bounded_deep_values(self) -> None:
         value: object = "safe_marker"
         for _ in range(validate.MAX_JSON_DEPTH):

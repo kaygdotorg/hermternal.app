@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 ROOT = Path(__file__).resolve().parent
 CASES_PATH = ROOT / "cases.json"
@@ -50,12 +50,12 @@ RETAINED_FILES = ARTIFACT_FILES + ("validation-baseline.json", "validation-basel
 # metadata, not an immutable trust root; reviewed source/path authority comes from
 # exact bytes in the independently reviewed Git objects below.
 PINNED_RETAINED_ARTIFACTS: dict[str, tuple[int, str]] = {
-    "README.md": (6473, "1e88c51a5c6954e9a84c28149531397df1e6c3a62a5e13dc5f4eded41e93bbfc"),
+    "README.md": (6658, "315d11253d170e8570e332c4e135bd3697fc5d5caa3430a4955af3d2c9ab4086"),
     "cases.json": (26733, "fdba8da5d759395f20624af5eebb5893f48d015814240faa75456d0aad0c2afb"),
-    "test_validate.py": (21409, "52ddf9eefbc5d01414f9d66e4590c7ca94387c88cc791c642d9cdd4ac6692874"),
+    "test_validate.py": (23398, "c4f039d896f3d2a0272209d2411e28cc89d6162fea815c15c01ab3fc1aec5dd2"),
 }
-PINNED_VALIDATOR_SOURCE_SHA256 = "395911e57754793195cc67e814011250f944eab420a9d74cc4038de86e0da73e"
-PINNED_BASELINE_EVIDENCE_SHA256 = "c323d9b9d8377f58583d20c87211c7520171a3c40ac4b4b5361d44d38847517a"
+PINNED_VALIDATOR_SOURCE_SHA256 = "faab54a6aa8c7b9e3d1d8fc3287e30338672cc47e192047b4232e6efa70b416b"
+PINNED_BASELINE_EVIDENCE_SHA256 = "97c0b7f1f07118d4ba8746bea7a2c60eaec58d4e3284550a973749970a39086f"
 REVIEWED_NETWORK_COMMIT = "014c4b84789b0d14a4b024c4a670033146aed25a"
 REVIEWED_NETWORK_PATH = "contracts/fixtures/deployment-security/private-network-firewall/cases.json"
 REVIEWED_NETWORK_BYTES = 17789
@@ -730,8 +730,14 @@ def validate_cases_document(
     require(allow_count == 1, "exactly one configured proxy path must be allowed")
 
 
-def _read_artifact(root: Path, relative: str, *, limit: int = MAX_TOTAL_RETAINED_BYTES) -> bytes:
-    """Read a regular non-symlink file without allocating past its limit."""
+def _read_artifact(
+    root: Path,
+    relative: str,
+    *,
+    limit: int = MAX_TOTAL_RETAINED_BYTES,
+    _before_open: Callable[[Path], None] | None = None,
+) -> bytes:
+    """Capture a regular file without blocking on a raced special-file replacement."""
 
     path = root / relative
     try:
@@ -739,12 +745,31 @@ def _read_artifact(root: Path, relative: str, *, limit: int = MAX_TOTAL_RETAINED
         require(stat.S_ISREG(metadata.st_mode), "retained artifact must be a regular file")
         require(not stat.S_ISLNK(metadata.st_mode), "retained artifact symlink is not allowed")
         require(metadata.st_size <= limit, "retained artifact byte limit exceeded")
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        require(hasattr(os, "O_NONBLOCK"), "nonblocking retained artifact open is unavailable")
+        flags = (
+            os.O_RDONLY
+            | os.O_NONBLOCK
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        # This private seam makes the lstat-to-open replacement regression exact;
+        # production callers never supply it.
+        if _before_open is not None:
+            _before_open(path)
         descriptor = os.open(path, flags)
         try:
             opened = os.fstat(descriptor)
             require(stat.S_ISREG(opened.st_mode), "retained artifact must remain a regular file")
-            require(opened.st_dev == metadata.st_dev and opened.st_ino == metadata.st_ino, "retained artifact changed during open")
+            require(
+                opened.st_dev == metadata.st_dev and opened.st_ino == metadata.st_ino,
+                "retained artifact changed during open",
+            )
+            current = path.lstat()
+            require(stat.S_ISREG(current.st_mode), "retained artifact path must remain a regular file")
+            require(
+                current.st_dev == opened.st_dev and current.st_ino == opened.st_ino,
+                "retained artifact path identity changed during open",
+            )
             require(opened.st_size <= limit, "retained artifact byte limit exceeded")
             chunks: list[bytes] = []
             total = 0
@@ -755,6 +780,13 @@ def _read_artifact(root: Path, relative: str, *, limit: int = MAX_TOTAL_RETAINED
                 total += len(chunk)
                 require(total <= limit, "retained artifact byte limit exceeded")
                 chunks.append(chunk)
+            final = os.fstat(descriptor)
+            require(
+                final.st_dev == opened.st_dev
+                and final.st_ino == opened.st_ino
+                and final.st_size == opened.st_size,
+                "retained artifact changed during read",
+            )
             require(total == opened.st_size, "retained artifact changed during read")
             return b"".join(chunks)
         finally:

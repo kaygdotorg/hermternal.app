@@ -54,12 +54,15 @@ float overflow, oversized integers, excessive input bytes, excessive depth,
 excessive total nodes, oversized containers, oversized strings, control
 characters, unknown keys, changed key order, wrong scalar types, and booleans in
 integer fields. Structural, redaction, and equality walks are iterative. Retained
-artifacts are opened once with no-follow semantics, must be regular files, and
-are size-checked before and during chunked reads. Parsing, hashing, redaction, and
-identity checks consume the same captured bytes; no phase reopens a canonical
-path. Symlinks, special files, file swaps during capture, alternate CLI artifact
-paths, and reads beyond the remaining aggregate byte budget fail closed. These
-checks use explicit exceptions and remain active under optimized Python.
+artifacts are opened once with no-follow and nonblocking semantics, then must
+pass descriptor and current-path regular-file, device, inode, and size checks
+before bounded reads. Nonblocking acquisition prevents a regular-file-to-FIFO
+replacement between `lstat` and `open` from hanging before `fstat` rejects it.
+Parsing, hashing, redaction, and identity checks consume the same captured bytes;
+no phase reopens a canonical path. Symlinks, devices, FIFOs, file swaps during
+capture, alternate CLI artifact paths, and reads beyond the remaining aggregate
+byte budget fail closed. These checks use explicit exceptions and remain active
+under optimized Python.
 
 Malformed or incomplete evidence returns one bounded JSON line with status `2`.
 It emits no traceback, usage text, raw command-line value, duplicate key, or
