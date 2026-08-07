@@ -4,7 +4,7 @@
 
 **Status:** deterministic, local, no-network benchmark harness with baseline-only evidence
 
-This exclusive directory owns the web production-build benchmark. It does not change package scripts, the lockfile, routes, application styles, the shared fixture registry, or production runtime. It builds a bounded temporary copy of the reviewed static web scaffold with an immutable snapshot of installed local dependencies. It does not start Hermes, a browser, a preview server, or a live integration.
+This exclusive directory owns the web production-build benchmark. It does not alter package scripts or the lockfile during a run, and it does not change routes, application styles, the shared fixture registry, or production runtime. The integrated `apps/web/package.json` carries the reviewed Bun and Node pins and is measured and bound by the workload. It builds a bounded temporary copy of the reviewed static web scaffold with an immutable snapshot of installed local dependencies. It does not start Hermes, a browser, a preview server, or a live integration.
 
 ## Workload and states
 
@@ -47,7 +47,7 @@ The canonical B-01 validator at `contracts/benchmarks/validate.py` validates che
 
 All inputs are repository source, static assets, and synthetic prototype data. Evidence contains no credentials, cookies, tokens, user data, transcripts, live hosts, network traces, or provider data.
 
-The checked-in observation used an Apple M2 Max with Bun 1.3.14, Node 26.7.0, and Vite 8.2.0. Cold p50/p95/p99 were `1861.089/2564.520/2972.828 ms`. Warm p50/p95/p99 were `1670.828/2274.896/2387.717 ms`. The excluded warm-up and all 60 measured builds produced artifact digest `78ae81588063c7327dcee1f04832d255f01bb8f48518777670d1c92ce2099cb9`. These observations from one local machine do not establish a regression threshold or approved budget.
+The checked-in observation was collected from integrated measurement source `67f9aab40722826d043e8e8e20a25c345b434f05` on an Apple M2 Max with Bun 1.3.14, Node 26.7.0, and Vite 8.2.0. Cold p50/p95/p99 were `2170.982/3018.763/3394.615 ms`. Warm p50/p95/p99 were `2778.074/4260.780/5775.756 ms`. The excluded warm-up and all 60 measured builds produced artifact digest `1d48fd99e771af2a283e6b1deb0152208f3f1bd386584e53e0635a872b94432e`. These observations from one local machine do not establish a regression threshold or approved budget.
 
 ## Run and verify
 
