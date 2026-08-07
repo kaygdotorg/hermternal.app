@@ -129,6 +129,27 @@ class ManifestMutationTests(unittest.TestCase):
                 state["coverage"] = list(coverage)
                 self._assert_cli_failure(mutated)
 
+    def test_terminal_metadata_drift_fails_closed(self) -> None:
+        def swap(items: list[object], first: int, second: int) -> None:
+            items[first], items[second] = items[second], items[first]
+
+        mutations = (
+            ("page order", lambda doc: swap(doc["paper"]["pages"], 2, 3)),
+            ("page name", lambda doc: doc["paper"]["pages"][2].update(name="renamed Terminal page")),
+            ("page count", lambda doc: doc["paper"]["pages"][2].update(artboard_count=24)),
+            ("state order", lambda doc: swap(doc["terminal"]["states"], 0, 1)),
+            ("state id", lambda doc: doc["terminal"]["states"][0].update(id="terminal.fresh-renamed")),
+            ("board name", lambda doc: doc["terminal"]["states"][0]["boards"][0].update(name="renamed Terminal board")),
+            ("board dimensions", lambda doc: doc["terminal"]["states"][0]["boards"][0].update(width=1441)),
+            ("board page", lambda doc: doc["terminal"]["states"][0]["boards"][0].update(page_id="G-0")),
+            ("static caveat", lambda doc: doc["terminal"]["states"][0].update(notes="Paper evidence only.")),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                mutated = copy.deepcopy(self.manifest)
+                mutate(mutated)
+                self._assert_cli_failure(mutated)
+
     def test_unknown_artboard_fails_closed(self) -> None:
         mutated = copy.deepcopy(self.manifest)
         mutated["states"][0]["variants"][0]["artboard_id"] = "unknown-paper-board"
