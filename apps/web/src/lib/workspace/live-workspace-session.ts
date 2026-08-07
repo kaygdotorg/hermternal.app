@@ -64,6 +64,11 @@ export class LiveWorkspaceSession {
   private chat: JsonRpcChatTransport | undefined;
   private activeRequest: JsonRpcChatRequest | undefined;
   private generation = 0;
+  // History reads are presentation-owned operations. A generation protects
+  // session replacement, while this monotonic epoch also protects same-session
+  // overlap: a newer prompt, reconnect, terminal connection state, or
+  // lifecycle reset revokes every older refresh's publication authority.
+  private refreshEpoch = 0;
   private disposed = false;
 
   constructor(options: LiveWorkspaceSessionOptions) {
@@ -172,10 +177,14 @@ export class LiveWorkspaceSession {
     try {
       request = chat.sendPrompt(text);
     } catch {
+      this.advanceRefreshEpoch();
       this.publish({ ...this.snapshot, state: 'retryable-error' });
       return;
     }
 
+    // Starting a newer prompt revokes any completion-history read that was
+    // still in flight for an earlier prompt in the same session.
+    this.advanceRefreshEpoch();
     this.activeRequest = request;
     const operationSignal = this.controller?.signal;
     const userItem: TimelineItem = {
@@ -228,6 +237,9 @@ export class LiveWorkspaceSession {
     const sessionId = this.snapshot.activeSessionId;
     if (!chat || !sessionId) return;
 
+    // Reconnect owns the next history publication in this generation. This
+    // invalidates a completion refresh that may still be waiting on REST.
+    const refreshEpoch = this.advanceRefreshEpoch();
     this.publish({ ...this.snapshot, state: 'reconnecting', permanentFailure: undefined });
     // Subscribers can synchronously invalidate or replace the workspace from
     // the reconnecting publication. Do not call an old transport after that
@@ -237,7 +249,7 @@ export class LiveWorkspaceSession {
     try {
       await chat.reconnect();
       if (!this.ownsChat(generation, chat, sessionId)) return;
-      await this.refreshMessages(sessionId, generation, chat);
+      await this.refreshMessages(sessionId, generation, chat, undefined, refreshEpoch);
     } catch (error) {
       if (!this.ownsChat(generation, chat, sessionId)) return;
       this.publishLoadFailure(error, generation);
@@ -414,6 +426,12 @@ export class LiveWorkspaceSession {
 
   private handleConnectionState(generation: number, state: JsonRpcConnectionState): void {
     if (!this.isCurrent(generation)) return;
+
+    // A terminal transport transition is newer lifecycle information even
+    // when the workspace generation and selected session are unchanged. It
+    // revokes pending REST history reads before they can hide the boundary.
+    if (isTerminalConnectionStatus(state.status)) this.advanceRefreshEpoch();
+
     if (state.status === 'reconnecting') this.publish({ ...this.snapshot, state: 'reconnecting' });
     if (state.status === 'incompatible' || state.status === 'auth_required') {
       this.publishPermanentFailure(generation, {
@@ -448,15 +466,22 @@ export class LiveWorkspaceSession {
     signal?: AbortSignal
   ): Promise<void> {
     if (this.activeRequest !== request || !this.snapshot.activeSessionId) return;
+    const sessionId = this.snapshot.activeSessionId;
+    const generation = this.generation;
+    // Completion history is one owner in the shared publication sequence. Any
+    // later prompt, reconnect, terminal close, replacement, or reset advances
+    // the epoch and makes this read's result observationally stale.
+    const refreshEpoch = this.advanceRefreshEpoch();
     this.activeRequest = undefined;
-    await this.refreshMessages(this.snapshot.activeSessionId, this.generation, undefined, signal);
+    await this.refreshMessages(sessionId, generation, undefined, signal, refreshEpoch);
   }
 
   private async refreshMessages(
     sessionId: string,
     generation: number,
-    expectedChat?: JsonRpcChatTransport,
-    signal?: AbortSignal
+    expectedChat: JsonRpcChatTransport | undefined,
+    signal: AbortSignal | undefined,
+    refreshEpoch: number
   ): Promise<void> {
     try {
       const response = await this.rest.getSessionMessages(
@@ -464,23 +489,15 @@ export class LiveWorkspaceSession {
         { limit: 500, offset: 0 },
         signal
       );
-      if (
-        signal?.aborted ||
-        !this.isCurrent(generation) ||
-        this.snapshot.activeSessionId !== sessionId ||
-        (expectedChat !== undefined && this.chat !== expectedChat)
-      )
-        return;
+      if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
       const timeline = mapLiveMessages(sessionId, response.messages, this.snapshot.model);
       this.publish({ ...this.snapshot, timeline, state: timeline.length === 0 ? 'empty' : 'ready' });
     } catch {
-      if (
-        this.isCurrent(generation) &&
-        this.snapshot.activeSessionId === sessionId &&
-        (expectedChat === undefined || this.chat === expectedChat)
-      ) {
-        this.publish({ ...this.snapshot, state: 'retryable-error' });
-      }
+      // Abort and stale non-abort failures are both deliberately silent. A
+      // replacement operation owns the visible state and must not be
+      // downgraded to retryable-error by an old REST continuation.
+      if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
+      this.publish({ ...this.snapshot, state: 'retryable-error' });
     }
   }
 
@@ -533,11 +550,14 @@ export class LiveWorkspaceSession {
     permanentFailure: LiveWorkspacePermanentFailure
   ): void {
     if (!this.isCurrent(generation)) return;
+    this.advanceRefreshEpoch();
     this.publish({ ...this.snapshot, state: 'permanent-error', permanentFailure });
   }
 
   private publishUncertainDelivery(generation: number): void {
-    if (this.isCurrent(generation) && this.snapshot.state !== 'permanent-error') {
+    if (!this.isCurrent(generation)) return;
+    this.advanceRefreshEpoch();
+    if (this.snapshot.state !== 'permanent-error') {
       this.publish({ ...this.snapshot, state: 'retryable-error' });
     }
   }
@@ -557,12 +577,16 @@ export class LiveWorkspaceSession {
       this.publishPermanentFailure(generation, { reason: 'incompatible' });
       return;
     }
+    // A generic terminal load failure also supersedes any same-generation
+    // history owner, including one started before an explicit reconnect.
+    this.advanceRefreshEpoch();
     this.publish({ ...this.snapshot, state: 'retryable-error', permanentFailure: undefined });
   }
 
   private begin(): { readonly generation: number; readonly signal: AbortSignal } {
     this.assertActive();
     this.generation += 1;
+    this.advanceRefreshEpoch();
     this.controller?.abort();
     const chat = this.chat;
     this.chat = undefined;
@@ -576,6 +600,7 @@ export class LiveWorkspaceSession {
 
   private resetForInvalidation(publishSnapshot: boolean): void {
     this.generation += 1;
+    this.advanceRefreshEpoch();
     this.controller?.abort();
     this.controller = undefined;
     const chat = this.chat;
@@ -589,6 +614,27 @@ export class LiveWorkspaceSession {
     const cleared = initialSnapshot();
     if (publishSnapshot) this.publish(cleared);
     else this.snapshot = cleared;
+  }
+
+  private advanceRefreshEpoch(): number {
+    this.refreshEpoch += 1;
+    return this.refreshEpoch;
+  }
+
+  private ownsRefresh(
+    generation: number,
+    sessionId: string,
+    expectedChat: JsonRpcChatTransport | undefined,
+    signal: AbortSignal | undefined,
+    refreshEpoch: number
+  ): boolean {
+    return (
+      !signal?.aborted &&
+      refreshEpoch === this.refreshEpoch &&
+      this.isCurrent(generation) &&
+      this.snapshot.activeSessionId === sessionId &&
+      (expectedChat === undefined || this.chat === expectedChat)
+    );
   }
 
   private isCurrent(generation: number): boolean {
@@ -641,6 +687,17 @@ function payloadStringArray(payload: BoundedJsonValue, key: string): string[] {
   const value = payload[key];
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+}
+
+function isTerminalConnectionStatus(status: JsonRpcConnectionState['status']): boolean {
+  return (
+    status === 'offline' ||
+    status === 'auth_required' ||
+    status === 'incompatible' ||
+    status === 'failed' ||
+    status === 'delivery_uncertain' ||
+    status === 'closing'
+  );
 }
 
 function isAbort(error: unknown): boolean {

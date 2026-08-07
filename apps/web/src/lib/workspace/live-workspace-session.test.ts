@@ -72,6 +72,16 @@ class BrowserChatSocket implements JsonRpcWebSocket {
     this.onmessage?.({ data: JSON.stringify({ jsonrpc: '2.0', id, result: { restored: true } }) });
   }
 
+  emitEvent(type: string, requestId: string, payload: Record<string, unknown> = {}): void {
+    this.onmessage?.({
+      data: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'event',
+        params: { type, request_id: requestId, payload }
+      })
+    });
+  }
+
   emitClose(code = 1006, reason = ''): void {
     this.onclose?.({ code, reason });
   }
@@ -84,6 +94,33 @@ async function waitForSocket(sockets: readonly BrowserChatSocket[]): Promise<Bro
     await flush();
   }
   throw new Error('browser chat socket was not created');
+}
+
+async function createConnectedSocketWorkspace(rest: LiveRestTransport = createRest()) {
+  const socket = new BrowserChatSocket();
+  let transport: JsonRpcChatTransport | undefined;
+  const createChat = vi.fn((options: BrowserChatOptions) => {
+    transport = createBrowserChatTransport({
+      ...options,
+      fetch: async () =>
+        new Response('{"ticket":"fresh-ticket-1","ttl_seconds":30}', {
+          headers: { 'content-type': 'application/json' }
+        }),
+      createSocket: () => socket
+    });
+    return transport;
+  });
+  const session = new LiveWorkspaceSession({ rest, createChat });
+  const initialization = session.initialize();
+  const attached = await waitForSocket([socket]);
+  attached.emitOpen();
+  attached.emitGatewayReady();
+  await flush();
+  const resumeFrame = JSON.parse(attached.sent[0] ?? '{}') as { id?: string };
+  if (!resumeFrame.id) throw new Error('session resume frame was not sent');
+  attached.emitResponse(resumeFrame.id);
+  await initialization;
+  return { session, socket: attached, transport, createChat };
 }
 
 function createRest(messages: LiveMessage[] = []): LiveRestTransport {
@@ -105,6 +142,14 @@ function createDeferred<T>() {
     reject = nextReject;
   });
   return { promise, resolve, reject };
+}
+
+function latestPromptId(socket: BrowserChatSocket): string {
+  for (const frame of [...socket.sent].reverse()) {
+    const parsed = JSON.parse(frame) as { id?: string; method?: string };
+    if (parsed.method === 'prompt.submit' && parsed.id) return parsed.id;
+  }
+  throw new Error('prompt frame was not sent');
 }
 
 function createUnauthorizedChatFactory() {
@@ -153,14 +198,23 @@ function createReconnectUnauthorizedChatFactory() {
 
 function createChatHarness() {
   let options: BrowserChatOptions | undefined;
-  let activeRequest: ReturnType<typeof createDeferred<JsonRpcCompletionEvent>> | undefined;
+  let requestNumber = 0;
+  let activeRequest:
+    | { readonly id: string; readonly deferred: ReturnType<typeof createDeferred<JsonRpcCompletionEvent>> }
+    | undefined;
+  const pendingRequests = new Map<
+    string,
+    ReturnType<typeof createDeferred<JsonRpcCompletionEvent>>
+  >();
   const sendPrompt = vi.fn((prompt: string): JsonRpcChatRequest => {
+    const id = `request-${++requestNumber}`;
     const deferred = createDeferred<JsonRpcCompletionEvent>();
-    activeRequest = deferred;
+    activeRequest = { id, deferred };
+    pendingRequests.set(id, deferred);
     return {
-      id: 'request-1',
+      id,
       completion: deferred.promise,
-      state: { id: 'request-1', status: 'submitting' },
+      state: { id, status: 'submitting' },
       abort: vi.fn()
     };
   });
@@ -198,11 +252,21 @@ function createChatHarness() {
     changeState(state: JsonRpcConnectionState) {
       options?.onStateChange?.(state);
     },
-    complete(event: JsonRpcCompletionEvent) {
-      activeRequest?.resolve(event);
+    complete(event: JsonRpcCompletionEvent, requestId?: string) {
+      const id = requestId ?? activeRequest?.id;
+      if (!id) return;
+      pendingRequests.get(id)?.resolve(event);
     },
-    reject(error: unknown) {
-      activeRequest?.reject(error);
+    reject(error: unknown, requestId?: string) {
+      const id = requestId ?? activeRequest?.id;
+      if (!id) return;
+      pendingRequests.get(id)?.reject(error);
+    },
+    completeRequest(requestId: string, event: JsonRpcCompletionEvent) {
+      pendingRequests.get(requestId)?.resolve(event);
+    },
+    rejectRequest(requestId: string, error: unknown) {
+      pendingRequests.get(requestId)?.reject(error);
     }
   };
 }
@@ -338,6 +402,50 @@ describe('LiveWorkspaceSession', () => {
     ]);
   });
 
+  it('does not let an earlier completion refresh erase a newer prompt', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    const refresh = createDeferred<SessionMessages>();
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+
+    session.sendPrompt('First prompt');
+    const firstComplete: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'First answer' }
+    };
+    chat.emit(firstComplete);
+    chat.complete(firstComplete);
+    await flush();
+    await flush();
+
+    session.sendPrompt('Second prompt');
+    expect(session.current.state).toBe('streaming');
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'streaming', id: 'request-2:stream' })
+    );
+
+    refresh.resolve(
+      sessionMessages([
+        { role: 'user', content: 'First prompt' },
+        { role: 'assistant', content: 'Late first history' }
+      ])
+    );
+    await flush();
+
+    expect(session.current.state).toBe('streaming');
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'user-message', id: 'request-2:user', text: 'Second prompt' })
+    );
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'streaming', id: 'request-2:stream' })
+    );
+    expect(JSON.stringify(session.current.timeline)).not.toContain('Late first history');
+    expect(chat.sendPrompt).toHaveBeenCalledTimes(2);
+  });
+
   it('interrupts without replay and permits a later user-led prompt', async () => {
     const rest = createRest([]);
     const chat = createChatHarness();
@@ -428,6 +536,239 @@ describe('LiveWorkspaceSession', () => {
 
     expect(session.current.state).toBe('loading');
     expect(session.current.timeline).toEqual([]);
+  });
+
+  it('keeps close 4401 permanent when completion history is still pending', async () => {
+    const rest = createRest([]);
+    const refresh = createDeferred<SessionMessages>();
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+
+    session.sendPrompt('Complete before authentication closes');
+    const requestId = latestPromptId(socket);
+    socket.emitEvent('message.complete', requestId, { text: 'Server answer' });
+    await flush();
+    await flush();
+
+    socket.emitClose(4401, 'redacted');
+    expect(session.current).toMatchObject({
+      state: 'permanent-error',
+      permanentFailure: {
+        reason: 'authentication-required',
+        closeCode: 4401,
+        closeClassification: 'authentication-rejected'
+      }
+    });
+    const sentBeforeBlockedPrompt = socket.sent.length;
+    session.sendPrompt('must remain blocked');
+    expect(socket.sent).toHaveLength(sentBeforeBlockedPrompt);
+
+    refresh.resolve(sessionMessages([{ role: 'assistant', content: 'late history' }]));
+    await flush();
+
+    expect(session.current.state).toBe('permanent-error');
+    expect(session.current.permanentFailure?.reason).toBe('authentication-required');
+    expect(session.current.timeline).not.toContainEqual(
+      expect.objectContaining({ text: 'late history' })
+    );
+  });
+
+  it('keeps close 4403 incompatible when completion history is still pending', async () => {
+    const rest = createRest([]);
+    const refresh = createDeferred<SessionMessages>();
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+
+    session.sendPrompt('Complete before origin rejection');
+    const requestId = latestPromptId(socket);
+    socket.emitEvent('message.complete', requestId, { text: 'Server answer' });
+    await flush();
+    await flush();
+
+    socket.emitClose(4403, 'redacted');
+    expect(session.current).toMatchObject({
+      state: 'permanent-error',
+      permanentFailure: {
+        reason: 'incompatible',
+        closeCode: 4403,
+        closeClassification: 'host-or-origin-rejected'
+      }
+    });
+    const sentBeforeBlockedPrompt = socket.sent.length;
+    session.sendPrompt('must remain blocked');
+    expect(socket.sent).toHaveLength(sentBeforeBlockedPrompt);
+
+    refresh.resolve(sessionMessages([{ role: 'assistant', content: 'late history' }]));
+    await flush();
+
+    expect(session.current.state).toBe('permanent-error');
+    expect(session.current.permanentFailure?.reason).toBe('incompatible');
+    expect(session.current.timeline).not.toContainEqual(
+      expect.objectContaining({ text: 'late history' })
+    );
+  });
+
+  it('lets only the newer reconnect refresh publish when it resolves after the old completion refresh', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    const completionRefresh = createDeferred<SessionMessages>();
+    const reconnectRefresh = createDeferred<SessionMessages>();
+    vi.mocked(rest.getSessionMessages)
+      .mockImplementationOnce(() => completionRefresh.promise)
+      .mockImplementationOnce(() => reconnectRefresh.promise);
+
+    session.sendPrompt('First prompt');
+    const completeEvent: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'First answer' }
+    };
+    chat.emit(completeEvent);
+    chat.complete(completeEvent);
+    await flush();
+    await flush();
+
+    const reconnect = session.retryConnection();
+    await flush();
+    await flush();
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(3);
+    expect(session.current.state).toBe('reconnecting');
+
+    completionRefresh.resolve(sessionMessages([{ role: 'assistant', content: 'old completion history' }]));
+    await flush();
+    expect(session.current.state).toBe('reconnecting');
+    expect(JSON.stringify(session.current.timeline)).not.toContain('old completion history');
+
+    reconnectRefresh.resolve(sessionMessages([{ role: 'assistant', content: 'new reconnect history' }]));
+    await reconnect;
+
+    expect(session.current.state).toBe('ready');
+    expect(JSON.stringify(session.current.timeline)).toContain('new reconnect history');
+  });
+
+  it('keeps the newer reconnect history when it resolves before the old completion refresh', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    const completionRefresh = createDeferred<SessionMessages>();
+    const reconnectRefresh = createDeferred<SessionMessages>();
+    vi.mocked(rest.getSessionMessages)
+      .mockImplementationOnce(() => completionRefresh.promise)
+      .mockImplementationOnce(() => reconnectRefresh.promise);
+
+    session.sendPrompt('First prompt');
+    const completeEvent: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'First answer' }
+    };
+    chat.emit(completeEvent);
+    chat.complete(completeEvent);
+    await flush();
+    await flush();
+
+    const reconnect = session.retryConnection();
+    await flush();
+    await flush();
+
+    reconnectRefresh.resolve(sessionMessages([{ role: 'assistant', content: 'new reconnect history' }]));
+    await flush();
+    expect(session.current.state).toBe('ready');
+    expect(JSON.stringify(session.current.timeline)).toContain('new reconnect history');
+
+    completionRefresh.resolve(sessionMessages([{ role: 'assistant', content: 'old completion history' }]));
+    await reconnect;
+
+    expect(session.current.state).toBe('ready');
+    expect(JSON.stringify(session.current.timeline)).not.toContain('old completion history');
+    expect(JSON.stringify(session.current.timeline)).toContain('new reconnect history');
+  });
+
+  it('does not publish an abort rejection from a completion refresh after session replacement', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    const refresh = createDeferred<SessionMessages>();
+    vi.mocked(rest.getSession).mockResolvedValueOnce({ ...SESSION, id: 'session-2', title: 'Replacement' });
+    vi.mocked(rest.getSessionMessages)
+      .mockImplementationOnce(() => refresh.promise)
+      .mockResolvedValueOnce({ ...sessionMessages([]), sessionId: 'session-2' });
+
+    session.sendPrompt('First prompt');
+    const completeEvent: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'First answer' }
+    };
+    chat.complete(completeEvent);
+    await flush();
+    await flush();
+
+    const replacement = session.selectSession('session-2');
+    refresh.reject(new DOMException('aborted', 'AbortError'));
+    await replacement;
+    await flush();
+
+    expect(session.current).toMatchObject({ activeSessionId: 'session-2', state: 'empty' });
+    expect(session.current.state).not.toBe('retryable-error');
+    expect(session.current.timeline).toEqual([]);
+  });
+
+  it('does not publish a non-abort completion refresh rejection after session replacement', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    const refresh = createDeferred<SessionMessages>();
+    vi.mocked(rest.getSession).mockResolvedValueOnce({ ...SESSION, id: 'session-2', title: 'Replacement' });
+    vi.mocked(rest.getSessionMessages)
+      .mockImplementationOnce(() => refresh.promise)
+      .mockResolvedValueOnce({ ...sessionMessages([]), sessionId: 'session-2' });
+
+    session.sendPrompt('First prompt');
+    const completeEvent: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'First answer' }
+    };
+    chat.complete(completeEvent);
+    await flush();
+    await flush();
+
+    const replacement = session.selectSession('session-2');
+    refresh.reject(new Error('late history failure'));
+    await replacement;
+    await flush();
+
+    expect(session.current).toMatchObject({ activeSessionId: 'session-2', state: 'empty' });
+    expect(session.current.state).not.toBe('retryable-error');
+    expect(session.current.timeline).toEqual([]);
+  });
+
+  it('keeps a generic terminal close retryable when completion history is still pending', async () => {
+    const rest = createRest([]);
+    const refresh = createDeferred<SessionMessages>();
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+
+    session.sendPrompt('Complete before generic close');
+    const requestId = latestPromptId(socket);
+    socket.emitEvent('message.complete', requestId, { text: 'Server answer' });
+    await flush();
+    await flush();
+
+    socket.emitClose(1011, 'redacted');
+    expect(session.current.state).toBe('retryable-error');
+
+    refresh.resolve(sessionMessages([{ role: 'assistant', content: 'late history' }]));
+    await flush();
+
+    expect(session.current.state).toBe('retryable-error');
+    expect(JSON.stringify(session.current.timeline)).not.toContain('late history');
   });
 
   it('maps authentication-required chat state to a permanent workspace error', async () => {

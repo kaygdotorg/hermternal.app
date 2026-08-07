@@ -11,9 +11,11 @@
   let liveContext: LiveRootContext | undefined;
 
   function returnLiveWorkspaceToSignIn(): void {
-    // Chat close 4401 is the only workspace failure that may invalidate the
-    // authenticated root. The BrowserAuthSession owns generation, local
-    // workspace invalidation, and the signed-in-to-expired transition.
+    // Only the semantic authentication-required boundary may invalidate the
+    // authenticated root: ticket HTTP 401, JsonRpcChatError auth-required,
+    // and chat close 4401. The BrowserAuthSession owns generation, local
+    // workspace invalidation, and the signed-in-to-expired transition; 403 and
+    // 4403 incompatible-origin failures never call this bridge.
     liveContext?.auth.expire();
   }
 

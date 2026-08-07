@@ -23,9 +23,12 @@ const identity: AuthIdentity = {
   expiresAt: 2_000_000_000
 };
 
-function createWorkspace(permanentFailure: NonNullable<LiveWorkspaceSnapshot['permanentFailure']>) {
+function createWorkspace(
+  permanentFailure: LiveWorkspaceSnapshot['permanentFailure'],
+  state: LiveWorkspaceSnapshot['state'] = 'permanent-error'
+) {
   let snapshot: LiveWorkspaceSnapshot = {
-    state: 'permanent-error',
+    state,
     sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
     activeSessionId: 'session-1',
     title: 'Live session',
@@ -66,8 +69,11 @@ function createWorkspace(permanentFailure: NonNullable<LiveWorkspaceSnapshot['pe
   return workspace as unknown as LiveWorkspaceSession & typeof workspace;
 }
 
-function createContext(permanentFailure: NonNullable<LiveWorkspaceSnapshot['permanentFailure']>) {
-  const workspace = createWorkspace(permanentFailure);
+function createContext(
+  permanentFailure: LiveWorkspaceSnapshot['permanentFailure'],
+  state: LiveWorkspaceSnapshot['state'] = 'permanent-error'
+) {
+  const workspace = createWorkspace(permanentFailure, state);
   const client: BrowserAuthClient = {
     verify: vi.fn(async () => identity),
     loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
@@ -101,6 +107,33 @@ describe('live root route composition', () => {
     expect(workspace.invalidate).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'session-expired'));
     expect(screen.getByRole('heading', { name: 'Session expired' })).toBeInTheDocument();
+  });
+
+  it('routes semantic ticket 401 authentication-required state through the same sign-in bridge', async () => {
+    const { auth, workspace } = createContext({ reason: 'authentication-required' });
+    const expire = vi.spyOn(auth, 'expire');
+
+    render(Page);
+
+    await screen.findByRole('button', { name: 'Back to sessions' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
+
+    expect(expire).toHaveBeenCalledTimes(1);
+    expect(workspace.invalidate).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'session-expired'));
+  });
+
+  it('keeps a rendered ticket 403 failure retryable without a sign-in transition', async () => {
+    const { auth, workspace } = createContext(undefined, 'retryable-error');
+    const expire = vi.spyOn(auth, 'expire');
+
+    render(Page);
+
+    expect(await screen.findByTestId('retryable-error-state')).toBeInTheDocument();
+    expect(expire).not.toHaveBeenCalled();
+    expect(workspace.invalidate).not.toHaveBeenCalled();
+    expect(auth.current.status).toBe('authenticated');
+    expect(screen.getByText('Connection lost')).toBeInTheDocument();
   });
 
   it('keeps a rendered 4403 workspace failure on the authenticated incompatible boundary', async () => {
