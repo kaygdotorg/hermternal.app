@@ -12,7 +12,9 @@ export type AuthViewState =
   | 'discovery-malformed'
   | 'discovery-aborted'
   | 'provider-unavailable'
-  | 'password-submitting';
+  | 'password-submitting'
+  | 'logout-pending'
+  | 'logout-failed';
 
 export type AuthProviderKind = 'oauth' | 'password' | 'unavailable';
 export type AuthDiscoveryMode = 'fixture' | 'live';
@@ -42,11 +44,19 @@ export type AuthAction =
   | { type: 'choose-provider-again' }
   | { type: 'retry-discovery' }
   | { type: 'cancel-discovery' }
+  | { type: 'retry-logout' }
   | { type: 'back-to-sign-in' }
   | { type: 'sign-in-again' }
   | { type: 'discard-draft' };
 
 export type AuthActionHandler = (action: AuthAction) => void;
+
+export interface PasswordSubmission {
+  username: string;
+  password: string;
+}
+
+export type PasswordSubmissionHandler = (submission: PasswordSubmission) => void;
 
 export interface AuthPreviewProps {
   appearance?: Appearance;
@@ -54,4 +64,7 @@ export interface AuthPreviewProps {
   providers?: AuthProvider[];
   discoveryMode?: AuthDiscoveryMode;
   onAction?: AuthActionHandler;
+  onPasswordSubmit?: PasswordSubmissionHandler;
+  failureMessage?: string;
+  failureCode?: string;
 }

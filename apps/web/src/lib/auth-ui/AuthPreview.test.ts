@@ -75,8 +75,12 @@ describe('AuthPreview', () => {
     const onAction = vi.fn();
     render(AuthPreview, { state: 'password', onAction });
 
-    fireEvent.input(screen.getByLabelText('Username'), { target: { value: 'sam' } });
-    fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'not-a-secret-fixture' } });
+    fireEvent.input(screen.getByLabelText('Username'), {
+      target: { value: 'sam' }
+    });
+    fireEvent.input(screen.getByLabelText('Password'), {
+      target: { value: 'not-a-secret-fixture' }
+    });
     const form = screen.getByRole('form', { name: 'Hermes password sign in' });
     fireEvent.submit(form);
     fireEvent.submit(form);
@@ -87,6 +91,39 @@ describe('AuthPreview', () => {
     await waitFor(() => expect(screen.getByLabelText('Password')).toHaveValue(''));
   });
 
+  it('passes live credentials only to the transient password callback and clears the form', async () => {
+    const onAction = vi.fn();
+    const onPasswordSubmit = vi.fn();
+    render(AuthPreview, {
+      discoveryMode: 'live',
+      state: 'password',
+      onAction,
+      onPasswordSubmit
+    });
+
+    fireEvent.input(screen.getByLabelText('Username'), {
+      target: { value: 'synthetic-user' }
+    });
+    fireEvent.input(screen.getByLabelText('Password'), {
+      target: { value: 'transient-password' }
+    });
+    fireEvent.submit(screen.getByRole('form', { name: 'Hermes password sign in' }));
+
+    expect(onPasswordSubmit).toHaveBeenCalledTimes(1);
+    expect(onPasswordSubmit).toHaveBeenCalledWith({
+      username: 'synthetic-user',
+      password: 'transient-password'
+    });
+    expect(onAction).not.toHaveBeenCalledWith({
+      type: 'submit-password-fixture'
+    });
+    expect(JSON.stringify(onAction.mock.calls)).not.toContain('transient-password');
+    await waitFor(() => {
+      expect(screen.getByLabelText('Username')).toHaveValue('');
+      expect(screen.getByLabelText('Password')).toHaveValue('');
+    });
+  });
+
   it('rejects blank credentials and clears the uncontrolled form on cancel and state changes', async () => {
     const onAction = vi.fn();
     const view = render(AuthPreview, { state: 'password', onAction });
@@ -95,12 +132,16 @@ describe('AuthPreview', () => {
     fireEvent.submit(form);
     expect(onAction).not.toHaveBeenCalled();
 
-    fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'temporary-fixture' } });
+    fireEvent.input(screen.getByLabelText('Password'), {
+      target: { value: 'temporary-fixture' }
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Back to providers' }));
     await waitFor(() => expect(screen.getByLabelText('Password')).toHaveValue(''));
 
     await view.rerender({ state: 'password' });
-    fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'state-change-fixture' } });
+    fireEvent.input(screen.getByLabelText('Password'), {
+      target: { value: 'state-change-fixture' }
+    });
     await view.rerender({ state: 'provider-selection' });
     await view.rerender({ state: 'password' });
 
@@ -168,6 +209,39 @@ describe('AuthPreview', () => {
     expect(onAction).toHaveBeenCalledWith({ type: 'retry-authentication' });
   });
 
+  it('renders logout pending without exposing retry or cancellation actions', async () => {
+    const onAction = vi.fn();
+    render(AuthPreview, { state: 'logout-pending', discoveryMode: 'live', onAction });
+
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'logout-pending');
+    expect(screen.getByRole('heading', { name: 'Signing out' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Signing out');
+    expect(screen.queryByRole('button', { name: /retry discovery/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /cancel/i })).not.toBeInTheDocument();
+    expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it('renders logout recovery with only retry sign out', () => {
+    const onAction = vi.fn();
+    render(AuthPreview, {
+      state: 'logout-failed',
+      discoveryMode: 'live',
+      failureCode: 'logout-unverified',
+      failureMessage: 'Logout could not be verified.',
+      onAction
+    });
+
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'logout-failed');
+    expect(screen.getByRole('heading', { name: 'Sign-out could not be verified' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Only Retry sign out is available');
+    expect(screen.getByRole('button', { name: 'Retry sign out' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Choose provider' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry sign out' }));
+    expect(onAction).toHaveBeenCalledWith({ type: 'retry-logout' });
+  });
+
   it('renders live success, pending, empty, malformed, unavailable, aborted, and retry states truthfully', () => {
     const liveProviders = [
       {
@@ -188,7 +262,11 @@ describe('AuthPreview', () => {
     live.unmount();
 
     const pendingAction = vi.fn();
-    const pending = render(AuthPreview, { discoveryMode: 'live', state: 'discovery-pending', onAction: pendingAction });
+    const pending = render(AuthPreview, {
+      discoveryMode: 'live',
+      state: 'discovery-pending',
+      onAction: pendingAction
+    });
     expect(screen.getByText(/same-origin GET \/api\/auth\/providers request is pending/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Nous, loading' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel discovery' }));

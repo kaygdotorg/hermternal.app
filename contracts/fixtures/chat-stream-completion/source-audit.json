@@ -1,0 +1,66 @@
+{
+  "schema": "hermternal.source-audit.chat-stream-completion.v1",
+  "operation": "C-08",
+  "contract": "dashboard-v0.0.1",
+  "hermes_repository": "NousResearch/hermes-agent",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "hermes_tree_sha": "886db5eb1150f819344d67fedc81aef0caab09ff",
+  "synthetic_only": true,
+  "citations": [
+    {
+      "id": "stream-buffer-order",
+      "path": "tui_gateway/ws.py",
+      "lines": [50, 58],
+      "sha256": "2b1c772cb37c77a756325e4c298f6a5ee8947d6566cd7638f06f7a0421b8b5fd",
+      "git_blob_sha": "073c4ac1497c7a266209169176ebfff673ecbbcb",
+      "markers": [
+        "_STREAMING_EVENT_TYPES = frozenset({",
+        "\"message.delta\"",
+        "\"reasoning.delta\"",
+        "\"thinking.delta\"",
+        "anything a client must see promptly (tool/approval/status/completion frames) is non-streaming",
+        "flushes the buffer ahead of itself, so ordering is preserved"
+      ],
+      "claim": "Only display deltas are buffered; tool, status, error, and completion frames flush buffered deltas before delivery."
+    },
+    {
+      "id": "stream-and-terminal-emission",
+      "path": "tui_gateway/server.py",
+      "lines": [5292, 5363, 7580, 7612, 9600, 9856],
+      "sha256": "e4bd9009827ffd224cc85c8b17ad7baba0f560d643d688e265be5a06fe8ba29c",
+      "git_blob_sha": "9d5fd00ce7d0becfd4581a5a3867c516a6d3b20a",
+      "markers": [
+        "_emit(\"tool.start\"",
+        "_emit(\"tool.complete\"",
+        "_emit(\"message.delta\"",
+        "_emit(\"message.complete\"",
+        "payload[\"error\"]",
+        "payload[\"recoverable\"] = True"
+      ],
+      "claim": "The pinned gateway emits ordered message and tool lifecycle frames and uses message.complete as the terminal success or recoverable-error frame."
+    },
+    {
+      "id": "interrupt-turn-boundary",
+      "path": "tui_gateway/methods_session.py",
+      "lines": [2750, 2821],
+      "sha256": "1e70561f7c5ca08556e26216f9f6a553bbf25e4c8de3368ac9cb9634e57ea34e",
+      "git_blob_sha": "1a3e09f16e49c5c75a42ca94e4fbfd8f36c290f0",
+      "markers": [
+        "@method(\"session.interrupt\")",
+        "session[\"_turn_cancel_requested\"] = True",
+        "session[\"queued_prompt\"] = None",
+        "return _ok(rid, {\"status\": \"interrupted\"})"
+      ],
+      "claim": "Interruption is scoped to the active turn, clears queued prompts, and requires a confirmed interrupted result rather than an invented completion."
+    }
+  ],
+  "redaction": {
+    "contains_prompt_text": false,
+    "contains_transcript": false,
+    "contains_tool_arguments": false,
+    "contains_tool_results": false,
+    "contains_credentials": false,
+    "contains_hosts": false,
+    "contains_user_data": false
+  }
+}

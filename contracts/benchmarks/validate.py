@@ -12,8 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import locale
 import math
+import os
 import re
+import stat
+import subprocess
 import sys
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
@@ -21,16 +25,21 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[1]
 EVIDENCE_PATH = ROOT / "benchmark-evidence.json"
 BASELINE_PATH = ROOT / "validation-baseline.json"
+WEB_BENCHMARK_ROOT = REPOSITORY_ROOT / "apps" / "web" / "benchmarks" / "production-build"
+WEB_EVIDENCE_PATH = WEB_BENCHMARK_ROOT / "evidence" / "benchmark-evidence.json"
 
 SCHEMA = "hermternal.benchmark-evidence.v1"
 EVIDENCE_ID = "shared-format-example"
 BASELINE_EVIDENCE_ID = "validator-baseline"
+WEB_PRODUCTION_BUILD_EVIDENCE_ID = "web-production-build-baseline"
 PINNED_HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 ERROR_CODE = "benchmark_evidence_validation_error"
 
 MAX_JSON_BYTES = 1024 * 1024
+MAX_MEASURED_INPUT_FILE_BYTES = 16 * 1024 * 1024
 MAX_JSON_DEPTH = 32
 MAX_JSON_INTEGER_DIGITS = 1000
 MAX_JSON_NODES = 4096
@@ -41,6 +50,14 @@ MAX_ERROR_OUTPUT = 240
 MAX_RUNS = 32
 MAX_REPETITIONS = 10_000
 MIN_REPETITIONS = 30
+
+# The TypeScript runner uses String.localeCompare for input record ordering.
+# Select the process locale before reproducing that ordering so the validator
+# hashes the same integrated checkout rather than trusting a copied literal.
+try:
+    locale.setlocale(locale.LC_COLLATE, "")
+except locale.Error:
+    pass
 
 ROOT_KEYS = (
     "schema",
@@ -114,6 +131,28 @@ REDACTION_KEYS = (
     "contains_live_hosts",
     "contains_transcripts",
 )
+WEB_WORKLOAD_KEYS = (
+    "schema", "fixture_id", "fixture_version", "build", "repetitions", "limits", "network", "launcher", "package_manager", "toolchain", "integrity", "hermes_source_sha"
+)
+WEB_TRACE_KEYS = (
+    "schema", "recorded_at_utc", "source_commit_sha", "fixture_sha256", "environment", "build_input", "toolchain",
+    "network_mode", "limits", "warmup_excluded_from_distribution", "runs"
+)
+WEB_TOOLCHAIN_KEYS = (
+    "package_manager", "node_version", "package_json", "bun_lock", "benchmark_runner", "sandbox_runner", "artifact_scanner", "node_executable",
+    "bun_executable", "python_executable", "sandbox_executable", "dependencies", "vite", "sveltekit",
+    "vite_svelte_plugin", "svelte", "typescript_native"
+)
+WEB_INTEGRITY_KEYS = (
+    "package_json", "bun_lock", "dependencies", "vite", "sveltekit", "vite_svelte_plugin", "svelte", "typescript_native", "runtime"
+)
+WEB_RUNTIME_ANCHOR_KEYS = ("node", "bun", "python", "sandbox")
+WEB_FILE_IDENTITY_KEYS = ("bytes", "sha256")
+WEB_TREE_IDENTITY_KEYS = ("files", "symlinks", "bytes", "sha256")
+WEB_OBSERVATION_KEYS = (
+    "sequence", "duration_ms", "exit_code", "stdout_bytes", "stderr_bytes", "artifact_files", "artifact_bytes", "artifact_sha256"
+)
+WEB_TRACE_RUN_KEYS = ("provenance", "samples")
 
 PLATFORMS = frozenset({"shared", "web", "ios", "ipados", "macos"})
 STATES = frozenset({"cold", "warm"})
@@ -126,6 +165,7 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 IDENTIFIER_RE = re.compile(r"[a-z][a-z0-9._-]{1,63}\Z")
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\Z")
+UTC_TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z\Z")
 ARTIFACT_PATH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\Z")
 
 SENSITIVE_KEY_PARTS = frozenset(
@@ -202,20 +242,29 @@ EXPECTED_REVISIONS = {
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     BASELINE_EVIDENCE_ID: {
-        "commit_sha": "f707fdcfb781907c7e80e353aeb86a0575d3ad71",
+        "commit_sha": "ced8cc08fde64f2f32302bb5020580885acee610",
         "fixture_id": "shared-benchmark-validator",
         "fixture_version": "1.0.0",
-        "fixture_sha256": "cafd3009688c9a1adace242ec3a087b74fda313fcf1921762c82fc8fca2aa283",
+        "fixture_sha256": "08a255d0a2717059e801c2042f3bad9d4eadabf44d4f3193a374b3bbdfd73a1c",
+        "hermes_source_sha": PINNED_HERMES_SHA,
+    },
+    WEB_PRODUCTION_BUILD_EVIDENCE_ID: {
+        "commit_sha": "67f9aab40722826d043e8e8e20a25c345b434f05",
+        "fixture_id": "web-production-build",
+        "fixture_version": "1.0.0",
+        "fixture_sha256": "b9833cf2df3aeb4c54212af4560c28935057c324a545f7243cd20e841d685d9e",
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
 }
 EXPECTED_FIXTURE_PATHS = {
     EVIDENCE_ID: "synthetic/workload.json",
     BASELINE_EVIDENCE_ID: "sample-provenance.json",
+    WEB_PRODUCTION_BUILD_EVIDENCE_ID: "workload.json",
 }
 EXPECTED_FIXTURE_SCHEMAS = {
     EVIDENCE_ID: "hermternal.benchmark-fixture.v1",
     BASELINE_EVIDENCE_ID: "hermternal.benchmark-sample-provenance.v1",
+    WEB_PRODUCTION_BUILD_EVIDENCE_ID: "hermternal.web-production-build-workload.v1",
 }
 EXPECTED_ARTIFACT_PATHS = {
     EVIDENCE_ID: ("synthetic/workload.json", "synthetic/trace.json"),
@@ -228,6 +277,9 @@ EXPECTED_ARTIFACT_PATHS = {
         "synthetic/workload.json",
         "synthetic/trace.json",
     ),
+    WEB_PRODUCTION_BUILD_EVIDENCE_ID: (
+        "workload.json", "run.ts", "sandbox-runner.py", "artifact-scanner.py", "evidence/raw-trace.json"
+    ),
 }
 # These byte identities are a second, code-pinned review anchor.  Artifact
 # records may restate them, but cannot change the bytes that this validator
@@ -236,18 +288,37 @@ EXPECTED_ARTIFACT_PATHS = {
 # Its submitted metadata is still checked against the local file when artifact
 # verification is enabled; every other artifact, including the synthetic trace,
 # must match this immutable anchor exactly.
+WEB_EVIDENCE_ALLOWED_DESCENDANT_PATHS = (
+    "apps/web/README.md",
+    "apps/web/benchmarks/production-build/README.md",
+    "apps/web/benchmarks/production-build/evidence/",
+    "apps/web/benchmarks/production-build/run.test.ts",
+    "contracts/benchmarks/README.md",
+    "contracts/benchmarks/sample-provenance.json",
+    "contracts/benchmarks/test_validate.py",
+    "contracts/benchmarks/validate.py",
+    "contracts/benchmarks/validation-baseline.json",
+)
+
 EXPECTED_ARTIFACT_METADATA = {
     EVIDENCE_ID: (
         ("synthetic/workload.json", 4042, "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"),
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
     BASELINE_EVIDENCE_ID: (
-        ("README.md", 6916, "4d8626acd899ef0262146a88608024b990b6b7b22125f0e4f583a6fdc5753458"),
+        ("README.md", 7786, "15fe80009cab297973d12e7b1c0d7d8e083342db43e75460a3b07a3f739850da"),
         ("benchmark-evidence.json", 6446, "aa652867dc336467ab07873964f54a9d5000cfb01b1d55756091be2e8797a6eb"),
-        ("test_validate.py", 20606, "2a4441fe87231e91e35d8c96a56168d701f17fbe1b26ab4d1d6cc5517865c229"),
-        ("sample-provenance.json", 2304, "cafd3009688c9a1adace242ec3a087b74fda313fcf1921762c82fc8fca2aa283"),
+        ("test_validate.py", 31689, "8d8bee54c2964e96f87abe112144eefa404a957ad1428d5be14e066b2cd078ac"),
+        ("sample-provenance.json", 2301, "08a255d0a2717059e801c2042f3bad9d4eadabf44d4f3193a374b3bbdfd73a1c"),
         ("synthetic/workload.json", 4042, "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"),
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
+    ),
+    WEB_PRODUCTION_BUILD_EVIDENCE_ID: (
+        ("workload.json", 2600, "b9833cf2df3aeb4c54212af4560c28935057c324a545f7243cd20e841d685d9e"),
+        ("run.ts", 76318, "de0e3dbc0249483c721f5b7497cc3e8fbed972f2a28762fc99ec1e6473b6fff8"),
+        ("sandbox-runner.py", 13629, "240719c214b74ca097cf545f697a64aedcec9b2477470ce96248bebc89687865"),
+        ("artifact-scanner.py", 5994, "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb"),
+        ("evidence/raw-trace.json", 17733, "a975d8c25ff97907acd108e30c818e0fc5f989915fba48a3328a2bb747a0a62f"),
     ),
 }
 SELF_AUTHENTICATED_ARTIFACT_PATHS = {
@@ -354,6 +425,45 @@ EXPECTED_RUN_METADATA = {
             "repetitions": 30,
         },
     },
+    WEB_PRODUCTION_BUILD_EVIDENCE_ID: {
+        "web-production-build-cold": {
+            "platform": "web",
+            "environment": {
+                "platform": "darwin-25.5.0",
+                "os": "Darwin-25.5.0",
+                "architecture": "arm64",
+                "device": "local-Apple M2 Max",
+                "runtime": "Bun-1.3.14; Node-v26.7.0; Vite-vite/8.2.0 darwin-arm64 node-v26.7.0",
+                "browser": "not_applicable",
+            },
+            "state": "cold",
+            "build_mode": "production",
+            "optimization": "not_applicable",
+            "command": "node node_modules/vite/bin/vite.js build --configLoader runner",
+            "repetitions": 30,
+        },
+        "web-production-build-warm": {
+            "platform": "web",
+            "environment": {
+                "platform": "darwin-25.5.0",
+                "os": "Darwin-25.5.0",
+                "architecture": "arm64",
+                "device": "local-Apple M2 Max",
+                "runtime": "Bun-1.3.14; Node-v26.7.0; Vite-vite/8.2.0 darwin-arm64 node-v26.7.0",
+                "browser": "not_applicable",
+            },
+            "state": "warm",
+            "build_mode": "production",
+            "optimization": "not_applicable",
+            "command": "node node_modules/vite/bin/vite.js build --configLoader runner",
+            "repetitions": 30,
+        },
+    },
+}
+EXPECTED_METRICS = {
+    EVIDENCE_ID: {"name": "operation_duration", "unit": "ms", "clock": "monotonic"},
+    BASELINE_EVIDENCE_ID: {"name": "validator_duration", "unit": "ms", "clock": "monotonic"},
+    WEB_PRODUCTION_BUILD_EVIDENCE_ID: {"name": "production_build_duration", "unit": "ms", "clock": "monotonic"},
 }
 
 
@@ -387,14 +497,7 @@ def _parse_json_integer(value: str) -> int:
     return int(value)
 
 
-def load_json(path: Path) -> Any:
-    """Read bounded UTF-8 JSON with duplicate-key and numeric checks."""
-
-    try:
-        raw = path.read_bytes()
-    except OSError as error:
-        del error
-        raise ValidationError("input could not be read") from None
+def _parse_json_bytes(raw: bytes) -> Any:
     require(len(raw) <= MAX_JSON_BYTES, "input exceeds the bounded byte limit")
     try:
         text = raw.decode("utf-8")
@@ -411,6 +514,50 @@ def load_json(path: Path) -> Any:
         raise ValidationError("input is malformed JSON") from None
     validate_json_tree(value)
     return value
+
+
+def _read_bounded_descriptor(descriptor: int, label: str, limit: int = MAX_JSON_BYTES) -> bytes:
+    """Read one regular file to EOF with a bounded sentinel and stability check."""
+
+    initial = os.fstat(descriptor)
+    require(stat.S_ISREG(initial.st_mode), f"{label} is not a regular file")
+    require(initial.st_size <= limit, f"{label} exceeds the bounded byte limit")
+    chunks: list[bytes] = []
+    total = 0
+    read_limit = limit + 1
+    while total < read_limit:
+        chunk = os.read(descriptor, min(65536, read_limit - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    final = os.fstat(descriptor)
+    require(final.st_size == initial.st_size, f"{label} changed while reading")
+    require(total == final.st_size, f"{label} changed while reading")
+    require(total <= limit, f"{label} exceeds the bounded byte limit")
+    return b"".join(chunks)
+
+
+def load_json(path: Path) -> Any:
+    """Read bounded UTF-8 JSON with duplicate-key and numeric checks.
+
+    The no-follow descriptor is measured before and after a cap-plus-one read.
+    This rejects an append, truncation, or torn EOF observation without ever
+    allocating more than the reviewed JSON bound plus one rejection byte.
+    """
+
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        return _parse_json_bytes(_read_bounded_descriptor(descriptor, "input"))
+    except (OSError, ValidationError):
+        raise ValidationError("input could not be read") from None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def validate_json_tree(value: Any, label: str = "input", depth: int = 0) -> int:
@@ -529,7 +676,7 @@ def _walk_redaction(value: Any, path: str = "$") -> None:
         _reject_sensitive_text(
             value,
             path,
-            allow_relative_artifact_path=path.startswith("$.artifacts[") and path.endswith(".path"),
+            allow_relative_artifact_path=(path.startswith("$.artifacts[") and path.endswith(".path")) or path == "$.recorded_at_utc",
         )
 
 
@@ -555,8 +702,9 @@ def _validate_revision(value: Any, evidence_id: str) -> None:
         require(revision[key] == expected[key], f"revision.{key} is not the reviewed identity")
 
 
-def _validate_metric(value: Any) -> None:
+def _validate_metric(value: Any, evidence_id: str) -> None:
     metric = _strict_keys(value, METRIC_KEYS, "metric")
+    require(metric == EXPECTED_METRICS[evidence_id], "metric is not the reviewed identity")
     _text(metric["name"], "metric.name", pattern=IDENTIFIER_RE)
     _text(metric["unit"], "metric.unit")
     require(metric["unit"] in METRIC_UNITS, "metric.unit is unsupported")
@@ -725,18 +873,370 @@ def _reviewed_artifact_metadata(
     )
 
 
+def _read_local_file(
+    root: Path,
+    portable_path: str,
+    label: str,
+    *,
+    limit: int = MAX_JSON_BYTES,
+) -> bytes:
+    """Read one reviewed file through an O_NOFOLLOW descriptor chain."""
+
+    parts = portable_path.split("/")
+    require(parts and all(part not in {"", ".", ".."} for part in parts), f"{label} path is invalid")
+    descriptors: list[int] = []
+    try:
+        current = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(current)
+        for part in parts[:-1]:
+            current = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            descriptors.append(current)
+        file_descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
+        descriptors.append(file_descriptor)
+        return _read_bounded_descriptor(file_descriptor, label, limit)
+    except (OSError, ValidationError):
+        raise ValidationError(f"{label} could not be read safely") from None
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def _validate_local_artifacts(artifacts: list[dict[str, Any]], root: Path) -> None:
-    resolved_root = root.resolve()
     for artifact in artifacts:
-        candidate = (root / artifact["path"]).resolve()
-        require(resolved_root in candidate.parents, "artifact path escapes the benchmark directory")
-        require(candidate.is_file(), "recorded artifact is missing")
-        try:
-            raw = candidate.read_bytes()
-        except OSError:
-            raise ValidationError("recorded artifact could not be read") from None
+        raw = _read_local_file(root, artifact["path"], "recorded artifact")
         require(len(raw) == artifact["bytes"], "recorded artifact byte count changed")
         require(hashlib.sha256(raw).hexdigest() == artifact["sha256"], "recorded artifact hash changed")
+
+
+def _load_reviewed_json(root: Path, evidence_id: str, portable_path: str, label: str) -> Any:
+    raw = _read_local_file(root, portable_path, label)
+    metadata = {path: (byte_count, digest) for path, byte_count, digest in EXPECTED_ARTIFACT_METADATA[evidence_id]}
+    expected = metadata.get(portable_path)
+    require(expected is not None, f"{label} is not a reviewed artifact")
+    require(len(raw) == expected[0], f"{label} byte count changed")
+    require(hashlib.sha256(raw).hexdigest() == expected[1], f"{label} digest changed")
+    return _parse_json_bytes(raw)
+
+
+def _runtime_anchor_for_environment(
+    runtime_anchors: dict[str, dict[str, Any]],
+    environment_platform: str,
+) -> dict[str, Any]:
+    """Select the platform anchor without assuming Darwin evidence."""
+
+    runtime_key = environment_platform.split("-", 1)[0]
+    require(runtime_key in runtime_anchors, "web trace runtime anchor is unavailable")
+    return runtime_anchors[runtime_key]
+
+
+def _validate_web_observation(value: Any, label: str, *, expected_sequence: int | None = None) -> dict[str, Any]:
+    observation = _strict_keys(value, WEB_OBSERVATION_KEYS, label)
+    sequence = _integer(observation["sequence"], f"{label}.sequence", minimum=0, maximum=MAX_REPETITIONS)
+    if expected_sequence is not None:
+        require(sequence == expected_sequence, f"{label}.sequence changed")
+    _finite_decimal(observation["duration_ms"], f"{label}.duration_ms", positive=True)
+    require(_integer(observation["exit_code"], f"{label}.exit_code", minimum=0, maximum=255) == 0, f"{label}.exit_code changed")
+    _integer(observation["stdout_bytes"], f"{label}.stdout_bytes", minimum=0, maximum=131073)
+    _integer(observation["stderr_bytes"], f"{label}.stderr_bytes", minimum=0, maximum=131073)
+    _integer(observation["artifact_files"], f"{label}.artifact_files", minimum=1, maximum=2048)
+    _integer(observation["artifact_bytes"], f"{label}.artifact_bytes", minimum=1, maximum=67108864)
+    _text(observation["artifact_sha256"], f"{label}.artifact_sha256", pattern=SHA256_RE)
+    return observation
+
+
+def _web_evidence_path_is_allowed(path: str) -> bool:
+    """Keep descendant evidence changes outside measured source paths."""
+
+    return any(
+        path.startswith(allowed) if allowed.endswith("/") else path == allowed
+        for allowed in WEB_EVIDENCE_ALLOWED_DESCENDANT_PATHS
+    )
+
+
+def _web_measured_input_identity(workload: dict[str, Any], source_root: Path) -> dict[str, Any]:
+    """Recompute the runner's package/src/static identity from the checkout.
+
+    Workload and trace fields are review anchors, not authority over the bytes
+    that the integrated benchmark would measure. This mirrors inputIdentity()
+    with no symlink following and descriptor-bounded reads, including the
+    runner's localeCompare ordering for mixed-case fixture paths.
+    """
+
+    build = workload["build"]
+    records: list[dict[str, Any]] = []
+
+    def add_file(portable_path: str) -> None:
+        raw = _read_local_file(
+            source_root,
+            portable_path,
+            "web measured input",
+            limit=MAX_MEASURED_INPUT_FILE_BYTES,
+        )
+        records.append(
+            {
+                "path": portable_path,
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+
+    def add_tree(portable_root: str) -> None:
+        directory = source_root.joinpath(*portable_root.split("/"))
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: locale.strxfrm(entry.name))
+        except OSError:
+            raise ValidationError("web measured input tree could not be read") from None
+        for entry in entries:
+            portable_path = f"{portable_root}/{entry.name}"
+            try:
+                metadata = os.lstat(entry.path)
+            except OSError:
+                raise ValidationError("web measured input changed while reading") from None
+            if stat.S_ISDIR(metadata.st_mode):
+                add_tree(portable_path)
+            elif stat.S_ISREG(metadata.st_mode):
+                add_file(portable_path)
+            else:
+                raise ValidationError("web measured input contains a non-regular entry")
+
+    for portable_path in build["input_files"]:
+        add_file(portable_path)
+    for portable_root in build["input_roots"]:
+        add_tree(portable_root)
+
+    records.sort(key=lambda record: locale.strxfrm(record["path"]))
+    payload = json.dumps(records, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
+    return {
+        "bytes": sum(record["bytes"] for record in records),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _validate_web_evidence_revision(record: dict[str, Any], root: Path) -> None:
+    """Require current-head evidence or a reviewed evidence-only descendant."""
+
+    # Copied fixture roots are used by the regression suite and cannot be
+    # related to the repository's Git history.  Canonical checked-in evidence
+    # is the only evidence subject to this ancestry check.
+    if root.resolve() != WEB_BENCHMARK_ROOT.resolve():
+        return
+    source = record["revision"]["commit_sha"]
+    try:
+        head_result = subprocess.run(
+            ["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "--verify", "HEAD"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        head = head_result.stdout.decode("ascii").strip()
+        require(
+            head_result.returncode == 0 and COMMIT_RE.fullmatch(head) is not None,
+            "web repository head is unavailable",
+        )
+        if source == head:
+            return
+        ancestor = subprocess.run(
+            ["git", "-C", str(REPOSITORY_ROOT), "merge-base", "--is-ancestor", source, head],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        require(ancestor.returncode == 0, "web evidence source is not an ancestor of repository head")
+        changed_result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPOSITORY_ROOT),
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                "--no-ext-diff",
+                f"{source}..{head}",
+                "--",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        require(changed_result.returncode == 0, "web evidence descendant scope is unavailable")
+        changed = [path for path in changed_result.stdout.decode("utf-8").split("\0") if path]
+        require(
+            all(_web_evidence_path_is_allowed(path) for path in changed),
+            "web evidence descendant contains unreviewed source changes",
+        )
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        raise ValidationError("web evidence revision could not be checked") from None
+
+
+def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
+    _validate_web_evidence_revision(record, root)
+    workload = _load_reviewed_json(root, WEB_PRODUCTION_BUILD_EVIDENCE_ID, "workload.json", "web workload")
+    workload = _strict_keys(workload, WEB_WORKLOAD_KEYS, "web workload")
+    require(workload["schema"] == EXPECTED_FIXTURE_SCHEMAS[WEB_PRODUCTION_BUILD_EVIDENCE_ID], "web workload schema changed")
+    require(workload["fixture_id"] == record["revision"]["fixture_id"], "web workload fixture identity changed")
+    require(workload["fixture_version"] == record["revision"]["fixture_version"], "web workload fixture version changed")
+    require(workload["hermes_source_sha"] == record["revision"]["hermes_source_sha"], "web workload Hermes identity changed")
+    build = _strict_keys(workload["build"], ("entrypoint", "arguments", "input_files", "input_roots", "output_root", "version_name"), "web workload.build")
+    require(build == {
+        "entrypoint": "node_modules/vite/bin/vite.js",
+        "arguments": ["build", "--configLoader", "runner"],
+        "input_files": ["package.json", ".bun-version", "bun.lock", "svelte.config.js", "tsconfig.json", "vite.config.ts"],
+        "input_roots": ["src", "static"],
+        "output_root": ".artifact-output/build",
+        "version_name": "hermternal-web-production-build-v1",
+    }, "web workload build changed")
+    package_manager = _strict_keys(workload["package_manager"], ("name", "version", "install_args"), "web workload.package_manager")
+    require(package_manager == {"name": "bun", "version": "1.3.14", "install_args": ["install", "--frozen-lockfile"]}, "web workload package manager changed")
+    toolchain_pin = _strict_keys(workload["toolchain"], ("bun_version", "node_version"), "web workload.toolchain")
+    require(toolchain_pin == {"bun_version": "1.3.14", "node_version": "v26.7.0"}, "web workload toolchain changed")
+    integrity = _strict_keys(workload["integrity"], WEB_INTEGRITY_KEYS, "web workload.integrity")
+    for key in WEB_INTEGRITY_KEYS[:-1]:
+        if key in {"package_json", "bun_lock"}:
+            _strict_keys(integrity[key], WEB_FILE_IDENTITY_KEYS, f"web workload.integrity.{key}")
+        else:
+            _strict_keys(integrity[key], WEB_TREE_IDENTITY_KEYS, f"web workload.integrity.{key}")
+    runtime = integrity["runtime"]
+    require(type(runtime) is dict, "web workload.integrity.runtime must be an object")
+    require(tuple(runtime.keys()) in (("darwin",), ("darwin", "linux")), "web workload.integrity.runtime keys changed")
+    runtime_anchors = {
+        platform_key: _strict_keys(
+            anchor,
+            WEB_RUNTIME_ANCHOR_KEYS,
+            f"web workload.integrity.runtime.{platform_key}",
+        )
+        for platform_key, anchor in runtime.items()
+    }
+    for platform_key, anchor in runtime_anchors.items():
+        for key in WEB_RUNTIME_ANCHOR_KEYS:
+            _strict_keys(anchor[key], WEB_FILE_IDENTITY_KEYS, f"web workload.integrity.runtime.{platform_key}.{key}")
+    expected_integrity = {
+        "package_json": {"bytes": 1768, "sha256": "03fa003069e5f4f2a317b26757bd3cee1c3913332f87307aff58198e59c59c86"},
+        "bun_lock": {"bytes": 46368, "sha256": "f9999f93386967986d0393b34b008af2f71472fb4eb825062575fb9f822f8d3e"},
+        "dependencies": {"files": 5727, "symlinks": 15, "bytes": 150511188, "sha256": "ddf2c47880cf0899e6e5ad71787e2e63b8a2f566c44955f2c5122b96588ad709"},
+        "vite": {"files": 42, "symlinks": 0, "bytes": 2500530, "sha256": "50fae63c7384b51a88596f83fbef112bfcf119371164e1817f383ab77a024145"},
+        "sveltekit": {"files": 194, "symlinks": 0, "bytes": 1295253, "sha256": "0ec64b01924815c0fc77e956a89751182da0ca44314723183fc48fae96e208cc"},
+        "vite_svelte_plugin": {"files": 38, "symlinks": 0, "bytes": 145592, "sha256": "909f391b0a3b76eb71c1d9b82538fface1ca76cad9e4c96ab4cb5dfb27c1f542"},
+        "svelte": {"files": 546, "symlinks": 0, "bytes": 3049600, "sha256": "2f9abf26cca39a363d037b2bb8e6194828e4dfb4168a8a48b870afbfee6e1b62"},
+        "typescript_native": {"files": 416, "symlinks": 0, "bytes": 2497498, "sha256": "d32f5c97c4752aa2d962de11058d4cda2737d0b92e5d1cb381a880f0e5fa28ad"},
+    }
+    require(
+        {key: integrity[key] for key in WEB_INTEGRITY_KEYS[:-1]} == expected_integrity,
+        "web workload integrity anchors changed",
+    )
+    source_root = REPOSITORY_ROOT / "apps" / "web"
+    actual_package_json = _read_local_file(source_root, "package.json", "web package metadata")
+    actual_bun_lock = _read_local_file(source_root, "bun.lock", "web lockfile")
+    require(
+        integrity["package_json"] == {
+            "bytes": len(actual_package_json),
+            "sha256": hashlib.sha256(actual_package_json).hexdigest(),
+        },
+        "web package identity does not match the integrated checkout",
+    )
+    require(
+        integrity["bun_lock"] == {
+            "bytes": len(actual_bun_lock),
+            "sha256": hashlib.sha256(actual_bun_lock).hexdigest(),
+        },
+        "web lockfile identity does not match the integrated checkout",
+    )
+    require(
+        runtime["darwin"] == {
+            "node": {"bytes": 50320, "sha256": "1ef99ea25fe70c9b67e7efe768ef8ee22148d3cabc703db6131b57aeb617d040"},
+            "bun": {"bytes": 61512816, "sha256": "fb46ac6497104821512b67a3b3157c9fbbab8a99e311fb38da5b7039a373d860"},
+            "python": {"bytes": 118928, "sha256": "179301dcb41ea78accc3fa0048a7e6f6710d891945a751a34addd622020c1818"},
+            "sandbox": {"bytes": 102560, "sha256": "8290e4be7387a0df83cd1559e86afd880464f269450573d012795761fe298f16"},
+        },
+        "web workload Darwin runtime anchor changed",
+    )
+    repetitions = _strict_keys(workload["repetitions"], ("cold", "warm", "maximum"), "web workload.repetitions")
+    require(repetitions == {"cold": 30, "warm": 30, "maximum": 100}, "web workload repetitions changed")
+    limits = _strict_keys(workload["limits"], ("build_timeout_ms", "stdout_bytes", "stderr_bytes", "workspace_input_bytes", "artifact_files", "artifact_bytes", "node_heap_megabytes"), "web workload.limits")
+    require(limits == {"build_timeout_ms": 120000, "stdout_bytes": 131072, "stderr_bytes": 131072, "workspace_input_bytes": 16777216, "artifact_files": 2048, "artifact_bytes": 67108864, "node_heap_megabytes": 1024}, "web workload limits changed")
+    network = _strict_keys(workload["network"], ("mode", "boundary"), "web workload.network")
+    require(network == {"mode": "deny", "boundary": "os_sandbox"}, "web workload network boundary changed")
+    launcher = _strict_keys(workload["launcher"], ("supervisor_sha256", "scanner_sha256"), "web workload.launcher")
+    require(launcher == {
+        "supervisor_sha256": "240719c214b74ca097cf545f697a64aedcec9b2477470ce96248bebc89687865",
+        "scanner_sha256": "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb",
+    }, "web workload protected helper identities changed")
+
+    trace = _load_reviewed_json(root, WEB_PRODUCTION_BUILD_EVIDENCE_ID, "evidence/raw-trace.json", "web trace")
+    _walk_redaction(trace)
+    trace = _strict_keys(trace, WEB_TRACE_KEYS, "web trace")
+    require(trace["schema"] == "hermternal.web-production-build-trace.v1", "web trace schema changed")
+    _text(trace["recorded_at_utc"], "web trace.recorded_at_utc", pattern=UTC_TIMESTAMP_RE)
+    require(trace["source_commit_sha"] == record["revision"]["commit_sha"], "web trace source commit changed")
+    require(trace["fixture_sha256"] == record["revision"]["fixture_sha256"], "web trace fixture digest changed")
+    require(trace["environment"] == record["runs"][0]["environment"], "web trace environment changed")
+    _validate_environment(trace["environment"], "web trace.environment")
+    runtime_anchor = _runtime_anchor_for_environment(runtime_anchors, trace["environment"]["platform"])
+    build_input = _strict_keys(trace["build_input"], WEB_FILE_IDENTITY_KEYS, "web trace.build_input")
+    _integer(build_input["bytes"], "web trace.build_input.bytes", minimum=1, maximum=16777216)
+    _text(build_input["sha256"], "web trace.build_input.sha256", pattern=SHA256_RE)
+    require(
+        build_input == _web_measured_input_identity(workload, source_root),
+        "web measured input identity does not match the integrated checkout",
+    )
+    toolchain = _strict_keys(trace["toolchain"], WEB_TOOLCHAIN_KEYS, "web trace.toolchain")
+    trace_package_manager = _strict_keys(toolchain["package_manager"], ("name", "version", "install_args"), "web trace.toolchain.package_manager")
+    require(trace_package_manager == package_manager, "web trace package manager changed")
+    require(toolchain["node_version"] == toolchain_pin["node_version"], "web trace Node version changed")
+    _text(toolchain["node_version"], "web trace.toolchain.node_version")
+    for key in WEB_TOOLCHAIN_KEYS[2:11]:
+        identity = _strict_keys(toolchain[key], WEB_FILE_IDENTITY_KEYS, f"web trace.toolchain.{key}")
+        _integer(identity["bytes"], f"web trace.toolchain.{key}.bytes", minimum=1)
+        _text(identity["sha256"], f"web trace.toolchain.{key}.sha256", pattern=SHA256_RE)
+    for key in WEB_TOOLCHAIN_KEYS[11:]:
+        identity = _strict_keys(toolchain[key], WEB_TREE_IDENTITY_KEYS, f"web trace.toolchain.{key}")
+        _integer(identity["files"], f"web trace.toolchain.{key}.files", minimum=1)
+        _integer(identity["symlinks"], f"web trace.toolchain.{key}.symlinks", minimum=0)
+        _integer(identity["bytes"], f"web trace.toolchain.{key}.bytes", minimum=1)
+        _text(identity["sha256"], f"web trace.toolchain.{key}.sha256", pattern=SHA256_RE)
+    anchored_toolchain = {
+        "package_manager": package_manager,
+        "node_version": toolchain_pin["node_version"],
+        "package_json": integrity["package_json"],
+        "bun_lock": integrity["bun_lock"],
+        "node_executable": runtime_anchor["node"],
+        "bun_executable": runtime_anchor["bun"],
+        "python_executable": runtime_anchor["python"],
+        "sandbox_executable": runtime_anchor["sandbox"],
+        "dependencies": integrity["dependencies"],
+        "vite": integrity["vite"],
+        "sveltekit": integrity["sveltekit"],
+        "vite_svelte_plugin": integrity["vite_svelte_plugin"],
+        "svelte": integrity["svelte"],
+        "typescript_native": integrity["typescript_native"],
+    }
+    require(
+        {key: toolchain[key] for key in anchored_toolchain} == anchored_toolchain,
+        "web trace toolchain identities changed",
+    )
+    require(trace["network_mode"] == "os_sandbox_deny", "web trace network mode changed")
+    require(trace["limits"] == limits, "web trace limits changed")
+    artifact_identities: set[str] = set()
+    warmup = _validate_web_observation(trace["warmup_excluded_from_distribution"], "web trace.warmup", expected_sequence=0)
+    artifact_identities.add(warmup["artifact_sha256"])
+    require(type(trace["runs"]) is list and len(trace["runs"]) == len(record["runs"]), "web trace run inventory changed")
+    for index, (trace_item, evidence_run) in enumerate(zip(trace["runs"], record["runs"])):
+        trace_run = _strict_keys(trace_item, WEB_TRACE_RUN_KEYS, f"web trace.runs[{index}]")
+        provenance = _strict_keys(trace_run["provenance"], PROVENANCE_INPUT_KEYS, f"web trace.runs[{index}].provenance")
+        require(provenance == _provenance_input(evidence_run), f"web trace.runs[{index}] provenance changed")
+        require(evidence_run["sample_provenance_sha256"] == sample_provenance_digest(provenance), f"web trace.runs[{index}] provenance digest changed")
+        require(type(trace_run["samples"]) is list and len(trace_run["samples"]) == evidence_run["repetitions"], f"web trace.runs[{index}] samples changed")
+        for sample_index, observation_value in enumerate(trace_run["samples"], 1):
+            observation = _validate_web_observation(observation_value, f"web trace.runs[{index}].samples[{sample_index - 1}]", expected_sequence=sample_index)
+            require(Decimal(str(observation["duration_ms"])) == Decimal(str(evidence_run["raw_samples"][sample_index - 1])), f"web trace.runs[{index}] duration changed")
+            artifact_identities.add(observation["artifact_sha256"])
+    require(len(artifact_identities) == 1, "web trace artifact identity drifted")
 
 
 def _validate_provenance_fixture(record: dict[str, Any], root: Path) -> None:
@@ -748,17 +1248,15 @@ def _validate_provenance_fixture(record: dict[str, Any], root: Path) -> None:
     """
 
     evidence_id = record["evidence_id"]
-    fixture_path = (root / EXPECTED_FIXTURE_PATHS[evidence_id]).resolve()
-    require(root.resolve() in fixture_path.parents, "fixture path escapes the benchmark directory")
-    try:
-        fixture_bytes = fixture_path.read_bytes()
-    except OSError:
-        raise ValidationError("sample provenance fixture could not be read") from None
+    if evidence_id == WEB_PRODUCTION_BUILD_EVIDENCE_ID:
+        _validate_web_provenance(record, root)
+        return
+    fixture_bytes = _read_local_file(root, EXPECTED_FIXTURE_PATHS[evidence_id], "sample provenance fixture")
     require(
         hashlib.sha256(fixture_bytes).hexdigest() == record["revision"]["fixture_sha256"],
         "sample provenance fixture digest changed",
     )
-    fixture = load_json(fixture_path)
+    fixture = _parse_json_bytes(fixture_bytes)
     _walk_redaction(fixture)
     fixture = _strict_keys(fixture, ("schema", "evidence_id", "fixture_id", "fixture_version", "runs"), "sample provenance")
     require(fixture["schema"] == EXPECTED_FIXTURE_SCHEMAS[evidence_id], "sample provenance schema changed")
@@ -799,7 +1297,7 @@ def validate_evidence(
     if expected_id is not None:
         require(evidence_id == expected_id, f"{label}.evidence_id is not the expected identity")
     _validate_revision(record["revision"], evidence_id)
-    _validate_metric(record["metric"])
+    _validate_metric(record["metric"], evidence_id)
     _validate_method(record["method"])
     require(type(record["runs"]) is list, f"{label}.runs must be an array")
     expected_run_ids = tuple(EXPECTED_RUN_METADATA[evidence_id])
@@ -897,7 +1395,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         evidence_path, baseline_path, skip_baseline = _parse_args(list(sys.argv[1:] if argv is None else argv))
         evidence = load_json(evidence_path)
-        record = validate_evidence(evidence, root=ROOT)
+        if evidence_path.resolve() == WEB_EVIDENCE_PATH.resolve():
+            evidence_root = WEB_BENCHMARK_ROOT
+            expected_id = WEB_PRODUCTION_BUILD_EVIDENCE_ID
+        else:
+            evidence_root = ROOT
+            expected_id = EVIDENCE_ID
+        record = validate_evidence(evidence, root=evidence_root, expected_id=expected_id)
         if not skip_baseline:
             validate_baseline(load_json(baseline_path), ROOT)
         result = {

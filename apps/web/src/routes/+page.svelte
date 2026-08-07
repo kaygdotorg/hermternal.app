@@ -1,27 +1,51 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import BrowserAuthView from '$lib/auth-ui/BrowserAuthView.svelte';
   import PrototypeShell from '$lib/components/PrototypeShell.svelte';
-  import { createMockTransport } from '$lib/transport';
-  import type { MockScenario } from '$lib/transport';
+  import { createLiveRootContext, resolveRootRoute, type LiveRootContext } from '$lib/root-route';
+  import { createMockTransport, type MockTransport } from '$lib/transport';
+  import LiveWorkspaceView from '$lib/workspace/LiveWorkspaceView.svelte';
 
-  function createRouteTransport() {
-    if (typeof window === 'undefined') {
-      return createMockTransport({ scenario: 'success' });
-    }
+  let routeMode: 'pending' | 'fixture' | 'live' = 'pending';
+  let fixtureTransport: MockTransport | undefined;
+  let liveContext: LiveRootContext | undefined;
 
-    // Query-selected fixtures keep browser regression states deterministic
-    // without adding a product route or a live transport boundary.
-    const params = new URLSearchParams(window.location.search);
-    const candidate = params.get('scenario');
-    const scenario: MockScenario =
-      candidate === 'empty' || candidate === 'failure' || candidate === 'success'
-        ? candidate
-        : 'success';
-    const delayMs = params.get('delayMs') === 'short' ? 250 : 0;
-
-    return createMockTransport({ scenario, delayMs });
+  function returnLiveWorkspaceToSignIn(): void {
+    // Only the semantic authentication-required boundary may invalidate the
+    // authenticated root: ticket HTTP 401, JsonRpcChatError auth-required,
+    // and chat close 4401. The BrowserAuthSession owns generation, local
+    // workspace invalidation, and the signed-in-to-expired transition; 403 and
+    // 4403 incompatible-origin failures never call this bridge.
+    liveContext?.auth.expire();
   }
 
-  const transport = createRouteTransport();
+  // Route selection waits for browser mount. The server and first client render
+  // stay identical, while valid scenario queries retain the no-network lane.
+  onMount(() => {
+    const selection = resolveRootRoute(window.location.search);
+    if (selection.mode === 'fixture') {
+      fixtureTransport = createMockTransport({ scenario: selection.scenario, delayMs: selection.delayMs });
+      routeMode = 'fixture';
+      return;
+    }
+
+    liveContext = createLiveRootContext();
+    routeMode = 'live';
+  });
 </script>
 
-<PrototypeShell {transport} />
+{#if routeMode === 'fixture' && fixtureTransport}
+  <PrototypeShell transport={fixtureTransport} />
+{:else if routeMode === 'live' && liveContext}
+  <BrowserAuthView session={liveContext.auth}>
+    <LiveWorkspaceView session={liveContext.workspace} onReturnToSignIn={returnLiveWorkspaceToSignIn} />
+  </BrowserAuthView>
+{:else}
+  <main aria-busy="true" aria-label="Starting Hermternal"></main>
+{/if}
+
+<style>
+  main {
+    min-height: 100dvh;
+  }
+</style>

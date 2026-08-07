@@ -65,6 +65,7 @@ The source audit and deterministic regression fixtures for this distinction live
 - Output older than the retained 1 MiB may be missing. The client must not claim that reattached output is a complete transcript or a strictly ordered replay snapshot.
 - User input bytes and resize controls are not retained as replayable actions. Never replay input, resize controls, prompt submissions, or tool actions after detach or reattach; a retry requires a new, explicit user action. Prompt and tool output bytes are PTY output and may appear in retained output without implying that the underlying action was replayed.
 - The client may show a non-blocking "reconnected" or "output may be truncated" notice. It must not save retained output as a durable transcript.
+- `outputMayBeTruncated` is true only for the current attachment established by a successful explicit reattach. Detach, Close, cancellation, failure, replacement, and stale-generation cleanup reset it; cancellation after reattach `onopen` restores the exact identity's detached-retention evidence before cleanup.
 
 ## Close and failure rules
 

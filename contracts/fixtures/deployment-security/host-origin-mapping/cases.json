@@ -1,0 +1,1501 @@
+{
+  "schema": "hermternal.deployment.host-origin-mapping.v3",
+  "fixture_id": "host-origin-mapping-dep-03-f5be9236",
+  "issue": "DEP-03",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "live_claim": false,
+  "proof_mode": "offline_disposable_raw_request_mapping_model",
+  "mapping": {
+    "configured_public_scheme": "https",
+    "configured_public_host": "chat.public.invalid",
+    "configured_public_origin": "https://chat.public.invalid",
+    "hermes_bound_authority": "fixed_private_non_loopback_9119",
+    "hermes_required_origin": "mapped_private_http_origin",
+    "mapping_source": "trusted_edge_configuration_only",
+    "forwarded_host_marker": "public_host_from_edge_validation",
+    "forwarded_proto_marker": "https_from_edge_transport",
+    "forwarded_prefix_marker": "reviewed_route_prefix_only",
+    "forwarded_for_marker": "proxy_generated_client_chain",
+    "strip_inbound_forwarded_headers": true,
+    "request_values_never_select_upstream": true
+  },
+  "policy": {
+    "route": "/hermes/api/ws",
+    "method": "GET",
+    "transport": "websocket",
+    "host_rejection_status": 421,
+    "origin_rejection_status": 403,
+    "forwarded_rejection_status": 421,
+    "host_precedes_origin": true,
+    "origin_precedes_forwarded": true,
+    "forwarded_precedes_overrides": true,
+    "rejection_upstream_called": false,
+    "forwarded_headers_policy": "strip_inbound_then_rebuild",
+    "accepted_action": "forward_with_configured_mapping"
+  },
+  "evidence_contract": {
+    "retained_fields": [
+      "case_id",
+      "decision",
+      "responding_layer",
+      "upstream_called",
+      "public_scheme_result",
+      "public_host_result",
+      "public_origin_result",
+      "forwarded_result",
+      "mapped_host_marker",
+      "mapped_origin_marker",
+      "forwarded_host_marker",
+      "forwarded_proto_marker",
+      "forwarded_prefix_marker",
+      "forwarded_for_marker"
+    ],
+    "forbidden_retained_classes": [
+      "raw_request_values",
+      "forwarded_headers",
+      "credentials",
+      "cookies",
+      "bearer_values",
+      "ticket_values",
+      "live_hosts",
+      "private_addresses",
+      "filesystem_paths",
+      "user_data",
+      "transcripts"
+    ],
+    "structural_exemptions": [
+      "reserved_invalid_fixture_authorities",
+      "exact_validator_command_paths",
+      "exact_artifact_filenames",
+      "reviewed_route_path"
+    ],
+    "maximum_failure_line_characters": 240,
+    "maximum_retained_evidence_bytes": 16384,
+    "failure_output": "one_bounded_semantic_json_line"
+  },
+  "cases": [
+    {
+      "id": "accept-exact-browser-mapping",
+      "source_evidence": {
+        "observation_index": 0,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "b3fae33dd5fc8220802883318251e208bc351cbf1443116e2a67111b8b89bbf3"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "forward_with_configured_mapping",
+        "status": null,
+        "responding_layer": "upstream",
+        "upstream_called": true,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "accepted_exact",
+        "forwarded_result": "stripped_and_rebuilt",
+        "mapped_host_marker": "fixed_private_non_loopback_9119",
+        "mapped_origin_marker": "mapped_private_http_origin",
+        "forwarded_host_marker": "public_host_from_edge_validation",
+        "forwarded_proto_marker": "https_from_edge_transport",
+        "forwarded_prefix_marker": "reviewed_route_prefix_only",
+        "forwarded_for_marker": "proxy_generated_client_chain"
+      }
+    },
+    {
+      "id": "reject-http-scheme",
+      "source_evidence": {
+        "observation_index": 1,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "aa444422816675bb27bb88645303c64a85f57c073e33786ea5fc39b64ed287c1"
+      },
+      "request": {
+        "scheme": "http",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_scheme",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "rejected_mismatch",
+        "public_host_result": "not_evaluated",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-scheme-case",
+      "source_evidence": {
+        "observation_index": 2,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "15f816fe02466d7f4a8bce9ba07e6e2e269e687411d1d2b98d19ad5b0fe8b944"
+      },
+      "request": {
+        "scheme": "HTTPS",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_scheme",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "rejected_mismatch",
+        "public_host_result": "not_evaluated",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-missing-scheme",
+      "source_evidence": {
+        "observation_index": 3,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "1795c4bfd5dffbf56f35de6ed2135e4bbc8be49e6f9f67bdd5f3bd1d21efc4b4"
+      },
+      "request": {
+        "scheme": null,
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_scheme",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "rejected_missing",
+        "public_host_result": "not_evaluated",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-port",
+      "source_evidence": {
+        "observation_index": 4,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "c317f746f45a55b1ca1fe56cddbf8b363e91c24a3b625e9e30c3217512f435b3"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid:443"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_mismatch",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-case",
+      "source_evidence": {
+        "observation_index": 5,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "728b1ee5d3e766b79fb0ad05edbc2d8b45e99b6d71e02dc7343892586d232811"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "CHAT.PUBLIC.INVALID"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_mismatch",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-trailing-dot",
+      "source_evidence": {
+        "observation_index": 6,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "012f793c2eb56410b6af4edff72e94a2d52ebdf1b5180a04c1010d7183311125"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid."
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_mismatch",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-multiple-values",
+      "source_evidence": {
+        "observation_index": 7,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "5427dbb0ed6575ff5b767b187e3727c350b068f1ba852fa282918ead6e89271e"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid",
+          "other.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_multiple",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-leading-whitespace",
+      "source_evidence": {
+        "observation_index": 8,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "0fc5ebebb803201431b7deb6da19ce8f9c48cda48e605d99cc0cfd209eecb677"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          " chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_whitespace",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-trailing-whitespace",
+      "source_evidence": {
+        "observation_index": 9,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "ed2659d742fda570b8ee6a6be46285504603d3249fd1085dffc2bf32118bd973"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid "
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_whitespace",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-userinfo",
+      "source_evidence": {
+        "observation_index": 10,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "64b823b05ceee58e5402d73e4be255a2e809cdb0f4c00dc95698966f4130ea4b"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "user@chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_malformed",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-scheme-prefix",
+      "source_evidence": {
+        "observation_index": 11,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "c9586efc31a43f31de5364190530e44650f7be29ed2265f90869937ae59c5beb"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "https://chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_malformed",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-empty-label",
+      "source_evidence": {
+        "observation_index": 12,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "bbbe781291df2ab75542dad2441aaca2e9d587c095cdbd41178a3a201d5bee9e"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat..public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_malformed",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-missing",
+      "source_evidence": {
+        "observation_index": 13,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "1fb9d098bfdb3b52dfd49ce22b926e3d3529b06b81ae77a508b8c9ad7f896081"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_missing",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-http",
+      "source_evidence": {
+        "observation_index": 14,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "3ddef8844e87b34a3f797836b7a91f95cea61f91250f153d5e718567387fb95d"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "http://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_mismatch",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-port",
+      "source_evidence": {
+        "observation_index": 15,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "5da6619362de22a357cc4974c19614abaf5d5297299d515421276323aa6c31e8"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid:443"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_mismatch",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-host-case",
+      "source_evidence": {
+        "observation_index": 16,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "5463d68fc0a778e7697ef8478e7ae6f204264558f27502d14ce47b39bd0702ce"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://CHAT.PUBLIC.INVALID"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_mismatch",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-scheme-case",
+      "source_evidence": {
+        "observation_index": 17,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "83ecb4ec48cbf18cd7a2989123d00945a5c248f0b32745e4bbca20885b1c8f07"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "HTTPS://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_mismatch",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-trailing-dot",
+      "source_evidence": {
+        "observation_index": 18,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "090bdc8ec743bf8d3c93b3a79a9d9dc7579513cb8b3347004963a600a10abfc5"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid."
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_mismatch",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-trailing-slash",
+      "source_evidence": {
+        "observation_index": 19,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "b33eaf165c5acf2f474ca00c8dd9a456db876778ba3a48557d03471ef160be60"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid/"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_malformed",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-multiple-values",
+      "source_evidence": {
+        "observation_index": 20,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "d8c1c1d43d43f551bfabd67949b776669b79e7a47ad5140ccdfc072c5a4ce1eb"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid",
+          "https://other.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_multiple",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-leading-whitespace",
+      "source_evidence": {
+        "observation_index": 21,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "927709992066d2d135c38629a89749a2c062db0c59e00b660c6e0b0243de4bf4"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          " https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_whitespace",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-trailing-whitespace",
+      "source_evidence": {
+        "observation_index": 22,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "6b7332cd19e0dee3ffb3bdd2842e01c66cbea7229b8eb98377edb4526cd17dd7"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid "
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_whitespace",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-userinfo",
+      "source_evidence": {
+        "observation_index": 23,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "cb95c097a3340052fdea29ad19cc7bee2e0edb794eea6d91f6468882f6defc8e"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://user@chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_malformed",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-query",
+      "source_evidence": {
+        "observation_index": 24,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "e74d7beb335a2b2e2e122ee825a09b19890a14763f820164fa9a2af587997eaa"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid?x"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_malformed",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-null",
+      "source_evidence": {
+        "observation_index": 25,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "bdea74a2326e22d18e0062ca00b86c8ac2076339c462d03fb45ec300dfc74d80"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "null"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_null",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-wildcard",
+      "source_evidence": {
+        "observation_index": 26,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "0c180371ec7c8a4d435c244172b529e98da8a06acef15618139a138f9488c4cc"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "*"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_wildcard",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-missing",
+      "source_evidence": {
+        "observation_index": 27,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "28e4a3fca6bd12ab449563304c7a5c15dcf708c3240b0b0c5b9b48293d643a8f"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_public_origin",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "rejected_missing",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-override",
+      "source_evidence": {
+        "observation_index": 28,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "b39fb814fac1d8091c7c0e749ee2002ae6f15b5a693cee9746abf90d4286e6db"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": "attacker.private.invalid",
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_upstream_override",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "accepted_exact",
+        "forwarded_result": "stripped_not_forwarded",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-origin-override",
+      "source_evidence": {
+        "observation_index": 29,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "80621d50a051b1f7e2f09281aff7a82a5971d32ba1b25bf3efe784a268509764"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": "http://attacker.private.invalid"
+      },
+      "expected": {
+        "decision": "reject_upstream_override",
+        "status": 403,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "accepted_exact",
+        "forwarded_result": "stripped_not_forwarded",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-both-overrides",
+      "source_evidence": {
+        "observation_index": 30,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "e8908dd8911e292d4205b7e6c49c3e3604dae8d43f0e228d698118f4bed8be60"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": "attacker.private.invalid",
+        "upstream_origin_override": "http://attacker.private.invalid"
+      },
+      "expected": {
+        "decision": "reject_upstream_override",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "accepted_exact",
+        "forwarded_result": "stripped_not_forwarded",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-host-before-hostile-origin-and-overrides",
+      "source_evidence": {
+        "observation_index": 31,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "97dce25388d2821f22cf3e3cc62ae034ba22424a3ff7e93db33d40e3972bba83"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "bad host"
+        ],
+        "origin_values": [
+          "null"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": [],
+          "x_forwarded_proto": [],
+          "x_forwarded_prefix": [],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": "attacker.private.invalid",
+        "upstream_origin_override": "http://attacker.private.invalid"
+      },
+      "expected": {
+        "decision": "reject_public_host",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "rejected_whitespace",
+        "public_origin_result": "not_evaluated",
+        "forwarded_result": "not_evaluated",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    },
+    {
+      "id": "reject-forwarded-malformed",
+      "source_evidence": {
+        "observation_index": 32,
+        "contract_path": "docs/deployment/proof-matrix.md",
+        "contract_commit": "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb",
+        "contract_sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
+        "case_binding_sha256": "3c6d3a3d1f009c579b3e765f3a0f0e9ed833654c1a654fa089a0165787681341"
+      },
+      "request": {
+        "scheme": "https",
+        "host_values": [
+          "chat.public.invalid"
+        ],
+        "origin_values": [
+          "https://chat.public.invalid"
+        ],
+        "inbound_forwarded": {
+          "x_forwarded_host": "spoofed-forwarded",
+          "x_forwarded_proto": [
+            "https"
+          ],
+          "x_forwarded_prefix": [
+            "/hermes"
+          ],
+          "x_forwarded_for": []
+        },
+        "upstream_host_override": null,
+        "upstream_origin_override": null
+      },
+      "expected": {
+        "decision": "reject_forwarded_headers",
+        "status": 421,
+        "responding_layer": "edge",
+        "upstream_called": false,
+        "public_scheme_result": "accepted_exact",
+        "public_host_result": "accepted_exact",
+        "public_origin_result": "accepted_exact",
+        "forwarded_result": "rejected_malformed",
+        "mapped_host_marker": null,
+        "mapped_origin_marker": null,
+        "forwarded_host_marker": null,
+        "forwarded_proto_marker": null,
+        "forwarded_prefix_marker": null,
+        "forwarded_for_marker": null
+      }
+    }
+  ]
+}

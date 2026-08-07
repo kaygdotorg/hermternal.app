@@ -1,0 +1,64 @@
+<script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
+  import WorkspacePreview from './WorkspacePreview.svelte';
+  import type { LiveWorkspaceSession, LiveWorkspaceSnapshot } from './live-workspace-session';
+  import type { Appearance, WorkspaceAction } from './types';
+
+  export let session: LiveWorkspaceSession;
+  export let appearance: Appearance = 'light';
+  export let onReturnToSignIn: () => void = () => {};
+
+  let snapshot: Readonly<LiveWorkspaceSnapshot> = session.current;
+  let unsubscribe: (() => void) | undefined;
+
+  onMount(() => {
+    unsubscribe = session.subscribe((next) => {
+      snapshot = next;
+    });
+    void session.initialize();
+  });
+
+  onDestroy(() => {
+    unsubscribe?.();
+    session.dispose();
+  });
+
+  function handleAction(action: WorkspaceAction): void {
+    if (action.type === 'back-to-sessions' || action.type === 'dismiss') {
+      // Both visible permanent-error exits lead back to sign-in only when the
+      // transport proved that authentication is required. Incompatible-origin
+      // failures remain on the reviewed fail-closed workspace boundary.
+      if (snapshot.permanentFailure?.reason === 'authentication-required') {
+        onReturnToSignIn();
+      }
+      return;
+    }
+    if (action.type === 'new-session') void session.createSession();
+    if (action.type === 'select-session') void session.selectSession(action.sessionId);
+    if (action.type === 'send') session.sendPrompt(action.text);
+    if (action.type === 'stop') void session.stop();
+    if (action.type === 'retry' || action.type === 'check-connection') void session.retryConnection();
+    if (action.type === 'cancel-reconnect') session.cancelReconnect();
+    if (action.type === 'approve-tool') void session.approve(action.itemId, true);
+    if (action.type === 'reject-tool') void session.approve(action.itemId, false);
+    if (action.type === 'answer-clarification') {
+      void session.answerClarification(action.itemId, action.answer);
+    }
+  }
+</script>
+
+<WorkspacePreview
+  activeSessionId={snapshot.activeSessionId ?? ''}
+  artifactInspectorEnabled={false}
+  {appearance}
+  dataMode="live"
+  interactionEnabled={snapshot.activeSessionId !== undefined}
+  model={snapshot.model}
+  permanentFailure={snapshot.permanentFailure}
+  sessions={snapshot.sessions}
+  state={snapshot.state}
+  timelineEmptyLabel="No messages in this chat yet."
+  timelineItems={snapshot.timeline}
+  title={snapshot.title}
+  onAction={handleAction}
+/>

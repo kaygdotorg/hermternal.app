@@ -11,6 +11,20 @@ function jsonResponse(body: string, status = 200, headers: Record<string, string
   });
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function providerPayload(): string {
   return JSON.stringify({
     providers: [
@@ -41,6 +55,20 @@ function cancellableResponse(
       }
     }),
     { status, headers: { 'content-type': contentType, ...headers } }
+  );
+  return { response, wasCancelled: () => cancelled };
+}
+
+function neverSettlingCancelResponse(): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+        return new Promise<void>(() => {});
+      }
+    }),
+    { status: 200, headers: { 'content-type': 'text/html' } }
   );
   return { response, wasCancelled: () => cancelled };
 }
@@ -207,6 +235,17 @@ describe('discoverProviders', () => {
     }
   });
 
+  it('bounds a response cancel that never settles after headers fail closed', async () => {
+    const tracked = neverSettlingCancelResponse();
+    const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(tracked.response);
+    const startedAt = Date.now();
+
+    await expect(discoverProviders({ fetch: fetcher })).rejects.toMatchObject({ code: 'invalid-response' });
+
+    expect(tracked.wasCancelled()).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
   it('cancels an active response reader after headers when the caller aborts or the timeout expires', async () => {
     const callerTracked = cancellableResponse(200, 'application/json');
     const callerFetch = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(callerTracked.response);
@@ -222,6 +261,35 @@ describe('discoverProviders', () => {
     const timeoutFetch = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(timeoutTracked.response);
     await expect(discoverProviders({ fetch: timeoutFetch, timeoutMs: 5 })).rejects.toMatchObject({ code: 'timeout' });
     await vi.waitFor(() => expect(timeoutTracked.wasCancelled()).toBe(true));
+  });
+
+  it('observes cancellation in the synthetic no-body text path', async () => {
+    const response = new Response(null, { status: 200, headers: { 'content-type': 'application/json' } });
+    vi.spyOn(response, 'text').mockImplementation(() => new Promise<string>(() => {}));
+    const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(response);
+    const controller = new AbortController();
+    const pending = discoverProviders({ fetch: fetcher, signal: controller.signal, timeoutMs: 1_000 });
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' });
+  });
+
+  it('lets caller abort classification win a same-generation provider failure without masking real failures', async () => {
+    const controller = new AbortController();
+    const gate = deferred<Response>();
+    const fetcher = vi.fn<ProviderDiscoveryFetch>(() => gate.promise);
+    const pending = discoverProviders({ fetch: fetcher, signal: controller.signal, timeoutMs: 1_000 });
+
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    gate.reject(new ProviderDiscoveryError('network'));
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' });
+
+    const realFailure = vi
+      .fn<ProviderDiscoveryFetch>()
+      .mockRejectedValue(new ProviderDiscoveryError('network'));
+    await expect(discoverProviders({ fetch: realFailure })).rejects.toMatchObject({ code: 'network' });
   });
 
   it('maps network failures, caller aborts, and timeouts to bounded diagnostics', async () => {

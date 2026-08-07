@@ -83,9 +83,12 @@ budgets:
 - `expires_at` is a required integer Unix-second value in
   `0..4,294,967,295`. Strings, `null`, fractions, negatives, and excessive
   integers fail closed.
-- Session `started_at` and `last_active` are required integer Unix-second values;
-  `ended_at` is a required nullable integer. Source string timestamps are not
-  coerced. The pinned session counters and booleans are required as well.
+- Session `started_at` and `last_active` are required finite Unix-second values;
+  `ended_at` is a required nullable finite value. Fractional seconds are preserved
+  because the official Hermes session store emits sub-second timestamps. Source
+  strings are not coerced. Message timestamps use the same bounded rule. The
+  pinned session counters, pagination fields, token totals, and booleans remain
+  integers or exact booleans.
 - A returned session ID is validated independently. It may differ from the
   requested path because Hermes resolves aliases and continuation sessions to a
   canonical ID before returning session details or messages.

@@ -231,7 +231,13 @@ function sanitizePaste(text: string): string {
   return text.replace(/\x1b/gu, '');
 }
 
-function canonicalizeUint8Array(data: unknown): Uint8Array | null {
+type Uint8ArrayViewInfo = Readonly<{
+  buffer: ArrayBufferLike;
+  byteOffset: number;
+  byteLength: number;
+}>;
+
+function inspectUint8Array(data: unknown): Uint8ArrayViewInfo | null {
   // Vitest, embedded webviews, and iframes can provide a Uint8Array from a
   // different realm. Use intrinsic %TypedArray% accessors rather than public
   // properties: a genuine Uint8Array subclass can override byteLength/length.
@@ -249,16 +255,42 @@ function canonicalizeUint8Array(data: unknown): Uint8Array | null {
     const byteLength = typedArrayByteLengthGetter.call(data);
     const byteOffset = typedArrayByteOffsetGetter.call(data);
     const buffer = typedArrayBufferGetter.call(data);
-    if (length !== byteLength || byteLength < 0 || byteOffset < 0) return null;
-    const source = new Uint8Array(buffer, byteOffset, byteLength);
-    const copy = new Uint8Array(byteLength);
-    copy.set(source);
-    return copy;
+    if (
+      typeof length !== 'number' ||
+      typeof byteLength !== 'number' ||
+      typeof byteOffset !== 'number' ||
+      length !== byteLength ||
+      !Number.isSafeInteger(byteLength) ||
+      byteLength < 0 ||
+      !Number.isSafeInteger(byteOffset) ||
+      byteOffset < 0
+    ) return null;
+    // Construct only a non-retaining view while inspecting the intrinsic
+    // metadata. Public write admission happens before the full defensive copy
+    // so an oversized caller view cannot cause a transient duplicate buffer.
+    new Uint8Array(buffer, byteOffset, byteLength);
+    return { buffer, byteOffset, byteLength };
   } catch {
     // Proxies, revoked views, detached buffers, and malformed accessors fail
     // closed rather than reaching W-Term or affecting byte accounting.
     return null;
   }
+}
+
+function copyUint8Array(info: Uint8ArrayViewInfo): Uint8Array | null {
+  try {
+    const source = new Uint8Array(info.buffer, info.byteOffset, info.byteLength);
+    const copy = new Uint8Array(info.byteLength);
+    copy.set(source);
+    return copy;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalizeUint8Array(data: unknown): Uint8Array | null {
+  const info = inspectUint8Array(data);
+  return info ? copyUint8Array(info) : null;
 }
 
 function createPendingPaste(
@@ -413,7 +445,8 @@ type WTermRuntime = {
 
 type WTermHostRecord = {
   readonly beforeClasses: ReadonlySet<string>;
-  readonly ownedClasses: Set<string>;
+  /** Track every W-Term-mutated class, including classes present on entry. */
+  readonly trackedClasses: ReadonlySet<string>;
   readonly beforeHeight: string;
   readonly beforeRowHeight: string;
   ownedHeight: string | null;
@@ -428,10 +461,12 @@ type WTermHostRecord = {
 };
 
 function recordWTermClasses(host: HTMLElement, record: WTermHostRecord): void {
-  for (const className of WTERM_HOST_CLASSES) {
-    const present = host.classList.contains(className);
-    if (!record.beforeClasses.has(className) && present) record.ownedClasses.add(className);
-    if (record.ownedClasses.has(className)) record.observedClasses.set(className, present);
+  for (const className of record.trackedClasses) {
+    // Record the current value for every known W-Term class. A class that was
+    // already present before mounting can still be toggled by W-Term and must
+    // be restored to its exact pre-mount value when this generation releases
+    // the host.
+    record.observedClasses.set(className, host.classList.contains(className));
   }
   if (record.otherClassesCaptured) return;
   for (const className of host.classList) {
@@ -491,12 +526,15 @@ function restoreWTermHostRecord(host: HTMLElement, record: WTermHostRecord): voi
   // Leave every host class untouched rather than stripping a later owner's
   // state while still removing the adapter's private nodes below.
   if (sameClassSet(currentOtherClasses, record.observedOtherClasses)) {
-    for (const className of record.ownedClasses) {
+    for (const className of record.trackedClasses) {
       // A class can be removed or replaced by a later owner while the async
-      // adapter is settling. Only remove the exact state this generation saw.
-      if (record.observedClasses.get(className) === true && host.classList.contains(className)) {
-        host.classList.remove(className);
-      }
+      // adapter is settling. Restore only when the host still has the exact
+      // state this generation last observed; otherwise leave the newer state
+      // untouched.
+      const observed = record.observedClasses.get(className);
+      if (observed === undefined || host.classList.contains(className) !== observed) continue;
+      if (record.beforeClasses.has(className)) host.classList.add(className);
+      else host.classList.remove(className);
     }
     restoreOwnedStyle(host, 'height', record.beforeHeight, record.ownedHeight, record.observedHeight);
     restoreOwnedStyle(
@@ -652,7 +690,7 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
 
       const record: WTermHostRecord = {
         beforeClasses: new Set(host.classList),
-        ownedClasses: new Set(),
+        trackedClasses: new Set(WTERM_HOST_CLASSES),
         beforeHeight: host.style.height,
         beforeRowHeight: host.style.getPropertyValue('--term-row-height'),
         ownedHeight: null,
@@ -810,7 +848,9 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   private readonly idleWaiters: Array<() => void> = [];
   private pendingMount: Promise<void> | null = null;
   private pasteQueue: PendingPaste[] = [];
+  /** Bytes retained by queued confirmations; active bytes are tracked separately. */
   private pasteQueueBytes = 0;
+  private activePasteBytes = 0;
   private activePaste: PendingPaste | null = null;
   private pasteDrainRunning = false;
   private backend: MountedTerminal | null = null;
@@ -954,25 +994,35 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   write(data: Uint8Array): void {
-    const bytes = canonicalizeUint8Array(data);
-    if (!bytes) {
+    const view = inspectUint8Array(data);
+    if (!view) {
       throw new TypeError('terminal writes require Uint8Array data');
     }
-    if (bytes.byteLength === 0) return;
+    if (view.byteLength === 0) return;
     if (this.state === 'ready' && this.host && hostOwners.get(this.host)?.renderer !== this) return;
     if (this.state === 'ready' && this.backend) {
+      if (!this.canAdmitReadyWrite(view.byteLength)) {
+        this.fail('pending-output-limit');
+        return;
+      }
+      const bytes = copyUint8Array(view);
+      if (!bytes) throw new TypeError('terminal writes require Uint8Array data');
       this.enqueueReadyWrite(bytes);
       return;
     }
     if (this.state === 'error' || this.state === 'disposed') return;
-    if (this.pendingWriteBytes + bytes.byteLength > this.maxPendingWriteBytes) {
+    if (
+      this.pendingWriteBytes + view.byteLength > this.maxPendingWriteBytes ||
+      this.pendingOperations.length >= MAX_PENDING_OPERATION_COUNT
+    ) {
+      // Check intrinsic byte length before allocating a defensive copy. This
+      // keeps rejected public writes from creating a transient duplicate of an
+      // oversized caller-owned buffer.
       this.fail('pending-output-limit');
       return;
     }
-    if (this.pendingOperations.length >= MAX_PENDING_OPERATION_COUNT) {
-      this.fail('pending-output-limit');
-      return;
-    }
+    const bytes = copyUint8Array(view);
+    if (!bytes) throw new TypeError('terminal writes require Uint8Array data');
     this.pendingOperations.push({ type: 'write', data: bytes });
     this.pendingWriteBytes += bytes.byteLength;
   }
@@ -1135,6 +1185,17 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     }
   }
 
+  private canAdmitReadyWrite(byteLength: number): boolean {
+    if (this.readyOperations.length === 0 && this.readyDrainTimer === null && byteLength <= MAX_READY_WRITE_CHUNK_BYTES) {
+      return true;
+    }
+    const chunkCount = Math.ceil(byteLength / MAX_READY_WRITE_CHUNK_BYTES);
+    return (
+      this.readyWriteBytes + byteLength <= MAX_READY_WRITE_BUFFER_BYTES &&
+      this.readyOperations.length + chunkCount <= MAX_PENDING_OPERATION_COUNT
+    );
+  }
+
   private enqueueReadyWrite(data: Uint8Array): void {
     const backend = this.backend;
     if (!backend) return;
@@ -1219,6 +1280,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     if (this.activePaste) pending.push(this.activePaste);
     this.pasteQueue = [];
     this.pasteQueueBytes = 0;
+    this.activePasteBytes = 0;
     this.activePaste = null;
     for (const entry of pending) {
       entry.counted = false;
@@ -1230,7 +1292,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     const activeCount = this.activePaste ? 1 : 0;
     if (
       activeCount + this.pasteQueue.length >= MAX_PENDING_PASTE_COUNT ||
-      this.pasteQueueBytes + pending.byteLength > MAX_PENDING_PASTE_BYTES
+      this.activePasteBytes + this.pasteQueueBytes + pending.byteLength > MAX_PENDING_PASTE_BYTES
     ) {
       pending.counted = false;
       pending.cancel();
@@ -1248,12 +1310,19 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       while (this.pasteQueue.length > 0) {
         const pending = this.pasteQueue.shift();
         if (!pending) break;
-        this.activePaste = pending;
-        await this.confirmAndPaste(pending);
-        if (this.activePaste === pending) this.activePaste = null;
         if (pending.counted) {
           this.pasteQueueBytes = Math.max(0, this.pasteQueueBytes - pending.byteLength);
-          pending.counted = false;
+          this.activePasteBytes += pending.byteLength;
+        }
+        this.activePaste = pending;
+        try {
+          await this.confirmAndPaste(pending);
+        } finally {
+          if (this.activePaste === pending) this.activePaste = null;
+          if (pending.counted) {
+            this.activePasteBytes = Math.max(0, this.activePasteBytes - pending.byteLength);
+            pending.counted = false;
+          }
         }
       }
     } finally {

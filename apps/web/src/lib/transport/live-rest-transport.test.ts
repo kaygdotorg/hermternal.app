@@ -384,6 +384,28 @@ describe('createLiveRestTransport', () => {
     });
   });
 
+  it('accepts bounded fractional Unix timestamps emitted by the official Hermes session store', async () => {
+    const session = JSON.parse(rawSession()) as Record<string, unknown>;
+    session.started_at = 1_767_225_600.125;
+    session.ended_at = 1_767_225_601.5;
+    session.last_active = 1_767_225_602.875;
+    const messages = JSON.parse(rawSessionMessages()) as {
+      messages: Array<Record<string, unknown>>;
+    };
+    messages.messages[0].timestamp = 1_767_225_603.25;
+    const fixture = fetchSequence(response(JSON.stringify(session)), response(JSON.stringify(messages)));
+    const transport = createLiveRestTransport({ fetch: fixture.fetch });
+
+    await expect(transport.getSession(LIVE_SESSION_FIXTURE.id)).resolves.toMatchObject({
+      startedAt: 1_767_225_600.125,
+      endedAt: 1_767_225_601.5,
+      lastActive: 1_767_225_602.875
+    });
+    await expect(transport.getSessionMessages(LIVE_SESSION_FIXTURE.id)).resolves.toMatchObject({
+      messages: [{ timestamp: 1_767_225_603.25 }]
+    });
+  });
+
   it('accepts empty source-defined strings while identifier fields remain non-empty', async () => {
     const providers = JSON.parse(rawProviderDiscovery()) as {
       providers: Array<Record<string, unknown>>;

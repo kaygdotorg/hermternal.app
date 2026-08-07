@@ -2,10 +2,13 @@
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
+  import type { LiveWorkspacePermanentFailure } from './live-workspace-session';
   import type { WorkspaceActionHandler, WorkspaceDataSource, WorkspaceRuntimeState } from './types';
 
   export let state: WorkspaceRuntimeState = 'ready';
   export let dataSource: WorkspaceDataSource = 'synthetic-preview';
+  export let dataMode: 'fixture' | 'live' = 'fixture';
+  export let permanentFailure: LiveWorkspacePermanentFailure | undefined = undefined;
   export let onAction: WorkspaceActionHandler = () => {};
 
   let recoveryAction: HTMLButtonElement | undefined;
@@ -77,10 +80,21 @@
     <span aria-hidden="true" class="state-icon"><Icon name="conversation" size={20} /></span>
     <div class="empty-copy">
       <strong>Start with a question</strong>
-      <span>This session is ready for a fresh start. Available controls remain local to this preview.</span>
+      {#if dataMode === 'live'}
+        <span>This Hermes session has no messages yet. Send a message to begin.</span>
+      {:else}
+        <span>This session is ready for a fresh start. Available controls remain local to this preview.</span>
+      {/if}
     </div>
-    <Pill label="Choose an action" icon="spark" variant="action" onActivate={() => onAction({ type: 'new-session' })} />
-    <p>Mocked fixture only · synthetic empty state · no live connection</p>
+    {#if dataMode === 'fixture'}
+      <Pill
+        label="Choose an action"
+        icon="spark"
+        variant="action"
+        onActivate={() => onAction({ type: 'new-session' })}
+      />
+      <p>Mocked fixture only · synthetic empty state · no live connection</p>
+    {/if}
   </div>
 {:else if state === 'offline'}
   <div aria-live="polite" class="state-card offline-state" data-testid="offline-state" role="status">
@@ -180,7 +194,11 @@
     <span aria-hidden="true" class="state-icon"><Icon name="refresh" size={18} /></span>
     <div class="error-copy">
       <strong>Connection lost</strong>
-      <span>Your draft is safe. Reconnect before sending it. No prompt was resent.</span>
+      {#if dataMode === 'live'}
+        <span>Reconnect and inspect Hermes history before sending again. No prompt was resent.</span>
+      {:else}
+        <span>Your draft is safe. Reconnect before sending it. No prompt was resent.</span>
+      {/if}
       <small>Focus order: status → Retry now → Later. Copy reflows at 200% zoom.</small>
     </div>
     <div class="state-actions">
@@ -192,8 +210,24 @@
   <div aria-live="assertive" class="state-card error-state" data-testid="permanent-error-state" role="alert">
     <span aria-hidden="true" class="state-icon"><Icon name="warning" size={18} /></span>
     <div class="error-copy">
-      <strong>Session state rejected</strong>
-      <span>Hermes rejected the session state. No prompt was resent.</span>
+      <strong>
+        {permanentFailure?.reason === 'authentication-required'
+          ? 'Authentication required'
+          : permanentFailure?.closeClassification === 'host-or-origin-rejected'
+            ? 'Incompatible origin'
+            : permanentFailure?.reason === 'incompatible'
+              ? 'Incompatible deployment'
+              : 'Session state rejected'}
+      </strong>
+      <span>
+        {permanentFailure?.reason === 'authentication-required'
+          ? 'Sign in again before sending another prompt.'
+          : permanentFailure?.closeClassification === 'host-or-origin-rejected'
+            ? 'Hermes rejected this origin for chat. Use a reviewed origin before sending another prompt.'
+            : permanentFailure?.reason === 'incompatible'
+              ? 'This Hermes deployment is outside the reviewed chat contract. No prompt was resent.'
+              : 'Hermes rejected the session state. No prompt was resent.'}
+      </span>
       <small>Focus order: status → Back to sessions → Dismiss. No automatic recovery.</small>
     </div>
     <div class="state-actions">

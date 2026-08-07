@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent
@@ -34,6 +35,12 @@ class BenchmarkEvidenceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.document = validate.load_json(validate.EVIDENCE_PATH)
         validate.validate_evidence(cls.document)
+        cls.web_document = validate.load_json(validate.WEB_EVIDENCE_PATH)
+        validate.validate_evidence(
+            cls.web_document,
+            root=validate.WEB_BENCHMARK_ROOT,
+            expected_id=validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID,
+        )
 
     def _run_cli(
         self,
@@ -212,6 +219,44 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         bad_manifest["artifact_manifest_sha256"] = "0" * 64
         self._assert_rejected(bad_manifest)
 
+    def test_web_toolchain_identity_mutation_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for portable_path in validate.EXPECTED_ARTIFACT_PATHS[validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID]:
+                source = validate.WEB_BENCHMARK_ROOT / portable_path
+                destination = root / portable_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            trace_path = root / "evidence" / "raw-trace.json"
+            trace = validate.load_json(trace_path)
+            trace["toolchain"]["vite"]["sha256"] = "0" * 64
+            trace_path.write_text(json.dumps(trace, separators=(",", ":")), encoding="utf-8")
+            with self.assertRaises(validate.ValidationError):
+                validate.validate_evidence(
+                    self.web_document,
+                    root=root,
+                    expected_id=validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID,
+                )
+
+    def test_web_measured_input_identity_rejects_stale_trace_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for portable_path in validate.EXPECTED_ARTIFACT_PATHS[validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID]:
+                source = validate.WEB_BENCHMARK_ROOT / portable_path
+                destination = root / portable_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            trace_path = root / "evidence" / "raw-trace.json"
+            trace = validate.load_json(trace_path)
+            trace["build_input"]["sha256"] = "0" * 64
+            trace_path.write_text(json.dumps(trace, separators=(",", ":")), encoding="utf-8")
+            with self.assertRaises(validate.ValidationError):
+                validate.validate_evidence(
+                    self.web_document,
+                    root=root,
+                    expected_id=validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID,
+                )
+
         traversal = copy.deepcopy(self.document)
         traversal["artifacts"][0]["path"] = "../outside.json"
         self._assert_rejected(traversal)
@@ -313,6 +358,74 @@ class BenchmarkEvidenceTests(unittest.TestCase):
                 with self.subTest(field=field_label, token=token_label):
                     self._assert_cli_document_failure(candidate, token)
 
+    def test_registered_web_evidence_passes_normal_and_optimized_cli(self) -> None:
+        for optimized in (False, True):
+            command = [sys.executable]
+            if optimized:
+                command.append("-O")
+            command.extend((str(validate.EVIDENCE_PATH.with_name("validate.py")), "--evidence", str(validate.WEB_EVIDENCE_PATH), "--skip-baseline"))
+            completed = subprocess.run(command, check=False, capture_output=True, text=True)
+            with self.subTest(optimized=optimized):
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                self.assertEqual(completed.stderr, "")
+                payload = json.loads(completed.stdout)
+                self.assertEqual(payload["evidence_id"], validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID)
+
+    def test_web_evidence_cannot_rebind_its_canonical_root(self) -> None:
+        raw = validate.WEB_EVIDENCE_PATH.read_bytes()
+        self._assert_cli_failure(raw)
+
+    def test_web_evidence_descendant_scope_is_ancestry_and_path_bound(self) -> None:
+        source = "a" * 40
+        head = "b" * 40
+        record = {"revision": {"commit_sha": source}}
+        common = [
+            subprocess.CompletedProcess([], 0, stdout=f"{head}\n".encode(), stderr=b""),
+            subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""),
+        ]
+        with patch.object(
+            validate.subprocess,
+            "run",
+            side_effect=common + [
+                subprocess.CompletedProcess([], 0, stdout=b"apps/web/benchmarks/production-build/evidence/new.json\0", stderr=b"")
+            ],
+        ):
+            validate._validate_web_evidence_revision(record, validate.WEB_BENCHMARK_ROOT)
+
+        with patch.object(
+            validate.subprocess,
+            "run",
+            side_effect=common + [
+                subprocess.CompletedProcess([], 0, stdout=b"apps/web/src/unreviewed.ts\0", stderr=b"")
+            ],
+        ):
+            with self.assertRaises(validate.ValidationError):
+                validate._validate_web_evidence_revision(record, validate.WEB_BENCHMARK_ROOT)
+
+    def test_web_trace_replacement_and_symlink_escape_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            copied_root = Path(directory) / "production-build"
+            shutil.copytree(validate.WEB_BENCHMARK_ROOT, copied_root)
+            trace_path = copied_root / "evidence" / "raw-trace.json"
+            trace_path.write_bytes(b'{"schema":"hermternal.web-production-build-trace.v1"}')
+            with self.assertRaises(validate.ValidationError):
+                validate.validate_evidence(
+                    copy.deepcopy(self.web_document),
+                    root=copied_root,
+                    expected_id=validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID,
+                )
+
+            trace_path.unlink()
+            external = Path(directory) / "external.json"
+            external.write_bytes(validate.WEB_BENCHMARK_ROOT.joinpath("evidence/raw-trace.json").read_bytes())
+            trace_path.symlink_to(external)
+            with self.assertRaises(validate.ValidationError):
+                validate.validate_evidence(
+                    copy.deepcopy(self.web_document),
+                    root=copied_root,
+                    expected_id=validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID,
+                )
+
     def test_missing_recorded_artifact_fails_in_both_cli_modes(self) -> None:
         """Exercise local artifact absence without mutating the checkout.
 
@@ -380,7 +493,116 @@ class BenchmarkEvidenceTests(unittest.TestCase):
     def test_duplicate_keys_nonfinite_numbers_and_invalid_utf8_are_controlled(self) -> None:
         self._assert_cli_failure(b'{"schema":1,"schema":2}')
         self._assert_cli_failure(b'{"schema":NaN}')
+        self._assert_cli_failure(b'{"schema":1e999}')
         self._assert_cli_failure(b"\xff\xfe\xfd")
+
+    def test_load_json_rejects_oversized_input_after_bounded_descriptor_read(self) -> None:
+        with tempfile.NamedTemporaryFile() as handle:
+            handle.write(b"{" + b"x" * (validate.MAX_JSON_BYTES - 1))
+            handle.flush()
+            requested: list[int] = []
+            original_read = validate.os.read
+
+            def bounded_read(descriptor: int, count: int) -> bytes:
+                requested.append(count)
+                return original_read(descriptor, count)
+
+            with patch.object(validate.os, "read", side_effect=bounded_read):
+                with self.assertRaises(validate.ValidationError):
+                    validate.load_json(Path(handle.name))
+            self.assertTrue(requested)
+            self.assertTrue(all(count <= validate.MAX_JSON_BYTES + 1 for count in requested))
+
+    def test_load_json_rejects_append_after_first_read(self) -> None:
+        with tempfile.NamedTemporaryFile() as handle:
+            handle.write(b"{}")
+            handle.flush()
+            original_read = validate.os.read
+            calls = 0
+
+            def growing_read(descriptor: int, count: int) -> bytes:
+                nonlocal calls
+                result = original_read(descriptor, count)
+                calls += 1
+                if calls == 1:
+                    with open(handle.name, "ab") as replacement:
+                        replacement.write(b" ")
+                return result
+
+            with patch.object(validate.os, "read", side_effect=growing_read):
+                with self.assertRaises(validate.ValidationError):
+                    validate.load_json(Path(handle.name))
+
+    def test_load_json_rejects_growth_from_an_initially_empty_file(self) -> None:
+        with tempfile.NamedTemporaryFile() as handle:
+            handle.flush()
+            original_fstat = validate.os.fstat
+            calls = 0
+
+            def growing_fstat(descriptor: int):
+                nonlocal calls
+                calls += 1
+                result = original_fstat(descriptor)
+                if calls == 1:
+                    with open(handle.name, "wb") as replacement:
+                        replacement.write(b"{}")
+                return result
+
+            with patch.object(validate.os, "fstat", side_effect=growing_fstat):
+                with self.assertRaises(validate.ValidationError):
+                    validate.load_json(Path(handle.name))
+
+    def test_local_file_reader_rejects_append_after_first_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            path.write_bytes(b"{}")
+            original_read = validate.os.read
+            calls = 0
+
+            def growing_read(descriptor: int, count: int) -> bytes:
+                nonlocal calls
+                result = original_read(descriptor, count)
+                calls += 1
+                if calls == 1:
+                    with path.open("ab") as replacement:
+                        replacement.write(b" ")
+                return result
+
+            with patch.object(validate.os, "read", side_effect=growing_read):
+                with self.assertRaises(validate.ValidationError):
+                    validate._read_local_file(Path(directory), "evidence.json", "local file")
+
+    def test_local_file_reader_rejects_growth_from_an_initially_empty_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            path.write_bytes(b"")
+            original_fstat = validate.os.fstat
+            calls = 0
+
+            def growing_fstat(descriptor: int):
+                nonlocal calls
+                calls += 1
+                result = original_fstat(descriptor)
+                if calls == 1:
+                    path.write_bytes(b"{}")
+                return result
+
+            with patch.object(validate.os, "fstat", side_effect=growing_fstat):
+                with self.assertRaises(validate.ValidationError):
+                    validate._read_local_file(Path(directory), "evidence.json", "local file")
+
+    def test_runtime_anchor_selection_fails_closed_for_unanchored_linux(self) -> None:
+        darwin = {"darwin": {"node": {}, "bun": {}, "python": {}, "sandbox": {}}}
+        self.assertIs(validate._runtime_anchor_for_environment(darwin, "darwin-25.5.0"), darwin["darwin"])
+        with self.assertRaises(validate.ValidationError):
+            validate._runtime_anchor_for_environment(darwin, "linux-6.1.0")
+
+    def test_runtime_anchor_selection_binds_linux_to_linux_identity(self) -> None:
+        darwin = {"node": {"bytes": 1, "sha256": "a" * 64}, "bun": {"bytes": 2, "sha256": "b" * 64}, "python": {"bytes": 3, "sha256": "c" * 64}, "sandbox": {"bytes": 4, "sha256": "d" * 64}}
+        linux = {"node": {"bytes": 5, "sha256": "e" * 64}, "bun": {"bytes": 6, "sha256": "f" * 64}, "python": {"bytes": 7, "sha256": "0" * 64}, "sandbox": {"bytes": 8, "sha256": "1" * 64}}
+        anchors = {"darwin": darwin, "linux": linux}
+        self.assertIs(validate._runtime_anchor_for_environment(anchors, "linux-6.1.0"), linux)
+        self.assertIsNot(validate._runtime_anchor_for_environment(anchors, "linux-6.1.0"), darwin)
 
     def test_error_output_does_not_echo_sensitive_arguments_or_values(self) -> None:
         for optimized in (False, True):

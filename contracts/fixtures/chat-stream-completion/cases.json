@@ -1,0 +1,1016 @@
+{
+  "schema": "hermternal.chat-stream-completion.v1",
+  "operation": "C-08",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "event_order": [
+    "message.delta",
+    "reasoning.delta",
+    "thinking.delta",
+    "tool.start",
+    "tool.complete",
+    "message.complete",
+    "error",
+    "interrupt.request",
+    "interrupt.result"
+  ],
+  "cases": [
+    {
+      "id": "empty-idle",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [],
+      "expected": {
+        "trace": [
+          "idle"
+        ],
+        "final_state": "idle",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "empty",
+        "contract_error": null
+      },
+      "notes": "No stream frame creates no transcript or side effect."
+    },
+    {
+      "id": "delta-then-complete",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "content-marker-001"
+        },
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "streaming",
+          "completed"
+        ],
+        "final_state": "completed",
+        "segments": [
+          "content-marker-001",
+          "content-marker-final"
+        ],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "complete",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "completed",
+        "contract_error": null
+      },
+      "notes": "Buffered content precedes terminal completion."
+    },
+    {
+      "id": "reasoning-thinking-message-complete",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "reasoning.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "reasoning-marker-001"
+        },
+        {
+          "kind": "thinking.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "content_ref": "thinking-marker-001"
+        },
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 3,
+          "content_ref": "content-marker-001"
+        },
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 4,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "streaming",
+          "completed"
+        ],
+        "final_state": "completed",
+        "segments": [
+          "reasoning-marker-001",
+          "thinking-marker-001",
+          "content-marker-001",
+          "content-marker-final"
+        ],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "complete",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "completed",
+        "contract_error": null
+      },
+      "notes": "Display deltas remain ordered before completion."
+    },
+    {
+      "id": "tool-lifecycle-complete",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "content-marker-001"
+        },
+        {
+          "kind": "tool.start",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "tool_ref": "tool-marker-001"
+        },
+        {
+          "kind": "tool.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 3,
+          "tool_ref": "tool-marker-001"
+        },
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 4,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "streaming",
+          "tool_running",
+          "streaming",
+          "completed"
+        ],
+        "final_state": "completed",
+        "segments": [
+          "content-marker-001",
+          "content-marker-final"
+        ],
+        "open_tool": null,
+        "completed_tools": [
+          "tool-marker-001"
+        ],
+        "completion_status": "complete",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "completed",
+        "contract_error": null
+      },
+      "notes": "Tool completion closes before message completion."
+    },
+    {
+      "id": "two-tools-ordered",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "tool.start",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "tool_ref": "tool-marker-001"
+        },
+        {
+          "kind": "tool.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "tool_ref": "tool-marker-001"
+        },
+        {
+          "kind": "tool.start",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 3,
+          "tool_ref": "tool-marker-002"
+        },
+        {
+          "kind": "tool.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 4,
+          "tool_ref": "tool-marker-002"
+        },
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 5,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "tool_running",
+          "streaming",
+          "tool_running",
+          "streaming",
+          "completed"
+        ],
+        "final_state": "completed",
+        "segments": [
+          "content-marker-final"
+        ],
+        "open_tool": null,
+        "completed_tools": [
+          "tool-marker-001",
+          "tool-marker-002"
+        ],
+        "completion_status": "complete",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "completed",
+        "contract_error": null
+      },
+      "notes": "Sequential tools cannot overlap."
+    },
+    {
+      "id": "terminal-recoverable-error",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "content-marker-partial"
+        },
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "content_ref": "error-marker-001",
+          "status": "error",
+          "recoverable": true
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "streaming",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [
+          "content-marker-partial",
+          "error-marker-001"
+        ],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "error",
+        "interrupted": false,
+        "recoverable": true,
+        "ignored_events": 0,
+        "decision": "recoverable_error",
+        "contract_error": null
+      },
+      "notes": "Terminal error preserves only synthetic partial markers."
+    },
+    {
+      "id": "gateway-error-terminal",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "error",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "error_code": "error-marker-001",
+          "recoverable": false
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "error",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "gateway_error",
+        "contract_error": null
+      },
+      "notes": "A gateway error terminates without fabricating completion."
+    },
+    {
+      "id": "interrupt-after-delta",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "content-marker-partial"
+        },
+        {
+          "kind": "interrupt.request",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001"
+        },
+        {
+          "kind": "interrupt.result",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "status": "interrupted"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "streaming",
+          "interrupting",
+          "interrupted"
+        ],
+        "final_state": "interrupted",
+        "segments": [
+          "content-marker-partial"
+        ],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": true,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "interrupted_confirmed",
+        "contract_error": null
+      },
+      "notes": "Confirmed interruption settles the active turn only."
+    },
+    {
+      "id": "interrupt-abandons-open-tool",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "tool.start",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "tool_ref": "tool-marker-001"
+        },
+        {
+          "kind": "interrupt.request",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001"
+        },
+        {
+          "kind": "interrupt.result",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "status": "interrupted"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "tool_running",
+          "interrupting",
+          "interrupted"
+        ],
+        "final_state": "interrupted",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": true,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "interrupted_confirmed",
+        "contract_error": null
+      },
+      "notes": "Interruption may abandon an open tool without inventing tool completion."
+    },
+    {
+      "id": "interrupt-rejected-resumes",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "content-marker-001"
+        },
+        {
+          "kind": "interrupt.request",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001"
+        },
+        {
+          "kind": "interrupt.result",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "status": "rejected"
+        },
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "streaming",
+          "interrupting",
+          "streaming",
+          "completed"
+        ],
+        "final_state": "completed",
+        "segments": [
+          "content-marker-001",
+          "content-marker-final"
+        ],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "complete",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "completed",
+        "contract_error": null
+      },
+      "notes": "Rejected interruption does not fabricate a stop."
+    },
+    {
+      "id": "unknown-additive-ignored",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "unknown.additive",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "name": "telemetry-marker"
+        },
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "completed"
+        ],
+        "final_state": "completed",
+        "segments": [
+          "content-marker-final"
+        ],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "complete",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 1,
+        "decision": "completed",
+        "contract_error": null
+      },
+      "notes": "Unknown non-interactive events are ignored."
+    },
+    {
+      "id": "late-delta-after-complete",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        },
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "content_ref": "content-marker-late"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "completed",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "event_after_terminal",
+        "contract_error": "event_after_terminal"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "duplicate-completion",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        },
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "completed",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "event_after_terminal",
+        "contract_error": "event_after_terminal"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "ordinal-gap",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "content_ref": "content-marker-001"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "ordinal_not_monotonic",
+        "contract_error": "ordinal_not_monotonic"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "tool-complete-without-start",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "tool.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "tool_ref": "tool-marker-001"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "tool_complete_without_start",
+        "contract_error": "tool_complete_without_start"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "overlapping-tool-start",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "tool.start",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "tool_ref": "tool-marker-001"
+        },
+        {
+          "kind": "tool.start",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "tool_ref": "tool-marker-002"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "tool_running",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "tool_overlap",
+        "contract_error": "tool_overlap"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "complete-with-open-tool",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "tool.start",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "tool_ref": "tool-marker-001"
+        },
+        {
+          "kind": "message.complete",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 2,
+          "content_ref": "content-marker-final",
+          "status": "complete"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "tool_running",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "completion_with_open_tool",
+        "contract_error": "completion_with_open_tool"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "wrong-session-frame",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-002",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "content-marker-001"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "event_not_correlated",
+        "contract_error": "event_not_correlated"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "wrong-request-frame",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-002",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "content_ref": "content-marker-001"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "event_not_correlated",
+        "contract_error": "event_not_correlated"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "wrong-turn-frame",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "message.delta",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-002",
+          "ordinal": 1,
+          "content_ref": "content-marker-001"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "event_not_correlated",
+        "contract_error": "event_not_correlated"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "unknown-interactive-blocked",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "unknown.interactive",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "ordinal": 1,
+          "name": "secret.request"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "unsupported_interactive_event",
+        "contract_error": "unsupported_interactive_event"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    },
+    {
+      "id": "interrupt-result-without-request",
+      "initial_state": "idle",
+      "session_ref": "session-marker-001",
+      "request_ref": "request-marker-001",
+      "turn_ref": "turn-marker-001",
+      "events": [
+        {
+          "kind": "interrupt.result",
+          "session_ref": "session-marker-001",
+          "request_ref": "request-marker-001",
+          "turn_ref": "turn-marker-001",
+          "status": "interrupted"
+        }
+      ],
+      "expected": {
+        "trace": [
+          "idle",
+          "failed"
+        ],
+        "final_state": "failed",
+        "segments": [],
+        "open_tool": null,
+        "completed_tools": [],
+        "completion_status": "none",
+        "interrupted": false,
+        "recoverable": false,
+        "ignored_events": 0,
+        "decision": "interrupt_result_not_pending",
+        "contract_error": "interrupt_result_not_pending"
+      },
+      "notes": "Malformed ordering fails closed without retained content."
+    }
+  ],
+  "redaction": {
+    "contains_prompt_text": false,
+    "contains_transcript": false,
+    "contains_tool_arguments": false,
+    "contains_tool_results": false,
+    "contains_credentials": false,
+    "contains_hosts": false,
+    "contains_user_data": false,
+    "diagnostic_max_chars": 240
+  },
+  "accessibility": {
+    "applicable": false,
+    "reason": "Protocol fixture only; no UI behavior or accessibility surface is changed."
+  }
+}

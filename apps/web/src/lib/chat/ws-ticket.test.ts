@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CHAT_WEBSOCKET_PATH,
+  DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS,
   MAX_WS_TICKET_RESPONSE_BYTES,
   WS_TICKET_PATH,
   WsTicketError,
@@ -39,12 +40,36 @@ function deferred<T>(): {
   };
 }
 
+function neverSettlingCancelResponse(
+  contentType: string,
+  bodyBytes: Uint8Array = new Uint8Array(),
+  status = 200,
+): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (bodyBytes.byteLength > 0) controller.enqueue(bodyBytes);
+    },
+    cancel() {
+      cancelled = true;
+      return new Promise<void>(() => undefined);
+    },
+  });
+  return {
+    response: new Response(body, {
+      status,
+      headers: { "Content-Type": contentType },
+    }),
+    wasCancelled: () => cancelled,
+  };
+}
+
 describe("createWsTicketRequestBoundary", () => {
   it("sends only the fixed same-origin POST shape", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const fetcher: WsTicketFetch = async (input, init) => {
       calls.push({ input, init });
-      return jsonResponse({ ticket: opaqueTicket() });
+      return jsonResponse({ ticket: opaqueTicket(), ttl_seconds: 30 });
     };
     const boundary = createWsTicketRequestBoundary(fetcher);
     const signal = new AbortController().signal;
@@ -97,14 +122,76 @@ describe("createWsTicketRequestBoundary", () => {
     expect(bodyRead).toBe(false);
   });
 
+  it.each([401, 500])(
+    "bounds cancellation of a never-settling non-2xx body for status %s",
+    async (status) => {
+      const tracked = neverSettlingCancelResponse("application/json", undefined, status);
+      const boundary = createWsTicketRequestBoundary(async () => tracked.response);
+      const startedAt = Date.now();
+
+      await expect(
+        boundary({
+          method: "POST",
+          path: WS_TICKET_PATH,
+          credentials: "same-origin",
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toMatchObject({
+        code: status === 401 ? "authentication-failed" : "request-failed",
+        status,
+      });
+
+      expect(tracked.wasCancelled()).toBe(true);
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+    },
+  );
+
   it("rejects duplicate ticket keys instead of accepting a parser overwrite", async () => {
     const first = opaqueTicket();
     const second = opaqueTicket();
     const fetcher: WsTicketFetch = async () =>
-      new Response(`{"ticket":"${first}","ticket":"${second}"}`, {
-        headers: { "Content-Type": "application/json" },
-      });
+      new Response(
+        `{"ticket":"${first}","ticket":"${second}","ttl_seconds":30}`,
+        { headers: { "Content-Type": "application/json" } },
+      );
     const boundary = createWsTicketRequestBoundary(fetcher);
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "response-invalid" });
+  });
+
+  it("accepts the official fields in either JSON key order", async () => {
+    const ticket = opaqueTicket();
+    const boundary = createWsTicketRequestBoundary(
+      async () =>
+        new Response(`{"ttl_seconds":30,"ticket":"${ticket}"}`, {
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({ ticket });
+  });
+
+  it.each([
+    { ticket: opaqueTicket() },
+    { ticket: opaqueTicket(), ttl_seconds: 29 },
+    { ticket: opaqueTicket(), ttl_seconds: "30" },
+    { ticket: opaqueTicket(), ttl_seconds: 30, unexpected: true },
+  ])("rejects a ticket response outside the official 30-second shape", async (body) => {
+    const boundary = createWsTicketRequestBoundary(async () => jsonResponse(body));
 
     await expect(
       boundary({
@@ -139,6 +226,45 @@ describe("createWsTicketRequestBoundary", () => {
       }),
     ).rejects.toMatchObject({ code: "response-invalid" });
     expect(cancelled).toBe(true);
+  });
+
+  it("bounds a body.cancel that never settles after headers fail closed", async () => {
+    const tracked = neverSettlingCancelResponse("text/html");
+    const boundary = createWsTicketRequestBoundary(async () => tracked.response);
+    const startedAt = Date.now();
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "response-invalid" });
+
+    expect(tracked.wasCancelled()).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("bounds a reader.cancel that never settles after a streaming body fails closed", async () => {
+    const tracked = neverSettlingCancelResponse(
+      "application/json",
+      new Uint8Array(MAX_WS_TICKET_RESPONSE_BYTES + 1),
+    );
+    const boundary = createWsTicketRequestBoundary(async () => tracked.response);
+    const startedAt = Date.now();
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "response-invalid" });
+
+    expect(tracked.wasCancelled()).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 });
 
@@ -255,6 +381,55 @@ describe("createWsTicketClient", () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it("starts a fresh attempt when reconnect aborts the coalesced request before it settles", async () => {
+    const firstRequest = deferred<{ ticket: string }>();
+    const controller = new AbortController();
+    const request = vi.fn(async () => {
+      if (request.mock.calls.length === 1) {
+        return firstRequest.promise;
+      }
+      return { ticket: opaqueTicket() };
+    });
+    const connect = vi.fn(async () => "connected");
+    const client = createWsTicketClient({ request, connect });
+
+    const first = client.open(controller.signal);
+    await Promise.resolve();
+    controller.abort();
+
+    const replacement = client.retry();
+    await expect(replacement).resolves.toBe("connected");
+    await expect(first).rejects.toMatchObject({ code: "cancelled" });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenCalledTimes(1);
+
+    firstRequest.resolve({ ticket: opaqueTicket() });
+  });
+
+  it("closes an acquired connection when caller abort wins after upgrade resolution", async () => {
+    const caller = new AbortController();
+    const connection = { close: vi.fn() };
+    const connect = vi.fn(() => {
+      // Let the upgrade result settle, then abort before runAttempt's outer
+      // continuation reaches its post-upgrade adoption boundary.
+      queueMicrotask(() => queueMicrotask(() => caller.abort()));
+      return connection;
+    });
+    const client = createWsTicketClient({
+      request: async () => ({ ticket: opaqueTicket() }),
+      connect
+    });
+
+    const attempt = client.open(caller.signal);
+    await expect(attempt).rejects.toMatchObject({
+      code: "cancelled",
+      name: "AbortError"
+    });
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(connection.close).toHaveBeenCalledTimes(1);
+    expect(connection.close).toHaveBeenCalledWith(1000, "cancelled");
+  });
+
   it("requires an explicit retry after authentication failure and redacts arbitrary boundary errors", async () => {
     const rawErrorMarker = opaqueTicket();
     const freshTicket = opaqueTicket();
@@ -282,6 +457,61 @@ describe("createWsTicketClient", () => {
     await expect(client.retry()).resolves.toBe("connected");
     expect(request).toHaveBeenCalledTimes(2);
     expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a never-resolving request without a caller signal and permits retry after the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let requestCount = 0;
+      const request = vi.fn(async () => {
+        requestCount += 1;
+        if (requestCount === 1) return new Promise<{ ticket: string }>(() => undefined);
+        return { ticket: opaqueTicket() };
+      });
+      const client = createWsTicketClient({
+        request,
+        connect: async () => "connected",
+      });
+
+      const first = client.open();
+      void first.catch(() => undefined);
+      expect(request).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS);
+      await expect(first).rejects.toMatchObject({ code: "cancelled" });
+
+      await expect(client.retry()).resolves.toBe("connected");
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a connector that resolves after the internal deadline exactly once", async () => {
+    vi.useFakeTimers();
+    try {
+      const connectorGate = deferred<{ close: ReturnType<typeof vi.fn> }>();
+      const connection = { close: vi.fn() };
+      const connect = vi.fn(async () => connectorGate.promise);
+      const client = createWsTicketClient({
+        request: async () => ({ ticket: opaqueTicket() }),
+        connect,
+      });
+
+      const attempt = client.open();
+      void attempt.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(connect).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS);
+      await expect(attempt).rejects.toMatchObject({ code: "cancelled" });
+
+      connectorGate.resolve(connection);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(connection.close).toHaveBeenCalledTimes(1);
+      expect(connection.close).toHaveBeenCalledWith(1000, "cancelled");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not forward an abort reason that could contain sensitive input", async () => {

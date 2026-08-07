@@ -506,6 +506,38 @@ describe('TerminalRenderer', () => {
     expect(host.querySelector('[role="alert"]')).toBeInTheDocument();
   });
 
+  it('checks intrinsic write sizes before copying and accepts exact pending limits', async () => {
+    const copySet = vi.spyOn(Uint8Array.prototype, 'set');
+    try {
+      const oversizedRenderer = createTerminalRenderer({
+        adapter: createDeterministicAdapter().adapter,
+        maxPendingWriteBytes: 128
+      });
+      oversizedRenderer.write(new Uint8Array(129));
+      expect(oversizedRenderer.state).toBe('error');
+      expect(oversizedRenderer.error?.code).toBe('pending-output-limit');
+      expect(copySet).not.toHaveBeenCalled();
+
+      const exactRenderer = createTerminalRenderer({
+        adapter: createDeterministicAdapter().adapter,
+        maxPendingWriteBytes: 128
+      });
+      exactRenderer.write(new Uint8Array(128));
+      expect(exactRenderer.state).toBe('idle');
+      expect(copySet).toHaveBeenCalledTimes(1);
+
+      const readyRenderer = createTerminalRenderer({ adapter: createDeterministicAdapter().adapter });
+      await readyRenderer.mount(document.createElement('div'));
+      const callsBeforeOversizedReadyWrite = copySet.mock.calls.length;
+      readyRenderer.write(new Uint8Array(MAX_READY_WRITE_BUFFER_BYTES + 1));
+      expect(readyRenderer.state).toBe('error');
+      expect(readyRenderer.error?.code).toBe('pending-output-limit');
+      expect(copySet.mock.calls.length).toBe(callsBeforeOversizedReadyWrite);
+    } finally {
+      copySet.mockRestore();
+    }
+  });
+
   it('keeps the loading status visible until the adapter is ready', async () => {
     let resolveMount!: (terminal: MountedTerminal) => void;
     const backend: MountedTerminal = {
@@ -982,17 +1014,20 @@ describe('TerminalRenderer', () => {
     const runtime = renderer as unknown as {
       pasteQueue: unknown[];
       pasteQueueBytes: number;
+      activePasteBytes: number;
       activePaste: { request: PasteRequest | null } | null;
     };
     expect(confirmPaste).toHaveBeenCalledWith(expect.objectContaining({ text: maximumPayload }));
     expect(runtime.activePaste).not.toBeNull();
     expect(runtime.pasteQueue).toHaveLength(0);
-    expect(runtime.pasteQueueBytes).toBe(new TextEncoder().encode(maximumPayload).byteLength);
+    expect(runtime.pasteQueueBytes).toBe(0);
+    expect(runtime.activePasteBytes).toBe(new TextEncoder().encode(maximumPayload).byteLength);
 
     await renderer.mount(secondHost);
     expect(runtime.activePaste).toBeNull();
     expect(runtime.pasteQueue).toHaveLength(0);
     expect(runtime.pasteQueueBytes).toBe(0);
+    expect(runtime.activePasteBytes).toBe(0);
 
     resolveStalled(true);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1031,10 +1066,13 @@ describe('TerminalRenderer', () => {
     const runtime = renderer as unknown as {
       pasteQueue: unknown[];
       pasteQueueBytes: number;
+      activePasteBytes: number;
       activePaste: unknown;
     };
     expect(runtime.pasteQueue).toHaveLength(MAX_PENDING_PASTE_COUNT - 1);
     expect(runtime.pasteQueueBytes).toBeGreaterThan(0);
+    expect(runtime.activePasteBytes).toBeGreaterThan(0);
+    expect(runtime.activePasteBytes + runtime.pasteQueueBytes).toBeLessThanOrEqual(MAX_PENDING_PASTE_BYTES);
 
     clipboardPaste(host, `${MAX_PENDING_PASTE_COUNT}\n`);
     await Promise.resolve();
@@ -1069,10 +1107,45 @@ describe('TerminalRenderer', () => {
     await aggregateRenderer.mount(aggregateHost);
     clipboardPaste(aggregateHost, oneByteUnderLimit);
     clipboardPaste(aggregateHost, '\n');
-    await vi.waitFor(() => expect((aggregateRenderer as unknown as { pasteQueueBytes: number }).pasteQueueBytes).toBe(MAX_PENDING_PASTE_BYTES));
+    const aggregateRuntime = aggregateRenderer as unknown as {
+      pasteQueueBytes: number;
+      activePasteBytes: number;
+    };
+    await vi.waitFor(() => expect(
+      aggregateRuntime.activePasteBytes + aggregateRuntime.pasteQueueBytes
+    ).toBe(MAX_PENDING_PASTE_BYTES));
+    expect(aggregateRuntime.activePasteBytes).toBeGreaterThan(0);
+    expect(aggregateRuntime.pasteQueueBytes).toBe(1);
     clipboardPaste(aggregateHost, 'x\n');
-    expect((aggregateRenderer as unknown as { pasteQueueBytes: number }).pasteQueueBytes).toBe(MAX_PENDING_PASTE_BYTES);
+    expect(aggregateRuntime.activePasteBytes + aggregateRuntime.pasteQueueBytes).toBe(MAX_PENDING_PASTE_BYTES);
     resolveFirst(false);
+    await vi.waitFor(() => expect(
+      aggregateRuntime.activePasteBytes + aggregateRuntime.pasteQueueBytes
+    ).toBe(0));
+
+    // A rejected confirmation releases its retained bytes before the next
+    // exact-limit payload is admitted.
+    const rejectConfirmation = vi.fn()
+      .mockRejectedValueOnce(new Error('synthetic denial'))
+      .mockResolvedValue(true);
+    const rejectionRenderer = createTerminalRenderer({
+      adapter: createDeterministicAdapter().adapter,
+      confirmPaste: rejectConfirmation
+    });
+    const rejectionHost = document.createElement('div');
+    await rejectionRenderer.mount(rejectionHost);
+    clipboardPaste(rejectionHost, atLimit);
+    const rejectionRuntime = rejectionRenderer as unknown as {
+      pasteQueueBytes: number;
+      activePasteBytes: number;
+    };
+    await vi.waitFor(() => expect(rejectConfirmation).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(
+      rejectionRuntime.activePasteBytes + rejectionRuntime.pasteQueueBytes
+    ).toBe(0));
+    clipboardPaste(rejectionHost, atLimit);
+    await vi.waitFor(() => expect(rejectConfirmation).toHaveBeenCalledTimes(2));
+    rejectionRenderer.dispose();
     aggregateRenderer.dispose();
   });
 
@@ -1549,6 +1622,37 @@ describe('TerminalRenderer', () => {
     mounted.dispose();
     expect(host).toContainElement(existingContent);
     expect(host.style.height).toBe('91px');
+  });
+
+  it('restores preexisting W-Term classes after direct disposal toggles them', async () => {
+    moduleMocks.MockGhosttyCore.load.mockResolvedValue(new moduleMocks.MockGhosttyCore());
+    const host = document.createElement('div');
+    host.className = 'shell-host wterm cursor-blink focused has-scrollback';
+    document.body.appendChild(host);
+
+    const mounted = await createWTermGhosttyAdapter().mount(host, {
+      initialSize: { cols: 80, rows: 24 },
+      scrollbackLimitBytes: 64 * 1024,
+      onInput: vi.fn()
+    });
+    host.classList.remove('wterm', 'cursor-blink', 'focused', 'has-scrollback');
+    mounted.dispose();
+
+    expect(host).toHaveClass('shell-host', 'wterm', 'cursor-blink', 'focused', 'has-scrollback');
+  });
+
+  it('restores preexisting W-Term classes through renderer remount disposal', async () => {
+    moduleMocks.MockGhosttyCore.load.mockResolvedValue(new moduleMocks.MockGhosttyCore());
+    const host = document.createElement('div');
+    host.className = 'shell-host wterm cursor-blink focused has-scrollback';
+    document.body.appendChild(host);
+
+    const renderer = createTerminalRenderer();
+    await renderer.mount(host);
+    host.classList.remove('wterm', 'cursor-blink', 'focused', 'has-scrollback');
+    renderer.dispose();
+
+    expect(host).toHaveClass('shell-host', 'wterm', 'cursor-blink', 'focused', 'has-scrollback');
   });
 
   it('rejects missing or malformed benchmark commit provenance', () => {
