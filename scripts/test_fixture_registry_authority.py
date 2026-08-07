@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 from typing import Any
@@ -302,6 +303,24 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         )
         helper.chmod(0o755)
         return helper
+
+    @staticmethod
+    def assert_process_exited(pid_file: Path) -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not pid_file.exists():
+            time.sleep(0.01)
+        if not pid_file.exists():
+            raise AssertionError("bounded Git child did not publish its pid")
+        pid = int(pid_file.read_text(encoding="ascii"))
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                return
+            time.sleep(0.01)
+        raise AssertionError(f"bounded Git child {pid} survived cleanup")
 
     @staticmethod
     def assert_success(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -605,6 +624,21 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             verifier._git(object_repo, "cat-file", "blob", blob_oid)
         self.assertLess(time.monotonic() - started, 5)
 
+    def test_corrupt_loose_object_under_existing_oid_fails_fsck(self) -> None:
+        object_temporary, object_repo = self.copy_object_repo()
+        self.addCleanup(object_temporary.cleanup)
+        object_oid = subprocess.check_output(
+            ["git", "-C", str(object_repo), "hash-object", "-w", "--stdin"],
+            input=b"unreachable trusted-object\n",
+        ).decode("ascii").strip()
+        object_path = object_repo / ".git/objects" / object_oid[:2] / object_oid[2:]
+        decoded = zlib.decompress(object_path.read_bytes())
+        corrupted = decoded[:-1] + bytes((decoded[-1] ^ 1,))
+        object_path.chmod(0o600)
+        object_path.write_bytes(zlib.compress(corrupted))
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
     def test_oversized_stderr_is_bounded_without_deadlock(self) -> None:
         helper = self.make_oversized_git_helper()
         started = time.monotonic()
@@ -620,6 +654,45 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             with self.assertRaises(verifier.AuthorityError):
                 verifier._authority_introduction_commit(self.object_repo)
         self.assertLess(time.monotonic() - started, 5)
+
+    def test_no_output_timeout_terminates_and_reaps_child(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-timeout-")
+        self.addCleanup(temporary.cleanup)
+        pid_file = Path(temporary.name) / "pid"
+        script = (
+            "import os, pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii'); "
+            "time.sleep(30)"
+        )
+        started = time.monotonic()
+        with mock.patch.object(verifier, "GIT_TIMEOUT_SECONDS", 0.2):
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._run_bounded_git(
+                    [sys.executable, "-c", script, str(pid_file)],
+                    verifier._strict_git_environment(),
+                )
+        self.assertLess(time.monotonic() - started, 5)
+        self.assert_process_exited(pid_file)
+
+    def test_simultaneous_stdout_and_stderr_saturation_cleans_child(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-dual-output-")
+        self.addCleanup(temporary.cleanup)
+        pid_file = Path(temporary.name) / "pid"
+        script = (
+            "import os, pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii'); "
+            "chunk=b'x'*65536; "
+            "[ (os.write(1, chunk), os.write(2, chunk)) for _ in range(32) ]; "
+            "time.sleep(30)"
+        )
+        started = time.monotonic()
+        with self.assertRaises(verifier.AuthorityError):
+            verifier._run_bounded_git(
+                [sys.executable, "-c", script, str(pid_file)],
+                verifier._strict_git_environment(),
+            )
+        self.assertLess(time.monotonic() - started, 5)
+        self.assert_process_exited(pid_file)
 
     def test_authority_relationship_is_external_and_exact(self) -> None:
         trusted = verifier.load_trusted_authority(self.object_repo)
@@ -711,6 +784,24 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             with self.assertRaises(verifier.AuthorityError):
                 verifier._read_checkout_file(Path(temporary), ".")
 
+    def test_different_valid_source_commit_is_rejected(self) -> None:
+        object_repo, checkout = self.make_synthetic_authority_repo()
+        synthetic_source = subprocess.check_output(
+            ["git", "-C", str(object_repo), "rev-parse", "HEAD^"],
+            text=True,
+        ).strip()
+        self.assertNotEqual(synthetic_source, verifier.APPROVED_SOURCE_COMMIT)
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(object_repo), "cat-file", "-t", synthetic_source],
+                check=False,
+                capture_output=True,
+                text=True,
+            ).stdout,
+            "commit\n",
+        )
+        self.assert_pair_failure(checkout, object_repo=object_repo)
+
     def test_warning_suppressed_grafts_cannot_forge_ancestry(self) -> None:
         object_repo, checkout = self.make_synthetic_authority_repo(grafted_parent=True)
         self.assert_pair_failure(checkout, object_repo=object_repo)
@@ -795,6 +886,72 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 nested.symlink_to(outside)
                 with self.copy_checkout() as checkout_temporary:
                     self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_source_replacements_after_descriptor_walk_do_not_race_snapshot(self) -> None:
+        variants = ("fanout", "pack", "ref", "config", "metadata")
+        for variant in variants:
+            with self.subTest(variant=variant):
+                object_temporary, object_repo = self.copy_object_repo()
+                self.addCleanup(object_temporary.cleanup)
+                git_dir = object_repo / ".git"
+                outside = object_repo.parent / f"race-outside-{variant}"
+                if variant == "fanout":
+                    target = git_dir / "objects" / verifier.APPROVED_SOURCE_COMMIT[:2] / verifier.APPROVED_SOURCE_COMMIT[2:]
+                    self.assertTrue(target.is_file())
+                    backup = target.with_name(target.name + ".saved")
+                    outside.write_bytes(b"not a Git object")
+                    mutate = lambda: (target.rename(backup), target.symlink_to(outside))
+                elif variant == "pack":
+                    subprocess.run(
+                        ["git", "-C", str(object_repo), "repack", "-ad"],
+                        check=True,
+                        capture_output=True,
+                    )
+                    subprocess.run(
+                        ["git", "-C", str(object_repo), "prune-packed"],
+                        check=True,
+                        capture_output=True,
+                    )
+                    target = git_dir / "objects" / "pack"
+                    self.assertTrue(target.is_dir())
+                    backup = target.with_name("pack.saved")
+                    outside.mkdir()
+                    mutate = lambda: (target.rename(backup), target.symlink_to(outside, target_is_directory=True))
+                elif variant == "ref":
+                    ref_name = subprocess.check_output(
+                        ["git", "-C", str(object_repo), "symbolic-ref", "HEAD"],
+                        text=True,
+                    ).strip()
+                    target = git_dir / ref_name
+                    self.assertTrue(target.is_file())
+                    backup = target.with_name(target.name + ".saved")
+                    outside.write_text("0" * 40 + "\n", encoding="ascii")
+                    mutate = lambda: (target.rename(backup), target.symlink_to(outside))
+                elif variant == "config":
+                    target = git_dir / "config"
+                    backup = target.with_name("config.saved")
+                    outside.write_text("[core]\n\tbare = true\n", encoding="ascii")
+                    mutate = lambda: (target.rename(backup), target.symlink_to(outside))
+                else:
+                    target = git_dir / "HEAD"
+                    backup = target.with_name("HEAD.saved")
+                    outside.write_text("ref: refs/heads/missing\n", encoding="ascii")
+                    mutate = lambda: (target.rename(backup), target.symlink_to(outside))
+
+                real_walk = verifier._walk_plain_tree
+                mutated = False
+
+                def race_walk(path: Path) -> None:
+                    nonlocal mutated
+                    real_walk(path)
+                    if not mutated:
+                        mutate()
+                        mutated = True
+
+                with mock.patch.object(verifier, "_walk_plain_tree", side_effect=race_walk):
+                    trusted = verifier.load_trusted_authority(object_repo)
+                self.assertTrue(mutated)
+                self.assertEqual(trusted["source_commit"], verifier.APPROVED_SOURCE_COMMIT)
 
     def test_local_include_promisor_and_redirect_config_is_rejected(self) -> None:
         configurations = (

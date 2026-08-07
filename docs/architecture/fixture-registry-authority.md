@@ -35,9 +35,11 @@ and the new multi-artifact authority is introduced at:
 `scripts/fixture_registry_authority.v2.json`
 
 The new document explicitly declares
-`hermternal.fixture-registry-authority.v2`. It is anchored to the external
-predecessor `abb6754bddd1cf18927b0172ed9fa3456235b035`, not to its own
-implementation commit and not to the scanner-preparation change.
+`hermternal.fixture-registry-authority.v2`. The implementation accepts only the
+approved external predecessor
+`abb6754bddd1cf18927b0172ed9fa3456235b035`; it does not accept an arbitrary
+self-consistent ancestor. The pin is not the verifier's implementation commit
+and is not the scanner-preparation change.
 
 ## Active v2 loading rule
 
@@ -47,8 +49,9 @@ checkout copy as its authority source. It reads the v2 bytes from the local Git
 object database, validates the schema and key order, and requires all of the
 following:
 
-- the declared predecessor is a distinct ancestor of the v2 authority
-  introduction commit;
+- the declared predecessor exactly equals the approved external commit
+  `abb6754bddd1cf18927b0172ed9fa3456235b035` and is a distinct ancestor of the
+  v2 authority introduction commit;
 - the four declared paths resolve at that predecessor to the recorded Git blob
   object IDs;
 - each predecessor object has the recorded byte length and SHA-256 digest; and
@@ -60,12 +63,18 @@ but it is not selected as the active v2 trust root. The v2 path selection is
 therefore explicit and cannot silently fall back to a schema-incompatible v1
 record.
 
-The object-repository input is a canonical absolute plain checkout. The
-verifier rejects a symlinked `.git`, a linked-worktree `.git` file, external or
-symlinked `gitdir`/`commondir` metadata, and symlinked object/ref/config
-boundaries. It descriptor-walks the complete `objects` and `refs` trees with
-`O_NOFOLLOW`, so nested fanout, pack, and ref symlinks cannot redirect reads.
-It also rejects local `info/grafts`, shallow metadata,
+The object-repository input is a canonical absolute plain checkout. Before
+running any path-based Git command, the verifier opens the caller's root and
+`.git` directory with no-follow descriptors and copies the complete Git
+metadata tree into a private mode-700 temporary snapshot. The copy is
+chunked, rejects symlinks/non-regular entries, and checks source metadata before
+and after each copy. Git is invoked only against that snapshot, so a concurrent
+rename or symlink replacement of the caller's `.git`, nested fanout/pack/ref
+path, config, or metadata cannot redirect a later read. The snapshot also
+uses a descriptor walk of the complete `objects` and `refs` trees with
+`O_NOFOLLOW` as a second structural check.
+
+The verifier rejects local `info/grafts`, shallow metadata,
 `objects/info/alternates`, `objects/info/http-alternates`, replacement refs,
 partial-clone/promisor settings, and local include or URL-redirection config.
 A disposable plain clone is therefore required when the caller is operating
@@ -77,13 +86,16 @@ not a claim about production deployment security.
 
 Checkout reads use descriptor-relative `O_NOFOLLOW | O_NONBLOCK` opens and
 regular-file descriptor checks. They stop after `MAX_GIT_OUTPUT` bytes, so a
-FIFO or oversized replacement fails promptly. Git stdout and stderr are also
-collected incrementally; either stream reaching the cap terminates or kills
-the child and drains both pipes without retaining unbounded output. Timeouts,
-non-zero exits, and pipe failures use the same bounded error path. The
-declared `source_commit` must be a Git `commit` object, not an annotated tag
-object. Path resolution, Git executable, config, and subprocess failures are
-converted to the same bounded redacted authority error.
+FIFO or oversized replacement fails promptly. Before consuming any authority
+or artifact object, the private snapshot runs bounded `git fsck --full
+--strict` to verify compressed object contents match their OIDs; a corrupted
+loose object under an existing filename is rejected. Git stdout and stderr are
+also collected incrementally; either stream reaching the cap terminates or
+kills the child and drains both pipes without retaining unbounded output.
+Timeouts, no-output hangs, non-zero exits, and pipe failures use the same
+bounded error path. The declared `source_commit` must be a Git `commit` object,
+not an annotated tag object. Path resolution, Git executable, config, and
+subprocess failures are converted to the same bounded redacted authority error.
 
 Run the standalone verifier from a plain checkout with:
 
@@ -126,15 +138,17 @@ verification:
   validator, and validator-test files without creating a replacement Git
   repository or authority commit.
 
-The same normal and optimized suite also rejects warning-suppressed grafts,
-shallow histories, empty local object stores that use alternates, replacement
-refs, nested fanout/pack/ref symlinks, symlinked or linked Git metadata, local
-include/promisor/redirect configuration, annotated-tag source objects, FIFO
-artifact paths, hostile Git `PATH`/global config, and checkout/object-root
-resolution failures. It bounds oversized blob, stderr, and history output in
-both interpreter modes without waiting for the helper process to finish. The
-FIFO and output-cap cases assert prompt bounded exit rather than relying on a
-post-timeout kill.
+The same normal and optimized suite also rejects a different valid synthetic
+source commit, warning-suppressed grafts, shallow histories, empty local object
+stores that use alternates, replacement refs, nested fanout/pack/ref symlinks,
+symlinked or linked Git metadata, local include/promisor/redirect
+configuration, annotated-tag source objects, FIFO artifact paths, hostile Git
+`PATH`/global config, checkout/object-root resolution failures, source-path
+replacement races after descriptor validation, and corrupted loose objects
+under existing OIDs. It bounds oversized blob, stderr, and history output in
+both interpreter modes, terminates no-output timeouts, and cleans up a child
+saturating stdout and stderr simultaneously. The FIFO and output-cap cases
+assert prompt bounded exit rather than relying on a post-timeout kill.
 
 The real Git object database remains the source of truth throughout these
 mutations. A local replacement authority therefore cannot authorize a matching

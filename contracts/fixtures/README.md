@@ -44,22 +44,32 @@ the legacy path readable and places the new multi-artifact authority at
 
 The standalone v2 verifier loads that separate path from its immutable Git
 introduction object. It can read the legacy v1 shape for migration checks, but
-it never treats the legacy path as a v2 fallback. The v2 trust root remains
-independent of the scanner-preparation change; after this authority is merged,
-that preparation must rebase onto the merged external predecessor before
-regenerating the index, baseline, and next authority.
+it never treats the legacy path as a v2 fallback. The v2 trust root accepts
+only the approved external predecessor
+`abb6754bddd1cf18927b0172ed9fa3456235b035`; an arbitrary self-consistent
+ancestor is rejected. The trust root remains independent of the
+scanner-preparation change; after this authority is merged, that preparation
+must rebase onto the merged external predecessor before regenerating the index,
+baseline, and next authority.
 
 The verifier's object repository must be a canonical absolute plain checkout,
 not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
-`commondir`, object, ref, or config boundaries. It descriptor-walks the full
-`objects` and `refs` trees with no-follow descriptors, so nested fanout, pack,
-and ref symlinks fail closed before Git can redirect an object or ref read. It
-also fails closed on local grafts, shallow metadata, alternates and HTTP
-alternates, replacement refs, partial-clone/promisor settings, and local
-include or URL-redirection config. Git is invoked only through validated
-`/usr/bin/git` with fixed helper `PATH` `/usr/bin:/bin`; inherited Git
-redirects and system/global config are removed. This is a trusted-host
-boundary for synthetic local evidence, not a production attestation. Checkout
+`commondir`, object, ref, or config boundaries. Before any path-based Git
+command, it opens the caller root and `.git` directory with no-follow
+descriptors and copies the complete Git metadata tree into a private mode-700
+temporary snapshot. The copy is chunked, rejects symlinks/non-regular entries,
+and checks source metadata before and after each copy. Git then runs only
+against that snapshot, so concurrent rename or symlink replacement of nested
+fanout/pack/ref paths, config, or metadata cannot redirect reads. The snapshot
+also descriptor-walks the full `objects` and `refs` trees with no-follow
+descriptors as a second structural check. It fails closed on local grafts,
+shallow metadata, alternates and HTTP alternates, replacement refs,
+partial-clone/promisor settings, and local include or URL-redirection config.
+Git is invoked only through validated `/usr/bin/git` with fixed helper `PATH`
+`/usr/bin:/bin`; inherited Git redirects and system/global config are removed.
+This is a trusted-host boundary for synthetic local evidence, not a production
+attestation. Before object reads, bounded `git fsck --full --strict` verifies
+compressed object contents against their OIDs, including loose objects. Checkout
 artifact reads are bounded nonblocking regular-file reads. Git stdout and
 stderr are streamed into separate bounded buffers; reaching the cap terminates
 or kills the child and drains both pipes. All normal and optimized failures

@@ -21,9 +21,11 @@ import re
 import selectors
 import stat
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 
 LEGACY_AUTHORITY_PATH = "scripts/fixture_registry_authority.json"
@@ -42,6 +44,10 @@ LEGACY_BASELINE_PATH = "contracts/fixtures/validator/validation-baseline.json"
 AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.json"
 AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
 AUTHORITY_ROLE = "bootstrap_predecessor"
+# The bootstrap is approved only for this reviewed external predecessor. An
+# ancestry check alone would let a self-consistent but unreviewed commit become
+# the authority source.
+APPROVED_SOURCE_COMMIT = "abb6754bddd1cf18927b0172ed9fa3456235b035"
 EXPECTED_ARTIFACT_PATHS = (
     "contracts/fixtures/index.json",
     "contracts/fixtures/validator/test_validate.py",
@@ -61,6 +67,7 @@ RECORD_KEYS = ("path", "blob_oid", "sha256", "size_bytes")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_GIT_OUTPUT = 512 * 1024
+GIT_TIMEOUT_SECONDS = 10.0
 MAX_ERROR_LENGTH = 220
 SAFE_ERROR_MESSAGE = "fixture registry authority rejected"
 TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
@@ -307,16 +314,129 @@ def _walk_plain_tree(path: Path) -> None:
                 pass
 
 
-def _validate_object_repository(object_repo: Path) -> Path:
-    """Accept only a plain checkout with a local, self-contained Git database."""
+def _file_stat_fingerprint(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _copy_regular_from_fd(source_fd: int, destination: Path) -> None:
+    """Copy one already-open regular file without reopening its source path."""
+
+    before = os.fstat(source_fd)
+    destination_fd: int | None = None
+    try:
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        while True:
+            chunk = os.read(source_fd, 64 * 1024)
+            if not chunk:
+                break
+            remaining = memoryview(chunk)
+            while remaining:
+                written = os.write(destination_fd, remaining)
+                _require(written > 0)
+                remaining = remaining[written:]
+        _require(_file_stat_fingerprint(before) == _file_stat_fingerprint(os.fstat(source_fd)))
+    except AuthorityError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise AuthorityError() from exc
+    finally:
+        if destination_fd is not None:
+            try:
+                os.close(destination_fd)
+            except OSError:
+                pass
+
+
+def _copy_git_tree(source_fd: int, destination: Path) -> None:
+    """Create a private regular-file snapshot from an open Git directory fd."""
+
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock
+    before = os.fstat(source_fd)
+    try:
+        os.mkdir(destination, 0o700)
+        for name in os.listdir(source_fd):
+            _require(name not in ("", ".", ".."))
+            child_fd: int | None = None
+            child_destination = destination / name
+            try:
+                child_fd = os.open(name, flags, dir_fd=source_fd)
+                mode = os.fstat(child_fd).st_mode
+                if stat.S_ISDIR(mode):
+                    _copy_git_tree(child_fd, child_destination)
+                else:
+                    _require(stat.S_ISREG(mode))
+                    _copy_regular_from_fd(child_fd, child_destination)
+            finally:
+                if child_fd is not None:
+                    os.close(child_fd)
+        _require(_file_stat_fingerprint(before) == _file_stat_fingerprint(os.fstat(source_fd)))
+    except AuthorityError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise AuthorityError() from exc
+
+
+def _snapshot_object_repository(object_repo: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    """Snapshot the caller repository before any path-based Git command runs."""
 
     root = _canonical_directory(object_repo)
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock | directory_flag
+    root_fd: int | None = None
+    git_fd: int | None = None
+    temporary: tempfile.TemporaryDirectory[str] | None = None
+    try:
+        root_fd = os.open(root, flags)
+        git_fd = os.open(".git", flags, dir_fd=root_fd)
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-snapshot-")
+        snapshot_root = Path(temporary.name) / "repo"
+        os.mkdir(snapshot_root, 0o700)
+        _copy_git_tree(git_fd, snapshot_root / ".git")
+        return temporary, snapshot_root
+    except AuthorityError:
+        if temporary is not None:
+            temporary.cleanup()
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        if temporary is not None:
+            temporary.cleanup()
+        raise AuthorityError() from exc
+    finally:
+        for descriptor in (git_fd, root_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+
+def _validate_snapshot_repository(snapshot_root: Path) -> Path:
+    """Validate and use only the private snapshot, never the caller paths."""
+
+    root = _canonical_directory(snapshot_root)
     git_dir = root / ".git"
-    # A .git file is a linked worktree's external gitdir pointer. A symlinked
-    # marker or any commondir/gitdir indirection would move authority reads
-    # outside this checkout, so the verifier deliberately accepts plain clones
-    # only. This also makes an empty local object store plus alternates fail
-    # before Git can borrow an external object.
     _require_plain_directory(git_dir)
     for relative in GIT_METADATA_FILES:
         path = git_dir / relative
@@ -336,11 +456,10 @@ def _validate_object_repository(object_repo: Path) -> Path:
     for relative in ("gitdir", "commondir", "config.worktree"):
         _require_missing(git_dir / relative)
     _validate_local_config(_read_bounded_regular_path(git_dir / "config", MAX_GIT_OUTPUT))
-    # Git resolves fanout objects, pack indexes, and nested refs below these
-    # directories. Walk them through descriptors so a nested symlink cannot
-    # redirect an otherwise valid object or ref read after this preflight.
     _walk_plain_tree(git_dir / "objects")
     _walk_plain_tree(git_dir / "refs")
+    # Verify every copied object before trusting any authority or artifact blob.
+    _git(root, "fsck", "--full", "--strict", "--no-reflogs", "--no-progress")
 
     _require(_git(root, "rev-parse", "--show-toplevel") == f"{root}\n".encode("utf-8"))
     _require(_git(root, "rev-parse", "--is-inside-work-tree") == b"true\n")
@@ -348,6 +467,17 @@ def _validate_object_repository(object_repo: Path) -> Path:
     _require(_git(root, "rev-parse", "--is-shallow-repository") == b"false\n")
     _require(_git(root, "for-each-ref", "--format=%(refname)", "refs/replace") == b"")
     return root
+
+
+@contextmanager
+def _validate_object_repository(object_repo: Path) -> Iterator[Path]:
+    """Validate a private snapshot so later Git opens cannot race the caller."""
+
+    temporary, snapshot_root = _snapshot_object_repository(object_repo)
+    try:
+        yield _validate_snapshot_repository(snapshot_root)
+    finally:
+        temporary.cleanup()
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -506,7 +636,7 @@ def _run_bounded_git(
                 raise AuthorityError()
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, label)
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -609,6 +739,7 @@ def _validate_manifest(authority: dict[str, Any]) -> tuple[str, list[dict[str, A
     _require(authority["role"] == AUTHORITY_ROLE)
     source_commit = authority["source_commit"]
     _require(type(source_commit) is str and HEX40.fullmatch(source_commit) is not None)
+    _require(source_commit == APPROVED_SOURCE_COMMIT)
     _require(authority["canonicalization"] == "exact_bytes")
     _require(authority["synthetic_only"] is True and authority["live_claim"] is False)
     manifest = authority["artifact_manifest"]
@@ -664,19 +795,19 @@ def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
     """Load and verify the v2 authority from immutable Git history."""
 
     try:
-        object_repo = _validate_object_repository(object_repo)
-        introduction = _authority_introduction_commit(object_repo)
-        authority_bytes = _git(object_repo, "show", f"{introduction}:{AUTHORITY_PATH}")
-        authority = _parse_json(authority_bytes)
-        source_commit, records = _validate_manifest(authority)
-        _require(source_commit != introduction)
-        _require(_git(object_repo, "cat-file", "-t", source_commit) == b"commit\n")
-        _require(_git(object_repo, "merge-base", "--is-ancestor", source_commit, introduction) == b"")
-        for record in records:
-            blob_oid, data = _git_blob(object_repo, source_commit, record["path"])
-            _require(blob_oid == record["blob_oid"])
-            _require(len(data) == record["size_bytes"])
-            _require(hashlib.sha256(data).hexdigest() == record["sha256"])
+        with _validate_object_repository(object_repo) as isolated_repo:
+            introduction = _authority_introduction_commit(isolated_repo)
+            authority_bytes = _git(isolated_repo, "show", f"{introduction}:{AUTHORITY_PATH}")
+            authority = _parse_json(authority_bytes)
+            source_commit, records = _validate_manifest(authority)
+            _require(source_commit != introduction)
+            _require(_git(isolated_repo, "cat-file", "-t", source_commit) == b"commit\n")
+            _require(_git(isolated_repo, "merge-base", "--is-ancestor", source_commit, introduction) == b"")
+            for record in records:
+                blob_oid, data = _git_blob(isolated_repo, source_commit, record["path"])
+                _require(blob_oid == record["blob_oid"])
+                _require(len(data) == record["size_bytes"])
+                _require(hashlib.sha256(data).hexdigest() == record["sha256"])
         return {
             "authority_path": AUTHORITY_PATH,
             "schema": AUTHORITY_SCHEMA,
