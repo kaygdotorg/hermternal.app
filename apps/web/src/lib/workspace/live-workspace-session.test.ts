@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { BrowserChatOptions } from '$lib/chat/browser-chat';
+import { createBrowserChatTransport, type BrowserChatOptions } from '$lib/chat/browser-chat';
 import {
   JsonRpcChatError,
   type JsonRpcChatEvent,
   type JsonRpcChatRequest,
   type JsonRpcCompletionEvent,
   type JsonRpcChatTransport,
-  type JsonRpcConnectionState
+  type JsonRpcConnectionState,
+  type JsonRpcWebSocket
 } from '$lib/chat/json-rpc-chat';
 import type { LiveMessage, LiveRestTransport, LiveSession, SessionMessages } from '$lib/transport';
 import { LiveWorkspaceSession } from './live-workspace-session';
@@ -35,6 +36,52 @@ function sessionMessages(messages: LiveMessage[]): SessionMessages {
   };
 }
 
+class BrowserChatSocket implements JsonRpcWebSocket {
+  onopen: ((event?: unknown) => void) | null = null;
+  onmessage: ((event: { readonly data: unknown }) => void) | null = null;
+  onerror: ((event?: unknown) => void) | null = null;
+  onclose: ((event?: { readonly code?: number; readonly reason?: string }) => void) | null = null;
+  readonly sent: string[] = [];
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  close(code?: number, reason?: string): void {
+    this.onclose?.({ code, reason });
+  }
+
+  emitOpen(): void {
+    this.onopen?.();
+  }
+
+  emitGatewayReady(): void {
+    this.onmessage?.({
+      data: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'event',
+        params: {
+          type: 'gateway.ready',
+          payload: { skin: 'official', change_events: true }
+        }
+      })
+    });
+  }
+
+  emitResponse(id: string): void {
+    this.onmessage?.({ data: JSON.stringify({ jsonrpc: '2.0', id, result: { restored: true } }) });
+  }
+}
+
+async function waitForSocket(sockets: readonly BrowserChatSocket[]): Promise<BrowserChatSocket> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const socket = sockets[0];
+    if (socket) return socket;
+    await flush();
+  }
+  throw new Error('browser chat socket was not created');
+}
+
 function createRest(messages: LiveMessage[] = []): LiveRestTransport {
   return {
     getProviders: vi.fn(),
@@ -54,6 +101,50 @@ function createDeferred<T>() {
     reject = nextReject;
   });
   return { promise, resolve, reject };
+}
+
+function createUnauthorizedChatFactory() {
+  const transports: JsonRpcChatTransport[] = [];
+  const createChat = vi.fn((options: BrowserChatOptions) => {
+    const transport = createBrowserChatTransport({
+      ...options,
+      fetch: async () => new Response(null, { status: 401 }),
+      createSocket: () => {
+        throw new Error('unauthorized ticket must not start a WebSocket upgrade');
+      }
+    });
+    transports.push(transport);
+    return transport;
+  });
+  return { createChat, transports };
+}
+
+function createReconnectUnauthorizedChatFactory() {
+  const sockets: BrowserChatSocket[] = [];
+  const transports: JsonRpcChatTransport[] = [];
+  let ticketRequests = 0;
+  const createChat = vi.fn((options: BrowserChatOptions) => {
+    const transport = createBrowserChatTransport({
+      ...options,
+      fetch: async () => {
+        ticketRequests += 1;
+        return ticketRequests === 1
+          ? new Response('{"ticket":"fresh-ticket-1","ttl_seconds":30}', {
+              status: 200,
+              headers: { 'content-type': 'application/json' }
+            })
+          : new Response(null, { status: 401 });
+      },
+      createSocket: () => {
+        const socket = new BrowserChatSocket();
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    transports.push(transport);
+    return transport;
+  });
+  return { createChat, sockets, transports };
 }
 
 function createChatHarness() {
@@ -267,6 +358,77 @@ describe('LiveWorkspaceSession', () => {
 
     chat.changeState({ status: 'auth_required', generation: 1 });
 
+    expect(session.current.state).toBe('permanent-error');
+  });
+
+  it('preserves a real HTTP 401 connect rejection during initialize', async () => {
+    const rest = createRest();
+    const chat = createUnauthorizedChatFactory();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(chat.transports[0]?.state.status).toBe('auth_required');
+    expect(session.current.state).toBe('permanent-error');
+  });
+
+  it('preserves a real HTTP 401 connect rejection during session selection', async () => {
+    const rest = createRest();
+    const chat = createUnauthorizedChatFactory();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.selectSession('session-1');
+
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(chat.transports[0]?.state.status).toBe('auth_required');
+    expect(session.current.state).toBe('permanent-error');
+  });
+
+  it('preserves a real HTTP 401 connect rejection during empty-session creation', async () => {
+    const rest = createRest([]);
+    vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+    const chat = createUnauthorizedChatFactory();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+    await session.createSession();
+
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(chat.transports[0]?.state.status).toBe('auth_required');
+    expect(session.current.state).toBe('permanent-error');
+  });
+
+  it('keeps a genuine generic connect rejection retryable', async () => {
+    const rest = createRest([]);
+    vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+    const chat = createChatHarness();
+    vi.mocked(chat.transport.connect).mockRejectedValue(new JsonRpcChatError('connection-failed'));
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+    await session.createSession();
+
+    expect(session.current.state).toBe('retryable-error');
+  });
+
+  it('preserves a real HTTP 401 reconnect rejection as permanent workspace state', async () => {
+    const rest = createRest();
+    const chat = createReconnectUnauthorizedChatFactory();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    const initialization = session.initialize();
+    const socket = await waitForSocket(chat.sockets);
+    socket.emitOpen();
+    socket.emitGatewayReady();
+    await flush();
+    const resumeFrame = JSON.parse(socket.sent[0] ?? '{}') as { id?: string };
+    if (!resumeFrame.id) throw new Error('session resume frame was not sent');
+    socket.emitResponse(resumeFrame.id);
+    await initialization;
+
+    await session.retryConnection();
+
+    expect(chat.transports[0]?.state.status).toBe('auth_required');
     expect(session.current.state).toBe('permanent-error');
   });
 

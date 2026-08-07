@@ -118,6 +118,28 @@ describe("createBrowserChatTransport", () => {
     expect(socket.close).toHaveBeenCalledWith(1000, "cancelled");
   });
 
+  it("closes exactly once when a synchronous factory aborts before listener setup", async () => {
+    const controller = new AbortController();
+    const socket = new FakeWebSocket();
+    const transport = createBrowserChatTransport({
+      fetch: async () =>
+        new Response('{"ticket":"fresh-ticket-1","ttl_seconds":30}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      createSocket: () => {
+        controller.abort();
+        return socket;
+      },
+    });
+
+    await expect(transport.connect(controller.signal)).rejects.toMatchObject({
+      code: "aborted",
+    });
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(socket.close).toHaveBeenCalledWith(1000, "cancelled");
+  });
+
   it("clears an unconsumed prepared socket on abort so the next connect is fresh", async () => {
     const sockets = [new FakeWebSocket(), new FakeWebSocket()];
     let transport: ReturnType<typeof createBrowserChatTransport>;

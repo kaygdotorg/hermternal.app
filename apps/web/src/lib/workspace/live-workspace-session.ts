@@ -220,9 +220,9 @@ export class LiveWorkspaceSession {
       await chat.reconnect();
       if (!this.ownsChat(generation, chat, sessionId)) return;
       await this.refreshMessages(sessionId, generation, chat);
-    } catch {
+    } catch (error) {
       if (!this.ownsChat(generation, chat, sessionId)) return;
-      this.publish({ ...this.snapshot, state: 'retryable-error' });
+      this.publishLoadFailure(error, generation);
     }
   }
 
@@ -478,6 +478,19 @@ export class LiveWorkspaceSession {
 
   private publishLoadFailure(error: unknown, generation: number): void {
     if (!this.isCurrent(generation) || isAbort(error)) return;
+    // `connect()` reports a terminal auth/incompatibility state through its
+    // callback before rejecting. The surrounding load catch must not downgrade
+    // that state to a generic retryable error; this also preserves the barrier
+    // if a transport rejects before its state callback runs.
+    if (
+      this.snapshot.state === 'permanent-error' ||
+      (error instanceof JsonRpcChatError && error.code === 'authentication-required')
+    ) {
+      if (this.snapshot.state !== 'permanent-error') {
+        this.publish({ ...this.snapshot, state: 'permanent-error' });
+      }
+      return;
+    }
     this.publish({ ...this.snapshot, state: 'retryable-error' });
   }
 

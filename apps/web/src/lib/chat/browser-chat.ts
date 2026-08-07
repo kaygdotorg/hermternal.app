@@ -113,6 +113,13 @@ export function createBrowserChatTransport(
       unlinkSocketAbort.set(socket, () =>
         signal.removeEventListener("abort", closeOnAbort),
       );
+      // A synchronous factory can abort between returning the socket and this
+      // listener setup. Close immediately and remove the no-longer-needed
+      // ownership entry; the wrapper still absorbs any late cleanup call.
+      if (signal.aborted) {
+        releaseSocketAbort(socket);
+        socket.close(1000, "cancelled");
+      }
       return socket;
     },
   });
