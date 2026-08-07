@@ -60,16 +60,52 @@ but it is not selected as the active v2 trust root. The v2 path selection is
 therefore explicit and cannot silently fall back to a schema-incompatible v1
 record.
 
-Run the standalone verifier with:
+The object-repository input is a canonical absolute plain checkout. The
+verifier rejects a symlinked `.git`, a linked-worktree `.git` file, external or
+symlinked `gitdir`/`commondir` metadata, and symlinked object/ref/config
+boundaries. It also rejects local `info/grafts`, shallow metadata,
+`objects/info/alternates`, `objects/info/http-alternates`, replacement refs,
+partial-clone/promisor settings, and local include or URL-redirection config.
+A disposable plain clone is therefore required when the caller is operating
+from a Git worktree. The host's `/usr/bin/git` is checked as an absolute,
+regular executable; Git helper lookup is fixed to `/usr/bin:/bin`, while
+system/global config and inherited `GIT_*` redirect variables are removed.
+These host paths are a trusted-host boundary for this synthetic fixture proof,
+not a claim about production deployment security.
+
+Checkout reads use descriptor-relative `O_NOFOLLOW | O_NONBLOCK` opens and
+regular-file descriptor checks. They stop after `MAX_GIT_OUTPUT` bytes, so a
+FIFO or oversized replacement fails promptly. The declared `source_commit`
+must be a Git `commit` object, not an annotated tag object. Path resolution,
+Git executable, config, and subprocess failures are converted to the same
+bounded redacted authority error.
+
+Run the standalone verifier from a plain checkout with:
 
 ```sh
 python3 scripts/verify_fixture_registry_authority.py
 python3 -O scripts/verify_fixture_registry_authority.py
 ```
 
+When the source and checkout roots differ, pass canonical absolute paths:
+
+```sh
+python3 scripts/verify_fixture_registry_authority.py \\
+  --repo-root /absolute/plain/checkout \\
+  --checkout-root /absolute/fixture/checkout
+```
+
 Both modes emit one bounded JSON line. A failure is redacted, has
 `"live_claim":false`, and does not echo paths, arguments, keys, values, or a
-traceback. No command fetches a remote or opens a network connection.
+traceback. No command fetches a remote or opens a network connection. Run the
+focused regression suite in both interpreter modes:
+
+```sh
+python3 scripts/test_fixture_registry_authority.py
+python3 -O scripts/test_fixture_registry_authority.py
+python3 -m py_compile scripts/verify_fixture_registry_authority.py scripts/test_fixture_registry_authority.py
+python3 -O -m py_compile scripts/verify_fixture_registry_authority.py scripts/test_fixture_registry_authority.py
+```
 
 ## Rewrite resistance
 
@@ -84,6 +120,13 @@ verification:
 - rejects coordinated local rewrites of the v2 authority, index, baseline,
   validator, and validator-test files without creating a replacement Git
   repository or authority commit.
+
+The same normal and optimized suite also rejects warning-suppressed grafts,
+shallow histories, empty local object stores that use alternates, replacement
+refs, symlinked or linked Git metadata, local include/promisor/redirect
+configuration, annotated-tag source objects, FIFO artifact paths, hostile Git
+`PATH`/global config, and checkout/object-root resolution failures. The FIFO
+case asserts prompt bounded exit rather than relying on a post-timeout kill.
 
 The real Git object database remains the source of truth throughout these
 mutations. A local replacement authority therefore cannot authorize a matching

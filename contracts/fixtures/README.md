@@ -49,6 +49,18 @@ independent of the scanner-preparation change; after this authority is merged,
 that preparation must rebase onto the merged external predecessor before
 regenerating the index, baseline, and next authority.
 
+The verifier's object repository must be a canonical absolute plain checkout,
+not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
+`commondir`, object, ref, or config boundaries. It fails closed on local
+grafts, shallow metadata, alternates and HTTP alternates, replacement refs,
+partial-clone/promisor settings, and local include or URL-redirection config.
+Git is invoked only through validated `/usr/bin/git` with fixed helper `PATH`
+`/usr/bin:/bin`; inherited Git redirects and system/global config are removed.
+This is a trusted-host boundary for synthetic local evidence, not a production
+attestation. Checkout artifact reads are bounded nonblocking regular-file
+reads, and all normal and optimized failures remain one redacted
+`live_claim:false` JSON line.
+
 ## C-19 aggregate registry
 
 [`index.json`](index.json) is the language-neutral registry consumed by later

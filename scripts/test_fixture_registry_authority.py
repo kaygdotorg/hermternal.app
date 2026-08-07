@@ -46,15 +46,39 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             verifier.AUTHORITY_PATH,
             *verifier.EXPECTED_ARTIFACT_PATHS,
         )
+        cls.object_repo_temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-class-repo-")
+        cls.object_repo = (Path(cls.object_repo_temporary.name) / "repo").resolve()
+        completed = subprocess.run(
+            ["git", "clone", "--no-hardlinks", "--quiet", str(ROOT), str(cls.object_repo)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            cls.object_repo_temporary.cleanup()
+            raise AssertionError(completed.stderr or completed.stdout)
+        cls.addClassCleanup(cls.object_repo_temporary.cleanup)
 
     def run_cli(
         self,
         checkout_root: Path,
         *,
         optimized: bool,
-        object_repo: Path = ROOT,
+        object_repo: Path | None = None,
         environment: dict[str, str] | None = None,
+        timeout: float = 30,
     ) -> subprocess.CompletedProcess[str]:
+        if object_repo is None:
+            object_repo = self.object_repo
+        try:
+            checkout_argument = checkout_root.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            checkout_argument = checkout_root
+        try:
+            object_argument = object_repo.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            object_argument = object_repo
         command = [sys.executable]
         if optimized:
             command.append("-O")
@@ -62,9 +86,9 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             [
                 str(SCRIPT),
                 "--repo-root",
-                str(object_repo),
+                str(object_argument),
                 "--checkout-root",
-                str(checkout_root),
+                str(checkout_argument),
             ]
         )
         child_environment = os.environ.copy()
@@ -77,6 +101,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             capture_output=True,
             text=True,
             env=child_environment,
+            timeout=timeout,
         )
 
     def copy_object_repo(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
@@ -103,6 +128,152 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
         return temporary
+
+    def assert_pair_failure(
+        self,
+        checkout: Path,
+        *,
+        object_repo: Path | None = None,
+        environment: dict[str, str] | None = None,
+        timeout: float = 30,
+    ) -> None:
+        try:
+            normal = self.run_cli(
+                checkout,
+                optimized=False,
+                object_repo=object_repo,
+                environment=environment,
+                timeout=timeout,
+            )
+            optimized = self.run_cli(
+                checkout,
+                optimized=True,
+                object_repo=object_repo,
+                environment=environment,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f"authority verifier exceeded {timeout}s: {exc}")
+        self.assertEqual(normal.stdout, optimized.stdout)
+        self.assert_bounded_failure(normal)
+        self.assert_bounded_failure(optimized)
+
+    def make_synthetic_authority_repo(
+        self,
+        *,
+        annotated_tag: bool = False,
+        grafted_parent: bool = False,
+    ) -> tuple[Path, Path]:
+        """Create a local-only authority history for ancestry/type regressions."""
+
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-synthetic-")
+        self.addCleanup(temporary.cleanup)
+        repo = Path(temporary.name) / "repo"
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+        for key, value in (
+            ("user.name", "fixture-tests"),
+            ("user.email", "fixture-tests@example.invalid"),
+        ):
+            subprocess.run(
+                ["git", "-C", str(repo), "config", key, value],
+                check=True,
+                capture_output=True,
+            )
+        source_commit = self.authority["source_commit"]
+        for relative_path in verifier.EXPECTED_ARTIFACT_PATHS:
+            data = subprocess.check_output(
+                ["git", "-C", str(self.object_repo), "show", f"{source_commit}:{relative_path}"],
+            )
+            destination = repo / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", *verifier.EXPECTED_ARTIFACT_PATHS],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--quiet", "-m", "source artifacts"],
+            check=True,
+            capture_output=True,
+        )
+        source_commit = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        records: list[dict[str, Any]] = []
+        for relative_path in verifier.EXPECTED_ARTIFACT_PATHS:
+            data = (repo / relative_path).read_bytes()
+            blob_oid = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", f"HEAD:{relative_path}"],
+                text=True,
+            ).strip()
+            records.append(
+                {
+                    "path": relative_path,
+                    "blob_oid": blob_oid,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size_bytes": len(data),
+                }
+            )
+        authority = dict(self.authority)
+        authority["source_commit"] = source_commit
+        authority["artifact_manifest"] = records
+        if annotated_tag:
+            subprocess.run(
+                ["git", "-C", str(repo), "tag", "-a", "source-tag", source_commit, "-m", "source tag"],
+                check=True,
+                capture_output=True,
+            )
+            authority["source_commit"] = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "refs/tags/source-tag"],
+                text=True,
+            ).strip()
+        authority_path = repo / verifier.AUTHORITY_PATH
+        authority_path.parent.mkdir(parents=True, exist_ok=True)
+        authority_path.write_text(json.dumps(authority, indent=2) + "\n", encoding="utf-8")
+        if grafted_parent:
+            subprocess.run(
+                ["git", "-C", str(repo), "checkout", "--quiet", "--orphan", "authority"],
+                check=True,
+                capture_output=True,
+            )
+            for child in repo.iterdir():
+                if child.name != ".git":
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+            authority_path.parent.mkdir(parents=True, exist_ok=True)
+            authority_path.write_text(json.dumps(authority, indent=2) + "\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", verifier.AUTHORITY_PATH],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--quiet", "-m", "authority"],
+            check=True,
+            capture_output=True,
+        )
+        introduction = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        if grafted_parent:
+            grafts = repo / ".git/info/grafts"
+            grafts.parent.mkdir(parents=True, exist_ok=True)
+            grafts.write_text(f"{introduction} {source_commit}\n", encoding="ascii")
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "advice.graftFileDeprecated", "false"],
+                check=True,
+                capture_output=True,
+            )
+        checkout_temporary = self.copy_checkout()
+        checkout = Path(checkout_temporary.name)
+        (checkout / verifier.AUTHORITY_PATH).write_bytes(authority_path.read_bytes())
+        self.addCleanup(checkout_temporary.cleanup)
+        return repo, checkout
 
     @staticmethod
     def assert_success(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -177,7 +348,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
     def test_v2_path_selection_ignores_legacy_path_rewrites(self) -> None:
         with self.copy_checkout() as temporary:
-            checkout = Path(temporary)
+            checkout = Path(temporary).resolve()
             legacy_path = checkout / verifier.LEGACY_AUTHORITY_PATH
             legacy_path.write_bytes(b'{"schema":"hermternal.fixture-registry-authority.v1"}\n')
             normal = self.run_cli(checkout, optimized=False)
@@ -188,7 +359,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
     def test_v2_path_missing_fails_in_both_modes(self) -> None:
         with self.copy_checkout() as temporary:
-            checkout = Path(temporary)
+            checkout = Path(temporary).resolve()
             (checkout / verifier.AUTHORITY_PATH).unlink()
             normal = self.run_cli(checkout, optimized=False)
             optimized = self.run_cli(checkout, optimized=True)
@@ -198,11 +369,12 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
     def test_v2_schema_rewrite_fails_in_both_modes(self) -> None:
         with self.copy_checkout() as temporary:
-            checkout = Path(temporary)
+            checkout = Path(temporary).resolve()
             authority_path = checkout / verifier.AUTHORITY_PATH
             authority = json.loads(authority_path.read_text(encoding="utf-8"))
             authority["schema"] = verifier.LEGACY_AUTHORITY_SCHEMA
-            authority_path.write_text(json.dumps(authority, indent=2) + "\\n", encoding="utf-8")
+            authority_path.write_text(json.dumps(authority, indent=2) + "\n", encoding="utf-8")
+            self.assertEqual(json.loads(authority_path.read_text(encoding="utf-8"))["schema"], verifier.LEGACY_AUTHORITY_SCHEMA)
             normal = self.run_cli(checkout, optimized=False)
             optimized = self.run_cli(checkout, optimized=True)
             self.assertEqual(normal.stdout, optimized.stdout)
@@ -210,9 +382,11 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             self.assert_bounded_failure(optimized)
 
     def test_git_blob_rejects_non_blob_object_types(self) -> None:
-        with mock.patch.object(verifier, "_git", side_effect=(b"a" * 40 + b"\\n", b"tree\\n")):
+        with mock.patch.object(verifier, "_git", side_effect=(b"a" * 40 + b"\n", b"tree\n")) as git_mock:
             with self.assertRaises(verifier.AuthorityError):
                 verifier._git_blob(ROOT, "0" * 40, "contracts/fixtures/index.json")
+        self.assertEqual(git_mock.call_args_list[0].args[1:], ("rev-parse", "0" * 40 + ":contracts/fixtures/index.json"))
+        self.assertEqual(git_mock.call_args_list[1].args[1:], ("cat-file", "-t", "a" * 40))
 
     def test_strict_git_environment_removes_hostile_overrides(self) -> None:
         hostile = {
@@ -236,7 +410,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
         def capture_environment(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
             command = args[0] if args else kwargs.get("args")
-            if isinstance(command, list) and command and command[0] == "git":
+            if isinstance(command, list) and command and command[0] == str(verifier.TRUSTED_GIT_EXECUTABLE):
                 captured.update(kwargs["env"])
             return real_run(*args, **kwargs)
 
@@ -244,9 +418,14 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             mock.patch.dict(os.environ, hostile, clear=False),
             mock.patch.object(verifier.subprocess, "run", side_effect=capture_environment),
         ):
-            self.assertTrue(verifier.verify_checkout(ROOT, ROOT)["ok"])
+            self.assertTrue(verifier.verify_checkout(ROOT, self.object_repo)["ok"])
         self.assertEqual(captured["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual(captured["GIT_NO_LAZY_FETCH"], "1")
+        self.assertEqual(captured["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(captured["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(captured["GIT_CONFIG_SYSTEM"], os.devnull)
+        self.assertEqual(captured["GIT_CONFIG_COUNT"], "0")
+        self.assertEqual(captured["PATH"], verifier.TRUSTED_HELPER_PATH)
         for variable in hostile:
             if variable not in {"GIT_NO_REPLACE_OBJECTS", "GIT_NO_LAZY_FETCH"}:
                 self.assertNotIn(variable, captured)
@@ -337,22 +516,10 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
     def test_hostile_git_redirects_replace_refs_and_promisor_are_ignored(self) -> None:
         with self.copy_checkout() as temporary:
-            object_temporary, object_repo = self.copy_object_repo()
-            self.addCleanup(object_temporary.cleanup)
-            checkout = Path(temporary)
-            decoy = object_repo.parent / "decoy"
+            checkout = Path(temporary).resolve()
+            decoy = checkout.parent / "decoy"
             subprocess.run(
                 ["git", "init", "--quiet", str(decoy)],
-                cwd=ROOT,
-                check=True,
-                capture_output=True,
-            )
-            authority_commit = subprocess.check_output(
-                ["git", "-C", str(object_repo), "rev-parse", "HEAD"],
-                text=True,
-            ).strip()
-            subprocess.run(
-                ["git", "-C", str(object_repo), "replace", authority_commit, "0f3a05ff5468fb9a3bd238cf788d746ec383e01a"],
                 cwd=ROOT,
                 check=True,
                 capture_output=True,
@@ -365,7 +532,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 "GIT_NAMESPACE": "decoy",
                 "GIT_WORK_TREE": str(decoy),
                 "GIT_INDEX_FILE": str(decoy / ".git" / "index"),
-                "GIT_CEILING_DIRECTORIES": str(object_repo.parent),
+                "GIT_CEILING_DIRECTORIES": str(checkout.parent),
                 "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
                 "GIT_REPLACE_REF_BASE": "refs/replace",
                 "GIT_PROMISOR_REMOTE": "hostile-promisor",
@@ -376,15 +543,15 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 "GIT_CONFIG_VALUE_0": "true",
                 "GIT_CONFIG_PARAMETERS": "'core.bare=true'",
             }
-            normal = self.run_cli(checkout, optimized=False, object_repo=object_repo, environment=hostile)
-            optimized = self.run_cli(checkout, optimized=True, object_repo=object_repo, environment=hostile)
+            normal = self.run_cli(checkout, optimized=False, environment=hostile)
+            optimized = self.run_cli(checkout, optimized=True, environment=hostile)
             self.assertEqual(normal.stdout, optimized.stdout)
             self.assert_success(normal)
             self.assert_success(optimized)
 
     def test_checkout_reads_are_bounded_and_reject_parent_symlinks(self) -> None:
         with self.copy_checkout() as temporary:
-            checkout = Path(temporary)
+            checkout = Path(temporary).resolve()
             oversized = checkout / "contracts/fixtures/index.json"
             oversized.write_bytes(b"x" * (verifier.MAX_GIT_OUTPUT + 1))
             with self.assertRaises(verifier.AuthorityError):
@@ -399,12 +566,12 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 verifier._read_checkout_file(checkout, "contracts/fixtures/index.json")
 
     def test_authority_relationship_is_external_and_exact(self) -> None:
-        trusted = verifier.load_trusted_authority(ROOT)
+        trusted = verifier.load_trusted_authority(self.object_repo)
         authority_commit = trusted["authority_commit"]
         source_commit = trusted["source_commit"]
         self.assertNotEqual(authority_commit, source_commit)
         subprocess.run(
-            ["git", "-C", str(ROOT), "merge-base", "--is-ancestor", source_commit, authority_commit],
+            ["git", "-C", str(self.object_repo), "merge-base", "--is-ancestor", source_commit, authority_commit],
             check=True,
             capture_output=True,
         )
@@ -416,7 +583,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             [
                 "git",
                 "-C",
-                str(ROOT),
+                str(self.object_repo),
                 "log",
                 "--format=%H",
                 "--diff-filter=A",
@@ -430,10 +597,10 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         self.assertEqual(introduced, [authority_commit])
         for record in trusted["artifact_manifest"]:
             object_bytes = subprocess.check_output(
-                ["git", "-C", str(ROOT), "show", f"{source_commit}:{record['path']}"],
+                ["git", "-C", str(self.object_repo), "show", f"{source_commit}:{record['path']}"],
             )
             blob_oid = subprocess.check_output(
-                ["git", "-C", str(ROOT), "rev-parse", f"{source_commit}:{record['path']}"],
+                ["git", "-C", str(self.object_repo), "rev-parse", f"{source_commit}:{record['path']}"],
                 text=True,
             ).strip()
             self.assertEqual(blob_oid, record["blob_oid"])
@@ -442,7 +609,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
     def test_checkout_only_authority_rewrite_fails_in_both_modes(self) -> None:
         with self.copy_checkout() as temporary:
-            checkout = Path(temporary)
+            checkout = Path(temporary).resolve()
             authority_path = checkout / verifier.AUTHORITY_PATH
             authority_path.write_bytes(authority_path.read_bytes() + b"\n")
             normal = self.run_cli(checkout, optimized=False)
@@ -453,7 +620,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
     def test_checkout_only_registry_rewrite_fails_in_both_modes(self) -> None:
         with self.copy_checkout() as temporary:
-            checkout = Path(temporary)
+            checkout = Path(temporary).resolve()
             index_path = checkout / "contracts/fixtures/index.json"
             index_path.write_bytes(index_path.read_bytes() + b"\n")
             normal = self.run_cli(checkout, optimized=False)
@@ -464,7 +631,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
     def test_coordinated_local_rewrites_cannot_replace_git_authority(self) -> None:
         with self.copy_checkout() as temporary:
-            checkout = Path(temporary)
+            checkout = Path(temporary).resolve()
             for relative_path in self.checkout_paths:
                 target = checkout / relative_path
                 target.write_bytes(target.read_bytes() + b"\n# local rewrite\n")
@@ -474,6 +641,167 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             self.assertEqual(normal.stdout, optimized.stdout)
             self.assert_bounded_failure(normal)
             self.assert_bounded_failure(optimized)
+
+    def test_fifo_checkout_read_exits_bounded_in_both_modes(self) -> None:
+        with self.copy_checkout() as temporary:
+            checkout = Path(temporary).resolve()
+            target = checkout / "contracts/fixtures/index.json"
+            target.unlink()
+            os.mkfifo(target)
+            self.assert_pair_failure(checkout, timeout=5)
+
+    def test_empty_checkout_helper_path_is_fail_closed(self) -> None:
+        with self.copy_checkout() as temporary:
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._read_checkout_file(Path(temporary), ".")
+
+    def test_warning_suppressed_grafts_cannot_forge_ancestry(self) -> None:
+        object_repo, checkout = self.make_synthetic_authority_repo(grafted_parent=True)
+        self.assert_pair_failure(checkout, object_repo=object_repo)
+
+    def test_empty_local_objects_with_alternates_are_rejected(self) -> None:
+        external_temporary, external = self.copy_object_repo()
+        self.addCleanup(external_temporary.cleanup)
+        local_temporary, local = self.copy_object_repo()
+        self.addCleanup(local_temporary.cleanup)
+        objects = local / ".git/objects"
+        shutil.rmtree(objects)
+        (objects / "info").mkdir(parents=True)
+        (objects / "info/alternates").write_text(
+            str(external / ".git/objects") + "\n", encoding="utf-8"
+        )
+        with self.copy_checkout() as temporary:
+            self.assert_pair_failure(Path(temporary), object_repo=local)
+
+    def test_shallow_repository_is_rejected_in_both_modes(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-shallow-")
+        self.addCleanup(temporary.cleanup)
+        object_repo = Path(temporary.name) / "repo"
+        subprocess.run(
+            ["git", "clone", "--no-local", "--depth", "1", "--quiet", ROOT.as_uri(), str(object_repo)],
+            check=True,
+            capture_output=True,
+        )
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_symlinked_and_external_git_boundaries_are_rejected(self) -> None:
+        variants: list[str] = ["git-marker", "commondir", "gitdir"]
+        for variant in variants:
+            with self.subTest(variant=variant):
+                object_temporary, object_repo = self.copy_object_repo()
+                self.addCleanup(object_temporary.cleanup)
+                marker = object_repo / ".git"
+                if variant == "git-marker":
+                    real_marker = object_repo / ".git-real"
+                    marker.rename(real_marker)
+                    marker.symlink_to(real_marker, target_is_directory=True)
+                elif variant == "commondir":
+                    (marker / "commondir").write_text("/tmp/external-common\n", encoding="ascii")
+                else:
+                    (marker / "gitdir").symlink_to(object_repo.parent / "external-gitdir")
+                with self.copy_checkout() as checkout_temporary:
+                    self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_linked_worktree_gitdir_is_rejected(self) -> None:
+        base_temporary, base_repo = self.copy_object_repo()
+        self.addCleanup(base_temporary.cleanup)
+        linked_repo = base_repo.parent / "linked-worktree"
+        subprocess.run(
+            ["git", "-C", str(base_repo), "worktree", "add", "--quiet", "--detach", str(linked_repo), "HEAD"],
+            check=True,
+            capture_output=True,
+        )
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=linked_repo)
+
+    def test_local_include_promisor_and_redirect_config_is_rejected(self) -> None:
+        configurations = (
+            "[include]\n    path = /tmp/hostile-include\n",
+            '[remote "origin"]\n    promisor = true\n',
+            "[extensions]\n    partialClone = origin\n",
+            '[url "file:///tmp/hostile/"]\n    insteadOf = origin\n',
+        )
+        for index, configuration in enumerate(configurations):
+            with self.subTest(index=index):
+                object_temporary, object_repo = self.copy_object_repo()
+                self.addCleanup(object_temporary.cleanup)
+                with (object_repo / ".git/config").open("a", encoding="utf-8") as config:
+                    config.write(configuration)
+                with self.copy_checkout() as checkout_temporary:
+                    self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_local_replacement_refs_are_rejected_not_followed(self) -> None:
+        object_temporary, object_repo = self.copy_object_repo()
+        self.addCleanup(object_temporary.cleanup)
+        authority_commit = subprocess.check_output(
+            ["git", "-C", str(object_repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+        subprocess.run(
+            ["git", "-C", str(object_repo), "replace", authority_commit, "0f3a05ff5468fb9a3bd238cf788d746ec383e01a"],
+            check=True,
+            capture_output=True,
+        )
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_annotated_tag_source_commit_is_rejected_in_both_modes(self) -> None:
+        object_repo, checkout = self.make_synthetic_authority_repo(annotated_tag=True)
+        self.assert_pair_failure(checkout, object_repo=object_repo)
+
+    def test_hostile_path_and_global_config_cannot_intercept_git(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-hostile-host-")
+        self.addCleanup(temporary.cleanup)
+        host = Path(temporary.name)
+        shim_dir = host / "bin"
+        shim_dir.mkdir()
+        marker = host / "shim-used"
+        shim = shim_dir / "git"
+        shim.write_text(f"#!/bin/sh\nprintf used > {marker}\nexit 99\n", encoding="utf-8")
+        shim.chmod(0o755)
+        global_config = host / "global.gitconfig"
+        global_config.write_text("[core]\n    bare = true\n", encoding="utf-8")
+        hostile = {
+            "PATH": str(shim_dir),
+            "HOME": str(host),
+            "GIT_CONFIG_GLOBAL": str(global_config),
+            "GIT_CONFIG_SYSTEM": str(global_config),
+            "GIT_CONFIG_NOSYSTEM": "0",
+        }
+        with self.copy_checkout() as checkout_temporary:
+            checkout = Path(checkout_temporary)
+            normal = self.run_cli(checkout, optimized=False, environment=hostile)
+            optimized = self.run_cli(checkout, optimized=True, environment=hostile)
+            self.assertEqual(normal.stdout, optimized.stdout)
+            self.assert_success(normal)
+            self.assert_success(optimized)
+        self.assertFalse(marker.exists())
+
+    def test_checkout_and_object_root_resolution_failures_are_bounded(self) -> None:
+        with self.copy_checkout() as checkout_temporary:
+            checkout = Path(checkout_temporary)
+            checkout_loop_temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-checkout-loop-")
+            self.addCleanup(checkout_loop_temporary.cleanup)
+            checkout_loop = Path(checkout_loop_temporary.name) / "loop"
+            checkout_loop_target = Path(checkout_loop_temporary.name) / "loop-target"
+            checkout_loop.symlink_to(checkout_loop_target, target_is_directory=True)
+            checkout_loop_target.symlink_to(checkout_loop, target_is_directory=True)
+            self.assert_pair_failure(checkout_loop, object_repo=self.object_repo)
+        object_loop_temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-object-loop-")
+        self.addCleanup(object_loop_temporary.cleanup)
+        object_loop = Path(object_loop_temporary.name) / "loop"
+        object_loop_target = Path(object_loop_temporary.name) / "loop-target"
+        object_loop.symlink_to(object_loop_target, target_is_directory=True)
+        object_loop_target.symlink_to(object_loop, target_is_directory=True)
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_loop)
+
+    def test_resolution_oserror_runtimeerror_and_valueerror_are_authority_errors(self) -> None:
+        for failure in (OSError("resolve"), RuntimeError("resolve"), ValueError("resolve")):
+            with self.subTest(failure=type(failure).__name__):
+                with mock.patch.object(Path, "resolve", side_effect=failure):
+                    with self.assertRaises(verifier.AuthorityError):
+                        verifier._read_checkout_file(ROOT, "contracts/fixtures/index.json")
 
     def test_unknown_cli_arguments_are_bounded(self) -> None:
         completed = subprocess.run(
