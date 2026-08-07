@@ -463,6 +463,9 @@ describe("PTY transport", () => {
     await expect(harness.transport.connect(ATTACH_INPUT)).rejects.toMatchObject({
       code: "attachment-superseded",
     });
+    await expect(
+      harness.transport.connect({ ...ATTACH_INPUT, detachedAtMs: 1 }),
+    ).rejects.toMatchObject({ code: "attachment-superseded" });
     expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
     expect(harness.sockets).toHaveLength(1);
   });
@@ -483,6 +486,107 @@ describe("PTY transport", () => {
     });
     expect(harness.ticketProvider).toHaveBeenCalledTimes(2);
     expect(harness.sockets).toHaveLength(2);
+  });
+
+  it("preserves attach retention when an adapter reports error without close", async () => {
+    const attached = makeHarness();
+    const socket = await open(attached);
+    socket.onerror?.();
+    expect(attached.transport.state.status).toBe("detached");
+    await reattach(attached);
+    expect(attached.ticketProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears a failed pre-open attempt before synchronous retry observers run", async () => {
+    let harness!: Harness;
+    let retry: Promise<void> | undefined;
+    let duplicateRetry: Promise<void> | undefined;
+    harness = makeHarness({
+      onStateChange: (state) => {
+        if (state.status === "failed" && !retry) {
+          retry = harness.transport.connect(ATTACH_INPUT);
+          duplicateRetry = harness.transport.connect(ATTACH_INPUT);
+        }
+      },
+    });
+
+    const first = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    const failedSocket = harness.sockets[0]!;
+    failedSocket.onerror?.();
+
+    await expect(first).rejects.toMatchObject({ code: "connection-failed" });
+    expect(retry).toBeDefined();
+    expect(duplicateRetry).toBe(retry);
+    await flush();
+    const replacement = harness.sockets[1]!;
+    replacement.open();
+    await retry;
+    expect(harness.transport.state.status).toBe("attached");
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps pre-open close and error failures out of detach retention", async () => {
+    for (const signal of ["error", "close"] as const) {
+      const harness = makeHarness();
+      const pending = harness.transport.connect(ATTACH_INPUT);
+      await flush();
+      const socket = harness.sockets[0]!;
+      if (signal === "error") socket.onerror?.();
+      else socket.closeFromServer(1006);
+
+      await expect(pending).rejects.toMatchObject({ code: "connection-failed" });
+      expect(harness.transport.state.status).toBe("failed");
+      await expect(harness.transport.reconnect()).rejects.toMatchObject({
+        code: "invalid-attachment",
+      });
+      expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("does not let detached expiry evidence cross a replacement PTY identity", async () => {
+    let now = 100_000;
+    const harness = makeHarness({ now: () => now });
+    await open(harness);
+    harness.transport.detach();
+    now += PTY_DETACH_RETENTION_MS + 1;
+    const replacementInput: PtyConnectionInput = {
+      sessionId: "session-current-replacement",
+      attach: ATTACH_INPUT.attach,
+      processIdentity: "process-current-replacement",
+    };
+
+    const pending = harness.transport.connect(replacementInput);
+    await flush();
+    const replacement = harness.sockets[1]!;
+    replacement.open();
+    await pending;
+    expect(harness.transport.state).toMatchObject({
+      status: "attached",
+      sessionId: replacementInput.sessionId,
+      processIdentity: replacementInput.processIdentity,
+    });
+  });
+
+  it("does not let a reentrant Close observer overwrite a replacement connection", async () => {
+    let harness!: Harness;
+    let replacementPending: Promise<void> | undefined;
+    harness = makeHarness({
+      onStateChange: (state) => {
+        if (state.status === "closing" && !replacementPending) {
+          replacementPending = harness.transport.connect(ATTACH_INPUT);
+        }
+      },
+    });
+
+    await open(harness);
+    harness.transport.close();
+    expect(harness.transport.state.status).toBe("closing");
+    await flush();
+    const replacement = harness.sockets[1]!;
+    replacement.open();
+    await replacementPending;
+    expect(harness.transport.state.status).toBe("attached");
   });
 
   it("reattaches attach mode after network loss but never legacy mode", async () => {
@@ -538,6 +642,22 @@ describe("PTY transport", () => {
     expect(legacy.transport.state.status).toBe("exited");
     expect(legacySocket.onmessage).toBeNull();
     expect(legacySocket.onclose).toBeNull();
+  });
+
+  it("blocks reconnect after explicit Close until a new connect", async () => {
+    const harness = makeHarness();
+    await open(harness);
+    harness.transport.close();
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({
+      code: "closed",
+    });
+
+    const replacementPending = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    const replacement = harness.sockets.at(-1);
+    if (!replacement) throw new Error("missing replacement fake socket");
+    replacement.open();
+    await replacementPending;
   });
 
   it("keeps observer failures outside lifecycle and retained diagnostics", async () => {

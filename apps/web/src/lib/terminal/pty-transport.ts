@@ -218,6 +218,11 @@ interface ConnectionAttempt {
   readonly promise: Promise<void>;
 }
 
+interface DetachedAttachment {
+  readonly input: PtyConnectionInput;
+  readonly atMs: number;
+}
+
 /**
  * Adapt the reviewed same-origin ticket request seam to the PTY transport.
  * The returned provider performs one request per call and retains no ticket
@@ -280,9 +285,29 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   let currentInput: PtyConnectionInput | undefined;
   let activeContext: SocketContext | undefined;
   let activeAttempt: ConnectionAttempt | undefined;
-  let detachedAtMs: number | undefined;
+  let detachedAttachment: DetachedAttachment | undefined;
   let reattachBlocked: PtyErrorCode | undefined;
   let userClosed = false;
+  let explicitlyClosed = false;
+
+  const detachedAtFor = (input: PtyConnectionInput): number | undefined =>
+    detachedAttachment && sameConnectionInput(detachedAttachment.input, input)
+      ? detachedAttachment.atMs
+      : undefined;
+
+  const clearDetachedFor = (input: PtyConnectionInput): void => {
+    if (
+      detachedAttachment &&
+      sameConnectionInput(detachedAttachment.input, input)
+    ) {
+      detachedAttachment = undefined;
+    }
+  };
+
+  const markDetached = (input: PtyConnectionInput, atMs: number): void => {
+    if (modeFor(input) !== "attach") return;
+    detachedAttachment = { input, atMs };
+  };
 
   const observe = (callback: (() => void) | undefined): void => {
     try {
@@ -346,12 +371,18 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     if (activeContext === context) activeContext = undefined;
   };
 
-  const failContext = (context: SocketContext, error: PtyTransportError): void => {
+  const failContext = (
+    context: SocketContext,
+    error: PtyTransportError,
+    status: PtyStatus = "failed",
+  ): void => {
     if (!isCurrent(context)) return;
     invalidateContext(context);
+    clearAttempt(context.generation);
+    if (status === "detached") markDetached(context.input, now());
     safeClose(context.socket);
     context.rejectReady(error);
-    setState("failed", context.generation, context.input, undefined, context.reattaching);
+    setState(status, context.generation, context.input, undefined, context.reattaching);
   };
 
   const attachContext = (
@@ -383,7 +414,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     socket.onopen = () => {
       if (!isCurrent(context)) return;
       context.opened = true;
-      detachedAtMs = undefined;
+      clearDetachedFor(input);
       setState("attached", generation, input, undefined, reattaching);
       if (reattaching) {
         emit({
@@ -416,16 +447,27 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     };
     socket.onerror = () => {
       if (!isCurrent(context)) return;
-      failContext(context, new PtyTransportError("connection-failed", generation));
+      // Some adapters report a network failure without a follow-up close. An
+      // already-open attach session is still eligible for explicit reattach;
+      // an unopened handshake remains a failed connection and has no retention.
+      const status =
+        context.mode === "attach" && context.opened ? "detached" : "failed";
+      failContext(
+        context,
+        new PtyTransportError("connection-failed", generation),
+        status,
+      );
     };
     socket.onclose = (event) => {
       if (!isCurrent(context)) return;
       const observation = classifyClose(event?.code);
+      const opened = context.opened;
       invalidateContext(context);
+      clearAttempt(context.generation);
       context.rejectReady(new PtyTransportError("connection-failed", generation));
-      if (context.mode === "attach" && context.opened) detachedAtMs = now();
+      const status = statusForClose(context.mode, observation, opened);
+      if (status === "detached") markDetached(input, now());
       reattachBlocked = retryBlockForClose(observation.classification);
-      const status = statusForClose(context.mode, observation);
       setState(status, generation, input, observation, reattaching);
     };
     return context;
@@ -448,8 +490,17 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       // A current-session replacement cancels the old attempt before a new
       // ticket is minted. A connector that settles late is closed by the abort
       // guard and cannot install callbacks for the replacement generation.
-      activeAttempt.controller.abort();
+      const staleAttempt = activeAttempt;
       activeAttempt = undefined;
+      staleAttempt.controller.abort();
+    }
+    if (
+      detachedAttachment &&
+      !sameConnectionInput(detachedAttachment.input, normalized)
+    ) {
+      // Retention belongs to one exact PTY identity. Do not let an old
+      // session's expiry evidence reject a replacement current-session attach.
+      detachedAttachment = undefined;
     }
     const generation = ++currentGeneration;
     const controller = new AbortController();
@@ -457,6 +508,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     currentInput = normalized;
     reattachBlocked = undefined;
     userClosed = false;
+    explicitlyClosed = false;
 
     if (activeContext) {
       const stale = activeContext;
@@ -469,7 +521,15 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     const promise = (async (): Promise<void> => {
       try {
         throwIfAborted(controller.signal, generation);
-        await validateAttachPreflight(normalized, reattaching, detachedAtMs, now(), options, controller.signal, generation);
+        await validateAttachPreflight(
+          normalized,
+          reattaching,
+          detachedAtFor(normalized),
+          now(),
+          options,
+          controller.signal,
+          generation,
+        );
         throwIfAborted(controller.signal, generation);
         setState("ticket_pending", generation, normalized, undefined, reattaching);
         let ticket = await awaitWithAbort(
@@ -499,13 +559,29 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
         await awaitWithAbort(context.ready, controller.signal, generation);
       } catch (error) {
         const sanitized = sanitizeError(error, controller.signal, generation);
+        const contextAlreadyHandled = attemptContext?.closed === true;
         if (attemptContext && isCurrent(attemptContext)) {
           invalidateContext(attemptContext);
           attemptContext.rejectReady(sanitized);
           safeClose(attemptContext.socket);
         }
-        if (generation === currentGeneration && !userClosed && currentState.status !== "failed") {
-          setState(sanitized.code === "aborted" ? detachedStatus(normalized) : "failed", generation, normalized, undefined, reattaching);
+        // Clear before notifying state observers. A synchronous retry from a
+        // failure observer must create a fresh attempt, while the finally block
+        // remains generation-guarded so it cannot clear that replacement.
+        clearAttempt(generation);
+        if (
+          generation === currentGeneration &&
+          !userClosed &&
+          !contextAlreadyHandled &&
+          currentState.status !== "failed"
+        ) {
+          setState(
+            sanitized.code === "aborted" ? detachedStatus(normalized) : "failed",
+            generation,
+            normalized,
+            undefined,
+            reattaching,
+          );
         }
         throw sanitized;
       } finally {
@@ -519,12 +595,13 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
 
   const stop = (closing: boolean): void => {
     userClosed = true;
+    explicitlyClosed = closing;
     reattachBlocked = undefined;
     const generation = ++currentGeneration;
-    activeAttempt?.controller.abort();
-    activeAttempt = undefined;
     const input = currentInput;
-    if (closing) setState("closing", generation, input);
+    const attempt = activeAttempt;
+    activeAttempt = undefined;
+    attempt?.controller.abort();
     let detachedOpenedSocket = false;
     if (activeContext) {
       const context = activeContext;
@@ -532,8 +609,16 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       invalidateContext(context);
       context.rejectReady(new PtyTransportError("closed", context.generation));
       safeClose(context.socket);
+      if (detachedOpenedSocket) markDetached(context.input, now());
     }
-    if (detachedOpenedSocket) detachedAtMs = now();
+
+    // Close invalidates the old socket before exposing its transient state. A
+    // reentrant observer can therefore start a replacement without the old
+    // cleanup path later overwriting that replacement's state.
+    if (closing && currentGeneration === generation) {
+      setState("closing", generation, input);
+    }
+    if (currentGeneration !== generation) return;
     setState(detachedStatus(input), generation, input);
   };
 
@@ -555,6 +640,9 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       return start(normalized, false, signal);
     },
     reconnect(signal) {
+      if (explicitlyClosed && currentInput && modeFor(currentInput) === "attach") {
+        return Promise.reject(new PtyTransportError("closed", currentGeneration));
+      }
       if (!currentInput || modeFor(currentInput) !== "attach") {
         return Promise.reject(
           new PtyTransportError("legacy-reattach-prohibited", currentGeneration),
@@ -708,12 +796,15 @@ function isSocketOpen(socket: PtyWebSocket): boolean {
   return socket.readyState === undefined || socket.readyState === 1;
 }
 
+/**
+ * Detached timestamps are local expiry evidence, not current-session identity.
+ * They must not let callers bypass a supersession block by changing metadata.
+ */
 function sameConnectionInput(left: PtyConnectionInput, right: PtyConnectionInput): boolean {
   return (
     left.sessionId === right.sessionId &&
     left.attach === right.attach &&
-    left.processIdentity === right.processIdentity &&
-    left.detachedAtMs === right.detachedAtMs
+    left.processIdentity === right.processIdentity
   );
 }
 
@@ -791,7 +882,12 @@ function classifyClose(code: number | undefined): {
 function statusForClose(
   mode: PtyMode,
   observation: { readonly classification: PtyCloseClassification },
+  opened: boolean,
 ): PtyStatus {
+  // A close before the handshake completes is a failed connection, not a
+  // retained detach. Retention only starts after the current PTY was proven
+  // attached, so a pre-open adapter error cannot extend its expiry window.
+  if (!opened) return "failed";
   if (observation.classification === "pty-process-exited") return "exited";
   if (observation.classification === "attachment-superseded") return "detached";
   if (observation.classification === "connection-closed") {

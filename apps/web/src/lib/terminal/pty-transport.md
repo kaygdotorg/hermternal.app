@@ -29,13 +29,23 @@ operations:
   exact integers to `1..2000` columns and `1..1000` rows.
 - `detach()` and `close()` remove every socket callback before closing. Attach
   mode enters `detached`; legacy mode enters `exited` because its bridge owns
-  the child process lifetime.
+  the child process lifetime. Explicit `close()` also blocks `reconnect()` until
+  a new `connect()` call makes the user's intent current again.
+- An established attach socket that reports `onerror` without `onclose` enters
+  `detached` and remains eligible for explicit reconnect. An error or close
+  before `onopen` remains `failed` and cannot seed a detach-retention window.
+  Detached timestamps are scoped to the exact session, attach, and process
+  identity; changing current-session identity discards the old expiry evidence.
+  Cleanup and state observers are generation-guarded so a synchronous retry or
+  replacement cannot be overwritten by the old failure or Close path.
 
 The transport never queues input or resize frames. It has no prompt or tool
-action method, so reconnect cannot replay those actions. Ticket values exist
-only between the injected provider and WebSocket factory call. Errors are a
-closed semantic set and never include ticket values, ticket fragments, attach
-handles, terminal bytes, socket reasons, or adapter errors.
+action method, so reconnect cannot replay those actions. The structured
+`PtyWebSocketUpgradeRequest.query` is the one ephemeral, same-origin
+upgrade-URL handoff for the fresh ticket; the transport does not copy it into
+state, storage, navigation, logs, or errors. Errors are a closed semantic set
+and never include ticket values, ticket fragments, attach handles, terminal
+bytes, socket reasons, or adapter errors.
 
 ## Retained output and races
 
@@ -58,8 +68,11 @@ preservation, malformed non-binary frames, resize boundaries and malformed
 types, active-session replacement, process-identity continuity, reconnect,
 retention equality and expiry, truncation notice, receive-order races, no action
 replay, `4409` stale cleanup, close-code classification, cancellation, Close,
-and callback cleanup. Tests also verify that terminal bytes and ticket material
-are not logged or retained in public state.
+and callback cleanup. Lifecycle regressions cover pre-open retry races,
+pre-open failure classification, established `onerror` detach semantics,
+identity-scoped expiry evidence, and reentrant Close replacement. Tests also
+verify that terminal bytes and ticket material are not logged or retained in
+public state.
 
 Accessibility is N/A for this transport-only change. It adds no UI nodes and
 does not alter the renderer contract. Keyboard, focus, semantic naming, browser
