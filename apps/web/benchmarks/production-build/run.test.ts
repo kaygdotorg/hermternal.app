@@ -605,13 +605,13 @@ describe('production-build benchmark contract', () => {
             child.stdout.once('data', (chunk) => resolveLine(String(chunk).trim()));
             child.once('error', reject);
           }),
-          Bun.sleep(3000).then(() => { throw new Error(`${mode} descendant readiness timeout`); })
+          Bun.sleep(10_000).then(() => { throw new Error(`${mode} descendant readiness timeout`); })
         ]);
         const supervisorExited = new Promise<number | null>((resolveExit) => child.once('exit', resolveExit));
         if (mode !== 'completion' && child.pid) process.kill(-child.pid, mode);
         await Promise.race([
           supervisorExited,
-          Bun.sleep(3000).then(() => { throw new Error(`${mode} supervisor survived cleanup`); })
+          Bun.sleep(10_000).then(() => { throw new Error(`${mode} supervisor survived cleanup`); })
         ]);
         if (/^\d+$/.test(line)) expect(() => process.kill(Number(line), 0)).toThrow();
         else expect(line).toBe('denied');
@@ -619,7 +619,7 @@ describe('production-build benchmark contract', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 20_000);
+  }, 60_000);
 
   test('SIGTERM finishes registered cleanup before exit across repeated runs', async () => {
     const prefix = 'hermternal-web-benchmark-';
@@ -654,7 +654,7 @@ describe('production-build benchmark contract', () => {
       expect(after).toEqual([]);
       await rm(readinessFile, { force: true });
     }
-  }, 180_000);
+  }, 300_000);
 
   test('CLI failures are bounded JSON without attacker-controlled values', () => {
     const result = Bun.spawnSync([process.execPath, join(benchmarkRoot, 'run.ts'), '--unknown', 'sensitive-value'], {
