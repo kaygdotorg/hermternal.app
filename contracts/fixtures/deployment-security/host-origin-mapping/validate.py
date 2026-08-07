@@ -47,14 +47,14 @@ FAILURE_LIMIT = 240
 # the later integration trust root; the reviewed proof-matrix Git object below
 # independently binds the source contract used by each synthetic observation.
 PINNED_CASES_SHA256 = "0cf4f545eef2b9dba17792cef04fb8bfee1f785ada06c44d53a8e116a66b0b34"
-PINNED_BASELINE_SHA256 = "b79897e192b320157af65a130df442f5d48c52b0d1058a506a1d93dc5b3dfbc2"
+PINNED_BASELINE_SHA256 = "fe639d2bf83cd8cc12c5b9ed9ad102a66e2445a2d165f64ec6f5d9c313e1db60"
 PINNED_SEMANTICS_SHA256 = "0d2cab9a0a709f9f1bf88ff91c53053af3d12c3d1cc5eb3dd0e227a02f71372f"
 PINNED_BASELINE_EVIDENCE_SHA256 = "5d988329644b6fc400b71d074f6d19ee3511deed6bfab23580f0f58366841e4e"
-PINNED_VALIDATOR_SOURCE_SHA256 = "adc43a0e3e7414d35d888cacc14ef10d503ff32e51bd6c15a0eb62b4c245ea12"
+PINNED_VALIDATOR_SOURCE_SHA256 = "82c5a48281a97c3d09ad5bb63e284232df52122135f7cc20808dcb0139fbe6d0"
 PINNED_RETAINED_ARTIFACTS: dict[str, tuple[int, str]] = {
-    "README.md": (8253, "0ff1ee8c929dc0ac70292b7ed4876cbf96ff93f84d68e3799b3adb82607c7f40"),
+    "README.md": (12203, "199ff911e5b386d4a437ef762c520f6e5eafef776fbf9702a1481e2404788724"),
     "cases.json": (52421, "0cf4f545eef2b9dba17792cef04fb8bfee1f785ada06c44d53a8e116a66b0b34"),
-    "test_validate.py": (16401, "eb7e6c3290f3643235f56822245f245c9f5b46a7ff9703d197c18556da667f1e"),
+    "test_validate.py": (43123, "2fdccc34467472d163cd82a98e7f9dd55035d82e5487b69bb02b80908d46e55e"),
 }
 
 # The deployment proof matrix is an immutable, local Git source contract. It
