@@ -7,15 +7,19 @@
 - Paper file: `01KZ6BB66KCWR2C4J2TSWQGDM7` (`Hermternal`)
 - Authentication page: `3-0`, `Web states — Authentication`, 34 artboards
 - Runtime page: `4-0`, `Web states — Runtime`, 68 artboards
-- Token snapshot: `cb15f2b1`
+- Shared Chat–Terminal workspace page: `B-0`, 25 artboards
+- Terminal desktop lifecycle page: `E-0`, 22 artboards
+- Terminal narrow and mobile page: `F-0`, 28 artboards
+- Accessibility page: `G-0`, 3 artboards
+- Paper token snapshot: `b5b2b8c5` (84 exact name/value records)
 - Platform: web
 - Contract: `dashboard-v0.0.1`
 - Variants, in order: `light.desktop`, `light.narrow`, `dark.desktop`, `dark.narrow`
 - Runtime desktop: `1440 × 960`
-- Authentication desktop: `1440 × 900`
+- Authentication and standalone Terminal desktop: `1440 × 900`
 - Narrow: `390 × 844`
 
-All 102 artboards from the two approved pages are represented exactly once. The manifest does not infer missing Paper evidence.
+The generic inventory represents 102 artboards in 29 state records. The nested Terminal evidence inventory represents 78 artboards in 15 lifecycle, selector, accessibility, and continuity records. Every registered record is matched to the approved Paper snapshot; the manifest does not infer missing Paper evidence.
 
 ## Evidence status
 
@@ -25,6 +29,14 @@ All 102 artboards from the two approved pages are represented exactly once. The 
 
 Private deep-link and Session Search records are deferred. They must not be treated as shipped v0.0.1 UI. No record is a production authentication, Hermes gateway, provider, or live-data claim.
 
+Terminal evidence is complete for the approved static Paper snapshot:
+
+- Lifecycle records cover fresh, open, connecting, detached, replaying, retained-output-truncated, reconnecting, superseded, ended, failed, and explicitly-closed states.
+- Selector evidence covers resting, hover, focused, pressed, selected, and keyboard sheets across light/dark desktop/narrow boards.
+- Accessibility evidence records keyboard focus, dark/narrow focus, zoom and text growth, reduced motion/transparency, forced colors, localization growth, touch targets, and focus order.
+- Continuity evidence records the static Chat → Terminal → Chat → Terminal sequence.
+- `paper_static_only` is `true`: Paper boards are static evidence and do not prove runtime interaction, focus transfer, motion, continuity, or error recovery.
+
 ## Validation
 
 The validator uses only the Python standard library and fails closed for:
@@ -32,10 +44,12 @@ The validator uses only the Python standard library and fails closed for:
 - duplicate JSON keys, unknown keys, malformed JSON, unsafe input bounds, and non-finite numbers;
 - unknown, duplicate, reordered, renamed, or dimension-shifted Paper records;
 - duplicate or missing variants;
-- unknown, duplicate, reordered, renamed, or value-shifted tokens;
+- unknown, duplicate, reordered, renamed, or value-shifted shipped tokens;
+- stale or value-shifted Paper token snapshots;
 - ready states with incomplete coverage;
-- blocked states without explicit missing variants; and
-- deferred states that do not target v0.0.2.
+- blocked states without explicit missing variants;
+- deferred states that do not target v0.0.2; and
+- missing, reordered, duplicated, renamed, dimension-shifted, or incomplete Terminal Paper pages, states, boards, and accessibility coverage.
 
 Run both interpreter modes and the focused tests from the repository root:
 

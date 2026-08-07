@@ -4,8 +4,10 @@
 The manifest is a planning contract, not a runtime integration or a live
 compatibility claim. This validator keeps the mapping deterministic: every
 Paper artboard in the Runtime and Authentication pages is named exactly once,
-shipped states require all four light/dark desktop/narrow variants, and known
-v0.0.1 gaps remain explicitly blocked instead of being guessed. It uses only
+shipped states require all four light/dark desktop/narrow variants, the exact
+Paper token snapshot and Terminal evidence inventory are pinned, and known
+v0.0.1 gaps remain explicitly blocked instead of being guessed. Terminal boards
+are static evidence only; they do not prove runtime interaction. It uses only
 Python's standard library and never opens Paper, Hermes, a socket, or a URL.
 """
 
@@ -23,7 +25,7 @@ MANIFEST_PATH = Path(__file__).resolve().with_name("artboards.json")
 SCHEMA = "hermternal.web-paper-artboard-manifest.v1"
 CONTRACT = "dashboard-v0.0.1"
 PAPER_FILE_ID = "01KZ6BB66KCWR2C4J2TSWQGDM7"
-PAPER_TOKEN_CONTENT_HASH = "cb15f2b1"
+PAPER_TOKEN_CONTENT_HASH = "b5b2b8c5"
 VARIANT_ORDER = ("light.desktop", "light.narrow", "dark.desktop", "dark.narrow")
 APPEARANCES = ("light", "dark")
 VIEWPORTS = ("desktop", "narrow")
@@ -43,8 +45,10 @@ TOP_LEVEL_KEYS = (
     "paper",
     "scope",
     "tokens",
+    "paper_tokens",
     "token_sets",
     "states",
+    "terminal",
 )
 PAPER_KEYS = ("file_id", "file_name", "token_content_hash", "pages")
 PAGE_KEYS = ("id", "name", "artboard_count")
@@ -52,9 +56,13 @@ SCOPE_KEYS = ("release", "platform", "appearances", "viewports", "variant_order"
 VIEWPORT_KEYS = ("id", "width", "height_policy")
 EXCLUDED_KEYS = ("id", "status", "target_release", "reason")
 TOKEN_KEYS = ("name", "value", "scope")
+PAPER_TOKEN_KEYS = ("name", "value")
 TOKEN_SET_KEYS = ("id", "tokens")
 STATE_KEYS = ("id", "family", "status", "release", "token_set", "variants", "missing_variants", "notes")
 VARIANT_KEYS = ("id", "artboard_id", "name", "width", "height")
+TERMINAL_KEYS = ("schema", "paper_static_only", "artboard_count", "state_count", "states")
+TERMINAL_STATE_KEYS = ("id", "kind", "status", "release", "boards", "coverage", "notes")
+TERMINAL_BOARD_KEYS = ("id", "page_id", "name", "surface", "appearance", "viewport", "width", "height")
 
 
 class ValidationError(ValueError):
@@ -333,6 +341,93 @@ TOKEN_RECORDS = (
     ("--radius-glass", "22px", "shipped"),
 )
 
+PAPER_TOKEN_RECORDS = (
+    ('--color-canvas', '#F3F5F8'),
+    ('--color-paper', '#FFFFFF'),
+    ('--color-ink', '#16181D'),
+    ('--color-muted', '#667080'),
+    ('--color-line', '#D8DDE5'),
+    ('--color-signal', '#4C6FFF'),
+    ('--color-courier', '#E88A2A'),
+    ('--color-success', '#2DA568'),
+    ('--color-danger', '#D94A4A'),
+    ('--color-dark-canvas', '#0D1117'),
+    ('--color-dark-paper', '#171C24'),
+    ('--color-dark-ink', '#F4F6FA'),
+    ('--color-dark-muted', '#A7B0BF'),
+    ('--color-dark-line', '#343C49'),
+    ('--color-dark-signal', '#6F88FF'),
+    ('--color-dark-courier', '#F0A451'),
+    ('--color-dark-success', '#4CC989'),
+    ('--color-dark-danger', '#F06A6A'),
+    ('--color-auth-signal', '#3157C7'),
+    ('--color-auth-danger', '#AB3838'),
+    ('--color-gate-light-action', '#2748C8'),
+    ('--color-gate-light-action-ink', 'var(--color-paper)'),
+    ('--color-gate-light-state-surface', '#EEF2FF'),
+    ('--color-gate-light-state-ink', '#2340A8'),
+    ('--color-gate-light-focus', '#2348C7'),
+    ('--color-gate-light-error-surface', '#FFF1F2'),
+    ('--color-gate-light-error-ink', '#A52B38'),
+    ('--color-gate-light-error-border', '#C44B57'),
+    ('--color-gate-dark-action', '#3B57D0'),
+    ('--color-gate-dark-action-ink', 'var(--color-dark-ink)'),
+    ('--color-gate-dark-state-surface', '#202A50'),
+    ('--color-gate-dark-state-ink', '#C2CCFF'),
+    ('--color-gate-dark-focus', '#C2CCFF'),
+    ('--color-gate-dark-error-surface', '#351F26'),
+    ('--color-gate-dark-error-ink', '#FFB7C0'),
+    ('--color-gate-dark-error-border', '#FF7581'),
+    ('--color-deeplink-light-courier', '#8A4B00'),
+    ('--color-deeplink-light-success', '#0B6B4B'),
+    ('--color-deeplink-light-signal', '#2348C7'),
+    ('--color-deeplink-light-danger', '#A52B38'),
+    ('--color-deeplink-light-muted', '#4D5765'),
+    ('--color-deeplink-light-action', '#2748C8'),
+    ('--color-deeplink-light-action-ink', 'var(--color-paper)'),
+    ('--color-deeplink-dark-courier', 'var(--color-dark-courier)'),
+    ('--color-deeplink-dark-success', 'var(--color-dark-success)'),
+    ('--color-deeplink-dark-signal', 'var(--color-dark-signal)'),
+    ('--color-deeplink-dark-danger', 'var(--color-dark-danger)'),
+    ('--color-deeplink-dark-muted', 'var(--color-dark-muted)'),
+    ('--color-deeplink-dark-action', 'var(--color-dark-signal)'),
+    ('--color-deeplink-dark-action-ink', 'var(--color-dark-paper)'),
+    ('--color-search-light-courier', '#8A4B00'),
+    ('--color-search-light-success', '#0B6B4B'),
+    ('--color-search-light-signal', '#2348C7'),
+    ('--color-focus', '#2348C7'),
+    ('--color-dark-focus', '#C2CCFF'),
+    ('--font-ui', 'Instrument Sans'),
+    ('--font-mono', 'Geist Mono'),
+    ('--text-meta', '12px'),
+    ('--text-control', '14px'),
+    ('--text-body', '15px'),
+    ('--text-title', '20px'),
+    ('--weight-regular', 400),
+    ('--weight-medium', 500),
+    ('--weight-semibold', 600),
+    ('--leading-meta', '16px'),
+    ('--leading-control', '18px'),
+    ('--leading-body', '23px'),
+    ('--leading-title', '26px'),
+    ('--space-1', '4px'),
+    ('--space-2', '8px'),
+    ('--space-3', '12px'),
+    ('--space-4', '16px'),
+    ('--space-6', '24px'),
+    ('--space-8', '32px'),
+    ('--radius-nested', '14px'),
+    ('--radius-structural', '22px'),
+    ('--radius-pill', '999px'),
+    ('--radius-input', '12px'),
+    ('--radius-nested-glass', '14px'),
+    ('--radius-card', '17px'),
+    ('--radius-popover', '18px'),
+    ('--radius-glass', '22px'),
+    ('--radius-compact', '8px'),
+    ('--radius-micro', '5px'),
+)
+
 COLOR_BASE_TOKENS = tuple(item[0] for item in TOKEN_RECORDS[:18])
 TYPOGRAPHY_TOKENS = tuple(item[0] for item in TOKEN_RECORDS[53:])
 BASE_TOKENS = COLOR_BASE_TOKENS + TYPOGRAPHY_TOKENS
@@ -353,6 +448,144 @@ TOKEN_SETS = (
 )
 
 
+TERMINAL_SCHEMA = "hermternal.web-paper-terminal-evidence.v1"
+TERMINAL_ARTBOARD_COUNT = 78
+TERMINAL_STATE_COUNT = 15
+TERMINAL_PAGE_RECORDS = (
+    ('B-0', 'Shared Chat–Terminal workspace', 25),
+    ('E-0', 'Terminal desktop lifecycle', 22),
+    ('F-0', 'Terminal narrow and mobile', 28),
+    ('G-0', 'Accessibility', 3),
+)
+TERMINAL_STATE_RECORDS = (
+    ('terminal.fresh', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.open', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.connecting', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.detached', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.replaying', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.retained-output-truncated', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.reconnecting', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.superseded', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.ended', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.failed', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.explicitly-closed', 'lifecycle', 'approved', 'v0.0.1', ('light.desktop', 'light.narrow', 'dark.desktop', 'dark.narrow'), 6),
+    ('terminal.narrow-reference', 'reference', 'reference', 'v0.0.1', ('light.narrow', 'retained-reference'), 4),
+    ('terminal.selector-states', 'selector', 'approved', 'v0.0.1', ('resting', 'hover', 'focused', 'pressed', 'selected', 'keyboard'), 4),
+    ('terminal.accessibility', 'accessibility', 'approved', 'v0.0.1', ('keyboard-focus', 'dark-focus', 'narrow-focus', '200-percent-zoom', 'text-growth', 'reduced-motion', 'reduced-transparency', 'high-contrast-forced-colors', 'localization-growth', 'touch-targets', 'focus-order'), 3),
+    ('terminal.continuity', 'continuity', 'approved', 'v0.0.1', ('chat', 'terminal', 'chat', 'terminal'), 1),
+)
+TERMINAL_BOARD_RECORDS = {
+    'terminal.fresh': (
+        ('CDO-0', 'E-0', 'Light / Desktop — Terminal fresh', 'standalone', 'light', 'desktop', 1440, 900),
+        ('EM8-0', 'B-0', 'Light / Desktop — Terminal fresh · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('FKW-0', 'F-0', 'Light / Narrow — Terminal fresh · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CPA-0', 'E-0', 'Dark / Desktop — Terminal fresh', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('F58-0', 'B-0', 'Dark / Desktop — Terminal fresh · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('FU1-0', 'F-0', 'Dark / Narrow — Terminal fresh · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.open': (
+        ('CCG-0', 'E-0', 'Light / Desktop — Terminal open', 'standalone', 'light', 'desktop', 1440, 900),
+        ('DBS-0', 'B-0', 'Light / Desktop — Terminal open · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('DIW-0', 'F-0', 'Light / Narrow — Terminal open · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CO8-0', 'E-0', 'Dark / Desktop — Terminal open', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('E8V-0', 'B-0', 'Dark / Desktop — Terminal open · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('FVC-0', 'F-0', 'Dark / Narrow — Terminal open · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.connecting': (
+        ('CEQ-0', 'E-0', 'Light / Desktop — Terminal connecting', 'standalone', 'light', 'desktop', 1440, 900),
+        ('DPV-0', 'B-0', 'Light / Desktop — Terminal connecting · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('FM7-0', 'F-0', 'Light / Narrow — Terminal connecting · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CQC-0', 'E-0', 'Dark / Desktop — Terminal connecting', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('EBS-0', 'B-0', 'Dark / Desktop — Terminal connecting · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('FWN-0', 'F-0', 'Dark / Narrow — Terminal connecting · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.detached': (
+        ('CFS-0', 'E-0', 'Light / Desktop — Terminal detached', 'standalone', 'light', 'desktop', 1440, 900),
+        ('EPE-0', 'B-0', 'Light / Desktop — Terminal detached · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('FNI-0', 'F-0', 'Light / Narrow — Terminal detached · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CRE-0', 'E-0', 'Dark / Desktop — Terminal detached', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('F7U-0', 'B-0', 'Dark / Desktop — Terminal detached · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('FXY-0', 'F-0', 'Dark / Narrow — Terminal detached · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.replaying': (
+        ('CGU-0', 'E-0', 'Light / Desktop — Terminal replaying', 'standalone', 'light', 'desktop', 1440, 900),
+        ('ESK-0', 'B-0', 'Light / Desktop — Terminal replaying · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('FOT-0', 'F-0', 'Light / Narrow — Terminal replaying · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CSG-0', 'E-0', 'Dark / Desktop — Terminal replaying', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('FAG-0', 'B-0', 'Dark / Desktop — Terminal replaying · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('FZ9-0', 'F-0', 'Dark / Narrow — Terminal replaying · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.retained-output-truncated': (
+        ('CHW-0', 'E-0', 'Light / Desktop — Terminal retained output truncated', 'standalone', 'light', 'desktop', 1440, 900),
+        ('DW7-0', 'B-0', 'Light / Desktop — Terminal retained output truncated · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('DN9-0', 'F-0', 'Light / Narrow — Terminal retained output truncated · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CTI-0', 'E-0', 'Dark / Desktop — Terminal retained output truncated', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('EH0-0', 'B-0', 'Dark / Desktop — Terminal retained output truncated · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('G0K-0', 'F-0', 'Dark / Narrow — Terminal retained output truncated · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.reconnecting': (
+        ('CIY-0', 'E-0', 'Light / Desktop — Terminal reconnecting', 'standalone', 'light', 'desktop', 1440, 900),
+        ('DT1-0', 'B-0', 'Light / Desktop — Terminal reconnecting · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('DLY-0', 'F-0', 'Light / Narrow — Terminal reconnecting · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CUK-0', 'E-0', 'Dark / Desktop — Terminal reconnecting', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('EEE-0', 'B-0', 'Dark / Desktop — Terminal reconnecting · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('G1V-0', 'F-0', 'Dark / Narrow — Terminal reconnecting · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.superseded': (
+        ('CK0-0', 'E-0', 'Light / Desktop — Terminal superseded', 'standalone', 'light', 'desktop', 1440, 900),
+        ('EVQ-0', 'B-0', 'Light / Desktop — Terminal superseded · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('FQ4-0', 'F-0', 'Light / Narrow — Terminal superseded · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CVM-0', 'E-0', 'Dark / Desktop — Terminal superseded', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('FD2-0', 'B-0', 'Dark / Desktop — Terminal superseded · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('G36-0', 'F-0', 'Dark / Narrow — Terminal superseded · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.ended': (
+        ('CL2-0', 'E-0', 'Light / Desktop — Terminal ended', 'standalone', 'light', 'desktop', 1440, 900),
+        ('EYW-0', 'B-0', 'Light / Desktop — Terminal ended · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('FRF-0', 'F-0', 'Light / Narrow — Terminal ended · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CWO-0', 'E-0', 'Dark / Desktop — Terminal ended', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('FFO-0', 'B-0', 'Dark / Desktop — Terminal ended · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('G4H-0', 'F-0', 'Dark / Narrow — Terminal ended · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.failed': (
+        ('CM4-0', 'E-0', 'Light / Desktop — Terminal failed', 'standalone', 'light', 'desktop', 1440, 900),
+        ('DZD-0', 'B-0', 'Light / Desktop — Terminal failed · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('DOK-0', 'F-0', 'Light / Narrow — Terminal failed · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CXQ-0', 'E-0', 'Dark / Desktop — Terminal failed', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('EJM-0', 'B-0', 'Dark / Desktop — Terminal failed · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('G5S-0', 'F-0', 'Dark / Narrow — Terminal failed · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.explicitly-closed': (
+        ('CN6-0', 'E-0', 'Light / Desktop — Terminal explicitly closed', 'standalone', 'light', 'desktop', 1440, 900),
+        ('F22-0', 'B-0', 'Light / Desktop — Terminal explicitly closed · workspace shell', 'workspace', 'light', 'desktop', 1440, 960),
+        ('FSQ-0', 'F-0', 'Light / Narrow — Terminal explicitly closed · workspace shell', 'workspace', 'light', 'narrow', 390, 844),
+        ('CYS-0', 'E-0', 'Dark / Desktop — Terminal explicitly closed', 'standalone', 'dark', 'desktop', 1440, 900),
+        ('FIA-0', 'B-0', 'Dark / Desktop — Terminal explicitly closed · workspace shell', 'workspace', 'dark', 'desktop', 1440, 960),
+        ('G73-0', 'F-0', 'Dark / Narrow — Terminal explicitly closed · workspace shell', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.narrow-reference': (
+        ('CZU-0', 'F-0', 'Light / Narrow — Terminal open', 'reference', 'light', 'narrow', 390, 844),
+        ('D16-0', 'F-0', 'Light / Narrow — Terminal reconnecting', 'reference', 'light', 'narrow', 390, 844),
+        ('D2C-0', 'F-0', 'Light / Narrow — Terminal retained output truncated', 'reference', 'light', 'narrow', 390, 844),
+        ('D3I-0', 'F-0', 'Light / Narrow — Terminal failed', 'reference', 'light', 'narrow', 390, 844),
+    ),
+    'terminal.selector-states': (
+        ('GC2-0', 'B-0', 'Light / Desktop — Chat–Terminal selector states', 'workspace', 'light', 'desktop', 760, 520),
+        ('G8E-0', 'F-0', 'Light / Narrow — Chat–Terminal selector states', 'workspace', 'light', 'narrow', 390, 844),
+        ('GGD-0', 'B-0', 'Dark / Desktop — Chat–Terminal selector states', 'workspace', 'dark', 'desktop', 760, 520),
+        ('G8F-0', 'F-0', 'Dark / Narrow — Chat–Terminal selector states', 'workspace', 'dark', 'narrow', 390, 844),
+    ),
+    'terminal.accessibility': (
+        ('E2J-0', 'G-0', 'Light / Desktop — Terminal keyboard focus', 'accessibility', 'light', 'desktop', 1440, 960),
+        ('E5P-0', 'G-0', 'Light / Desktop — Terminal reduced transparency', 'accessibility', 'light', 'desktop', 1440, 960),
+        ('GID-0', 'G-0', 'Accessibility evidence — Terminal and selector', 'accessibility', 'multi', 'multi', 1440, 960),
+    ),
+    'terminal.continuity': (
+        ('GL4-0', 'B-0', 'Static continuity — Chat → Terminal → Chat → Terminal', 'continuity', 'light', 'desktop', 1440, 720),
+    ),
+}
+
+
 def _expected_token_sets() -> dict[str, tuple[str, ...]]:
     return dict(TOKEN_SETS)
 
@@ -366,10 +599,14 @@ def _validate_paper(document: dict[str, Any]) -> None:
         "pages": paper["pages"],
     })
     pages = paper["pages"]
-    require(type(pages) is list and len(pages) == 2)
+    require(type(pages) is list and len(pages) == 6)
     expected_pages = (
         ("3-0", "Web states — Authentication", 34),
         ("4-0", "Web states — Runtime", 68),
+        ("B-0", "Shared Chat–Terminal workspace", 25),
+        ("E-0", "Terminal desktop lifecycle", 22),
+        ("F-0", "Terminal narrow and mobile", 28),
+        ("G-0", "Accessibility", 3),
     )
     for raw, expected in zip(pages, expected_pages):
         item = strict_keys(raw, PAGE_KEYS, "paper page")
@@ -426,6 +663,75 @@ def _validate_tokens(document: dict[str, Any]) -> None:
         tokens_in_set = _list_of_strings(item["tokens"], tuple(allowed))
         require(tokens_in_set == expected)
     require(seen_sets == set(expected_sets))
+
+
+def _validate_paper_tokens(document: dict[str, Any]) -> None:
+    paper_tokens = document["paper_tokens"]
+    require(type(paper_tokens) is list and len(paper_tokens) == len(PAPER_TOKEN_RECORDS))
+    seen: set[str] = set()
+    for raw, expected in zip(paper_tokens, PAPER_TOKEN_RECORDS):
+        item = strict_keys(raw, PAPER_TOKEN_KEYS, "Paper token")
+        require(tuple(item.values()) == expected)
+        require(item["name"] not in seen)
+        seen.add(item["name"])
+
+
+def _validate_terminal(document: dict[str, Any]) -> None:
+    terminal = strict_keys(document["terminal"], TERMINAL_KEYS, "terminal evidence")
+    require(terminal["schema"] == TERMINAL_SCHEMA)
+    require(terminal["paper_static_only"] is True)
+    require(type(terminal["artboard_count"]) is int and type(terminal["artboard_count"]) is not bool)
+    require(terminal["artboard_count"] == TERMINAL_ARTBOARD_COUNT)
+    require(type(terminal["state_count"]) is int and type(terminal["state_count"]) is not bool)
+    require(terminal["state_count"] == TERMINAL_STATE_COUNT)
+
+    states = terminal["states"]
+    require(type(states) is list and len(states) == TERMINAL_STATE_COUNT)
+    expected_state_ids = {record[0] for record in TERMINAL_STATE_RECORDS}
+    expected_pages = {record[0]: record[2] for record in TERMINAL_PAGE_RECORDS}
+    seen_states: set[str] = set()
+    seen_boards: set[str] = set()
+    page_counts = {page_id: 0 for page_id in expected_pages}
+
+    for raw, expected in zip(states, TERMINAL_STATE_RECORDS):
+        identifier, kind, status, release, expected_coverage, expected_board_count = expected
+        item = strict_keys(raw, TERMINAL_STATE_KEYS, "terminal state")
+        require(tuple(item[key] for key in ("id", "kind", "status", "release")) == (identifier, kind, status, release))
+        require(_id(item["id"]))
+        require(item["id"] not in seen_states)
+        seen_states.add(item["id"])
+        require(item["id"] in expected_state_ids)
+
+        coverage = item["coverage"]
+        require(type(coverage) is list and tuple(coverage) == expected_coverage)
+        require(all(type(value) is str and value for value in coverage))
+
+        expected_boards = TERMINAL_BOARD_RECORDS[identifier]
+        boards = item["boards"]
+        require(type(boards) is list and len(boards) == expected_board_count == len(expected_boards))
+        for raw_board, expected_board in zip(boards, expected_boards):
+            board = strict_keys(raw_board, TERMINAL_BOARD_KEYS, "terminal board")
+            require(tuple(board.values()) == expected_board)
+            board_id, page_id, name, surface, appearance, viewport, width, height = expected_board
+            require(type(board_id) is str and board_id)
+            require(type(name) is str and name)
+            require(page_id in expected_pages)
+            require(surface in {"standalone", "workspace", "reference", "accessibility", "continuity"})
+            require(appearance in {"light", "dark", "multi"})
+            require(viewport in {"desktop", "narrow", "multi"})
+            require(type(width) is int and type(width) is not bool and width > 0)
+            require(type(height) is int and type(height) is not bool and height > 0)
+            require(board_id not in seen_boards)
+            seen_boards.add(board_id)
+            page_counts[page_id] += 1
+        notes = _text(item["notes"])
+        notes_lower = notes.casefold()
+        require("paper" in notes_lower and "static" in notes_lower)
+
+    require(seen_states == expected_state_ids)
+    require(len(seen_boards) == TERMINAL_ARTBOARD_COUNT)
+    require(sum(page_counts.values()) == TERMINAL_ARTBOARD_COUNT)
+    require(tuple((page_id, page_counts[page_id]) for page_id, _, _ in TERMINAL_PAGE_RECORDS) == tuple((page_id, count) for page_id, _, count in TERMINAL_PAGE_RECORDS))
 
 
 def _validate_variant(raw: Any, expected: tuple[str, str, str, int, int]) -> str:
@@ -488,6 +794,8 @@ def validate_manifest(document: dict[str, Any]) -> tuple[int, int, int]:
     _validate_paper(document)
     _validate_scope(document)
     _validate_tokens(document)
+    _validate_paper_tokens(document)
+    _validate_terminal(document)
     return _validate_states(document)
 
 
@@ -521,6 +829,8 @@ def main(argv: list[str] | None = None) -> int:
         "blocked_state_count": blocked,
         "deferred_state_count": deferred,
         "artboard_count": 102,
+        "terminal_state_count": TERMINAL_STATE_COUNT,
+        "terminal_artboard_count": TERMINAL_ARTBOARD_COUNT,
     }
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return 0
