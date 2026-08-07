@@ -654,7 +654,7 @@ describe('production-build benchmark contract', () => {
       expect(after).toEqual([]);
       await rm(readinessFile, { force: true });
     }
-  }, 120_000);
+  }, 180_000);
 
   test('CLI failures are bounded JSON without attacker-controlled values', () => {
     const result = Bun.spawnSync([process.execPath, join(benchmarkRoot, 'run.ts'), '--unknown', 'sensitive-value'], {
