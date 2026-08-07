@@ -74,6 +74,11 @@ function createChatHarness() {
     selectedSessionId: SESSION.id,
     connect: vi.fn().mockResolvedValue(undefined),
     reconnect: vi.fn().mockResolvedValue(undefined),
+    createSession: vi.fn().mockResolvedValue({
+      sessionId: 'live-draft',
+      storedSessionId: 'stored-draft',
+      model: 'Hermes 4'
+    }),
     restore: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
     sendPrompt,
@@ -112,6 +117,31 @@ async function flush(): Promise<void> {
 }
 
 describe('LiveWorkspaceSession', () => {
+  it('creates an official empty draft before enabling its first prompt', async () => {
+    const rest = createRest();
+    vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+    expect(session.current.state).toBe('empty');
+
+    await session.createSession();
+
+    expect(chat.createChat).toHaveBeenCalledWith(expect.not.objectContaining({ selectedSessionId: expect.anything() }));
+    expect(chat.transport.connect).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(chat.transport.createSession).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(session.current).toMatchObject({
+      state: 'empty',
+      activeSessionId: 'stored-draft',
+      title: 'Untitled chat',
+      model: 'Hermes 4'
+    });
+    expect(session.current.sessions).toEqual([
+      expect.objectContaining({ id: 'stored-draft', title: 'Untitled chat', group: 'recent' })
+    ]);
+  });
+
   it('restores the active server session before enabling chat', async () => {
     const rest = createRest([{ role: 'user', content: 'Server-owned history' }]);
     const chat = createChatHarness();

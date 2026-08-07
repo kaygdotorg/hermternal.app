@@ -23,6 +23,7 @@
   });
 
   function handleAction(action: WorkspaceAction): void {
+    if (action.type === 'new-session') void session.createSession();
     if (action.type === 'select-session') void session.selectSession(action.sessionId);
     if (action.type === 'send') session.sendPrompt(action.text);
     if (action.type === 'stop') void session.stop();

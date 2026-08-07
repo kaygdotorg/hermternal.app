@@ -105,6 +105,43 @@ export class LiveWorkspaceSession {
     }
   }
 
+  async createSession(): Promise<void> {
+    this.assertActive();
+    const operation = this.begin();
+    this.publish({ ...initialSnapshot(), sessions: this.snapshot.sessions, state: 'loading' });
+
+    const chat = this.createChat({
+      onEvent: (event) => this.handleEvent(operation.generation, event),
+      onStateChange: (state) => this.handleConnectionState(operation.generation, state),
+      onUncertainDelivery: () => this.publishUncertainDelivery(operation.generation)
+    });
+    this.chat = chat;
+    try {
+      await chat.connect(operation.signal);
+      if (!this.isCurrent(operation.generation) || this.chat !== chat) return;
+      const created = await chat.createSession(operation.signal);
+      if (!this.isCurrent(operation.generation) || this.chat !== chat) return;
+      const model = created.model?.trim() || 'Hermes';
+      const draft: SessionSummary = {
+        id: created.storedSessionId,
+        title: 'Untitled chat',
+        detail: 'New chat',
+        group: 'recent',
+        selected: true
+      };
+      this.publish({
+        state: 'empty',
+        sessions: [draft, ...this.snapshot.sessions.filter((session) => session.id !== draft.id)],
+        activeSessionId: created.storedSessionId,
+        title: draft.title,
+        model,
+        timeline: []
+      });
+    } catch (error) {
+      this.publishLoadFailure(error, operation.generation);
+    }
+  }
+
   sendPrompt(text: string): void {
     this.assertActive();
     const chat = this.chat;

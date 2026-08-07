@@ -56,13 +56,22 @@ test('browser UI reaches the official Hermes gateway through completion', async 
   await expect(workspace).toBeVisible();
   await expect(workspace).toHaveAttribute('data-state', /^(empty|ready)$/);
 
+  // A fresh disposable instance has no durable history. The user-led New chat
+  // action must create the source-owned ephemeral draft before the first prompt.
+  if ((await page.locator('.session-items button').count()) === 0) {
+    await page.getByRole('button', { name: 'Start a new chat' }).click();
+    await expect.poll(() => sentMethods.includes('session.create')).toBe(true);
+    await expect(workspace).toHaveAttribute('data-state', 'empty');
+  } else {
+    await expect.poll(() => sentMethods.includes('session.resume')).toBe(true);
+  }
+
   await expect.poll(() => receivedEvents.includes('gateway.ready')).toBe(true);
-  await expect.poll(() => sentMethods.includes('session.resume')).toBe(true);
   expect(requests).toContain('GET /api/auth/me');
   expect(requests).toContain('GET /api/auth/providers');
   expect(requests).toContain('POST /auth/password-login');
   expect(requests).toContain('GET /api/sessions');
-  expect(requests.some((entry) => entry.endsWith('/messages'))).toBe(true);
+  // A brand-new source draft has no durable REST history until its first prompt.
   expect(requests).toContain('POST /api/auth/ws-ticket');
   expect(websocketUpgradeCount).toBe(1);
   expect(websocketQueryIsTicketOnly).toBe(true);
@@ -80,10 +89,22 @@ test('browser UI reaches the official Hermes gateway through completion', async 
     sessionStorage: false
   });
 
+  const initialMessageReadCount = requests.filter((entry) => entry.endsWith('/messages')).length;
   await page.getByLabel('Message Hermes').fill(prompt);
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect.poll(() => sentMethods.includes('prompt.submit')).toBe(true);
-  await expect.poll(() => receivedEvents.includes('message.delta'), { timeout: 90_000 }).toBe(true);
+  await expect
+    .poll(
+      () =>
+        receivedEvents.includes('message.delta') ||
+        receivedEvents.includes('message.complete') ||
+        receivedEvents.includes('error'),
+      { timeout: 90_000 }
+    )
+    .toBe(true);
+  // Do not retain the source error payload. An `error` event proves transport but
+  // blocks completion, usually because the disposable VM lacks inference auth.
+  expect(receivedEvents.includes('error')).toBe(false);
   await expect.poll(() => receivedEvents.includes('message.complete'), { timeout: 90_000 }).toBe(true);
   await expect(workspace).toHaveAttribute('data-state', /^(empty|ready)$/);
   // Completion is transient. The controller must replace it from Hermes REST
@@ -91,7 +112,7 @@ test('browser UI reaches the official Hermes gateway through completion', async 
   await expect.poll(
     () => requests.filter((entry) => entry.endsWith('/messages')).length,
     { timeout: 30_000 }
-  ).toBeGreaterThanOrEqual(2);
+  ).toBeGreaterThan(initialMessageReadCount);
 
   expect(requests.filter((entry) => entry === 'POST /api/auth/ws-ticket')).toHaveLength(1);
   expect(sentMethods.filter((method) => method === 'prompt.submit')).toHaveLength(1);

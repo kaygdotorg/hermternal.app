@@ -111,10 +111,18 @@ received. `sendPrompt()` requires `ready` after this response; `restoring` is a
 strict barrier that permits waiting or cancellation only. The server owns the
 durable history; the transport does not mirror it.
 
+An authenticated empty workspace can explicitly call `session.create` after
+readiness. Hermes returns a short-lived live session ID and a distinct stored
+session ID. The first prompt uses only the live ID; REST reconciliation uses the
+stored ID after that prompt makes the row durable. The client validates both
+identifiers, does not retry creation, and does not invent a durable session from
+an empty REST list.
+
 ## Reviewed wire methods and events
 
 The client sends only these methods in this transport:
 
+- `session.create` for one explicit empty draft;
 - `session.resume` for restoration;
 - `prompt.submit` for a prompt;
 - `session.interrupt` for an explicit stop;
@@ -141,9 +149,11 @@ correlation, and optional fixture sequence numbers. It passes the bounded
 payload through as opaque transient data. Unknown additive fields are ignored.
 
 Unknown additive non-interactive event names are ignored without creating UI
-state. Unknown interactive names, including `sudo.request`, `secret.request`,
-and other `*.request` events, fail closed as `incompatible`; they are never
-promoted to approval or clarification.
+state. Official session-less global broadcasts, such as `sessions.changed`, use
+an empty `session_id`; the transport normalizes that source sentinel to absent
+before ignoring the event. Unknown interactive names, including `sudo.request`,
+`secret.request`, and other `*.request` events, fail closed as `incompatible`;
+they are never promoted to approval or clarification.
 
 Server replies and events share the channel. A reply is correlated only by the
 JSON-RPC request `id`. The event `request_id` field is optional source data; it

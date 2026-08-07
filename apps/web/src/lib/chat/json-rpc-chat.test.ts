@@ -8,6 +8,7 @@ import {
   JSON_RPC_GATEWAY_READY_EVENT,
   JSON_RPC_INTERRUPT_METHOD,
   JSON_RPC_PROMPT_METHOD,
+  JSON_RPC_SESSION_CREATE_METHOD,
   JSON_RPC_SESSION_RESUME_METHOD,
   JSON_RPC_WS_PATH,
   JsonRpcChatError,
@@ -276,6 +277,46 @@ describe("createJsonRpcChatTransport", () => {
         query: { ticket: "ticket-1" },
       },
     ]);
+  });
+
+  it("creates one empty source-owned session and uses its ephemeral ID for the first prompt", async () => {
+    const harness = makeHarness({ selectedSessionId: undefined });
+    const connection = harness.transport.connect();
+    await flush();
+    const socket = harness.sockets[0];
+    if (!socket) throw new Error("fake socket was not created");
+    socket.emitOpen();
+    emitEvent(socket, JSON_RPC_GATEWAY_READY_EVENT, {
+      skin: "synthetic",
+      change_events: true,
+    });
+    await connection;
+
+    const creation = harness.transport.createSession();
+    const create = frame(socket, 0);
+    expect(create).toMatchObject({
+      jsonrpc: "2.0",
+      method: JSON_RPC_SESSION_CREATE_METHOD,
+      params: {},
+    });
+    emitResponse(socket, create.id as string, {
+      session_id: "live-draft-1",
+      stored_session_id: "stored-draft-1",
+      message_count: 0,
+      messages: [],
+      info: { model: "synthetic/model", additive: true },
+    });
+    await expect(creation).resolves.toEqual({
+      sessionId: "live-draft-1",
+      storedSessionId: "stored-draft-1",
+      model: "synthetic/model",
+    });
+
+    harness.transport.sendPrompt("first persisted prompt");
+    expect(frame(socket, 1)).toMatchObject({
+      method: JSON_RPC_PROMPT_METHOD,
+      params: { session_id: "live-draft-1", text: "first persisted prompt" },
+    });
   });
 
   it("uses exact prompt, interrupt, approval, and clarification methods with opaque source payloads", async () => {
@@ -580,6 +621,9 @@ describe("createJsonRpcChatTransport", () => {
     const harness = makeHarness();
     const socket = await connectHarness(harness);
     emitEvent(socket, "tool.progress", { percent: 50, additive: true });
+    // Official global change broadcasts are session-less and encode that with
+    // an empty session_id rather than omitting the field.
+    emitEvent(socket, "sessions.changed", {}, { session_id: "" });
     expect(socket.closed).toBeUndefined();
     expect(harness.transport.state.status).toBe("ready");
 

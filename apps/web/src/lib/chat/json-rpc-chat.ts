@@ -6,6 +6,7 @@ export const JSON_RPC_WS_PATH = "/api/ws" as const;
 export const JSON_RPC_WS_ORIGIN = "same-origin" as const;
 export const JSON_RPC_EVENT_METHOD = "event" as const;
 export const JSON_RPC_GATEWAY_READY_EVENT = "gateway.ready" as const;
+export const JSON_RPC_SESSION_CREATE_METHOD = "session.create" as const;
 export const JSON_RPC_SESSION_RESUME_METHOD = "session.resume" as const;
 export const JSON_RPC_PROMPT_METHOD = "prompt.submit" as const;
 export const JSON_RPC_INTERRUPT_METHOD = "session.interrupt" as const;
@@ -320,6 +321,14 @@ export interface JsonRpcChatRequest {
   abort(): void;
 }
 
+export interface JsonRpcCreatedSession {
+  /** Ephemeral gateway ID used for the first prompt on this connection. */
+  readonly sessionId: string;
+  /** Durable REST identity allocated before the first prompt persists the row. */
+  readonly storedSessionId: string;
+  readonly model?: string;
+}
+
 export interface JsonRpcChatOptions {
   readonly ticketProvider: FreshChatTicketProvider;
   readonly createWebSocket: JsonRpcWebSocketFactory;
@@ -350,6 +359,7 @@ export interface JsonRpcChatTransport {
   readonly selectedSessionId: string | undefined;
   connect(signal?: AbortSignal): Promise<void>;
   reconnect(signal?: AbortSignal): Promise<void>;
+  createSession(signal?: AbortSignal): Promise<JsonRpcCreatedSession>;
   restore(sessionId?: string, signal?: AbortSignal): Promise<void>;
   close(): void;
   sendPrompt(
@@ -422,13 +432,15 @@ interface OperationRecord {
   acknowledgementTimer?: ReturnType<typeof setTimeout>;
 }
 
-type ControlKind = "restore" | "interrupt" | "approval" | "clarification";
+type ControlKind = "create" | "restore" | "interrupt" | "approval" | "clarification";
 
 interface ControlRecord {
   readonly id: string;
   readonly kind: ControlKind;
   readonly resolve: () => void;
   readonly reject: (error: JsonRpcChatError) => void;
+  /** Validate and project a source-owned result before acknowledging control success. */
+  readonly acceptResult?: (result: BoundedJsonValue) => void;
   removeAbortListener?: () => void;
   acknowledgementTimer?: ReturnType<typeof setTimeout>;
 }
@@ -913,7 +925,16 @@ export function createJsonRpcChatTransport(
           new JsonRpcChatError("server-rejected", context.generation),
         );
       } else {
-        settleControl(control);
+        try {
+          control.acceptResult?.(message.result ?? null);
+          settleControl(control);
+        } catch {
+          settleControl(
+            control,
+            new JsonRpcChatError("protocol-violation", context.generation),
+          );
+          failContext(context, "protocol-violation", "protocol-error");
+        }
       }
       return;
     }
@@ -1240,6 +1261,7 @@ export function createJsonRpcChatTransport(
     params: Record<string, BoundedJsonValue>,
     kind: ControlKind,
     signal?: AbortSignal,
+    acceptResult?: (result: BoundedJsonValue) => void,
   ): Promise<void> => {
     if (pendingControls.size >= MAX_JSON_RPC_PENDING_CONTROLS) {
       return Promise.reject(
@@ -1276,7 +1298,7 @@ export function createJsonRpcChatTransport(
       resolve = resolvePromise;
       reject = rejectPromise;
     });
-    const record: ControlRecord = { id, kind, resolve, reject };
+    const record: ControlRecord = { id, kind, resolve, reject, acceptResult };
     pendingControls.set(id, record);
     record.acknowledgementTimer = setTimeout(() => {
       if (pendingControls.get(id) !== record) {
@@ -1494,6 +1516,34 @@ export function createJsonRpcChatTransport(
     // This callback runs only after the old generation and handlers are stale.
     safeCall(options.onReconnect);
     return startConnection(signal, true);
+  };
+
+  const createSession = async (
+    signal?: AbortSignal,
+  ): Promise<JsonRpcCreatedSession> => {
+    const context = activeContext;
+    if (!context?.gatewayReady || currentState.status !== "ready") {
+      throw new JsonRpcChatError("not-connected", currentGeneration);
+    }
+
+    let created: JsonRpcCreatedSession | undefined;
+    await sendRequest(
+      context,
+      JSON_RPC_SESSION_CREATE_METHOD,
+      {},
+      "create",
+      signal,
+      (result) => {
+        created = parseCreatedSession(result);
+      },
+    );
+    if (!created) {
+      throw new JsonRpcChatError("protocol-violation", currentGeneration);
+    }
+    // The first prompt addresses the ephemeral live ID. REST reconciliation uses
+    // the separately returned stored ID after Hermes persists the first turn.
+    selectedSessionId = created.sessionId;
+    return created;
   };
 
   const restore = (
@@ -1775,6 +1825,7 @@ export function createJsonRpcChatTransport(
     },
     connect,
     reconnect,
+    createSession,
     restore,
     close,
     sendPrompt,
@@ -1914,6 +1965,28 @@ function parseEventEnvelope(value: BoundedJsonValue): ParsedEventEnvelope {
   };
 }
 
+function parseCreatedSession(value: BoundedJsonValue): JsonRpcCreatedSession {
+  const object = requireObject(value, ["session_id", "stored_session_id"]);
+  const sessionId = requireString(object.session_id, MAX_SESSION_ID_LENGTH);
+  const storedSessionId = requireString(
+    object.stored_session_id,
+    MAX_SESSION_ID_LENGTH,
+  );
+  if (!isSafeSessionId(sessionId) || !isSafeSessionId(storedSessionId)) {
+    throw new JsonRpcChatError("protocol-violation");
+  }
+
+  let model: string | undefined;
+  if (object.info !== undefined) {
+    const info = requireObject(object.info, []);
+    if (info.model !== undefined) {
+      const candidate = requireString(info.model, MAX_JSON_RPC_TEXT_LENGTH);
+      if (candidate.length > 0) model = candidate;
+    }
+  }
+  return { sessionId, storedSessionId, ...(model ? { model } : {}) };
+}
+
 function parseErrorShape(
   value: BoundedJsonValue | undefined,
 ): JsonRpcErrorShape {
@@ -1988,7 +2061,9 @@ function optionalSafeId(
 function optionalSessionId(
   value: BoundedJsonValue | undefined,
 ): string | undefined {
-  if (value === undefined || value === null) {
+  if (value === undefined || value === null || value === "") {
+    // Official session-less global broadcasts use an empty string sentinel.
+    // Normalize it to absence; operation events still require an owner later.
     return undefined;
   }
   if (typeof value !== "string" || !isSafeSessionId(value)) {
