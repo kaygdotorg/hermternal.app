@@ -13,6 +13,9 @@ export const MAX_READY_WRITE_CHUNK_BYTES = 16 * 1024;
 export const MAX_READY_WRITE_BUFFER_BYTES = MAX_SCROLLBACK_LIMIT_BYTES;
 /** Do not retain an unbounded dangerous clipboard payload in the confirmation queue. */
 export const MAX_DANGEROUS_PASTE_BYTES = DEFAULT_PENDING_WRITE_LIMIT_BYTES;
+/** Bound stalled confirmation count as well as aggregate retained bytes. */
+export const MAX_PENDING_PASTE_COUNT = 32;
+export const MAX_PENDING_PASTE_BYTES = MAX_DANGEROUS_PASTE_BYTES;
 /** Keep terminal dimensions aligned with the reviewed PTY boundary. */
 export const MAX_TERMINAL_COLS = 2000;
 export const MAX_TERMINAL_ROWS = 1000;
@@ -85,6 +88,8 @@ export interface TerminalRenderer {
   write(data: Uint8Array): void;
   resize(cols: number, rows: number): void;
   focus(): void;
+  /** Resolve after queued ready-state writes and resizes have drained. */
+  whenIdle(): Promise<void>;
   dispose(): void;
 }
 
@@ -92,12 +97,17 @@ type PendingOperation =
   | Readonly<{ type: 'write'; data: Uint8Array }>
   | Readonly<{ type: 'resize'; size: TerminalSize }>;
 
-type PendingPaste = Readonly<{
-  request: PasteRequest;
+type PendingPaste = {
+  request: PasteRequest | null;
   generation: number;
   host: HTMLElement;
   backend: MountedTerminal;
-}>;
+  byteLength: number;
+  canceled: boolean;
+  counted: boolean;
+  cancellation: Promise<void>;
+  cancel: () => void;
+};
 
 type HostSnapshot = Readonly<{
   className: string | null;
@@ -120,6 +130,16 @@ type WTermModules = Readonly<{
 let wTermModulesPromise: Promise<WTermModules> | null = null;
 const WTERM_HOST_CLASSES = ['wterm', 'cursor-blink', 'has-scrollback', 'focused'] as const;
 const wTermHostRecords = new WeakMap<HTMLElement, WTermHostRecord>();
+// Direct adapter callers do not pass through rendererHostOwners, so the
+// exported adapter keeps its own host arbitration token. A pending token is
+// claimed before lazy loading and a mounted token is disposed on takeover.
+type DirectAdapterHostOwner = {
+  canceled: boolean;
+  backend: MountedTerminal | null;
+  cancelCleanup: (() => void) | null;
+  cancel: () => void;
+};
+const directAdapterHostOwners = new WeakMap<HTMLElement, DirectAdapterHostOwner>();
 // One renderer generation owns host-level loading/error/restore mutations at a
 // time. This prevents an older renderer instance from clearing a newer owner's
 // content when both instances are pointed at the same host.
@@ -228,6 +248,37 @@ function canonicalizeUint8Array(data: unknown): Uint8Array | null {
     // closed rather than reaching W-Term or affecting byte accounting.
     return null;
   }
+}
+
+function createPendingPaste(
+  request: PasteRequest,
+  generation: number,
+  host: HTMLElement,
+  backend: MountedTerminal,
+  byteLength: number
+): PendingPaste {
+  let resolveCancellation!: () => void;
+  const cancellation = new Promise<void>((resolve) => {
+    resolveCancellation = resolve;
+  });
+  let pending!: PendingPaste;
+  pending = {
+    request,
+    generation,
+    host,
+    backend,
+    byteLength,
+    canceled: false,
+    counted: true,
+    cancellation,
+    cancel: () => {
+      if (pending.canceled) return;
+      pending.canceled = true;
+      pending.request = null;
+      resolveCancellation();
+    }
+  };
+  return pending;
 }
 
 function renderLoading(host: HTMLElement): void {
@@ -538,7 +589,29 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
   return {
     async mount(host, options): Promise<MountedTerminal> {
       const initialSize = normalizeSize(options.initialSize);
-      const { WTerm, GhosttyCore, wasmPath } = await loadWTermModules();
+      const previousOwner = directAdapterHostOwners.get(host);
+      previousOwner?.cancel();
+      const owner: DirectAdapterHostOwner = {
+        canceled: false,
+        backend: null,
+        cancelCleanup: null,
+        cancel: () => {
+          if (owner.canceled) return;
+          owner.canceled = true;
+          owner.cancelCleanup?.();
+          owner.backend = null;
+          if (directAdapterHostOwners.get(host) === owner) directAdapterHostOwners.delete(host);
+        }
+      };
+      directAdapterHostOwners.set(host, owner);
+      const isCurrent = (): boolean =>
+        !owner.canceled &&
+        directAdapterHostOwners.get(host) === owner &&
+        (!options.isCurrent || options.isCurrent());
+      const { WTerm, GhosttyCore, wasmPath } = await loadWTermModules().catch((error: unknown) => {
+        owner.cancel();
+        throw error;
+      });
       const core = await GhosttyCore.load({
         wasmPath,
         scrollbackLimit: clampByteLimit(
@@ -546,11 +619,15 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
           DEFAULT_SCROLLBACK_LIMIT_BYTES,
           MAX_SCROLLBACK_LIMIT_BYTES
         )
+      }).catch((error: unknown) => {
+        owner.cancel();
+        throw error;
       });
-      if (options.isCurrent && !options.isCurrent()) {
+      if (!isCurrent()) {
         // Avoid constructing W-Term into a host released while WASM loaded.
         // The core API has no deterministic release hook; dropping this local
         // reference is the safest available behavior for the stale operation.
+        owner.cancel();
         throw new Error('terminal mount became stale');
       }
 
@@ -587,6 +664,16 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         }
       };
       let term: WTerm | null = null;
+      owner.cancelCleanup = () => {
+        if (owner.backend) {
+          owner.backend.dispose();
+          return;
+        }
+        if (term && !record.disposed) {
+          recordWTermHostState(host, record);
+          disposeWTermPreservingHost(term, host, record, true);
+        }
+      };
       try {
         term = new WTerm(host, termOptions);
         await term.init();
@@ -603,14 +690,14 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
           });
           record.classObserver.observe(host, { attributes: true, attributeFilter: ['class'] });
         }
-        if (options.isCurrent && !options.isCurrent()) {
+        if (!isCurrent()) {
           disposeWTermPreservingHost(term, host, record, true);
           throw new Error('terminal mount became stale');
         }
 
         const mountedTerm = term;
         let disposed = false;
-        return {
+        const mounted: MountedTerminal = {
           write(data) {
             if (disposed) return;
             const bytes = canonicalizeUint8Array(data);
@@ -647,6 +734,10 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
           dispose(disposeOptions) {
             if (disposed) return;
             disposed = true;
+            owner.canceled = true;
+            owner.backend = null;
+            owner.cancelCleanup = null;
+            if (directAdapterHostOwners.get(host) === owner) directAdapterHostOwners.delete(host);
             // A stale dispose must not learn values restored or written by a
             // later host owner. A direct dispose can capture the final known
             // class state synchronously; the observer covers async W-Term
@@ -655,8 +746,11 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
             disposeWTermPreservingHost(mountedTerm, host, record, disposeOptions?.preserveHost === true);
           }
         };
+        owner.backend = mounted;
+        owner.cancelCleanup = () => mounted.dispose();
+        return mounted;
       } catch (error) {
-        const preserveHost = options.isCurrent?.() === false;
+        const preserveHost = !isCurrent();
         if (term && !record.disposed) {
           recordWTermHostState(host, record);
           disposeWTermPreservingHost(term, host, record, preserveHost);
@@ -667,6 +761,10 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
             restoreWTermHostRecord(host, record);
           }
         }
+        owner.canceled = true;
+        owner.backend = null;
+        owner.cancelCleanup = null;
+        if (directAdapterHostOwners.get(host) === owner) directAdapterHostOwners.delete(host);
         throw error;
       }
     }
@@ -690,8 +788,12 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   private readyOperations: PendingOperation[] = [];
   private readyWriteBytes = 0;
   private readyDrainTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly idleWaiters: Array<() => void> = [];
   private pendingMount: Promise<void> | null = null;
-  private pasteConfirmationQueue: Promise<void> = Promise.resolve();
+  private pasteQueue: PendingPaste[] = [];
+  private pasteQueueBytes = 0;
+  private activePaste: PendingPaste | null = null;
+  private pasteDrainRunning = false;
   private backend: MountedTerminal | null = null;
   private host: HTMLElement | null = null;
   private hostSnapshot: HostSnapshot | null = null;
@@ -711,7 +813,8 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     const clipboardEvent = event as ClipboardEvent;
     const text = clipboardEvent.clipboardData?.getData('text/plain') ?? '';
     if (!text || !isDangerousPaste(text)) return;
-    if (utf8Encoder.encode(text).byteLength > MAX_DANGEROUS_PASTE_BYTES) {
+    const byteLength = utf8Encoder.encode(text).byteLength;
+    if (byteLength > MAX_DANGEROUS_PASTE_BYTES) {
       // Keep the browser from forwarding a dangerous oversized payload while
       // avoiding another retained copy in the confirmation queue.
       clipboardEvent.preventDefault();
@@ -726,12 +829,13 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       multiline: isMultiline(text),
       hasControlCharacters: hasControlCharacters(text)
     };
-    this.enqueuePasteConfirmation({
+    this.enqueuePasteConfirmation(createPendingPaste(
       request,
-      generation: this.mountGeneration,
+      this.mountGeneration,
       host,
-      backend
-    });
+      backend,
+      byteLength
+    ));
   };
 
   constructor(options: TerminalRendererOptions = {}) {
@@ -760,7 +864,16 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       this.backend &&
       rendererHostOwners.get(host) === this
     ) {
-      if (this.restoreFocusOnMount || this.focusRequested) this.backend.focus();
+      const backend = this.backend;
+      if (this.restoreFocusOnMount || this.focusRequested) {
+        try {
+          backend.focus();
+        } catch {
+          this.fail('wasm-initialization-failed');
+          return;
+        }
+        if (!this.isCurrentMount(this.mountGeneration, host, backend)) return;
+      }
       this.restoreFocusOnMount = false;
       this.focusRequested = false;
       return;
@@ -792,6 +905,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     renderLoading(host);
     this.error = null;
     this.setState('loading');
+    if (!this.isCurrentMount(generation, host)) return;
 
     const load = this.mountAdapter(host, generation);
     this.pendingMount = load;
@@ -875,6 +989,16 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     if (this.state === 'loading' || this.state === 'idle') this.focusRequested = true;
   }
 
+  whenIdle(): Promise<void> {
+    if (
+      this.state !== 'ready' ||
+      (this.readyOperations.length === 0 && this.readyDrainTimer === null)
+    ) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.idleWaiters.push(resolve);
+    });
+  }
+
   dispose(): void {
     const host = this.host;
     if (host) this.restoreFocusOnMount = host.contains(document.activeElement);
@@ -889,24 +1013,29 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     this.setState('disposed');
   }
 
+  private isCurrentMount(
+    generation: number,
+    host: HTMLElement,
+    backend?: MountedTerminal
+  ): boolean {
+    return (
+      generation === this.mountGeneration &&
+      this.host === host &&
+      rendererHostOwners.get(host) === this &&
+      this.state !== 'disposed' &&
+      (!backend || this.backend === backend)
+    );
+  }
+
   private async mountAdapter(host: HTMLElement, generation: number): Promise<void> {
     try {
       const backend = await this.adapter.mount(host, {
         initialSize: this.initialSize,
         scrollbackLimitBytes: this.scrollbackLimitBytes,
         onInput: this.onInput,
-        isCurrent: () =>
-          generation === this.mountGeneration &&
-          this.host === host &&
-          rendererHostOwners.get(host) === this &&
-          this.state !== 'disposed'
+        isCurrent: () => this.isCurrentMount(generation, host)
       });
-      if (
-        generation !== this.mountGeneration ||
-        this.state === 'disposed' ||
-        this.host !== host ||
-        rendererHostOwners.get(host) !== this
-      ) {
+      if (!this.isCurrentMount(generation, host)) {
         // The async adapter may have constructed W-Term after this renderer
         // released the host. Never let the upstream destructor clear reused
         // content; production W-Term uses its host-preserving cleanup path.
@@ -921,11 +1050,24 @@ class ManagedTerminalRenderer implements TerminalRenderer {
         this.fail('wasm-initialization-failed');
         return;
       }
+      if (!this.isCurrentMount(generation, host, backend)) {
+        safeDispose(backend, true);
+        return;
+      }
       removeLoadingStatus(host);
       host.addEventListener('paste', this.onPasteCapture, true);
       applyHostState(host, 'ready', this.label);
       this.setState('ready');
-      if (this.restoreFocusOnMount || this.focusRequested) backend.focus();
+      if (!this.isCurrentMount(generation, host, backend)) return;
+      if (this.restoreFocusOnMount || this.focusRequested) {
+        try {
+          backend.focus();
+        } catch {
+          if (this.isCurrentMount(generation, host, backend)) this.fail('wasm-initialization-failed');
+          return;
+        }
+        if (!this.isCurrentMount(generation, host, backend)) return;
+      }
       this.restoreFocusOnMount = false;
       this.focusRequested = false;
     } catch {
@@ -981,7 +1123,11 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   private scheduleReadyDrain(): void {
-    if (this.readyDrainTimer !== null || this.readyOperations.length === 0) return;
+    if (this.readyDrainTimer !== null) return;
+    if (this.readyOperations.length === 0) {
+      this.resolveIdleWaiters();
+      return;
+    }
     this.readyDrainTimer = setTimeout(() => {
       this.readyDrainTimer = null;
       this.drainReadyOperations();
@@ -1013,21 +1159,68 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     this.scheduleReadyDrain();
   }
 
+  private resolveIdleWaiters(): void {
+    const waiters = this.idleWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
+
   private clearReadyOperations(): void {
     if (this.readyDrainTimer !== null) clearTimeout(this.readyDrainTimer);
     this.readyDrainTimer = null;
     this.readyOperations = [];
     this.readyWriteBytes = 0;
+    this.resolveIdleWaiters();
   }
 
   private resetPasteConfirmationQueue(): void {
-    this.pasteConfirmationQueue = Promise.resolve();
+    const pending = [...this.pasteQueue];
+    if (this.activePaste) pending.push(this.activePaste);
+    this.pasteQueue = [];
+    this.pasteQueueBytes = 0;
+    this.activePaste = null;
+    for (const entry of pending) {
+      entry.counted = false;
+      entry.cancel();
+    }
   }
 
   private enqueuePasteConfirmation(pending: PendingPaste): void {
-    this.pasteConfirmationQueue = this.pasteConfirmationQueue
-      .then(() => this.confirmAndPaste(pending), () => this.confirmAndPaste(pending))
-      .catch(() => undefined);
+    const activeCount = this.activePaste ? 1 : 0;
+    if (
+      activeCount + this.pasteQueue.length >= MAX_PENDING_PASTE_COUNT ||
+      this.pasteQueueBytes + pending.byteLength > MAX_PENDING_PASTE_BYTES
+    ) {
+      pending.counted = false;
+      pending.cancel();
+      return;
+    }
+    this.pasteQueue.push(pending);
+    this.pasteQueueBytes += pending.byteLength;
+    if (this.pasteDrainRunning) return;
+    this.pasteDrainRunning = true;
+    void this.drainPasteQueue();
+  }
+
+  private async drainPasteQueue(): Promise<void> {
+    try {
+      while (this.pasteQueue.length > 0) {
+        const pending = this.pasteQueue.shift();
+        if (!pending) break;
+        this.activePaste = pending;
+        await this.confirmAndPaste(pending);
+        if (this.activePaste === pending) this.activePaste = null;
+        if (pending.counted) {
+          this.pasteQueueBytes = Math.max(0, this.pasteQueueBytes - pending.byteLength);
+          pending.counted = false;
+        }
+      }
+    } finally {
+      this.pasteDrainRunning = false;
+      if (this.pasteQueue.length > 0) {
+        this.pasteDrainRunning = true;
+        void this.drainPasteQueue();
+      }
+    }
   }
 
   private restoreErrorIfOwned(host: HTMLElement): void {
@@ -1042,36 +1235,58 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   private async confirmAndPaste(pending: PendingPaste): Promise<void> {
-    const { request, generation, host, backend } = pending;
+    const { generation, host, backend } = pending;
     if (
-      this.state !== 'ready' ||
-      this.mountGeneration !== generation ||
-      this.host !== host ||
-      rendererHostOwners.get(host) !== this ||
-      this.backend !== backend ||
+      pending.canceled ||
+      !pending.request ||
+      !this.isCurrentMount(generation, host, backend) ||
       !this.confirmPaste
-    ) return;
-    let confirmed = false;
-    try {
-      confirmed = await this.confirmPaste(request);
-    } catch {
-      return;
-    }
-    if (
-      !confirmed ||
-      this.state !== 'ready' ||
-      this.mountGeneration !== generation ||
-      this.host !== host ||
-      rendererHostOwners.get(host) !== this ||
-      this.backend !== backend
     ) {
+      pending.cancel();
       return;
     }
+
+    let requestForPaste: PasteRequest | null = pending.request;
+    pending.request = null;
+    if (!requestForPaste) {
+      pending.cancel();
+      return;
+    }
+    const confirmPaste = this.confirmPaste;
+    let confirmation: Promise<boolean>;
     try {
-      backend.paste(request.text);
+      confirmation = Promise.resolve(confirmPaste(requestForPaste));
+    } catch {
+      requestForPaste = null;
+      pending.cancel();
+      return;
+    }
+
+    const outcome = await Promise.race([
+      confirmation.then(
+        (confirmed) => ({ canceled: false, confirmed }),
+        () => ({ canceled: false, confirmed: false })
+      ),
+      pending.cancellation.then(() => ({ canceled: true, confirmed: false }))
+    ]);
+    if (
+      outcome.canceled ||
+      pending.canceled ||
+      !outcome.confirmed ||
+      !requestForPaste ||
+      !this.isCurrentMount(generation, host, backend)
+    ) {
+      requestForPaste = null;
+      return;
+    }
+
+    try {
+      backend.paste(requestForPaste.text);
       backend.focus();
     } catch {
-      this.fail('wasm-initialization-failed');
+      if (this.isCurrentMount(generation, host, backend)) this.fail('wasm-initialization-failed');
+    } finally {
+      requestForPaste = null;
     }
   }
 

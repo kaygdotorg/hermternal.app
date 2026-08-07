@@ -87,6 +87,13 @@ function waitForText(host: HTMLElement, text: string): Promise<void> {
   });
 }
 
+async function waitForRendererIdle(renderer: ReturnType<typeof createTerminalRenderer>): Promise<void> {
+  await renderer.whenIdle();
+  if (renderer.state !== 'ready' || renderer.error !== null) {
+    throw new Error(`terminal renderer was not ready after workload: ${renderer.error?.code ?? renderer.state}`);
+  }
+}
+
 async function run(): Promise<BrowserBenchmarkResult> {
   const host = document.createElement('div');
   host.style.cssText = 'position: fixed; left: -10000px; top: 0; width: 960px; height: 480px;';
@@ -123,17 +130,21 @@ async function run(): Promise<BrowserBenchmarkResult> {
     renderer.dispose();
     const started = performance.now();
     await renderer.mount(host);
+    await waitForRendererIdle(renderer);
     coldMountSamples.push(performance.now() - started);
     const firstGlyphStarted = performance.now();
     renderer.write(encoder.encode(`cold-glyph-${index}`));
     await waitForText(host, `cold-glyph-${index}`);
+    await waitForRendererIdle(renderer);
     firstGlyphSamples.push(performance.now() - firstGlyphStarted);
   }
 
   for (let index = 0; index < 10; index += 1) {
     const started = performance.now();
     renderer.write(replay.subarray(0, 64 * 1024));
+    await waitForRendererIdle(renderer);
     await waitForPaint();
+    await waitForRendererIdle(renderer);
     sustainedOutputSamples.push(performance.now() - started);
   }
 
@@ -143,7 +154,9 @@ async function run(): Promise<BrowserBenchmarkResult> {
     for (let offset = 0; offset < replay.byteLength; offset += 64 * 1024) {
       renderer.write(replay.subarray(offset, Math.min(replay.byteLength, offset + 64 * 1024)));
     }
+    await waitForRendererIdle(renderer);
     await waitForPaint();
+    await waitForRendererIdle(renderer);
     replaySamples.push(performance.now() - started);
   }
   const afterReplay = memoryBytes();
@@ -151,7 +164,9 @@ async function run(): Promise<BrowserBenchmarkResult> {
   for (let index = 0; index < 10; index += 1) {
     const started = performance.now();
     renderer.resize(100 + (index % 3), 28 + (index % 2));
+    await waitForRendererIdle(renderer);
     await waitForPaint();
+    await waitForRendererIdle(renderer);
     resizeSettlingSamples.push(performance.now() - started);
   }
 
@@ -159,6 +174,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
     const started = performance.now();
     renderer.dispose();
     await renderer.mount(host);
+    await waitForRendererIdle(renderer);
     mountDisposeSamples.push(performance.now() - started);
   }
   renderer.dispose();

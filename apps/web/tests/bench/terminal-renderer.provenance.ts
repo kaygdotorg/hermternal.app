@@ -34,6 +34,19 @@ export type BenchmarkSampleSet = Readonly<{
   distribution?: Partial<BenchmarkDistribution>;
 }>;
 
+export type BenchmarkExecutionInput = Readonly<{
+  path: string;
+  bytes: number;
+  sha256: string;
+}>;
+
+export type BenchmarkCheckout = Readonly<{
+  /** The clean source checkout used to produce or review the trace. */
+  head: string;
+  clean: boolean;
+  execution_inputs: readonly BenchmarkExecutionInput[];
+}>;
+
 const DISTRIBUTION_KEYS = ['min', 'p50', 'p95', 'p99', 'max', 'mean'] as const;
 
 type BenchmarkSamples = Readonly<Record<string, BenchmarkSampleSet>>;
@@ -132,14 +145,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-/** Validate the checked-in trace independently from the benchmark producer. */
-export function assertBenchmarkTrace(value: unknown): void {
+/** Validate the checked-in trace against a clean, recomputed source checkout. */
+export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout): void {
   if (!isRecord(value) || value.schema !== 'hermternal.web-terminal-renderer-benchmark.v1') {
     throw new Error('checked-in benchmark evidence schema was invalid');
   }
   const revision = value.revision;
   if (!isRecord(revision) || !FULL_COMMIT_SHA.test(String(revision.source_commit ?? ''))) {
     throw new Error('checked-in benchmark evidence source commit was invalid');
+  }
+  if (
+    revision.browser_entry !== 'apps/web/tests/bench/terminal-renderer.browser.ts' ||
+    revision.renderer_module !== 'apps/web/src/lib/terminal/renderer.ts'
+  ) {
+    throw new Error('checked-in benchmark evidence revision paths were invalid');
+  }
+  if (!checkout || !FULL_COMMIT_SHA.test(checkout.head) || !checkout.clean) {
+    throw new Error('checked-in benchmark evidence checkout was not a clean full-commit source');
+  }
+  if (String(revision.source_commit).toLowerCase() !== checkout.head.toLowerCase()) {
+    throw new Error('checked-in benchmark evidence source commit did not match the reviewed checkout HEAD');
   }
   const inputs = revision.execution_inputs;
   if (!Array.isArray(inputs) || inputs.length !== BENCHMARK_EXECUTION_INPUT_PATHS.length) {
@@ -159,9 +184,39 @@ export function assertBenchmarkTrace(value: unknown): void {
       throw new Error('checked-in benchmark evidence execution input was invalid');
     }
   }
+  if (
+    checkout.execution_inputs.length !== BENCHMARK_EXECUTION_INPUT_PATHS.length ||
+    checkout.execution_inputs.some((expected, index) => {
+      const actual = inputs[index];
+      return (
+        expected.path !== BENCHMARK_EXECUTION_INPUT_PATHS[index] ||
+        !isRecord(actual) ||
+        actual.path !== expected.path ||
+        actual.bytes !== expected.bytes ||
+        String(actual.sha256).toLowerCase() !== expected.sha256.toLowerCase()
+      );
+    })
+  ) {
+    throw new Error('checked-in benchmark evidence execution inputs did not match the recomputed checkout');
+  }
   const browser = value.browser;
-  if (!isRecord(browser) || !isRecord(browser.samples)) {
+  if (
+    !isRecord(browser) ||
+    browser.schema !== 'hermternal.web-terminal-renderer-browser-benchmark.v1' ||
+    !isRecord(browser.samples)
+  ) {
     throw new Error('checked-in benchmark evidence browser samples were missing');
+  }
+  const build = value.build;
+  if (
+    !isRecord(build) ||
+    !['entry_bytes', 'lazy_chunk_bytes', 'wasm_bytes', 'css_bytes'].every((key) => {
+      const number = build[key];
+      return typeof number === 'number' && Number.isInteger(number) && number >= 0;
+    }) ||
+    !Array.isArray(build.files)
+  ) {
+    throw new Error('checked-in benchmark evidence build metadata was invalid');
   }
   const sampleNames = Object.keys(browser.samples).sort();
   const expectedNames = Object.keys(BENCHMARK_REPETITIONS).sort();
@@ -173,13 +228,49 @@ export function assertBenchmarkTrace(value: unknown): void {
     BENCHMARK_REPETITIONS
   );
   const method = value.method;
-  if (!isRecord(method) || !isRecord(method.repetitions)) {
-    throw new Error('checked-in benchmark evidence repetitions were missing');
+  if (
+    !isRecord(method) ||
+    method.browser !== 'Playwright Chromium headless' ||
+    method.warmups !== 0 ||
+    method.percentile !== 'inclusive-linear-r7' ||
+    method.rounding !== 'decimal-half-even-to-three-places' ||
+    !Array.isArray(method.quantiles) ||
+    method.quantiles.join(',') !== '0.5,0.95,0.99' ||
+    !isRecord(method.repetitions)
+  ) {
+    throw new Error('checked-in benchmark evidence method metadata was invalid');
   }
   for (const [name, expected] of Object.entries(BENCHMARK_REPETITIONS)) {
     if (method.repetitions[name] !== expected) {
       throw new Error(`checked-in benchmark evidence repetition for ${name} was invalid`);
     }
+  }
+  const redaction = value.redaction;
+  const redactionKeys = [
+    'synthetic_only',
+    'network_access',
+    'provider_access',
+    'credentials',
+    'cookies',
+    'terminal_bytes_logged',
+    'hostnames',
+    'user_data'
+  ];
+  if (
+    !isRecord(redaction) ||
+    redactionKeys.some((key) => typeof redaction[key] !== 'boolean') ||
+    redaction.synthetic_only !== true ||
+    redaction.network_access !== false ||
+    redaction.provider_access !== false ||
+    redaction.credentials !== false ||
+    redaction.cookies !== false ||
+    redaction.terminal_bytes_logged !== false ||
+    redaction.hostnames !== false ||
+    redaction.user_data !== false ||
+    value.threshold !== null ||
+    value.budget !== null
+  ) {
+    throw new Error('checked-in benchmark evidence redaction metadata was invalid');
   }
 }
 

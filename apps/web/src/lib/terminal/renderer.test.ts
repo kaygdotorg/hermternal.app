@@ -1,9 +1,13 @@
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createTerminalRenderer,
   createWTermGhosttyAdapter,
+  MAX_READY_WRITE_CHUNK_BYTES,
+  MAX_READY_WRITE_BUFFER_BYTES,
   type MountedTerminal,
   type TerminalRendererAdapter,
   type TerminalSize
@@ -13,7 +17,9 @@ import {
   assertBenchmarkTrace,
   assertCleanExecutionInputs,
   assertCommitMatchesHead,
+  BENCHMARK_EXECUTION_INPUT_PATHS,
   BENCHMARK_REPETITIONS,
+  type BenchmarkCheckout,
   validateFullCommit
 } from '../../../tests/bench/terminal-renderer.provenance';
 
@@ -257,9 +263,9 @@ function createDeterministicAdapter(options: { fail?: boolean } = {}): {
         paste(data) {
           operations.push({ type: 'paste', text: data });
         },
-        dispose(disposeOptions) {
+        dispose: vi.fn((disposeOptions?: Readonly<{ preserveHost?: boolean }>) => {
           if (!disposeOptions?.preserveHost) host.replaceChildren();
-        },
+        }),
         snapshot() {
           const graphemes = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (entry) => entry.segment);
           return {
@@ -285,6 +291,25 @@ function clipboardPaste(host: HTMLElement, text: string): Event {
   });
   host.dispatchEvent(event);
   return event;
+}
+
+function recomputeBenchmarkCheckout(commit: string): BenchmarkCheckout {
+  const repoRoot = resolve(process.cwd(), '../..');
+  const executionInputs = BENCHMARK_EXECUTION_INPUT_PATHS.map((path) => {
+    const bytes = execFileSync('git', ['-C', repoRoot, 'show', `${commit}:${path}`]);
+    return {
+      path,
+      bytes: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex')
+    };
+  });
+  return {
+    head: commit,
+    // The Git commit tree is the reviewed clean checkout; current working-tree
+    // dirtiness is covered independently by assertCleanExecutionInputs tests.
+    clean: true,
+    execution_inputs: executionInputs
+  };
 }
 
 describe('TerminalRenderer', () => {
@@ -357,6 +382,34 @@ describe('TerminalRenderer', () => {
 
     expect(terminals[0]?.operations.map((operation) => operation.type)).toEqual(['write', 'resize', 'write', 'resize']);
     expect(terminals[0]?.operations.at(-1)).toEqual({ type: 'resize', size: { cols: 120, rows: 40 } });
+  });
+
+  it('awaits cooperative ready-state output drain before reporting idle', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter });
+    await renderer.mount(document.createElement('div'));
+    renderer.write(new Uint8Array(MAX_READY_WRITE_CHUNK_BYTES * 2 + 1));
+
+    expect(terminals[0]?.operations).toHaveLength(0);
+    await renderer.whenIdle();
+
+    expect(renderer.state).toBe('ready');
+    expect(terminals[0]?.operations.filter((operation) => operation.type === 'write')).toHaveLength(3);
+  });
+
+  it('fails ready-state output closed when its bounded drain buffer is exceeded', async () => {
+    const { adapter } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter });
+    const host = document.createElement('div');
+    document.body.append(host);
+    await renderer.mount(host);
+    renderer.write(new Uint8Array(MAX_READY_WRITE_BUFFER_BYTES));
+    renderer.write(new Uint8Array([0x41]));
+
+    await renderer.whenIdle();
+    expect(renderer.state).toBe('error');
+    expect(renderer.error?.code).toBe('pending-output-limit');
+    expect(host.querySelector('[role="alert"]')).toBeInTheDocument();
   });
 
   it('keeps the loading status visible until the adapter is ready', async () => {
@@ -778,6 +831,41 @@ describe('TerminalRenderer', () => {
     ]);
   });
 
+  it('cancels stalled paste confirmation and releases queued requests on dispose/remount', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    let resolveFirst!: (accepted: boolean) => void;
+    const stalledConfirmation = new Promise<boolean>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const confirmPaste = vi.fn()
+      .mockImplementationOnce(() => stalledConfirmation)
+      .mockResolvedValue(true);
+    const renderer = createTerminalRenderer({ adapter, confirmPaste });
+    const host = document.createElement('div');
+    await renderer.mount(host);
+
+    const firstText = `${'x'.repeat(120 * 1024)}\n`;
+    const secondText = `${'y'.repeat(120 * 1024)}\n`;
+    clipboardPaste(host, firstText);
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(1));
+    clipboardPaste(host, secondText);
+    await Promise.resolve();
+    expect(confirmPaste).toHaveBeenCalledTimes(1);
+
+    renderer.dispose();
+    await renderer.mount(host);
+    resolveFirst(true);
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(confirmPaste).toHaveBeenCalledTimes(1);
+    expect(terminals[0]?.operations.filter((operation) => operation.type === 'paste')).toHaveLength(0);
+
+    clipboardPaste(host, 'fresh command\n');
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(terminals[1]?.operations).toContainEqual({ type: 'paste', text: 'fresh command\n' }));
+  });
+
   it('catches backend paste failures without an unhandled rejection', async () => {
     const backend: MountedTerminal = {
       write: vi.fn(),
@@ -830,6 +918,50 @@ describe('TerminalRenderer', () => {
     await renderer.mount(firstHost);
     expect(renderer.state).toBe('ready');
     expect(firstHost).toHaveFocus();
+  });
+
+  it('rechecks ownership after onStateChange synchronously disposes at ready', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    let renderer!: ReturnType<typeof createTerminalRenderer>;
+    renderer = createTerminalRenderer({
+      adapter,
+      onStateChange: (state) => {
+        if (state === 'ready') renderer.dispose();
+      }
+    });
+    const host = document.createElement('div');
+
+    await renderer.mount(host);
+
+    expect(renderer.state).toBe('disposed');
+    expect(terminals[0]?.dispose).toHaveBeenCalledTimes(1);
+    expect(host).toBeEmptyDOMElement();
+  });
+
+  it('does not let onStateChange synchronously remount clobber the old continuation', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    const firstHost = document.createElement('div');
+    const secondHost = document.createElement('div');
+    document.body.append(firstHost, secondHost);
+    let remounted = false;
+    let renderer!: ReturnType<typeof createTerminalRenderer>;
+    renderer = createTerminalRenderer({
+      adapter,
+      onStateChange: (state) => {
+        if (state === 'ready' && !remounted) {
+          remounted = true;
+          void renderer.mount(secondHost);
+        }
+      }
+    });
+
+    await renderer.mount(firstHost);
+    await vi.waitFor(() => expect(terminals).toHaveLength(2));
+    await vi.waitFor(() => expect(renderer.state).toBe('ready'));
+
+    expect(firstHost).toBeEmptyDOMElement();
+    expect(secondHost.querySelector('[data-test-terminal-screen]')).toBeInTheDocument();
+    expect(terminals[0]?.dispose).toHaveBeenCalledTimes(1);
   });
 
   it('renders one controlled error state when initialization fails', async () => {
@@ -956,6 +1088,33 @@ describe('TerminalRenderer', () => {
     expect(() => mounted.resize(2001, 24)).toThrow('terminal size must use integer columns 1-2000');
     expect(() => mounted.resize(80, 1001)).toThrow('terminal size must use integer columns 1-2000');
     mounted.dispose();
+  });
+
+  it('direct adapter mounts arbitrate shared-host ownership before returning', async () => {
+    moduleMocks.MockGhosttyCore.load.mockResolvedValue(new moduleMocks.MockGhosttyCore());
+    const host = document.createElement('div');
+    host.className = 'shell-host';
+    const adapter = createWTermGhosttyAdapter();
+    const first = await adapter.mount(host, {
+      initialSize: { cols: 80, rows: 24 },
+      scrollbackLimitBytes: 64 * 1024,
+      onInput: vi.fn()
+    });
+    const firstInstance = moduleMocks.MockWTerm.instances.at(-1)!;
+    const second = await adapter.mount(host, {
+      initialSize: { cols: 80, rows: 24 },
+      scrollbackLimitBytes: 64 * 1024,
+      onInput: vi.fn()
+    });
+    const secondInstance = moduleMocks.MockWTerm.instances.at(-1)!;
+
+    expect(firstInstance).not.toBe(secondInstance);
+    expect(firstInstance.input).toBeNull();
+    expect(host.querySelectorAll('.term-grid')).toHaveLength(1);
+    first.dispose();
+    expect(host.querySelector('.term-grid')).toBe(secondInstance._container);
+    second.dispose();
+    expect(host).toHaveClass('shell-host');
   });
 
   it('direct adapter disposal preserves host values and cleans only its own nodes once', async () => {
@@ -1098,9 +1257,31 @@ describe('TerminalRenderer', () => {
     );
   });
 
-  it('independently validates the checked-in benchmark evidence trace', () => {
+  it('independently validates and binds the checked-in benchmark evidence trace', () => {
     const evidencePath = resolve(process.cwd(), 'tests/bench/terminal-renderer.evidence.json');
-    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as unknown;
-    expect(() => assertBenchmarkTrace(evidence)).not.toThrow();
+    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as {
+      revision: { source_commit: string };
+    };
+    const checkout = recomputeBenchmarkCheckout(evidence.revision.source_commit);
+    expect(() => assertBenchmarkTrace(evidence, checkout)).not.toThrow();
+    expect(() => assertBenchmarkTrace(evidence, undefined as never)).toThrow(
+      'checked-in benchmark evidence checkout was not a clean full-commit source'
+    );
+
+    const tamperedInput = JSON.parse(JSON.stringify(evidence)) as {
+      revision: { execution_inputs: Array<{ sha256: string }> };
+    };
+    tamperedInput.revision.execution_inputs[0]!.sha256 = '0'.repeat(64);
+    expect(() => assertBenchmarkTrace(tamperedInput, checkout)).toThrow(
+      'did not match the recomputed checkout'
+    );
+
+    const tamperedSource = JSON.parse(JSON.stringify(evidence)) as {
+      revision: { source_commit: string };
+    };
+    tamperedSource.revision.source_commit = 'a'.repeat(40);
+    expect(() => assertBenchmarkTrace(tamperedSource, checkout)).toThrow(
+      'did not match the reviewed checkout HEAD'
+    );
   });
 });

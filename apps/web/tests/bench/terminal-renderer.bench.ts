@@ -8,6 +8,7 @@ import { chromium, type Browser, type Page } from '@playwright/test';
 import { build } from 'vite';
 import {
   assertBenchmarkSampleCounts,
+  assertBenchmarkTrace,
   assertCleanExecutionInputs,
   assertCommitMatchesHead,
   BENCHMARK_EXECUTION_INPUT_PATHS,
@@ -282,7 +283,7 @@ async function run(): Promise<Trace> {
     });
     assertBenchmarkSampleCounts(browserResult.samples, BENCHMARK_REPETITIONS);
     const files = buildResult.files;
-    return {
+    const trace: Trace = {
       schema: 'hermternal.web-terminal-renderer-benchmark.v1',
       revision: {
         source_commit: sourceCommit,
@@ -320,6 +321,12 @@ async function run(): Promise<Trace> {
       threshold: null,
       budget: null
     };
+    assertBenchmarkTrace(trace, {
+      head: sourceCommit,
+      clean: true,
+      execution_inputs: inputs
+    });
+    return trace;
   } finally {
     if (page) await page.close().catch(() => undefined);
     if (browser) await browser.close().catch(() => undefined);
