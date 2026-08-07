@@ -384,6 +384,41 @@ describe('createLiveRestTransport', () => {
     });
   });
 
+  it('accepts official null tool_calls and preserves its distinction from omission', async () => {
+    const withNullToolCalls = {
+      session_id: LIVE_SESSION_MESSAGES_FIXTURE.sessionId,
+      messages: [
+        { role: 'user', content: 'Synthetic user message', tool_calls: null },
+        { role: 'assistant', content: 'Synthetic assistant message', tool_calls: null },
+        { role: 'system', content: null, tool_calls: null },
+        { role: 'tool', content: 'Synthetic tool result', tool_calls: null }
+      ],
+      pagination: { limit: null, offset: 0, returned: 4 }
+    };
+    const withoutToolCalls = {
+      session_id: LIVE_SESSION_MESSAGES_FIXTURE.sessionId,
+      messages: [{ role: 'assistant', content: 'No tool-call field' }],
+      pagination: { limit: null, offset: 0, returned: 1 }
+    };
+    const fixture = fetchSequence(
+      response(JSON.stringify(withNullToolCalls)),
+      response(JSON.stringify(withoutToolCalls))
+    );
+    const transport = createLiveRestTransport({ fetch: fixture.fetch });
+
+    await expect(transport.getSessionMessages(LIVE_SESSION_MESSAGES_FIXTURE.sessionId)).resolves.toMatchObject({
+      messages: [
+        { role: 'user', content: 'Synthetic user message', toolCalls: null },
+        { role: 'assistant', content: 'Synthetic assistant message', toolCalls: null },
+        { role: 'system', content: null, toolCalls: null },
+        { role: 'tool', content: 'Synthetic tool result', toolCalls: null }
+      ]
+    });
+
+    const omitted = await transport.getSessionMessages(LIVE_SESSION_MESSAGES_FIXTURE.sessionId);
+    expect(omitted.messages[0]).not.toHaveProperty('toolCalls');
+  });
+
   it('accepts bounded fractional Unix timestamps emitted by the official Hermes session store', async () => {
     const session = JSON.parse(rawSession()) as Record<string, unknown>;
     session.started_at = 1_767_225_600.125;

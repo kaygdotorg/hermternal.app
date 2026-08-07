@@ -6,6 +6,7 @@ import {
   type LiveMessageContent,
   type LiveProvider,
   type LiveToolCall,
+  type LiveToolCalls,
   type LiveSession,
   type MessageListOptions,
   type ProviderDiscovery,
@@ -838,7 +839,13 @@ function requireMessageContent(value: StrictJsonValue): LiveMessageContent {
   return requireBoundedString(value, MAX_TEXT_LENGTH);
 }
 
-function requireToolCalls(value: StrictJsonValue): LiveToolCall[] {
+function requireToolCalls(value: StrictJsonValue): LiveToolCalls {
+  // The official history route emits null when a message has no tool calls.
+  // Preserve that source representation; only non-null arrays are projected.
+  if (value === null) {
+    return null;
+  }
+
   return requireArray(value, MAX_TOOL_CALL_COUNT).map((toolCall) => {
     const object = requireObject(toolCall, ['id', 'function']);
     const functionObject = requireObject(object.function, ['name', 'arguments']);

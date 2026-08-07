@@ -31,6 +31,7 @@ export type {
   LiveRestTransportOptions,
   LiveSession,
   LiveToolCall,
+  LiveToolCalls,
   MessageListOptions,
   NullableString,
   ProviderDiscovery,
