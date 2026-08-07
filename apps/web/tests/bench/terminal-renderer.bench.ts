@@ -11,8 +11,12 @@ import {
   assertBenchmarkTrace,
   assertCleanExecutionInputs,
   assertCommitMatchesHead,
+  assertNoDisallowedNetworkRequests,
+  BENCHMARK_BUILD_COMMAND,
   BENCHMARK_EXECUTION_INPUT_PATHS,
   BENCHMARK_REPETITIONS,
+  isAllowedBenchmarkRequest,
+  type BenchmarkBuild,
   validateFullCommit
 } from './terminal-renderer.provenance';
 
@@ -53,14 +57,7 @@ type Trace = Readonly<{
     renderer_module: string;
     execution_inputs: ReadonlyArray<Readonly<{ path: string; bytes: number; sha256: string }>>;
   }>;
-  build: Readonly<{
-    command: string;
-    files: ReadonlyArray<Readonly<{ path: string; bytes: number; sha256: string }>>;
-    entry_bytes: number;
-    lazy_chunk_bytes: number;
-    wasm_bytes: number;
-    css_bytes: number;
-  }>;
+  build: BenchmarkBuild;
   browser: BrowserBenchmarkResult;
   method: Readonly<{
     browser: string;
@@ -202,7 +199,7 @@ async function filesIn(root: string, relative = ''): Promise<string[]> {
 
 async function buildRenderer(): Promise<Readonly<{
   entryFile: string;
-  files: ReadonlyArray<Readonly<{ path: string; bytes: number; sha256: string }>>;
+  build: BenchmarkBuild;
 }>> {
   await fs.rm(outputDirectory, { recursive: true, force: true });
   await build({
@@ -232,10 +229,16 @@ async function buildRenderer(): Promise<Readonly<{
     files.push({ path: relative, bytes: bytes.byteLength, sha256: sha256(bytes) });
   }
   files.sort((left, right) => left.path.localeCompare(right.path));
-  return {
-    entryFile: 'entry.js',
-    files
+  const entryFile = 'entry.js';
+  const buildMetadata: BenchmarkBuild = {
+    command: BENCHMARK_BUILD_COMMAND,
+    files,
+    entry_bytes: sumFiles(files, (path) => path === entryFile),
+    lazy_chunk_bytes: sumFiles(files, (path) => path.startsWith('chunks/')),
+    wasm_bytes: sumFiles(files, (path) => path.endsWith('.wasm')),
+    css_bytes: sumFiles(files, (path) => path.endsWith('.css'))
   };
+  return { entryFile, build: buildMetadata };
 }
 
 function sumFiles(files: ReadonlyArray<Readonly<{ path: string; bytes: number }>>, predicate: (path: string) => boolean): number {
@@ -255,6 +258,7 @@ async function run(): Promise<Trace> {
   let server: Awaited<ReturnType<typeof listen>> | null = null;
   let browser: Browser | null = null;
   let page: Page | null = null;
+  let disallowedNetworkRequests = 0;
   try {
     const buildResult = await buildRenderer();
     const activeServer = await listen(outputDirectory, buildResult.entryFile);
@@ -266,6 +270,15 @@ async function run(): Promise<Trace> {
     browser = activeBrowser;
     const activePage = await activeBrowser.newPage({ viewport: { width: 1280, height: 800 } });
     page = activePage;
+    await activePage.route('**/*', async (route) => {
+      const requestUrl = route.request().url();
+      if (isAllowedBenchmarkRequest(requestUrl, activeServer.origin)) {
+        await route.continue();
+        return;
+      }
+      disallowedNetworkRequests += 1;
+      await route.abort('blockedbyclient');
+    });
     await activePage.goto(activeServer.origin, { waitUntil: 'networkidle' });
     await activePage.waitForFunction(() => {
       const value = (window as Window & { __hermternalTerminalRendererBenchmark?: BrowserBenchmarkResult })
@@ -281,11 +294,11 @@ async function run(): Promise<Trace> {
       if (!value) throw new Error('browser benchmark did not publish a result');
       return value;
     });
+    assertNoDisallowedNetworkRequests(disallowedNetworkRequests);
     if (typeof browserResult.environment.error === 'string') {
       throw new Error(`browser benchmark failed: ${browserResult.environment.error}`);
     }
     assertBenchmarkSampleCounts(browserResult.samples, BENCHMARK_REPETITIONS);
-    const files = buildResult.files;
     const trace: Trace = {
       schema: 'hermternal.web-terminal-renderer-benchmark.v1',
       revision: {
@@ -294,15 +307,14 @@ async function run(): Promise<Trace> {
         renderer_module: 'apps/web/src/lib/terminal/renderer.ts',
         execution_inputs: inputs
       },
-      build: {
-        command: 'vite build --configFile false --minify',
-        files,
-        entry_bytes: sumFiles(files, (path) => path === buildResult.entryFile),
-        lazy_chunk_bytes: sumFiles(files, (path) => path.startsWith('chunks/')),
-        wasm_bytes: sumFiles(files, (path) => path.endsWith('.wasm')),
-        css_bytes: sumFiles(files, (path) => path.endsWith('.css'))
+      build: buildResult.build,
+      browser: {
+        ...browserResult,
+        environment: {
+          ...browserResult.environment,
+          disallowed_network_requests: String(disallowedNetworkRequests)
+        }
       },
-      browser: browserResult,
       method: {
         browser: 'Playwright Chromium headless',
         warmups,
@@ -327,9 +339,15 @@ async function run(): Promise<Trace> {
     assertBenchmarkTrace(trace, {
       head: sourceCommit,
       clean: true,
-      execution_inputs: inputs
+      execution_inputs: inputs,
+      build: buildResult.build
     });
     return trace;
+  } catch (error: unknown) {
+    if (disallowedNetworkRequests > 0) {
+      throw new Error(`benchmark attempted ${disallowedNetworkRequests} disallowed network request(s)`);
+    }
+    throw error;
   } finally {
     if (page) await page.close().catch(() => undefined);
     if (browser) await browser.close().catch(() => undefined);

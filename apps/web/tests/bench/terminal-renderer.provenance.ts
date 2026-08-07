@@ -40,11 +40,30 @@ export type BenchmarkExecutionInput = Readonly<{
   sha256: string;
 }>;
 
+export const BENCHMARK_BUILD_COMMAND = 'vite build --configFile false --minify';
+
+export type BenchmarkBuildFile = Readonly<{
+  path: string;
+  bytes: number;
+  sha256: string;
+}>;
+
+export type BenchmarkBuild = Readonly<{
+  command: string;
+  files: readonly BenchmarkBuildFile[];
+  entry_bytes: number;
+  lazy_chunk_bytes: number;
+  wasm_bytes: number;
+  css_bytes: number;
+}>;
+
 export type BenchmarkCheckout = Readonly<{
   /** The clean source checkout used to produce or review the trace. */
   head: string;
   clean: boolean;
   execution_inputs: readonly BenchmarkExecutionInput[];
+  /** Artifact bytes and hashes collected from the exact produced build output. */
+  build: BenchmarkBuild;
 }>;
 
 const DISTRIBUTION_KEYS = ['min', 'p50', 'p95', 'p99', 'max', 'mean'] as const;
@@ -145,6 +164,108 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function isSafeBuildPath(path: string): boolean {
+  return (
+    path.length > 0 &&
+    !path.startsWith('/') &&
+    !path.includes('\\') &&
+    !path.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+  );
+}
+
+function recomputeBuildTotals(files: readonly BenchmarkBuildFile[]): Readonly<{
+  entry_bytes: number;
+  lazy_chunk_bytes: number;
+  wasm_bytes: number;
+  css_bytes: number;
+}> {
+  const entryFiles = files.filter((file) => file.path === 'entry.js');
+  if (entryFiles.length !== 1) {
+    throw new Error('benchmark build must contain exactly one entry.js artifact');
+  }
+  return {
+    entry_bytes: entryFiles[0]?.bytes ?? 0,
+    lazy_chunk_bytes: files
+      .filter((file) => file.path.startsWith('chunks/'))
+      .reduce((total, file) => total + file.bytes, 0),
+    wasm_bytes: files
+      .filter((file) => file.path.endsWith('.wasm'))
+      .reduce((total, file) => total + file.bytes, 0),
+    css_bytes: files
+      .filter((file) => file.path.endsWith('.css'))
+      .reduce((total, file) => total + file.bytes, 0)
+  };
+}
+
+function parseBenchmarkBuild(value: unknown, label: string): BenchmarkBuild {
+  if (!isRecord(value) || value.command !== BENCHMARK_BUILD_COMMAND || !Array.isArray(value.files) || value.files.length === 0) {
+    throw new Error(`${label} build metadata was invalid`);
+  }
+  const files: BenchmarkBuildFile[] = [];
+  const paths = new Set<string>();
+  for (const file of value.files) {
+    if (
+      !isRecord(file) ||
+      typeof file.path !== 'string' ||
+      !isSafeBuildPath(file.path) ||
+      paths.has(file.path) ||
+      typeof file.bytes !== 'number' ||
+      !Number.isInteger(file.bytes) ||
+      file.bytes < 0 ||
+      typeof file.sha256 !== 'string' ||
+      !INPUT_SHA256.test(file.sha256)
+    ) {
+      throw new Error(`${label} build artifact metadata was invalid`);
+    }
+    paths.add(file.path);
+    files.push({
+      path: file.path,
+      bytes: file.bytes,
+      sha256: file.sha256
+    });
+  }
+  for (let index = 1; index < files.length; index += 1) {
+    if (files[index - 1]!.path.localeCompare(files[index]!.path) > 0) {
+      throw new Error(`${label} build artifacts were not sorted by path`);
+    }
+  }
+  const totals = recomputeBuildTotals(files);
+  for (const key of ['entry_bytes', 'lazy_chunk_bytes', 'wasm_bytes', 'css_bytes'] as const) {
+    const number = value[key];
+    if (typeof number !== 'number' || !Number.isInteger(number) || number < 0 || number !== totals[key]) {
+      throw new Error(`${label} build ${key} did not match recomputed artifacts`);
+    }
+  }
+  return {
+    command: BENCHMARK_BUILD_COMMAND,
+    files,
+    ...totals
+  };
+}
+
+function assertBuildMatchesExpected(actual: unknown, expected: unknown): void {
+  const actualBuild = parseBenchmarkBuild(actual, 'checked-in benchmark evidence');
+  const expectedBuild = parseBenchmarkBuild(expected, 'recomputed checkout');
+  if (
+    actualBuild.files.length !== expectedBuild.files.length ||
+    actualBuild.files.some((file, index) => {
+      const expectedFile = expectedBuild.files[index];
+      return (
+        !expectedFile ||
+        file.path !== expectedFile.path ||
+        file.bytes !== expectedFile.bytes ||
+        file.sha256.toLowerCase() !== expectedFile.sha256.toLowerCase()
+      );
+    }) ||
+    actualBuild.entry_bytes !== expectedBuild.entry_bytes ||
+    actualBuild.lazy_chunk_bytes !== expectedBuild.lazy_chunk_bytes ||
+    actualBuild.wasm_bytes !== expectedBuild.wasm_bytes ||
+    actualBuild.css_bytes !== expectedBuild.css_bytes
+  ) {
+    throw new Error('checked-in benchmark evidence build did not match the recomputed checkout artifacts');
+  }
+}
+
 /** Validate the checked-in trace against a clean, recomputed source checkout. */
 export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout): void {
   if (!isRecord(value) || value.schema !== 'hermternal.web-terminal-renderer-benchmark.v1') {
@@ -160,7 +281,7 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
   ) {
     throw new Error('checked-in benchmark evidence revision paths were invalid');
   }
-  if (!checkout || !FULL_COMMIT_SHA.test(checkout.head) || !checkout.clean) {
+  if (!checkout || !FULL_COMMIT_SHA.test(checkout.head) || !checkout.clean || !isRecord(checkout.build)) {
     throw new Error('checked-in benchmark evidence checkout was not a clean full-commit source');
   }
   if (String(revision.source_commit).toLowerCase() !== checkout.head.toLowerCase()) {
@@ -203,21 +324,13 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
   if (
     !isRecord(browser) ||
     browser.schema !== 'hermternal.web-terminal-renderer-browser-benchmark.v1' ||
+    !isRecord(browser.environment) ||
+    browser.environment.disallowed_network_requests !== '0' ||
     !isRecord(browser.samples)
   ) {
-    throw new Error('checked-in benchmark evidence browser samples were missing');
+    throw new Error('checked-in benchmark evidence browser network policy or samples were invalid');
   }
-  const build = value.build;
-  if (
-    !isRecord(build) ||
-    !['entry_bytes', 'lazy_chunk_bytes', 'wasm_bytes', 'css_bytes'].every((key) => {
-      const number = build[key];
-      return typeof number === 'number' && Number.isInteger(number) && number >= 0;
-    }) ||
-    !Array.isArray(build.files)
-  ) {
-    throw new Error('checked-in benchmark evidence build metadata was invalid');
-  }
+  assertBuildMatchesExpected(value.build, checkout.build);
   const sampleNames = Object.keys(browser.samples).sort();
   const expectedNames = Object.keys(BENCHMARK_REPETITIONS).sort();
   if (sampleNames.join('\n') !== expectedNames.join('\n')) {
@@ -271,6 +384,33 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
     value.budget !== null
   ) {
     throw new Error('checked-in benchmark evidence redaction metadata was invalid');
+  }
+}
+
+/**
+ * Allow only the loopback benchmark server and browser-internal resource schemes.
+ * Playwright's declarative network flag is not a runtime enforcement boundary, so
+ * the benchmark installs this predicate in an explicit request route instead.
+ */
+export function isAllowedBenchmarkRequest(requestUrl: string, localOrigin: string): boolean {
+  try {
+    const parsed = new URL(requestUrl);
+    if (parsed.protocol === 'about:' || parsed.protocol === 'blob:' || parsed.protocol === 'data:') {
+      return true;
+    }
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      parsed.origin === localOrigin
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Fail closed if the browser attempted any request outside the local policy. */
+export function assertNoDisallowedNetworkRequests(count: number): void {
+  if (!Number.isInteger(count) || count < 0 || count !== 0) {
+    throw new Error(`benchmark attempted ${count} disallowed network request(s)`);
   }
 }
 

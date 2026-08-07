@@ -17,8 +17,11 @@ import {
   assertBenchmarkTrace,
   assertCleanExecutionInputs,
   assertCommitMatchesHead,
+  assertNoDisallowedNetworkRequests,
   BENCHMARK_EXECUTION_INPUT_PATHS,
   BENCHMARK_REPETITIONS,
+  isAllowedBenchmarkRequest,
+  type BenchmarkBuild,
   type BenchmarkCheckout,
   validateFullCommit
 } from '../../../tests/bench/terminal-renderer.provenance';
@@ -293,7 +296,7 @@ function clipboardPaste(host: HTMLElement, text: string): Event {
   return event;
 }
 
-function recomputeBenchmarkCheckout(commit: string): BenchmarkCheckout {
+function recomputeBenchmarkCheckout(commit: string, build: BenchmarkBuild): BenchmarkCheckout {
   const repoRoot = resolve(process.cwd(), '../..');
   const executionInputs = BENCHMARK_EXECUTION_INPUT_PATHS.map((path) => {
     const bytes = execFileSync('git', ['-C', repoRoot, 'show', `${commit}:${path}`]);
@@ -308,7 +311,8 @@ function recomputeBenchmarkCheckout(commit: string): BenchmarkCheckout {
     // The Git commit tree is the reviewed clean checkout; current working-tree
     // dirtiness is covered independently by assertCleanExecutionInputs tests.
     clean: true,
-    execution_inputs: executionInputs
+    execution_inputs: executionInputs,
+    build
   };
 }
 
@@ -1261,8 +1265,9 @@ describe('TerminalRenderer', () => {
     const evidencePath = resolve(process.cwd(), 'tests/bench/terminal-renderer.evidence.json');
     const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as {
       revision: { source_commit: string };
+      build: BenchmarkBuild;
     };
-    const checkout = recomputeBenchmarkCheckout(evidence.revision.source_commit);
+    const checkout = recomputeBenchmarkCheckout(evidence.revision.source_commit, evidence.build);
     expect(() => assertBenchmarkTrace(evidence, checkout)).not.toThrow();
     expect(() => assertBenchmarkTrace(evidence, undefined as never)).toThrow(
       'checked-in benchmark evidence checkout was not a clean full-commit source'
@@ -1283,5 +1288,44 @@ describe('TerminalRenderer', () => {
     expect(() => assertBenchmarkTrace(tamperedSource, checkout)).toThrow(
       'did not match the reviewed checkout HEAD'
     );
+
+    type MutableBuildEvidence = {
+      build: {
+        files: Array<{ path: string; bytes: number; sha256: string }>;
+        entry_bytes: number;
+        lazy_chunk_bytes: number;
+        wasm_bytes: number;
+        css_bytes: number;
+      };
+    };
+    const cloneBuildEvidence = (): MutableBuildEvidence => JSON.parse(JSON.stringify(evidence)) as MutableBuildEvidence;
+
+    const tamperedPath = cloneBuildEvidence();
+    tamperedPath.build.files[0]!.path = 'assets/tampered.wasm';
+    expect(() => assertBenchmarkTrace(tamperedPath, checkout)).toThrow(/build/);
+
+    const tamperedSize = cloneBuildEvidence();
+    tamperedSize.build.files[0]!.bytes += 1;
+    expect(() => assertBenchmarkTrace(tamperedSize, checkout)).toThrow(/build/);
+
+    const tamperedHash = cloneBuildEvidence();
+    tamperedHash.build.files[0]!.sha256 = '0'.repeat(64);
+    expect(() => assertBenchmarkTrace(tamperedHash, checkout)).toThrow(/build/);
+
+    for (const key of ['entry_bytes', 'lazy_chunk_bytes', 'wasm_bytes', 'css_bytes'] as const) {
+      const tamperedTotals = cloneBuildEvidence();
+      tamperedTotals.build[key] += 1;
+      expect(() => assertBenchmarkTrace(tamperedTotals, checkout)).toThrow(/recomputed artifacts|recomputed checkout/);
+    }
+  });
+
+  it('fails closed for outbound benchmark requests', () => {
+    expect(isAllowedBenchmarkRequest('http://127.0.0.1:4173/assets/entry.js', 'http://127.0.0.1:4173')).toBe(true);
+    expect(isAllowedBenchmarkRequest('data:text/javascript,export default 1', 'http://127.0.0.1:4173')).toBe(true);
+    expect(isAllowedBenchmarkRequest('blob:http://127.0.0.1:4173/id', 'http://127.0.0.1:4173')).toBe(true);
+    expect(isAllowedBenchmarkRequest('https://example.com/collect', 'http://127.0.0.1:4173')).toBe(false);
+    expect(isAllowedBenchmarkRequest('http://127.0.0.2:4173/other-loopback', 'http://127.0.0.1:4173')).toBe(false);
+    expect(() => assertNoDisallowedNetworkRequests(0)).not.toThrow();
+    expect(() => assertNoDisallowedNetworkRequests(1)).toThrow('disallowed network request');
   });
 });
