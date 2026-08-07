@@ -334,6 +334,27 @@ describe('LiveWorkspaceSession', () => {
     expect(JSON.stringify(session.current)).not.toContain('must not enter presentation state');
   });
 
+  it('retries a pre-identity persisted restore without creating a new session', async () => {
+    const rest = createRest([]);
+    vi.mocked(rest.getSessionMessages).mockRejectedValueOnce(new Error('synthetic history parse failure'));
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+
+    expect(session.current).toMatchObject({ state: 'retryable-error' });
+    expect(session.current.activeSessionId).toBeUndefined();
+    expect(chat.createChat).not.toHaveBeenCalled();
+    expect(JSON.stringify(session.current)).not.toContain('session-1');
+
+    await session.retryConnection();
+
+    expect(rest.getSession).toHaveBeenCalledWith('session-1', expect.any(AbortSignal));
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(chat.transport.createSession).not.toHaveBeenCalled();
+    expect(session.current).toMatchObject({ state: 'empty', activeSessionId: 'session-1' });
+  });
+
   it('suppresses a stale session read after a newer selection starts', async () => {
     const rest = createRest();
     const first = createDeferred<LiveSession>();
