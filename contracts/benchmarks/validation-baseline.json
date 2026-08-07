@@ -156,7 +156,7 @@
     {
       "path": "validate.py",
       "bytes": 52487,
-      "sha256": "4febb66e5e92d12bf619930bbf74295ab8a3c7bb2431278ae8d1533ad7d2f448"
+      "sha256": "60601faf7eb73f001b85d7c815dc92fc46a5478f2a0971930c2ea88f722987b9"
     },
     {
       "path": "test_validate.py",
@@ -179,7 +179,7 @@
       "sha256": "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"
     }
   ],
-  "artifact_manifest_sha256": "37262aef153716ec9269394e6b876f9ca4d948969d98ce143cde8d5f6926aa49",
+  "artifact_manifest_sha256": "4e6af7cd219f93d140d5b5ab544c6c2a77e4709f46825657b89822a8b6e9b241",
   "redaction": {
     "policy": "semantic_only",
     "synthetic_only": true,

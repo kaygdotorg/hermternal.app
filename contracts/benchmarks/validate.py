@@ -234,10 +234,10 @@ EXPECTED_REVISIONS = {
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: {
-        "commit_sha": "e3db0441a32f9f5ba80ec148cfec91886d2c9cd9",
+        "commit_sha": "45a5414cf9f0370b8c98f9b2bae3a3538e919696",
         "fixture_id": "web-production-build",
         "fixture_version": "1.0.0",
-        "fixture_sha256": "36b391786b8b8a8d8524c8be8514f31364091ce13126f35599b6703213e41e6d",
+        "fixture_sha256": "422794f7c168253347336d3e13a8024fbd57be37c73fb71b94e853379c636498",
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
 }
@@ -287,11 +287,11 @@ EXPECTED_ARTIFACT_METADATA = {
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: (
-        ("workload.json", 1002, "36b391786b8b8a8d8524c8be8514f31364091ce13126f35599b6703213e41e6d"),
-        ("run.ts", 49795, "d9d973f2826593e4ca34b2a52718dad76fc76393080480a78bb6686418dcc30b"),
-        ("sandbox-runner.py", 6676, "f60e98a4a66baa2b4fce41b930e4768863522747d1d50f7ff09b80bef0e0a14c"),
+        ("workload.json", 1002, "422794f7c168253347336d3e13a8024fbd57be37c73fb71b94e853379c636498"),
+        ("run.ts", 52327, "a9a09b909ed91d715b90804d8da5ce918b257043d888057f46e2268a3fe80d56"),
+        ("sandbox-runner.py", 8891, "be288563be9c5b782fad1b1d50a584d28538d3d5af7a67bcaa6fc0f5c6b0ca7e"),
         ("artifact-scanner.py", 5994, "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb"),
-        ("evidence/raw-trace.json", 17600, "aa77567fd1b0dbaa8b8b45dce2f6319c6fca8a55074e773af3d4b46f96727c4c"),
+        ("evidence/raw-trace.json", 17588, "ea3b3bedc3f68b110c4343947f4931ee3454d14af3e1edf28563f63544e6843f"),
     ),
 }
 SELF_AUTHENTICATED_ARTIFACT_PATHS = {
@@ -902,7 +902,7 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     require(network == {"mode": "deny", "boundary": "os_sandbox"}, "web workload network boundary changed")
     launcher = _strict_keys(workload["launcher"], ("supervisor_sha256", "scanner_sha256"), "web workload.launcher")
     require(launcher == {
-        "supervisor_sha256": "f60e98a4a66baa2b4fce41b930e4768863522747d1d50f7ff09b80bef0e0a14c",
+        "supervisor_sha256": "be288563be9c5b782fad1b1d50a584d28538d3d5af7a67bcaa6fc0f5c6b0ca7e",
         "scanner_sha256": "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb",
     }, "web workload protected helper identities changed")
 
