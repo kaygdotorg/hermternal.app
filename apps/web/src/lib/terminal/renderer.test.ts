@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createTerminalRenderer,
@@ -8,6 +10,7 @@ import {
 } from './renderer';
 import {
   assertBenchmarkSampleCounts,
+  assertBenchmarkTrace,
   assertCleanExecutionInputs,
   assertCommitMatchesHead,
   BENCHMARK_REPETITIONS,
@@ -384,6 +387,36 @@ describe('TerminalRenderer', () => {
     expect(renderer.state).toBe('ready');
   });
 
+  it('does not let an unresolved mount block dispose and remount', async () => {
+    const backend: MountedTerminal = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      focus: vi.fn(),
+      paste: vi.fn(),
+      dispose: vi.fn()
+    };
+    let calls = 0;
+    const adapter: TerminalRendererAdapter = {
+      mount: vi.fn(() => {
+        calls += 1;
+        if (calls === 1) return new Promise<MountedTerminal>(() => undefined);
+        return Promise.resolve(backend);
+      })
+    };
+    const renderer = createTerminalRenderer({ adapter });
+    const firstHost = document.createElement('div');
+    const secondHost = document.createElement('div');
+    const firstMount = renderer.mount(firstHost);
+    await vi.waitFor(() => expect(adapter.mount).toHaveBeenCalledTimes(1));
+
+    renderer.dispose();
+    await renderer.mount(secondHost);
+
+    expect(calls).toBe(2);
+    expect(renderer.state).toBe('ready');
+    expect(firstMount).toBeInstanceOf(Promise);
+  });
+
   it('does not let stale async teardown erase a reused host or its newer owner state', async () => {
     let resolveMount!: (terminal: MountedTerminal) => void;
     const host = document.createElement('div');
@@ -490,11 +523,12 @@ describe('TerminalRenderer', () => {
 
     await first.mount(host);
     await second.mount(host);
-    first.dispose();
 
     expect(host).toHaveTextContent('second renderer');
+    expect(first.state).toBe('disposed');
     expect(second.state).toBe('ready');
-    expect(firstDispose).toHaveBeenCalledWith({ preserveHost: true });
+    expect(firstDispose).toHaveBeenCalledTimes(1);
+    expect(firstDispose).toHaveBeenCalledWith();
     expect(secondDispose).not.toHaveBeenCalled();
   });
 
@@ -563,7 +597,14 @@ describe('TerminalRenderer', () => {
     if (!ForeignUint8Array) return;
     renderer.write(new ForeignUint8Array([0x43, 0x44]) as unknown as Uint8Array);
 
-    class ExtendedUint8Array extends Uint8Array {}
+    class ExtendedUint8Array extends Uint8Array {
+      get byteLength(): number {
+        return Number.MAX_SAFE_INTEGER;
+      }
+      get length(): number {
+        return Number.MAX_SAFE_INTEGER;
+      }
+    }
     const host = document.createElement('div');
     await renderer.mount(host);
     renderer.write(new ExtendedUint8Array([0x41, 0x42]));
@@ -709,6 +750,54 @@ describe('TerminalRenderer', () => {
     expect(terminals[0]?.operations.filter((operation) => operation.type === 'paste')).toHaveLength(2);
   });
 
+  it('serializes dangerous paste confirmations and preserves input order', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    let resolveFirst!: (accepted: boolean) => void;
+    const firstConfirmation = new Promise<boolean>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const confirmPaste = vi.fn()
+      .mockImplementationOnce(() => firstConfirmation)
+      .mockResolvedValueOnce(true);
+    const renderer = createTerminalRenderer({ adapter, confirmPaste });
+    const host = document.createElement('div');
+    await renderer.mount(host);
+
+    clipboardPaste(host, 'first\ncommand');
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(1));
+    clipboardPaste(host, 'second\ncommand');
+    await Promise.resolve();
+    expect(confirmPaste).toHaveBeenCalledTimes(1);
+
+    resolveFirst(true);
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(terminals[0]?.operations.filter((operation) => operation.type === 'paste')).toHaveLength(2));
+    expect(terminals[0]?.operations.filter((operation) => operation.type === 'paste')).toEqual([
+      { type: 'paste', text: 'first\ncommand' },
+      { type: 'paste', text: 'second\ncommand' }
+    ]);
+  });
+
+  it('catches backend paste failures without an unhandled rejection', async () => {
+    const backend: MountedTerminal = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      focus: vi.fn(),
+      paste: vi.fn(() => { throw new Error('synthetic paste failure'); }),
+      dispose: vi.fn()
+    };
+    const renderer = createTerminalRenderer({
+      adapter: { mount: vi.fn(async () => backend) },
+      confirmPaste: vi.fn().mockResolvedValue(true)
+    });
+    const host = document.createElement('div');
+    document.body.append(host);
+    await renderer.mount(host);
+    clipboardPaste(host, 'first\ncommand');
+    await vi.waitFor(() => expect(renderer.state).toBe('error'));
+    expect(host.querySelector('[role="alert"]')).toBeInTheDocument();
+  });
+
   it('lets safe single-line paste use W-Term input without confirmation', async () => {
     const { adapter } = createDeterministicAdapter();
     const confirmPaste = vi.fn();
@@ -843,6 +932,32 @@ describe('TerminalRenderer', () => {
     mounted.dispose();
   });
 
+  it('validates direct adapter write and resize boundaries', async () => {
+    const adapter = createWTermGhosttyAdapter();
+    const host = document.createElement('div');
+    const mounted = await adapter.mount(host, {
+      initialSize: { cols: 80, rows: 24 },
+      scrollbackLimitBytes: 64 * 1024,
+      onInput: vi.fn()
+    });
+    const spoofed = new Uint8Array([0x41, 0x42]) as Uint8Array & {
+      readonly byteLength: number;
+      readonly length: number;
+    };
+    Object.defineProperties(spoofed, {
+      byteLength: { get: () => Number.MAX_SAFE_INTEGER },
+      length: { get: () => Number.MAX_SAFE_INTEGER }
+    });
+    expect(() => mounted.write(spoofed)).not.toThrow();
+    expect(moduleMocks.MockWTerm.instances.at(-1)?.writes.at(-1)).toEqual(new Uint8Array([0x41, 0x42]));
+    expect(() => mounted.write(new Uint16Array([0x1234]) as unknown as Uint8Array)).toThrow(
+      'terminal writes require Uint8Array data'
+    );
+    expect(() => mounted.resize(2001, 24)).toThrow('terminal size must use integer columns 1-2000');
+    expect(() => mounted.resize(80, 1001)).toThrow('terminal size must use integer columns 1-2000');
+    mounted.dispose();
+  });
+
   it('direct adapter disposal preserves host values and cleans only its own nodes once', async () => {
     moduleMocks.MockGhosttyCore.load.mockResolvedValue(new moduleMocks.MockGhosttyCore());
     const host = document.createElement('div');
@@ -970,5 +1085,22 @@ describe('TerminalRenderer', () => {
     expect(() => assertBenchmarkSampleCounts(invalidDistribution, BENCHMARK_REPETITIONS)).toThrow(
       'benchmark distribution for repeated_mount_dispose was not finite and non-negative'
     );
+
+    const mismatchedDistribution = {
+      ...samples,
+      cold_initialization: {
+        raw_samples: Array(BENCHMARK_REPETITIONS.cold_initialization).fill(1),
+        distribution: { min: 0, p50: 0, p95: 0, p99: 0, max: 0, mean: 0 }
+      }
+    };
+    expect(() => assertBenchmarkSampleCounts(mismatchedDistribution, BENCHMARK_REPETITIONS)).toThrow(
+      'benchmark distribution for cold_initialization did not match recomputed min'
+    );
+  });
+
+  it('independently validates the checked-in benchmark evidence trace', () => {
+    const evidencePath = resolve(process.cwd(), 'tests/bench/terminal-renderer.evidence.json');
+    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as unknown;
+    expect(() => assertBenchmarkTrace(evidence)).not.toThrow();
   });
 });

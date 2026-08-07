@@ -10,6 +10,7 @@ import {
   assertBenchmarkSampleCounts,
   assertCleanExecutionInputs,
   assertCommitMatchesHead,
+  BENCHMARK_EXECUTION_INPUT_PATHS,
   BENCHMARK_REPETITIONS,
   validateFullCommit
 } from './terminal-renderer.provenance';
@@ -83,15 +84,7 @@ const packageManifest = resolve(webRoot, 'package.json');
 const dependencyLockfile = resolve(webRoot, 'bun.lock');
 const provenanceModule = resolve(sourceDirectory, 'terminal-renderer.provenance.ts');
 const outputDirectory = resolve(webRoot, '../../.terminal-renderer-benchmark-build');
-const executionCriticalPaths = [
-  'apps/web/src/lib/terminal/renderer.ts',
-  'apps/web/src/lib/terminal/terminal.css',
-  'apps/web/package.json',
-  'apps/web/bun.lock',
-  'apps/web/tests/bench/terminal-renderer.browser.ts',
-  'apps/web/tests/bench/terminal-renderer.bench.ts',
-  'apps/web/tests/bench/terminal-renderer.provenance.ts'
-] as const;
+const executionCriticalPaths = BENCHMARK_EXECUTION_INPUT_PATHS;
 const warmups = 0;
 
 const CONTENT_TYPES: Record<string, string> = {

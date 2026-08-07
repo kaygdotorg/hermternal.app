@@ -7,6 +7,15 @@ export const DEFAULT_SCROLLBACK_LIMIT_BYTES = 64 * 1024;
 export const MAX_SCROLLBACK_LIMIT_BYTES = 1024 * 1024;
 export const DEFAULT_PENDING_WRITE_LIMIT_BYTES = 256 * 1024;
 export const MAX_PENDING_OPERATION_COUNT = 4096;
+/** Keep each ready-state write cooperative with the browser event loop. */
+export const MAX_READY_WRITE_CHUNK_BYTES = 16 * 1024;
+/** Bound ready-state work separately from the pre-mount queue. */
+export const MAX_READY_WRITE_BUFFER_BYTES = MAX_SCROLLBACK_LIMIT_BYTES;
+/** Do not retain an unbounded dangerous clipboard payload in the confirmation queue. */
+export const MAX_DANGEROUS_PASTE_BYTES = DEFAULT_PENDING_WRITE_LIMIT_BYTES;
+/** Keep terminal dimensions aligned with the reviewed PTY boundary. */
+export const MAX_TERMINAL_COLS = 2000;
+export const MAX_TERMINAL_ROWS = 1000;
 
 export type TerminalRendererState = 'idle' | 'loading' | 'ready' | 'error' | 'disposed';
 
@@ -83,6 +92,13 @@ type PendingOperation =
   | Readonly<{ type: 'write'; data: Uint8Array }>
   | Readonly<{ type: 'resize'; size: TerminalSize }>;
 
+type PendingPaste = Readonly<{
+  request: PasteRequest;
+  generation: number;
+  host: HTMLElement;
+  backend: MountedTerminal;
+}>;
+
 type HostSnapshot = Readonly<{
   className: string | null;
   terminalState: string | null;
@@ -107,11 +123,17 @@ const wTermHostRecords = new WeakMap<HTMLElement, WTermHostRecord>();
 // One renderer generation owns host-level loading/error/restore mutations at a
 // time. This prevents an older renderer instance from clearing a newer owner's
 // content when both instances are pointed at the same host.
-const rendererHostOwners = new WeakMap<HTMLElement, object>();
+const rendererHostOwners = new WeakMap<HTMLElement, ManagedTerminalRenderer>();
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const typedArrayNameGetter = Object.getOwnPropertyDescriptor(
-  Object.getPrototypeOf(Uint8Array.prototype),
+  typedArrayPrototype,
   Symbol.toStringTag
 )?.get;
+const typedArrayLengthGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'length')?.get;
+const typedArrayByteLengthGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength')?.get;
+const typedArrayByteOffsetGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteOffset')?.get;
+const typedArrayBufferGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffer')?.get;
+const utf8Encoder = new TextEncoder();
 
 function loadWTermModules(): Promise<WTermModules> {
   if (wTermModulesPromise) return wTermModulesPromise;
@@ -145,8 +167,17 @@ function clampByteLimit(value: number | undefined, fallback: number, maximum: nu
 function normalizeSize(size: TerminalSize | undefined): TerminalSize {
   const cols = size?.cols ?? DEFAULT_TERMINAL_COLS;
   const rows = size?.rows ?? DEFAULT_TERMINAL_ROWS;
-  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) {
-    throw new RangeError('terminal size must use positive integer columns and rows');
+  if (
+    !Number.isInteger(cols) ||
+    !Number.isInteger(rows) ||
+    cols < 1 ||
+    rows < 1 ||
+    cols > MAX_TERMINAL_COLS ||
+    rows > MAX_TERMINAL_ROWS
+  ) {
+    throw new RangeError(
+      `terminal size must use integer columns 1-${MAX_TERMINAL_COLS} and rows 1-${MAX_TERMINAL_ROWS}`
+    );
   }
   return { cols, rows };
 }
@@ -169,16 +200,33 @@ function sanitizePaste(text: string): string {
   return text.replace(/\x1b/gu, '');
 }
 
-function isUint8Array(data: unknown): data is Uint8Array {
+function canonicalizeUint8Array(data: unknown): Uint8Array | null {
   // Vitest, embedded webviews, and iframes can provide a Uint8Array from a
-  // different realm. Use the intrinsic %TypedArray%.prototype brand getter,
-  // rather than Object#toString, because an instance can spoof toStringTag.
-  if (!ArrayBuffer.isView(data) || !typedArrayNameGetter) return false;
+  // different realm. Use intrinsic %TypedArray% accessors rather than public
+  // properties: a genuine Uint8Array subclass can override byteLength/length.
+  if (
+    !ArrayBuffer.isView(data) ||
+    !typedArrayNameGetter ||
+    !typedArrayLengthGetter ||
+    !typedArrayByteLengthGetter ||
+    !typedArrayByteOffsetGetter ||
+    !typedArrayBufferGetter
+  ) return null;
   try {
-    return typedArrayNameGetter.call(data) === 'Uint8Array';
+    if (typedArrayNameGetter.call(data) !== 'Uint8Array') return null;
+    const length = typedArrayLengthGetter.call(data);
+    const byteLength = typedArrayByteLengthGetter.call(data);
+    const byteOffset = typedArrayByteOffsetGetter.call(data);
+    const buffer = typedArrayBufferGetter.call(data);
+    if (length !== byteLength || byteLength < 0 || byteOffset < 0) return null;
+    const source = new Uint8Array(buffer, byteOffset, byteLength);
+    const copy = new Uint8Array(byteLength);
+    copy.set(source);
+    return copy;
   } catch {
-    // Proxies and revoked views must fail closed rather than reaching W-Term.
-    return false;
+    // Proxies, revoked views, detached buffers, and malformed accessors fail
+    // closed rather than reaching W-Term or affecting byte accounting.
+    return null;
   }
 }
 
@@ -477,7 +525,9 @@ function safeStateChange(
 
 function safeDispose(backend: MountedTerminal | null, preserveHost = false): void {
   try {
-    backend?.dispose(preserveHost ? { preserveHost: true } : undefined);
+    if (!backend) return;
+    if (preserveHost) backend.dispose({ preserveHost: true });
+    else backend.dispose();
   } catch {
     // Disposal is best effort and remains idempotent even after a failed WASM
     // initialization or a DOM teardown race.
@@ -487,10 +537,15 @@ function safeDispose(backend: MountedTerminal | null, preserveHost = false): voi
 export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
   return {
     async mount(host, options): Promise<MountedTerminal> {
+      const initialSize = normalizeSize(options.initialSize);
       const { WTerm, GhosttyCore, wasmPath } = await loadWTermModules();
       const core = await GhosttyCore.load({
         wasmPath,
-        scrollbackLimit: options.scrollbackLimitBytes
+        scrollbackLimit: clampByteLimit(
+          options.scrollbackLimitBytes,
+          DEFAULT_SCROLLBACK_LIMIT_BYTES,
+          MAX_SCROLLBACK_LIMIT_BYTES
+        )
       });
       if (options.isCurrent && !options.isCurrent()) {
         // Avoid constructing W-Term into a host released while WASM loaded.
@@ -518,11 +573,18 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
 
       const termOptions: WTermOptions = {
         core,
-        cols: options.initialSize.cols,
-        rows: options.initialSize.rows,
+        cols: initialSize.cols,
+        rows: initialSize.rows,
         autoResize: false,
         cursorBlink: true,
-        onData: options.onInput
+        onData: (data) => {
+          try {
+            options.onInput(data);
+          } catch {
+            // Consumer callbacks must not escape W-Term event handlers or
+            // become unhandled browser exceptions.
+          }
+        }
       };
       let term: WTerm | null = null;
       try {
@@ -530,7 +592,7 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         await term.init();
         const ownedInput = (term as unknown as WTermRuntime).input?.textarea;
         normalizeWTermInputAccessibility(host, ownedInput);
-        relockWTermHeight(host, options.initialSize.rows);
+        relockWTermHeight(host, initialSize.rows);
         // Capture W-Term's final initial host state before consulting the
         // renderer generation guard. No user callback runs between these
         // statements, so a stale cleanup cannot learn a later owner's values.
@@ -551,14 +613,18 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         return {
           write(data) {
             if (disposed) return;
-            mountedTerm.write(data);
+            const bytes = canonicalizeUint8Array(data);
+            if (!bytes) throw new TypeError('terminal writes require Uint8Array data');
+            if (bytes.byteLength === 0) return;
+            mountedTerm.write(bytes);
           },
           resize(cols, rows) {
             if (disposed) return;
-            mountedTerm.resize(cols, rows);
+            const size = normalizeSize({ cols, rows });
+            mountedTerm.resize(size.cols, size.rows);
             // W-Term locks the initial height when autoResize is false. Re-lock
             // after every explicit resize so a larger row count is not clipped.
-            relockWTermHeight(host, rows);
+            relockWTermHeight(host, size.rows);
             recordWTermHostState(host, record);
           },
           focus() {
@@ -571,7 +637,12 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
             const safe = sanitizePaste(data);
             const bracketed = mountedTerm.bridge?.bracketedPaste() ?? false;
             const payload = bracketed ? `\x1b[200~${safe}\x1b[201~` : safe;
-            options.onInput(payload);
+            try {
+              options.onInput(payload);
+            } catch {
+              // Direct adapter callers must receive no unhandled callback
+              // rejection from W-Term paste delivery.
+            }
           },
           dispose(disposeOptions) {
             if (disposed) return;
@@ -616,7 +687,11 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   private readonly onStateChange: ((state: TerminalRendererState) => void) | undefined;
   private pendingOperations: PendingOperation[] = [];
   private pendingWriteBytes = 0;
+  private readyOperations: PendingOperation[] = [];
+  private readyWriteBytes = 0;
+  private readyDrainTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingMount: Promise<void> | null = null;
+  private pasteConfirmationQueue: Promise<void> = Promise.resolve();
   private backend: MountedTerminal | null = null;
   private host: HTMLElement | null = null;
   private hostSnapshot: HostSnapshot | null = null;
@@ -625,9 +700,10 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   private focusRequested = false;
   private readonly onPasteCapture = (event: Event): void => {
     const host = this.host;
+    const backend = this.backend;
     if (
       this.state !== 'ready' ||
-      !this.backend ||
+      !backend ||
       !host ||
       event.currentTarget !== host ||
       rendererHostOwners.get(host) !== this
@@ -635,6 +711,13 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     const clipboardEvent = event as ClipboardEvent;
     const text = clipboardEvent.clipboardData?.getData('text/plain') ?? '';
     if (!text || !isDangerousPaste(text)) return;
+    if (utf8Encoder.encode(text).byteLength > MAX_DANGEROUS_PASTE_BYTES) {
+      // Keep the browser from forwarding a dangerous oversized payload while
+      // avoiding another retained copy in the confirmation queue.
+      clipboardEvent.preventDefault();
+      clipboardEvent.stopPropagation();
+      return;
+    }
 
     clipboardEvent.preventDefault();
     clipboardEvent.stopPropagation();
@@ -643,7 +726,12 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       multiline: isMultiline(text),
       hasControlCharacters: hasControlCharacters(text)
     };
-    void this.confirmAndPaste(request);
+    this.enqueuePasteConfirmation({
+      request,
+      generation: this.mountGeneration,
+      host,
+      backend
+    });
   };
 
   constructor(options: TerminalRendererOptions = {}) {
@@ -678,8 +766,13 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       return;
     }
     if (this.pendingMount) {
-      await this.pendingMount;
-      if (this.state === 'ready' && this.host === host) return;
+      // A lazy adapter may never settle. Invalidate it instead of awaiting a
+      // promise that would make dispose/remount hang forever; its eventual
+      // backend is rejected by the generation/ownership guard below.
+      this.mountGeneration += 1;
+      this.pendingMount = null;
+      this.resetPasteConfirmationQueue();
+      this.teardownCurrentHost();
     }
 
     const wasFocused = this.host?.contains(document.activeElement) ?? false;
@@ -687,6 +780,9 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       this.restoreFocusOnMount ||= wasFocused;
       this.teardownCurrentHost();
     }
+
+    const previousOwner = rendererHostOwners.get(host);
+    if (previousOwner && previousOwner !== this) previousOwner.dispose();
 
     const generation = ++this.mountGeneration;
     rendererHostOwners.set(host, this);
@@ -707,21 +803,18 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   write(data: Uint8Array): void {
-    if (!isUint8Array(data)) {
+    const bytes = canonicalizeUint8Array(data);
+    if (!bytes) {
       throw new TypeError('terminal writes require Uint8Array data');
     }
-    if (data.byteLength === 0) return;
+    if (bytes.byteLength === 0) return;
     if (this.state === 'ready' && this.host && rendererHostOwners.get(this.host) !== this) return;
     if (this.state === 'ready' && this.backend) {
-      try {
-        this.backend.write(data);
-      } catch {
-        this.fail('wasm-initialization-failed');
-      }
+      this.enqueueReadyWrite(bytes);
       return;
     }
     if (this.state === 'error' || this.state === 'disposed') return;
-    if (this.pendingWriteBytes + data.byteLength > this.maxPendingWriteBytes) {
+    if (this.pendingWriteBytes + bytes.byteLength > this.maxPendingWriteBytes) {
       this.fail('pending-output-limit');
       return;
     }
@@ -729,16 +822,26 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       this.fail('pending-output-limit');
       return;
     }
-    const copy = new Uint8Array(data.byteLength);
-    copy.set(data);
-    this.pendingOperations.push({ type: 'write', data: copy });
-    this.pendingWriteBytes += copy.byteLength;
+    this.pendingOperations.push({ type: 'write', data: bytes });
+    this.pendingWriteBytes += bytes.byteLength;
   }
 
   resize(cols: number, rows: number): void {
     const size = normalizeSize({ cols, rows });
     if (this.state === 'ready' && this.host && rendererHostOwners.get(this.host) !== this) return;
     if (this.state === 'ready' && this.backend) {
+      if (this.readyOperations.length > 0) {
+        const last = this.readyOperations.at(-1);
+        if (last?.type === 'resize') {
+          this.readyOperations[this.readyOperations.length - 1] = { type: 'resize', size };
+        } else if (this.readyOperations.length >= MAX_PENDING_OPERATION_COUNT) {
+          this.fail('pending-output-limit');
+        } else {
+          this.readyOperations.push({ type: 'resize', size });
+        }
+        this.scheduleReadyDrain();
+        return;
+      }
       try {
         this.backend.resize(size.cols, size.rows);
       } catch {
@@ -762,7 +865,11 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   focus(): void {
     if (this.state === 'ready' && this.host && rendererHostOwners.get(this.host) !== this) return;
     if (this.state === 'ready' && this.backend) {
-      this.backend.focus();
+      try {
+        this.backend.focus();
+      } catch {
+        this.fail('wasm-initialization-failed');
+      }
       return;
     }
     if (this.state === 'loading' || this.state === 'idle') this.focusRequested = true;
@@ -772,6 +879,8 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     const host = this.host;
     if (host) this.restoreFocusOnMount = host.contains(document.activeElement);
     this.mountGeneration += 1;
+    this.pendingMount = null;
+    this.resetPasteConfirmationQueue();
     this.teardownCurrentHost();
     this.pendingOperations = [];
     this.pendingWriteBytes = 0;
@@ -842,6 +951,85 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     }
   }
 
+  private enqueueReadyWrite(data: Uint8Array): void {
+    const backend = this.backend;
+    if (!backend) return;
+    if (this.readyOperations.length === 0 && this.readyDrainTimer === null && data.byteLength <= MAX_READY_WRITE_CHUNK_BYTES) {
+      try {
+        backend.write(data);
+      } catch {
+        this.fail('wasm-initialization-failed');
+      }
+      return;
+    }
+    const chunkCount = Math.ceil(data.byteLength / MAX_READY_WRITE_CHUNK_BYTES);
+    if (
+      this.readyWriteBytes + data.byteLength > MAX_READY_WRITE_BUFFER_BYTES ||
+      this.readyOperations.length + chunkCount > MAX_PENDING_OPERATION_COUNT
+    ) {
+      this.fail('pending-output-limit');
+      return;
+    }
+    for (let offset = 0; offset < data.byteLength; offset += MAX_READY_WRITE_CHUNK_BYTES) {
+      this.readyOperations.push({
+        type: 'write',
+        data: data.subarray(offset, Math.min(offset + MAX_READY_WRITE_CHUNK_BYTES, data.byteLength))
+      });
+    }
+    this.readyWriteBytes += data.byteLength;
+    this.scheduleReadyDrain();
+  }
+
+  private scheduleReadyDrain(): void {
+    if (this.readyDrainTimer !== null || this.readyOperations.length === 0) return;
+    this.readyDrainTimer = setTimeout(() => {
+      this.readyDrainTimer = null;
+      this.drainReadyOperations();
+    }, 0);
+  }
+
+  private drainReadyOperations(): void {
+    const host = this.host;
+    const backend = this.backend;
+    if (
+      this.state !== 'ready' ||
+      !host ||
+      !backend ||
+      rendererHostOwners.get(host) !== this
+    ) {
+      this.clearReadyOperations();
+      return;
+    }
+    const operation = this.readyOperations.shift();
+    if (!operation) return;
+    if (operation.type === 'write') this.readyWriteBytes -= operation.data.byteLength;
+    try {
+      if (operation.type === 'write') backend.write(operation.data);
+      else backend.resize(operation.size.cols, operation.size.rows);
+    } catch {
+      this.fail('wasm-initialization-failed');
+      return;
+    }
+    this.scheduleReadyDrain();
+  }
+
+  private clearReadyOperations(): void {
+    if (this.readyDrainTimer !== null) clearTimeout(this.readyDrainTimer);
+    this.readyDrainTimer = null;
+    this.readyOperations = [];
+    this.readyWriteBytes = 0;
+  }
+
+  private resetPasteConfirmationQueue(): void {
+    this.pasteConfirmationQueue = Promise.resolve();
+  }
+
+  private enqueuePasteConfirmation(pending: PendingPaste): void {
+    this.pasteConfirmationQueue = this.pasteConfirmationQueue
+      .then(() => this.confirmAndPaste(pending), () => this.confirmAndPaste(pending))
+      .catch(() => undefined);
+  }
+
   private restoreErrorIfOwned(host: HTMLElement): void {
     if (
       this.state !== 'error' ||
@@ -853,15 +1041,14 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     renderError(host);
   }
 
-  private async confirmAndPaste(request: PasteRequest): Promise<void> {
-    const generation = this.mountGeneration;
-    const host = this.host;
-    const backend = this.backend;
+  private async confirmAndPaste(pending: PendingPaste): Promise<void> {
+    const { request, generation, host, backend } = pending;
     if (
       this.state !== 'ready' ||
-      !host ||
-      !backend ||
+      this.mountGeneration !== generation ||
+      this.host !== host ||
       rendererHostOwners.get(host) !== this ||
+      this.backend !== backend ||
       !this.confirmPaste
     ) return;
     let confirmed = false;
@@ -880,13 +1067,19 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     ) {
       return;
     }
-    backend.paste(request.text);
-    backend.focus();
+    try {
+      backend.paste(request.text);
+      backend.focus();
+    } catch {
+      this.fail('wasm-initialization-failed');
+    }
   }
 
   private fail(code: TerminalRendererErrorCode): void {
     if (this.state === 'error') return;
     this.mountGeneration += 1;
+    this.pendingMount = null;
+    this.resetPasteConfirmationQueue();
     this.teardownCurrentHost(true);
     this.pendingOperations = [];
     this.pendingWriteBytes = 0;
@@ -902,6 +1095,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   private teardownCurrentHost(keepHost = false): void {
+    this.clearReadyOperations();
     const host = this.host;
     const snapshot = this.hostSnapshot;
     const ownsHost = host !== null && rendererHostOwners.get(host) === this;

@@ -1,16 +1,14 @@
 import { createTerminalRenderer } from '../../src/lib/terminal/renderer';
+import {
+  roundBenchmarkValue,
+  summarizeBenchmarkSamples,
+  type BenchmarkDistribution
+} from './terminal-renderer.provenance';
 
 const encoder = new TextEncoder();
 const resultKey = '__hermternalTerminalRendererBenchmark';
 
-type Distribution = Readonly<{
-  min: number;
-  p50: number;
-  p95: number;
-  p99: number;
-  max: number;
-  mean: number;
-}>;
+type Distribution = BenchmarkDistribution;
 
 type Samples = Readonly<{
   raw_samples: number[];
@@ -44,48 +42,6 @@ type BenchmarkWindow = Window & {
 
 const browserWindow = window as BenchmarkWindow;
 
-function percentile(sorted: readonly number[], quantile: number): number {
-  const position = (sorted.length - 1) * quantile;
-  const lower = Math.floor(position);
-  const upper = Math.ceil(position);
-  if (lower === upper) return sorted[lower] ?? 0;
-  const low = sorted[lower] ?? 0;
-  const high = sorted[upper] ?? low;
-  return low + (high - low) * (position - lower);
-}
-
-function round(value: number): number {
-  const scale = 1000;
-  const scaled = value * scale;
-  const sign = scaled < 0 ? -1 : 1;
-  const magnitude = Math.abs(scaled);
-  const lower = Math.floor(magnitude);
-  const fraction = magnitude - lower;
-  const epsilon = Number.EPSILON * Math.max(1, magnitude) * 8;
-  const roundedInteger = fraction > 0.5 + epsilon
-    ? lower + 1
-    : fraction < 0.5 - epsilon
-      ? lower
-      : lower % 2 === 0 ? lower : lower + 1;
-  return sign * roundedInteger / scale;
-}
-
-function summarize(rawSamples: number[]): Samples {
-  const publishedSamples = rawSamples.map(round);
-  const sorted = [...publishedSamples].sort((left, right) => left - right);
-  const mean = publishedSamples.reduce((total, value) => total + value, 0) / Math.max(1, publishedSamples.length);
-  return {
-    raw_samples: publishedSamples,
-    distribution: {
-      min: sorted[0] ?? 0,
-      p50: round(percentile(sorted, 0.5)),
-      p95: round(percentile(sorted, 0.95)),
-      p99: round(percentile(sorted, 0.99)),
-      max: sorted.at(-1) ?? 0,
-      mean: round(mean)
-    }
-  };
-}
 
 function waitForPaint(): Promise<void> {
   return new Promise((resolve) => {
@@ -139,7 +95,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
   const longTasks: number[] = [];
   const longTaskObserver = typeof PerformanceObserver === 'function'
     ? new PerformanceObserver((list) => {
-        for (const entry of list.getEntries()) longTasks.push(round(entry.duration));
+        for (const entry of list.getEntries()) longTasks.push(roundBenchmarkValue(entry.duration));
       })
     : null;
   try {
@@ -209,12 +165,12 @@ async function run(): Promise<BrowserBenchmarkResult> {
   await waitForPaint();
   const afterDispose = memoryBytes();
 
-  samples.cold_initialization = summarize(coldMountSamples);
-  samples.first_byte_to_first_glyph = summarize(firstGlyphSamples);
-  samples.sustained_output = summarize(sustainedOutputSamples);
-  samples.resize_settling = summarize(resizeSettlingSamples);
-  samples.replay_1_mib = summarize(replaySamples);
-  samples.repeated_mount_dispose = summarize(mountDisposeSamples);
+  samples.cold_initialization = summarizeBenchmarkSamples(coldMountSamples);
+  samples.first_byte_to_first_glyph = summarizeBenchmarkSamples(firstGlyphSamples);
+  samples.sustained_output = summarizeBenchmarkSamples(sustainedOutputSamples);
+  samples.resize_settling = summarizeBenchmarkSamples(resizeSettlingSamples);
+  samples.replay_1_mib = summarizeBenchmarkSamples(replaySamples);
+  samples.repeated_mount_dispose = summarizeBenchmarkSamples(mountDisposeSamples);
 
   const result: BrowserBenchmarkResult = {
     schema: 'hermternal.web-terminal-renderer-browser-benchmark.v1',
