@@ -177,6 +177,7 @@ export class LiveWorkspaceSession {
     }
 
     this.activeRequest = request;
+    const operationSignal = this.controller?.signal;
     const userItem: TimelineItem = {
       kind: 'user-message',
       id: `${request.id}:user`,
@@ -195,7 +196,7 @@ export class LiveWorkspaceSession {
     });
 
     void request.completion
-      .then(() => this.refreshMessagesAfterCompletion(request))
+      .then(() => this.refreshMessagesAfterCompletion(request, operationSignal))
       .catch((error) => this.handlePromptFailure(request, error));
   }
 
@@ -442,20 +443,29 @@ export class LiveWorkspaceSession {
     if (found) this.publish({ ...this.snapshot, timeline, state: complete ? 'ready' : 'streaming' });
   }
 
-  private async refreshMessagesAfterCompletion(request: JsonRpcChatRequest): Promise<void> {
+  private async refreshMessagesAfterCompletion(
+    request: JsonRpcChatRequest,
+    signal?: AbortSignal
+  ): Promise<void> {
     if (this.activeRequest !== request || !this.snapshot.activeSessionId) return;
     this.activeRequest = undefined;
-    await this.refreshMessages(this.snapshot.activeSessionId, this.generation);
+    await this.refreshMessages(this.snapshot.activeSessionId, this.generation, undefined, signal);
   }
 
   private async refreshMessages(
     sessionId: string,
     generation: number,
-    expectedChat?: JsonRpcChatTransport
+    expectedChat?: JsonRpcChatTransport,
+    signal?: AbortSignal
   ): Promise<void> {
     try {
-      const response = await this.rest.getSessionMessages(sessionId, { limit: 500, offset: 0 });
+      const response = await this.rest.getSessionMessages(
+        sessionId,
+        { limit: 500, offset: 0 },
+        signal
+      );
       if (
+        signal?.aborted ||
         !this.isCurrent(generation) ||
         this.snapshot.activeSessionId !== sessionId ||
         (expectedChat !== undefined && this.chat !== expectedChat)

@@ -13,7 +13,7 @@
 
 ## Prompt delivery
 
-A prompt is submitted only after REST restoration and the explicit JSON-RPC connection and `session.resume` sequence complete. Streaming text is transient presentation data. A successful completion triggers a new REST message read so server-owned history replaces it.
+A prompt is submitted only after REST restoration and the explicit JSON-RPC connection and `session.resume` sequence complete. Streaming text is transient presentation data. A successful completion triggers a new REST message read so server-owned history replaces it. That read receives the prompt operation's abort signal, so invalidation, session replacement, logout, and disposal cancel it and stale authenticated data cannot repopulate the timeline.
 
 Hermternal never reconnects or replays a prompt automatically. An uncertain delivery shows a fixed warning. The user must reconnect and inspect Hermes history before deciding whether to send again.
 
@@ -23,4 +23,4 @@ The controller reads only documented text keys from known JSON-RPC events. Unkno
 
 `WorkspacePreview` defaults to deterministic fixture copy. Live callers must pass `dataMode="live"`, explicit timeline data, and disable the fixture-only artifact inspector. The live empty and recovery copy does not claim that controls are mocked or that an unretained draft is safe.
 
-Authentication, provider discovery, REST, WebSocket tickets, and JSON-RPC remain separate reviewed boundaries. This module composes them; it does not weaken their same-origin, cancellation, size, or diagnostic rules. A genuine unauthenticated connect or reconnect rejection remains `permanent-error` through the surrounding load catch; generic connection failures remain `retryable-error`. The workspace retains the terminal reason and close classification separately from that broad state: an active prompt after `4401` shows sign-in guidance, while `4403` shows incompatible-origin guidance. Uncertain-delivery callbacks and prompt-failure cleanup cannot downgrade either permanent result.
+Authentication, provider discovery, REST, WebSocket tickets, and JSON-RPC remain separate reviewed boundaries. This module composes them; it does not weaken their same-origin, cancellation, size, or diagnostic rules. A genuine unauthenticated connect or reconnect rejection remains `permanent-error` through the surrounding load catch; generic connection failures remain `retryable-error`. The workspace retains the terminal reason and close classification separately from that broad state: an active prompt after `4401` shows sign-in guidance, while `4403` shows incompatible-origin guidance. The rendered `4401` actions call the root-provided auth recovery bridge, which invokes `BrowserAuthSession.expire()` and invalidates local workspace state; `4403` actions stay on the fail-closed incompatible boundary. Uncertain-delivery callbacks and prompt-failure cleanup cannot downgrade either permanent result.

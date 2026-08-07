@@ -88,4 +88,20 @@ describe('root route composition', () => {
     expect(events).toEqual(['identity-active', 'local-invalidated', 'logout-request', 'identity-cleared']);
     expect(context.auth.current.status).toBe('signed_out');
   });
+
+  it('keeps live auth expiry invalidation inside the composed root boundary', async () => {
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
+      throw new Error('unexpected request');
+    });
+    const context = createLiveRootContext({ fetch });
+    const invalidate = vi.spyOn(context.workspace, 'invalidate');
+
+    await context.auth.initialize();
+    context.auth.expire();
+
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(context.auth.current.status).toBe('expired');
+    expect(context.workspace.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
+  });
 });

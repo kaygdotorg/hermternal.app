@@ -58,4 +58,52 @@ describe('LiveWorkspaceView', () => {
     expect(screen.queryByText(/Mocked fixture only/)).not.toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Message Hermes' })).toBeDisabled();
   });
+
+  it('returns authentication-required permanent errors to the root auth boundary', async () => {
+    const onReturnToSignIn = vi.fn();
+    const session = createSession({
+      state: 'permanent-error',
+      sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4',
+      timeline: [],
+      permanentFailure: {
+        reason: 'authentication-required',
+        closeCode: 4401,
+        closeClassification: 'authentication-rejected'
+      }
+    });
+    render(LiveWorkspaceView, { session, onReturnToSignIn });
+
+    expect(screen.getByText('Sign in again before sending another prompt.')).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+
+    expect(onReturnToSignIn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not route incompatible permanent errors through authentication recovery', async () => {
+    const onReturnToSignIn = vi.fn();
+    const session = createSession({
+      state: 'permanent-error',
+      sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4',
+      timeline: [],
+      permanentFailure: {
+        reason: 'incompatible',
+        closeCode: 4403,
+        closeClassification: 'host-or-origin-rejected'
+      }
+    });
+    render(LiveWorkspaceView, { session, onReturnToSignIn });
+
+    expect(screen.getByText('Hermes rejected this origin for chat. Use a reviewed origin before sending another prompt.')).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+
+    expect(onReturnToSignIn).not.toHaveBeenCalled();
+  });
 });

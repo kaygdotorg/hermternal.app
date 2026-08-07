@@ -10,6 +10,13 @@
   let fixtureTransport: MockTransport | undefined;
   let liveContext: LiveRootContext | undefined;
 
+  function returnLiveWorkspaceToSignIn(): void {
+    // Chat close 4401 is the only workspace failure that may invalidate the
+    // authenticated root. The BrowserAuthSession owns generation, local
+    // workspace invalidation, and the signed-in-to-expired transition.
+    liveContext?.auth.expire();
+  }
+
   // Route selection waits for browser mount. The server and first client render
   // stay identical, while valid scenario queries retain the no-network lane.
   onMount(() => {
@@ -29,7 +36,7 @@
   <PrototypeShell transport={fixtureTransport} />
 {:else if routeMode === 'live' && liveContext}
   <BrowserAuthView session={liveContext.auth}>
-    <LiveWorkspaceView session={liveContext.workspace} />
+    <LiveWorkspaceView session={liveContext.workspace} onReturnToSignIn={returnLiveWorkspaceToSignIn} />
   </BrowserAuthView>
 {:else}
   <main aria-busy="true" aria-label="Starting Hermternal"></main>

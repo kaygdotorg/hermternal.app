@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 type BrowserProofResult = {
   providers: Array<{ name: string; displayName: string; supportsPassword: boolean }>;
@@ -20,9 +20,19 @@ type W06ProofWindow = Window & {
   __hermternalW06BrowserProof?: () => Promise<BrowserProofResult>;
 };
 
+async function waitForBrowserProof(page: Page): Promise<void> {
+  // The route document is static, but its bundled proof callback is installed
+  // during hydration. Wait for that reviewed boundary before evaluating it so
+  // test scheduling cannot turn a valid bundle into a false missing-proof failure.
+  await page.waitForFunction(
+    () => typeof (window as W06ProofWindow).__hermternalW06BrowserProof === 'function'
+  );
+}
+
 test.describe('W-06 same-origin REST boundary', () => {
   test('executes the exported transport in the browser context', async ({ page }) => {
     await page.goto('/__w06/transport');
+    await waitForBrowserProof(page);
     await page.context().addCookies([
       {
         name: 'synthetic_session_cookie',
@@ -63,6 +73,7 @@ test.describe('W-06 same-origin REST boundary', () => {
 
   test('rejects forbidden origins and API roots before the transport fetcher runs', async ({ page }) => {
     await page.goto('/__w06/transport');
+    await waitForBrowserProof(page);
 
     const result = await page.evaluate(async () => {
       const proofWindow = window as W06ProofWindow;

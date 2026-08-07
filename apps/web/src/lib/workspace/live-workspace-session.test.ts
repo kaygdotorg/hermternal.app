@@ -354,6 +354,82 @@ describe('LiveWorkspaceSession', () => {
     expect(chat.sendPrompt).toHaveBeenNthCalledWith(2, 'Second prompt');
   });
 
+  it('aborts completion history refresh and drops a late authenticated response after invalidation', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+
+    const refresh = createDeferred<SessionMessages>();
+    let refreshSignal: AbortSignal | undefined;
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce((_sessionId, _options, signal) => {
+      refreshSignal = signal;
+      return refresh.promise;
+    });
+
+    session.sendPrompt('Complete once');
+    const completeEvent: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'Server answer' }
+    };
+    chat.complete(completeEvent);
+    await flush();
+    await flush();
+
+    expect(refreshSignal).toBeInstanceOf(AbortSignal);
+    session.invalidate();
+    expect(refreshSignal?.aborted).toBe(true);
+
+    refresh.resolve(
+      sessionMessages([
+        { role: 'assistant', content: 'Late authenticated response must not be retained' }
+      ])
+    );
+    await flush();
+
+    expect(session.current.state).toBe('loading');
+    expect(session.current.timeline).toEqual([]);
+  });
+
+  it('aborts completion history refresh and drops a late authenticated response after disposal', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+
+    const refresh = createDeferred<SessionMessages>();
+    let refreshSignal: AbortSignal | undefined;
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce((_sessionId, _options, signal) => {
+      refreshSignal = signal;
+      return refresh.promise;
+    });
+
+    session.sendPrompt('Complete once');
+    const completeEvent: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'Server answer' }
+    };
+    chat.complete(completeEvent);
+    await flush();
+    await flush();
+
+    expect(refreshSignal).toBeInstanceOf(AbortSignal);
+    session.dispose();
+    expect(refreshSignal?.aborted).toBe(true);
+
+    refresh.resolve(
+      sessionMessages([
+        { role: 'assistant', content: 'Late authenticated response must not be retained' }
+      ])
+    );
+    await flush();
+
+    expect(session.current.state).toBe('loading');
+    expect(session.current.timeline).toEqual([]);
+  });
+
   it('maps authentication-required chat state to a permanent workspace error', async () => {
     const rest = createRest([]);
     const chat = createChatHarness();
