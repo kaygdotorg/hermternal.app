@@ -1114,7 +1114,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                             zlib.compress(
                                 b"commit "
                                 + str(len(object_data)).encode("ascii")
-                                + b"\\x00"
+                                + b"\x00"
                                 + object_data
                             )
                         )
