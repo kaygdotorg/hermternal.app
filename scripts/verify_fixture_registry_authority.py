@@ -19,11 +19,13 @@ import json
 import os
 import re
 import selectors
+import signal
 import stat
 import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
@@ -68,6 +70,9 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_GIT_OUTPUT = 512 * 1024
 GIT_TIMEOUT_SECONDS = 10.0
+MAX_SNAPSHOT_FILE_BYTES = 1 * 1024 * 1024
+MAX_SNAPSHOT_TOTAL_BYTES = 32 * 1024 * 1024
+SNAPSHOT_TIMEOUT_SECONDS = 30.0
 MAX_ERROR_LENGTH = 220
 SAFE_ERROR_MESSAGE = "fixture registry authority rejected"
 TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
@@ -157,23 +162,78 @@ def _resolve_path(path: Path, *, strict: bool) -> Path:
         raise AuthorityError() from exc
 
 
-def _canonical_directory(path: Path) -> Path:
-    """Require an absolute directory without caller-controlled path aliases."""
+def _open_directory_chain(
+    path: Path, *, deadline: float | None = None
+) -> tuple[int, Path]:
+    """Open every absolute path component through a stable parent descriptor."""
 
     _require(path.is_absolute())
     _require(all(component not in ("", ".", "..") for component in path.parts[1:]))
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock | directory_flag
+    current_fd: int | None = None
+    current_path = Path(path.anchor)
+    transferred = False
     try:
-        _require(not path.is_symlink())
-        ancestor = Path(path.anchor)
-        for component in path.parts[1:-1]:
-            ancestor /= component
-            if ancestor.is_symlink():
-                _require(ancestor in TRUSTED_PATH_ALIASES)
+        if deadline is not None:
+            _require(time.monotonic() <= deadline)
+        current_fd = os.open(path.anchor, flags)
+        for component in path.parts[1:]:
+            if deadline is not None:
+                _require(time.monotonic() <= deadline)
+            candidate = current_path / component
+            try:
+                next_fd = os.open(component, flags, dir_fd=current_fd)
+            except OSError:
+                # macOS exposes the host temporary tree through /tmp and /var.
+                # Only those exact system aliases may be followed; all other
+                # ancestors must be opened with O_NOFOLLOW from their parent fd.
+                _require(candidate in TRUSTED_PATH_ALIASES)
+                next_fd = os.open(component, flags & ~no_follow, dir_fd=current_fd)
+            old_fd = current_fd
+            try:
+                os.close(old_fd)
+            except OSError:
+                os.close(next_fd)
+                raise
+            current_fd = next_fd
+            current_path = candidate
+        _require(current_fd is not None and stat.S_ISDIR(os.fstat(current_fd).st_mode))
+        # Resolve only after the descriptor chain is anchored. The resolved
+        # name is used for private Git commands and diagnostics; source reads
+        # continue through the already-open descriptor.
+        canonical = _resolve_path(path, strict=True)
+        transferred = True
+        return current_fd, canonical
+    except AuthorityError:
+        raise
     except (OSError, RuntimeError, ValueError) as exc:
         raise AuthorityError() from exc
-    resolved = _resolve_path(path, strict=True)
-    _require(resolved.is_dir())
-    return resolved
+    finally:
+        if current_fd is not None and not transferred:
+            try:
+                os.close(current_fd)
+            except OSError:
+                pass
+
+
+def _canonical_directory(path: Path) -> Path:
+    """Require an absolute directory after descriptor-anchored traversal."""
+
+    descriptor, canonical = _open_directory_chain(path)
+    try:
+        _require(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+        return canonical
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise AuthorityError() from exc
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
 
 
 def _lstat_optional(path: Path) -> os.stat_result | None:
@@ -325,11 +385,39 @@ def _file_stat_fingerprint(metadata: os.stat_result) -> tuple[int, int, int, int
     )
 
 
-def _copy_regular_from_fd(source_fd: int, destination: Path) -> None:
-    """Copy one already-open regular file without reopening its source path."""
+@dataclass
+class _SnapshotBudget:
+    """Bound private metadata copying before any Git command can run."""
 
+    deadline: float
+    total_bytes: int = 0
+
+    @classmethod
+    def start(cls) -> "_SnapshotBudget":
+        return cls(deadline=time.monotonic() + SNAPSHOT_TIMEOUT_SECONDS)
+
+    def check(self) -> None:
+        _require(time.monotonic() <= self.deadline)
+
+    def reserve(self, amount: int, copied_in_file: int) -> int:
+        self.check()
+        _require(amount >= 0)
+        _require(copied_in_file + amount <= MAX_SNAPSHOT_FILE_BYTES)
+        _require(self.total_bytes + amount <= MAX_SNAPSHOT_TOTAL_BYTES)
+        self.total_bytes += amount
+        self.check()
+        return copied_in_file + amount
+
+
+def _copy_regular_from_fd(source_fd: int, destination: Path, budget: _SnapshotBudget) -> None:
+    """Copy one already-open regular file under file, aggregate, and time caps."""
+
+    budget.check()
     before = os.fstat(source_fd)
+    _require(stat.S_ISREG(before.st_mode))
+    _require(0 <= before.st_size <= MAX_SNAPSHOT_FILE_BYTES)
     destination_fd: int | None = None
+    copied = 0
     try:
         destination_fd = os.open(
             destination,
@@ -341,15 +429,21 @@ def _copy_regular_from_fd(source_fd: int, destination: Path) -> None:
             0o600,
         )
         while True:
+            budget.check()
             chunk = os.read(source_fd, 64 * 1024)
             if not chunk:
                 break
+            copied = budget.reserve(len(chunk), copied)
             remaining = memoryview(chunk)
             while remaining:
+                budget.check()
                 written = os.write(destination_fd, remaining)
                 _require(written > 0)
                 remaining = remaining[written:]
-        _require(_file_stat_fingerprint(before) == _file_stat_fingerprint(os.fstat(source_fd)))
+        budget.check()
+        after = os.fstat(source_fd)
+        _require(_file_stat_fingerprint(before) == _file_stat_fingerprint(after))
+        _require(copied == before.st_size)
     except AuthorityError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
@@ -362,18 +456,24 @@ def _copy_regular_from_fd(source_fd: int, destination: Path) -> None:
                 pass
 
 
-def _copy_git_tree(source_fd: int, destination: Path) -> None:
-    """Create a private regular-file snapshot from an open Git directory fd."""
+def _copy_git_tree(
+    source_fd: int, destination: Path, budget: _SnapshotBudget
+) -> None:
+    """Create a bounded private regular-file snapshot from an open Git fd."""
 
     no_follow = getattr(os, "O_NOFOLLOW", None)
     nonblock = getattr(os, "O_NONBLOCK", None)
     directory_flag = getattr(os, "O_DIRECTORY", None)
     _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock
+    budget.check()
     before = os.fstat(source_fd)
+    _require(stat.S_ISDIR(before.st_mode))
     try:
         os.mkdir(destination, 0o700)
+        budget.check()
         for name in os.listdir(source_fd):
+            budget.check()
             _require(name not in ("", ".", ".."))
             child_fd: int | None = None
             child_destination = destination / name
@@ -381,13 +481,14 @@ def _copy_git_tree(source_fd: int, destination: Path) -> None:
                 child_fd = os.open(name, flags, dir_fd=source_fd)
                 mode = os.fstat(child_fd).st_mode
                 if stat.S_ISDIR(mode):
-                    _copy_git_tree(child_fd, child_destination)
+                    _copy_git_tree(child_fd, child_destination, budget)
                 else:
                     _require(stat.S_ISREG(mode))
-                    _copy_regular_from_fd(child_fd, child_destination)
+                    _copy_regular_from_fd(child_fd, child_destination, budget)
             finally:
                 if child_fd is not None:
                     os.close(child_fd)
+        budget.check()
         _require(_file_stat_fingerprint(before) == _file_stat_fingerprint(os.fstat(source_fd)))
     except AuthorityError:
         raise
@@ -398,7 +499,6 @@ def _copy_git_tree(source_fd: int, destination: Path) -> None:
 def _snapshot_object_repository(object_repo: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
     """Snapshot the caller repository before any path-based Git command runs."""
 
-    root = _canonical_directory(object_repo)
     no_follow = getattr(os, "O_NOFOLLOW", None)
     nonblock = getattr(os, "O_NONBLOCK", None)
     directory_flag = getattr(os, "O_DIRECTORY", None)
@@ -407,13 +507,20 @@ def _snapshot_object_repository(object_repo: Path) -> tuple[tempfile.TemporaryDi
     root_fd: int | None = None
     git_fd: int | None = None
     temporary: tempfile.TemporaryDirectory[str] | None = None
+    budget = _SnapshotBudget.start()
     try:
-        root_fd = os.open(root, flags)
+        # Keep the root fd returned by the descriptor chain. Reopening the
+        # caller path here would reintroduce an ancestor replacement race.
+        root, _ = _open_directory_chain(object_repo, deadline=budget.deadline)
+        root_fd = root
+        budget.check()
         git_fd = os.open(".git", flags, dir_fd=root_fd)
+        _require(stat.S_ISDIR(os.fstat(git_fd).st_mode))
         temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-snapshot-")
         snapshot_root = Path(temporary.name) / "repo"
         os.mkdir(snapshot_root, 0o700)
-        _copy_git_tree(git_fd, snapshot_root / ".git")
+        budget.check()
+        _copy_git_tree(git_fd, snapshot_root / ".git", budget)
         return temporary, snapshot_root
     except AuthorityError:
         if temporary is not None:
@@ -543,72 +650,104 @@ def _strict_git_environment() -> dict[str, str]:
     return environment
 
 
-def _close_git_stream(selector: selectors.BaseSelector, stream: Any) -> None:
-    try:
-        selector.unregister(stream)
-    except (KeyError, ValueError):
-        pass
+def _close_git_stream(selector: selectors.BaseSelector | None, stream: Any) -> None:
+    if selector is not None:
+        try:
+            selector.unregister(stream)
+        except (KeyError, ValueError):
+            pass
     try:
         stream.close()
     except (OSError, ValueError):
         pass
 
 
-def _terminate_and_drain_git(
-    process: subprocess.Popen[bytes], selector: selectors.BaseSelector
+def _signal_git_group(
+    process: subprocess.Popen[bytes], signal_number: int
 ) -> None:
-    """Stop a bounded-output child and drain its pipes without retaining data."""
+    """Signal an isolated Git session, falling back to its leader if needed."""
 
     try:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=0.25)
-            except subprocess.TimeoutExpired:
-                process.kill()
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
-        try:
+        os.killpg(process.pid, signal_number)
+        return
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        pass
+    try:
+        if signal_number == signal.SIGKILL:
             process.kill()
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        else:
+            process.terminate()
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        pass
+
+
+def _terminate_and_drain_git(
+    process: subprocess.Popen[bytes] | None,
+    selector: selectors.BaseSelector | None,
+    streams: tuple[Any, ...] = (),
+) -> None:
+    """Kill the complete isolated child session and drain registered pipes."""
+
+    if process is not None:
+        _signal_git_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=0.25)
+        except (subprocess.TimeoutExpired, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass
+        # A descendant can retain stdout/stderr after the leader exits. Kill
+        # the process group again before draining so those descriptors close.
+        _signal_git_group(process, signal.SIGKILL)
+        try:
+            process.wait(timeout=0.25)
+        except (subprocess.TimeoutExpired, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             pass
 
     deadline = time.monotonic() + 1.0
-    while selector.get_map():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        try:
-            events = selector.select(remaining)
-        except (OSError, RuntimeError, ValueError):
-            break
-        if not events:
-            break
-        for key, _ in events:
-            stream = key.fileobj
+    if selector is not None:
+        while True:
             try:
-                while True:
-                    chunk = os.read(stream.fileno(), 64 * 1024)
-                    if not chunk:
-                        _close_git_stream(selector, stream)
-                        break
-            except BlockingIOError:
-                continue
+                registered = selector.get_map()
             except (OSError, RuntimeError, ValueError):
-                _close_git_stream(selector, stream)
+                break
+            if not registered:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                events = selector.select(remaining)
+            except (OSError, RuntimeError, ValueError):
+                break
+            if not events:
+                break
+            for key, _ in events:
+                stream = key.fileobj
+                try:
+                    while True:
+                        chunk = os.read(stream.fileno(), 64 * 1024)
+                        if not chunk:
+                            _close_git_stream(selector, stream)
+                            break
+                except BlockingIOError:
+                    continue
+                except (OSError, RuntimeError, ValueError):
+                    _close_git_stream(selector, stream)
+        try:
+            remaining_streams = [key.fileobj for key in selector.get_map().values()]
+        except (OSError, RuntimeError, ValueError):
+            remaining_streams = []
+        for stream in remaining_streams:
+            _close_git_stream(selector, stream)
 
-    for key in list(selector.get_map().values()):
-        _close_git_stream(selector, key.fileobj)
-    try:
-        process.wait(timeout=0.25)
-    except subprocess.TimeoutExpired:
+    registered_ids: set[int] = set()
+    if selector is not None:
         try:
-            process.kill()
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            registered_ids = {id(key.fileobj) for key in selector.get_map().values()}
+        except (OSError, RuntimeError, ValueError):
             pass
-        try:
-            process.wait(timeout=0.25)
-        except subprocess.SubprocessError:
-            pass
+    for stream in streams:
+        if stream is not None and id(stream) not in registered_ids:
+            _close_git_stream(None, stream)
 
 
 def _run_bounded_git(
@@ -616,22 +755,24 @@ def _run_bounded_git(
 ) -> tuple[int, bytes, bytes]:
     """Collect both pipes incrementally and abort at the first output cap."""
 
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        close_fds=True,
-        env=environment,
-    )
-    selector = selectors.DefaultSelector()
+    process: subprocess.Popen[bytes] | None = None
+    selector: selectors.BaseSelector | None = None
+    streams: tuple[Any, ...] = ()
     buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
-    streams: tuple[tuple[Any, str], ...] = (
-        (process.stdout, "stdout"),
-        (process.stderr, "stderr"),
-    )
     try:
-        for stream, label in streams:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            start_new_session=True,
+            env=environment,
+        )
+        streams = (process.stdout, process.stderr)
+        selector = selectors.DefaultSelector()
+        labeled_streams = ((process.stdout, "stdout"), (process.stderr, "stderr"))
+        for stream, label in labeled_streams:
             if stream is None:
                 raise AuthorityError()
             os.set_blocking(stream.fileno(), False)
@@ -666,15 +807,26 @@ def _run_bounded_git(
             raise AuthorityError() from exc
         return returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
     except AuthorityError:
-        _terminate_and_drain_git(process, selector)
+        _terminate_and_drain_git(process, selector, streams)
         raise
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-        _terminate_and_drain_git(process, selector)
+        _terminate_and_drain_git(process, selector, streams)
         raise AuthorityError() from exc
     finally:
-        for key in list(selector.get_map().values()):
-            _close_git_stream(selector, key.fileobj)
-        selector.close()
+        if selector is not None:
+            try:
+                remaining_streams = [key.fileobj for key in selector.get_map().values()]
+            except (OSError, RuntimeError, ValueError):
+                remaining_streams = []
+            for stream in remaining_streams:
+                _close_git_stream(selector, stream)
+            try:
+                selector.close()
+            except (OSError, RuntimeError, ValueError):
+                pass
+        for stream in streams:
+            if stream is not None:
+                _close_git_stream(None, stream)
 
 
 def _git(repo_root: Path, *arguments: str) -> bytes:
@@ -832,17 +984,16 @@ def _read_checkout_file(checkout_root: Path, path: str) -> bytes:
         and not relative.is_absolute()
         and all(part not in ("", ".", "..") for part in relative.parts)
     )
-    root = _canonical_directory(checkout_root)
     no_follow = getattr(os, "O_NOFOLLOW", None)
     nonblock = getattr(os, "O_NONBLOCK", None)
-    _require(type(no_follow) is int and type(nonblock) is int)
-    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow
-    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock | directory_flag
     file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock
     directory_fds: list[int] = []
     file_fd: int | None = None
     try:
-        current_fd = os.open(root, directory_flags)
+        current_fd, _ = _open_directory_chain(checkout_root)
         directory_fds.append(current_fd)
         _require(stat.S_ISDIR(os.fstat(current_fd).st_mode))
         for component in relative.parts[:-1]:

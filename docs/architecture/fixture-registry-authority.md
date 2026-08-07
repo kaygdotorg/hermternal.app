@@ -64,15 +64,19 @@ therefore explicit and cannot silently fall back to a schema-incompatible v1
 record.
 
 The object-repository input is a canonical absolute plain checkout. Before
-running any path-based Git command, the verifier opens the caller's root and
-`.git` directory with no-follow descriptors and copies the complete Git
-metadata tree into a private mode-700 temporary snapshot. The copy is
-chunked, rejects symlinks/non-regular entries, and checks source metadata before
-and after each copy. Git is invoked only against that snapshot, so a concurrent
-rename or symlink replacement of the caller's `.git`, nested fanout/pack/ref
-path, config, or metadata cannot redirect a later read. The snapshot also
-uses a descriptor walk of the complete `objects` and `refs` trees with
-`O_NOFOLLOW` as a second structural check.
+running any path-based Git command, the verifier opens `/` and every caller
+ancestor through a descriptor-relative chain, using `O_NOFOLLOW` except for the
+explicit host aliases `/tmp` and `/var`. It then opens the caller root and
+`.git` directory from the held descriptors and copies the complete Git metadata
+tree into a private mode-700 temporary snapshot. The copy is chunked and
+bounded to `MAX_SNAPSHOT_FILE_BYTES` per regular file and
+`MAX_SNAPSHOT_TOTAL_BYTES` in aggregate, with a `SNAPSHOT_TIMEOUT_SECONDS`
+wall-clock deadline. It rejects symlinks/non-regular entries and checks source
+metadata before and after each copy. Git is invoked only against that snapshot,
+so a concurrent rename or symlink replacement of the caller's `.git`, nested
+fanout/pack/ref path, config, or metadata cannot redirect a later read. The
+snapshot also uses a descriptor walk of the complete `objects` and `refs`
+trees with `O_NOFOLLOW` as a second structural check.
 
 The verifier rejects local `info/grafts`, shallow metadata,
 `objects/info/alternates`, `objects/info/http-alternates`, replacement refs,
@@ -91,11 +95,14 @@ or artifact object, the private snapshot runs bounded `git fsck --full
 --strict` to verify compressed object contents match their OIDs; a corrupted
 loose object under an existing filename is rejected. Git stdout and stderr are
 also collected incrementally; either stream reaching the cap terminates or
-kills the child and drains both pipes without retaining unbounded output.
-Timeouts, no-output hangs, non-zero exits, and pipe failures use the same
-bounded error path. The declared `source_commit` must be a Git `commit` object,
-not an annotated tag object. Path resolution, Git executable, config, and
-subprocess failures are converted to the same bounded redacted authority error.
+kills the isolated child session and drains both pipes without retaining
+unbounded output. `Popen`, selector creation, registration, collection, and
+cleanup share one defensive boundary, so setup failures cannot strand a child
+or an unregistered pipe. Timeouts, no-output hangs, non-zero exits, and pipe
+failures use the same bounded error path. The declared `source_commit` must be a
+Git `commit` object, not an annotated tag object. Path resolution, Git
+executable, config, and subprocess failures are converted to the same bounded
+redacted authority error.
 
 Run the standalone verifier from a plain checkout with:
 
@@ -144,11 +151,15 @@ stores that use alternates, replacement refs, nested fanout/pack/ref symlinks,
 symlinked or linked Git metadata, local include/promisor/redirect
 configuration, annotated-tag source objects, FIFO artifact paths, hostile Git
 `PATH`/global config, checkout/object-root resolution failures, source-path
-replacement races after descriptor validation, and corrupted loose objects
-under existing OIDs. It bounds oversized blob, stderr, and history output in
-both interpreter modes, terminates no-output timeouts, and cleans up a child
-saturating stdout and stderr simultaneously. The FIFO and output-cap cases
-assert prompt bounded exit rather than relying on a post-timeout kill.
+replacement races after descriptor validation, deterministic ancestor
+replacement during descriptor opening, corrupted loose objects under existing
+OIDs, and oversized pack, loose-object, reflog, and metadata snapshot files.
+It also rejects an aggregate snapshot over the total byte budget and a
+snapshot deadline overrun. It bounds oversized blob, stderr, and history output
+in both interpreter modes, terminates no-output timeouts, cleans up selector
+setup failures, and kills descendants that retain stdout or stderr pipes. The
+FIFO and output-cap cases assert prompt bounded exit rather than relying on a
+post-timeout kill.
 
 The real Git object database remains the source of truth throughout these
 mutations. A local replacement authority therefore cannot authorize a matching

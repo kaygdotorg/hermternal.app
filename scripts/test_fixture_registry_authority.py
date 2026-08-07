@@ -612,6 +612,44 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             with self.assertRaises(verifier.AuthorityError):
                 verifier._read_checkout_file(checkout, "contracts/fixtures/index.json")
 
+    def test_ancestor_replacement_after_open_keeps_original_descriptor(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-ancestor-race-")
+        self.addCleanup(temporary.cleanup)
+        parent = Path(temporary.name) / "parent"
+        original_child = parent / "child"
+        original_child.mkdir(parents=True)
+        (original_child / "marker").write_text("original\n", encoding="ascii")
+        outside = Path(temporary.name) / "outside"
+        outside_child = outside / "child"
+        outside_child.mkdir(parents=True)
+        (outside_child / "marker").write_text("redirected\n", encoding="ascii")
+        saved = parent.with_name("parent.saved")
+        original_stat = original_child.stat()
+        real_open = verifier.os.open
+        mutated = False
+
+        def open_and_replace(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            nonlocal mutated
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if path == "parent" and kwargs.get("dir_fd") is not None and not mutated:
+                parent.rename(saved)
+                parent.symlink_to(outside, target_is_directory=True)
+                mutated = True
+            return descriptor
+
+        with mock.patch.object(verifier.os, "open", side_effect=open_and_replace):
+            descriptor, _ = verifier._open_directory_chain(original_child)
+        try:
+            self.assertTrue(mutated)
+            self.assertEqual(os.fstat(descriptor).st_ino, original_stat.st_ino)
+            marker_fd = real_open("marker", os.O_RDONLY, dir_fd=descriptor)
+            try:
+                self.assertEqual(os.read(marker_fd, 64), b"original\n")
+            finally:
+                os.close(marker_fd)
+        finally:
+            os.close(descriptor)
+
     def test_oversized_blob_output_is_bounded_in_both_modes(self) -> None:
         object_temporary, object_repo = self.copy_object_repo()
         self.addCleanup(object_temporary.cleanup)
@@ -623,6 +661,47 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         with self.assertRaises(verifier.AuthorityError):
             verifier._git(object_repo, "cat-file", "blob", blob_oid)
         self.assertLess(time.monotonic() - started, 5)
+
+    def test_oversized_snapshot_files_fail_closed_in_both_modes(self) -> None:
+        variants = ("pack", "loose", "reflog", "metadata")
+        for variant in variants:
+            with self.subTest(variant=variant):
+                object_temporary, object_repo = self.copy_object_repo()
+                self.addCleanup(object_temporary.cleanup)
+                git_dir = object_repo / ".git"
+                if variant == "pack":
+                    target = git_dir / "objects/pack/oversized.pack"
+                elif variant == "loose":
+                    target = git_dir / "objects/aa/oversized-loose-object"
+                elif variant == "reflog":
+                    target = git_dir / "logs/refs/heads/oversized"
+                else:
+                    target = git_dir / "description"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"x" * (verifier.MAX_SNAPSHOT_FILE_BYTES + 1))
+                with self.copy_checkout() as checkout_temporary:
+                    self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_aggregate_snapshot_budget_fails_closed_in_both_modes(self) -> None:
+        object_temporary, object_repo = self.copy_object_repo()
+        self.addCleanup(object_temporary.cleanup)
+        budget_files = verifier.MAX_SNAPSHOT_TOTAL_BYTES // verifier.MAX_SNAPSHOT_FILE_BYTES + 1
+        for index in range(budget_files):
+            (object_repo / ".git" / f"snapshot-budget-{index}").write_bytes(
+                b"x" * verifier.MAX_SNAPSHOT_FILE_BYTES
+            )
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_snapshot_deadline_fails_closed(self) -> None:
+        object_temporary, object_repo = self.copy_object_repo()
+        self.addCleanup(object_temporary.cleanup)
+        with (
+            mock.patch.object(verifier, "SNAPSHOT_TIMEOUT_SECONDS", 0.5),
+            mock.patch.object(verifier.time, "monotonic", side_effect=(0.0, 1.0)),
+        ):
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._snapshot_object_repository(object_repo)
 
     def test_corrupt_loose_object_under_existing_oid_fails_fsck(self) -> None:
         object_temporary, object_repo = self.copy_object_repo()
@@ -672,6 +751,50 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                     verifier._strict_git_environment(),
                 )
         self.assertLess(time.monotonic() - started, 5)
+        self.assert_process_exited(pid_file)
+
+    def test_selector_setup_failure_terminates_and_reaps_child(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-selector-setup-")
+        self.addCleanup(temporary.cleanup)
+        pid_file = Path(temporary.name) / "pid"
+        script = (
+            "import os, pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii'); "
+            "time.sleep(30)"
+        )
+        def fail_selector() -> Any:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and not pid_file.exists():
+                time.sleep(0.01)
+            raise RuntimeError("setup")
+
+        with mock.patch.object(verifier.selectors, "DefaultSelector", side_effect=fail_selector):
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._run_bounded_git(
+                    [sys.executable, "-c", script, str(pid_file)],
+                    verifier._strict_git_environment(),
+                )
+        self.assert_process_exited(pid_file)
+
+    def test_descendant_pipe_holder_is_killed_with_child_session(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-descendant-")
+        self.addCleanup(temporary.cleanup)
+        pid_file = Path(temporary.name) / "descendant-pid"
+        script = (
+            "import os, pathlib, sys, time\n"
+            "child = os.fork()\n"
+            "if child == 0:\n"
+            "    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii')\n"
+            "    time.sleep(30)\n"
+            "else:\n"
+            "    time.sleep(30)\n"
+        )
+        with mock.patch.object(verifier, "GIT_TIMEOUT_SECONDS", 0.2):
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._run_bounded_git(
+                    [sys.executable, "-c", script, str(pid_file)],
+                    verifier._strict_git_environment(),
+                )
         self.assert_process_exited(pid_file)
 
     def test_simultaneous_stdout_and_stderr_saturation_cleans_child(self) -> None:
@@ -914,6 +1037,17 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                     )
                     target = git_dir / "objects" / "pack"
                     self.assertTrue(target.is_dir())
+                    # A real pack may exceed the snapshot's deliberate
+                    # per-file cap. That is a bounded rejection, not a race
+                    # success case; the dedicated oversized-pack regression
+                    # below covers this trust boundary.
+                    if any(
+                        child.is_file() and child.stat().st_size > verifier.MAX_SNAPSHOT_FILE_BYTES
+                        for child in target.iterdir()
+                    ):
+                        with self.copy_checkout() as checkout_temporary:
+                            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+                        continue
                     backup = target.with_name("pack.saved")
                     outside.mkdir()
                     mutate = lambda: (target.rename(backup), target.symlink_to(outside, target_is_directory=True))
