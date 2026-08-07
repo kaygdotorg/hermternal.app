@@ -13,6 +13,19 @@ const identity: AuthIdentity = {
   expiresAt: 2_000_000_000
 };
 
+const basicIdentity: AuthIdentity = {
+  ...identity,
+  email: '',
+  organizationId: ''
+};
+
+const oauthIdentity: AuthIdentity = {
+  ...identity,
+  email: 'oauth@example.invalid',
+  organizationId: 'oauth-org',
+  provider: 'nous'
+};
+
 const passwordProvider = {
   id: 'basic',
   name: 'Hermes password',
@@ -119,6 +132,82 @@ describe('BrowserAuthSession', () => {
 
     expect(events).toEqual(['invalidate-local', 'server-logout']);
     expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it('logs out the Basic identity when optional profile metadata is empty', async () => {
+    const events: string[] = [];
+    const logout = vi.fn(async () => {
+      events.push('server-logout');
+    });
+    const invalidateLocalSession = vi.fn(() => {
+      events.push('invalidate-local');
+    });
+    const session = new BrowserAuthSession({
+      client: client({
+        verify: vi.fn(async () => basicIdentity),
+        logout
+      }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession
+    });
+
+    await session.initialize();
+    const first = session.logout();
+    const second = session.logout();
+    await Promise.all([first, second]);
+
+    expect(events).toEqual(['invalidate-local', 'server-logout']);
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(1);
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+    expect(JSON.stringify(session.current)).not.toContain('synthetic-password');
+    expect(JSON.stringify(session.current)).not.toContain('hermes-session-secret');
+  });
+
+  it('preserves logout for a non-empty OAuth-like identity', async () => {
+    const logout = vi.fn(async () => undefined);
+    const session = new BrowserAuthSession({
+      client: client({
+        verify: vi.fn(async () => oauthIdentity),
+        logout
+      }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession: vi.fn()
+    });
+
+    await session.initialize();
+    await session.logout();
+
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it.each([
+    ['missing user identity', { ...basicIdentity, userId: '' }],
+    ['missing provider identity', { ...basicIdentity, provider: '' }],
+    ['missing expiry identity', { ...basicIdentity, expiresAt: Number.NaN }],
+    ['missing stable field', (() => {
+      const { userId: _userId, ...missingUserId } = basicIdentity;
+      return missingUserId;
+    })()]
+  ])('fails closed for %s', async (_description, malformedIdentity) => {
+    const logout = vi.fn(async () => undefined);
+    const invalidateLocalSession = vi.fn();
+    const session = new BrowserAuthSession({
+      client: client({
+        verify: vi.fn(async () => malformedIdentity as AuthIdentity),
+        logout
+      }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession
+    });
+
+    await session.initialize();
+    await session.logout();
+
+    expect(session.current).toMatchObject({ status: 'failed', errorCode: 'identity-failed' });
+    expect(logout).not.toHaveBeenCalled();
+    expect(invalidateLocalSession).not.toHaveBeenCalled();
   });
 
   it('does not invoke logout before a verified authenticated identity exists', async () => {
@@ -296,6 +385,30 @@ describe('BrowserAuthSession', () => {
     logoutPending.resolve();
     await pendingLogout;
     expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it('keeps reentrant logout, expiry, and disposal exactly once', async () => {
+    const logoutPending = deferred<void>();
+    const logout = vi.fn(() => logoutPending.promise);
+    const invalidateLocalSession = vi.fn();
+    const session = new BrowserAuthSession({
+      client: client({ logout }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession
+    });
+    await session.initialize();
+
+    const first = session.logout();
+    const second = session.logout();
+    session.expire();
+    session.dispose();
+    session.dispose();
+    logoutPending.resolve();
+    await Promise.all([first, second]);
+
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(1);
+    expect(session.current.status).toBe('logging_out');
   });
 
   it('reconciles an ambiguous logout before staying signed out', async () => {

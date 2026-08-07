@@ -57,9 +57,13 @@ bounded projection; it does not create a new normative Hermes schema.
 Pinned source citations at `f5be9236e00ddf2f2a412697f267078fc4ee068e`:
 
 - [`web/src/lib/api.ts`](https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/web/src/lib/api.ts)
-  defines `AuthMeResponse` with non-null string identity fields and numeric
-  `expires_at`; it also defines `SessionInfo` with required source fields,
-  numeric `started_at`/`last_active`, nullable numeric `ended_at`, required
+  defines `AuthMeResponse` with non-null string fields and numeric
+  `expires_at`; non-null does not mean non-empty for provider profile data.
+  `user_id`, `provider`, and `expires_at` are the stable authentication
+  identity used by the client. `email`, `display_name`, and `org_id` are
+  profile metadata and may be empty for the pinned Basic provider. The source
+  also defines `SessionInfo` with required source fields, numeric
+  `started_at`/`last_active`, nullable numeric `ended_at`, required
   activity/token counters, and optional `parent_session_id`.
 - The same pinned web type defines `SessionMessage.content` as `string | null`
   and permits optional `tool_calls`, `tool_name`, `tool_call_id`, and numeric
@@ -93,10 +97,12 @@ budgets:
   requested path because Hermes resolves aliases and continuation sessions to a
   canonical ID before returning session details or messages.
 - Source-defined strings stay bounded but may be empty when the pinned
-  TypeScript type says only `string`. This includes identity display fields,
-  nullable session text when it is non-null, provider display labels, profiles,
-  message content, and optional tool metadata. Empty strings are rejected only
-  for reviewed local identifiers such as provider names and session IDs.
+  TypeScript type says only `string`. This includes the identity's optional
+  profile metadata (`email`, `display_name`, and `org_id`), nullable session
+  text when it is non-null, provider display labels, profiles, message content,
+  and optional tool metadata. Empty strings are rejected for the stable auth
+  identity keys (`user_id` and `provider`) and reviewed local identifiers such
+  as provider names and session IDs.
 - Message content is `null` or a bounded string. Optional source-defined tool
   metadata is projected only when its fields have the pinned scalar/object
   shapes; arbitrary arrays and dictionaries at the content root are rejected.

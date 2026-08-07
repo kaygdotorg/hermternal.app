@@ -1,4 +1,4 @@
-import type { AuthIdentity } from '$lib/transport/live-rest-types';
+import { isAuthIdentity, type AuthIdentity } from '$lib/transport/live-rest-types';
 import type { AuthProvider } from './types';
 import {
   BrowserAuthError,
@@ -85,6 +85,9 @@ export class BrowserAuthSession {
     if (!this.ownsOperation(operation)) return;
     try {
       const identity = await this.client.verify(operation.signal);
+      if (!isAuthIdentity(identity)) {
+        throw new BrowserAuthError('identity-failed');
+      }
       if (!this.ownsOperation(operation)) return;
       this.publish({ status: 'authenticated', identity, providers: [] });
     } catch (error) {
@@ -153,6 +156,9 @@ export class BrowserAuthSession {
     if (!this.ownsOperation(operation)) return;
     try {
       const result = await this.client.loginWithPassword({ provider: provider.id, ...input }, operation.signal);
+      if (!isAuthIdentity(result.identity)) {
+        throw new BrowserAuthError('identity-failed');
+      }
       if (!this.ownsOperation(operation)) return;
       this.publish({
         status: 'authenticated',
@@ -172,7 +178,7 @@ export class BrowserAuthSession {
     const retry = this.snapshot.status === 'logout_failed';
     const identity = this.snapshot.identity;
     if (
-      !isVerifiedIdentity(identity) ||
+      !isAuthIdentity(identity) ||
       (!retry && this.snapshot.status !== 'authenticated')
     ) {
       // Logout is an authenticated boundary. A signed-out, generic failure, or
@@ -384,25 +390,4 @@ function isAmbiguousLogout(error: unknown): boolean {
 
 function mapLogoutFailureCode(error: unknown): 'logout-failed' | 'logout-unverified' {
   return error instanceof BrowserAuthError && error.code === 'logout-failed' ? 'logout-failed' : 'logout-unverified';
-}
-
-function isVerifiedIdentity(value: AuthIdentity | undefined): value is AuthIdentity {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const candidate = value as unknown as Record<string, unknown>;
-  const keys = Object.keys(candidate).sort().join('|');
-  if (keys !== 'displayName|email|expiresAt|organizationId|provider|userId') return false;
-
-  const validText = (item: unknown): item is string =>
-    typeof item === 'string' && item.length > 0 && item.length <= 512;
-  return (
-    validText(candidate.userId) &&
-    validText(candidate.email) &&
-    validText(candidate.displayName) &&
-    validText(candidate.organizationId) &&
-    validText(candidate.provider) &&
-    typeof candidate.expiresAt === 'number' &&
-    Number.isInteger(candidate.expiresAt) &&
-    candidate.expiresAt >= 0 &&
-    candidate.expiresAt <= 4_294_967_295
-  );
 }

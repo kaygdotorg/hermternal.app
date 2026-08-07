@@ -1,16 +1,17 @@
 import { parseStrictJson, StrictJsonError, type StrictJsonValue } from './strict-json';
-import type {
-  AuthIdentity,
-  LiveMessage,
-  LiveMessageContent,
-  LiveProvider,
-  LiveToolCall,
-  LiveSession,
-  MessageListOptions,
-  ProviderDiscovery,
-  SessionList,
-  SessionListOptions,
-  SessionMessages
+import {
+  isAuthIdentity,
+  type AuthIdentity,
+  type LiveMessage,
+  type LiveMessageContent,
+  type LiveProvider,
+  type LiveToolCall,
+  type LiveSession,
+  type MessageListOptions,
+  type ProviderDiscovery,
+  type SessionList,
+  type SessionListOptions,
+  type SessionMessages
 } from './live-rest-types';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -630,14 +631,22 @@ function validateAuthIdentity(value: StrictJsonValue): AuthIdentity {
     'expires_at'
   ]);
 
-  return {
-    userId: requireBoundedString(object.user_id, MAX_SHORT_TEXT_LENGTH),
+  const identity = {
+    // user_id and provider are stable authentication identity, not optional
+    // profile metadata. Keep them non-empty at the REST boundary so the
+    // browser-session logout guard and this parser share one invariant.
+    userId: requireString(object.user_id, MAX_SHORT_TEXT_LENGTH),
     email: requireBoundedString(object.email, MAX_SHORT_TEXT_LENGTH),
     displayName: requireBoundedString(object.display_name, MAX_SHORT_TEXT_LENGTH),
     organizationId: requireBoundedString(object.org_id, MAX_SHORT_TEXT_LENGTH),
     provider: requireString(object.provider, MAX_SHORT_TEXT_LENGTH),
     expiresAt: requireBoundedInteger(object.expires_at, 0, MAX_UNIX_SECONDS)
   };
+
+  if (!isAuthIdentity(identity)) {
+    throw new LiveRestError('invalid-response');
+  }
+  return identity;
 }
 
 function validateSessionList(value: StrictJsonValue): SessionList {
