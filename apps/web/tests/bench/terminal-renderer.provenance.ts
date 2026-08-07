@@ -282,7 +282,7 @@ function assertBrowserEnvironment(environment: Record<string, unknown>): void {
   if (stringKeys.some((key) => typeof environment[key] !== 'string' || environment[key] === '')) {
     throw new Error('checked-in benchmark evidence browser environment metadata was invalid');
   }
-  const viewport = String(environment.viewport).match(/^(\\d+)x(\\d+)$/u);
+  const viewport = String(environment.viewport).match(/^(\d+)x(\d+)$/u);
   if (!viewport || Number(viewport[1]) < 1 || Number(viewport[2]) < 1) {
     throw new Error('checked-in benchmark evidence browser viewport metadata was invalid');
   }
