@@ -208,6 +208,49 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(fake.connect).toHaveBeenCalledTimes(1);
   });
 
+  it('does not release a pending attach when the renderer sink is torn down', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    bridge.setRendererReady(false);
+    const pending = bridge.attach('session-one', new AbortController().signal);
+
+    await Promise.resolve();
+    bridge.setRendererReady(false);
+    await Promise.resolve();
+    expect(fake.connect).not.toHaveBeenCalled();
+
+    bridge.dispose();
+    await expect(pending).rejects.toMatchObject({ code: 'closed' });
+    expect(fake.connect).not.toHaveBeenCalled();
+  });
+
+  it('defers the first PTY bytes across an independent renderer remount', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const events: CurrentSessionTerminalEvent[] = [];
+    bridge.subscribe((event) => events.push(event));
+    bridge.setRendererReady(false);
+    const pending = bridge.attach('session-one', new AbortController().signal);
+
+    await Promise.resolve();
+    bridge.setRendererReady(false);
+    await Promise.resolve();
+    expect(fake.connect).not.toHaveBeenCalled();
+    expect(events.some((event) => event.type === 'bytes')).toBe(false);
+
+    // A later renderer mount is the only operation allowed to reopen the gate.
+    bridge.setRendererReady(true);
+    await pending;
+    expect(fake.connect).toHaveBeenCalledTimes(1);
+
+    const bytes = new Uint8Array([0xff, 0x00, 0x80]);
+    fake.emit({ type: 'bytes', generation: 1, bytes, outputMayBeTruncated: false });
+    const byteEvent = events.find(
+      (event): event is Extract<CurrentSessionTerminalEvent, { type: 'bytes' }> => event.type === 'bytes'
+    );
+    expect(byteEvent?.bytes).toBe(bytes);
+  });
+
   it('rejects reconnect for the normal legacy binding instead of pretending it can reattach', async () => {
     const fake = createFakePty();
     const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });

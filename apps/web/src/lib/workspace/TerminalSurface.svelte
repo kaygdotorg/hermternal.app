@@ -76,10 +76,12 @@
     mountGeneration += 1;
     unsubscribe?.();
     observer?.disconnect();
-    // Release a bridge waiting for the lazy renderer before the parent session
-    // disposes it. No PTY bytes are buffered here; the renderer gate only
-    // delays the first transport attach until a sink exists.
-    bridge.setRendererReady?.(true);
+    // Keep readiness closed while the sink is being torn down. Resolving a
+    // pending attach here could start the PTY after the renderer is disposed;
+    // raw bytes are intentionally not buffered in the application to repair
+    // that race. A later mount may reopen the gate, while bridge disposal
+    // rejects any waiter that will never get another sink.
+    bridge.setRendererReady?.(false);
     renderer?.dispose();
     renderer = undefined;
   });
