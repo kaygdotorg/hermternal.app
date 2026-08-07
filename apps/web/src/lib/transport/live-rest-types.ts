@@ -85,13 +85,16 @@ export interface LiveSession {
   title: NullableString;
   startedAt: number;
   endedAt: number | null;
-  lastActive: number;
-  isActive: boolean;
+  /** List projections derive this from activity/message timestamps; detail rows may omit it. */
+  lastActive?: number;
+  /** List projections compute this flag; raw detail rows may omit it. */
+  isActive?: boolean;
   messageCount: number;
   toolCallCount: number;
   inputTokens: number;
   outputTokens: number;
-  preview: NullableString;
+  /** Detail rows may omit this list-derived value; null remains source-backed when present. */
+  preview?: NullableString;
   parentSessionId?: NullableString;
   // These fields are additive session-list metadata observed in the pinned
   // route. They remain optional because SessionInfo does not require them.
