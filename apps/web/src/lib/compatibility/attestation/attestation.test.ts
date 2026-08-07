@@ -55,7 +55,7 @@ const RUNTIME_EVIDENCE: JsonRpcCompatibilityEvidence = {
     path: 'contracts/hermes-dashboard/manifest.md',
     revision: 'dashboard-v0.0.1',
     sha256: '0f2f1ea3af722cf2d14f6a43754a8430d20bae98d335b961c64b3f1229bd07c1',
-    sizeBytes: 18_163
+    sizeBytes: 18_396
   },
   sourceReview: {
     path: 'contracts/fixtures/source-audit/planning-reconciliation/planning_review.json',
