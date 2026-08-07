@@ -421,9 +421,11 @@ def inspect_container(
     runner: Runner,
     environment: Mapping[str, str],
     executable: str,
+    *,
+    target: str | None = None,
 ) -> dict[str, object]:
     result = runner(
-        (executable, "container", "inspect", spec.container, "--format", "json"),
+        (executable, "container", "inspect", target or spec.container, "--format", "json"),
         environment,
         20,
     )
@@ -537,7 +539,7 @@ def require_same_recovery_snapshot(
 
 
 def _run_container_action(
-    spec: InstanceSpec,
+    target: str,
     action: str,
     runner: Runner,
     environment: Mapping[str, str],
@@ -546,7 +548,7 @@ def _run_container_action(
 ) -> None:
     try:
         result = runner(
-            (executable, action, spec.container),
+            (executable, action, target),
             environment,
             CONTAINER_ACTION_TIMEOUT,
         )
@@ -682,9 +684,9 @@ def start_instance(
             raise LauncherError("port_unavailable")
 
         # Starting an existing stopped container is a transaction. Re-inspect
-        # immediately before the action so a replacement cannot inherit the
-        # launcher-owned name and labels. The rollback re-inspects again and
-        # stops only the same container if it is still running.
+        # immediately before the action, then address both lifecycle commands
+        # by the pinned ID rather than the mutable name. The rollback re-inspects
+        # that same ID and stops only it if it is still running.
         fresh_identity = require_same_recovery_snapshot(
             spec,
             recovery_identity,
@@ -707,32 +709,41 @@ def start_instance(
                 current_identity = require_same_recovery_snapshot(
                     spec,
                     recovery_identity,
-                    inspect_container(spec, runner, environment, podman),
+                    inspect_container(
+                        spec,
+                        runner,
+                        environment,
+                        podman,
+                        target=recovery_identity.container_id,
+                    ),
                 )
                 if current_identity.status == original_status:
                     return None
                 if current_identity.status != "running":
                     raise LauncherError("container_recovery_rollback_failed")
                 _run_container_action(
-                    spec,
+                    recovery_identity.container_id,
                     "stop",
                     runner,
                     environment,
                     podman,
                     "container_recovery_rollback_failed",
                 )
-            except BaseException as exc:
-                rollback_failure = (
-                    exc
-                    if isinstance(exc, LauncherError)
-                    else LauncherError("container_recovery_rollback_failed")
-                )
+            except LauncherError as exc:
+                # If the pinned container vanished, the mutable name may now
+                # refer to a foreign replacement. Do not touch it or mask the
+                # already-redacted lifecycle error with inspect details.
+                if exc.code == "container_inspect_failed":
+                    return None
+                rollback_failure = exc
+            except BaseException:
+                rollback_failure = LauncherError("container_recovery_rollback_failed")
             return rollback_failure
 
         try:
             recovery_attempted = True
             _run_container_action(
-                spec,
+                recovery_identity.container_id,
                 "start",
                 runner,
                 environment,

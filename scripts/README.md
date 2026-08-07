@@ -208,7 +208,9 @@ that one validated instance directory; it never runs a broad prune.
 An existing container is reused only after its launcher labels prove the exact
 instance, loopback port, and immutable image identity. A stopped owned
 container is started only after the requested port is available, then readiness
-is checked. If start, readiness, or state persistence fails, the recovery
+is checked. Lifecycle actions use the freshly inspected immutable container ID,
+not the mutable container name, and rollback re-inspects that same ID before
+stopping it. If start, readiness, or state persistence fails, the recovery
 transaction attempts one bounded exact-container stop, so an initially stopped
 container is not left running. An initially running container is never stopped
 by the ordinary reuse path. Foreign or mismatched containers fail closed before
@@ -230,7 +232,7 @@ python3 -m unittest scripts.test_hermes_agent
 python3 -O -m unittest scripts.test_hermes_agent
 ```
 
-The 27-test suite uses a fake Podman boundary and local synthetic HTTP server.
+The 28-test suite uses a fake Podman boundary and local synthetic HTTP server.
 It never starts Hermes or reads a real credential. It covers immutable image
 binding, rootless checks, environment cleanup, deterministic scaling, upstream
 command preservation, absence of custom policy flags, credential redaction,
