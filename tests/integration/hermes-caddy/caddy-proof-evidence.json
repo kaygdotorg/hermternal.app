@@ -4,8 +4,6 @@
   "contract": "dashboard-v0.0.1",
   "deployment": {
     "proxy": "caddy",
-    "caddy_version": "v2.11.4",
-    "official_image_digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
     "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
     "runtime_config_sha256": "0c2626619ecd065b6a7c532162cdc046ec7dafd7300b47ed1ff082a19429c91f",
     "runtime_inputs_schema": "hermternal.caddy-proof.runtime-inputs.v1",
@@ -259,12 +257,9 @@
     ],
     "request_material": "redacted"
   },
-  "cookie_attributes": {
-    "secure": true,
-    "http_only": true,
-    "same_site": "lax",
-    "path": "/",
-    "value": "redacted"
+  "cookie_proof": {
+    "status": "not_proven",
+    "reason": "local mock emitted no Set-Cookie; renderer-only Secure rewriting is not a complete cookie-attribute proof"
   },
   "retention": {
     "credentials": "redacted",

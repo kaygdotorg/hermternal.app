@@ -43,10 +43,13 @@ and remains edge-denied. The proxy resets all inbound forwarding headers before
 rebuilding trusted public metadata. Local black-box
 Caddy/mock-upstream tests assert these behaviors against the shared static
 route and deep-link fixture identities. The browser journey remains
-`blocked_provider`: authentication, ticket acquisition, one WebSocket upgrade,
-`gateway.ready`, `session.resume`, and `prompt.submit` were observed, but the
-official launcher has no provider credential and the turn did not produce
-`message.delta` or `message.complete`.
+`blocked_provider`: the official launcher has no provider credential, so this
+fixture retains no browser event artifact and does not claim `gateway.ready`,
+`session.resume`, `prompt.submit`, `message.delta`, or `message.complete`.
+The local mock emits no `Set-Cookie`; the renderer-only `Secure` rewrite is not
+an attribute proof, so `HttpOnly`, `SameSite`, and `Path` remain unproven. A
+Caddy binary version or image digest is likewise external metadata, not a
+validated identity in this fixture.
 
 ## Public origin and private bind
 

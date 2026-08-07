@@ -19,9 +19,12 @@ The evidence is bound to:
 - deterministic runtime-input digest `94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4`;
 - shared static-route grammar digest `f0542d97b363b8e2a921e93001d72dd0f56d5f30001f15e95bbca5b2f4165165`;
 - deep-link fixture digest `91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96`;
-- Hermes source SHA `f5be9236e00ddf2f2a412697f267078fc4ee068e`; and
-- official Hermes image digest
-  `sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e`.
+- Hermes source SHA `f5be9236e00ddf2f2a412697f267078fc4ee068e`.
+
+The retained fixture does not claim a Caddy binary version or official image
+identity. Those values are external deployment metadata until a bounded,
+reproducible collection step validates them; a VM-reported value is not a local
+trust root.
 
 The evidence file records only status codes, responding layers, upstream-request
 booleans, fixed policy outcomes, and redaction markers. It has no passwords,
@@ -56,11 +59,16 @@ chat/PTY query grammars. The proof binds those parity vectors to the committed
 static-route grammar and deep-link fixture digests above; it does not contact
 Hermes or the VM during correction runs.
 
-Authentication, cookie attributes, ticket acquisition, one WebSocket upgrade,
-`gateway.ready`, `session.resume`, and `prompt.submit` were observed. The
-official launcher did not provide an inference credential, so the browser
-journey stopped in the provider/API-key class before `message.delta` or
-`message.complete`. The retained browser state is `blocked_provider`; this is
-not a successful real-product journey and no preview URL may be published.
+The retained browser state is `blocked_provider`. No gateway, session, or
+prompt event artifact is retained or claimed, and the official launcher did not
+provide an inference credential. The browser journey therefore remains an
+incomplete provider/API-key proof before `message.delta` or `message.complete`;
+this is not a successful real-product journey and no preview URL may be
+published.
+
+The local mock emitted no `Set-Cookie`. The renderer test proves only that the
+Caddyfile contains its current `Secure` rewrite; `HttpOnly`, `SameSite`, and
+`Path` attributes are not proven by this fixture. The evidence records that
+cookie proof as `not_proven` rather than claiming attributes.
 
 The evidence SHA-256 is stored in `caddy-proof-evidence-sha256.txt`.
