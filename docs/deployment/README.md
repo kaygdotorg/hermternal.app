@@ -60,14 +60,17 @@ upstream path, body, prefix, query policy, and rebuilt headers. It does not
 contact the disposable VM during correction work.
 
 The official launcher intentionally publishes Hermes only on VM loopback. The
-empty durable-session state in a fresh instance prevents the PR #291 workspace
-from opening its ticket/WebSocket path, so the proof seeded one disposable
-session through the same official Dashboard contract. The browser journey then
-reached `gateway.ready`, `session.resume`, and `prompt.submit`, but the official
-launcher supplied no provider credential and the turn stopped in the observed
-provider/API-key class before `message.delta` or `message.complete`. The
-retained state is therefore `blocked_provider`; no preview URL is valid and no
-provider payload is retained. This lane does not implement or attest Traefik.
+retained browser state is `blocked_provider`: the launcher supplied no provider
+credential, so this fixture does not claim `gateway.ready`, `session.resume`, or
+`prompt.submit`, and it does not claim `message.delta` or `message.complete`.
+No browser event artifact or provider payload is retained. No preview URL is
+valid. This lane does not implement or attest Traefik.
+
+The local Caddy/mock-upstream proof emits no `Set-Cookie`. Its renderer test
+covers only the configured `Secure` rewrite; `HttpOnly`, `SameSite`, and `Path`
+attributes remain unproven, so the retained evidence marks cookie proof as
+`not_proven`. A Caddy binary version or image digest is also not retained or
+validated by this local fixture and is not a deployment identity claim.
 
 Before application or live integration, prove both proxy choices for HTTPS, HttpOnly cookies, WebSocket upgrades, private `:9119` reachability, firewall behavior, and the web-only `/api/pty` path. Also prove that missing or mismatched revision attestation and failed behavioral evidence block operation. Measure the performance baseline before setting optimization claims.
 

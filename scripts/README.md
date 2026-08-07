@@ -149,6 +149,10 @@ The default image is pinned by tag and immutable digest:
 docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
 ```
 
+This launcher source pin is an execution input, not Caddy evidence. The issue
+#156 retained evidence does not repeat it as a validated deployment identity;
+that requires a separate bounded collection and verification step.
+
 The launcher preserves `/opt/hermes/docker/entrypoint-dispatch.sh` and runs
 `gateway run`. It publishes only `127.0.0.1:<requested-port>:9119`, creates one
 host data directory per instance, and enables a synthetic Basic provider. It
@@ -308,9 +312,11 @@ attach, accepts any key order, and rejects duplicate, extra, empty, and
 unsupported `fresh` parameters at the edge. The renderer strips
 all inbound `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` headers before
 rebuilding trusted public metadata, and applies the private upstream
-Host/Origin mapping and Secure cookie rewrite. Caddy's canonical formatter
-uses tabs, so the renderer emits that form directly; the runtime digest
-therefore covers the exact file that was validated.
+Host/Origin mapping and current `Secure` cookie rewrite. The local mock emits
+no `Set-Cookie`, so `HttpOnly`, `SameSite`, and `Path` attributes are not proven
+by this fixture. Caddy's canonical formatter uses tabs, so the renderer emits
+that form directly; the runtime digest therefore covers the exact file that
+was validated.
 
 The evidence also records a deterministic runtime-input manifest and the
 SHA-256 identities of the shared static-route grammar and deep-link fixture.
@@ -341,6 +347,9 @@ runtime Caddyfile digest
 The runtime input manifest digest is
 `94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4`; its
 paths are deterministic proof placeholders, not retained user or VM paths.
-The retained browser state is `blocked_provider`: it does not claim
-`message.delta` or `message.complete`, and it contains no credential, cookie,
-ticket, ticket fragment, provider payload, or transcript.
+The retained browser state is `blocked_provider`: no browser event artifact is
+retained, so the fixture does not claim `gateway.ready`, `session.resume`, or
+`prompt.submit`; it also does not claim `message.delta` or `message.complete`.
+It contains no credential, cookie, ticket, ticket fragment, provider payload,
+or transcript. A Caddy binary version or image digest is not retained or
+validated by this local fixture.

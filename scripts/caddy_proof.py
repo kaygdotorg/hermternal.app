@@ -503,13 +503,16 @@ def render_manifest(
     if caddyfile_digest != rendered_digest:
         raise ValueError("caddyfile_digest does not match the committed runtime inputs")
 
+    # A VM-reported binary version or image digest is not an immutable local
+    # trust root. Retain only renderer output and deterministic inputs here;
+    # deployment identity must be separately collected and validated before a
+    # real deployment claim is made.
     return {
         "schema": SCHEMA,
         "contract": "dashboard-v0.0.1",
         "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
         "deployment": {
             "proxy": "caddy",
-            "official_image_digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
             "runtime_config_sha256": caddyfile_digest,
             "runtime_inputs_schema": RUNTIME_INPUT_SCHEMA,
             "runtime_inputs": normalized_inputs,

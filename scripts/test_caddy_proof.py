@@ -3,7 +3,9 @@
 
 These tests protect the reviewed edge boundary without starting Caddy or
 contacting Hermes. The live status matrix is retained separately as redacted
-evidence; this file proves that the renderer cannot silently widen it.
+evidence; this file proves that the renderer cannot silently widen it. The
+retained-evidence checks also reject unverified runtime identity, cookie
+attribute, and browser-event claims.
 """
 
 from __future__ import annotations
@@ -192,6 +194,45 @@ class CaddyProofEvidenceTests(unittest.TestCase):
         self.assertEqual(self.evidence["product"]["static_manifest_sha256"], EXPECTED_BUILD_DIGEST)
         self.assertEqual(self.evidence["deployment"]["runtime_config_sha256"], EXPECTED_CADDYFILE_DIGEST)
         self.assertEqual(self.evidence["browser_journey"], "blocked_provider")
+
+    def test_rendered_evidence_does_not_claim_unverified_runtime_identity(self) -> None:
+        manifest = caddy_proof.render_manifest(
+            build_sha=EXPECTED_BUILD_SHA,
+            build_digest=EXPECTED_BUILD_DIGEST,
+            caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
+            browser_journey="blocked_provider",
+        )
+        deployment = manifest["deployment"]
+        self.assertNotIn("caddy_version", deployment)
+        self.assertNotIn("official_image_digest", deployment)
+
+    def test_retained_evidence_schema_narrows_unverified_claims(self) -> None:
+        self.assertEqual(
+            set(self.evidence),
+            {
+                "schema",
+                "issue",
+                "contract",
+                "deployment",
+                "product",
+                "browser_journey",
+                "positive_cases",
+                "negative_cases",
+                "black_box",
+                "cookie_proof",
+                "retention",
+            },
+        )
+        deployment = self.evidence["deployment"]
+        self.assertNotIn("caddy_version", deployment)
+        self.assertNotIn("official_image_digest", deployment)
+        self.assertEqual(
+            self.evidence["cookie_proof"],
+            {
+                "status": "not_proven",
+                "reason": "local mock emitted no Set-Cookie; renderer-only Secure rewriting is not a complete cookie-attribute proof",
+            },
+        )
 
     def test_evidence_reconstructs_runtime_and_parity_inputs(self) -> None:
         deployment = self.evidence["deployment"]
