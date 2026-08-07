@@ -402,6 +402,70 @@ describe('createSessionCoordinator', () => {
     expect(firstBinding.invalidate).toHaveBeenCalledTimes(1);
   });
 
+  it('revokes the current session and PTY lease synchronously without closing Chat', async () => {
+    const harness = createCoordinator();
+    await harness.coordinator.activate('terminal');
+    const binding = await harness.terminal.attach.mock.results[0]!.value;
+    const generation = harness.coordinator.state.sessionGeneration;
+
+    harness.coordinator.invalidateSession();
+
+    expectInvalidatedThenReleased(harness.terminal, binding);
+    expect(harness.chat.close).not.toHaveBeenCalled();
+    expect(harness.coordinator.state).toMatchObject({
+      status: 'empty',
+      terminalStatus: 'detached',
+      sessionGeneration: generation + 1
+    });
+    expect(harness.coordinator.state).not.toHaveProperty('activeSessionId');
+    expect(harness.coordinator.state).not.toHaveProperty('terminalSessionId');
+
+    await harness.coordinator.setSession('session-new');
+    expect(harness.coordinator.state.activeSessionId).toBe('session-new');
+    expect(harness.chat.restore).toHaveBeenCalledWith('session-new', expect.any(AbortSignal));
+  });
+
+  it('reconciles an unsolicited PTY failure before the next Terminal action', async () => {
+    const harness = createCoordinator();
+    await harness.coordinator.activate('terminal');
+    const binding = await harness.terminal.attach.mock.results[0]!.value;
+
+    harness.coordinator.invalidateTerminalBinding('failed', 'session-old');
+
+    expectInvalidatedThenReleased(harness.terminal, binding);
+    expect(harness.coordinator.state).toMatchObject({
+      status: 'terminal-attach-failed',
+      terminalStatus: 'failed',
+      lastError: 'terminal-attach-failed'
+    });
+    expect(harness.coordinator.state).not.toHaveProperty('terminalSessionId');
+
+    await harness.coordinator.activate('terminal');
+    expect(harness.coordinator.state).toMatchObject({
+      status: 'active',
+      terminalStatus: 'attached',
+      terminalSessionId: 'session-old'
+    });
+  });
+
+  it('does not resume session invalidation after binding cleanup reenters disposal', async () => {
+    const harness = createCoordinator();
+    await harness.coordinator.activate('terminal');
+    const binding = await harness.terminal.attach.mock.results[0]!.value;
+    vi.spyOn(binding, 'invalidate').mockImplementation(() => harness.coordinator.dispose());
+
+    harness.coordinator.invalidateSession();
+
+    expect(binding.invalidate).toHaveBeenCalledTimes(1);
+    expect(harness.terminal.release).toHaveBeenCalledTimes(1);
+    expect(harness.chat.close).toHaveBeenCalledTimes(1);
+    expect(harness.coordinator.state).toMatchObject({
+      status: 'disposed',
+      terminalStatus: 'detached'
+    });
+    expect(harness.coordinator.state).not.toHaveProperty('activeSessionId');
+  });
+
   it('contains Terminal attach failure without closing or poisoning Chat', async () => {
     const chat = createFakeChat();
     const terminal = createFakeTerminal();

@@ -33,12 +33,40 @@ const SESSION: LiveSession = {
   preview: null
 };
 
-function sessionMessages(messages: LiveMessage[] = []): SessionMessages {
+const SESSION_2: LiveSession = {
+  ...SESSION,
+  id: 'session-2',
+  title: 'Second session',
+  isActive: false
+};
+
+const SESSION_3: LiveSession = {
+  ...SESSION,
+  id: 'session-3',
+  title: 'Third session',
+  isActive: false
+};
+
+function sessionMessages(messages: LiveMessage[] = [], sessionId = SESSION.id): SessionMessages {
   return {
-    sessionId: SESSION.id,
+    sessionId,
     messages,
     pagination: { limit: 500, offset: 0, returned: messages.length }
   };
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
 }
 
 function createRest(): LiveRestTransport {
@@ -55,8 +83,10 @@ function createRest(): LiveRestTransport {
 function createChatHarness(): {
   readonly createChat: ReturnType<typeof vi.fn<(options: BrowserChatOptions) => JsonRpcChatTransport>>;
   readonly transport: JsonRpcChatTransport;
+  readonly optionsHistory: BrowserChatOptions[];
 } {
   const state: JsonRpcConnectionState = { status: 'ready', generation: 1 };
+  const optionsHistory: BrowserChatOptions[] = [];
   const transport: JsonRpcChatTransport = {
     get state() {
       return state;
@@ -78,8 +108,11 @@ function createChatHarness(): {
     abort: vi.fn(),
     subscribe: vi.fn(() => () => {})
   };
-  const createChat = vi.fn((_: BrowserChatOptions) => transport);
-  return { createChat, transport };
+  const createChat = vi.fn((options: BrowserChatOptions) => {
+    optionsHistory.push(options);
+    return transport;
+  });
+  return { createChat, transport, optionsHistory };
 }
 
 function createPtyHarness(): {
@@ -87,9 +120,11 @@ function createPtyHarness(): {
   readonly connect: ReturnType<typeof vi.fn>;
   readonly close: ReturnType<typeof vi.fn>;
   readonly detach: ReturnType<typeof vi.fn>;
+  readonly events: string[];
   emit(event: PtyTransportEvent): void;
 } {
   const listeners = new Set<(event: PtyTransportEvent) => void>();
+  const events: string[] = [];
   let state: PtyConnectionState = {
     status: 'closed',
     generation: 0,
@@ -101,6 +136,7 @@ function createPtyHarness(): {
     for (const listener of [...listeners]) listener(event);
   };
   const connect = vi.fn(async (input: { readonly sessionId: string }) => {
+    events.push(`connect:${input.sessionId}`);
     state = {
       status: 'attached',
       generation: state.generation + 1,
@@ -111,10 +147,12 @@ function createPtyHarness(): {
     emit({ type: 'state', state });
   });
   const detach = vi.fn(() => {
+    events.push('detach');
     state = { ...state, status: 'detached' };
     emit({ type: 'state', state });
   });
   const close = vi.fn(() => {
+    events.push('close');
     state = { ...state, status: 'exited' };
     emit({ type: 'state', state });
   });
@@ -138,13 +176,18 @@ function createPtyHarness(): {
       return () => listeners.delete(listener);
     }
   };
-  return { pty, connect, close, detach, emit };
+  return { pty, connect, close, detach, events, emit };
 }
 
-async function createInitializedWorkspace() {
-  const rest = createRest();
-  const chat = createChatHarness();
-  const pty = createPtyHarness();
+async function flush(): Promise<void> {
+  for (let index = 0; index < 10; index += 1) await Promise.resolve();
+}
+
+async function createInitializedWorkspace(
+  rest = createRest(),
+  chat = createChatHarness(),
+  pty = createPtyHarness()
+) {
   const session = new LiveWorkspaceSession({
     rest,
     createChat: chat.createChat,
@@ -177,6 +220,153 @@ describe('LiveWorkspaceSession current-session Terminal integration', () => {
     expect(session.current.activeSessionId).toBe(SESSION.id);
     expect(session.current.mode).toBe('terminal');
     expect(terminal.state.sessionId).toBe(SESSION.id);
+  });
+
+  it('detaches the old PTY before publishing a replacement session snapshot', async () => {
+    const rest = createRest();
+    vi.mocked(rest.getSession).mockResolvedValue(SESSION_2);
+    vi.mocked(rest.getSessionMessages).mockImplementation(async (sessionId) => sessionMessages([], sessionId));
+    const { session, coordinator, pty } = await createInitializedWorkspace(rest);
+    await coordinator.activate('terminal');
+    pty.events.length = 0;
+
+    const unsubscribe = session.subscribe((snapshot) => {
+      if (snapshot.activeSessionId === SESSION_2.id) pty.events.push('snapshot:session-2');
+    });
+    await session.selectSession(SESSION_2.id);
+    unsubscribe();
+
+    expect(pty.events.indexOf('detach')).toBeGreaterThanOrEqual(0);
+    expect(pty.events.indexOf('snapshot:session-2')).toBeGreaterThanOrEqual(0);
+    expect(pty.events.indexOf('detach')).toBeLessThan(pty.events.indexOf('snapshot:session-2'));
+    expect(session.current).toMatchObject({
+      activeSessionId: SESSION_2.id,
+      state: 'empty',
+      coordinator: { activeSessionId: SESSION_2.id, terminalStatus: 'attached' }
+    });
+  });
+
+  it('does not let an old Chat callback poison the coordinator fallback during replacement', async () => {
+    const rest = createRest();
+    const sessionLookup = deferred<LiveSession>();
+    vi.mocked(rest.getSession).mockImplementationOnce(() => sessionLookup.promise);
+    const chat = createChatHarness();
+    const { session } = await createInitializedWorkspace(rest, chat);
+    const oldChatOptions = chat.optionsHistory[0];
+    if (!oldChatOptions) throw new Error('initial Chat options are missing');
+
+    const replacement = session.selectSession(SESSION_2.id);
+    await flush();
+    oldChatOptions.onStateChange?.({ status: 'ready', generation: 99 });
+
+    expect(session.coordinator?.state.chatStatus).toBe('offline');
+
+    sessionLookup.resolve(SESSION_2);
+    await replacement;
+  });
+
+  it('reconciles a PTY failure into coordinator state before the next Terminal action', async () => {
+    const { session, coordinator, pty } = await createInitializedWorkspace();
+    await coordinator.activate('terminal');
+
+    pty.emit({
+      type: 'state',
+      state: {
+        status: 'failed',
+        generation: 2,
+        mode: 'legacy',
+        sessionId: SESSION.id,
+        closeCode: 1011,
+        closeClassification: 'backend-failure',
+        outputMayBeTruncated: false
+      }
+    });
+
+    expect(session.current.coordinator).toMatchObject({
+      status: 'terminal-attach-failed',
+      terminalStatus: 'failed',
+      lastError: 'terminal-attach-failed'
+    });
+    expect(session.current.coordinator).not.toHaveProperty('terminalSessionId');
+    expect(session.current.terminal).toMatchObject({ status: 'failed', sessionId: SESSION.id });
+
+    await coordinator.activate('terminal');
+    expect(session.current.coordinator).toMatchObject({
+      status: 'active',
+      terminalStatus: 'attached',
+      terminalSessionId: SESSION.id
+    });
+  });
+
+  it('reconciles an unexpected PTY exit into a failed coordinator lease', async () => {
+    const { session, coordinator, pty } = await createInitializedWorkspace();
+    await coordinator.activate('terminal');
+
+    pty.emit({
+      type: 'state',
+      state: {
+        status: 'exited',
+        generation: 2,
+        mode: 'legacy',
+        sessionId: SESSION.id,
+        outputMayBeTruncated: false
+      }
+    });
+
+    expect(session.current.coordinator).toMatchObject({
+      status: 'terminal-attach-failed',
+      terminalStatus: 'failed',
+      lastError: 'terminal-attach-failed'
+    });
+    expect(session.current.coordinator).not.toHaveProperty('terminalSessionId');
+  });
+
+  it('rejects late deferred Terminal state from session B after session C owns the coordinator', async () => {
+    const rest = createRest();
+    vi.mocked(rest.getSession).mockImplementation(async (sessionId) =>
+      sessionId === SESSION_2.id ? SESSION_2 : SESSION_3
+    );
+    vi.mocked(rest.getSessionMessages).mockImplementation(async (sessionId) => sessionMessages([], sessionId));
+    const { session, coordinator, pty } = await createInitializedWorkspace(rest);
+    await coordinator.activate('terminal');
+
+    const deferredConnect = deferred<void>();
+    const originalConnect = pty.connect.getMockImplementation() as
+      | ((input: { readonly sessionId: string }) => Promise<void>)
+      | undefined;
+    if (!originalConnect) throw new Error('PTY connect implementation is missing');
+    pty.connect.mockImplementation(async (input) => {
+      if (input.sessionId === SESSION_2.id) await deferredConnect.promise;
+      return originalConnect(input);
+    });
+
+    const staleStates: string[] = [];
+    let sessionCVisible = false;
+    const unsubscribe = session.subscribe((snapshot) => {
+      if (snapshot.activeSessionId === SESSION_3.id) sessionCVisible = true;
+      if (sessionCVisible && snapshot.coordinator?.activeSessionId === SESSION_2.id) {
+        staleStates.push('session-2');
+      }
+    });
+
+    const sessionB = session.selectSession(SESSION_2.id);
+    await flush();
+    expect(pty.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: SESSION_2.id }),
+      expect.any(AbortSignal)
+    );
+
+    await session.selectSession(SESSION_3.id);
+    expect(session.current.activeSessionId).toBe(SESSION_3.id);
+    expect(session.current.coordinator?.activeSessionId).toBe(SESSION_3.id);
+
+    deferredConnect.resolve();
+    await sessionB;
+    unsubscribe();
+
+    expect(staleStates).toEqual([]);
+    expect(session.current.activeSessionId).toBe(SESSION_3.id);
+    expect(session.current.coordinator?.activeSessionId).toBe(SESSION_3.id);
   });
 
   it('forwards one raw PTY byte view without adding bytes to workspace state', async () => {
@@ -257,6 +447,8 @@ describe('LiveWorkspaceSession current-session Terminal integration', () => {
 
     session.closeTerminal();
     expect(pty.close).toHaveBeenCalledTimes(1);
+    expect(coordinator.state.terminalStatus).toBe('detached');
+    expect(coordinator.state).not.toHaveProperty('terminalSessionId');
     await coordinator.activate('terminal');
 
     expect(pty.connect).toHaveBeenCalledTimes(2);
