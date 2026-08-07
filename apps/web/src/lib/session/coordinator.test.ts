@@ -99,6 +99,7 @@ interface FakeTerminalHarness {
   terminal: TerminalSessionPort;
   attach: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
+  events: string[];
   deferNext(sessionId: string): { deferred: Deferred<TerminalBinding>; binding: TerminalBinding };
   rejectNext(sessionId: string): Deferred<TerminalBinding>;
 }
@@ -109,7 +110,10 @@ type AttachPlan =
 
 function createFakeTerminal(): FakeTerminalHarness {
   const plans = new Map<string, AttachPlan[]>();
-  const release = vi.fn();
+  const events: string[] = [];
+  const release = vi.fn((binding: TerminalBinding) => {
+    events.push(`release:${binding.sessionId}`);
+  });
   const enqueue = (sessionId: string, plan: AttachPlan): void => {
     const queue = plans.get(sessionId) ?? [];
     queue.push(plan);
@@ -117,7 +121,9 @@ function createFakeTerminal(): FakeTerminalHarness {
   };
   const makeBinding = (sessionId: string): TerminalBinding => ({
     sessionId,
-    invalidate: vi.fn()
+    invalidate: vi.fn(() => {
+      events.push(`invalidate:${sessionId}`);
+    })
   });
   const attach = vi.fn(async (sessionId: string, signal: AbortSignal): Promise<TerminalBinding> => {
     const [plan, ...remaining] = plans.get(sessionId) ?? [];
@@ -132,6 +138,7 @@ function createFakeTerminal(): FakeTerminalHarness {
     terminal: { attach, release },
     attach,
     release,
+    events,
     deferNext(sessionId) {
       const binding = makeBinding(sessionId);
       const pending = deferred<TerminalBinding>();
@@ -170,6 +177,16 @@ function createCoordinator(
     chat,
     terminal
   };
+}
+
+function expectInvalidatedThenReleased(terminal: FakeTerminalHarness, binding: TerminalBinding): void {
+  expect(binding.invalidate).toHaveBeenCalledTimes(1);
+  expect(terminal.release).toHaveBeenCalledTimes(1);
+  expect(terminal.release).toHaveBeenCalledWith(binding);
+  expect(terminal.events).toEqual([
+    `invalidate:${binding.sessionId}`,
+    `release:${binding.sessionId}`
+  ]);
 }
 
 describe('createSessionCoordinator', () => {
@@ -221,6 +238,41 @@ describe('createSessionCoordinator', () => {
 
     expect(harness.terminal.attach).toHaveBeenCalledTimes(1);
     expect(harness.coordinator.state.terminalSessionId).toBe('session-old');
+  });
+
+  it('gives one focus intent to the latest request during a pending Terminal attach', async () => {
+    const focus: Array<{ mode: string; target: string; sequence: number }> = [];
+    const harness = createCoordinator(undefined, undefined, {
+      onFocusIntent: (intent) => focus.push(intent)
+    });
+    const pending = harness.terminal.deferNext('session-old');
+
+    const firstTerminal = harness.coordinator.activate('terminal');
+    await flush();
+    const throughChat = harness.coordinator.activate('chat');
+    const backToTerminal = harness.coordinator.activate('terminal');
+
+    expect(harness.terminal.attach).toHaveBeenCalledTimes(1);
+    pending.deferred.resolve(pending.binding);
+    await Promise.all([firstTerminal, throughChat, backToTerminal]);
+
+    expect(focus).toEqual([
+      expect.objectContaining({
+        mode: 'chat',
+        target: 'composer',
+        sessionId: 'session-old',
+        sessionGeneration: 1,
+        sequence: 1
+      }),
+      expect.objectContaining({
+        mode: 'terminal',
+        target: 'w-term-input',
+        sessionId: 'session-old',
+        sessionGeneration: 1,
+        sequence: 2
+      })
+    ]);
+    expect(harness.coordinator.state.focusIntent?.target).toBe('w-term-input');
   });
 
   it('replaces the session while Chat is active and restores only the server session', async () => {
@@ -294,7 +346,7 @@ describe('createSessionCoordinator', () => {
     expect(harness.coordinator.state.terminalSessionId).toBe('session-old');
   });
 
-  it('invalidates a stale Terminal completion from the previous session', async () => {
+  it('invalidates and releases a stale Terminal completion from the previous session', async () => {
     const harness = createCoordinator();
     const oldAttach = harness.terminal.deferNext('session-old');
     const oldActivation = harness.coordinator.activate('terminal');
@@ -305,13 +357,43 @@ describe('createSessionCoordinator', () => {
     await flush();
     oldAttach.deferred.resolve(oldAttach.binding);
     await flush();
-    expect(oldAttach.binding.invalidate).toHaveBeenCalledTimes(1);
+    expectInvalidatedThenReleased(harness.terminal, oldAttach.binding);
     expect(harness.coordinator.state.terminalSessionId).not.toBe('session-old');
 
     newAttach.deferred.resolve(newAttach.binding);
     await Promise.all([oldActivation, replacement]);
     expect(harness.coordinator.state.terminalSessionId).toBe('session-new');
     expect(newAttach.binding.invalidate).not.toHaveBeenCalled();
+  });
+
+  it('invalidates and releases a stale Terminal completion after logout', async () => {
+    const harness = createCoordinator();
+    const pending = harness.terminal.deferNext('session-old');
+    const activation = harness.coordinator.activate('terminal');
+    await flush();
+    expect(harness.terminal.attach).toHaveBeenCalledTimes(1);
+
+    harness.coordinator.logout();
+    pending.deferred.resolve(pending.binding);
+    await activation;
+
+    expectInvalidatedThenReleased(harness.terminal, pending.binding);
+    expect(harness.coordinator.state.status).toBe('logged-out');
+  });
+
+  it('invalidates and releases a stale Terminal completion after disposal', async () => {
+    const harness = createCoordinator();
+    const pending = harness.terminal.deferNext('session-old');
+    const activation = harness.coordinator.activate('terminal');
+    await flush();
+    expect(harness.terminal.attach).toHaveBeenCalledTimes(1);
+
+    harness.coordinator.dispose();
+    pending.deferred.resolve(pending.binding);
+    await activation;
+
+    expectInvalidatedThenReleased(harness.terminal, pending.binding);
+    expect(harness.coordinator.state.status).toBe('disposed');
   });
 
   it('restores a selected server session after refresh without creating a transcript mirror', async () => {
@@ -330,7 +412,7 @@ describe('createSessionCoordinator', () => {
     await logoutHarness.coordinator.activate('terminal');
     const logoutBinding = await logoutHarness.terminal.attach.mock.results[0]!.value;
     logoutHarness.coordinator.logout();
-    expect(logoutBinding.invalidate).toHaveBeenCalledTimes(1);
+    expectInvalidatedThenReleased(logoutHarness.terminal, logoutBinding);
     expect(logoutHarness.chat.close).toHaveBeenCalledTimes(1);
     expect(logoutHarness.coordinator.state.status).toBe('logged-out');
     await expect(logoutHarness.coordinator.activate('chat')).rejects.toMatchObject({ code: 'logged-out' });
@@ -340,7 +422,7 @@ describe('createSessionCoordinator', () => {
     const disposeBinding = await disposeHarness.terminal.attach.mock.results[0]!.value;
     disposeHarness.coordinator.dispose();
     disposeHarness.coordinator.dispose();
-    expect(disposeBinding.invalidate).toHaveBeenCalledTimes(1);
+    expectInvalidatedThenReleased(disposeHarness.terminal, disposeBinding);
     expect(disposeHarness.chat.close).toHaveBeenCalledTimes(1);
     expect(disposeHarness.coordinator.state.status).toBe('disposed');
   });

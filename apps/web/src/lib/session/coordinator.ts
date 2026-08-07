@@ -77,7 +77,7 @@ export type ChatSessionPort = Pick<
 /**
  * W-Term owns the concrete PTY/renderer binding. The coordinator only receives
  * an opaque invalidatable handle and never stores terminal bytes or transcript
- * content.
+ * content. The coordinator invalidates and releases each returned handle once.
  */
 export interface TerminalBinding {
   readonly sessionId: string;
@@ -86,7 +86,7 @@ export interface TerminalBinding {
 
 export interface TerminalSessionPort {
   attach(sessionId: string, signal: AbortSignal): TerminalBinding | Promise<TerminalBinding>;
-  /** Optional renderer/transport cleanup after the binding is invalidated. */
+  /** Optional renderer/transport cleanup after invalidation; called once per binding. */
   release?(binding: TerminalBinding): void;
 }
 
@@ -163,6 +163,7 @@ interface PendingTerminalAttach {
   readonly sessionId: string;
   readonly controller: AbortController;
   readonly promise: Promise<TerminalBinding>;
+  focusOwnerSequence: number | undefined;
   cancelled: boolean;
 }
 
@@ -172,6 +173,14 @@ interface PendingReconnect {
   readonly controller: AbortController;
   readonly promise: Promise<void>;
   cancelled: boolean;
+}
+
+/** Captures the requested focus target and per-mode completion ownership. */
+interface ModeActivation {
+  readonly mode: WorkspaceMode;
+  readonly generation: number;
+  readonly sessionId: string;
+  readonly sequence: number;
 }
 
 function safeCall<T extends unknown[]>(callback: ((...args: T) => void) | undefined, ...args: T): void {
@@ -227,17 +236,6 @@ function safeAbort(controller: AbortController): void {
     controller.abort();
   } catch {
     // AbortController is platform-owned; cleanup remains best effort.
-  }
-}
-
-function invalidateUnknownBinding(value: unknown): void {
-  if (!value || typeof value !== 'object') return;
-  const invalidate = (value as { invalidate?: unknown }).invalidate;
-  if (typeof invalidate !== 'function') return;
-  try {
-    invalidate.call(value);
-  } catch {
-    // A stale binding is already unusable from the coordinator's perspective.
   }
 }
 
@@ -310,15 +308,19 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   let sessionGeneration = 0;
   let terminalStatus: TerminalBindingStatus = 'detached';
   let terminalBinding: TerminalBinding | undefined;
+  let terminalBindingFocusOwnerSequence: number | undefined;
   let lastError: SessionCoordinatorErrorCode | undefined;
   let lastFocusIntent: FocusIntent | undefined;
   let nextFocusSequence = 0;
+  let nextModeActivationSequence = 0;
+  const latestModeActivationSequence: Record<WorkspaceMode, number> = { chat: 0, terminal: 0 };
   let disposed = false;
   let loggedOut = false;
   let lifecycle: SessionCoordinatorStatus;
   let pendingSession: PendingSessionOperation | undefined;
   let pendingTerminal: PendingTerminalAttach | undefined;
   let pendingReconnect: PendingReconnect | undefined;
+  const cleanedBindings = new WeakSet<object>();
 
   if (!isMode(mode)) {
     throw new SessionCoordinatorError('chat-operation-failed');
@@ -369,13 +371,21 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     for (const listener of [...listeners]) safeCall(listener, snapshot);
   };
 
-  const publishFocus = (target: FocusTarget): void => {
-    if (!activeSessionId) return;
+  const current = (generation: number, sessionId: string): boolean =>
+    !disposed && !loggedOut && generation === sessionGeneration && activeSessionId === sessionId;
+
+  const isCurrentModeActivation = (activation: ModeActivation): boolean =>
+    current(activation.generation, activation.sessionId) &&
+    latestModeActivationSequence[activation.mode] === activation.sequence &&
+    (activation.mode === 'chat' || terminalBindingFocusOwnerSequence === activation.sequence);
+
+  const publishFocus = (activation: ModeActivation): void => {
+    if (!isCurrentModeActivation(activation)) return;
     const intent = Object.freeze({
-      mode,
-      target,
-      sessionId: activeSessionId,
-      sessionGeneration,
+      mode: activation.mode,
+      target: activation.mode === 'chat' ? 'composer' : 'w-term-input',
+      sessionId: activation.sessionId,
+      sessionGeneration: activation.generation,
       sequence: ++nextFocusSequence
     });
     lastFocusIntent = intent;
@@ -416,11 +426,10 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     void pending.promise.catch(() => undefined);
   };
 
-  const invalidateBinding = (): void => {
-    const binding = terminalBinding;
-    terminalBinding = undefined;
-    terminalStatus = 'detached';
-    if (!binding) return;
+  /** Cleanup is identity-based so each binding is invalidated, then released, once. */
+  const cleanupBinding = (binding: TerminalBinding): void => {
+    if (cleanedBindings.has(binding)) return;
+    cleanedBindings.add(binding);
     try {
       binding.invalidate();
     } catch {
@@ -433,8 +442,20 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     }
   };
 
-  const current = (generation: number, sessionId: string): boolean =>
-    !disposed && !loggedOut && generation === sessionGeneration && activeSessionId === sessionId;
+  const cleanupUnknownBinding = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return;
+    const invalidate = (value as { invalidate?: unknown }).invalidate;
+    if (typeof invalidate !== 'function') return;
+    cleanupBinding(value as TerminalBinding);
+  };
+
+  const invalidateBinding = (): void => {
+    const binding = terminalBinding;
+    terminalBinding = undefined;
+    terminalBindingFocusOwnerSequence = undefined;
+    terminalStatus = 'detached';
+    if (binding) cleanupBinding(binding);
+  };
 
   const assertCurrent = (generation: number, sessionId: string): void => {
     if (!current(generation, sessionId)) {
@@ -557,22 +578,26 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
 
   const normalizeBinding = (value: TerminalBinding, sessionId: string): TerminalBinding => {
     if (!value || typeof value !== 'object' || value.sessionId !== sessionId) {
-      invalidateUnknownBinding(value);
+      cleanupUnknownBinding(value);
       throw normalizeTerminalError();
     }
     const invalidate = (value as { invalidate?: unknown }).invalidate;
     if (typeof invalidate !== 'function') {
-      invalidateUnknownBinding(value);
+      cleanupUnknownBinding(value);
       throw normalizeTerminalError();
     }
     return value;
   };
 
-  const ensureTerminalForCurrentSession = (signal?: AbortSignal): Promise<TerminalBinding> => {
+  const ensureTerminalForCurrentSession = (
+    signal?: AbortSignal,
+    focusOwnerSequence?: number
+  ): Promise<TerminalBinding> => {
     const sessionId = assertSession();
     const generation = sessionGeneration;
     if (terminalBinding?.sessionId === sessionId) {
       terminalStatus = 'attached';
+      if (focusOwnerSequence !== undefined) terminalBindingFocusOwnerSequence = focusOwnerSequence;
       return Promise.resolve(terminalBinding);
     }
 
@@ -583,6 +608,8 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
       existing.generation === generation &&
       existing.sessionId === sessionId
     ) {
+      // Coalescing keeps one attach; the latest Terminal waiter owns its focus.
+      if (focusOwnerSequence !== undefined) existing.focusOwnerSequence = focusOwnerSequence;
       return awaitWithAbort(existing.promise, signal);
     }
     if (existing) cancelTerminal();
@@ -595,6 +622,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
       generation,
       sessionId,
       controller,
+      focusOwnerSequence,
       cancelled: false,
       promise: undefined as unknown as Promise<TerminalBinding>
     } satisfies Omit<PendingTerminalAttach, 'promise'> & { promise: Promise<TerminalBinding> };
@@ -603,15 +631,16 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
       try {
         const value = await terminal.attach(sessionId, controller.signal);
         if (!current(generation, sessionId) || pending.cancelled) {
-          invalidateUnknownBinding(value);
+          cleanupUnknownBinding(value);
           throw new SessionCoordinatorError('stale-operation');
         }
         const binding = normalizeBinding(value, sessionId);
         if (!current(generation, sessionId) || pending.cancelled) {
-          invalidateUnknownBinding(binding);
+          cleanupUnknownBinding(binding);
           throw new SessionCoordinatorError('stale-operation');
         }
         terminalBinding = binding;
+        terminalBindingFocusOwnerSequence = pending.focusOwnerSequence;
         terminalStatus = 'attached';
         lastError = undefined;
         lifecycle = 'active';
@@ -637,14 +666,34 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     return awaitWithAbort(promise, signal);
   };
 
-  const beginModeActivation = (nextMode: WorkspaceMode): void => {
+  const beginModeActivation = (
+    nextMode: WorkspaceMode,
+    generation: number,
+    sessionId: string
+  ): ModeActivation => {
     if (!isMode(nextMode)) throw new SessionCoordinatorError('chat-operation-failed');
     mode = nextMode;
+    const activation = Object.freeze({
+      mode: nextMode,
+      generation,
+      sessionId,
+      sequence: ++nextModeActivationSequence
+    });
+    latestModeActivationSequence[nextMode] = activation.sequence;
     lastError = undefined;
     clearFocus();
     lifecycle = 'activating';
     publish();
+    return activation;
   };
+
+  const captureModeActivation = (generation: number, sessionId: string): ModeActivation =>
+    Object.freeze({
+      mode,
+      generation,
+      sessionId,
+      sequence: latestModeActivationSequence[mode]
+    });
 
   const activate = async (
     nextMode: WorkspaceMode,
@@ -652,21 +701,20 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   ): Promise<SessionCoordinatorState> => {
     assertUsable();
     const sessionId = assertSession();
-    beginModeActivation(nextMode);
     const generation = sessionGeneration;
+    const activation = beginModeActivation(nextMode, generation, sessionId);
 
     try {
       await ensureChatForCurrentSession(false, signal);
       assertCurrent(generation, sessionId);
-      if (nextMode === 'terminal' && mode === 'terminal') {
-        await ensureTerminalForCurrentSession(signal);
+      if (activation.mode === 'terminal') {
+        await ensureTerminalForCurrentSession(signal, activation.sequence);
         assertCurrent(generation, sessionId);
       }
-      if (!current(generation, sessionId)) return state();
+      if (!isCurrentModeActivation(activation)) return state();
       lifecycle = 'active';
       publish();
-      if (mode === 'chat') publishFocus('composer');
-      else if (terminalBinding?.sessionId === sessionId) publishFocus('w-term-input');
+      publishFocus(activation);
       return state();
     } catch (error) {
       if (isStale(error)) return state();
@@ -696,18 +744,18 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     lifecycle = 'activating';
     publish();
     const generation = sessionGeneration;
+    const activation = captureModeActivation(generation, sessionId);
 
     try {
       await ensureChatForCurrentSession(false, signal);
       assertCurrent(generation, sessionId);
-      if (mode === 'terminal') {
-        await ensureTerminalForCurrentSession(signal);
+      if (activation.mode === 'terminal') {
+        await ensureTerminalForCurrentSession(signal, activation.sequence);
         assertCurrent(generation, sessionId);
       }
       lifecycle = 'active';
       publish();
-      if (mode === 'chat') publishFocus('composer');
-      else if (terminalBinding?.sessionId === sessionId) publishFocus('w-term-input');
+      publishFocus(activation);
       return state();
     } catch (error) {
       if (isStale(error)) return state();
@@ -728,13 +776,13 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     lifecycle = 'activating';
     publish();
     const generation = sessionGeneration;
+    const activation = captureModeActivation(generation, sessionId);
     try {
       await ensureChatForCurrentSession(true, signal);
       assertCurrent(generation, sessionId);
       lifecycle = 'active';
       publish();
-      if (mode === 'chat') publishFocus('composer');
-      else if (terminalBinding?.sessionId === sessionId) publishFocus('w-term-input');
+      publishFocus(activation);
       return state();
     } catch (error) {
       if (isStale(error)) return state();
