@@ -1,14 +1,14 @@
 {
   "schema": "hermternal.web-terminal-renderer-benchmark.v1",
   "revision": {
-    "source_commit": "e0217c5746d0d085ad481237121509c47a7c364e",
+    "source_commit": "646067b1b5c509a6c8dfefb2c7ab7afb5d1a9573",
     "browser_entry": "apps/web/tests/bench/terminal-renderer.browser.ts",
     "renderer_module": "apps/web/src/lib/terminal/renderer.ts",
     "execution_inputs": [
       {
         "path": "apps/web/src/lib/terminal/renderer.ts",
-        "bytes": 29917,
-        "sha256": "22fe4cf0bd3120ae784c771b9e966201650bf6b1a7a5f1379c94613014e061e6"
+        "bytes": 30783,
+        "sha256": "3a7d39ef15b6730fabbd22e76deda0cd062fb9e8b397496300651fa17799c9a6"
       },
       {
         "path": "apps/web/src/lib/terminal/terminal.css",
@@ -17,18 +17,18 @@
       },
       {
         "path": "apps/web/tests/bench/terminal-renderer.browser.ts",
-        "bytes": 8643,
-        "sha256": "c4c80528e06c4a8341ac18716d883bc24d8a177c2de1f51c2ef2b8273cfb3104"
+        "bytes": 9121,
+        "sha256": "ef9740e316d06097d0a9fd408901da5315144ebf9c0c990a91171e40cd8bb562"
       },
       {
         "path": "apps/web/tests/bench/terminal-renderer.bench.ts",
-        "bytes": 11195,
-        "sha256": "34ca65b84be9ecc58f8f5ef9b7f6eab3656f0df549a7a331d7ba78c2867161b3"
+        "bytes": 11760,
+        "sha256": "cf83d573314c2bca0689a8cfc2e528ec862d87ad51d9dc41fa614b6c361d72b5"
       },
       {
         "path": "apps/web/tests/bench/terminal-renderer.provenance.ts",
-        "bytes": 980,
-        "sha256": "8d150df1b9eb2bbe7d841e32c24c5a01c7f4cf0555672eaa9d1e30397cedcec6"
+        "bytes": 1741,
+        "sha256": "174c83d5556be0734c34e95c576e9033904d1e46b0b85addf32c92e26c59bff8"
       }
     ]
   },
@@ -67,11 +67,11 @@
       },
       {
         "path": "entry.js",
-        "bytes": 16761,
-        "sha256": "35e9479d841bde0374f8056c62d9f8ec139dcbb214282ea270e568cd3064c4e6"
+        "bytes": 17201,
+        "sha256": "5849eb3ee963833a5a23627f636c827b86319c9d5d9d6fac14c47c0c50d9bbe3"
       }
     ],
-    "entry_bytes": 16761,
+    "entry_bytes": 17201,
     "lazy_chunk_bytes": 51003,
     "wasm_bytes": 429514,
     "css_bytes": 4112
@@ -88,131 +88,131 @@
     "samples": {
       "cold_initialization": {
         "raw_samples": [
-          37.1,
-          4.2,
+          23.2,
+          4.7,
           4.1,
-          3.9,
-          3.6
+          4.1,
+          4.1
         ],
         "distribution": {
-          "min": 3.6,
+          "min": 4.1,
           "p50": 4.1,
-          "p95": 30.52,
-          "p99": 35.784,
-          "max": 37.1,
-          "mean": 10.58
+          "p95": 19.5,
+          "p99": 22.46,
+          "max": 23.2,
+          "mean": 8.04
         }
       },
       "first_byte_to_first_glyph": {
         "raw_samples": [
-          96.2,
-          132.7,
-          120.7,
-          45.9,
-          12.7
+          110.2,
+          77.1,
+          95.6,
+          100.6,
+          57.5
         ],
         "distribution": {
-          "min": 12.7,
-          "p50": 96.2,
-          "p95": 130.3,
-          "p99": 132.22,
-          "max": 132.7,
-          "mean": 81.64
+          "min": 57.5,
+          "p50": 95.6,
+          "p95": 108.28,
+          "p99": 109.816,
+          "max": 110.2,
+          "mean": 88.2
         }
       },
       "sustained_output": {
         "raw_samples": [
-          4941.7,
-          1653.7,
-          204.2,
-          100,
-          100,
-          100,
-          100.1,
-          133.7,
-          66.2,
-          166.6
+          4739.1,
+          1627.1,
+          199.9,
+          200.1,
+          199.9,
+          200.1,
+          199.9,
+          200,
+          200,
+          199.9
         ],
         "distribution": {
-          "min": 66.2,
-          "p50": 116.9,
-          "p95": 3462.1,
-          "p99": 4645.78,
-          "max": 4941.7,
-          "mean": 756.62
+          "min": 199.9,
+          "p50": 200,
+          "p95": 3338.7,
+          "p99": 4459.02,
+          "max": 4739.1,
+          "mean": 796.6
         }
       },
       "resize_settling": {
         "raw_samples": [
-          149.4,
-          100,
-          166.8,
-          74.9,
-          158.4,
-          66.6,
-          100,
-          100.1,
-          75,
-          158.2
+          203,
+          218.1,
+          145.8,
+          199.8,
+          200,
+          200,
+          200.1,
+          199.9,
+          200.1,
+          199.9
         ],
         "distribution": {
-          "min": 66.6,
-          "p50": 100.05,
-          "p95": 163.02,
-          "p99": 166.044,
-          "max": 166.8,
-          "mean": 114.94
+          "min": 145.8,
+          "p50": 200,
+          "p95": 211.305,
+          "p99": 216.741,
+          "max": 218.1,
+          "mean": 196.67
         }
       },
       "replay_1_mib": {
         "raw_samples": [
-          82.6,
-          100,
-          100,
-          100,
-          100.5
+          132.3,
+          200,
+          199.9,
+          200.1,
+          199.9
         ],
         "distribution": {
-          "min": 82.6,
-          "p50": 100,
-          "p95": 100.4,
-          "p99": 100.48,
-          "max": 100.5,
-          "mean": 96.62
+          "min": 132.3,
+          "p50": 199.9,
+          "p95": 200.08,
+          "p99": 200.096,
+          "max": 200.1,
+          "mean": 186.44
         }
       },
       "repeated_mount_dispose": {
         "raw_samples": [
           4.1,
-          2.9,
-          2.8,
+          2.7,
           2.6,
+          2.5,
           2.6,
-          4.5,
-          2.8,
-          3,
-          2.9,
-          2.3
+          5.9,
+          2.7,
+          2.6,
+          2.5,
+          2.4
         ],
         "distribution": {
-          "min": 2.3,
-          "p50": 2.85,
-          "p95": 4.32,
-          "p99": 4.464,
-          "max": 4.5,
-          "mean": 3.05
+          "min": 2.4,
+          "p50": 2.6,
+          "p95": 5.09,
+          "p99": 5.738,
+          "max": 5.9,
+          "mean": 3.06
         }
       }
     },
     "long_tasks_ms": [
-      4890,
-      1533
+      4692,
+      1489
     ],
     "memory": {
       "supported": true,
-      "before_replay_bytes": 4790270,
-      "after_replay_bytes": 4803830,
-      "after_dispose_bytes": 5635483,
+      "before_replay_bytes": 4792600,
+      "after_replay_bytes": 4806292,
+      "after_dispose_bytes": 5640521,
       "reason": null
     },
     "workload": {
@@ -229,7 +229,14 @@
   "method": {
     "browser": "Playwright Chromium headless",
     "warmups": 0,
-    "repetitions": 5,
+    "repetitions": {
+      "cold_initialization": 5,
+      "first_byte_to_first_glyph": 5,
+      "sustained_output": 10,
+      "resize_settling": 10,
+      "replay_1_mib": 5,
+      "repeated_mount_dispose": 10
+    },
     "percentile": "inclusive-linear-r7",
     "quantiles": [
       0.5,
