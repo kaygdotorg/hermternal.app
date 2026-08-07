@@ -176,11 +176,11 @@ and both normal and optimized validators fail closed if its commit, byte count,
 or digest drifts. The comma-joined origin
 cardinality canary is assembled from separate Python string fragments so the
 aggregate registry scanner does not mistake two synthetic URLs for one live
-host; its runtime mutation value is unchanged. The local scanner also rejects
-escaped compact JSON aliases such as `apikey`. The current aggregate scanner
-accepts that escaped-apikey canary without decoding its key; this is a documented
-downstream blocker for the registry lane and requires aggregate helper
-coordination. This fixture does not edit aggregate files.
+host; its runtime mutation value is unchanged. The aggregate scanner now
+handles escaped compact JSON aliases such as `apikey` in its own boundary.
+This fixture does not edit aggregate files. Synthetic Caddy `421`/`403` and
+no-upstream rows remain fixture evidence only; they do not claim a live public
+edge, arbitrary Host/Origin acceptance, or `4403` behavior.
 
 Run from the repository root:
 
