@@ -238,10 +238,10 @@ EXPECTED_REVISIONS = {
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: {
-        "commit_sha": "d6bdc55d882a913774a8e7b7e61fde0c77ebd8c4",
+        "commit_sha": "e227a347d81d653f4ff3897dae6786d5f6937cf5",
         "fixture_id": "web-production-build",
         "fixture_version": "1.0.0",
-        "fixture_sha256": "838a3df292f0a004a46de7c281ed8d6d58676b099f344ea10fa0cb14a4cdb689",
+        "fixture_sha256": "9987e6d7c5be8c70dcf0e39d1b4e3fc3289b2964cb8957cb46e9f182baf08267",
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
 }
@@ -285,17 +285,17 @@ EXPECTED_ARTIFACT_METADATA = {
     BASELINE_EVIDENCE_ID: (
         ("README.md", 7581, "cea7d5eae37398d0b6f4cad593be5d72b0bebb77c5a3bd73e5e08d4c835e944a"),
         ("benchmark-evidence.json", 6446, "aa652867dc336467ab07873964f54a9d5000cfb01b1d55756091be2e8797a6eb"),
-        ("test_validate.py", 23177, "ce9e318da479b061cf8c6bdae10b2416d5cd577d93b2dfaec281f64745ee40bb"),
+        ("test_validate.py", 24231, "1b47a4c0a0110c9a0f94f1817cce8a23069291353b6420353310dd4dc4d33e24"),
         ("sample-provenance.json", 2308, "7b0e11706465195dafb6a6821049b1dceb384ca77230bc3d21adbbc26450dbc5"),
         ("synthetic/workload.json", 4042, "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"),
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: (
-        ("workload.json", 1002, "838a3df292f0a004a46de7c281ed8d6d58676b099f344ea10fa0cb14a4cdb689"),
-        ("run.ts", 59504, "2b94482f4ee4e60e5657fe53b7de0bf4d48977d2b8d40acb42d74e864adbc539"),
-        ("sandbox-runner.py", 12446, "b38eb87ef2e3395a31ae0223675ab0506ea2cdd5c40ed4720f76f5fa535a4869"),
+        ("workload.json", 2452, "9987e6d7c5be8c70dcf0e39d1b4e3fc3289b2964cb8957cb46e9f182baf08267"),
+        ("run.ts", 65596, "b2b48b94fef3c944daf285929de84ad2e88df6a3bea151176fb99382e834d51e"),
+        ("sandbox-runner.py", 13010, "e12eb3f7ec3e499802a27027cab6d188d4d60af544920b58be7fd48b8ff6c44b"),
         ("artifact-scanner.py", 5994, "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb"),
-        ("evidence/raw-trace.json", 17602, "1110d9a851569f68d8dc3ae996eae13efd80b6d0905ca7636e449bc064561e74"),
+        ("evidence/raw-trace.json", 17609, "940f69d108920098532c4422f8730177975f82946af7a05cb6fb8d22a2afa6cf"),
     ),
 }
 SELF_AUTHENTICATED_ARTIFACT_PATHS = {
