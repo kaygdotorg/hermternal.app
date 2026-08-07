@@ -22,7 +22,7 @@ Hermes owns the transcript. Hermternal renders a server projection. A local memo
 | `awaiting_approval` | The server emitted `approval.request`. | Approve or deny the one pending request. Do not auto-approve. |
 | `awaiting_clarification` | The server emitted `clarify.request`. | Submit the answer or cancel the clarification. |
 | `interrupting` | `session.interrupt` was sent and the final state is not known. | Wait for a status/result or reconnect and restore. |
-| `delivery_uncertain` | The prompt may have been accepted, but the client lacks a result. | Restore first. Do not resend automatically. |
+| `delivery_uncertain` | The prompt may have been accepted, but the client lacks a result; the original draft is present. | Restore first, keep the draft, or sign out. Do not resend automatically. |
 | `completed` | The turn ended with a server completion or an explicit interruption. | Read, copy, start a new draft, or continue. |
 | `failed` | The server returned a known error or the turn failed. | Preserve the draft when possible and allow an explicit retry. |
 
@@ -42,11 +42,69 @@ Hermes owns the transcript. Hermternal renders a server projection. A local memo
 The client must not blindly retry a prompt.
 
 - A timeout, WebSocket close, app suspension, or process crash after send is an unknown outcome.
-- Reconnect and restore the server session before any resend decision.
-- Inspect server-owned history and status. If the prompt is present, render the server result and do not duplicate it.
+- Reconnect and restore the server session before any resend decision. Observe
+  `gateway.ready` and matching compatibility evidence before `session.history`,
+  `session.status`, or another prompt operation.
+- Inspect fresh server-owned history and status for every uncertainty cycle.
+  Bind each restore request and response to the exact selected session, active
+  submission request, and next monotonic restore generation. Reject evidence
+  from another session or request, an earlier or skipped generation, a replay,
+  an incomplete pair, or a conflicting history/status pair. A transient history
+  read invalidates the prior history result and any status
+  paired with it; a successful retry of `session.history` must complete before
+  another history result can be used. A transient status read likewise requires
+  a fresh successful status result. Stale `absent`/`idle` evidence cannot
+  authorize a later resend.
+- If the prompt is present, render the server result and do not duplicate it.
 - If the prompt is absent and the server confirms that no turn is running, ask the user whether to resend.
 - Keep the original draft and a user-visible uncertainty notice until the decision is complete.
 - Do not create a new session as an automatic workaround.
+- A send requires a selected session, a non-empty draft, ready transport,
+  gateway readiness, and compatible evidence. A `ready` label alone is not a
+  transport or compatibility proof.
+- Automatic retries of `session.history`, `session.status`, and `model.options`
+  require a selected session, ready transport, observed `gateway.ready`, and
+  matching compatibility evidence. History and status retries also require the
+  `restoring` state. No automatic read retry may run while offline,
+  reconnecting, handshaking, incompatible, signed out, or terminal.
+- Sign-out clears selected session, active request/turn references, restore
+  evidence, and armed retry decisions. It latches offline and rejects stale
+  transport, event, or user-decision input until a new authenticated session
+  starts.
+
+## C-06 uncertain-delivery contract
+
+`delivery_uncertain` is a recoverable protocol state, not a server rejection. It applies when a prompt or interrupt may have reached Hermes but the client lost the result. For prompt delivery, a present original draft is required. The client keeps the draft and the selected session while it obtains authoritative evidence.
+
+### Transition matrix
+
+| Evidence or action | Required transition | Retry or rendering rule |
+| --- | --- | --- |
+| Explicit send from a selected `ready` session (or after the user creates one from `empty`) | `submitting` | Count one outward `prompt.submit`; block another local send while the turn is active. |
+| Confirmed prompt acceptance or correlated output | `streaming`, then `completed` when the server completes | Never submit the same prompt again. A later local cancel affects only waiting UI and cannot enter an absent/idle resend path. Render the server-owned turn, not a local transcript copy. |
+| Timeout, WebSocket close, app suspension, process loss, or local cancellation without a confirmed server result after send | `delivery_uncertain` | Do not classify the prompt as rejected and do not retry it automatically. A local cancel cannot make an unknown send safe to repeat. |
+| Restore begins | `restoring` | Reconnect first and wait for `gateway.ready` before application RPC. Keep the uncertainty notice and draft visible. |
+| History shows the prompt and status is `running`/`streaming` | `streaming` | The server turn wins; resume rendering and do not resend. |
+| History shows the prompt and status is `completed` | `completed` | Render completion and do not resend. |
+| History shows the prompt absent and status is `idle` | `ready` | Preserve the draft and require an explicit user choice before one resend. |
+| History or status remains unknown/pending | `delivery_uncertain` or `restoring` | Wait for more evidence. Unknown is never converted to rejection, success, or permission to resend. |
+| Confirmed `prompt.submit` rejection | `failed` | Preserve the draft and permit only a later explicit retry. |
+
+### Retry and idempotency rules
+
+- Only idempotent reads may retry automatically: `session.resume`, `session.history`, `session.status`, and `model.options`.
+- `prompt.submit`, `session.create`, and `session.interrupt` are never automatically retried. A restore barrier must complete before any resend decision.
+- A resend is valid only when restored history says the prompt is absent, restored status says the turn is idle, and the user confirms. This rule also applies after a local cancellation of an unconfirmed in-flight submission. Use a new local request marker and perform one explicit resend. If that resend becomes uncertain, return to restore; never issue an automatic third submission.
+- `keep_draft` before restore preserves `delivery_uncertain` and the pending
+  restore barrier. It does not invent `ready` evidence. The user may then start
+  restore, obtain fresh history and status, and continue to the same explicit
+  absent-and-idle resend gate.
+- A duplicate send while `submitting` or `streaming` is blocked locally and does not reach Hermes. A known rejection does not authorize an automatic retry.
+- `session.interrupt` enters `interrupting`. Mark it `completed` only after a confirmed interrupt result or restored server state that proves the turn stopped. If restore shows the turn still running, return to `streaming`; do not fabricate a stop result.
+- Sign-out clears the selected session, suppresses reconnect, and moves the view to `empty`/`offline` while preserving the draft. An explicit later sign-in may start a new restore.
+- An incompatible restore result or unknown interactive event fails closed. It must not become an approval, clarification, retry permission, or new session workaround.
+
+The deterministic C-06 fixture in `contracts/fixtures/uncertain-delivery/` freezes this matrix with synthetic markers only. It also covers the pending-evidence and keep-draft paths. The fixture is protocol evidence, not a live Hermes integration test.
 
 ## Approval and clarification boundary
 
@@ -86,4 +144,8 @@ The UI may show the pending model during a stream, but it must not claim that th
 - Drafts, attachment progress, selected session identity, and lightweight UI preferences may persist locally. Message bodies and tool output may not be persisted as a transcript mirror.
 - Every turn has one visible lifecycle. A reconnect must not create duplicate user or assistant messages.
 - Unknown event names do not create an interactive control.
+- Recognized server events must carry correlated request, turn, and session
+  identity and are accepted only for an active turn on a ready compatible
+  transport. Events received in `empty`, `failed`, `completed`, or another
+  inactive state fail closed.
 - The send, stop, approval, clarification, attachment, and model controls must remain usable while the connection reports progress. Reduced-motion mode changes presentation only, not state rules.
