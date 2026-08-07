@@ -29,7 +29,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .terminal-renderer .cursor-blink .term-cursor {
+  /* W-Term puts cursor-blink on the terminal host, not a descendant. */
+  .terminal-renderer.wterm.cursor-blink .term-cursor {
     animation: none;
   }
 }

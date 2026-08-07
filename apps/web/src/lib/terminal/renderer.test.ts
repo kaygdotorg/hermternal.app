@@ -33,6 +33,16 @@ const moduleMocks = vi.hoisted(() => {
 
     async init(): Promise<this> {
       this.host.dataset.mockWterm = 'ready';
+      this.host.classList.add('wterm', 'cursor-blink');
+      const row = document.createElement('div');
+      row.className = 'term-row';
+      row.style.height = '17px';
+      row.style.lineHeight = '17px';
+      this.host.appendChild(row);
+      const input = document.createElement('textarea');
+      input.setAttribute('tabindex', '0');
+      input.setAttribute('aria-hidden', 'true');
+      this.host.appendChild(input);
       return this;
     }
 
@@ -284,6 +294,107 @@ describe('TerminalRenderer', () => {
     expect(terminals[0]?.operations.at(-1)).toEqual({ type: 'resize', size: { cols: 120, rows: 40 } });
   });
 
+  it('keeps the loading status visible until the adapter is ready', async () => {
+    let resolveMount!: (terminal: MountedTerminal) => void;
+    const backend: MountedTerminal = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      focus: vi.fn(),
+      paste: vi.fn(),
+      dispose: vi.fn()
+    };
+    const adapter: TerminalRendererAdapter = {
+      mount: vi.fn(() => new Promise<MountedTerminal>((resolve) => {
+        resolveMount = resolve;
+      }))
+    };
+    const renderer = createTerminalRenderer({ adapter });
+    const host = document.createElement('div');
+    const mounting = renderer.mount(host);
+
+    await vi.waitFor(() => expect(adapter.mount).toHaveBeenCalledTimes(1));
+    expect(host.querySelector('[role="status"]')).toHaveTextContent('Loading terminal…');
+    expect(renderer.state).toBe('loading');
+
+    resolveMount(backend);
+    await mounting;
+    expect(host.querySelector('[role="status"]')).not.toBeInTheDocument();
+    expect(renderer.state).toBe('ready');
+  });
+
+  it('does not paste into a remounted backend after an old confirmation resolves', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    let resolveConfirmation!: (accepted: boolean) => void;
+    const confirmation = new Promise<boolean>((resolve) => {
+      resolveConfirmation = resolve;
+    });
+    const confirmPaste = vi.fn(() => confirmation);
+    const renderer = createTerminalRenderer({ adapter, confirmPaste });
+    const firstHost = document.createElement('div');
+    const secondHost = document.createElement('div');
+    document.body.append(firstHost, secondHost);
+
+    await renderer.mount(firstHost);
+    clipboardPaste(firstHost, 'printf one\nprintf two');
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(1));
+
+    await renderer.mount(secondHost);
+    resolveConfirmation(true);
+    await vi.waitFor(() => expect(renderer.state).toBe('ready'));
+
+    expect(terminals[0]?.operations.filter((operation) => operation.type === 'paste')).toHaveLength(0);
+    expect(terminals[1]?.operations.filter((operation) => operation.type === 'paste')).toHaveLength(0);
+  });
+
+  it('keeps controlled error ownership through retry, remount, and dispose', async () => {
+    let attempts = 0;
+    const disposed = vi.fn();
+    const backend: MountedTerminal = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      focus: vi.fn(),
+      paste: vi.fn(),
+      dispose: disposed
+    };
+    const adapter: TerminalRendererAdapter = {
+      mount: vi.fn(async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('synthetic initialization failure');
+        return backend;
+      })
+    };
+    const renderer = createTerminalRenderer({ adapter, label: 'Session terminal' });
+    const firstHost = document.createElement('div');
+    firstHost.className = 'shell-host';
+    firstHost.setAttribute('role', 'group');
+    firstHost.setAttribute('aria-label', 'Original host');
+    firstHost.style.height = '99px';
+    document.body.append(firstHost);
+
+    await renderer.mount(firstHost);
+    expect(renderer.state).toBe('error');
+    expect(firstHost).toHaveClass('shell-host', 'terminal-renderer');
+    expect(firstHost).toHaveAttribute('role', 'region');
+    expect(firstHost).toHaveAttribute('aria-label', 'Session terminal');
+    expect(firstHost.querySelector('[role="alert"]')).toBeInTheDocument();
+
+    const secondHost = document.createElement('div');
+    document.body.append(secondHost);
+    await renderer.mount(secondHost);
+    expect(renderer.state).toBe('ready');
+    expect(firstHost).not.toHaveClass('terminal-renderer');
+    expect(firstHost.querySelector('[role="alert"]')).not.toBeInTheDocument();
+    expect(firstHost).toHaveClass('shell-host');
+    expect(firstHost).toHaveAttribute('role', 'group');
+    expect(firstHost).toHaveAttribute('aria-label', 'Original host');
+    expect(firstHost.style.height).toBe('99px');
+
+    renderer.dispose();
+    expect(disposed).toHaveBeenCalledTimes(1);
+    expect(secondHost.querySelector('[role="alert"], [role="status"]')).not.toBeInTheDocument();
+    expect(secondHost).not.toHaveClass('terminal-renderer');
+  });
+
   it('keeps native selection and keyboard copy available without intercepting copy', async () => {
     const { adapter } = createDeterministicAdapter();
     const renderer = createTerminalRenderer({ adapter });
@@ -444,6 +555,13 @@ describe('TerminalRenderer', () => {
     mounted.paste('echo \x1b[31munsafe');
 
     expect(input).toHaveBeenCalledWith('\x1b[200~echo [31munsafe\x1b[201~');
+    const inputElement = host.querySelector('textarea');
+    expect(inputElement).not.toHaveAttribute('aria-hidden');
+    expect(inputElement).toHaveAttribute('aria-label', 'Terminal input');
+    expect(host.style.height).toBe('408px');
+
+    mounted.resize(80, 30);
+    expect(host.style.height).toBe('510px');
     mounted.dispose();
   });
 });

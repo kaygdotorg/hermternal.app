@@ -76,6 +76,18 @@ type PendingOperation =
   | Readonly<{ type: 'write'; data: Uint8Array }>
   | Readonly<{ type: 'resize'; size: TerminalSize }>;
 
+type HostSnapshot = Readonly<{
+  className: string | null;
+  terminalState: string | null;
+  terminalLoading: string | null;
+  terminalError: string | null;
+  role: string | null;
+  ariaLabel: string | null;
+  height: string;
+  rowHeight: string;
+  tabIndex: string | null;
+}>;
+
 type WTermModules = Readonly<{
   WTerm: typeof WTerm;
   GhosttyCore: (typeof import('@wterm/ghostty'))['GhosttyCore'];
@@ -167,6 +179,78 @@ function renderError(host: HTMLElement): void {
   status.focus({ preventScroll: true });
 }
 
+function captureHostSnapshot(host: HTMLElement): HostSnapshot {
+  return {
+    className: host.getAttribute('class'),
+    terminalState: host.getAttribute('data-terminal-state'),
+    terminalLoading: host.getAttribute('data-terminal-loading'),
+    terminalError: host.getAttribute('data-terminal-error'),
+    role: host.getAttribute('role'),
+    ariaLabel: host.getAttribute('aria-label'),
+    height: host.style.height,
+    rowHeight: host.style.getPropertyValue('--term-row-height'),
+    tabIndex: host.getAttribute('tabindex')
+  };
+}
+
+function restoreAttribute(host: HTMLElement, name: string, value: string | null): void {
+  if (value === null) host.removeAttribute(name);
+  else host.setAttribute(name, value);
+}
+
+function restoreHostSnapshot(host: HTMLElement, snapshot: HostSnapshot): void {
+  restoreAttribute(host, 'class', snapshot.className);
+  restoreAttribute(host, 'data-terminal-state', snapshot.terminalState);
+  restoreAttribute(host, 'data-terminal-loading', snapshot.terminalLoading);
+  restoreAttribute(host, 'data-terminal-error', snapshot.terminalError);
+  restoreAttribute(host, 'role', snapshot.role);
+  restoreAttribute(host, 'aria-label', snapshot.ariaLabel);
+  restoreAttribute(host, 'tabindex', snapshot.tabIndex);
+  if (snapshot.height) host.style.height = snapshot.height;
+  else host.style.removeProperty('height');
+  if (snapshot.rowHeight) host.style.setProperty('--term-row-height', snapshot.rowHeight);
+  else host.style.removeProperty('--term-row-height');
+}
+
+function applyHostState(host: HTMLElement, state: 'loading' | 'ready' | 'error', label: string): void {
+  host.classList.add('terminal-renderer');
+  host.dataset.terminalState = state;
+  host.setAttribute('role', 'region');
+  host.setAttribute('aria-label', label);
+}
+
+function removeLoadingStatus(host: HTMLElement): void {
+  host.querySelector('[data-terminal-loading="true"]')?.remove();
+}
+
+/**
+ * W-Term 0.3.2 marks its keyboard textarea aria-hidden while leaving it
+ * tabbable. That violates aria-hidden-focus, so the renderer owns the small
+ * compatibility adaptation until the upstream input contract is corrected.
+ */
+export function normalizeWTermInputAccessibility(host: HTMLElement): void {
+  const input = host.querySelector<HTMLTextAreaElement>('textarea[aria-hidden="true"][tabindex="0"]');
+  if (!input) return;
+  input.removeAttribute('aria-hidden');
+  input.setAttribute('aria-label', 'Terminal input');
+}
+
+function relockWTermHeight(host: HTMLElement, rows: number): void {
+  const row = host.querySelector<HTMLElement>('.term-row');
+  if (!row) return;
+  const rowStyles = getComputedStyle(row);
+  const hostStyles = getComputedStyle(host);
+  const rowHeight = [rowStyles.height, rowStyles.lineHeight, hostStyles.getPropertyValue('--term-row-height')]
+    .map((value) => Number.parseFloat(value))
+    .find((value) => Number.isFinite(value) && value > 0);
+  if (!rowHeight) return;
+  let extra = (Number.parseFloat(hostStyles.paddingTop) || 0) + (Number.parseFloat(hostStyles.paddingBottom) || 0);
+  if (hostStyles.boxSizing === 'border-box') {
+    extra += (Number.parseFloat(hostStyles.borderTopWidth) || 0) + (Number.parseFloat(hostStyles.borderBottomWidth) || 0);
+  }
+  host.style.height = `${rows * rowHeight + extra}px`;
+}
+
 function safeStateChange(
   callback: ((state: TerminalRendererState) => void) | undefined,
   state: TerminalRendererState
@@ -206,6 +290,8 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
       };
       const term = new WTerm(host, termOptions);
       await term.init();
+      normalizeWTermInputAccessibility(host);
+      relockWTermHeight(host, options.initialSize.rows);
 
       return {
         write(data) {
@@ -213,6 +299,9 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         },
         resize(cols, rows) {
           term.resize(cols, rows);
+          // W-Term locks the initial height when autoResize is false. Re-lock
+          // after every explicit resize so a larger row count is not clipped.
+          relockWTermHeight(host, rows);
         },
         focus() {
           term.focus();
@@ -224,7 +313,14 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
           options.onInput(payload);
         },
         dispose() {
-          term.destroy();
+          try {
+            term.destroy();
+          } finally {
+            // @wterm/ghostty@0.3.2 has no core disposal API. Drop the active
+            // bridge reference after DOM cleanup; deterministic WASM release
+            // remains an upstream limitation documented by this boundary.
+            term.bridge = null;
+          }
         }
       };
     }
@@ -248,6 +344,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   private pendingMount: Promise<void> | null = null;
   private backend: MountedTerminal | null = null;
   private host: HTMLElement | null = null;
+  private hostSnapshot: HostSnapshot | null = null;
   private mountGeneration = 0;
   private restoreFocusOnMount = false;
   private focusRequested = false;
@@ -286,15 +383,6 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   async mount(host: HTMLElement): Promise<void> {
-    if (this.state === 'error') {
-      this.host = host;
-      host.classList.add('terminal-renderer');
-      host.dataset.terminalState = 'error';
-      host.setAttribute('role', 'region');
-      host.setAttribute('aria-label', this.label);
-      renderError(host);
-      return;
-    }
     if (this.state === 'ready' && this.host === host && this.backend) {
       if (this.restoreFocusOnMount || this.focusRequested) this.backend.focus();
       this.restoreFocusOnMount = false;
@@ -314,10 +402,8 @@ class ManagedTerminalRenderer implements TerminalRenderer {
 
     const generation = ++this.mountGeneration;
     this.host = host;
-    host.classList.add('terminal-renderer');
-    host.dataset.terminalState = 'loading';
-    host.setAttribute('role', 'region');
-    host.setAttribute('aria-label', this.label);
+    this.hostSnapshot = captureHostSnapshot(host);
+    applyHostState(host, 'loading', this.label);
     renderLoading(host);
     this.error = null;
     this.setState('loading');
@@ -404,7 +490,6 @@ class ManagedTerminalRenderer implements TerminalRenderer {
 
   private async mountAdapter(host: HTMLElement, generation: number): Promise<void> {
     try {
-      host.replaceChildren();
       const backend = await this.adapter.mount(host, {
         initialSize: this.initialSize,
         scrollbackLimitBytes: this.scrollbackLimitBytes,
@@ -412,26 +497,28 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       });
       if (generation !== this.mountGeneration || this.state === 'disposed' || this.host !== host) {
         safeDispose(backend);
-        // A bounded pre-mount buffer can fail while the adapter promise is
-        // resolving. W-Term cleanup clears the host, so restore the single
-        // controlled error state after disposing that stale backend.
-        if (this.state === 'error' && this.error) {
-          host.classList.add('terminal-renderer');
-          host.dataset.terminalState = 'error';
-          renderError(host);
-        }
+        this.restoreErrorIfOwned(host);
         return;
       }
       this.backend = backend;
-      this.flushPendingOperations(backend);
+      try {
+        this.flushPendingOperations(backend);
+      } catch {
+        this.fail('wasm-initialization-failed');
+        return;
+      }
+      removeLoadingStatus(host);
       host.addEventListener('paste', this.onPasteCapture, true);
-      host.dataset.terminalState = 'ready';
+      applyHostState(host, 'ready', this.label);
       this.setState('ready');
       if (this.restoreFocusOnMount || this.focusRequested) backend.focus();
       this.restoreFocusOnMount = false;
       this.focusRequested = false;
     } catch {
-      if (generation !== this.mountGeneration || this.state === 'disposed') return;
+      if (generation !== this.mountGeneration || this.state === 'disposed') {
+        this.restoreErrorIfOwned(host);
+        return;
+      }
       this.fail('wasm-initialization-failed');
     }
   }
@@ -446,48 +533,67 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     }
   }
 
+  private restoreErrorIfOwned(host: HTMLElement): void {
+    if (this.state !== 'error' || !this.error || this.host !== host) return;
+    applyHostState(host, 'error', this.label);
+    renderError(host);
+  }
+
   private async confirmAndPaste(request: PasteRequest): Promise<void> {
-    if (this.state !== 'ready' || !this.backend || !this.confirmPaste) return;
+    const generation = this.mountGeneration;
+    const host = this.host;
+    const backend = this.backend;
+    if (this.state !== 'ready' || !host || !backend || !this.confirmPaste) return;
     let confirmed = false;
     try {
       confirmed = await this.confirmPaste(request);
     } catch {
       return;
     }
-    if (!confirmed || this.state !== 'ready' || !this.backend) return;
-    this.backend.paste(request.text);
-    this.backend.focus();
+    if (
+      !confirmed ||
+      this.state !== 'ready' ||
+      this.mountGeneration !== generation ||
+      this.host !== host ||
+      this.backend !== backend
+    ) {
+      return;
+    }
+    backend.paste(request.text);
+    backend.focus();
   }
 
   private fail(code: TerminalRendererErrorCode): void {
     if (this.state === 'error') return;
-    const host = this.host;
     this.mountGeneration += 1;
-    this.teardownCurrentHost();
+    this.teardownCurrentHost(true);
     this.pendingOperations = [];
     this.pendingWriteBytes = 0;
     this.error = {
       code,
       message: code === 'pending-output-limit' ? 'Terminal output was not ready in time.' : 'Terminal could not start.'
     };
-    if (host) {
-      host.dataset.terminalState = 'error';
-      renderError(host);
+    if (this.host) {
+      applyHostState(this.host, 'error', this.label);
+      renderError(this.host);
     }
     this.setState('error');
   }
 
-  private teardownCurrentHost(): void {
+  private teardownCurrentHost(keepHost = false): void {
     const host = this.host;
-    if (host) {
-      host.removeEventListener('paste', this.onPasteCapture, true);
-      host.classList.remove('terminal-renderer');
-      delete host.dataset.terminalState;
-      host.replaceChildren();
-    }
+    const snapshot = this.hostSnapshot;
+    if (host) host.removeEventListener('paste', this.onPasteCapture, true);
     safeDispose(this.backend);
     this.backend = null;
-    this.host = null;
+    if (host) {
+      host.replaceChildren();
+      if (snapshot) restoreHostSnapshot(host, snapshot);
+    }
+    if (!keepHost) {
+      this.host = null;
+      this.hostSnapshot = null;
+    }
   }
 
   private setState(state: TerminalRendererState): void {
