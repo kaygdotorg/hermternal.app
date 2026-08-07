@@ -44,6 +44,7 @@ export type PtyCloseClassification =
 
 export type PtyErrorCode =
   | "aborted"
+  | "authentication-required"
   | "closed"
   | "attachment-superseded"
   | "connection-failed"
@@ -59,6 +60,7 @@ export type PtyErrorCode =
 
 const ERROR_MESSAGES: Record<PtyErrorCode, string> = {
   aborted: "The Terminal connection attempt was cancelled.",
+  "authentication-required": "Terminal authentication is required.",
   "attachment-superseded": "The Terminal attachment was superseded.",
   closed: "The Terminal transport is closed.",
   "connection-failed": "The Terminal WebSocket connection failed.",
@@ -257,6 +259,7 @@ export function createFreshPtyTicketProvider(
       if (signal.aborted || isAbortLike(error)) {
         throw new PtyTransportError("aborted");
       }
+      if (error instanceof PtyTransportError) throw error;
       throw new PtyTransportError("connection-failed");
     }
     return parseTicketResponse(response);

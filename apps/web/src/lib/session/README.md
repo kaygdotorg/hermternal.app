@@ -1,9 +1,10 @@
 # Shared Chat and Terminal session coordinator
 
 `coordinator.ts` owns the browser runtime's one selected Hermes session identity.
-It is a narrow prototype seam between the reviewed W-07 Chat transport and a
-future W-Term adapter. It does not render either workspace, open a PTY, create a
-Hermes session, or mirror transcript content.
+It is a narrow prototype seam between the reviewed W-07 Chat transport and the
+current-session W-Term adapter. It does not render either workspace, create a
+Hermes session, or mirror transcript content; the adapter owns the PTY and the
+Svelte TerminalSurface owns renderer lifecycle.
 
 ## Invariants
 
@@ -96,6 +97,23 @@ into the new session.
 This is offline prototype evidence. The injected adapters are the only places
 where a later runtime may connect to a server or renderer; this change itself
 makes no network request and does not claim live Hermes compatibility.
+
+## Chat and Terminal continuity
+
+`LiveWorkspaceSession` creates one coordinator around the existing Chat transport
+and one `CurrentSessionTerminalBridge` around the current opaque session. Chat and
+Terminal mode actions only change the coordinator mode; they do not call
+`createSession()`, create another Chat transport, or tear down Chat. The
+coordinator's `TerminalBinding` is a lease, so a session replacement invalidates
+the old PTY binding before the replacement can attach.
+
+The bridge forwards `Uint8Array` output directly to the renderer and projects only
+redacted lifecycle state. Terminal bytes, attach handles, process identities,
+tickets, and transport diagnostics do not enter the workspace snapshot. The
+TerminalSurface stays mounted while Chat is selected, loads W-Term/Ghostty only
+after Terminal activation, and releases the renderer on generation changes or
+component disposal. These are prototype seams with synthetic tests; live same-
+session Hermes proof remains a separate gate.
 
 ## Verification
 
