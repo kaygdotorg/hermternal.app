@@ -7,7 +7,10 @@
   import Pill from './Pill.svelte';
   import SessionList from './SessionList.svelte';
   import StateBanner from './StateBanner.svelte';
+  import TerminalSurface from './TerminalSurface.svelte';
   import Timeline from './Timeline.svelte';
+  import type { FocusIntent, SessionCoordinatorState, WorkspaceMode } from '$lib/session/coordinator';
+  import type { CurrentSessionTerminalBridge } from '$lib/terminal/current-session-terminal';
   import type { LiveWorkspacePermanentFailure } from './live-workspace-session';
   import { DEFAULT_SESSIONS, timelineForState } from './fixtures';
   import type {
@@ -22,6 +25,11 @@
 
   export let appearance: Appearance = 'light';
   export let dataSource: WorkspaceDataSource = 'synthetic-preview';
+  export let mode: WorkspaceMode = 'chat';
+  export let modeActionsEnabled = false;
+  export let coordinator: SessionCoordinatorState | undefined = undefined;
+  export let terminal: CurrentSessionTerminalBridge | undefined = undefined;
+  export let focusIntent: FocusIntent | undefined = undefined;
   export let state: WorkspaceRuntimeState = 'stopped';
   export let title = 'Quarterly analysis';
   export let model = 'Atlas · balanced';
@@ -42,12 +50,6 @@
   let mobileTitleDraft = title;
   let mobileTitleInput: HTMLInputElement | undefined;
   let mobileTitleTrigger: HTMLButtonElement | undefined;
-  let mobileSidebarTrigger: HTMLButtonElement | undefined;
-  let mobileWorkspaceTrigger: HTMLButtonElement | undefined;
-  let mobileSidebarDrawer: HTMLElement | undefined;
-  let mobileWorkspaceDrawer: HTMLElement | undefined;
-  let mobileTitleLayer: HTMLElement | undefined;
-  let modalTrigger: HTMLElement | undefined;
   let localTitle = title;
   let localModel = model;
 
@@ -83,82 +85,6 @@
       if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
       else setTimeout(resolve, 0);
     });
-  }
-
-  function activeModalRoot(): HTMLElement | undefined {
-    if (mobileTitleEditing) return mobileTitleLayer;
-    if (mobileSidebarOpen) return mobileSidebarDrawer;
-    if (mobileWorkspaceOpen) return mobileWorkspaceDrawer;
-    return undefined;
-  }
-
-  function focusables(root: HTMLElement): HTMLElement[] {
-    return Array.from(
-      root.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
-    ).filter((element) => element.getAttribute('aria-hidden') !== 'true');
-  }
-
-  async function focusModalStart(): Promise<void> {
-    await afterActivationFrame();
-    const root = activeModalRoot();
-    const first = root ? focusables(root)[0] : undefined;
-    first?.focus();
-  }
-
-  async function closeMobileDrawers(restoreFocus = true): Promise<void> {
-    const trigger = modalTrigger;
-    mobileSidebarOpen = false;
-    mobileWorkspaceOpen = false;
-    modalTrigger = undefined;
-    if (!restoreFocus) return;
-    await afterActivationFrame();
-    trigger?.focus();
-  }
-
-  function openMobileDrawer(kind: 'sidebar' | 'workspace'): void {
-    if (compatibilityBlocked) return;
-    // Pointer-down runs before the browser moves focus to the button. Use the
-    // bound trigger identity so Escape and scrim close always restore focus.
-    modalTrigger = kind === 'sidebar' ? mobileSidebarTrigger : mobileWorkspaceTrigger;
-    mobileSidebarOpen = kind === 'sidebar';
-    mobileWorkspaceOpen = kind === 'workspace';
-    void focusModalStart();
-  }
-
-  function handleGlobalKeydown(event: KeyboardEvent): void {
-    const root = activeModalRoot();
-    if (!root || compatibilityBlocked) return;
-
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      if (mobileTitleEditing) void closeMobileTitleEditing(false);
-      else void closeMobileDrawers();
-      return;
-    }
-
-    if (event.key !== 'Tab') return;
-    const controls = focusables(root);
-    if (controls.length === 0) {
-      event.preventDefault();
-      return;
-    }
-
-    const currentIndex = controls.indexOf(document.activeElement as HTMLElement);
-    if (currentIndex === -1) {
-      event.preventDefault();
-      controls[0].focus();
-      return;
-    }
-
-    const nextIndex = event.shiftKey
-      ? (currentIndex - 1 + controls.length) % controls.length
-      : (currentIndex + 1) % controls.length;
-    if ((event.shiftKey && currentIndex === 0) || (!event.shiftKey && currentIndex === controls.length - 1)) {
-      event.preventDefault();
-      controls[nextIndex].focus();
-    }
   }
 
   async function startMobileTitleEditing(): Promise<void> {
@@ -197,30 +123,25 @@
     // Forced events can bypass native `inert`; guard local presentation state
     // before any drawer mutation, matching the action-emission boundary below.
     if (compatibilityBlocked) return;
-    if (mobileSidebarOpen) void closeMobileDrawers();
-    else openMobileDrawer('sidebar');
+    mobileSidebarOpen = !mobileSidebarOpen;
+    mobileWorkspaceOpen = false;
   }
 
   function toggleMobileWorkspace(): void {
     if (compatibilityBlocked) return;
-    if (mobileWorkspaceOpen) void closeMobileDrawers();
-    else {
-      openMobileDrawer('workspace');
-      handleAction({ type: 'open-workspace' });
-    }
+    mobileWorkspaceOpen = !mobileWorkspaceOpen;
+    mobileSidebarOpen = false;
+    handleAction({ type: 'open-workspace' });
   }
 
   function handleAction(action: WorkspaceAction): void {
     // `inert` is the browser and accessibility boundary; this handler guard is
     // the matching programmatic boundary for synthetic or forced DOM events.
     if (compatibilityBlocked && !recoveryActionAllowed(action)) return;
-    if (action.type === 'toggle-inspector' && artifactInspectorEnabled) {
-      if (mobileWorkspaceOpen) void closeMobileDrawers();
-      else inspectorVisible = !inspectorVisible;
-    }
+    if (action.type === 'toggle-inspector' && artifactInspectorEnabled) inspectorVisible = !inspectorVisible;
     if (action.type === 'select-session') {
       activeSessionId = action.sessionId;
-      if (mobileSidebarOpen) void closeMobileDrawers();
+      mobileSidebarOpen = false;
     }
     if (action.type === 'edit-title') localTitle = action.title;
     if (action.type === 'set-model') localModel = action.model;
@@ -228,32 +149,23 @@
   }
 </script>
 
-<svelte:window onkeydown={handleGlobalKeydown} />
-
-<div class="workspace-preview-container">
-  <section
-    aria-label="Hermternal runtime workspace preview"
-    class="workspace-preview"
-    data-appearance={appearance}
-    data-state={state}
-    data-testid="runtime-preview"
-  >
+<section
+  aria-label="Hermternal runtime workspace preview"
+  class="workspace-preview"
+  data-appearance={appearance}
+  data-state={state}
+  data-testid="runtime-preview"
+>
   <div
-    aria-hidden={compatibilityBlocked || mobileTitleEditing || mobileSidebarOpen || mobileWorkspaceOpen ? 'true' : undefined}
+    aria-hidden={compatibilityBlocked ? 'true' : undefined}
     class="workspace-underlay"
     data-testid="workspace-underlay"
-    inert={compatibilityBlocked || mobileTitleEditing || mobileSidebarOpen || mobileWorkspaceOpen}
+    inert={compatibilityBlocked || mobileTitleEditing}
   >
-    <div aria-hidden="true" class="workspace-mobile-status-bar">
-      <span class="status-time">9:41</span>
-      <span class="status-system"><span>5G</span><span class="status-battery"><span></span></span></span>
-    </div>
-
     <div class="mobile-toolbar">
-      <div class="mobile-title-island" aria-label="Navigation and conversation">
+    <div class="mobile-title-island" aria-label="Navigation and conversation">
       <Pill
         ariaLabel="Open conversations"
-        bind:element={mobileSidebarTrigger}
         icon="menu"
         iconOnly
         label="Conversations"
@@ -270,7 +182,6 @@
     </div>
     <Pill
       ariaLabel="Open workspace"
-      bind:element={mobileWorkspaceTrigger}
       expandable
       expanded={mobileWorkspaceOpen}
       icon="workspace"
@@ -282,14 +193,15 @@
   </div>
 
     <div class:inspector-hidden={!artifactInspectorEnabled || !inspectorVisible} class="workspace-grid">
-      <aside class="sidebar">
-        <SessionList {activeSessionId} {sessions} onAction={handleAction} />
-      </aside>
+    <aside class:open={mobileSidebarOpen} class="sidebar">
+      <SessionList {activeSessionId} {sessions} onAction={handleAction} />
+    </aside>
 
-      <div class="conversation-panel">
-        <ConversationHeader model={localModel} title={localTitle} onAction={handleAction} />
+    <div class="conversation-panel">
+      <ConversationHeader mode={mode} modeActionsEnabled={modeActionsEnabled} model={localModel} title={localTitle} onAction={handleAction} />
 
-        <div class="conversation-body">
+      <div class="conversation-body">
+        <div class:hidden-mode={mode === 'terminal' && terminal !== undefined} class="mode-layer chat-mode-layer">
           <Timeline {dataSource} emptyLabel={timelineEmptyLabel} items={timeline} runtimeState={state} onAction={handleAction} />
 
           <div
@@ -309,51 +221,33 @@
             onAction={handleAction}
           />
         </div>
-      </div>
 
-      {#if artifactInspectorEnabled && inspectorVisible}
-        <div class="desktop-inspector">
-          <ArtifactInspector onAction={handleAction} />
-        </div>
-      {/if}
+        {#if terminal}
+          <div class:hidden-mode={mode !== 'terminal'} class="mode-layer terminal-mode-layer">
+            <TerminalSurface
+              active={mode === 'terminal'}
+              bridge={terminal}
+              coordinator={coordinator}
+              focusIntent={focusIntent}
+              onAction={handleAction}
+              title={localTitle}
+            />
+          </div>
+        {/if}
+      </div>
     </div>
+
+    {#if artifactInspectorEnabled && inspectorVisible}
+      <ArtifactInspector onAction={handleAction} />
+    {/if}
   </div>
 
-  {#if mobileSidebarOpen || mobileWorkspaceOpen}
-    <button
-      aria-label="Close drawer"
-      class="mobile-drawer-scrim"
-      data-testid="mobile-drawer-scrim"
-      type="button"
-      onclick={() => void closeMobileDrawers()}
-    ></button>
-  {/if}
-
-  {#if mobileSidebarOpen}
-    <div
-      aria-label="Conversations"
-      aria-modal="true"
-      bind:this={mobileSidebarDrawer}
-      class="mobile-session-drawer"
-      data-testid="mobile-session-drawer"
-      role="dialog"
-    >
-      <SessionList {activeSessionId} {sessions} onAction={handleAction} />
-    </div>
-  {/if}
-
-  {#if mobileWorkspaceOpen}
-    <div
-      aria-label="Workspace"
-      aria-modal="true"
-      bind:this={mobileWorkspaceDrawer}
-      class="mobile-workspace-drawer"
-      data-testid="mobile-workspace-drawer"
-      role="dialog"
-    >
-      <ArtifactInspector onAction={handleAction} />
-    </div>
-  {/if}
+    {#if mobileWorkspaceOpen}
+      <aside aria-label="Workspace" class="mobile-workspace-drawer">
+        <ArtifactInspector onAction={handleAction} />
+      </aside>
+    {/if}
+  </div>
 
   {#if compatibilityBlocked}
     <div class="state-layer compatibility-layer visible" data-testid="compatibility-gate-layer">
@@ -365,7 +259,6 @@
     <div
       aria-label="Edit conversation title"
       aria-modal="true"
-      bind:this={mobileTitleLayer}
       class="mobile-title-edit-layer"
       data-testid="mobile-title-editor"
       role="dialog"
@@ -398,29 +291,21 @@
       </div>
     </div>
   {/if}
-  </section>
-</div>
+</section>
 
 <style>
-  .workspace-preview-container {
-    width: 100%;
-    min-width: 0;
-    container-name: workspace-preview;
-    container-type: inline-size;
-  }
-
   .workspace-preview {
-    --canvas: var(--color-canvas);
-    --surface: var(--color-paper);
-    --ink: var(--color-ink);
-    --muted: var(--color-muted);
-    --line: var(--color-line);
+    --canvas: #f3f5f8;
+    --surface: #ffffff;
+    --ink: #16181d;
+    --muted: #667080;
+    --line: #d8dde5;
     --line-soft: color-mix(in srgb, var(--line) 70%, transparent);
-    --signal: var(--color-signal);
-    --courier: var(--color-courier);
+    --signal: #4c6fff;
+    --courier: #e88a2a;
     --courier-ink: #8a4b00;
-    --success: var(--color-success);
-    --danger: var(--color-danger);
+    --success: #2da568;
+    --danger: #d94a4a;
     --focus: #2348c7;
     --action-ink: #040b1e;
     --gate-action: var(--color-gate-light-action);
@@ -443,10 +328,7 @@
     --radius-glass: 22px;
     position: relative;
     box-sizing: border-box;
-    container-name: workspace-preview;
-    container-type: inline-size;
     width: 100%;
-    height: 960px;
     min-width: 0;
     min-height: 960px;
     overflow: hidden;
@@ -516,43 +398,26 @@
   }
 
   .workspace-underlay {
-    display: block;
-    height: 100%;
+    display: contents;
   }
 
-  /* Keep the approved desktop family intact: the sidebar and inspector stay
-     present while the conversation flexes down to the available width. The
-     named container switches the whole surface to the mobile family instead
-     of introducing intermediate navigation substitutions. */
   .workspace-grid {
     box-sizing: border-box;
     display: grid;
     grid-template-columns: minmax(220px, 276px) minmax(0, 720px) minmax(260px, 380px);
-    grid-template-rows: 928px;
     gap: 16px;
-    height: 928px;
     min-height: 928px;
     padding: 16px;
   }
 
   .workspace-grid.inspector-hidden {
-    grid-template-columns: minmax(220px, 276px) minmax(0, 720px);
-  }
-
-  .workspace-mobile-status-bar {
-    display: none;
+    grid-template-columns: minmax(220px, 276px) minmax(0, 1fr);
   }
 
   .sidebar,
-  .conversation-panel,
-  .desktop-inspector {
+  .conversation-panel {
     min-width: 0;
     min-height: 0;
-    height: 928px;
-  }
-
-  .desktop-inspector {
-    display: flex;
   }
 
   .conversation-panel {
@@ -567,16 +432,25 @@
   .conversation-body {
     position: relative;
     display: flex;
-    height: 856px;
     min-height: 0;
-    flex: 0 0 856px;
+    flex: 1 1 auto;
     flex-direction: column;
+  }
+
+  .mode-layer {
+    position: relative;
+    display: flex;
+    min-height: 0;
+    flex: 1 1 auto;
+    flex-direction: column;
+  }
+
+  .mode-layer.hidden-mode {
+    display: none;
   }
 
   .conversation-body :global(.timeline) {
     flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
   }
 
   .state-layer {
@@ -612,10 +486,7 @@
     max-width: 400px;
   }
 
-  .workspace-mobile-status-bar,
   .mobile-toolbar,
-  .mobile-drawer-scrim,
-  .mobile-session-drawer,
   .mobile-workspace-drawer,
   .mobile-title-edit-layer {
     display: none;
@@ -644,61 +515,26 @@
     white-space: nowrap;
   }
 
-  @container workspace-preview (max-width: 760px) {
+  @media (max-width: 1320px) {
+    .workspace-grid {
+      grid-template-columns: minmax(210px, 248px) minmax(0, 1fr) minmax(248px, 320px);
+    }
+  }
+
+  @media (max-width: 1120px) {
+    .workspace-grid {
+      grid-template-columns: minmax(210px, 248px) minmax(0, 1fr);
+    }
+
+    .workspace-grid :global(.inspector) {
+      display: none;
+    }
+  }
+
+  @media (max-width: 760px) {
     .workspace-preview {
-      height: 844px;
-      min-height: 844px;
+      min-height: 0;
       overflow: visible;
-    }
-
-    .workspace-mobile-status-bar {
-      box-sizing: border-box;
-      display: flex;
-      width: 100%;
-      height: 62px;
-      align-items: center;
-      justify-content: space-between;
-      padding: 21px 24px 19px;
-      color: var(--ink);
-      font-size: 12px;
-      font-weight: 600;
-      line-height: 16px;
-    }
-
-    .status-system {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .status-battery {
-      position: relative;
-      display: inline-flex;
-      width: 23px;
-      height: 12px;
-      align-items: center;
-      padding: 2px;
-      border: 1px solid currentColor;
-      border-radius: 4px;
-    }
-
-    .status-battery::after {
-      position: absolute;
-      top: 3px;
-      right: -3px;
-      width: 2px;
-      height: 4px;
-      border-radius: 0 2px 2px 0;
-      background: currentColor;
-      content: '';
-    }
-
-    .status-battery span {
-      display: block;
-      width: 100%;
-      height: 100%;
-      border-radius: 2px;
-      background: currentColor;
     }
 
     .mobile-toolbar {
@@ -772,69 +608,44 @@
 
     .workspace-grid {
       display: block;
-      grid-template-rows: 718px;
-      height: 718px;
-      min-height: 718px;
-      padding: 0;
+      min-height: calc(100dvh - 64px);
+      padding: 8px;
     }
 
-    .workspace-grid > .sidebar,
-    .workspace-grid > .desktop-inspector {
+    .sidebar {
+      position: absolute;
+      top: 64px;
+      left: 8px;
+      z-index: 8;
       display: none;
-    }
-
-    .mobile-drawer-scrim {
-      position: absolute;
-      top: 62px;
-      right: 0;
-      bottom: 0;
-      left: 0;
-      z-index: 10;
-      display: block;
-      width: 100%;
-      height: auto;
-      padding: 0;
-      border: 0;
-      background: #343b4780;
-      backdrop-filter: blur(2px);
-    }
-
-    .mobile-session-drawer,
-    .mobile-workspace-drawer {
-      position: absolute;
-      top: 74px;
-      left: 12px;
-      z-index: 11;
-      display: block;
       box-sizing: border-box;
-      height: 756px;
-      max-height: calc(100% - 88px);
-      overflow: hidden;
-      border: 1px solid var(--chrome-line);
-      border-radius: 28px;
-      background: var(--chrome-surface);
-      box-shadow: var(--chrome-shadow);
+      width: min(276px, calc(100% - 16px));
+      max-width: calc(100% - 16px);
+      height: min(720px, calc(100dvh - 80px));
+      max-height: calc(100dvh - 80px);
+      overflow: auto;
       contain: layout paint;
     }
 
-    .mobile-session-drawer {
-      width: min(342px, calc(100% - 24px));
+    .sidebar.open {
+      display: block;
     }
 
     .mobile-workspace-drawer {
-      width: min(366px, calc(100% - 24px));
+      position: absolute;
+      top: 64px;
+      right: 8px;
+      z-index: 8;
+      display: block;
+      width: min(320px, calc(100% - 16px));
+      max-height: calc(100dvh - 80px);
+      overflow: auto;
+      contain: layout paint;
     }
 
-    .mobile-session-drawer :global(.session-list),
     .mobile-workspace-drawer :global(.inspector) {
-      box-sizing: border-box;
       display: flex;
-      width: 100%;
-      height: 100%;
-      min-height: 0;
-      border: 0;
-      border-radius: 27px;
-      box-shadow: none;
+      min-height: 560px;
     }
 
     .mobile-title-edit-layer {
@@ -842,17 +653,14 @@
       inset: 0;
       z-index: 20;
       display: block;
-      min-height: 100%;
+      min-height: 844px;
     }
 
     .title-edit-dimmer {
       position: absolute;
-      top: 62px;
-      right: 0;
-      bottom: 0;
-      left: 0;
+      inset: 0;
       width: 100%;
-      height: auto;
+      height: 100%;
       padding: 0;
       border: 0;
       background: #0d11175c;
@@ -972,15 +780,8 @@
     }
 
     .conversation-panel {
-      height: 718px;
-      min-height: 718px;
+      min-height: calc(100dvh - 72px);
       border-radius: var(--radius-nested-glass);
-    }
-
-    .conversation-body {
-      height: 718px;
-      min-height: 0;
-      flex: 0 0 718px;
     }
 
     .state-layer {
@@ -992,7 +793,7 @@
     }
   }
 
-  @container workspace-preview (max-width: 420px) {
+  @media (max-width: 420px) {
     .workspace-grid {
       padding: 0;
     }
@@ -1040,51 +841,6 @@
     .title-edit-dimmer,
     .state-layer.compatibility-layer {
       backdrop-filter: none;
-    }
-  }
-
-  @media (forced-colors: active) {
-    .workspace-preview {
-      --line: CanvasText;
-      --line-soft: CanvasText;
-      --chrome-line: CanvasText;
-      --focus: Highlight;
-      --signal: Highlight;
-      --ink: CanvasText;
-      --muted: CanvasText;
-      --surface: Canvas;
-      --canvas: Canvas;
-    }
-
-    .workspace-preview :global(.session-list),
-    .workspace-preview :global(.inspector),
-    .workspace-preview :global(.composer),
-    .conversation-panel,
-    .mobile-session-drawer,
-    .mobile-workspace-drawer,
-    .mobile-title-island,
-    .mobile-toolbar > :global(.pill),
-    .mobile-workspace-drawer,
-    .title-edit-dimmer,
-    .workspace-preview :global(.artifact-card),
-    .workspace-preview :global(.approval-card),
-    .workspace-preview :global(.clarification-card),
-    .workspace-preview :global(.image-card),
-    .workspace-preview :global(.stopped-card),
-    .workspace-preview :global(.loading-card),
-    .workspace-preview :global(.error-card) {
-      border-color: CanvasText;
-      background: Canvas;
-      box-shadow: none;
-      forced-color-adjust: auto;
-    }
-
-    .workspace-preview :global(.pill:focus-visible),
-    .workspace-preview :global(button:focus-visible),
-    .workspace-preview :global(textarea:focus-visible),
-    .workspace-preview :global(input:focus-visible) {
-      outline: 2px solid Highlight;
-      outline-offset: 2px;
     }
   }
 </style>

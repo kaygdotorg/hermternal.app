@@ -1,5 +1,7 @@
 import type { BrowserChatOptions } from '$lib/chat/browser-chat';
 import {
+  DASHBOARD_CONTRACT,
+  HERMES_SOURCE_SHA,
   JsonRpcChatError,
   type BoundedJsonValue,
   type JsonRpcChatEvent,
@@ -9,11 +11,26 @@ import {
   type JsonRpcConnectionState
 } from '$lib/chat/json-rpc-chat';
 import { LiveRestError, type LiveRestTransport, type LiveSession } from '$lib/transport';
+import {
+  createSessionCoordinator,
+  type ChatSessionPort,
+  type SessionCoordinator,
+  type SessionCoordinatorState,
+  type WorkspaceMode
+} from '$lib/session/coordinator';
+import {
+  CurrentSessionTerminalBridge,
+  type CurrentSessionTerminalEvent,
+  type CurrentSessionTerminalState
+} from '$lib/terminal/current-session-terminal';
+import type { PtyTransport } from '$lib/terminal/pty-transport';
 import { mapLiveMessages, mapLiveSessions } from './live-workspace';
 import type { SessionSummary, TimelineItem, WorkspaceRuntimeState } from './types';
 
 export interface LiveWorkspaceSnapshot {
   readonly state: WorkspaceRuntimeState;
+  /** Shared Chat/Terminal mode; omitted only for legacy test façades. */
+  readonly mode?: WorkspaceMode;
   readonly sessions: SessionSummary[];
   readonly activeSessionId?: string;
   readonly title: string;
@@ -21,11 +38,16 @@ export interface LiveWorkspaceSnapshot {
   readonly timeline: TimelineItem[];
   /** Semantic terminal cause retained separately from the broad UI state. */
   readonly permanentFailure?: LiveWorkspacePermanentFailure;
+  /** Terminal presentation state contains no PTY bytes or opaque attach values. */
+  readonly terminal?: CurrentSessionTerminalState;
+  readonly coordinator?: SessionCoordinatorState;
 }
 
 export interface LiveWorkspaceSessionOptions {
   readonly rest: LiveRestTransport;
   readonly createChat: (options: BrowserChatOptions) => JsonRpcChatTransport;
+  /** Optional normal-route PTY factory; tests and fixture façades may omit it. */
+  readonly createTerminal?: () => PtyTransport;
 }
 
 type LiveWorkspaceSubscriber = (snapshot: Readonly<LiveWorkspaceSnapshot>) => void;
@@ -114,6 +136,7 @@ interface CreatedDraftOwnership {
 export class LiveWorkspaceSession {
   private readonly rest: LiveRestTransport;
   private readonly createChat: LiveWorkspaceSessionOptions['createChat'];
+  private readonly createTerminal: LiveWorkspaceSessionOptions['createTerminal'];
   private readonly subscribers = new Set<LiveWorkspaceSubscriber>();
   private readonly approvals = new Map<string, PendingApproval>();
   private readonly clarifications = new Map<string, PendingClarification>();
@@ -128,6 +151,11 @@ export class LiveWorkspaceSession {
   // is no transport-specific reconnect operation to abort.
   private factoryRetryGeneration: number | undefined;
   private generation = 0;
+  private lastChatState: JsonRpcConnectionState = { status: 'offline', generation: 0 };
+  private coordinatorInstance: SessionCoordinator | undefined;
+  private terminalBridge: CurrentSessionTerminalBridge | undefined;
+  private coordinatorState: SessionCoordinatorState | undefined;
+  private terminalUnsubscribe: (() => void) | undefined;
   // History reads are presentation-owned operations. A generation protects
   // session replacement, while this monotonic epoch also protects same-session
   // overlap: a newer prompt, reconnect, terminal connection state, or
@@ -154,10 +182,48 @@ export class LiveWorkspaceSession {
   constructor(options: LiveWorkspaceSessionOptions) {
     this.rest = options.rest;
     this.createChat = options.createChat;
+    this.createTerminal = options.createTerminal;
   }
 
   get current(): Readonly<LiveWorkspaceSnapshot> {
     return this.snapshot;
+  }
+
+  /** The shared coordinator is created lazily so signed-out tests and auth reset do not own a stale lease. */
+  get coordinator(): SessionCoordinator | undefined {
+    return this.ensureCoordinatorResources()?.coordinator;
+  }
+
+  /** The surface receives the bridge, never the PTY's opaque transport identity. */
+  get terminal(): CurrentSessionTerminalBridge | undefined {
+    return this.ensureCoordinatorResources()?.terminal;
+  }
+
+  async activateMode(mode: WorkspaceMode): Promise<void> {
+    const coordinator = this.coordinator;
+    const sessionId = this.snapshot.activeSessionId;
+    if (!coordinator || !sessionId) return;
+    try {
+      await coordinator.switchMode(mode);
+    } catch {
+      // Coordinator state and terminal state publish the bounded recovery copy.
+    }
+  }
+
+  async reconnectTerminal(): Promise<void> {
+    try {
+      await this.terminal?.reconnect(this.controller?.signal);
+    } catch {
+      // TerminalSurface renders the sanitized transport state; no raw error crosses the boundary.
+    }
+  }
+
+  detachTerminal(): void {
+    this.terminal?.detach();
+  }
+
+  closeTerminal(): void {
+    this.terminal?.close();
   }
 
   subscribe(subscriber: LiveWorkspaceSubscriber): () => void {
@@ -266,6 +332,7 @@ export class LiveWorkspaceSession {
         model,
         timeline: []
       });
+      await this.syncCoordinatorSession(operation.generation, created.storedSessionId);
     } catch (error) {
       this.publishLoadFailure(error, operation.generation);
     }
@@ -526,6 +593,7 @@ export class LiveWorkspaceSession {
 
   invalidate(): void {
     if (this.disposed) return;
+    this.disposeCoordinatorResources();
     this.resetForInvalidation(true);
   }
 
@@ -536,7 +604,115 @@ export class LiveWorkspaceSession {
     // observe a still-active workspace during disposal.
     this.disposed = true;
     this.subscribers.clear();
+    this.disposeCoordinatorResources();
     this.resetForInvalidation(false);
+  }
+
+  private ensureCoordinatorResources():
+    | { readonly coordinator: SessionCoordinator; readonly terminal: CurrentSessionTerminalBridge }
+    | undefined {
+    if (!this.createTerminal || this.disposed) return undefined;
+
+    if (!this.terminalBridge) {
+      const terminal = new CurrentSessionTerminalBridge({ createTransport: this.createTerminal });
+      this.terminalBridge = terminal;
+      this.terminalUnsubscribe = terminal.subscribe((event) => this.handleTerminalEvent(event));
+    }
+
+    if (!this.coordinatorInstance) {
+      const workspace = this;
+      const chatPort: ChatSessionPort = {
+        get state(): JsonRpcConnectionState {
+          return workspace.chat?.state ?? workspace.lastChatState;
+        },
+        get selectedSessionId(): string | undefined {
+          return workspace.chat?.selectedSessionId ?? workspace.snapshot.activeSessionId;
+        },
+        connect: (signal) => {
+          const chat = workspace.chat;
+          if (!chat) return Promise.reject(new Error('Chat transport is not initialized.'));
+          return chat.connect(signal);
+        },
+        reconnect: (signal) => {
+          const chat = workspace.chat;
+          if (!chat) return Promise.reject(new Error('Chat transport is not initialized.'));
+          return chat.reconnect(signal);
+        },
+        restore: (sessionId, signal) => {
+          const chat = workspace.chat;
+          if (!chat) return Promise.reject(new Error('Chat transport is not initialized.'));
+          return chat.restore(sessionId, signal);
+        },
+        close: () => {
+          const chat = workspace.chat;
+          workspace.chat = undefined;
+          if (chat) closeChat(chat);
+        }
+      };
+      const coordinator = createSessionCoordinator({
+        chat: chatPort,
+        terminal: this.terminalBridge,
+        deployment: {
+          status: 'compatible',
+          contract: DASHBOARD_CONTRACT,
+          hermesSourceSha: HERMES_SOURCE_SHA
+        },
+        onStateChange: (state) => this.handleCoordinatorState(state)
+      });
+      this.coordinatorInstance = coordinator;
+      this.coordinatorState = coordinator.state;
+    }
+
+    return { coordinator: this.coordinatorInstance, terminal: this.terminalBridge };
+  }
+
+  private handleCoordinatorState(state: SessionCoordinatorState): void {
+    this.coordinatorState = state;
+    if (this.disposed) return;
+    this.publish({
+      ...this.snapshot,
+      mode: state.mode,
+      coordinator: state
+    });
+  }
+
+  private handleTerminalEvent(event: CurrentSessionTerminalEvent): void {
+    if (this.disposed) return;
+    if (event.type === 'bytes') return;
+    if (event.type === 'state') {
+      this.publish({ ...this.snapshot, terminal: event.state });
+      return;
+    }
+    if (this.snapshot.terminal) {
+      this.publish({
+        ...this.snapshot,
+        terminal: { ...this.snapshot.terminal, outputMayBeTruncated: true }
+      });
+    }
+  }
+
+  private async syncCoordinatorSession(
+    generation: number,
+    sessionId: string
+  ): Promise<void> {
+    const coordinator = this.coordinatorInstance;
+    if (!coordinator || !this.isCurrent(generation)) return;
+    try {
+      await coordinator.setSession(sessionId);
+    } catch {
+      // The workspace snapshot remains the authoritative Chat presentation;
+      // coordinator state carries the bounded Terminal recovery status.
+    }
+  }
+
+  private disposeCoordinatorResources(): void {
+    this.terminalUnsubscribe?.();
+    this.terminalUnsubscribe = undefined;
+    this.coordinatorInstance?.dispose();
+    this.coordinatorInstance = undefined;
+    this.coordinatorState = undefined;
+    this.terminalBridge?.dispose();
+    this.terminalBridge = undefined;
   }
 
   private async openSession(
@@ -608,6 +784,7 @@ export class LiveWorkspaceSession {
     // erase the server-owned timeline that is already on screen.
     this.commitHistory(operation.generation, session.id, chat);
     this.publish({ ...this.snapshot, state: timeline.length === 0 ? 'empty' : 'ready' });
+    await this.syncCoordinatorSession(operation.generation, session.id);
   }
 
   private handleEvent(generation: number, event: JsonRpcChatEvent): void {
@@ -716,6 +893,7 @@ export class LiveWorkspaceSession {
   }
 
   private handleConnectionState(generation: number, state: JsonRpcConnectionState): void {
+    this.lastChatState = state;
     if (!this.isCurrent(generation)) return;
 
     // Hermes can report a generic failed/uncertain callback after REST because

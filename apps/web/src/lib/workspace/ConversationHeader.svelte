@@ -2,10 +2,13 @@
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
+  import type { WorkspaceMode } from '$lib/session/coordinator';
   import type { WorkspaceActionHandler } from './types';
 
   export let title = 'Quarterly analysis';
   export let model = 'Atlas · balanced';
+  export let mode: WorkspaceMode = 'chat';
+  export let modeActionsEnabled = false;
   export let onAction: WorkspaceActionHandler = () => {};
 
   let editing = false;
@@ -79,35 +82,28 @@
 
   <div aria-label="Workspace mode" class="mode-controls">
     <Pill
-      ariaLabel="Chat mode selected"
+      ariaLabel={mode === 'chat' ? 'Chat mode selected' : 'Switch to Chat mode'}
       icon="conversation"
-      iconOnly
       label="Chat"
-      revealLabel
-      selected
-      title="Chat mode is current in this preview"
+      selected={mode === 'chat'}
+      title={modeActionsEnabled ? (mode === 'chat' ? 'Chat mode is current' : 'Switch to Chat mode') : 'Deferred in this preview'}
       toggleable
-      variant="selected"
+      variant={mode === 'chat' ? 'selected' : 'ghost'}
+      onActivate={modeActionsEnabled ? () => { if (mode !== 'chat') onAction({ type: 'set-mode', mode: 'chat' }); } : undefined}
     />
     <Pill
-      ariaLabel="Open terminal mode"
+      ariaLabel={mode === 'terminal' ? 'Terminal mode selected' : 'Open terminal mode'}
       icon="terminal"
-      iconOnly
       label="Terminal"
-      revealLabel
-      title="Terminal mode is deferred in this preview"
-      variant="ghost"
+      selected={mode === 'terminal'}
+      title={modeActionsEnabled ? (mode === 'terminal' ? 'Terminal mode is current' : 'Open the current-session terminal') : 'Deferred in this preview'}
+      toggleable
+      variant={mode === 'terminal' ? 'selected' : 'ghost'}
+      onActivate={modeActionsEnabled ? () => { if (mode !== 'terminal') onAction({ type: 'set-mode', mode: 'terminal' }); } : undefined}
     />
   </div>
 
-  <Pill
-    ariaLabel="Workspace options"
-    icon="share"
-    iconOnly
-    label="Workspace options"
-    title="Sharing is deferred in this preview"
-    variant="ghost"
-  />
+  <Pill ariaLabel="Workspace options" icon="menu" iconOnly label="Workspace options" variant="ghost" />
 
   <div class="header-model" aria-label={`Current model ${model}`}>
     <Icon name="spark" size={14} />
@@ -121,15 +117,14 @@
     display: flex;
     min-height: 72px;
     align-items: center;
-    gap: 14px;
+    gap: 10px;
     padding: 8px 8px 8px 12px;
     border-bottom: 1px solid var(--line-soft);
   }
 
   .title-region {
-    width: min(486px, 100%);
     min-width: 0;
-    flex: 0 1 486px;
+    flex: 1 1 auto;
   }
 
   .title-region :global(.pill) {
@@ -161,71 +156,56 @@
   }
 
   .mode-controls {
-    position: relative;
-    box-sizing: border-box;
     display: flex;
-    width: 92px;
-    height: 44px;
     flex: 0 0 auto;
-    align-items: center;
     gap: 2px;
-    padding: 0;
-    overflow: visible;
-  }
-
-  /* The mode island may grow visually, but its layout slot stays 92px wide.
-     Keeping the shell in a non-layout layer prevents a stationary pointer from
-     losing the hovered Chat or Terminal button while the reveal settles. */
-  .mode-controls::before {
-    position: absolute;
-    top: 0;
-    left: 0;
-    z-index: 0;
-    box-sizing: border-box;
-    width: 92px;
-    height: 44px;
+    padding: 2px;
     border: 1px solid var(--line-soft);
     border-radius: var(--radius-pill);
     background: color-mix(in srgb, var(--muted) 8%, transparent);
-    content: '';
-    pointer-events: none;
-    transition: width 150ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-
-  .mode-controls:has(:global(.pill:hover)),
-  .mode-controls:has(:global(.pill:focus-visible)) {
-    /* Raise the whole visual overlay above following header controls. The
-       overlay itself remains pointer-transparent, so adjacent buttons keep
-       their hit testing while the mode label is visibly unobscured. */
-    z-index: 2;
-  }
-
-  .mode-controls:has(:global(.pill:hover))::before,
-  .mode-controls:has(:global(.pill:focus-visible))::before {
-    width: 220px;
   }
 
   .mode-controls :global(.pill) {
-    position: relative;
-    z-index: 1;
-    width: 44px;
-    min-width: 44px;
-    height: 44px;
     min-height: 44px;
-    padding-inline: 8px;
+    padding-inline: 10px;
   }
 
   .mode-controls :global(.pill.ghost) {
     color: var(--ink);
   }
 
-  .header-model {
-    display: none;
+  .mode-controls :global(.pill-label) {
+    font-size: 13px;
   }
 
-  @container workspace-preview (max-width: 760px) {
+  .header-model {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  @media (min-width: 1280px) {
+    .header-model {
+      display: inline-flex;
+    }
+  }
+
+  @media (max-width: 620px) {
     .conversation-header {
       gap: 6px;
+    }
+
+    .mode-controls :global(.pill-label) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
     }
 
     .mode-controls :global(.pill) {

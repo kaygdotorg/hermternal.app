@@ -1,5 +1,6 @@
 import { createBrowserChatTransport } from '$lib/chat/browser-chat';
 import type { BrowserWebSocketFactory } from '$lib/chat/browser-chat';
+import { createBrowserPtyTransport } from '$lib/terminal/current-session-terminal';
 import { createBrowserAuthClient } from '$lib/auth-ui/browser-auth';
 import { BrowserAuthSession } from '$lib/auth-ui/browser-auth-session';
 import { discoverProviders } from '$lib/auth-ui/provider-discovery';
@@ -56,7 +57,8 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
         ...options,
         fetch: dependencies.fetch,
         createSocket: dependencies.createSocket
-      })
+      }),
+    createTerminal: () => createBrowserPtyTransport({ fetch: dependencies.fetch })
   });
   const auth = new BrowserAuthSession({
     client: createBrowserAuthClient({ fetch: dependencies.fetch }),

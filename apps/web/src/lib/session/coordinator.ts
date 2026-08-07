@@ -83,6 +83,8 @@ export type ChatSessionPort = Pick<
 export interface TerminalBinding {
   readonly sessionId: string;
   invalidate(): void;
+  /** Optional health hook for an explicit renderer/transport close. */
+  isValid?(): boolean;
 }
 
 export interface TerminalSessionPort {
@@ -614,11 +616,15 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   ): Promise<TerminalBinding> => {
     const sessionId = assertSession();
     const generation = sessionGeneration;
-    if (terminalBinding?.binding.sessionId === sessionId) {
+    if (
+      terminalBinding?.binding.sessionId === sessionId &&
+      terminalBinding.binding.isValid?.() !== false
+    ) {
       terminalStatus = 'attached';
       if (focusOwnerSequence !== undefined) terminalBindingFocusOwnerSequence = focusOwnerSequence;
       return Promise.resolve(terminalBinding.binding);
     }
+    if (terminalBinding?.binding.sessionId === sessionId) invalidateBinding();
 
     const existing = pendingTerminal;
     if (

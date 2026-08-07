@@ -2,6 +2,13 @@
 
 `renderer.ts` owns the browser-only Terminal boundary for W-22. It does not import Chat, PTY transport, session coordination, credentials, or live Hermes code.
 
+`current-session-terminal.ts` is the separate current-session bridge. It owns one
+`PtyTransport`, exposes one opaque `TerminalBinding`, and maps only the reviewed
+lifecycle state into the workspace. It forwards generation-tagged raw
+`Uint8Array` views without decoding or retaining them. A renderer-ready gate may
+delay the first PTY attach until the lazy TerminalSurface has a mounted sink;
+headless coordinator tests leave that gate disabled.
+
 ## Runtime contract
 
 - `createTerminalRenderer()` returns a small `TerminalRenderer` interface with `mount`, `write`, `resize`, `focus`, `whenIdle`, and `dispose`. `whenIdle()` is a renderer-call drain fence only; production W-Term DOM work is confirmed separately with a visible sentinel in browser workloads.
