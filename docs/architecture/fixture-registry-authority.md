@@ -63,7 +63,9 @@ record.
 The object-repository input is a canonical absolute plain checkout. The
 verifier rejects a symlinked `.git`, a linked-worktree `.git` file, external or
 symlinked `gitdir`/`commondir` metadata, and symlinked object/ref/config
-boundaries. It also rejects local `info/grafts`, shallow metadata,
+boundaries. It descriptor-walks the complete `objects` and `refs` trees with
+`O_NOFOLLOW`, so nested fanout, pack, and ref symlinks cannot redirect reads.
+It also rejects local `info/grafts`, shallow metadata,
 `objects/info/alternates`, `objects/info/http-alternates`, replacement refs,
 partial-clone/promisor settings, and local include or URL-redirection config.
 A disposable plain clone is therefore required when the caller is operating
@@ -75,10 +77,13 @@ not a claim about production deployment security.
 
 Checkout reads use descriptor-relative `O_NOFOLLOW | O_NONBLOCK` opens and
 regular-file descriptor checks. They stop after `MAX_GIT_OUTPUT` bytes, so a
-FIFO or oversized replacement fails promptly. The declared `source_commit`
-must be a Git `commit` object, not an annotated tag object. Path resolution,
-Git executable, config, and subprocess failures are converted to the same
-bounded redacted authority error.
+FIFO or oversized replacement fails promptly. Git stdout and stderr are also
+collected incrementally; either stream reaching the cap terminates or kills
+the child and drains both pipes without retaining unbounded output. Timeouts,
+non-zero exits, and pipe failures use the same bounded error path. The
+declared `source_commit` must be a Git `commit` object, not an annotated tag
+object. Path resolution, Git executable, config, and subprocess failures are
+converted to the same bounded redacted authority error.
 
 Run the standalone verifier from a plain checkout with:
 
@@ -123,10 +128,13 @@ verification:
 
 The same normal and optimized suite also rejects warning-suppressed grafts,
 shallow histories, empty local object stores that use alternates, replacement
-refs, symlinked or linked Git metadata, local include/promisor/redirect
-configuration, annotated-tag source objects, FIFO artifact paths, hostile Git
-`PATH`/global config, and checkout/object-root resolution failures. The FIFO
-case asserts prompt bounded exit rather than relying on a post-timeout kill.
+refs, nested fanout/pack/ref symlinks, symlinked or linked Git metadata, local
+include/promisor/redirect configuration, annotated-tag source objects, FIFO
+artifact paths, hostile Git `PATH`/global config, and checkout/object-root
+resolution failures. It bounds oversized blob, stderr, and history output in
+both interpreter modes without waiting for the helper process to finish. The
+FIFO and output-cap cases assert prompt bounded exit rather than relying on a
+post-timeout kill.
 
 The real Git object database remains the source of truth throughout these
 mutations. A local replacement authority therefore cannot authorize a matching

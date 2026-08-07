@@ -51,15 +51,19 @@ regenerating the index, baseline, and next authority.
 
 The verifier's object repository must be a canonical absolute plain checkout,
 not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
-`commondir`, object, ref, or config boundaries. It fails closed on local
-grafts, shallow metadata, alternates and HTTP alternates, replacement refs,
-partial-clone/promisor settings, and local include or URL-redirection config.
-Git is invoked only through validated `/usr/bin/git` with fixed helper `PATH`
-`/usr/bin:/bin`; inherited Git redirects and system/global config are removed.
-This is a trusted-host boundary for synthetic local evidence, not a production
-attestation. Checkout artifact reads are bounded nonblocking regular-file
-reads, and all normal and optimized failures remain one redacted
-`live_claim:false` JSON line.
+`commondir`, object, ref, or config boundaries. It descriptor-walks the full
+`objects` and `refs` trees with no-follow descriptors, so nested fanout, pack,
+and ref symlinks fail closed before Git can redirect an object or ref read. It
+also fails closed on local grafts, shallow metadata, alternates and HTTP
+alternates, replacement refs, partial-clone/promisor settings, and local
+include or URL-redirection config. Git is invoked only through validated
+`/usr/bin/git` with fixed helper `PATH` `/usr/bin:/bin`; inherited Git
+redirects and system/global config are removed. This is a trusted-host
+boundary for synthetic local evidence, not a production attestation. Checkout
+artifact reads are bounded nonblocking regular-file reads. Git stdout and
+stderr are streamed into separate bounded buffers; reaching the cap terminates
+or kills the child and drains both pipes. All normal and optimized failures
+remain one redacted `live_claim:false` JSON line.
 
 ## C-19 aggregate registry
 

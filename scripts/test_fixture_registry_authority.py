@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -275,6 +276,33 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         self.addCleanup(checkout_temporary.cleanup)
         return repo, checkout
 
+    def make_oversized_git_helper(self) -> Path:
+        """Make a local Git stand-in that blocks after writing over the cap."""
+
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-git-output-")
+        self.addCleanup(temporary.cleanup)
+        helper = Path(temporary.name) / "git-output-helper"
+        helper.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "import sys\n"
+            "import time\n"
+            "\n"
+            "mode = next((argument for argument in sys.argv[1:] if argument in {\"stderr\", \"history\", \"log\"}), \"stdout\")\n"
+            "file_descriptor = 2 if mode == \"stderr\" else 1\n"
+            "payload = b\"x\" * (524 * 1024 + 1)\n"
+            "written = 0\n"
+            "while written < len(payload):\n"
+            "    try:\n"
+            "        written += os.write(file_descriptor, payload[written:])\n"
+            "    except BrokenPipeError:\n"
+            "        raise SystemExit(0)\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        return helper
+
     @staticmethod
     def assert_success(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
         if completed.returncode != 0:
@@ -406,17 +434,17 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             "GIT_NO_LAZY_FETCH": "0",
         }
         captured: dict[str, str] = {}
-        real_run = verifier.subprocess.run
+        real_popen = verifier.subprocess.Popen
 
-        def capture_environment(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
+        def capture_environment(*args: object, **kwargs: object) -> Any:
             command = args[0] if args else kwargs.get("args")
             if isinstance(command, list) and command and command[0] == str(verifier.TRUSTED_GIT_EXECUTABLE):
                 captured.update(kwargs["env"])
-            return real_run(*args, **kwargs)
+            return real_popen(*args, **kwargs)
 
         with (
             mock.patch.dict(os.environ, hostile, clear=False),
-            mock.patch.object(verifier.subprocess, "run", side_effect=capture_environment),
+            mock.patch.object(verifier.subprocess, "Popen", side_effect=capture_environment),
         ):
             self.assertTrue(verifier.verify_checkout(ROOT, self.object_repo)["ok"])
         self.assertEqual(captured["GIT_NO_REPLACE_OBJECTS"], "1")
@@ -564,6 +592,34 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             (checkout / "contracts").symlink_to(outside, target_is_directory=True)
             with self.assertRaises(verifier.AuthorityError):
                 verifier._read_checkout_file(checkout, "contracts/fixtures/index.json")
+
+    def test_oversized_blob_output_is_bounded_in_both_modes(self) -> None:
+        object_temporary, object_repo = self.copy_object_repo()
+        self.addCleanup(object_temporary.cleanup)
+        blob_oid = subprocess.check_output(
+            ["git", "-C", str(object_repo), "hash-object", "-w", "--stdin"],
+            input=b"x" * (verifier.MAX_GIT_OUTPUT + 1),
+        ).decode("ascii").strip()
+        started = time.monotonic()
+        with self.assertRaises(verifier.AuthorityError):
+            verifier._git(object_repo, "cat-file", "blob", blob_oid)
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_oversized_stderr_is_bounded_without_deadlock(self) -> None:
+        helper = self.make_oversized_git_helper()
+        started = time.monotonic()
+        with mock.patch.object(verifier, "TRUSTED_GIT_EXECUTABLE", helper):
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._git(self.object_repo, "stderr")
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_oversized_history_output_is_bounded_without_deadlock(self) -> None:
+        helper = self.make_oversized_git_helper()
+        started = time.monotonic()
+        with mock.patch.object(verifier, "TRUSTED_GIT_EXECUTABLE", helper):
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._authority_introduction_commit(self.object_repo)
+        self.assertLess(time.monotonic() - started, 5)
 
     def test_authority_relationship_is_external_and_exact(self) -> None:
         trusted = verifier.load_trusted_authority(self.object_repo)
@@ -714,6 +770,31 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         )
         with self.copy_checkout() as checkout_temporary:
             self.assert_pair_failure(Path(checkout_temporary), object_repo=linked_repo)
+
+    def test_nested_object_pack_and_ref_symlinks_are_rejected(self) -> None:
+        variants = ("fanout", "pack", "ref")
+        for variant in variants:
+            with self.subTest(variant=variant):
+                object_temporary, object_repo = self.copy_object_repo()
+                self.addCleanup(object_temporary.cleanup)
+                git_dir = object_repo / ".git"
+                outside = object_repo.parent / f"outside-{variant}"
+                outside.write_bytes(b"external\n")
+                if variant == "fanout":
+                    fanout = git_dir / "objects" / "aa"
+                    fanout.mkdir(exist_ok=True)
+                    nested = fanout / "nested-redirect"
+                elif variant == "pack":
+                    pack = git_dir / "objects" / "pack"
+                    pack.mkdir(exist_ok=True)
+                    nested = pack / "redirect.pack"
+                else:
+                    heads = git_dir / "refs" / "heads"
+                    heads.mkdir(parents=True, exist_ok=True)
+                    nested = heads / "redirect"
+                nested.symlink_to(outside)
+                with self.copy_checkout() as checkout_temporary:
+                    self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
 
     def test_local_include_promisor_and_redirect_config_is_rejected(self) -> None:
         configurations = (

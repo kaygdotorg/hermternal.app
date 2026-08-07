@@ -18,8 +18,10 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import stat
 import subprocess
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -253,6 +255,58 @@ def _validate_local_config(data: bytes) -> None:
         _require(key not in {"insteadof", "pushinsteadof"})
 
 
+def _walk_plain_tree(path: Path) -> None:
+    """Descriptor-walk a Git tree without following nested symlinks."""
+
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock
+    root_fd: int | None = None
+    pending: list[int] = []
+    try:
+        root_fd = os.open(path, flags | directory_flag)
+        pending.append(root_fd)
+        root_fd = None
+        while pending:
+            directory_fd = pending.pop()
+            try:
+                _require(stat.S_ISDIR(os.fstat(directory_fd).st_mode))
+                for name in os.listdir(directory_fd):
+                    _require(name not in ("", ".", ".."))
+                    child_fd: int | None = None
+                    try:
+                        child_fd = os.open(name, flags, dir_fd=directory_fd)
+                        mode = os.fstat(child_fd).st_mode
+                        if stat.S_ISDIR(mode):
+                            pending.append(child_fd)
+                            child_fd = None
+                        else:
+                            _require(stat.S_ISREG(mode))
+                    finally:
+                        if child_fd is not None:
+                            os.close(child_fd)
+            finally:
+                os.close(directory_fd)
+    except AuthorityError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise AuthorityError() from exc
+    finally:
+        if root_fd is not None:
+            try:
+                os.close(root_fd)
+            except OSError:
+                pass
+        while pending:
+            descriptor = pending.pop()
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def _validate_object_repository(object_repo: Path) -> Path:
     """Accept only a plain checkout with a local, self-contained Git database."""
 
@@ -282,6 +336,11 @@ def _validate_object_repository(object_repo: Path) -> Path:
     for relative in ("gitdir", "commondir", "config.worktree"):
         _require_missing(git_dir / relative)
     _validate_local_config(_read_bounded_regular_path(git_dir / "config", MAX_GIT_OUTPUT))
+    # Git resolves fanout objects, pack indexes, and nested refs below these
+    # directories. Walk them through descriptors so a nested symlink cannot
+    # redirect an otherwise valid object or ref read after this preflight.
+    _walk_plain_tree(git_dir / "objects")
+    _walk_plain_tree(git_dir / "refs")
 
     _require(_git(root, "rev-parse", "--show-toplevel") == f"{root}\n".encode("utf-8"))
     _require(_git(root, "rev-parse", "--is-inside-work-tree") == b"true\n")
@@ -354,11 +413,145 @@ def _strict_git_environment() -> dict[str, str]:
     return environment
 
 
+def _close_git_stream(selector: selectors.BaseSelector, stream: Any) -> None:
+    try:
+        selector.unregister(stream)
+    except (KeyError, ValueError):
+        pass
+    try:
+        stream.close()
+    except (OSError, ValueError):
+        pass
+
+
+def _terminate_and_drain_git(
+    process: subprocess.Popen[bytes], selector: selectors.BaseSelector
+) -> None:
+    """Stop a bounded-output child and drain its pipes without retaining data."""
+
+    try:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        try:
+            process.kill()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass
+
+    deadline = time.monotonic() + 1.0
+    while selector.get_map():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            events = selector.select(remaining)
+        except (OSError, RuntimeError, ValueError):
+            break
+        if not events:
+            break
+        for key, _ in events:
+            stream = key.fileobj
+            try:
+                while True:
+                    chunk = os.read(stream.fileno(), 64 * 1024)
+                    if not chunk:
+                        _close_git_stream(selector, stream)
+                        break
+            except BlockingIOError:
+                continue
+            except (OSError, RuntimeError, ValueError):
+                _close_git_stream(selector, stream)
+
+    for key in list(selector.get_map().values()):
+        _close_git_stream(selector, key.fileobj)
+    try:
+        process.wait(timeout=0.25)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass
+        try:
+            process.wait(timeout=0.25)
+        except subprocess.SubprocessError:
+            pass
+
+
+def _run_bounded_git(
+    command: list[str], environment: dict[str, str]
+) -> tuple[int, bytes, bytes]:
+    """Collect both pipes incrementally and abort at the first output cap."""
+
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+        env=environment,
+    )
+    selector = selectors.DefaultSelector()
+    buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    streams: tuple[tuple[Any, str], ...] = (
+        (process.stdout, "stdout"),
+        (process.stderr, "stderr"),
+    )
+    try:
+        for stream, label in streams:
+            if stream is None:
+                raise AuthorityError()
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, label)
+        deadline = time.monotonic() + 10.0
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AuthorityError()
+            events = selector.select(remaining)
+            if not events:
+                raise AuthorityError()
+            for key, _ in events:
+                stream = key.fileobj
+                label = key.data
+                try:
+                    chunk = os.read(
+                        stream.fileno(),
+                        min(64 * 1024, MAX_GIT_OUTPUT + 1 - len(buffers[label])),
+                    )
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    _close_git_stream(selector, stream)
+                    continue
+                buffers[label].extend(chunk)
+                if len(buffers[label]) > MAX_GIT_OUTPUT:
+                    raise AuthorityError()
+        try:
+            returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            raise AuthorityError() from exc
+        return returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
+    except AuthorityError:
+        _terminate_and_drain_git(process, selector)
+        raise
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        _terminate_and_drain_git(process, selector)
+        raise AuthorityError() from exc
+    finally:
+        for key in list(selector.get_map().values()):
+            _close_git_stream(selector, key.fileobj)
+        selector.close()
+
+
 def _git(repo_root: Path, *arguments: str) -> bytes:
     """Read only bounded data from the local object database; never fetches."""
 
     try:
-        completed = subprocess.run(
+        returncode, stdout, stderr = _run_bounded_git(
             [
                 str(_trusted_git_path()),
                 "--no-replace-objects",
@@ -368,18 +561,15 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
                 str(repo_root),
                 *arguments,
             ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=10,
-            env=_strict_git_environment(),
+            _strict_git_environment(),
         )
+    except AuthorityError:
+        raise
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         raise AuthorityError() from exc
-    _require(completed.returncode == 0 and completed.stderr == b"")
-    _require(len(completed.stdout) <= MAX_GIT_OUTPUT)
-    return completed.stdout
+    _require(returncode == 0 and stderr == b"")
+    _require(len(stdout) <= MAX_GIT_OUTPUT)
+    return stdout
 
 
 def _authority_introduction_commit(object_repo: Path) -> str:
