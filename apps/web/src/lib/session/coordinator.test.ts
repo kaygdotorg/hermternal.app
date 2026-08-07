@@ -230,6 +230,30 @@ describe('createSessionCoordinator', () => {
     });
   });
 
+  it('keeps a deferred Terminal binding attached without a late W-Term focus after switching to Chat', async () => {
+    const focus: Array<{ mode: string; target: string }> = [];
+    const harness = createCoordinator(undefined, undefined, {
+      onFocusIntent: (intent) => focus.push(intent)
+    });
+    const pending = harness.terminal.deferNext('session-old');
+
+    const terminalActivation = harness.coordinator.activate('terminal');
+    await flush();
+    const chatActivation = harness.coordinator.activate('chat');
+    await chatActivation;
+
+    expect(focus).toEqual([expect.objectContaining({ mode: 'chat', target: 'composer' })]);
+    pending.deferred.resolve(pending.binding);
+    await terminalActivation;
+
+    expect(focus).toEqual([expect.objectContaining({ mode: 'chat', target: 'composer' })]);
+    expect(harness.coordinator.state.mode).toBe('chat');
+    expect(harness.coordinator.state.terminalStatus).toBe('attached');
+    expect(harness.coordinator.state.terminalSessionId).toBe('session-old');
+    expect(pending.binding.invalidate).not.toHaveBeenCalled();
+    expect(harness.terminal.release).not.toHaveBeenCalled();
+  });
+
   it('coalesces rapid repeated switching and does not duplicate a Terminal attach', async () => {
     const harness = createCoordinator();
     const pending = harness.terminal.deferNext('session-old');
@@ -374,6 +398,48 @@ describe('createSessionCoordinator', () => {
     expect(newAttach.binding.invalidate).not.toHaveBeenCalled();
   });
 
+  it.each(['logout', 'dispose'] as const)(
+    'does not clean a current shared raw binding from a stale completion before %s',
+    async (finalize) => {
+      const harness = createCoordinator();
+      const oldAttach = harness.terminal.deferNext('session-old');
+      const replacementAttach = harness.terminal.deferNext('session-new', oldAttach.binding);
+      const oldActivation = harness.coordinator.activate('terminal');
+      await flush();
+
+      const replacement = harness.coordinator.setSession('session-new');
+      await flush();
+      expect(harness.terminal.attach).toHaveBeenCalledTimes(2);
+      replacementAttach.deferred.resolve(oldAttach.binding);
+      await replacement;
+
+      expect(harness.coordinator.state.terminalSessionId).toBe('session-new');
+      expect(oldAttach.binding.invalidate).not.toHaveBeenCalled();
+      expect(harness.terminal.release).not.toHaveBeenCalled();
+
+      oldAttach.deferred.resolve(oldAttach.binding);
+      await oldActivation;
+
+      expect(oldAttach.binding.invalidate).not.toHaveBeenCalled();
+      expect(harness.terminal.release).not.toHaveBeenCalled();
+      const attachedGeneration = harness.coordinator.state.sessionGeneration;
+      if (finalize === 'logout') harness.coordinator.logout();
+      else harness.coordinator.dispose();
+
+      expectInvalidatedThenReleased(harness.terminal, oldAttach.binding);
+      expect(harness.coordinator.state.sessionGeneration).toBe(attachedGeneration + 1);
+      expect(harness.coordinator.state.terminalStatus).toBe('detached');
+      expect(harness.coordinator.state.activeSessionId).toBeUndefined();
+      expect(harness.coordinator.state.status).toBe(finalize === 'logout' ? 'logged-out' : 'disposed');
+
+      if (finalize === 'logout') harness.coordinator.logout();
+      else harness.coordinator.dispose();
+      expect(oldAttach.binding.invalidate).toHaveBeenCalledTimes(1);
+      expect(harness.terminal.release).toHaveBeenCalledTimes(1);
+      expect(harness.coordinator.state.sessionGeneration).toBe(attachedGeneration + 1);
+    }
+  );
+
   it('cleans each attachment lease when the adapter reuses one raw binding', async () => {
     const harness = createCoordinator();
     const staleAttach = harness.terminal.deferNext('session-old');
@@ -445,6 +511,129 @@ describe('createSessionCoordinator', () => {
     expectInvalidatedThenReleased(harness.terminal, pending.binding);
     expect(harness.coordinator.state.status).toBe('disposed');
   });
+
+  it.each([
+    ['invalidate', 'logout', 'logged-out'],
+    ['release', 'logout', 'logged-out'],
+    ['invalidate', 'dispose', 'disposed'],
+    ['release', 'dispose', 'disposed']
+  ] as const)(
+    'does not resume setSession when %s cleanup reentrantly calls %s',
+    async (cleanupPoint, action, expectedStatus) => {
+      const harness = createCoordinator();
+      await harness.coordinator.activate('terminal');
+      const binding = await harness.terminal.attach.mock.results[0]!.value;
+
+      if (cleanupPoint === 'invalidate') {
+        vi.spyOn(binding, 'invalidate').mockImplementation(() => {
+          if (action === 'logout') harness.coordinator.logout();
+          else harness.coordinator.dispose();
+        });
+      } else {
+        harness.terminal.release.mockImplementationOnce(() => {
+          if (action === 'logout') harness.coordinator.logout();
+          else harness.coordinator.dispose();
+        });
+      }
+
+      await harness.coordinator.setSession('session-new');
+
+      expect(binding.invalidate).toHaveBeenCalledTimes(1);
+      expect(harness.terminal.release).toHaveBeenCalledWith(binding);
+      expect(harness.chat.restore).not.toHaveBeenCalled();
+      expect(harness.chat.connect).not.toHaveBeenCalled();
+      expect(harness.coordinator.activeSessionId).toBeUndefined();
+      expect(harness.coordinator.state).toMatchObject({
+        status: expectedStatus,
+        mode: 'chat',
+        terminalStatus: 'detached',
+        sessionGeneration: 2
+      });
+      expect(harness.coordinator.state).not.toHaveProperty('activeSessionId');
+    }
+  );
+
+  it.each(['logout', 'dispose'] as const)(
+    'does not resume setSession after activating publication reenters %s',
+    async (action) => {
+      let reentered = false;
+      const harness = createCoordinator(undefined, undefined, {
+        onStateChange: (nextState) => {
+          if (reentered || nextState.status !== 'activating' || nextState.activeSessionId !== 'session-new') {
+            return;
+          }
+          reentered = true;
+          if (action === 'logout') harness.coordinator.logout();
+          else harness.coordinator.dispose();
+        }
+      });
+
+      const result = await harness.coordinator.setSession('session-new');
+
+      expect(reentered).toBe(true);
+      expect(result.status).toBe(action === 'logout' ? 'logged-out' : 'disposed');
+      expect(harness.chat.connect).not.toHaveBeenCalled();
+      expect(harness.chat.restore).not.toHaveBeenCalled();
+      expect(harness.terminal.attach).not.toHaveBeenCalled();
+      expect(harness.chat.close).toHaveBeenCalledTimes(1);
+      expect(harness.coordinator.activeSessionId).toBeUndefined();
+      expect(harness.coordinator.state.sessionGeneration).toBe(3);
+      expect(harness.coordinator.state.terminalStatus).toBe('detached');
+      expect(harness.coordinator.state).not.toHaveProperty('focusIntent');
+    }
+  );
+
+  it.each([
+    ['logout', 'invalidate', 'logout', 'logged-out'],
+    ['logout', 'invalidate', 'dispose', 'disposed'],
+    ['logout', 'release', 'logout', 'logged-out'],
+    ['logout', 'release', 'dispose', 'disposed'],
+    ['dispose', 'invalidate', 'dispose', 'disposed'],
+    ['dispose', 'invalidate', 'logout', 'disposed'],
+    ['dispose', 'release', 'dispose', 'disposed'],
+    ['dispose', 'release', 'logout', 'disposed']
+  ] as const)(
+    'keeps outer %s cleanup exactly once when %s reenters %s',
+    async (outerAction, cleanupPoint, nestedAction, expectedStatus) => {
+      const harness = createCoordinator();
+      await harness.coordinator.activate('terminal');
+      const binding = await harness.terminal.attach.mock.results[0]!.value;
+      const initialGeneration = harness.coordinator.state.sessionGeneration;
+      const invoke = (action: 'logout' | 'dispose'): void => {
+        if (action === 'logout') harness.coordinator.logout();
+        else harness.coordinator.dispose();
+      };
+      const reenter = (): void => invoke(nestedAction);
+
+      if (cleanupPoint === 'invalidate') {
+        vi.spyOn(binding, 'invalidate').mockImplementation(reenter);
+      } else {
+        harness.terminal.release.mockImplementationOnce(reenter);
+      }
+
+      invoke(outerAction);
+
+      expect(binding.invalidate).toHaveBeenCalledTimes(1);
+      expect(harness.terminal.release).toHaveBeenCalledTimes(1);
+      expect(harness.chat.close).toHaveBeenCalledTimes(1);
+      expect(harness.coordinator.state).toMatchObject({
+        status: expectedStatus,
+        mode: 'chat',
+        sessionGeneration: initialGeneration + 1,
+        terminalStatus: 'detached'
+      });
+      expect(harness.coordinator.state).not.toHaveProperty('activeSessionId');
+      expect(harness.coordinator.state).not.toHaveProperty('terminalSessionId');
+      expect(harness.coordinator.state).not.toHaveProperty('focusIntent');
+
+      invoke(expectedStatus === 'logged-out' ? 'logout' : 'dispose');
+      expect(binding.invalidate).toHaveBeenCalledTimes(1);
+      expect(harness.terminal.release).toHaveBeenCalledTimes(1);
+      expect(harness.chat.close).toHaveBeenCalledTimes(1);
+      expect(harness.coordinator.state.sessionGeneration).toBe(initialGeneration + 1);
+      expect(harness.coordinator.state.status).toBe(expectedStatus);
+    }
+  );
 
   it('restores a selected server session after refresh without creating a transcript mirror', async () => {
     const harness = createCoordinator();
