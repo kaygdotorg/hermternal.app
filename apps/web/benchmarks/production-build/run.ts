@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants as fsConstants, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
-import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, stat, symlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { arch, cpus, platform, release, tmpdir, type } from 'node:os';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -20,8 +20,51 @@ const MACOS_SANDBOX_PATH = '/usr/bin/sandbox-exec';
 const LINUX_SANDBOX_PATH = '/usr/bin/bwrap';
 const SIGNAL_CLEANUP_DEADLINE_MS = 10_000;
 const SERIES_CLEANUP_GRACE_MS = 2_000;
-const MAX_WORKLOAD_BYTES = 16 * 1024;
+export const MAX_JSON_BYTES = 16 * 1024;
 const MAX_ERROR_BYTES = 512;
+const GENERATED_SVELTE_TSCONFIG = `{
+  "compilerOptions": {
+    "paths": {
+      "$lib": ["../src/lib"],
+      "$lib/*": ["../src/lib/*"],
+      "$app/types": ["./types/index.d.ts"]
+    },
+    "rootDirs": ["..", "./types"],
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "lib": ["esnext", "DOM", "DOM.Iterable"],
+    "moduleResolution": "bundler",
+    "module": "esnext",
+    "noEmit": true,
+    "target": "esnext"
+  },
+  "include": [
+    "ambient.d.ts",
+    "env.d.ts",
+    "non-ambient.d.ts",
+    "./types/**/$types.d.ts",
+    "../vite.config.js",
+    "../vite.config.ts",
+    "../src/**/*.js",
+    "../src/**/*.ts",
+    "../src/**/*.svelte",
+    "../test/**/*.js",
+    "../test/**/*.ts",
+    "../test/**/*.svelte",
+    "../tests/**/*.js",
+    "../tests/**/*.ts",
+    "../tests/**/*.svelte"
+  ],
+  "exclude": [
+    "../node_modules/**",
+    "../src/service-worker.js",
+    "../src/service-worker/**/*.js",
+    "../src/service-worker.ts",
+    "../src/service-worker/**/*.ts",
+    "../src/service-worker.d.ts",
+    "../src/service-worker/**/*.d.ts"
+  ]
+}\n`;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PACKAGE_VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/;
 const activeWorkspaces = new Set<string>();
@@ -40,7 +83,7 @@ export interface TreeIdentity extends FileIdentity {
   symlinks: number;
 }
 
-interface RuntimeIdentity {
+export interface RuntimeIdentity {
   node: FileIdentity;
   bun: FileIdentity;
   python: FileIdentity;
@@ -279,7 +322,7 @@ export function validateWorkload(untrusted: unknown): Workload {
     pathLists.some((list) => !Array.isArray(list) || list.some((item) => typeof item !== 'string')) ||
     JSON.stringify(build.arguments) !== JSON.stringify(['build', '--configLoader', 'runner']) ||
     JSON.stringify(build.input_files) !==
-      JSON.stringify(['package.json', 'bun.lock', 'svelte.config.js', 'tsconfig.json', 'vite.config.ts', '.svelte-kit/tsconfig.json']) ||
+      JSON.stringify(['package.json', 'bun.lock', 'svelte.config.js', 'tsconfig.json', 'vite.config.ts']) ||
     JSON.stringify(build.input_roots) !== JSON.stringify(['src', 'static']) ||
     network.mode !== 'deny' ||
     network.boundary !== 'os_sandbox' ||
@@ -297,7 +340,7 @@ export function validateWorkload(untrusted: unknown): Workload {
   const maximum = requirePositiveInteger(repetitions.maximum, 'repetition_limit_invalid');
   const cold = requirePositiveInteger(repetitions.cold, 'cold_repetitions_invalid');
   const warm = requirePositiveInteger(repetitions.warm, 'warm_repetitions_invalid');
-  if (cold > maximum || warm > maximum || maximum > 100) {
+  if (cold > maximum || warm + 1 > maximum || maximum > 100) {
     throw new BenchmarkError('repetition_limit_invalid');
   }
   const validatedLimits = {
@@ -376,7 +419,13 @@ export function parseArguments(args: string[], workload: Workload): RunOptions {
     const rawValue = args[index + 1];
     if (!rawValue || !/^\d+$/.test(rawValue)) throw new BenchmarkError('argument_value_invalid');
     const value = Number(rawValue);
-    if (value < 1 || value > workload.repetitions.maximum) throw new BenchmarkError('argument_value_invalid');
+    if (
+      value < 1 ||
+      value > workload.repetitions.maximum ||
+      (argument === '--warm' && value + 1 > workload.repetitions.maximum)
+    ) {
+      throw new BenchmarkError('argument_value_invalid');
+    }
     if (argument === '--cold') coldRepetitions = value;
     else warmRepetitions = value;
     index += 1;
@@ -510,6 +559,12 @@ async function createWorkspace(workload: Workload, dependencySnapshot: string, i
     for (const inputRoot of workload.build.input_roots) {
       await copyBoundedTree(join(inputSnapshot, inputRoot), join(workspace, inputRoot), copied, workload.limits.workspace_input_bytes);
     }
+    const generatedTsconfig = join(workspace, '.svelte-kit', 'tsconfig.json');
+    await mkdir(dirname(generatedTsconfig), { recursive: true });
+    const generatedTsconfigBytes = new TextEncoder().encode(GENERATED_SVELTE_TSCONFIG);
+    copied.bytes += generatedTsconfigBytes.byteLength;
+    if (copied.bytes > workload.limits.workspace_input_bytes) throw new BenchmarkError('workspace_input_limit_exceeded');
+    await writeFile(generatedTsconfig, generatedTsconfigBytes);
     const copiedConfig = join(workspace, 'svelte.config.js');
     await rename(copiedConfig, join(workspace, 'svelte.config.source.js'));
     const deterministicConfig = `import adapter from '@sveltejs/adapter-static';\nimport config from './svelte.config.source.js';\n\n// The benchmark pins SvelteKit's otherwise timestamp-based version so identical\n// source inputs produce identical production artifacts across repetitions. The\n// adapter and SvelteKit intermediates stay below the same quota mount. Keeping\n// their configured paths real preserves generated relative imports while bounding\n// peak bytes, not only the final scanned artifact extent.\nexport default {\n  ...config,\n  kit: {\n    ...config.kit,\n    outDir: '.artifact-output/.svelte-kit',\n    adapter: adapter({ pages: '.artifact-output/build', assets: '.artifact-output/build', fallback: '200.html' }),\n    version: { name: ${JSON.stringify(workload.build.version_name)}, pollInterval: 0 }\n  }\n};\n`;
@@ -960,6 +1015,11 @@ async function runWarm(
   runtime: ProtectedRuntime,
   repetitions: number
 ): Promise<{ warmup: BuildObservation; observations: BuildObservation[] }> {
+  // The first helper repetition is an excluded warm-up, so the public warm
+  // count must leave one slot below both the workload and supervisor bounds.
+  if (!Number.isSafeInteger(repetitions) || repetitions < 1 || repetitions + 1 > workload.repetitions.maximum) {
+    throw new BenchmarkError('repetition_limit_invalid');
+  }
   const workspace = await createWorkspace(workload, dependencySnapshot, inputSnapshot);
   try {
     const series = await runBuildSeries(workspace, dependencySnapshot, workload, runtime, repetitions + 1);
@@ -984,18 +1044,41 @@ function commandVersion(command: string, args: string[]): string {
   return new TextDecoder().decode(result.stdout).trim();
 }
 
-export async function readPackageVersion(dependencySnapshot: string): Promise<string> {
+export type BoundedFileHandle = Pick<FileHandle, 'read' | 'close'>;
+export type BoundedFileOpener = (path: string, flags: number) => Promise<BoundedFileHandle>;
+
+export async function readBoundedFile(
+  path: string,
+  limit: number,
+  openFile: BoundedFileOpener = (filePath, flags) => open(filePath, flags)
+): Promise<Uint8Array> {
+  const handle = await openFile(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    // Read one byte beyond the accepted bound through the opened descriptor.
+    // This avoids a stat/read TOCTOU and keeps allocation bounded if a file
+    // grows or is replaced while metadata is being read.
+    const buffer = new Uint8Array(limit + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.byteLength) {
+      const result = await handle.read(buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead);
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
+    if (bytesRead > limit) throw new Error('bounded_file_oversized');
+    return buffer.slice(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function readPackageVersion(
+  dependencySnapshot: string,
+  openFile?: BoundedFileOpener
+): Promise<string> {
   const packagePath = join(dependencySnapshot, 'vite', 'package.json');
   let raw: Uint8Array;
   try {
-    const handle = await open(packagePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    try {
-      const metadata = await handle.stat();
-      if (!metadata.isFile() || metadata.size > 16 * 1024) throw new Error('package metadata invalid');
-      raw = await handle.readFile();
-    } finally {
-      await handle.close();
-    }
+    raw = await readBoundedFile(packagePath, MAX_JSON_BYTES, openFile);
   } catch {
     throw new BenchmarkError('vite_metadata_unavailable');
   }
@@ -1013,6 +1096,35 @@ export async function readPackageVersion(dependencySnapshot: string): Promise<st
   // execute Vite's bin script: that would leave the measured OS boundary and
   // could observe a mutable checkout or caller-controlled preload environment.
   return parsed.version;
+}
+
+export function assertMeasuredInputsTracked(
+  workload: Workload,
+  repositoryRoot = resolve(APP_ROOT, '..', '..')
+): void {
+  const measuredPaths = [...workload.build.input_files, ...workload.build.input_roots].map((path) =>
+    join('apps', 'web', path).split(sep).join('/')
+  );
+  const status = Bun.spawnSync(
+    [
+      '/usr/bin/git',
+      '-C',
+      repositoryRoot,
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--untracked-files=all',
+      '--ignored=matching',
+      '--',
+      ...measuredPaths
+    ],
+    { stdout: 'pipe', stderr: 'ignore' }
+  );
+  if (status.exitCode !== 0) throw new BenchmarkError('source_input_status_unavailable');
+  // Porcelain -z records are NUL-delimited. Never split on newlines: Git
+  // permits newlines in filenames, and every matching record is untrusted.
+  const records = new TextDecoder().decode(status.stdout).split('\0').filter(Boolean);
+  if (records.length > 0) throw new BenchmarkError('source_input_tree_dirty');
 }
 
 export function sourceCommit(): string {
@@ -1107,6 +1219,21 @@ function sameIdentity(actual: FileIdentity | TreeIdentity, expected: FileIdentit
   return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
+export function requireRuntimeAnchor(workload: Workload, targetPlatform = platform()): RuntimeIdentity {
+  if (targetPlatform !== 'darwin' && targetPlatform !== 'linux') {
+    throw new BenchmarkError('runtime_platform_unsupported');
+  }
+  const anchor = workload.integrity.runtime[targetPlatform];
+  if (!anchor) throw new BenchmarkError('runtime_identity_anchor_missing');
+  return anchor;
+}
+
+export function assertRuntimeIdentity(actual: RuntimeIdentity, expected: RuntimeIdentity): void {
+  for (const key of Object.keys(expected) as Array<keyof RuntimeIdentity>) {
+    if (!sameIdentity(actual[key], expected[key])) throw new BenchmarkError('runtime_identity_mismatch');
+  }
+}
+
 async function verifyDependencySnapshot(
   workload: Workload,
   dependencySnapshot: string,
@@ -1132,18 +1259,14 @@ async function verifyDependencySnapshot(
   for (const key of Object.keys(actualTrees) as Array<keyof typeof actualTrees>) {
     if (!sameIdentity(actualTrees[key], expected[key])) throw new BenchmarkError('dependency_identity_mismatch');
   }
-  const runtimeAnchor = expected.runtime[platform() as 'darwin' | 'linux'];
-  if (runtimeAnchor) {
-    const actualRuntime = {
-      node: await fileIdentity(runtime.nodePath),
-      bun: await fileIdentity(process.execPath),
-      python: await fileIdentity(runtime.pythonPath),
-      sandbox: await fileIdentity(runtime.sandboxPath)
-    };
-    for (const key of Object.keys(actualRuntime) as Array<keyof typeof actualRuntime>) {
-      if (!sameIdentity(actualRuntime[key], runtimeAnchor[key])) throw new BenchmarkError('runtime_identity_mismatch');
-    }
-  }
+  const runtimeAnchor = requireRuntimeAnchor(workload);
+  const actualRuntime = {
+    node: await fileIdentity(runtime.nodePath),
+    bun: await fileIdentity(process.execPath),
+    python: await fileIdentity(runtime.pythonPath),
+    sandbox: await fileIdentity(runtime.sandboxPath)
+  };
+  assertRuntimeIdentity(actualRuntime, runtimeAnchor);
 }
 
 async function toolchainIdentity(dependencySnapshot: string, inputSnapshot: string, runtime: ProtectedRuntime): Promise<Record<string, unknown>> {
@@ -1339,15 +1462,7 @@ async function loadWorkload(): Promise<{ workload: Workload; bytes: Uint8Array }
   let raw: Uint8Array;
   let parsed: unknown;
   try {
-    const handle = await open(WORKLOAD_PATH, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    try {
-      const buffer = new Uint8Array(MAX_WORKLOAD_BYTES + 1);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
-      if (bytesRead > MAX_WORKLOAD_BYTES) throw new Error('oversized');
-      raw = buffer.slice(0, bytesRead);
-    } finally {
-      await handle.close();
-    }
+    raw = await readBoundedFile(WORKLOAD_PATH, MAX_JSON_BYTES);
     parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
   } catch {
     throw new BenchmarkError('workload_json_invalid');
@@ -1416,6 +1531,9 @@ async function main(): Promise<void> {
   const workload = loadedWorkload.workload;
   const workloadBytes = loadedWorkload.bytes;
   const options = parseArguments(process.argv.slice(2), workload);
+  // Do not begin copying or measuring on a platform whose executable bytes are
+  // not independently anchored by the reviewed workload fixture.
+  requireRuntimeAnchor(workload);
   // Synchronous creation and registration form one signal-free JavaScript turn;
   // SIGINT/SIGTERM can no longer observe an unregistered on-disk run root.
   const runRoot = mkdtempSync(join(tmpdir(), 'hermternal-web-benchmark-'));
@@ -1425,6 +1543,10 @@ async function main(): Promise<void> {
     // copied from this immutable snapshot, while the live checkout is checked
     // again after the run so a concurrent edit cannot receive evidence.
     const sourceCommitSha = sourceCommit();
+    // Git membership is checked only against the live source repository. The
+    // snapshot and temporary workspaces are intentionally outside Git, so this
+    // preflight must remain separate from inputIdentity().
+    assertMeasuredInputsTracked(workload);
     const sourceInput = await inputIdentity(workload);
     const inputSnapshot = await captureInputSnapshot(
       workload,
@@ -1457,6 +1579,7 @@ async function main(): Promise<void> {
     if (new Set(artifactIdentities).size !== 1) throw new BenchmarkError('artifact_identity_drift');
     const finalToolchain = await toolchainIdentity(dependencySnapshot, inputSnapshot.root, runtime);
     if (JSON.stringify(toolchain) !== JSON.stringify(finalToolchain)) throw new BenchmarkError('dependency_snapshot_mutated');
+    assertMeasuredInputsTracked(workload);
     const finalSourceCommit = sourceCommit();
     const finalSourceInput = await inputIdentity(workload);
     assertSourceIdentityUnchanged(sourceCommitSha, sourceInput, finalSourceCommit, finalSourceInput);

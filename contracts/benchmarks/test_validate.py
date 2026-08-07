@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent
@@ -448,6 +449,29 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         self._assert_cli_failure(b'{"schema":NaN}')
         self._assert_cli_failure(b'{"schema":1e999}')
         self._assert_cli_failure(b"\xff\xfe\xfd")
+
+    def test_load_json_rejects_oversized_input_after_bounded_descriptor_read(self) -> None:
+        with tempfile.NamedTemporaryFile() as handle:
+            handle.write(b"{" + b"x" * validate.MAX_JSON_BYTES + b"}")
+            handle.flush()
+            requested: list[int] = []
+            original_read = validate.os.read
+
+            def bounded_read(descriptor: int, count: int) -> bytes:
+                requested.append(count)
+                return original_read(descriptor, count)
+
+            with patch.object(validate.os, "read", side_effect=bounded_read):
+                with self.assertRaises(validate.ValidationError):
+                    validate.load_json(Path(handle.name))
+            self.assertTrue(requested)
+            self.assertTrue(all(count <= validate.MAX_JSON_BYTES + 1 for count in requested))
+
+    def test_runtime_anchor_selection_fails_closed_for_unanchored_linux(self) -> None:
+        darwin = {"darwin": {"node": {}, "bun": {}, "python": {}, "sandbox": {}}}
+        self.assertIs(validate._runtime_anchor_for_environment(darwin, "darwin-25.5.0"), darwin["darwin"])
+        with self.assertRaises(validate.ValidationError):
+            validate._runtime_anchor_for_environment(darwin, "linux-6.1.0")
 
     def test_error_output_does_not_echo_sensitive_arguments_or_values(self) -> None:
         for optimized in (False, True):

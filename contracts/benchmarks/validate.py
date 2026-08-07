@@ -494,12 +494,33 @@ def _parse_json_bytes(raw: bytes) -> Any:
 
 
 def load_json(path: Path) -> Any:
-    """Read bounded UTF-8 JSON with duplicate-key and numeric checks."""
+    """Read bounded UTF-8 JSON with duplicate-key and numeric checks.
 
+    Read through one no-follow descriptor and stop after MAX_JSON_BYTES + 1
+    bytes. This keeps allocation bounded even if a file grows after opening.
+    """
+
+    descriptor: int | None = None
     try:
-        return _parse_json_bytes(path.read_bytes())
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        chunks: list[bytes] = []
+        remaining = MAX_JSON_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        return _parse_json_bytes(raw)
     except OSError:
         raise ValidationError("input could not be read") from None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def validate_json_tree(value: Any, label: str = "input", depth: int = 0) -> int:
@@ -867,6 +888,17 @@ def _load_reviewed_json(root: Path, evidence_id: str, portable_path: str, label:
     return _parse_json_bytes(raw)
 
 
+def _runtime_anchor_for_environment(
+    runtime_anchors: dict[str, dict[str, Any]],
+    environment_platform: str,
+) -> dict[str, Any]:
+    """Select the platform anchor without assuming Darwin evidence."""
+
+    runtime_key = environment_platform.split("-", 1)[0]
+    require(runtime_key in runtime_anchors, "web trace runtime anchor is unavailable")
+    return runtime_anchors[runtime_key]
+
+
 def _validate_web_observation(value: Any, label: str, *, expected_sequence: int | None = None) -> dict[str, Any]:
     observation = _strict_keys(value, WEB_OBSERVATION_KEYS, label)
     sequence = _integer(observation["sequence"], f"{label}.sequence", minimum=0, maximum=MAX_REPETITIONS)
@@ -893,7 +925,7 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     require(build == {
         "entrypoint": "node_modules/vite/bin/vite.js",
         "arguments": ["build", "--configLoader", "runner"],
-        "input_files": ["package.json", "bun.lock", "svelte.config.js", "tsconfig.json", "vite.config.ts", ".svelte-kit/tsconfig.json"],
+        "input_files": ["package.json", "bun.lock", "svelte.config.js", "tsconfig.json", "vite.config.ts"],
         "input_roots": ["src", "static"],
         "output_root": ".artifact-output/build",
         "version_name": "hermternal-web-production-build-v1",
@@ -905,9 +937,17 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
         else:
             _strict_keys(integrity[key], WEB_TREE_IDENTITY_KEYS, f"web workload.integrity.{key}")
     runtime = _strict_keys(integrity["runtime"], ("darwin",), "web workload.integrity.runtime")
-    darwin_runtime = _strict_keys(runtime["darwin"], WEB_RUNTIME_ANCHOR_KEYS, "web workload.integrity.runtime.darwin")
-    for key in WEB_RUNTIME_ANCHOR_KEYS:
-        _strict_keys(darwin_runtime[key], WEB_FILE_IDENTITY_KEYS, f"web workload.integrity.runtime.darwin.{key}")
+    runtime_anchors = {
+        platform_key: _strict_keys(
+            anchor,
+            WEB_RUNTIME_ANCHOR_KEYS,
+            f"web workload.integrity.runtime.{platform_key}",
+        )
+        for platform_key, anchor in runtime.items()
+    }
+    for platform_key, anchor in runtime_anchors.items():
+        for key in WEB_RUNTIME_ANCHOR_KEYS:
+            _strict_keys(anchor[key], WEB_FILE_IDENTITY_KEYS, f"web workload.integrity.runtime.{platform_key}.{key}")
     require(integrity == {
         "package_json": {"bytes": 1546, "sha256": "bb6f27b61e87d4cd3af84a54b52ec3c0d78c4018a903114fc5cfb7887875f113"},
         "bun_lock": {"bytes": 46368, "sha256": "f9999f93386967986d0393b34b008af2f71472fb4eb825062575fb9f822f8d3e"},
@@ -947,6 +987,7 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     require(trace["fixture_sha256"] == record["revision"]["fixture_sha256"], "web trace fixture digest changed")
     require(trace["environment"] == record["runs"][0]["environment"], "web trace environment changed")
     _validate_environment(trace["environment"], "web trace.environment")
+    runtime_anchor = _runtime_anchor_for_environment(runtime_anchors, trace["environment"]["platform"])
     build_input = _strict_keys(trace["build_input"], WEB_FILE_IDENTITY_KEYS, "web trace.build_input")
     _integer(build_input["bytes"], "web trace.build_input.bytes", minimum=1, maximum=16777216)
     _text(build_input["sha256"], "web trace.build_input.sha256", pattern=SHA256_RE)
@@ -964,10 +1005,10 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     anchored_toolchain = {
         "package_json": integrity["package_json"],
         "bun_lock": integrity["bun_lock"],
-        "node_executable": darwin_runtime["node"],
-        "bun_executable": darwin_runtime["bun"],
-        "python_executable": darwin_runtime["python"],
-        "sandbox_executable": darwin_runtime["sandbox"],
+        "node_executable": runtime_anchor["node"],
+        "bun_executable": runtime_anchor["bun"],
+        "python_executable": runtime_anchor["python"],
+        "sandbox_executable": runtime_anchor["sandbox"],
         "dependencies": integrity["dependencies"],
         "vite": integrity["vite"],
         "sveltekit": integrity["sveltekit"],

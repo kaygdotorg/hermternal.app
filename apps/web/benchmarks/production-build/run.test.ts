@@ -6,22 +6,27 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   BenchmarkError,
+  assertMeasuredInputsTracked,
+  assertRuntimeIdentity,
   assertSourceIdentityUnchanged,
   captureInputSnapshot,
   distribution,
   inputIdentity,
   measureArtifacts,
+  MAX_JSON_BYTES,
   mountArtifactQuota,
   parseArguments,
   protectedRuntime,
   readPackageVersion,
   removeWorkspace,
+  requireRuntimeAnchor,
   roundRationalHalfEven,
   sourceCommit,
   runBuildSeries,
   sandboxLauncher,
   terminateProcessGroup,
   validateWorkload,
+  type BoundedFileOpener,
   type Workload
 } from './run';
 
@@ -137,6 +142,75 @@ describe('production-build benchmark contract', () => {
     expect(sourceCommit()).toBe(expectedCommit);
   });
 
+  test('rejects untracked files under an explicit measured input file', async () => {
+    const candidate = structuredClone(await workload());
+    const relativePath = `preflight-explicit-${process.pid}-${Date.now()}\\ninput.json`;
+    const appRoot = resolve(benchmarkRoot, '../..');
+    const absolutePath = join(appRoot, relativePath);
+    candidate.build.input_files = [relativePath];
+    candidate.build.input_roots = [];
+    try {
+      await writeFile(absolutePath, 'untracked');
+      expect(() => assertMeasuredInputsTracked(candidate)).toThrow(new BenchmarkError('source_input_tree_dirty'));
+    } finally {
+      await rm(absolutePath, { force: true });
+    }
+  });
+
+  test('rejects untracked files under a recursive measured input root', async () => {
+    const candidate = structuredClone(await workload());
+    const relativePath = `preflight-root-${process.pid}-${Date.now()}\\ninput.ts`;
+    const absolutePath = join(resolve(benchmarkRoot, '../..'), 'src', relativePath);
+    candidate.build.input_files = [];
+    candidate.build.input_roots = ['src'];
+    try {
+      await writeFile(absolutePath, 'untracked');
+      expect(() => assertMeasuredInputsTracked(candidate)).toThrow(new BenchmarkError('source_input_tree_dirty'));
+    } finally {
+      await rm(absolutePath, { force: true });
+    }
+  });
+
+  test('rejects ignored files under an explicit measured input file', async () => {
+    const candidate = structuredClone(await workload());
+    const relativePath = `.svelte-kit/preflight-ignored-${process.pid}-${Date.now()}\\ninput.json`;
+    const absolutePath = join(resolve(benchmarkRoot, '../..'), relativePath);
+    candidate.build.input_files = [relativePath];
+    candidate.build.input_roots = [];
+    try {
+      await writeFile(absolutePath, 'ignored');
+      expect(() => assertMeasuredInputsTracked(candidate)).toThrow(new BenchmarkError('source_input_tree_dirty'));
+    } finally {
+      await rm(absolutePath, { force: true });
+    }
+  });
+
+  test('rejects an ignored recursive measured input root', async () => {
+    const candidate = structuredClone(await workload());
+    const marker = `preflight-ignored-root-${process.pid}-${Date.now()}\\ninput.json`;
+    const absolutePath = join(resolve(benchmarkRoot, '../..'), '.svelte-kit', marker);
+    candidate.build.input_files = [];
+    candidate.build.input_roots = ['.svelte-kit'];
+    try {
+      await writeFile(absolutePath, 'ignored');
+      expect(() => assertMeasuredInputsTracked(candidate)).toThrow(new BenchmarkError('source_input_tree_dirty'));
+    } finally {
+      await rm(absolutePath, { force: true });
+    }
+  });
+
+  test('requires platform runtime anchors and rejects an anchored identity mismatch', async () => {
+    const candidate = await workload();
+    expect(requireRuntimeAnchor(candidate, 'darwin')).toEqual(candidate.integrity.runtime.darwin);
+    expect(() => requireRuntimeAnchor(candidate, 'linux')).toThrow(new BenchmarkError('runtime_identity_anchor_missing'));
+    const linuxCandidate = structuredClone(candidate);
+    linuxCandidate.integrity.runtime.linux = structuredClone(candidate.integrity.runtime.darwin);
+    const linuxAnchor = requireRuntimeAnchor(linuxCandidate, 'linux');
+    const changed = structuredClone(linuxAnchor);
+    changed.node.bytes += 1;
+    expect(() => assertRuntimeIdentity(changed, linuxAnchor)).toThrow(new BenchmarkError('runtime_identity_mismatch'));
+  });
+
   test('reads Vite version metadata without executing the package bin', async () => {
     const root = await mkdtemp(join(tmpdir(), 'hermternal-vite-metadata-'));
     const packageRoot = join(root, 'vite');
@@ -150,6 +224,35 @@ describe('production-build benchmark contract', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test('rejects oversized Vite metadata before JSON parsing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-vite-oversized-'));
+    try {
+      await mkdir(join(root, 'vite'), { recursive: true });
+      await writeFile(join(root, 'vite', 'package.json'), Buffer.alloc(MAX_JSON_BYTES + 1, 0x20));
+      await expect(readPackageVersion(root)).rejects.toThrow(new BenchmarkError('vite_metadata_unavailable'));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('bounds Vite metadata growth through the opened descriptor', async () => {
+    let requestedLength = 0;
+    let reads = 0;
+    const opener = (async () => ({
+      read: async (_buffer: Uint8Array, _offset: number, length: number) => {
+        requestedLength = length;
+        reads += 1;
+        return { bytesRead: reads === 1 ? 1 : MAX_JSON_BYTES };
+      },
+      stat: async () => ({ size: 1 }),
+      close: async () => {}
+    })) as unknown as BoundedFileOpener;
+    await expect(readPackageVersion('/replacement-race', opener)).rejects.toThrow(
+      new BenchmarkError('vite_metadata_unavailable')
+    );
+    expect(requestedLength).toBe(MAX_JSON_BYTES);
   });
 
   test('snapshots exact plain data and rejects executable object shapes', async () => {
@@ -182,6 +285,15 @@ describe('production-build benchmark contract', () => {
       warmRepetitions: 3,
       writeEvidence: false
     });
+  });
+
+  test('reserves one supervisor repetition for the excluded warm-up', async () => {
+    const candidate = await workload();
+    expect(() => parseArguments(['--warm', '100'], candidate)).toThrow(new BenchmarkError('argument_value_invalid'));
+    expect(parseArguments(['--warm', '99'], candidate).warmRepetitions).toBe(99);
+    const invalid = structuredClone(candidate);
+    invalid.repetitions.warm = invalid.repetitions.maximum;
+    expect(() => validateWorkload(invalid)).toThrow(new BenchmarkError('repetition_limit_invalid'));
   });
 
   test('uses exact R-7 interpolation and half-even rounding', () => {
