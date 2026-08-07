@@ -98,6 +98,13 @@ async function run(): Promise<BrowserBenchmarkResult> {
   const host = document.createElement('div');
   host.style.cssText = 'position: fixed; left: -10000px; top: 0; width: 960px; height: 480px;';
   document.body.appendChild(host);
+  const browserErrorKinds: string[] = [];
+  const recordBrowserError = (event: ErrorEvent | PromiseRejectionEvent): void => {
+    const error = event instanceof ErrorEvent ? event.error : event.reason;
+    browserErrorKinds.push(error instanceof Error ? error.name : 'unhandled-browser-error');
+  };
+  window.addEventListener('error', recordBrowserError);
+  window.addEventListener('unhandledrejection', recordBrowserError);
   const replay = makeReplay(1024 * 1024);
   const longTasks: number[] = [];
   const longTaskObserver = typeof PerformanceObserver === 'function'
@@ -226,9 +233,14 @@ async function run(): Promise<BrowserBenchmarkResult> {
     return result;
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`terminal renderer workload failed during ${workloadPhase}: ${message}`);
+    const browserErrors = browserErrorKinds.length > 0
+      ? `; browser errors: ${browserErrorKinds.join(',')}`
+      : '';
+    throw new Error(`terminal renderer workload failed during ${workloadPhase}: ${message}${browserErrors}`);
   } finally {
     longTaskObserver?.disconnect();
+    window.removeEventListener('error', recordBrowserError);
+    window.removeEventListener('unhandledrejection', recordBrowserError);
     renderer.dispose();
     host.remove();
   }
