@@ -1,0 +1,226 @@
+{
+  "schema": "hermternal.web-terminal-renderer-benchmark.v1",
+  "revision": {
+    "source_commit": "aa23696d4b41aa99cb3ae090679521c42413dc1a",
+    "browser_entry": "apps/web/tests/bench/terminal-renderer.browser.ts",
+    "renderer_module": "apps/web/src/lib/terminal/renderer.ts"
+  },
+  "build": {
+    "command": "vite build --configFile false --minify",
+    "files": [
+      {
+        "path": "assets/ghostty-vt-CIdFSEIN.wasm",
+        "bytes": 429514,
+        "sha256": "551e3eb20fc66509f648f46b7261da35d6f1abe5138961ff1e33907673e1561c"
+      },
+      {
+        "path": "assets/terminal-B6F1Ts-T.css",
+        "bytes": 1056,
+        "sha256": "ce0be6f2d59e8215d1000ce16189648e98b109b91d43c1ae06c4ba64c7637078"
+      },
+      {
+        "path": "assets/terminal-C9fZeHzK.css",
+        "bytes": 3051,
+        "sha256": "ad9ca3679747f24b60962f442ce3acbc1c8b2e344da8decd44d3fc3eca4027b8"
+      },
+      {
+        "path": "chunks/dist-BS2jxe6q.js",
+        "bytes": 5672,
+        "sha256": "c36a40dd5a4868b0a9235708d017b1ac51ead794e112f5833c7087ebb79c0322"
+      },
+      {
+        "path": "chunks/dist-C1yqoU7Q.js",
+        "bytes": 45269,
+        "sha256": "6923ba1296c5cf92349977dbcbcd84454718c93472154679cd14e1913d462f25"
+      },
+      {
+        "path": "chunks/ghostty-vt-BwRHc_KE.js",
+        "bytes": 62,
+        "sha256": "a1ad7b43c3d7c2e0a2437701117acdf48bcb9e3934c516e37e22a5001535f35f"
+      },
+      {
+        "path": "entry.js",
+        "bytes": 12261,
+        "sha256": "771c9a86c335161e1253d601aba81f0e6c983d816751f2d8f27f0aed9c467cbe"
+      }
+    ],
+    "entry_bytes": 12261,
+    "lazy_chunk_bytes": 51003,
+    "wasm_bytes": 429514,
+    "css_bytes": 4107
+  },
+  "browser": {
+    "schema": "hermternal.web-terminal-renderer-browser-benchmark.v1",
+    "environment": {
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+      "platform": "MacIntel",
+      "viewport": "1280x800",
+      "device_pixel_ratio": "1",
+      "cross_origin_isolated": "false"
+    },
+    "samples": {
+      "cold_initialization": {
+        "raw_samples": [
+          18,
+          5.7,
+          4.3,
+          3.9,
+          4.2
+        ],
+        "distribution": {
+          "min": 3.9,
+          "p50": 4.3,
+          "p95": 15.54,
+          "p99": 17.508,
+          "max": 18,
+          "mean": 7.22
+        }
+      },
+      "first_byte_to_first_glyph": {
+        "raw_samples": [
+          122,
+          34.1,
+          113.2,
+          110.2,
+          106.2
+        ],
+        "distribution": {
+          "min": 34.1,
+          "p50": 110.2,
+          "p95": 120.24,
+          "p99": 121.648,
+          "max": 122,
+          "mean": 97.14
+        }
+      },
+      "sustained_output": {
+        "raw_samples": [
+          4864.6,
+          2018.2,
+          66.6,
+          183.4,
+          79.6,
+          177.2,
+          20.9,
+          189,
+          66.6,
+          179.5
+        ],
+        "distribution": {
+          "min": 20.9,
+          "p50": 178.35,
+          "p95": 3583.72,
+          "p99": 4608.424,
+          "max": 4864.6,
+          "mean": 784.56
+        }
+      },
+      "resize_settling": {
+        "raw_samples": [
+          85.4,
+          141.6,
+          41.6,
+          145.1,
+          117.2,
+          287.8,
+          124.8,
+          66.6,
+          86.4,
+          72
+        ],
+        "distribution": {
+          "min": 41.6,
+          "p50": 101.8,
+          "p95": 223.585,
+          "p99": 274.957,
+          "max": 287.8,
+          "mean": 116.85
+        }
+      },
+      "replay_1_mib": {
+        "raw_samples": [
+          109.5,
+          243.5,
+          117.4,
+          66.8,
+          72.9
+        ],
+        "distribution": {
+          "min": 66.8,
+          "p50": 109.5,
+          "p95": 218.28,
+          "p99": 238.456,
+          "max": 243.5,
+          "mean": 122.02
+        }
+      },
+      "repeated_mount_dispose": {
+        "raw_samples": [
+          5.7,
+          3.4,
+          3,
+          3.2,
+          5.1,
+          6.3,
+          19.3,
+          16.1,
+          12.9,
+          3.3
+        ],
+        "distribution": {
+          "min": 3,
+          "p50": 5.4,
+          "p95": 17.86,
+          "p99": 19.012,
+          "max": 19.3,
+          "mean": 7.83
+        }
+      }
+    },
+    "long_tasks_ms": [
+      4820,
+      1966
+    ],
+    "memory": {
+      "supported": true,
+      "before_replay_bytes": 4750889,
+      "after_replay_bytes": 4764509,
+      "after_dispose_bytes": 5582392,
+      "reason": null
+    },
+    "workload": {
+      "replay_bytes": 1048576,
+      "replay_chunks": 16,
+      "mount_dispose_repetitions": 10,
+      "initial_size": {
+        "cols": 80,
+        "rows": 24
+      },
+      "scrollback_limit_bytes": 65536
+    }
+  },
+  "method": {
+    "browser": "Playwright Chromium headless",
+    "warmups": 0,
+    "repetitions": 5,
+    "percentile": "inclusive-linear-r7",
+    "quantiles": [
+      0.5,
+      0.95,
+      0.99
+    ],
+    "rounding": "decimal-half-even-to-three-places"
+  },
+  "redaction": {
+    "synthetic_only": true,
+    "network_access": false,
+    "provider_access": false,
+    "credentials": false,
+    "cookies": false,
+    "terminal_bytes_logged": false,
+    "hostnames": false,
+    "user_data": false
+  },
+  "threshold": null,
+  "budget": null
+}
