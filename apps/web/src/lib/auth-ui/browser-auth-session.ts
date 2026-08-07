@@ -6,7 +6,7 @@ import {
   type BrowserAuthErrorCode,
   type PasswordLoginInput
 } from './browser-auth';
-import type { ProviderDiscoveryResult } from './provider-discovery';
+import { ProviderDiscoveryError, type ProviderDiscoveryResult } from './provider-discovery';
 
 export type BrowserAuthStatus =
   | 'signed_out'
@@ -346,7 +346,10 @@ export class BrowserAuthSession {
 }
 
 function isAbort(error: unknown): boolean {
-  return error instanceof BrowserAuthError && error.code === 'aborted';
+  return (
+    (error instanceof BrowserAuthError && error.code === 'aborted') ||
+    (error instanceof ProviderDiscoveryError && error.code === 'aborted')
+  );
 }
 
 function isIdentityUnavailable(error: unknown): boolean {

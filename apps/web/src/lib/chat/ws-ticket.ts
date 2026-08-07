@@ -6,6 +6,11 @@ export const WS_TICKET_TTL_SECONDS = 30 as const;
 export const MAX_WS_TICKET_LENGTH = 512 as const;
 export const MAX_WS_TICKET_RESPONSE_BYTES = 2 * 1024;
 export const MAX_WS_TICKET_ERROR_LENGTH = 240 as const;
+export const DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS = 5_000 as const;
+
+// A hostile response stream must not hold the ticket boundary open while its
+// cancellation promise settles. The reader lock is released after this bound.
+const WS_TICKET_RESPONSE_CANCEL_TIMEOUT_MS = 100;
 
 export type WsTicketErrorCode =
   | "cancelled"
@@ -236,7 +241,7 @@ async function readTicketResponse(
     // metadata so the client seam retains only the one ephemeral ticket value.
     return { ticket };
   } catch (error) {
-    await reader.cancel().catch(() => undefined);
+    await cancelReader(reader);
     if (signal.aborted || isAbortLike(error)) {
       throw new WsTicketCancelledError();
     }
@@ -266,8 +271,45 @@ function parseContentLength(value: string | null): number | undefined {
 async function cancelBody(
   body: ReadableStream<Uint8Array> | null,
 ): Promise<void> {
-  if (body !== null) {
-    await body.cancel().catch(() => undefined);
+  if (body === null) {
+    return;
+  }
+
+  let cancellation: Promise<unknown>;
+  try {
+    cancellation = Promise.resolve(body.cancel());
+  } catch {
+    return;
+  }
+  await awaitCleanupBounded(cancellation);
+}
+
+async function cancelReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<void> {
+  let cancellation: Promise<unknown>;
+  try {
+    cancellation = Promise.resolve(reader.cancel());
+  } catch {
+    return;
+  }
+  await awaitCleanupBounded(cancellation);
+}
+
+async function awaitCleanupBounded(cleanup: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, WS_TICKET_RESPONSE_CANCEL_TIMEOUT_MS);
+  });
+
+  try {
+    await Promise.race([cleanup, deadline]);
+  } catch {
+    // Cleanup cannot replace the bounded ticket diagnostic.
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -310,6 +352,10 @@ async function runAttempt<Connection>(
   const origin = resolveOrigin();
   const controller = new AbortController();
   const unlinkAbort = linkAbort(callerSignal, controller);
+  // The coalescing slot must not be held forever when a custom request or
+  // connector ignores the caller signal. The internal deadline aborts the
+  // attempt and lets the explicit retry path acquire a fresh ticket.
+  const deadline = setTimeout(() => controller.abort(), DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS);
 
   try {
     throwIfAborted(callerSignal);
@@ -344,6 +390,7 @@ async function runAttempt<Connection>(
 
     throw new WsTicketError("upgrade-failed");
   } finally {
+    clearTimeout(deadline);
     unlinkAbort();
   }
 }

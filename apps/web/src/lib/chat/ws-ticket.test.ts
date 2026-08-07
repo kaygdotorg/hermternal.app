@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CHAT_WEBSOCKET_PATH,
+  DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS,
   MAX_WS_TICKET_RESPONSE_BYTES,
   WS_TICKET_PATH,
   WsTicketError,
@@ -36,6 +37,26 @@ function deferred<T>(): {
     promise,
     resolve: resolvePromise,
     reject: rejectPromise,
+  };
+}
+
+function neverSettlingCancelResponse(
+  contentType: string,
+  bodyBytes: Uint8Array = new Uint8Array(),
+): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (bodyBytes.byteLength > 0) controller.enqueue(bodyBytes);
+    },
+    cancel() {
+      cancelled = true;
+      return new Promise<void>(() => undefined);
+    },
+  });
+  return {
+    response: new Response(body, { headers: { "Content-Type": contentType } }),
+    wasCancelled: () => cancelled,
   };
 }
 
@@ -177,6 +198,45 @@ describe("createWsTicketRequestBoundary", () => {
       }),
     ).rejects.toMatchObject({ code: "response-invalid" });
     expect(cancelled).toBe(true);
+  });
+
+  it("bounds a body.cancel that never settles after headers fail closed", async () => {
+    const tracked = neverSettlingCancelResponse("text/html");
+    const boundary = createWsTicketRequestBoundary(async () => tracked.response);
+    const startedAt = Date.now();
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "response-invalid" });
+
+    expect(tracked.wasCancelled()).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("bounds a reader.cancel that never settles after a streaming body fails closed", async () => {
+    const tracked = neverSettlingCancelResponse(
+      "application/json",
+      new Uint8Array(MAX_WS_TICKET_RESPONSE_BYTES + 1),
+    );
+    const boundary = createWsTicketRequestBoundary(async () => tracked.response);
+    const startedAt = Date.now();
+
+    await expect(
+      boundary({
+        method: "POST",
+        path: WS_TICKET_PATH,
+        credentials: "same-origin",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "response-invalid" });
+
+    expect(tracked.wasCancelled()).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 });
 
@@ -320,6 +380,33 @@ describe("createWsTicketClient", () => {
     await expect(client.retry()).resolves.toBe("connected");
     expect(request).toHaveBeenCalledTimes(2);
     expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a never-resolving request without a caller signal and permits retry after the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let requestCount = 0;
+      const request = vi.fn(async () => {
+        requestCount += 1;
+        if (requestCount === 1) return new Promise<{ ticket: string }>(() => undefined);
+        return { ticket: opaqueTicket() };
+      });
+      const client = createWsTicketClient({
+        request,
+        connect: async () => "connected",
+      });
+
+      const first = client.open();
+      void first.catch(() => undefined);
+      expect(request).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS);
+      await expect(first).rejects.toMatchObject({ code: "cancelled" });
+
+      await expect(client.retry()).resolves.toBe("connected");
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not forward an abort reason that could contain sensitive input", async () => {

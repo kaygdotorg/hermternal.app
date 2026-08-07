@@ -138,8 +138,12 @@ export async function discoverProviders(options: ProviderDiscoveryOptions = {}):
 
     return { providers: mapProviderEnvelope(parsed) };
   } catch (error) {
-    if (error instanceof ProviderDiscoveryError) throw error;
+    // The owning operation wins races between a provider failure and caller or
+    // deadline cancellation. Without this ordering, a same-generation provider
+    // error could hide the cancellation classification and leave stale failure
+    // UI visible to the caller.
     if (abortCode) throw new ProviderDiscoveryError(abortCode);
+    if (error instanceof ProviderDiscoveryError) throw error;
     throw new ProviderDiscoveryError('network');
   } finally {
     clearTimeout(timeout);

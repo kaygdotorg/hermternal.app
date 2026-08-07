@@ -11,6 +11,20 @@ function jsonResponse(body: string, status = 200, headers: Record<string, string
   });
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function providerPayload(): string {
   return JSON.stringify({
     providers: [
@@ -259,6 +273,23 @@ describe('discoverProviders', () => {
     controller.abort();
 
     await expect(pending).rejects.toMatchObject({ code: 'aborted' });
+  });
+
+  it('lets caller abort classification win a same-generation provider failure without masking real failures', async () => {
+    const controller = new AbortController();
+    const gate = deferred<Response>();
+    const fetcher = vi.fn<ProviderDiscoveryFetch>(() => gate.promise);
+    const pending = discoverProviders({ fetch: fetcher, signal: controller.signal, timeoutMs: 1_000 });
+
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    gate.reject(new ProviderDiscoveryError('network'));
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' });
+
+    const realFailure = vi
+      .fn<ProviderDiscoveryFetch>()
+      .mockRejectedValue(new ProviderDiscoveryError('network'));
+    await expect(discoverProviders({ fetch: realFailure })).rejects.toMatchObject({ code: 'network' });
   });
 
   it('maps network failures, caller aborts, and timeouts to bounded diagnostics', async () => {

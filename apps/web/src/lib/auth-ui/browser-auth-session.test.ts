@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AuthIdentity } from '$lib/transport/live-rest-types';
 import { BrowserAuthError, type BrowserAuthClient } from './browser-auth';
+import { ProviderDiscoveryError } from './provider-discovery';
 import { BrowserAuthSession } from './browser-auth-session';
 
 const identity: AuthIdentity = {
@@ -227,6 +228,24 @@ describe('BrowserAuthSession', () => {
     first.resolve({ providers: [passwordProvider] });
     await firstAttempt;
 
+    expect(session.current).toEqual({ status: 'provider_unavailable', providers: [] });
+  });
+
+  it('treats only provider-discovery aborts as cancellation and keeps real failures visible', async () => {
+    const discoverProviders = vi
+      .fn()
+      .mockRejectedValueOnce(new ProviderDiscoveryError('aborted'))
+      .mockRejectedValueOnce(new ProviderDiscoveryError('network'));
+    const session = new BrowserAuthSession({
+      client: client(),
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+
+    await session.retryDiscovery();
+    expect(session.current).toEqual({ status: 'discovering', providers: [] });
+
+    await session.retryDiscovery();
     expect(session.current).toEqual({ status: 'provider_unavailable', providers: [] });
   });
 
