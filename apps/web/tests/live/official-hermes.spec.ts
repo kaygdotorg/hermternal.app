@@ -118,6 +118,55 @@ test('browser UI reaches the official Hermes gateway through completion', async 
   expect(sentMethods.filter((method) => method === 'prompt.submit')).toHaveLength(1);
 });
 
+test('browser auth logs out of the official Hermes session', async ({ page }) => {
+  const password = process.env.HERMES_TEST_PASSWORD;
+  const username = process.env.HERMES_TEST_USERNAME ?? 'hermternal-test';
+  test.skip(!password, 'HERMES_TEST_PASSWORD is required for the authorized disposable lane.');
+
+  const requests: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/')) {
+      requests.push(`${request.method()} ${url.pathname}`);
+    }
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Username & Password' }).click();
+  await page.getByLabel('Username').fill(username);
+  await page.locator('#auth-password').fill(password!);
+  await page.getByRole('form', { name: 'Hermes password sign in' }).evaluate((form) =>
+    (form as HTMLFormElement).requestSubmit()
+  );
+  await expect(page.getByTestId('runtime-preview')).toBeVisible();
+
+  // The approved Paper workspace has no logout control yet. Exercise the same
+  // reviewed same-origin boundary here without inventing a UI state.
+  const logout = await page.evaluate(async () => {
+    const response = await fetch('/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'manual'
+    });
+    const identity = await fetch('/api/auth/me', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error'
+    });
+    return {
+      logoutStatus: response.status,
+      logoutRedirected: response.redirected,
+      identityStatus: identity.status
+    };
+  });
+
+  expect(logout.identityStatus).toBe(401);
+  expect(requests).toContain('POST /auth/logout');
+  expect(requests).toContain('GET /api/auth/me');
+});
+
 function parseFrame(payload: string | Buffer): Record<string, unknown> | undefined {
   try {
     const parsed: unknown = JSON.parse(typeof payload === 'string' ? payload : payload.toString('utf8'));
