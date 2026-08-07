@@ -122,6 +122,56 @@ describe('BrowserAuthView', () => {
     expect(document.body.textContent).not.toContain('must-not-render');
   });
 
+  it('retries an identity failure without entering provider discovery', async () => {
+    const verify = vi
+      .fn<BrowserAuthClient['verify']>()
+      .mockRejectedValueOnce(new BrowserAuthError('identity-failed', 500))
+      .mockResolvedValueOnce(identity);
+    const discoverProviders = vi.fn(async () => ({ providers: [] }));
+    const session = new BrowserAuthSession({
+      client: {
+        verify,
+        loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
+        logout: vi.fn(async () => undefined)
+      },
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+    render(BrowserAuthView, { session });
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(session.current.status).toBe('authenticated'));
+
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(discoverProviders).not.toHaveBeenCalled();
+  });
+
+  it('retries a timeout identity failure at the identity barrier', async () => {
+    const verify = vi
+      .fn<BrowserAuthClient['verify']>()
+      .mockRejectedValueOnce(new BrowserAuthError('timeout'))
+      .mockResolvedValueOnce(identity);
+    const discoverProviders = vi.fn(async () => ({ providers: [] }));
+    const session = new BrowserAuthSession({
+      client: {
+        verify,
+        loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
+        logout: vi.fn(async () => undefined)
+      },
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+    render(BrowserAuthView, { session });
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(session.current.status).toBe('authenticated'));
+
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(discoverProviders).not.toHaveBeenCalled();
+  });
+
   it('does not expose retry discovery while logout verification is pending', async () => {
     const pendingLogout = deferred<void>();
     const client: BrowserAuthClient = {
@@ -143,5 +193,36 @@ describe('BrowserAuthView', () => {
 
     pendingLogout.resolve();
     await pending;
+  });
+
+  it('keeps logout recovery dedicated and retries only the logout operation', async () => {
+    const logout = vi
+      .fn<BrowserAuthClient['logout']>()
+      .mockRejectedValueOnce(new BrowserAuthError('logout-failed'))
+      .mockResolvedValueOnce(undefined);
+    const verify = vi.fn<BrowserAuthClient['verify']>(async () => identity);
+    const discoverProviders = vi.fn(async () => ({ providers: [] }));
+    const session = new BrowserAuthSession({
+      client: {
+        verify,
+        loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
+        logout
+      },
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+    render(BrowserAuthView, { session });
+    await waitFor(() => expect(session.current.status).toBe('authenticated'));
+
+    await session.logout();
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'logout-failed'));
+    expect(screen.getByRole('button', { name: 'Retry sign out' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Choose provider' })).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry sign out' }));
+    await waitFor(() => expect(session.current.status).toBe('signed_out'));
+    expect(logout).toHaveBeenCalledTimes(2);
+    expect(discoverProviders).not.toHaveBeenCalled();
   });
 });

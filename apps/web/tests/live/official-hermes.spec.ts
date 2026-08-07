@@ -143,6 +143,12 @@ test('browser auth logs out of the official Hermes session', async ({ page }) =>
   // The approved Paper workspace has no logout control yet. Exercise the same
   // reviewed same-origin boundary here without inventing a UI state.
   const logout = await page.evaluate(async () => {
+    const authenticatedIdentity = await fetch('/api/auth/me', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error'
+    });
     const response = await fetch('/auth/logout', {
       method: 'POST',
       credentials: 'same-origin',
@@ -156,6 +162,7 @@ test('browser auth logs out of the official Hermes session', async ({ page }) =>
       redirect: 'error'
     });
     return {
+      authenticatedIdentityStatus: authenticatedIdentity.status,
       logoutStatus: response.status,
       logoutLocation: response.headers.get('location'),
       logoutRedirected: response.redirected,
@@ -163,6 +170,7 @@ test('browser auth logs out of the official Hermes session', async ({ page }) =>
     };
   });
 
+  expect(logout.authenticatedIdentityStatus).toBe(200);
   expect(logout.logoutStatus).toBe(302);
   expect(logout.logoutLocation).toBe('/login');
   expect(logout.logoutRedirected).toBe(false);

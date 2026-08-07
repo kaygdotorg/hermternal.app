@@ -14,6 +14,9 @@ const MAX_JSON_NODES = 4_096;
 const MAX_JSON_STRING_LENGTH = 8_192;
 const MAX_JSON_ARRAY_LENGTH = 500;
 const MAX_JSON_OBJECT_KEYS = 64;
+// Stream cleanup is bounded so an injected response cannot keep auth
+// discovery pending after headers have already failed closed.
+const RESPONSE_CANCEL_TIMEOUT_MS = 100;
 const PROVIDER_NAME_FORBIDDEN_PATTERN = /[\s/\\\p{C}]/u;
 const PROVIDER_CONTROL_PATTERN = /\p{C}/u;
 const PROVIDER_ENVELOPE_KEYS = ['providers'] as const;
@@ -306,12 +309,8 @@ async function readBoundedBody(response: Response, maxBodyBytes: number, signal:
   } finally {
     bodyAbort.cleanup();
     signal.removeEventListener('abort', onAbort);
-    if (cancelReader) void reader.cancel().catch(() => undefined);
-    try {
-      reader.releaseLock();
-    } catch {
-      // Synthetic readers may not implement the platform release contract.
-    }
+    if (cancelReader) await cancelReaderBounded(reader);
+    else releaseReader(reader);
   }
 
   if (signal.aborted) throw providerAbortError(signal);
@@ -330,11 +329,40 @@ async function readBoundedBody(response: Response, maxBodyBytes: number, signal:
 }
 
 async function cancelResponseBody(response: Response): Promise<void> {
+  if (!response.body) return;
   try {
-    await response.body?.cancel();
+    await cancelReaderBounded(response.body.getReader());
   } catch {
     // The response is already being rejected; a failed cleanup must not expose
     // an implementation detail or replace the bounded diagnostic.
+  }
+}
+
+async function cancelReaderBounded(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  let cancellation: Promise<unknown>;
+  try {
+    cancellation = Promise.resolve(reader.cancel());
+  } catch {
+    cancellation = Promise.resolve();
+  }
+
+  try {
+    await Promise.race([
+      cancellation,
+      new Promise<void>((resolve) => setTimeout(resolve, RESPONSE_CANCEL_TIMEOUT_MS))
+    ]);
+  } catch {
+    // The request already fails closed. Cleanup cannot replace its diagnostic.
+  } finally {
+    releaseReader(reader);
+  }
+}
+
+function releaseReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    reader.releaseLock();
+  } catch {
+    // Synthetic readers may not implement the platform release contract.
   }
 }
 

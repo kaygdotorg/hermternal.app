@@ -28,6 +28,7 @@ export type BrowserAuthErrorCode =
   | 'rate-limited'
   | 'invalid-response'
   | 'identity-unverified'
+  | 'identity-failed'
   | 'logout-failed'
   | 'logout-unverified';
 
@@ -42,6 +43,7 @@ const ERROR_MESSAGES: Record<BrowserAuthErrorCode, string> = {
   'rate-limited': 'Too many sign-in attempts were made. Try again later.',
   'invalid-response': 'Authentication returned an incompatible response.',
   'identity-unverified': 'The authenticated identity could not be verified.',
+  'identity-failed': 'The authentication identity check failed closed.',
   'logout-failed': 'The server session is still active.',
   'logout-unverified': 'Logout could not be verified.'
 };
@@ -153,8 +155,8 @@ export function createBrowserAuthClient(options: BrowserAuthClientOptions = {}):
       try {
         identity = await verify(signal);
       } catch (error) {
-        if (error instanceof BrowserAuthError && error.code === 'aborted') throw error;
-        throw new BrowserAuthError('identity-unverified');
+        if (error instanceof BrowserAuthError) throw error;
+        throw new BrowserAuthError('identity-failed');
       }
       return { identity, next };
     } finally {
@@ -228,7 +230,7 @@ async function performLogout(
   try {
     await verifyIdentity(signal);
   } catch (error) {
-    if (error instanceof LiveRestError && error.code === 'unauthenticated') return;
+    if (error instanceof LiveRestError && error.code === 'unauthenticated' && error.status === 401) return;
     if (error instanceof LiveRestError && error.code === 'aborted') throw new BrowserAuthError('aborted');
     throw new BrowserAuthError('logout-unverified');
   }
@@ -304,7 +306,7 @@ function validatePasswordInput(input: PasswordLoginInput): PasswordLoginInput {
 }
 
 function containsForbiddenControl(value: string): boolean {
-  return /[ --]/u.test(value);
+  return /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
 }
 
 function normalizeTimeout(value: number | undefined): number {
@@ -323,15 +325,19 @@ function mapPasswordStatus(status: number): BrowserAuthError {
 }
 
 function mapIdentityError(error: unknown): BrowserAuthError {
-  if (error instanceof BrowserAuthError) return error;
+  if (error instanceof BrowserAuthError) {
+    if (error.code === 'aborted') return error;
+    if (error.code === 'identity-unverified' && error.status === 401) return error;
+    return new BrowserAuthError('identity-failed', error.status);
+  }
   if (error instanceof LiveRestError) {
     if (error.code === 'aborted') return new BrowserAuthError('aborted');
-    if (error.code === 'timeout') return new BrowserAuthError('timeout');
-    if (error.code === 'unauthenticated') return new BrowserAuthError('identity-unverified', error.status);
-    if (error.code === 'network') return new BrowserAuthError('network');
-    return new BrowserAuthError('identity-unverified', error.status);
+    if (error.code === 'unauthenticated' && error.status === 401) {
+      return new BrowserAuthError('identity-unverified', error.status);
+    }
+    return new BrowserAuthError('identity-failed', error.status);
   }
-  return new BrowserAuthError('identity-unverified');
+  return new BrowserAuthError('identity-failed');
 }
 
 function isUnsafeResponse(response: Response): boolean {
@@ -438,8 +444,9 @@ function validatePasswordSuccess(value: StrictJsonValue): '/' {
 }
 
 async function cancelBody(response: Response): Promise<void> {
+  if (!response.body) return;
   try {
-    await response.body?.cancel();
+    await cancelReaderBounded(response.body.getReader());
   } catch {
     // Rejection diagnostics are closed; cleanup failure must not replace them.
   }

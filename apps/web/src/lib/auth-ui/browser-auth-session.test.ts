@@ -159,6 +159,25 @@ describe('BrowserAuthSession', () => {
     expect(session.current).toEqual({ status: 'provider_unavailable', providers: [] });
   });
 
+  it('fails closed on non-401 identity errors without entering provider discovery', async () => {
+    const verify = vi.fn(async () => {
+      throw new BrowserAuthError('identity-failed', 500);
+    });
+    const discoverProviders = vi.fn(async () => ({ providers: [passwordProvider] }));
+    const session = new BrowserAuthSession({
+      client: client({ verify }),
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+
+    await session.initialize();
+    await session.retryDiscovery();
+
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(discoverProviders).not.toHaveBeenCalled();
+    expect(session.current).toMatchObject({ status: 'failed', errorCode: 'identity-failed', providers: [] });
+  });
+
   it('keeps logout non-interruptible and does not start retry discovery while it is pending', async () => {
     const logoutPending = deferred<void>();
     let logoutSignal: AbortSignal | undefined;
@@ -187,5 +206,54 @@ describe('BrowserAuthSession', () => {
     logoutPending.resolve();
     await pendingLogout;
     expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it('reconciles an ambiguous logout before staying signed out', async () => {
+    const verify = vi
+      .fn<BrowserAuthClient['verify']>()
+      .mockResolvedValueOnce(identity)
+      .mockRejectedValueOnce(new BrowserAuthError('identity-unverified', 401));
+    const logout = vi.fn(async () => {
+      throw new BrowserAuthError('logout-unverified');
+    });
+    const discoverProviders = vi.fn(async () => ({ providers: [passwordProvider] }));
+    const session = new BrowserAuthSession({
+      client: client({ verify, logout }),
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+
+    await session.initialize();
+    await session.logout();
+
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(discoverProviders).not.toHaveBeenCalled();
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it('publishes dedicated logout recovery when the server identity remains active', async () => {
+    const verify = vi.fn<BrowserAuthClient['verify']>(async () => identity);
+    const logout = vi.fn(async () => {
+      throw new BrowserAuthError('logout-failed');
+    });
+    const discoverProviders = vi.fn(async () => ({ providers: [passwordProvider] }));
+    const session = new BrowserAuthSession({
+      client: client({ verify, logout }),
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+
+    await session.initialize();
+    await session.logout();
+    await session.retryDiscovery();
+    session.cancel();
+
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(discoverProviders).not.toHaveBeenCalled();
+    expect(session.current).toEqual({
+      status: 'logout_failed',
+      providers: [],
+      errorCode: 'logout-failed'
+    });
   });
 });

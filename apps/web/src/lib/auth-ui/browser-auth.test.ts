@@ -44,6 +44,20 @@ function pendingBodyResponse(): { response: Response; wasCancelled: () => boolea
   return { response, wasCancelled: () => cancelled };
 }
 
+function neverSettlingCancelResponse(): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+        return new Promise<void>(() => {});
+      }
+    }),
+    { status: 500, headers: { 'content-type': 'application/json' } }
+  );
+  return { response, wasCancelled: () => cancelled };
+}
+
 describe('browser authentication boundary', () => {
   it('submits one same-origin password request and verifies the cookie identity', async () => {
     const requests: Array<{ path: string; init?: RequestInit }> = [];
@@ -150,6 +164,46 @@ describe('browser authentication boundary', () => {
     await expect(
       client.loginWithPassword({ provider: 'basic', username: 'synthetic-user', password: 'synthetic-password' })
     ).rejects.toMatchObject({ code: 'identity-unverified' });
+  });
+
+  it.each([
+    [500, '{"detail":"server failure"}', 'identity-failed', 500],
+    [302, '', 'identity-failed', undefined],
+    [200, '{"user_id":', 'identity-failed', undefined]
+  ] as const)('classifies non-401 identity failures as %s without treating them as signed out', async (status, body, code, errorStatus) => {
+    const client = createBrowserAuthClient({
+      fetch: async () =>
+        new Response(body, {
+          status,
+          headers: { 'content-type': 'application/json' }
+        })
+    });
+
+    await expect(client.verify()).rejects.toMatchObject({ code, status: errorStatus });
+  });
+
+  it('classifies an identity timeout as a non-discovery failure', async () => {
+    const pending = deferred<Response>();
+    const client = createBrowserAuthClient({
+      fetch: async () => pending.promise,
+      timeoutMs: 5
+    });
+
+    await expect(client.verify()).rejects.toMatchObject({ code: 'identity-failed' });
+  });
+
+  it('bounds a response cancel that never settles after headers fail closed', async () => {
+    const tracked = neverSettlingCancelResponse();
+    const fetcher = vi.fn(async () => tracked.response);
+    const client = createBrowserAuthClient({ fetch: fetcher });
+    const startedAt = Date.now();
+
+    await expect(
+      client.loginWithPassword({ provider: 'basic', username: 'synthetic-user', password: 'synthetic-password' })
+    ).rejects.toMatchObject({ code: 'invalid-response', status: 500 });
+
+    expect(tracked.wasCancelled()).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
   it('treats logout as complete only after the identity probe returns 401', async () => {

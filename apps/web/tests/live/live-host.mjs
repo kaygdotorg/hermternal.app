@@ -1,4 +1,5 @@
 import { createServer, request as createRequest } from 'node:http';
+import { isIP } from 'node:net';
 import { readFile, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -6,6 +7,7 @@ import { cwd } from 'node:process';
 import { parseRawRequestTarget } from '../../src/lib/static-route-grammar.mjs';
 import { resolveStaticPath } from '../static/static-host.mjs';
 
+const DEFAULT_LIVE_TARGET = 'http://127.0.0.1:19131';
 const PROXY_PREFIXES = Object.freeze(['/api/', '/auth/']);
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -18,10 +20,12 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade'
 ]);
 
+/** @param {string} pathname @returns {boolean} */
 function isProxyTarget(pathname) {
   return PROXY_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
+/** @param {string} pathname @returns {string} */
 function contentTypeFor(pathname) {
   if (pathname === '/' || pathname.endsWith('.html')) return 'text/html; charset=utf-8';
   if (pathname.endsWith('.js')) return 'text/javascript; charset=utf-8';
@@ -33,7 +37,13 @@ function contentTypeFor(pathname) {
   return 'application/octet-stream';
 }
 
+/**
+ * @param {import('node:http').IncomingHttpHeaders} headers
+ * @param {URL} target
+ * @returns {import('node:http').OutgoingHttpHeaders}
+ */
 function proxyHeaders(headers, target) {
+  /** @type {import('node:http').OutgoingHttpHeaders} */
   const forwarded = {};
   for (const [name, value] of Object.entries(headers)) {
     if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase()) && value !== undefined) forwarded[name] = value;
@@ -42,6 +52,10 @@ function proxyHeaders(headers, target) {
   return forwarded;
 }
 
+/**
+ * @param {import('node:http').IncomingHttpHeaders} source
+ * @param {import('node:http').ServerResponse} destination
+ */
 function copyResponseHeaders(source, destination) {
   for (const [name, value] of Object.entries(source)) {
     if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase()) && value !== undefined) {
@@ -50,6 +64,11 @@ function copyResponseHeaders(source, destination) {
   }
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {URL} target
+ */
 function proxyHttp(request, response, target) {
   const upstream = createRequest(
     {
@@ -81,6 +100,12 @@ function proxyHttp(request, response, target) {
   request.pipe(upstream);
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:stream').Duplex} socket
+ * @param {Buffer} head
+ * @param {URL} target
+ */
 function proxyUpgrade(request, socket, head, target) {
   const parsed = parseRawRequestTarget(request.url ?? '');
   if (!parsed || parsed.pathname !== '/api/ws') {
@@ -132,11 +157,84 @@ function proxyUpgrade(request, socket, head, target) {
   upstream.end();
 }
 
+/**
+ * Validate the disposable upstream before the host can create an auth proxy.
+ * Keep the accepted grammar narrow so URL parsing cannot reinterpret an
+ * encoded, numeric, or user-controlled authority into a different host.
+ */
+/**
+ * @param {string | URL} value
+ * @returns {URL}
+ */
+export function validateLiveTarget(value) {
+  const raw = value instanceof URL ? value.href : value;
+  if (typeof raw !== 'string' || raw.length === 0 || raw !== raw.trim() || /[\u0000-\u0020\\%]/u.test(raw)) {
+    throw new Error('The disposable Hermes target must be a canonical HTTP loopback URL.');
+  }
+
+  const match = /^http:\/\/([^\/?#]+)\/?$/u.exec(raw);
+  if (!match) throw new Error('The disposable Hermes target must be plain HTTP with no path or credentials.');
+
+  let target;
+  try {
+    target = new URL(raw);
+  } catch {
+    throw new Error('The disposable Hermes target must be a valid HTTP loopback URL.');
+  }
+  if (target.protocol !== 'http:' || target.username || target.password || target.search || target.hash) {
+    throw new Error('The disposable Hermes target must be plain HTTP with no path or credentials.');
+  }
+
+  const authority = match[1];
+  if (authority.includes('@')) throw new Error('The disposable Hermes target must not include userinfo.');
+
+  let host;
+  let port;
+  if (authority.startsWith('[')) {
+    const ipv6 = /^\[([^\]]+)\](?::(\d+))?$/u.exec(authority);
+    if (!ipv6) throw new Error('The disposable Hermes target must use a canonical loopback host.');
+    host = ipv6[1];
+    port = ipv6[2];
+    if (host !== '::1' || isIP(host) !== 6) {
+      throw new Error('The disposable Hermes target must use the IPv6 loopback address.');
+    }
+  } else {
+    const hostPort = /^([^:]+)(?::(\d+))?$/u.exec(authority);
+    if (!hostPort) throw new Error('The disposable Hermes target must use a canonical loopback host.');
+    host = hostPort[1];
+    port = hostPort[2];
+    if (host.toLowerCase() !== 'localhost' && !isCanonicalLoopbackIpv4(host)) {
+      throw new Error('The disposable Hermes target must use a loopback IPv4 address or localhost.');
+    }
+  }
+
+  if (port !== undefined && (!/^(?:0|[1-9]\d*)$/u.test(port) || Number(port) < 1 || Number(port) > 65_535)) {
+    throw new Error('The disposable Hermes target port is invalid.');
+  }
+  if (target.pathname !== '/') throw new Error('The disposable Hermes target must not include a path.');
+  return target;
+}
+
+/** @param {string} host @returns {boolean} */
+function isCanonicalLoopbackIpv4(host) {
+  const octets = host.split('.');
+  return (
+    octets.length === 4 &&
+    octets.every((octet) => /^(?:0|[1-9]\d{0,2})$/u.test(octet) && Number(octet) <= 255) &&
+    Number(octets[0]) === 127 &&
+    isIP(host) === 4
+  );
+}
+
+/**
+ * @param {{buildDirectory?: string, target?: string | URL}} [options]
+ * @returns {import('node:http').Server}
+ */
 export function createLiveHost({
   buildDirectory = resolve(cwd(), 'build'),
-  target = new URL(process.env.HERMES_LIVE_TARGET ?? 'http://127.0.0.1:19131')
+  target = process.env.HERMES_LIVE_TARGET ?? DEFAULT_LIVE_TARGET
 } = {}) {
-  if (target.protocol !== 'http:') throw new Error('The disposable Hermes target must use local HTTP.');
+  const validatedTarget = validateLiveTarget(target);
 
   const server = createServer(async (request, response) => {
     const rawTarget = request.url ?? '';
@@ -147,7 +245,7 @@ export function createLiveHost({
       return;
     }
     if (isProxyTarget(parsed.pathname)) {
-      proxyHttp(request, response, target);
+      proxyHttp(request, response, validatedTarget);
       return;
     }
     if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -176,10 +274,14 @@ export function createLiveHost({
       response.end('not found');
     }
   });
-  server.on('upgrade', (request, socket, head) => proxyUpgrade(request, socket, head, target));
+  server.on('upgrade', (request, socket, head) => proxyUpgrade(request, socket, head, validatedTarget));
   return server;
 }
 
+/**
+ * @param {{buildDirectory?: string, target?: string | URL, port?: number}} [options]
+ * @returns {Promise<import('node:http').Server>}
+ */
 export async function startLiveHost({ port = 4187, ...options } = {}) {
   const server = createLiveHost(options);
   await new Promise((resolveServer, reject) => {

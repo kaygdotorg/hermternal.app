@@ -1,0 +1,45 @@
+import { describe, expect, it } from 'vitest';
+import { createLiveHost, validateLiveTarget } from '../../tests/live/live-host.mjs';
+
+describe('disposable live proof target', () => {
+  it.each([
+    'http://127.0.0.1:19131',
+    'http://127.255.255.254:19131/',
+    'http://[::1]:19131',
+    'http://localhost:19131'
+  ])('accepts the reviewed loopback form %s', (value) => {
+    const target = validateLiveTarget(value);
+
+    expect(target.protocol).toBe('http:');
+    expect(target.pathname).toBe('/');
+  });
+
+  it.each([
+    'https://127.0.0.1:19131',
+    'http://127.0.0.1.evil.example:19131',
+    'http://2130706433:19131',
+    'http://0177.0.0.1:19131',
+    'http://127.1:19131',
+    'http://127.0.0.1%2eexample:19131',
+    'http://user:password@127.0.0.1:19131',
+    'http://[::ffff:127.0.0.1]:19131',
+    'http://localhost.:19131',
+    'http://127.0.0.1:00080',
+    'http://127.0.0.1:65536',
+    'http://127.0.0.1:19131/api',
+    'http://127.0.0.1:19131?probe=1',
+    'http://127.0.0.1:19131#fragment',
+    'http://127.0.0.1:19131\\api',
+    ' http://127.0.0.1:19131'
+  ])('rejects unsafe or ambiguous target %s', (value) => {
+    expect(() => validateLiveTarget(value)).toThrow();
+  });
+
+  it('rejects an unsafe target synchronously before creating a proxy-capable host', () => {
+    expect(() =>
+      createLiveHost({
+        target: 'http://user:password@127.0.0.1:19131'
+      })
+    ).toThrow(/plain HTTP|userinfo/iu);
+  });
+});

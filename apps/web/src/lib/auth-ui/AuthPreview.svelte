@@ -45,7 +45,7 @@
   $: isPasswordState = effectiveState === 'password' || effectiveState === 'password-submitting';
   $: panelClass = isProviderState
     ? 'provider-panel'
-    : effectiveState === 'session-expired'
+    : effectiveState === 'session-expired' || effectiveState === 'logout-pending' || effectiveState === 'logout-failed'
       ? 'session-panel'
       : 'narrow-panel';
   $: politeAnnouncement =
@@ -63,7 +63,9 @@
   $: assertiveAnnouncement =
     effectiveState === 'failure'
       ? 'Sign-in did not complete. Try again or choose another provider.'
-      : effectiveState === 'session-expired'
+      : effectiveState === 'logout-failed'
+        ? 'Sign-out could not be verified. Only Retry sign out is available.'
+        : effectiveState === 'session-expired'
         ? 'Session expired. Sign in again or discard the local draft fixture.'
         : effectiveState === 'discovery-empty'
           ? 'Provider discovery returned an invalid empty registry. No sign-in method is available.'
@@ -459,6 +461,25 @@
           <span aria-hidden="true" class="info-icon"><Icon name="info" size={16} /></span>
           <p>Retry and provider discovery stay unavailable until the server identity probe confirms logout.</p>
         </div>
+      {:else if effectiveState === 'logout-failed'}
+        <div class="failure-icon" aria-hidden="true"><Icon name="warning" size={20} /></div>
+        <div class="failure-heading">
+          <h1 bind:this={stateHeading} tabindex="-1">Sign-out could not be verified</h1>
+          <p>{failureMessage ?? 'The server session could not be confirmed as signed out.'}</p>
+        </div>
+        <div class="failure-detail">
+          <strong>{failureCode ?? 'logout-unverified'}</strong>
+          <p>Retry sign out rechecks the same-origin session boundary. Provider discovery remains unavailable.</p>
+        </div>
+        <div class="failure-actions">
+          <Pill
+            label="Retry sign out"
+            icon="refresh"
+            variant="action"
+            onActivate={() => handleAction({ type: 'retry-logout' })}
+          />
+        </div>
+        <p class="metadata">Live boundary · logout recovery · no provider discovery</p>
       {:else if isDiscoveryFailureState(effectiveState)}
         <div class="failure-icon" aria-hidden="true">
           <Icon name={effectiveState === 'discovery-retry' ? 'refresh' : 'warning'} size={20} />

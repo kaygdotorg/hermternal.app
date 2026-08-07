@@ -221,6 +221,27 @@ describe('AuthPreview', () => {
     expect(onAction).not.toHaveBeenCalled();
   });
 
+  it('renders logout recovery with only retry sign out', () => {
+    const onAction = vi.fn();
+    render(AuthPreview, {
+      state: 'logout-failed',
+      discoveryMode: 'live',
+      failureCode: 'logout-unverified',
+      failureMessage: 'Logout could not be verified.',
+      onAction
+    });
+
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'logout-failed');
+    expect(screen.getByRole('heading', { name: 'Sign-out could not be verified' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Only Retry sign out is available');
+    expect(screen.getByRole('button', { name: 'Retry sign out' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Choose provider' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry sign out' }));
+    expect(onAction).toHaveBeenCalledWith({ type: 'retry-logout' });
+  });
+
   it('renders live success, pending, empty, malformed, unavailable, aborted, and retry states truthfully', () => {
     const liveProviders = [
       {

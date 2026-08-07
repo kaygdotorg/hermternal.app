@@ -45,6 +45,20 @@ function cancellableResponse(
   return { response, wasCancelled: () => cancelled };
 }
 
+function neverSettlingCancelResponse(): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+        return new Promise<void>(() => {});
+      }
+    }),
+    { status: 200, headers: { 'content-type': 'text/html' } }
+  );
+  return { response, wasCancelled: () => cancelled };
+}
+
 describe('discoverProviders', () => {
   it('uses the strict same-origin GET boundary and preserves source order', async () => {
     const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(jsonResponse(providerPayload()));
@@ -205,6 +219,17 @@ describe('discoverProviders', () => {
       await expect(discoverProviders({ fetch: fetcher, maxBodyBytes })).rejects.toMatchObject({ code: expectedCode });
       expect(tracked.wasCancelled()).toBe(true);
     }
+  });
+
+  it('bounds a response cancel that never settles after headers fail closed', async () => {
+    const tracked = neverSettlingCancelResponse();
+    const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(tracked.response);
+    const startedAt = Date.now();
+
+    await expect(discoverProviders({ fetch: fetcher })).rejects.toMatchObject({ code: 'invalid-response' });
+
+    expect(tracked.wasCancelled()).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
   it('cancels an active response reader after headers when the caller aborts or the timeout expires', async () => {

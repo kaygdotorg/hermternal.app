@@ -22,7 +22,11 @@
   }
 
   function handleAction(action: AuthAction): void {
-    if (snapshot.status === 'logging_out') return;
+    if (action.type === 'retry-logout') {
+      if (snapshot.status === 'logout_failed') void session.logout();
+      return;
+    }
+    if (snapshot.status === 'logging_out' || snapshot.status === 'logout_failed') return;
     if (action.type === 'choose-provider') {
       session.chooseProvider(action.providerId);
       return;
@@ -46,9 +50,15 @@
       return;
     }
     if (action.type === 'retry-authentication') {
+      // A failure without a selected provider came from the identity barrier.
+      // Retry that barrier; provider discovery is eligible only after a genuine
+      // 401 has classified the browser as signed out.
       const selected = snapshot.selectedProviderId;
-      if (selected) session.chooseProvider(selected);
-      else void session.retryDiscovery();
+      if (!selected || snapshot.errorCode === 'identity-failed') {
+        void session.initialize();
+        return;
+      }
+      session.chooseProvider(selected);
     }
   }
 
@@ -77,6 +87,7 @@
     if (value.status === 'password_submitting') return 'password-submitting';
     if (value.status === 'expired') return 'session-expired';
     if (value.status === 'logging_out') return 'logout-pending';
+    if (value.status === 'logout_failed') return 'logout-failed';
     if (value.status === 'failed') return 'failure';
     if (value.selectedProviderId) return 'password';
     return 'provider-selection';

@@ -13,7 +13,8 @@ export type AuthViewState =
   | 'discovery-aborted'
   | 'provider-unavailable'
   | 'password-submitting'
-  | 'logout-pending';
+  | 'logout-pending'
+  | 'logout-failed';
 
 export type AuthProviderKind = 'oauth' | 'password' | 'unavailable';
 export type AuthDiscoveryMode = 'fixture' | 'live';
@@ -43,6 +44,7 @@ export type AuthAction =
   | { type: 'choose-provider-again' }
   | { type: 'retry-discovery' }
   | { type: 'cancel-discovery' }
+  | { type: 'retry-logout' }
   | { type: 'back-to-sign-in' }
   | { type: 'sign-in-again' }
   | { type: 'discard-draft' };

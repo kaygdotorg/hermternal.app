@@ -19,6 +19,7 @@ export type BrowserAuthStatus =
   | 'refreshing'
   | 'expired'
   | 'logging_out'
+  | 'logout_failed'
   | 'failed';
 
 export interface BrowserAuthSnapshot {
@@ -74,6 +75,7 @@ export class BrowserAuthSession {
   }
 
   async initialize(): Promise<void> {
+    if (this.isLogoutState()) return;
     const operation = this.begin('refreshing');
     try {
       const identity = await this.client.verify(operation.signal);
@@ -93,7 +95,14 @@ export class BrowserAuthSession {
     // Logout owns the generation until its identity probe completes. Discovery
     // is read-only, but starting it here would abort the logout request and
     // expose a retry action over a pending sign-out state.
-    if (this.snapshot.status === 'logging_out') return;
+    if (this.isLogoutState()) return;
+    // A failed identity barrier has not established signed-out authority. A
+    // direct caller must retry verification rather than bypassing it with a
+    // provider-registry request.
+    if (this.snapshot.status === 'failed' && !this.snapshot.selectedProviderId) {
+      await this.initialize();
+      return;
+    }
     const operation = this.begin('discovering', { providers: [] });
     await this.discover(operation);
   }
@@ -157,20 +166,27 @@ export class BrowserAuthSession {
       this.publish({ status: 'signed_out', providers: [] });
     } catch (error) {
       if (!this.isCurrent(operation.generation) || isAbort(error)) return;
-      this.publishFailure(error);
+      const reconciliation = await this.reconcileLogout(operation);
+      if (!this.isCurrent(operation.generation)) return;
+      if (reconciliation === 'signed_out') {
+        this.publish({ status: 'signed_out', providers: [] });
+        return;
+      }
+      this.publishLogoutFailure(reconciliation === 'authenticated' ? 'logout-failed' : 'logout-unverified');
     }
   }
 
   expire(): void {
     this.assertActive();
+    if (this.isLogoutState()) return;
     this.invalidateAndCancel('expired');
   }
 
   cancel(): void {
     this.assertActive();
     // A logout is a protected boundary: the caller may not abort it or replace
-    // its pending state with discovery or signed-out UI before verification.
-    if (this.snapshot.status === 'logging_out') return;
+    // its pending or recovery state with discovery or signed-out UI before verification.
+    if (this.isLogoutState()) return;
     this.generation += 1;
     this.controller?.abort();
     this.controller = undefined;
@@ -231,6 +247,31 @@ export class BrowserAuthSession {
     this.publish({ status, providers: [] });
   }
 
+  /**
+   * Logout failures stay in logout-only recovery. A fresh identity probe is the
+   * authority for ambiguous transport outcomes; provider discovery must never
+   * turn an uncertain sign-out into a generic sign-in retry.
+   */
+  private async reconcileLogout(
+    operation: { generation: number; signal: AbortSignal }
+  ): Promise<'signed_out' | 'authenticated' | 'unknown'> {
+    try {
+      await this.client.verify(operation.signal);
+      return 'authenticated';
+    } catch (error) {
+      if (isUnauthenticated(error)) return 'signed_out';
+      return 'unknown';
+    }
+  }
+
+  private publishLogoutFailure(errorCode: 'logout-failed' | 'logout-unverified'): void {
+    this.publish({
+      status: 'logout_failed',
+      providers: [],
+      errorCode
+    });
+  }
+
   private selectedPasswordProvider(): AuthProvider | undefined {
     const selected = this.snapshot.selectedProviderId;
     if (!selected) return undefined;
@@ -257,8 +298,12 @@ export class BrowserAuthSession {
       this.snapshot.status === 'refreshing' ||
       this.snapshot.status === 'discovering' ||
       this.snapshot.status === 'password_submitting' ||
-      this.snapshot.status === 'logging_out'
+      this.isLogoutState()
     );
+  }
+
+  private isLogoutState(): boolean {
+    return this.snapshot.status === 'logging_out' || this.snapshot.status === 'logout_failed';
   }
 
   private isCurrent(generation: number): boolean {
@@ -275,5 +320,9 @@ function isAbort(error: unknown): boolean {
 }
 
 function isIdentityUnavailable(error: unknown): boolean {
-  return error instanceof BrowserAuthError && error.code === 'identity-unverified';
+  return error instanceof BrowserAuthError && error.code === 'identity-unverified' && error.status === 401;
+}
+
+function isUnauthenticated(error: unknown): boolean {
+  return error instanceof BrowserAuthError && error.code === 'identity-unverified' && error.status === 401;
 }
