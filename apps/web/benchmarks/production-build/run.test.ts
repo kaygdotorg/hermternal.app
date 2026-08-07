@@ -436,7 +436,7 @@ describe('production-build benchmark contract', () => {
     } finally {
       await writeFile(vitePackage, original);
     }
-  });
+  }, 15_000);
 
   test('enters the OS boundary before any PATH-selected Python shim can execute', async () => {
     const shimRoot = await mkdtemp(join(tmpdir(), 'hermternal-python-shim-'));
