@@ -19,14 +19,6 @@ from pathlib import Path
 import validate
 
 
-# Independent source trust anchor for the aggregate validator. This constant is
-# reviewed outside validate.py, whose own baseline line is normalized before the
-# canonical source digest is computed.
-TRUSTED_VALIDATE_SOURCE_SHA256 = "240d02062453f6932e4c706ca3d237ddcc9857c7ea880e8c8c564c5bcb9777c2"
-# This full-byte digest is outside the baseline manifest. It is the reviewed,
-# non-circular root for the baseline bytes and the validator anchor they carry.
-TRUSTED_BASELINE_SHA256 = "10c20d377bf6ee1293806e65049032d3e3c0aa7c2686315ac443763a2a43716b"
-
 
 class StrictJsonTests(unittest.TestCase):
     def _write(self, payload: bytes) -> Path:
@@ -197,15 +189,14 @@ class RegistryTests(unittest.TestCase):
     def test_canonical_baseline_anchor_matches_checked_in_content(self) -> None:
         self.assertEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
 
-    def test_independent_validator_source_anchor_matches_checked_in_content(self) -> None:
-        source = (validate.REPO_ROOT / validate.BASELINE_SELF_MANIFEST_PATH).read_bytes()
-        self.assertEqual(validate._canonical_validator_source_digest(source), TRUSTED_VALIDATE_SOURCE_SHA256)
-        self.assertEqual(validate._trusted_validator_source_digest(validate.REPO_ROOT), TRUSTED_VALIDATE_SOURCE_SHA256)
-
-    def test_external_baseline_anchor_matches_exact_checked_in_bytes(self) -> None:
-        digest = hashlib.sha256(validate.BASELINE_PATH.read_bytes()).hexdigest()
-        self.assertEqual(digest, TRUSTED_BASELINE_SHA256)
-        self.assertEqual(validate._trusted_baseline_digest(validate.REPO_ROOT), TRUSTED_BASELINE_SHA256)
+    def test_git_object_authority_matches_exact_checked_in_bytes(self) -> None:
+        authority = validate._trusted_authority(validate.REPO_ROOT)
+        validator = (validate.REPO_ROOT / validate.BASELINE_SELF_MANIFEST_PATH).read_bytes()
+        baseline = validate.BASELINE_PATH.read_bytes()
+        self.assertEqual(authority["validator_size_bytes"], len(validator))
+        self.assertEqual(authority["validator_sha256"], hashlib.sha256(validator).hexdigest())
+        self.assertEqual(authority["baseline_size_bytes"], len(baseline))
+        self.assertEqual(authority["baseline_sha256"], hashlib.sha256(baseline).hexdigest())
 
 
 class CliTests(unittest.TestCase):
@@ -240,6 +231,23 @@ class CliTests(unittest.TestCase):
             validate.REPO_ROOT / "contracts/fixtures",
             temporary / "contracts/fixtures",
         )
+        authority_commit = validate._authority_commit(validate.REPO_ROOT)
+        for command in (
+            ["git", "-C", str(temporary), "init", "--quiet"],
+            [
+                "git",
+                "-C",
+                str(temporary),
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                str(validate.REPO_ROOT),
+                authority_commit,
+            ],
+            ["git", "-C", str(temporary), "update-ref", "refs/heads/authority-test", "FETCH_HEAD"],
+            ["git", "-C", str(temporary), "symbolic-ref", "HEAD", "refs/heads/authority-test"],
+        ):
+            subprocess.run(command, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return temporary
 
     def _rebind_copy(
@@ -247,13 +255,8 @@ class CliTests(unittest.TestCase):
         repo_root: Path,
         *,
         refresh_anchor: bool = False,
-        refresh_external_trust: bool = True,
     ) -> tuple[dict[str, object], dict[str, object]]:
-        """Refresh copied integrity records so semantic mutations reach validation.
-
-        Trust-boundary tests can retain the checked-in external anchors to prove a
-        coordinated local manifest refresh still fails closed.
-        """
+        """Refresh copied local records while Git-object authority stays immutable."""
         fixtures_root = repo_root / "contracts/fixtures"
         index_path = fixtures_root / "index.json"
         baseline_path = fixtures_root / "validator/validation-baseline.json"
@@ -292,23 +295,6 @@ class CliTests(unittest.TestCase):
                     record["sha256"] = hashlib.sha256(data).hexdigest()
             baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
             baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-        if refresh_external_trust:
-            trust_path = repo_root / validate.VALIDATOR_TRUST_ANCHOR_PATH
-            trust_source = trust_path.read_text(encoding="utf-8")
-            validator_path = repo_root / validate.BASELINE_SELF_MANIFEST_PATH
-            source_digest = validate._canonical_validator_source_digest(validator_path.read_bytes())
-            trust_source = validate.TRUST_ANCHOR_PATTERN.sub(
-                f'TRUSTED_VALIDATE_SOURCE_SHA256 = "{source_digest}"',
-                trust_source,
-                count=1,
-            )
-            baseline_digest = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
-            trust_source = validate.BASELINE_TRUST_ANCHOR_PATTERN.sub(
-                f'TRUSTED_BASELINE_SHA256 = "{baseline_digest}"',
-                trust_source,
-                count=1,
-            )
-            trust_path.write_text(trust_source, encoding="utf-8")
         return index, baseline
 
     def _assert_blocked_in_both_modes(self, repo_root: Path, *args: str) -> None:
@@ -715,15 +701,31 @@ class CliTests(unittest.TestCase):
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
         self._assert_blocked_in_both_modes(repo_root)
 
-    def test_coordinated_validator_self_manifest_refresh_is_rejected_in_both_modes(self) -> None:
+    def test_coordinated_scanner_manifest_baseline_anchor_and_test_rebinding_is_rejected(self) -> None:
+        """Exercise the real CLI after refreshing every checkout-controlled root."""
+
         repo_root = self._copy_fixture_repo()
-        validator_path = repo_root / "contracts/fixtures/validator/validate.py"
-        validator_path.write_text(
-            validator_path.read_text(encoding="utf-8")
-            + "\n# coordinated validator source mutation\n",
+        readme = repo_root / "contracts/fixtures/connection-restoration/README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8") + "\nQWxhZGRpbjpvcGVuIHNlc2FtZQ==\n",
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_external_trust=False)
+        validator_path = repo_root / "contracts/fixtures/validator/validate.py"
+        source = validator_path.read_text(encoding="utf-8")
+        source = source.replace(
+            "RAW_RFC7617_TOKEN_PATTERN.finditer(scanned_value)",
+            "iter(())",
+            1,
+        )
+        validator_path.write_text(source, encoding="utf-8")
+        test_path = repo_root / "contracts/fixtures/validator/test_validate.py"
+        test_path.write_text(
+            test_path.read_text(encoding="utf-8")
+            + '\nTRUSTED_VALIDATE_SOURCE_SHA256 = "' + ("0" * 64) + '"\n'
+            + 'TRUSTED_BASELINE_SHA256 = "' + ("0" * 64) + '"\n',
+            encoding="utf-8",
+        )
+        self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_coverage_links_and_support_must_match_referenced_roots(self) -> None:
