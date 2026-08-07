@@ -10,6 +10,7 @@ observe different bytes.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import json
@@ -146,19 +147,31 @@ EXPECTED_CASE_IDS = (
 STRUCTURAL_HOSTS = (
     "chat.public.invalid", "chat.public.invalid.", "other.public.invalid",
     "attacker.private.invalid", "CHAT.PUBLIC.INVALID", "chat..public.invalid",
+    "chat.public.invalid:", "chat.public.invalid:443", "chat.public.invalid:0443",
+    "chat.public.invalid:abc", "chat.public.invalid:65536", "user@chat.public.invalid",
 )
 STRUCTURAL_URLS = (
     "https://chat.public.invalid", "http://chat.public.invalid", "https://CHAT.PUBLIC.INVALID",
     "HTTPS://chat.public.invalid", "https://chat.public.invalid.", "https://chat.public.invalid/",
     "https://other.public.invalid", "https://user@chat.public.invalid", "http://attacker.private.invalid",
+    "https://chat.public.invalid:443", "https://chat.public.invalid?x",
 )
 STRUCTURAL_PATHS = ("/hermes/api/ws",)
+STRUCTURAL_ARTIFACT_PATHS = (
+    "docs/deployment/proof-matrix.md",
+    "contracts/fixtures/deployment-security/host-origin-mapping/README.md",
+    "contracts/fixtures/deployment-security/host-origin-mapping/cases.json",
+    "contracts/fixtures/deployment-security/host-origin-mapping/test_validate.py",
+    "contracts/fixtures/deployment-security/host-origin-mapping/validate.py",
+    "contracts/fixtures/deployment-security/host-origin-mapping/validation-baseline.json",
+    "contracts/fixtures/index.json",
+)
 STRUCTURAL_FILENAMES = (
     "README.md", "cases.json", "test_validate.py", "validate.py", "validation-baseline.json",
     "proof-matrix.md", "index.json",
 )
 
-SENSITIVE_ASSIGNMENT = re.compile(r"(?i)(?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key)\s*[:=]\s*[^\s,;}]+")
+SENSITIVE_ASSIGNMENT = re.compile(r"(?i)(?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential(?:s)?)\s*[:=]\s*[^\s,;}]+")
 CREDENTIAL_HEADER = re.compile(r"(?i)\bauthorization\s*:\s*(?:basic|bearer)\s+[A-Za-z0-9._~+/-]{4,}")
 COOKIE_HEADER = re.compile(r"(?i)\bcookie\s*:\s*[^\s,;}]+")
 STRUCTURED_CREDENTIAL_KEY = re.compile(r"(?i)[\"'](?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential|credentials)[\"']\s*:\s*")
@@ -668,29 +681,149 @@ def artifact_manifest(captured: CapturedArtifacts | None = None) -> dict[str, An
     return {"files": files, "bytes": total, "sha256": digest.hexdigest()}
 
 
-def _normalize_python_code_members(text: str) -> str:
-    """Hide only dotted Python identifiers outside strings and comments.
+_CANONICAL_NEGATIVE_SCAFFOLD_DIGESTS = {
+    ("assignment", "mutations"): frozenset({
+        "37e8bf3535282d91e6b8345cfde1c8dc3482776cede8775a206d852974d787c5",
+        "cf8b464e479cf64fc506bc90a45af777e3e829b828563a732117e7f5d4fbb61d",
+    }),
+    ("assignment", "payloads"): frozenset({"9eb8ec19600054704dc350579ba8b031cfbc53283c9245ead45eca2431679c60"}),
+    ("for", "arguments"): frozenset({"64f72a7163adb5caa6620588b9c2ad4bcb85000495c09731fc0d9248598e7090"}),
+    ("for", "value"): frozenset({"98ef0847e7b74ced04c087844843b6b3e158fe1a6fd9176aa87ed137d88d0bbb"}),
+}
 
-    The hostname detector also matches ordinary module/member syntax. Tokenizing
-    code avoids a broad text exemption: literals
-    and comments remain unchanged, so a host, credential, or path payload in a
-    source string still reaches the fail-closed scanner.
-    """
 
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    except (IndentationError, SyntaxError, tokenize.TokenError):
-        return text
+def _ast_digest(node: ast.AST) -> str:
+    return hashlib.sha256(ast.dump(node, annotate_fields=True, include_attributes=False).encode("utf-8")).hexdigest()
+
+
+def _source_offsets(text: str) -> tuple[list[str], list[int]]:
     lines = text.splitlines(keepends=True)
     offsets = [0]
     for line in lines:
         offsets.append(offsets[-1] + len(line))
+    return lines, offsets
 
-    def absolute(position: tuple[int, int]) -> int:
-        line, column = position
-        return offsets[line - 1] + column
 
-    spans: list[tuple[int, int]] = []
+def _ast_absolute(lines: list[str], offsets: list[int], position: tuple[int, int]) -> int:
+    line, byte_column = position
+    raw_line = lines[line - 1].encode("utf-8")
+    try:
+        column = len(raw_line[:byte_column].decode("utf-8"))
+    except UnicodeDecodeError:
+        return offsets[line - 1] + byte_column
+    return offsets[line - 1] + column
+
+
+def _node_span(node: ast.AST, lines: list[str], offsets: list[int]) -> tuple[int, int] | None:
+    if not hasattr(node, "lineno") or not hasattr(node, "end_lineno"):
+        return None
+    return (
+        _ast_absolute(lines, offsets, (node.lineno, node.col_offset)),
+        _ast_absolute(lines, offsets, (node.end_lineno, node.end_col_offset)),
+    )
+
+
+def _apply_source_spans(text: str, spans: list[tuple[int, int, str]]) -> str:
+    """Apply non-overlapping source masks in one pass.
+
+    The scanner handles source artifacts up to the retained-artifact limit. A
+    single rebuild avoids quadratic behavior from repeatedly slicing the whole
+    string for each dotted member in a large, valid Python source file.
+    """
+
+    selected: list[tuple[int, int, str]] = []
+    last_end = 0
+    for start, end, replacement in sorted(spans, key=lambda item: (item[0], -(item[1] - item[0]))):
+        if start < 0 or end <= start or end > len(text) or start < last_end:
+            continue
+        selected.append((start, end, replacement))
+        last_end = end
+    selected.sort()
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, replacement in selected:
+        pieces.append(text[cursor:start])
+        pieces.append(replacement)
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _canonical_detector_assignment(node: ast.Assign) -> bool:
+    if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+        return False
+    name = node.targets[0].id
+    if name not in REDACTION_DETECTOR_NAMES:
+        return False
+    value = node.value
+    if not isinstance(value, ast.Call) or value.keywords or not isinstance(value.func, ast.Attribute):
+        return False
+    if not isinstance(value.func.value, ast.Name) or value.func.value.id != "re" or value.func.attr != "compile":
+        return False
+    if not 1 <= len(value.args) <= 2:
+        return False
+    try:
+        pattern = ast.literal_eval(value.args[0])
+        flags = ast.literal_eval(value.args[1]) if len(value.args) == 2 else 0
+    except (ValueError, TypeError, SyntaxError):
+        return False
+    if type(pattern) is not str or type(flags) is not int:
+        return False
+    expected = globals().get(name)
+    if not hasattr(expected, "pattern") or not hasattr(expected, "flags"):
+        return False
+    try:
+        candidate = re.compile(pattern, flags)
+    except (re.error, ValueError, TypeError):
+        return False
+    return candidate.pattern == expected.pattern and candidate.flags == expected.flags
+
+
+def _python_member_spans(text: str, source_name: str) -> list[tuple[int, int, str]]:
+    try:
+        tree = ast.parse(text)
+    except (IndentationError, SyntaxError, ValueError, TypeError, RecursionError):
+        return []
+    lines, offsets = _source_offsets(text)
+    parents: dict[int, ast.AST] = {}
+    bindings: set[str] = set()
+    attribute_ranges: list[tuple[int, int]] = []
+    import_ranges: list[tuple[int, int]] = []
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+        if isinstance(parent, ast.Name) and isinstance(parent.ctx, ast.Store):
+            bindings.add(parent.id)
+        elif isinstance(parent, ast.arg):
+            bindings.add(parent.arg)
+        elif isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bindings.add(parent.name)
+        elif isinstance(parent, ast.Import):
+            for alias in parent.names:
+                bindings.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(parent, ast.ImportFrom):
+            for alias in parent.names:
+                bindings.add(alias.asname or alias.name)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            span = _node_span(node, lines, offsets)
+            if span is not None:
+                import_ranges.append(span)
+        elif isinstance(node, ast.Attribute) and not isinstance(parents.get(id(node)), ast.Attribute):
+            root = node
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in bindings:
+                span = _node_span(node, lines, offsets)
+                if span is not None:
+                    attribute_ranges.append(span)
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (IndentationError, SyntaxError, tokenize.TokenError):
+        return []
+    spans: list[tuple[int, int, str]] = []
+    allowed_ranges = sorted(attribute_ranges + import_ranges)
+    allowed_index = 0
     index = 0
     while index + 2 < len(tokens):
         first, dot, last = tokens[index : index + 3]
@@ -700,45 +833,79 @@ def _normalize_python_code_members(text: str) -> str:
         end = index + 3
         while end + 1 < len(tokens) and tokens[end].string == "." and tokens[end + 1].type == tokenize.NAME:
             end += 2
-        spans.append((absolute(first.start), absolute(tokens[end - 1].end)))
+        start_offset = offsets[first.start[0] - 1] + first.start[1]
+        end_offset = offsets[tokens[end - 1].end[0] - 1] + tokens[end - 1].end[1]
+        while allowed_index < len(allowed_ranges) and allowed_ranges[allowed_index][1] <= start_offset:
+            allowed_index += 1
+        if allowed_index < len(allowed_ranges):
+            range_start, range_end = allowed_ranges[allowed_index]
+            if range_start <= start_offset and end_offset <= range_end:
+                spans.append((start_offset, end_offset, "<python-code-member>"))
         index = end
-    for start, end in reversed(spans):
-        text = text[:start] + "<python-code-member>" + text[end:]
-    return text
+    return spans
+
+
+def _python_source_spans(text: str, source_name: str) -> list[tuple[int, int, str]]:
+    try:
+        tree = ast.parse(text)
+    except (IndentationError, SyntaxError, ValueError, TypeError, RecursionError):
+        return _python_member_spans(text, source_name)
+    lines, offsets = _source_offsets(text)
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    spans = _python_member_spans(text, source_name)
+    if source_name == "validate.py":
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(parents.get(id(node)), ast.Module) and _canonical_detector_assignment(node):
+                span = _node_span(node, lines, offsets)
+                if span is not None:
+                    spans.append((*span, "<detector-definition>"))
+    if source_name == "test_validate.py":
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                if _ast_digest(node.value) in _CANONICAL_NEGATIVE_SCAFFOLD_DIGESTS.get(("assignment", name), ()):
+                    span = _node_span(node.value, lines, offsets)
+                    if span is not None:
+                        spans.append((*span, "<canonical-negative-matrix>"))
+            elif isinstance(node, ast.For) and isinstance(node.target, ast.Name):
+                name = node.target.id
+                if _ast_digest(node.iter) in _CANONICAL_NEGATIVE_SCAFFOLD_DIGESTS.get(("for", name), ()):
+                    span = _node_span(node.iter, lines, offsets)
+                    if span is not None:
+                        spans.append((*span, "<canonical-negative-matrix>"))
+    return spans
+
+
+def _normalize_python_code_members(text: str) -> str:
+    """Hide dotted members only when AST and token context prove code syntax.
+
+    A bare dotted host value is an expression-shaped string, but it is not an
+    approved member rooted in a bound Python name. Imports and
+    bound-name attribute chains remain normalized. String, docstring, and comment
+    contents have no matching AST/token span and remain scanner-visible.
+    """
+
+    spans = [span for span in _python_member_spans(text, "python" + ".py") if span[2] == "<python-code-member>"]
+    return _apply_source_spans(text, spans)
 
 
 def _normalize_structural_text(text: str, *, source_name: str | None = None) -> str:
     normalized = text
+    if source_name is not None and source_name.endswith(".py"):
+        normalized = _apply_source_spans(text, _python_source_spans(text, source_name))
     for value in sorted(STRUCTURAL_URLS, key=len, reverse=True):
         normalized = re.sub(rf"(?<![A-Za-z0-9._~:/?#@!$&'()*+,;=%-]){re.escape(value)}(?![A-Za-z0-9._~:/?#@!$&'()*+,;=%-])", "<reserved-invalid-url>", normalized)
     for value in sorted(STRUCTURAL_HOSTS, key=len, reverse=True):
-        normalized = re.sub(rf"(?<![A-Za-z0-9.-]){re.escape(value)}(?![A-Za-z0-9.-])", "<reserved-invalid-host>", normalized)
+        normalized = re.sub(rf"(?<![A-Za-z0-9.@/_:%?+#=&~-]){re.escape(value)}(?![A-Za-z0-9.@/_:%?+#=&~-])", "<reserved-invalid-host>", normalized)
     for value in STRUCTURAL_PATHS:
         normalized = re.sub(rf"(?<![A-Za-z0-9._/-]){re.escape(value)}(?![A-Za-z0-9._/-])", "<reviewed-route>", normalized)
-    # Detector definitions are security-test syntax, but a definition with an
-    # adjacent payload must remain visible. Normalize only a complete assignment
-    # line whose final parenthesis is the end of that line; appended credentials,
-    # hosts, user data, or paths are intentionally left for the scanner.
-    lines: list[str] = []
-    for line in normalized.splitlines(keepends=True):
-        if re.fullmatch(rf"\s*(?:{'|'.join(sorted(REDACTION_DETECTOR_NAMES))})\s*=\s*re\.compile\(.*\)(?:,\s*re\.[A-Za-z]+)?\s*\n?", line):
-            lines.append("<detector-definition>\n" if line.endswith("\n") else "<detector-definition>")
-        else:
-            lines.append(line)
-    normalized = "".join(lines)
+    for value in STRUCTURAL_ARTIFACT_PATHS:
+        normalized = re.sub(rf"(?<![A-Za-z0-9._/-]){re.escape(value)}(?![A-Za-z0-9._/-])", "<reviewed-artifact-path>", normalized)
     for value in STRUCTURAL_FILENAMES:
-        normalized = re.sub(rf"(?<![A-Za-z0-9._-]){re.escape(value)}(?![A-Za-z0-9._-])", "<reviewed-artifact-name>", normalized)
-    if source_name is not None and source_name.endswith(".py"):
-        normalized = _normalize_python_code_members(normalized)
-
-    # The remaining exemptions are exact, named negative-test source forms. Do
-    # not use a wildcard line exemption: mixed-line payload regressions must be
-    # scanned even when they share a line with a test helper.
-    normalized = re.sub(r"(?m)^\s*mutations = \[.*\]\s*$", "<parser-negative-matrix>", normalized)
-    normalized = re.sub(r"(?m)^\s*payloads = \(b'.*\)\s*$", "<malformed-json-negative-canary>", normalized)
-    normalized = re.sub(r"(?m)^\s*for arguments in \(\[\"--unknown\".*\)\s*$", "<cli-negative-canary>", normalized)
-    normalized = re.sub(r"(?m)^\s*for value in \(\"evilchat\.public\.invalid\".*\)\s*$", "<structural-boundary-negative-canary>", normalized)
-    normalized = re.sub(r"(?m)^.*<negative-test-canary>\s*$", "<negative-test-detector-definition>", normalized)
+        normalized = re.sub(rf"(?<![A-Za-z0-9._/@:?#=&%+~-]){re.escape(value)}(?![A-Za-z0-9._/@:?#=&%+~-])", "<reviewed-artifact-name>", normalized)
     return normalized
 
 
@@ -748,13 +915,27 @@ def _normalize_redaction_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", split_camel.lower()).strip("_")
 
 
-def _scan_structured_json(value: Any, path: str = "$") -> None:
-    """Reject sensitive object keys and user/transcript payload shapes.
+def _scan_text_detectors(text: str, *, source_name: str | None = None) -> None:
+    normalized = _normalize_structural_text(text, source_name=source_name)
+    for pattern, label in (
+        (SENSITIVE_ASSIGNMENT, "credential assignment"), (CREDENTIAL_HEADER, "credential header"),
+        (COOKIE_HEADER, "cookie header"), (STRUCTURED_CREDENTIAL_KEY, "structured credential"),
+        (STRUCTURED_USER_DATA, "structured user data"), (STRUCTURED_TRANSCRIPT, "structured transcript"),
+        (USER_ROLE, "user transcript"), (PRIVATE_KEY, "private key"), (LIVE_URL, "URL"),
+        (IPV4, "IPv4 address"), (IPV6, "IPv6 address"), (EMAIL, "email address"),
+        (ABSOLUTE_PATH, "filesystem path"), (HOSTNAME, "hostname"),
+    ):
+        require(not pattern.search(normalized), f"retained artifact contains forbidden {label}")
 
-    Raw regexes catch textual artifacts, but JSON keys can otherwise hide a
-    credential or conversation payload behind harmless-looking values. Walk
-    parsed JSON with bounded parser limits and reject normalized key aliases so
-    camelCase, hyphenated, and underscored spellings share one fail-closed rule.
+
+def _scan_structured_json(value: Any, path: str = "$") -> None:
+    """Reject sensitive keys and every decoded scalar string recursively.
+
+    Raw JSON text can hide a detector payload behind Unicode escapes. Walking the
+    parsed tree scans decoded keys and values without applying Python-source
+    exemptions, while the narrow structural normalizer still permits exact
+    reviewed fixture tokens. Alias checks run first so their bounded semantic
+    reasons remain stable.
     """
 
     if type(value) is dict:
@@ -763,13 +944,17 @@ def _scan_structured_json(value: Any, path: str = "$") -> None:
             require(normalized not in SENSITIVE_STRUCTURED_KEYS, f"retained artifact contains forbidden structured credential at {path}")
             require(normalized not in USER_DATA_STRUCTURED_KEYS, f"retained artifact contains forbidden user data at {path}")
             require(normalized not in TRANSCRIPT_STRUCTURED_KEYS, f"retained artifact contains forbidden transcript data at {path}")
-            if normalized == "role" and child == "user":
+            if normalized == "role" and type(child) is str and child.casefold() == "user":
                 raise ValidationError(f"retained artifact contains forbidden user transcript at {path}")
+            _scan_text_detectors(key)
             _scan_structured_json(child, f"{path}.<field>")
         return
     if type(value) is list:
         for child in value:
             _scan_structured_json(child, f"{path}[]")
+        return
+    if type(value) is str:
+        _scan_text_detectors(value)
 
 
 def scan_artifact_bytes(name: str, payload: bytes) -> None:
@@ -780,16 +965,7 @@ def scan_artifact_bytes(name: str, payload: bytes) -> None:
         raise ValidationError("retained artifact is not valid UTF-8") from exc
     if name.endswith(".json"):
         _scan_structured_json(parse_json_bytes(payload))
-    normalized = _normalize_structural_text(text, source_name=name)
-    for pattern, label in (
-        (SENSITIVE_ASSIGNMENT, "credential assignment"), (CREDENTIAL_HEADER, "credential header"),
-        (COOKIE_HEADER, "cookie header"), (STRUCTURED_CREDENTIAL_KEY, "structured credential"),
-        (STRUCTURED_USER_DATA, "structured user data"), (STRUCTURED_TRANSCRIPT, "structured transcript"),
-        (USER_ROLE, "user transcript"), (PRIVATE_KEY, "private key"), (LIVE_URL, "URL"),
-        (IPV4, "IPv4 address"), (IPV6, "IPv6 address"), (EMAIL, "email address"),
-        (HOSTNAME, "hostname"), (ABSOLUTE_PATH, "filesystem path"),
-    ):
-        require(not pattern.search(normalized), f"retained artifact contains forbidden {label}")
+    _scan_text_detectors(text, source_name=name)
 
 
 def scan_all_artifacts(captured: CapturedArtifacts | None = None) -> None:

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 VALIDATOR = ROOT / "validate.py"
@@ -23,6 +24,43 @@ if spec is None or spec.loader is None:
     raise RuntimeError("validator module could not be loaded")
 validate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(validate)
+
+
+def controlled_current_pin_validation() -> dict[str, int]:
+    """Run the default path with an isolated, in-memory current identity.
+
+    The checkout intentionally retains stale external pins after this fix. This
+    helper proves baseline validation and artifact scanning still execute when a
+    reviewed predecessor supplies current pins, without changing any fixture
+    artifact or production constant.
+    """
+
+    captured = validate._capture_retained_artifacts()
+    baseline = json.loads(captured.files["validation-baseline.json"].decode("utf-8"))
+    baseline["artifact"] = validate.artifact_manifest(captured)
+    baseline_payload = json.dumps(baseline, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    controlled_files = dict(captured.files)
+    controlled_files["validation-baseline.json"] = baseline_payload
+    controlled = validate.CapturedArtifacts(captured.root, controlled_files)
+    retained_pins = {
+        name: (len(controlled.files[name]), hashlib.sha256(controlled.files[name]).hexdigest())
+        for name in ("README.md", "cases.json", "test_validate.py")
+    }
+    with (
+        mock.patch.object(validate, "_capture_retained_artifacts", return_value=controlled),
+        mock.patch.object(validate, "PINNED_RETAINED_ARTIFACTS", retained_pins),
+        mock.patch.object(validate, "PINNED_VALIDATOR_SOURCE_SHA256", validate._validator_source_digest(controlled)),
+        mock.patch.object(validate, "PINNED_BASELINE_SHA256", hashlib.sha256(baseline_payload).hexdigest()),
+        mock.patch.object(validate, "validate_baseline", wraps=validate.validate_baseline) as baseline_call,
+        mock.patch.object(validate, "scan_all_artifacts", wraps=validate.scan_all_artifacts) as scanner_call,
+    ):
+        retained = validate.validate()
+    return {
+        "retained": len(retained),
+        "accepted": sum(1 for item in retained if item["upstream_called"]),
+        "baseline_calls": baseline_call.call_count,
+        "scan_calls": scanner_call.call_count,
+    }
 
 
 class HostOriginMappingProofTests(unittest.TestCase):
@@ -38,6 +76,97 @@ class HostOriginMappingProofTests(unittest.TestCase):
             command.append("-O")
         command.append(str(VALIDATOR)); command.extend(arguments or [])
         return subprocess.run(command, cwd=ROOT.parents[3], text=True, capture_output=True, check=False, timeout=30)
+
+    def run_scanner_probe(self, artifact: str, payload: bytes, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
+        handle = tempfile.NamedTemporaryFile("wb", suffix=".bin", delete=False)
+        with handle:
+            handle.write(payload)
+        path = Path(handle.name)
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        probe = (
+            "import importlib" + ".util, pathlib, sys\n"
+            "spec = importlib" + ".util.spec_from_file_location('probe_validate', sys" + ".argv[1])\n"
+            "module = importlib" + ".util.module_from_spec(spec)\n"
+            "spec" + ".loader.exec_module(module)\n"
+            "try:\n"
+            "    module" + ".scan_artifact_bytes(sys" + ".argv[3], pathlib" + ".Path(sys" + ".argv[2]).read_bytes())\n"
+            "except module" + ".ValidationError as exc:\n"
+            "    print(module" + ".bounded_failure(exc))\n"
+            "    raise SystemExit(2)\n"
+            "raise SystemExit(0)\n"
+        )
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(["-c", probe, str(VALIDATOR), str(path), artifact])
+        return subprocess.run(command, cwd=ROOT.parents[3], text=True, capture_output=True, check=False, timeout=30)
+
+    def assert_scanner_failure_parity(self, artifact: str, payload: bytes, expected_reason: str | None = None) -> None:
+        outputs = []
+        for optimized in (False, True):
+            result = self.run_scanner_probe(artifact, payload, optimized=optimized)
+            self.assert_bounded_failure(result)
+            if expected_reason is not None:
+                self.assertIn(expected_reason, json.loads(result.stdout)["reason"])
+            outputs.append((result.returncode, result.stdout, result.stderr))
+        self.assertEqual(outputs[0], outputs[1])
+
+    def run_parser_probe(self, payload: bytes, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
+        handle = tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False)
+        with handle:
+            handle.write(payload)
+        path = Path(handle.name)
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        probe = (
+            "import importlib" + ".util, pathlib, sys\n"
+            "spec = importlib" + ".util.spec_from_file_location('probe_validate', sys" + ".argv[1])\n"
+            "module = importlib" + ".util.module_from_spec(spec)\n"
+            "spec" + ".loader.exec_module(module)\n"
+            "try:\n"
+            "    module" + ".parse_json_bytes(pathlib" + ".Path(sys" + ".argv[2]).read_bytes())\n"
+            "except module" + ".ValidationError as exc:\n"
+            "    print(module" + ".bounded_failure(exc))\n"
+            "    raise SystemExit(2)\n"
+            "raise SystemExit(0)\n"
+        )
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(["-c", probe, str(VALIDATOR), str(path)])
+        return subprocess.run(command, cwd=ROOT.parents[3], text=True, capture_output=True, check=False, timeout=30)
+
+    def assert_parser_failure_parity(self, payload: bytes, expected_reason: str) -> None:
+        outputs = []
+        for optimized in (False, True):
+            result = self.run_parser_probe(payload, optimized=optimized)
+            self.assert_bounded_failure(result)
+            self.assertEqual(json.loads(result.stdout)["reason"], expected_reason)
+            outputs.append((result.returncode, result.stdout, result.stderr))
+        self.assertEqual(outputs[0], outputs[1])
+
+    def run_controlled_validation_probe(self, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
+        probe = (
+            "import importlib" + ".util, json, sys\n"
+            "spec = importlib" + ".util.spec_from_file_location('probe_tests', sys" + ".argv[1])\n"
+            "module = importlib" + ".util.module_from_spec(spec)\n"
+            "spec" + ".loader.exec_module(module)\n"
+            "print(json" + ".dumps(module" + ".controlled_current_pin_validation(), sort_keys=True, separators=(',', ':')))\n"
+        )
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(["-c", probe, str(Path(__file__))])
+        return subprocess.run(command, cwd=ROOT.parents[3], text=True, capture_output=True, check=False, timeout=30)
+
+    def assert_controlled_validation_parity(self) -> None:
+        outputs = []
+        for optimized in (False, True):
+            result = self.run_controlled_validation_probe(optimized=optimized)
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual(result.stderr, "")
+            outputs.append(result.stdout)
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(json.loads(outputs[0]), {"accepted": 1, "baseline_calls": 1, "retained": 33, "scan_calls": 1})
 
     def write_json(self, document: object) -> Path:
         handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
@@ -84,6 +213,7 @@ class HostOriginMappingProofTests(unittest.TestCase):
 
     def test_default_validator_passes_or_reports_external_pin_gate(self) -> None:
         expected = {"pinned retained artifact size changed", "pinned retained artifact digest changed", "pinned validator identity changed"}
+        outputs = []
         for optimized in (False, True):
             result = self.run_cli(optimized=optimized)
             self.assertEqual(result.stderr, "")
@@ -92,6 +222,11 @@ class HostOriginMappingProofTests(unittest.TestCase):
             else:
                 self.assert_bounded_failure(result)
                 self.assertIn(json.loads(result.stdout)["reason"], expected)
+            outputs.append((result.returncode, result.stdout, result.stderr))
+        self.assertEqual(outputs[0], outputs[1])
+
+    def test_default_validation_reaches_baseline_and_scan_with_current_controlled_identity(self) -> None:
+        self.assert_controlled_validation_parity()
 
     def test_case_inventory_and_raw_results_are_frozen(self) -> None:
         retained = validate.validate_document(copy.deepcopy(self.document))
@@ -205,6 +340,46 @@ class HostOriginMappingProofTests(unittest.TestCase):
         document = copy.deepcopy(self.document); document["cases"].reverse()
         self.assert_document_mutation_reaches_reason(document, "case id or order changed")
 
+    def test_root_source_and_shape_mutations_reach_intended_validation(self) -> None:
+        metadata_reasons = {
+            "schema": "fixture schema changed",
+            "fixture_id": "fixture id changed",
+            "issue": "fixture issue changed",
+            "contract": "fixture contract changed",
+            "hermes_source_sha": "Hermes source pin changed",
+            "synthetic_only": "synthetic-only flag changed",
+            "live_claim": "live-claim flag changed",
+            "proof_mode": "proof mode changed",
+        }
+        for field, expected_reason in metadata_reasons.items():
+            document = copy.deepcopy(self.document)
+            document[field] = "mutated"
+            self.assert_document_mutation_reaches_reason(document, expected_reason)
+        document = copy.deepcopy(self.document); document.pop("schema")
+        self.assert_document_mutation_reaches_reason(document, "fixture root keys changed")
+        document = copy.deepcopy(self.document); document["unexpected"] = True
+        self.assert_document_mutation_reaches_reason(document, "fixture root keys changed")
+        document = copy.deepcopy(self.document); document["cases"] = {}
+        self.assert_document_mutation_reaches_reason(document, "case inventory changed")
+
+        for field in validate.SOURCE_EVIDENCE_KEYS:
+            document = copy.deepcopy(self.document)
+            document["cases"][0]["source_evidence"][field] = "mutated"
+            self.assert_document_mutation_reaches_reason(document, "source evidence changed")
+        document = copy.deepcopy(self.document); document["cases"][0].pop("source_evidence")
+        self.assert_document_mutation_reaches_reason(document, "case keys changed")
+        document = copy.deepcopy(self.document); document["cases"][0]["source_evidence"] = []
+        self.assert_document_mutation_reaches_reason(document, "source evidence must be an object")
+        document = copy.deepcopy(self.document); document["cases"][0]["source_evidence"].pop("contract_sha256")
+        self.assert_document_mutation_reaches_reason(document, "source evidence keys changed")
+
+        document = copy.deepcopy(self.document); document["cases"][0] = []
+        self.assert_document_mutation_reaches_reason(document, "case must be an object")
+        document = copy.deepcopy(self.document); document["cases"][0]["request"] = []
+        self.assert_document_mutation_reaches_reason(document, "case request must be an object")
+        document = copy.deepcopy(self.document); document["cases"][0]["expected"] = []
+        self.assert_document_mutation_reaches_reason(document, "case expected result must be an object")
+
     def test_source_row_binding_rejects_copied_allow_row_evidence(self) -> None:
         document = copy.deepcopy(self.document)
         document["cases"][1]["source_evidence"] = copy.deepcopy(document["cases"][0]["source_evidence"])
@@ -219,10 +394,13 @@ class HostOriginMappingProofTests(unittest.TestCase):
 
     def test_alternate_cases_path_is_rejected_in_both_modes(self) -> None:
         path = self.write_json(self.document)
+        outputs = []
         for optimized in (False, True):
             result = self.run_cli(["--cases", str(path), "--skip-baseline"], optimized=optimized)
             self.assert_bounded_failure(result)
             self.assertEqual(json.loads(result.stdout)["reason"], "cases input must be the canonical artifact")
+            outputs.append((result.returncode, result.stdout, result.stderr))
+        self.assertEqual(outputs[0], outputs[1])
 
     def test_each_retained_artifact_rejects_every_forbidden_class(self) -> None:
         quote = chr(34)
@@ -254,6 +432,73 @@ class HostOriginMappingProofTests(unittest.TestCase):
                     payload = canary.encode() if label in structured_labels else json.dumps({"fixture": canary}, separators=(",", ":")).encode()
                     with self.assertRaises(validate.ValidationError):
                         validate.scan_artifact_bytes(artifact, payload)
+
+    def test_direct_scanner_regressions_match_normal_and_optimized_modes(self) -> None:
+        quote = chr(34)
+        credential_canary = "credential" + "=" + "redaction-canary"
+        credentials_canary = "credentials" + ": " + "redaction-canary"
+        host = "unsafe" + ".example" + ".com"
+        path = "/" + "srv/secrets/" + "README" + ".md"
+        role_json = "{" + quote + "role" + quote + ":" + quote + "User" + quote + "}"
+        transcript_json = "{" + quote + "content" + quote + ":" + quote + "private transcript" + quote + "}"
+        private_key_canary = "-----BEGIN " + "PRIVATE KEY-----"
+        detector_regressions = (
+            ("SENSITIVE_ASSIGNMENT", credential_canary, "credential assignment"),
+            ("HOSTNAME", host, "hostname"),
+            ("ABSOLUTE_PATH", path, "filesystem path"),
+            ("USER_ROLE", role_json, "user transcript"),
+            ("STRUCTURED_TRANSCRIPT", transcript_json, "structured user data"),
+            ("PRIVATE_KEY", private_key_canary, "private key"),
+        )
+        for detector_name, payload, expected_reason in detector_regressions:
+            with self.subTest(detector_name=detector_name):
+                source = payload.encode() if detector_name == "PRIVATE_KEY" else (detector_name + " = re" + ".compile(" + repr(payload) + ")").encode()
+                self.assert_scanner_failure_parity("validate.py", source, expected_reason)
+                self.assert_scanner_failure_parity("README.md", source, expected_reason)
+
+        canonical = "SENSITIVE_ASSIGNMENT = re" + ".compile(" + repr(validate.SENSITIVE_ASSIGNMENT.pattern) + ") # " + credential_canary + " )"
+        self.assert_scanner_failure_parity("validate.py", canonical.encode(), "credential assignment")
+        self.assert_scanner_failure_parity("README.md", ("\"\"\"" + canonical + "\"\"\"").encode(), "credential assignment")
+        self.assert_scanner_failure_parity("README.md", ("<!-- " + detector_regressions[1][0] + " = re" + ".compile(" + repr(host) + ") -->").encode(), "hostname")
+
+        scaffolds = (
+            ("mutations = [" + repr(credential_canary) + "]", "credential assignment"),
+            ("payloads = (" + repr(credential_canary.encode()) + ",)", "credential assignment"),
+            ("for arguments in (([\"--unknown\", " + repr(credential_canary) + "],)):\n    pass", "credential assignment"),
+            ("for value in (" + repr(host) + ",):\n    pass", "hostname"),
+            ("marker = " + repr(credential_canary + " <negative-test-canary>"), "credential assignment"),
+        )
+        for source, expected_reason in scaffolds:
+            with self.subTest(scaffold=source.split(" ", 1)[0]):
+                self.assert_scanner_failure_parity("test_validate.py", source.encode(), expected_reason)
+
+        self.assert_scanner_failure_parity("README.md", ("person@" + "chat.public.invalid").encode(), "email address")
+        self.assert_scanner_failure_parity("README.md", ("https" + "://" + "README.md").encode(), "URL")
+        self.assert_scanner_failure_parity("README.md", ("person@" + "README.md").encode(), "email address")
+        self.assert_scanner_failure_parity("README.md", ("/" + "tmp/" + "README" + ".md").encode(), "filesystem path")
+        self.assert_scanner_failure_parity("README.md", path.encode(), "filesystem path")
+
+    def test_decoded_json_keys_and_scalar_values_are_scanned_recursively(self) -> None:
+        quote = chr(34)
+        cases = (
+            (b'{"outer":"\\u0070assword\\u003dredaction-canary"}', "credential assignment"),
+            (b'{"outer":"\\u002ftmp/' + b"README" + b'.md"}', "filesystem path"),
+            (b'{"outer":"\\u002fsrv/secrets/' + b"README" + b'.md"}', "filesystem path"),
+            (b'{"outer":"\\u0068ttps://' + b"unsafe" + b".example/path" + b'"}', "URL"),
+            (json.dumps({"outer": "{" + quote + "role" + quote + ":" + quote + "User" + quote + "," + quote + "content" + quote + ":" + quote + "private transcript" + quote + "}"}, separators=(",", ":")).encode(), "structured user data"),
+            (b'{"\\u0075' + b"nsafe" + b".example" + b'.com":"x"}', "hostname"),
+            (b'{"\\u002fsrv/secrets/key":"x"}', "filesystem path"),
+            (b'{"password\\u003dsecret":"x"}', "credential assignment"),
+            (json.dumps({"outer": [{("access" + "." + "token"): "x"}]}, separators=(",", ":")).encode(), None),
+            (json.dumps({"outer": [{("user" + " data"): "x"}]}, separators=(",", ":")).encode(), None),
+            (json.dumps({"outer": [{("chat" + " history"): "x"}]}, separators=(",", ":")).encode(), None),
+        )
+        for payload, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                self.assert_scanner_failure_parity("cases.json", payload, expected_reason)
+        for payload, expected_reason in zip(cases[-3:], ("forbidden structured credential", "forbidden user data", "forbidden transcript data")):
+            with self.assertRaisesRegex(validate.ValidationError, expected_reason):
+                validate.scan_artifact_bytes("cases.json", payload[0])
 
     def test_structured_redaction_aliases_are_recursive(self) -> None:
         quote = chr(34)
@@ -291,7 +536,7 @@ class HostOriginMappingProofTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.scan_artifact_bytes("README.md", mixed)
 
-    def test_parser_rejections_reach_distinct_bounded_reasons(self) -> None:
+    def test_parser_rejections_reach_distinct_bounded_reasons_in_both_modes(self) -> None:
         payloads = (
             (b'{"schema":"x","schema":"' + b"secret" + b"=do-not-echo" + b'"}', "JSON contains a duplicate object key"),
             (b"\xff\xfe", "JSON artifact is not valid UTF-8"),
@@ -302,11 +547,21 @@ class HostOriginMappingProofTests(unittest.TestCase):
         )
         for payload, expected_reason in payloads:
             with self.subTest(expected_reason=expected_reason):
-                with self.assertRaises(validate.ValidationError) as caught:
-                    validate.parse_json_bytes(payload)
-                self.assertEqual(str(caught.exception), expected_reason)
+                self.assert_parser_failure_parity(payload, expected_reason)
         for arguments in ((["--unknown", "secret" + "=do-not-echo"], ["--skip-baseline", "--skip-baseline"], ["--cases"])):
-            self.assert_bounded_failure(self.run_cli(list(arguments)), "do-not-echo")
+            outputs = []
+            for optimized in (False, True):
+                result = self.run_cli(list(arguments), optimized=optimized)
+                self.assert_bounded_failure(result, "do-not-echo")
+                outputs.append((result.returncode, result.stdout, result.stderr))
+            self.assertEqual(outputs[0], outputs[1])
+
+    def test_large_dotted_member_normalization_is_linear_and_bounded(self) -> None:
+        source = "member = object()\n" + ("member" + ".value\n") * 20_000
+        normalized = validate._normalize_python_code_members(source)
+        self.assertEqual(normalized.count("<python-code-member>"), 20_000)
+        self.assertEqual(len(normalized), len("member = object()\n") + 20_000 * (len("<python-code-member>") + 1))
+        self.assertLess(len(source), validate.MAX_TOTAL_RETAINED_BYTES)
 
     def test_baseline_and_coordinated_rebinding_are_rejected(self) -> None:
         baseline, payload = validate.load_json(BASELINE)

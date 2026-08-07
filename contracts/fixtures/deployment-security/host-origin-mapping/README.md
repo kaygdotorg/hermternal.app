@@ -98,14 +98,31 @@ Exemptions are narrow and structural:
 
 - exact reserved `.invalid` fixture authorities and their frozen mutation forms;
 - the exact reviewed WebSocket route;
-- exact artifact filenames and validator command paths; and
-- complete detector-definition or explicit negative-test-canary source lines.
+- exact reviewed artifact paths and filenames, with boundaries that do not
+  match an email address, URL, absolute path, or credential assignment;
+- canonical detector assignments only when a module-level AST assignment has
+  the expected detector name and exactly matches the loaded pattern and flags;
+  a same-looking assignment in a string, docstring, comment, or trailing
+  comment remains scanner-visible; and
+- canonical negative-test scaffolds only when their AST value has an exact
+  reviewed fingerprint. Generic variable names, loop lines, and canary text
+  do not create an exemption.
 
-Python artifacts are tokenized only to recognize dotted identifiers in code;
-string and comment contents remain scanner-visible. Prefix, suffix, alternate
-host, alternate URL, and adjacent content do not inherit
-an exemption. Tests append each forbidden class to every artifact and require
-rejection.
+Python artifacts use tokens plus AST source context to recognize dotted
+identifiers in real code. A bare unreviewed dotted-host payload is not code and
+is scanned. String, docstring, HTML-comment, and comment contents remain
+scanner-visible, including content adjacent to an otherwise canonical
+assignment. Prefix, suffix, alternate host, alternate URL, and adjacent
+content do not inherit an exemption. Tests append each forbidden class to
+every artifact and require rejection.
+
+JSON artifacts are parsed before raw scanning. The validator recursively scans
+decoded scalar strings, dictionary keys, nested objects, and list elements, so
+Unicode escapes and separator variants such as dotted access-token,
+spaced user-data, and spaced chat-history aliases cannot hide credentials or
+transcript payloads. Role
+values are compared case-insensitively while the original decoded content
+remains subject to the same fail-closed checks.
 
 ## Validation, mutation, and identity binding
 
@@ -113,7 +130,9 @@ rejection.
 keys, non-finite numbers, malformed UTF-8, excessive input, deep or wide JSON,
 unknown keys, changed case order, changed mapping or policy, semantic outcome
 mismatches, unsafe retained data, and changed benchmark evidence. Explicit
-exceptions preserve the same checks under `python3 -O`.
+exceptions preserve the same checks under `python3 -O`; the regression suite
+runs every parser, scanner, CLI, default-validation, and controlled-integration
+failure probe in both modes and requires matching bounded output.
 
 The validator accepts only the canonical `cases.json` path and code-pins its
 raw digest. It also binds every row to its observation index, exact request
