@@ -231,7 +231,7 @@ EXPECTED_REVISIONS = {
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     BASELINE_EVIDENCE_ID: {
-        "commit_sha": "af4e3e975238102e295552841e202d7214c863ca",
+        "commit_sha": "fee6accac56592249bb2a965f5ac855076824300",
         "fixture_id": "shared-benchmark-validator",
         "fixture_version": "1.0.0",
         "fixture_sha256": "7b0e11706465195dafb6a6821049b1dceb384ca77230bc3d21adbbc26450dbc5",
