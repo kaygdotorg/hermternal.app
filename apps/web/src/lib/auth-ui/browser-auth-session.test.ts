@@ -411,6 +411,115 @@ describe('BrowserAuthSession', () => {
     expect(session.current.status).toBe('logging_out');
   });
 
+  it('blocks reentrant invalidation and observer callbacks, then resets the guard', async () => {
+    let session!: BrowserAuthSession;
+    const nestedCalls: Promise<void>[] = [];
+    const logout = vi.fn(async () => undefined);
+    const invalidateLocalSession = vi.fn(() => {
+      nestedCalls.push(session.logout());
+      session.expire();
+    });
+    session = new BrowserAuthSession({
+      client: client({ logout }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession
+    });
+    session.subscribe((snapshot) => {
+      if (snapshot.status === 'logging_out') {
+        nestedCalls.push(session.logout());
+        session.expire();
+      }
+    });
+    await session.initialize();
+
+    const first = session.logout();
+    await Promise.all([first, ...nestedCalls]);
+
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(1);
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+
+    await session.initialize();
+    session.expire();
+
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not publish or send server logout when the hook disposes reentrantly', async () => {
+    let session!: BrowserAuthSession;
+    const logout = vi.fn(async () => undefined);
+    const invalidateLocalSession = vi.fn(() => {
+      void session.logout();
+      session.expire();
+      session.dispose();
+    });
+    session = new BrowserAuthSession({
+      client: client({ logout }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession
+    });
+    await session.initialize();
+
+    await session.logout();
+
+    expect(logout).not.toHaveBeenCalled();
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(1);
+    expect(session.current).toEqual({ status: 'authenticated', identity, providers: [] });
+  });
+
+  it('resets the invalidation guard when the local hook throws', async () => {
+    let session!: BrowserAuthSession;
+    const logout = vi.fn(async () => undefined);
+    const invalidateLocalSession = vi
+      .fn<() => void>()
+      .mockImplementationOnce(() => {
+        void session.logout();
+        session.expire();
+        throw new Error('local invalidation failed');
+      })
+      .mockImplementationOnce(() => undefined);
+    session = new BrowserAuthSession({
+      client: client({ logout }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession
+    });
+    await session.initialize();
+
+    await expect(session.logout()).rejects.toThrow('local invalidation failed');
+    expect(logout).not.toHaveBeenCalled();
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(1);
+
+    await session.logout();
+
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(2);
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it('cleans local state once for each failed logout attempt and permits recovery retry', async () => {
+    const logout = vi
+      .fn<BrowserAuthClient['logout']>()
+      .mockRejectedValueOnce(new BrowserAuthError('logout-failed'))
+      .mockResolvedValueOnce(undefined);
+    const invalidateLocalSession = vi.fn();
+    const session = new BrowserAuthSession({
+      client: client({ logout }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession
+    });
+
+    await session.initialize();
+    await session.logout();
+    expect(session.current.status).toBe('logout_failed');
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(1);
+
+    await session.logout();
+
+    expect(logout).toHaveBeenCalledTimes(2);
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(2);
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
   it('reconciles an ambiguous logout before staying signed out', async () => {
     const verify = vi
       .fn<BrowserAuthClient['verify']>()

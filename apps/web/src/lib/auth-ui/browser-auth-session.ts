@@ -60,6 +60,7 @@ export class BrowserAuthSession {
   };
   private controller: AbortController | undefined;
   private generation = 0;
+  private invalidationInProgress: 'expired' | 'logging_out' | undefined;
   private disposed = false;
 
   constructor(options: BrowserAuthSessionOptions) {
@@ -173,7 +174,9 @@ export class BrowserAuthSession {
 
   async logout(): Promise<void> {
     this.assertActive();
-    if (this.snapshot.status === 'logging_out') return;
+    // A failed logout remains retryable. Only a pending logout or a synchronous
+    // local-invalidation callback blocks another logout attempt.
+    if (this.snapshot.status === 'logging_out' || this.invalidationInProgress) return;
 
     const retry = this.snapshot.status === 'logout_failed';
     const identity = this.snapshot.identity;
@@ -212,7 +215,7 @@ export class BrowserAuthSession {
 
   expire(): void {
     this.assertActive();
-    if (this.isLogoutState()) return;
+    if (this.isLogoutState() || this.invalidationInProgress) return;
     this.invalidateAndCancel('expired');
   }
 
@@ -288,10 +291,18 @@ export class BrowserAuthSession {
     const controller = new AbortController();
     this.controller = controller;
     const operation: AuthOperation = { generation: this.generation, signal: controller.signal };
-    this.invalidateLocalSession();
-    // The local hook is synchronous and may expire again, dispose, or start a
-    // newer auth operation. The outer lifecycle state is no longer authoritative
-    // after that callback returns.
+    // The local hook is synchronous and may re-enter logout or expiry before the
+    // outer lifecycle state is published. Mark that boundary until the callback
+    // returns, and always clear it so a thrown hook cannot permanently block the
+    // next lifecycle attempt.
+    this.invalidationInProgress = status;
+    try {
+      this.invalidateLocalSession();
+    } finally {
+      this.invalidationInProgress = undefined;
+    }
+    // The local hook may dispose or start a newer auth operation. The outer
+    // lifecycle state is no longer authoritative after that callback returns.
     if (!this.ownsOperation(operation)) return operation;
     this.publish({ status, providers: [], ...retained });
     return operation;
