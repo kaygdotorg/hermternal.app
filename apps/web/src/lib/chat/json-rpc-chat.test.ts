@@ -42,8 +42,8 @@ const COMPATIBILITY_EVIDENCE: JsonRpcChatOptions["compatibilityEvidence"] = {
   },
   proxyProof: {
     path: "docs/deployment/proof-matrix.md",
-    sha256: "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
-    sizeBytes: 16167,
+    sha256: "99945f3193f5ea9aa72c00c786d4c447c117774803ac036b1617575f0da8944d",
+    sizeBytes: 18047,
   },
 };
 
