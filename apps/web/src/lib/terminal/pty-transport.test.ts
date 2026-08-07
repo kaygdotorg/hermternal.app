@@ -120,6 +120,14 @@ async function reattach(harness: Harness): Promise<FakeSocket> {
   return socket;
 }
 
+async function openTruncated(harness: Harness): Promise<FakeSocket> {
+  await open(harness);
+  harness.transport.detach();
+  const socket = await reattach(harness);
+  expect(harness.transport.state.outputMayBeTruncated).toBe(true);
+  return socket;
+}
+
 describe("PTY transport", () => {
   it("adapts the same-origin authenticated ticket seam without retaining a credential", async () => {
     const calls: unknown[] = [];
@@ -214,6 +222,64 @@ describe("PTY transport", () => {
     harness.transport.detach();
     await reattach(harness);
     expect(harness.ticketProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a shared upgrade alive when a duplicate caller is already aborted", async () => {
+    const harness = makeHarness();
+    const first = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      harness.transport.connect(ATTACH_INPUT, controller.signal),
+    ).rejects.toMatchObject({ code: "aborted" });
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+
+    harness.sockets[0]!.open();
+    await first;
+    expect(harness.transport.state.status).toBe("attached");
+  });
+
+  it("cancels only a duplicate caller wait while an unabortable caller continues", async () => {
+    const harness = makeHarness();
+    const first = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    const controller = new AbortController();
+    const duplicate = harness.transport.connect(ATTACH_INPUT, controller.signal);
+    controller.abort();
+
+    await expect(duplicate).rejects.toMatchObject({ code: "aborted" });
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+    harness.sockets[0]!.open();
+    await first;
+    expect(harness.transport.state.status).toBe("attached");
+  });
+
+  it("stops ticket-stage stale work before validation and socket creation", async () => {
+    let resolveTicket!: (ticket: string) => void;
+    let factoryCalls = 0;
+    const controller = new AbortController();
+    const harness = makeHarness({
+      ticketProvider: () =>
+        new Promise<string>((resolve) => {
+          resolveTicket = resolve;
+        }),
+      createWebSocket: () => {
+        factoryCalls += 1;
+        return new FakeSocket();
+      },
+    });
+    const pending = harness.transport.connect(ATTACH_INPUT, controller.signal);
+    await flush();
+    resolveTicket("ticket-microtask");
+    queueMicrotask(() => controller.abort());
+
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    await flush();
+    expect(factoryCalls).toBe(0);
+    expect(harness.upgrades).toHaveLength(0);
+    expect(harness.transport.state.status).toBe("detached");
   });
 
   it("rejects malformed tickets with bounded semantic errors before upgrade", async () => {
@@ -722,6 +788,71 @@ describe("PTY transport", () => {
     expect(socket.closes).toEqual([{ code: 1000, reason: "client-detach" }]);
   });
 
+  it("resets truncation evidence on detach and explicit Close after a reattach", async () => {
+    for (const operation of ["detach", "close"] as const) {
+      const harness = makeHarness();
+      await openTruncated(harness);
+      harness.transport[operation]();
+      expect(harness.transport.state.outputMayBeTruncated).toBe(false);
+    }
+  });
+
+  it("resets truncation evidence after a prior reattach is cancelled", async () => {
+    const harness = makeHarness();
+    await openTruncated(harness);
+    harness.transport.detach();
+    const controller = new AbortController();
+    const pending = harness.transport.reconnect(controller.signal);
+    await flush();
+    const socket = harness.sockets.at(-1)!;
+    socket.open();
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    await flush();
+    expect(harness.transport.state.outputMayBeTruncated).toBe(false);
+  });
+
+  it("resets truncation evidence on pre-open failure after a prior reattach", async () => {
+    const replacementInput: PtyConnectionInput = {
+      sessionId: "session-truncation-pre-open",
+      attach: "attach-truncation-pre-open",
+      processIdentity: "process-truncation-pre-open",
+    };
+    const harness = makeHarness({ validateAttachment: async () => true });
+    await openTruncated(harness);
+    const pending = harness.transport.connect(replacementInput);
+    await flush();
+    const socket = harness.sockets.at(-1)!;
+    socket.closeFromServer(1006);
+    await expect(pending).rejects.toMatchObject({ code: "connection-failed" });
+    expect(harness.transport.state).toMatchObject({
+      status: "failed",
+      outputMayBeTruncated: false,
+    });
+  });
+
+  it("resets truncation evidence on a fresh attach and ignores stale generations", async () => {
+    const replacementInput: PtyConnectionInput = {
+      sessionId: "session-truncation-fresh",
+      attach: "attach-truncation-fresh",
+      processIdentity: "process-truncation-fresh",
+    };
+    const harness = makeHarness({ validateAttachment: async () => true });
+    const stale = await openTruncated(harness);
+    const staleOpen = stale.onopen;
+    const pending = harness.transport.connect(replacementInput);
+    await flush();
+    staleOpen?.();
+    expect(harness.transport.state.outputMayBeTruncated).toBe(false);
+    const replacement = harness.sockets.at(-1)!;
+    replacement.open();
+    await pending;
+    expect(harness.transport.state).toMatchObject({
+      status: "attached",
+      outputMayBeTruncated: false,
+    });
+  });
+
   it("clears a failed pre-open attempt before synchronous retry observers run", async () => {
     let harness!: Harness;
     let retry: Promise<void> | undefined;
@@ -812,6 +943,42 @@ describe("PTY transport", () => {
     replacement.open();
     await replacementPending;
     expect(harness.transport.state.status).toBe("attached");
+  });
+
+  it("does not publish a stale failure after adapter close starts a replacement", async () => {
+    let harness!: Harness;
+    let replacementPending: Promise<void> | undefined;
+    const replacementInput: PtyConnectionInput = {
+      sessionId: "session-fail-context-replacement",
+      attach: "attach-fail-context-replacement",
+      processIdentity: "process-fail-context-replacement",
+    };
+    harness = makeHarness({ validateAttachment: async () => true });
+    const socket = await open(harness);
+    const originalClose = socket.close.bind(socket);
+    socket.close = (code, reason) => {
+      if (!replacementPending) {
+        replacementPending = harness.transport.connect(replacementInput);
+      }
+      originalClose(code, reason);
+    };
+
+    socket.onerror?.();
+    await flush();
+    expect(replacementPending).toBeDefined();
+    const replacement = harness.sockets[1]!;
+    replacement.open();
+    await replacementPending;
+    expect(harness.transport.state).toMatchObject({
+      status: "attached",
+      sessionId: replacementInput.sessionId,
+      processIdentity: replacementInput.processIdentity,
+    });
+    expect(
+      harness.events.filter(
+        (event) => event.type === "state" && event.state.status === "failed",
+      ),
+    ).toHaveLength(0);
   });
 
   it("reattaches attach mode after network loss but never legacy mode", async () => {

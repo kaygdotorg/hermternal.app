@@ -40,9 +40,15 @@ operations:
   replacement cannot be overwritten by the old failure or Close path. A new
   attempt claims its generation and active slot before aborting the old adapter,
   and reattach notices/readiness are rechecked after observer callbacks. Late
-  socket-factory values are closed even when cancellation wins before the abort
-  listener is installed. State events capture the intended transition before
-  reentrant observers can publish a newer one.
+  socket-factory values are closed exactly once even when cancellation wins before
+  the abort listener is installed. Coalesced callers share one ticket and socket,
+  but each caller's abort signal only rejects that caller's wait; the shared
+  attempt continues while another caller still owns a wait. State events capture
+  the intended transition before reentrant observers can publish a newer one.
+  If an established reattach is cancelled after `onopen`, its exact identity's
+  detach-retention evidence is restored. `outputMayBeTruncated` is true only for
+  the current successful reattach and resets on detach, Close, cancellation,
+  failure, replacement, and unrelated generations.
 
 The transport never queues input or resize frames. It has no prompt or tool
 action method, so reconnect cannot replay those actions. The structured
@@ -76,9 +82,12 @@ replay, `4409` stale cleanup, close-code classification, cancellation, Close,
 and callback cleanup. Lifecycle regressions cover already-aborted attempts,
 pre-open retry races, pre-open failure classification, established `onerror`
 detach semantics, identity-scoped expiry evidence, reentrant Close replacement,
-observer cancellation during reattach, and abort-listener replacement races.
-Tests also verify that terminal bytes and ticket material are not logged or
-retained in public state.
+observer cancellation during reattach, abort-listener replacement races,
+post-ticket stale continuations, late socket ownership, duplicate-caller
+cancellation, adapter-close reentrancy, reattach-retention restoration, and
+prior-true truncation resets across failure and replacement transitions. Tests
+also verify that terminal bytes and ticket material are not logged or retained
+in public state.
 
 Accessibility is N/A for this transport-only change. It adds no UI nodes and
 does not alter the renderer contract. Keyboard, focus, semantic naming, browser

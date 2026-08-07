@@ -216,6 +216,9 @@ interface ConnectionAttempt {
   readonly generation: number;
   readonly controller: AbortController;
   readonly promise: Promise<void>;
+  waiters: number;
+  unabortableWaiters: number;
+  settled: boolean;
 }
 
 interface DetachedAttachment {
@@ -329,7 +332,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     generation: number,
     input = currentInput,
     observation?: { readonly code?: number; readonly classification?: PtyCloseClassification },
-    truncated = currentState.outputMayBeTruncated,
+    truncated = false,
   ): void => {
     const mode = modeFor(input);
     const nextState = Object.freeze({
@@ -381,12 +384,17 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     status: PtyStatus = "failed",
   ): void => {
     if (!isCurrent(context)) return;
+    const generation = context.generation;
     invalidateContext(context);
-    clearAttempt(context.generation);
+    clearAttempt(generation);
     if (status === "detached") markDetached(context.input, now());
     safeClose(context.socket);
     context.rejectReady(error);
-    setState(status, context.generation, context.input, undefined, context.reattaching);
+    // Adapter close hooks are user-controlled and may synchronously start a
+    // replacement or explicit Close. Never publish this old failure after a
+    // newer generation has claimed ownership.
+    if (currentGeneration !== generation || userClosed) return;
+    setState(status, generation, context.input);
   };
 
   const attachContext = (
@@ -476,13 +484,87 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       const status = statusForClose(context.mode, observation, opened);
       if (status === "detached") markDetached(input, now());
       reattachBlocked = retryBlockForClose(observation.classification);
-      setState(status, generation, input, observation, reattaching);
+      setState(status, generation, input, observation);
     };
     return context;
   };
 
   const clearAttempt = (generation: number): void => {
     if (activeAttempt?.generation === generation) activeAttempt = undefined;
+  };
+
+  const maybeAbortAttempt = (attempt: ConnectionAttempt): void => {
+    if (
+      !attempt.settled &&
+      attempt.waiters === 0 &&
+      attempt.unabortableWaiters === 0
+    ) {
+      attempt.controller.abort();
+    }
+  };
+
+  const waitForAttempt = (
+    attempt: ConnectionAttempt,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    if (!signal) {
+      // A caller without a signal keeps the shared attempt alive. Preserve the
+      // shared promise identity for ordinary coalescing callers.
+      if (!attempt.settled) {
+        attempt.unabortableWaiters += 1;
+        attempt.promise.then(
+          () => {
+            attempt.unabortableWaiters = Math.max(0, attempt.unabortableWaiters - 1);
+          },
+          () => {
+            attempt.unabortableWaiters = Math.max(0, attempt.unabortableWaiters - 1);
+          },
+        );
+      }
+      return attempt.promise;
+    }
+    if (signal.aborted) {
+      return Promise.reject(new PtyTransportError("aborted", attempt.generation));
+    }
+
+    attempt.waiters += 1;
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let registered = true;
+      const release = (): void => {
+        if (!registered) return;
+        registered = false;
+        attempt.waiters = Math.max(0, attempt.waiters - 1);
+        maybeAbortAttempt(attempt);
+      };
+      const cleanup = (): void => signal.removeEventListener("abort", onAbort);
+      const onAbort = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        release();
+        reject(new PtyTransportError("aborted", attempt.generation));
+      };
+
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      attempt.promise.then(
+        () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          release();
+          resolve();
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          release();
+          reject(error);
+        },
+      );
+    });
   };
 
   const start = (
@@ -492,10 +574,11 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   ): Promise<void> => {
     const normalized = validateInput(input);
     const staleAttempt = activeAttempt;
-    if (staleAttempt) {
-      if (currentInput && sameConnectionInput(currentInput, normalized)) {
-        return staleAttempt.promise;
-      }
+    if (staleAttempt && currentInput && sameConnectionInput(currentInput, normalized)) {
+      return waitForAttempt(staleAttempt, signal);
+    }
+    if (signal?.aborted) {
+      return Promise.reject(new PtyTransportError("aborted", currentGeneration));
     }
     if (
       detachedAttachment &&
@@ -506,23 +589,15 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       detachedAttachment = undefined;
     }
 
-    // Claim the replacement generation and its active-attempt slot before
-    // aborting the old controller. Adapter abort listeners are synchronous and
-    // must coalesce with this attempt rather than create a competing upgrade.
+    // Claim the replacement generation and its active-attempt slot before any
+    // adapter-controlled close or abort callback. A nested connector can then
+    // supersede this owner without the outer path overwriting its slot.
     const generation = ++currentGeneration;
     const controller = new AbortController();
-    const unlinkAbort = linkAbort(signal, controller);
     currentInput = normalized;
     reattachBlocked = undefined;
     userClosed = false;
     explicitlyClosed = false;
-
-    if (activeContext) {
-      const stale = activeContext;
-      invalidateContext(stale);
-      stale.rejectReady(new PtyTransportError("aborted", stale.generation));
-      safeClose(stale.socket);
-    }
 
     let resolveAttempt!: () => void;
     let rejectAttempt!: (error: PtyTransportError) => void;
@@ -530,13 +605,64 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       resolveAttempt = resolve;
       rejectAttempt = reject;
     });
-    activeAttempt = { generation, controller, promise };
-    staleAttempt?.controller.abort();
+    const attempt: ConnectionAttempt = {
+      generation,
+      controller,
+      promise,
+      waiters: 0,
+      unabortableWaiters: 0,
+      settled: false,
+    };
+    activeAttempt = attempt;
+
+    const ownsAttempt = (): boolean =>
+      currentGeneration === generation &&
+      !userClosed &&
+      activeAttempt === attempt;
+    const throwIfNotCurrent = (): void => {
+      throwIfAborted(controller.signal, generation);
+      if (!ownsAttempt()) throw new PtyTransportError("aborted", generation);
+    };
+    const rejectStaleAttempt = (): void => {
+      attempt.settled = true;
+      controller.abort();
+      rejectAttempt(new PtyTransportError("aborted", generation));
+      clearAttempt(generation);
+    };
+
+    if (activeContext) {
+      const stale = activeContext;
+      invalidateContext(stale);
+      stale.rejectReady(new PtyTransportError("aborted", stale.generation));
+      safeClose(stale.socket);
+      if (!ownsAttempt()) rejectStaleAttempt();
+    }
+    if (ownsAttempt() && staleAttempt) {
+      staleAttempt.controller.abort();
+      if (!ownsAttempt()) rejectStaleAttempt();
+    }
 
     let attemptContext: SocketContext | undefined;
+    let ownedSocket: PtyWebSocket | undefined;
+    const closeOwnedSocket = (socket?: PtyWebSocket): void => {
+      if (socket !== undefined) {
+        // A catch path may have closed and cleared the slot before the late
+        // promise reaction runs. Only the current owner may close this value.
+        if (ownedSocket !== socket) return;
+        ownedSocket = undefined;
+        safeClose(socket);
+        return;
+      }
+      const owned = ownedSocket;
+      ownedSocket = undefined;
+      if (owned) safeClose(owned);
+    };
+
+    if (!ownsAttempt()) return waitForAttempt(attempt, signal);
+
     void (async (): Promise<void> => {
       try {
-        throwIfAborted(controller.signal, generation);
+        throwIfNotCurrent();
         await validateAttachPreflight(
           normalized,
           reattaching,
@@ -546,28 +672,40 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
           controller.signal,
           generation,
         );
-        throwIfAborted(controller.signal, generation);
-        setState("ticket_pending", generation, normalized, undefined, reattaching);
-        let ticket = await awaitWithAbort(
+        throwIfNotCurrent();
+        setState("ticket_pending", generation, normalized);
+        const ticket = await awaitWithAbort(
           Promise.resolve(options.ticketProvider(controller.signal)),
           controller.signal,
           generation,
         );
+        // The ticket promise can settle and remove its abort listener before a
+        // queued abort or replacement runs this continuation. Do not validate,
+        // publish, or invoke the socket factory for a stale owner.
+        throwIfNotCurrent();
         validateTicket(ticket, generation);
-        setState("connecting", generation, normalized, undefined, reattaching);
+        setState("connecting", generation, normalized);
+        // The factory is intentionally invoked after the connecting observer,
+        // even if that observer cancelled the attempt. Its returned socket is
+        // captured by the ownership slot and closed by awaitWithAbort's late
+        // value path instead of being left as an untracked adapter resource.
         const upgrade = createUpgrade(ticket, normalized);
+        const socketPromise = Promise.resolve(
+          options.createWebSocket(upgrade, controller.signal),
+        ).then((socket) => {
+          // Capture ownership before awaitWithAbort can settle. This closes a
+          // factory value even when cancellation lands between promise
+          // settlement and the async continuation's next statement.
+          ownedSocket = socket;
+          return socket;
+        });
         const socket = await awaitWithAbort(
-          Promise.resolve(options.createWebSocket(upgrade, controller.signal)),
+          socketPromise,
           controller.signal,
           generation,
-          safeClose,
+          (lateSocket) => closeOwnedSocket(lateSocket),
         );
-        ticket = "";
-        throwIfAborted(controller.signal, generation);
-        if (generation !== currentGeneration || userClosed) {
-          safeClose(socket);
-          throw new PtyTransportError("aborted", generation);
-        }
+        throwIfNotCurrent();
         const context = attachContext(
           socket,
           generation,
@@ -577,13 +715,22 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
         );
         attemptContext = context;
         activeContext = context;
-        setState(reattaching ? "reattaching" : "starting", generation, normalized, undefined, reattaching);
+        // The active context now owns cleanup for this socket. Before this
+        // transfer, every post-await cancellation path closes ownedSocket.
+        ownedSocket = undefined;
+        setState(reattaching ? "reattaching" : "starting", generation, normalized);
         await awaitWithAbort(context.ready, controller.signal, generation);
+        throwIfNotCurrent();
+        attempt.settled = true;
         resolveAttempt();
       } catch (error) {
         const sanitized = sanitizeError(error, controller.signal, generation);
         const contextAlreadyHandled = attemptContext?.closed === true;
+        closeOwnedSocket();
         if (attemptContext && isCurrent(attemptContext)) {
+          if (attemptContext.mode === "attach" && attemptContext.opened) {
+            markDetached(attemptContext.input, now());
+          }
           invalidateContext(attemptContext);
           attemptContext.rejectReady(sanitized);
           safeClose(attemptContext.socket);
@@ -602,17 +749,15 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
             sanitized.code === "aborted" ? detachedStatus(normalized) : "failed",
             generation,
             normalized,
-            undefined,
-            sanitized.code === "aborted" ? false : reattaching,
           );
         }
+        attempt.settled = true;
         rejectAttempt(sanitized);
       } finally {
-        unlinkAbort();
         clearAttempt(generation);
       }
     })();
-    return promise;
+    return waitForAttempt(attempt, signal);
   };
 
   const stop = (closing: boolean): void => {
@@ -949,17 +1094,6 @@ function safeClose(socket: PtyWebSocket): void {
     // Adapter errors are intentionally discarded; terminal bytes, tickets, and
     // attach handles must never cross into retained diagnostics.
   }
-}
-
-function linkAbort(signal: AbortSignal | undefined, controller: AbortController): () => void {
-  if (!signal) return () => undefined;
-  const onAbort = (): void => controller.abort();
-  if (signal.aborted) {
-    controller.abort();
-    return () => undefined;
-  }
-  signal.addEventListener("abort", onAbort, { once: true });
-  return () => signal.removeEventListener("abort", onAbort);
 }
 
 function throwIfAborted(signal: AbortSignal, generation: number): void {
