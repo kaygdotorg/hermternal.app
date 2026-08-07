@@ -6,7 +6,7 @@
   "artifact_files": [
     {
       "path": "contracts/fixtures/compatibility-attestation/README.md",
-      "sha256": "177228166b92c32e7a1e2fe08acff52939fe0665d017829d6f8c095883016911",
+      "sha256": "50ecc3e46b48615fdfd1cf7ec75b69b65c4ea57734102d333a36e0c34cb613cb",
       "size_bytes": 7537
     },
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "contracts/fixtures/compatibility-attestation/validate.py",
-      "sha256": "8207ddc4dccf6995f441e72f52d0f7b947df469d9356b640e35bcaed89becae1",
+      "sha256": "becbba03825cf20f7bef03c7cf152d56a3321093ad87d6b03bf5b11b160b4fc5",
       "size_bytes": 45544
     },
     {
