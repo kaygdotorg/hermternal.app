@@ -96,39 +96,58 @@ wire-neutral shape. Each ready fixture root lists every checked-in artifact,
 its byte count, and its SHA-256 digest. The aggregate validator also rejects
 unsafe paths, duplicate JSON keys, non-finite numbers, oversized input,
 malformed UTF-8, credential-shaped values, live claims, `http`/`https`/`ws`/`wss`
-live hosts, symlinks, unsupported registered extensions, and unindexed
-artifacts. Registered Python artifacts are parsed and their retained string
-literals and comments are scanned, including compatibility-normalized
-assignment-shaped `ticket=`, `cookie=`, `password=`, `secret=`, and `token=` values;
-detector regex
-definitions and explicit domain negative-test markers are not treated as
-retained credentials. Reviewed source markers and negative-test samples use
-exact path/value allowances only. Domain validators remain authoritative for
-case semantics; the aggregate layer does not run them and makes no network
-request.
+live hosts, URL userinfo passwords, symlinks, unsupported registered extensions,
+and unindexed artifacts. Credential routing covers `api_key`, `x-api-key`,
+`access_token`, `refresh_token`, `client_secret`, and their reviewed normalized
+aliases across text assignments, query strings, JSON redaction trees, and
+Python AST names, keyword arguments, dictionary keys, and request-like
+subscripts. C0/C1 controls and Unicode format characters are scanned in a
+compact and boundary-preserving form; JSON keys containing them are rejected.
+Registered Python artifacts are parsed and their retained string literals,
+comments, and bounded source constructions are scanned. Flow joins keep a name
+unknown after conflicting assignments, and dynamic Authorization schemes or
+secrets receive a bounded probe instead of being treated as safe. Regex URL
+hosts decode only bounded literal escapes and fail closed for escaped letters,
+uncertain character classes, verbose whitespace, comments, or other recovery
+gaps. Detector regex definitions and explicit domain negative-test markers are
+not treated as retained credentials. Reviewed source markers and negative-test
+samples use exact path/value allowances only. Domain validators remain
+authoritative for case semantics; the aggregate layer does not run them and
+makes no network request.
 
 The `--index`, `--schema`, and `--baseline` inputs are bound to their canonical
 reviewed paths. The exact central-validator and baseline bytes are pinned by
-`scripts/fixture_registry_authority.v2.json` from the sole Git commit that introduced
-that out-of-tree authority. Validation reads those historical object-database
-bytes rather than checkout constants. Only the validator's own baseline-manifest
-digest and derived byte total are normalized to avoid a self-reference. A
-schema-valid copy or coordinated scanner, manifest, baseline, local anchor, and
-test-constant replacement cannot rebind the immutable authority. The central
-`validator/`
-directory also has an exact artifact allowlist, so caches, dotfiles, binaries,
-symlinks, special files, and unreviewed helpers fail closed. Coverage references
+`scripts/fixture_registry_authority.v2.json` from an immutable Git object, not
+from checkout constants. That object is a trust root only when its authority
+rotation was reviewed before, and outside, the scanner change it authorizes: an
+implementation commit must never introduce a weakened scanner and the authority
+that approves it in the same change set. The v1 authority remains historical
+evidence until an independently reviewed rotation establishes the v2 bytes;
+therefore baseline and authority regeneration is blocked until that migration
+exists. Only the validator's own baseline-manifest digest and derived byte total
+are normalized to avoid a self-reference. A schema-valid copy or coordinated
+scanner, manifest, baseline, local anchor, and test-constant replacement cannot
+rebind an immutable external authority.
+
+Every ordinary file under a ready fixture root is inventoried, including hidden
+files, cache contents, bytecode, and binary artifacts. Symlinks and special files
+are rejected explicitly; unsupported extensions or unreviewed helpers are not
+silently skipped. The central `validator/` directory has an exact artifact
+allowlist. Ready-root metadata must name a supported executable Python validator
+role (`validate.py` or `test_*.py`) and a real manifest; `README.md`, `cases.json`,
+and arbitrary non-executable files are not validator roles. Coverage references
 must be reciprocal, and every coverage platform and required state must be
 supported by every referenced root. Ready coverage may reference only ready
-fixture roots with named validators and real manifests. A registry can be structurally valid
-while coverage remains `partial`. A `pending`, `empty`, `failure`, `cancelled`,
-or `unknown` coverage row is never promoted to successful evidence. The
-checked-in index inventories the C-05 connection-restoration, C-06 uncertain
-delivery, C-07 session persistence, C-07A session search, C-07B session
-lineage, C-14 image attachment lifecycle, C-16 deep-link resolution, C-18 PTY
-detach-race, DEP-02 external method/path allowlist, DEP-10M PTY local-adapter,
-and DEP-11 direct-port-denial artifacts. The merged PR #260 compatibility-gate
-artifact manifests are also refreshed in this aggregate registry.
+fixture roots with named validators and real manifests. A registry can be
+structurally valid while coverage remains `partial`. A `pending`, `empty`,
+`failure`, `cancelled`, or `unknown` coverage row is never promoted to
+successful evidence. The checked-in index inventories the C-05
+connection-restoration, C-06 uncertain delivery, C-07 session persistence,
+C-07A session search, C-07B session lineage, C-14 image attachment lifecycle,
+C-16 deep-link resolution, C-18 PTY detach-race, DEP-02 external method/path
+allowlist, DEP-10M PTY local-adapter, and DEP-11 direct-port-denial artifacts.
+The merged PR #260 compatibility-gate artifact manifests are also refreshed in
+this aggregate registry.
 `review-anchors/deep-link-resolution.sha256` is intentionally separate: it is
 the C-16 domain validator's reviewed digest authority, not a canonical fixture
 root. The aggregate permits that one exact path and still rejects any other
@@ -156,6 +175,12 @@ python3 -m py_compile \
   contracts/fixtures/validator/validate.py \
   contracts/fixtures/validator/test_validate.py
 ```
+
+The repository does not yet have a checked-in GitHub Actions workflow that
+runs this aggregate validator, its test suite, and the `python -O` equivalents.
+That missing normal/optimized CI check is intentional while the independent
+v2 authority rotation is unresolved; it must be added only after the external
+trust root and regenerated baseline are reviewed.
 
 The validator is offline. It does not start Hermes, contact a proxy or
 identity provider, open a socket, follow a referenced URL, or claim deployment
