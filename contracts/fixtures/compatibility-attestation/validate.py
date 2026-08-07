@@ -38,8 +38,8 @@ HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 # Immutable fixture data is reviewed against this exact prior PR head. The
 # executing validator is checked separately against the current HEAD blob so
 # this correction can evolve without a self-referential commit hash.
-REVIEWED_COMMIT = "1314b005a614d5b3ac6deedb789f6b84dbc47d2a"
-REVIEWED_TREE = "352c97341ac93d706ed03db9c8fa704875096282"
+REVIEWED_COMMIT = "b1f98850ca22bbdb3d5ebcad1f98a4e208e622f3"
+REVIEWED_TREE = "208acd941716b4f0668fb5bf150a69a9b3a9a713"
 VALIDATOR_PATH = "contracts/fixtures/compatibility-attestation/validate.py"
 VALIDATOR_COMMAND = "python3 contracts/fixtures/compatibility-attestation/validate.py"
 ATTESTATION_RELATIVE = "contracts/fixtures/compatibility-attestation/revision_attestation.json"
