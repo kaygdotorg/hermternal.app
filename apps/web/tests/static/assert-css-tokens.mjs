@@ -10,8 +10,11 @@ const [css, manifestText] = await Promise.all([
   readFile(manifestPath, 'utf8')
 ]);
 const manifest = JSON.parse(manifestText);
+const presentationTokenSetIds = new Set(['runtime', 'runtime-gate', 'auth']);
 const runtimeTokenNames = new Set(
-  manifest.token_sets.find((tokenSet) => tokenSet.id === 'runtime')?.tokens ?? []
+  manifest.token_sets
+    .filter((tokenSet) => presentationTokenSetIds.has(tokenSet.id))
+    .flatMap((tokenSet) => tokenSet.tokens)
 );
 const canonicalValues = new Map(
   manifest.tokens.map((token) => [token.name, String(token.value).trim()])
@@ -24,14 +27,14 @@ for (const match of css.matchAll(/^\s*(--[A-Za-z0-9_-]+)\s*:\s*([^;]+);/gm)) {
 }
 
 if (runtimeTokenNames.size === 0) {
-  throw new Error('The canonical Paper manifest has no runtime token set.');
+  throw new Error('The canonical Paper manifest has no shipped presentation token sets.');
 }
 
 for (const tokenName of runtimeTokenNames) {
   const actualValue = declarations.get(tokenName);
   const expectedValue = canonicalValues.get(tokenName);
   if (actualValue === undefined || expectedValue === undefined) {
-    throw new Error(`Missing canonical runtime token declaration: ${tokenName}`);
+    throw new Error(`Missing canonical presentation token declaration: ${tokenName}`);
   }
   if (actualValue !== expectedValue) {
     throw new Error(
@@ -42,10 +45,10 @@ for (const tokenName of runtimeTokenNames) {
 
 for (const tokenName of declarations.keys()) {
   if (!runtimeTokenNames.has(tokenName)) {
-    throw new Error(`Invented or stale CSS token is not in the runtime Paper set: ${tokenName}`);
+    throw new Error(`Invented or stale CSS token is not in a shipped presentation Paper set: ${tokenName}`);
   }
 }
 
 console.log(
-  `CSS token evidence: ${runtimeTokenNames.size} runtime Paper tokens match ${manifest.paper.token_content_hash}`
+  `CSS token evidence: ${runtimeTokenNames.size} shipped presentation Paper tokens match ${manifest.paper.token_content_hash}`
 );
