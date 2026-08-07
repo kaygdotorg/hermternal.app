@@ -107,6 +107,10 @@ async function waitForVisibleSentinel(
   renderer: ReturnType<typeof createTerminalRenderer>,
   sentinel: string
 ): Promise<void> {
+  // A full 1 MiB replay can fill the bounded cooperative queue before its
+  // timer runs. Drain that reviewed buffer before admitting the fence marker so
+  // the sentinel cannot turn valid replay into a false overflow failure.
+  await waitForRendererIdle(renderer);
   renderer.write(encoder.encode(`\n${sentinel}`));
   await waitForRendererIdle(renderer);
   await waitForText(host, sentinel);
