@@ -27,9 +27,10 @@ The client treats PTY data as bytes. It does not parse command meaning or write 
 
 ## Identity and attach rules
 
+- The browser `/api/pty` upgrade query is exactly `ticket` plus `resume`, with an optional non-empty `attach` value. Key order is not significant; duplicate keys, empty values, unknown parameters, and `fresh` are invalid and must fail closed before upgrade.
+- `ticket` and `attach` are safe opaque values bounded to 512 characters; `resume` is a safe opaque value bounded to 128 characters. The browser client must not send a `fresh` query parameter.
 - `attach` is an opaque keep-alive identity for the PTY process. The client stores it only as a session handle and never derives its internal key.
 - `resume` identifies the Hermes conversation that the TUI should restore. It is separate from `attach`.
-- `fresh=1` disables the active-session fallback and asks for a fresh Hermes identity. It does not mean that a prior PTY process can be reattached under a different token.
 - In attach mode, a disconnect or navigation enters `detached`; the PTY remains eligible for reattach for 30 minutes. A legacy non-attach disconnect instead closes the bridge and enters `exited`.
 - An explicit Hermternal **Close** is mode-specific: in legacy mode it follows the disconnect path, closes the bridge, terminates the child, and enters `exited`; in attach mode it detaches the socket, retains the PTY for the keep-alive window, and stops client retries. The pinned source exposes no client-facing PTY kill operation for attach mode.
 - A second socket attaching to the same PTY supersedes the first socket. The source closes the old socket with `4409` before assigning the replacement WebSocket; the replacement then becomes active, and stale cleanup cannot detach it.

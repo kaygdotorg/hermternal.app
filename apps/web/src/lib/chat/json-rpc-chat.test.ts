@@ -32,8 +32,8 @@ const COMPATIBILITY_EVIDENCE: JsonRpcChatOptions["compatibilityEvidence"] = {
   routeManifest: {
     path: "contracts/hermes-dashboard/manifest.md",
     revision: DASHBOARD_CONTRACT,
-    sha256: "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197",
-    sizeBytes: 17859,
+    sha256: "680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5",
+    sizeBytes: 18163,
   },
   sourceReview: {
     path: "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",

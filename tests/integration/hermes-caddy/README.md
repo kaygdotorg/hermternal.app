@@ -38,9 +38,9 @@ methods and paths at the edge. Canonical session and message links matching
 `scenario=success|empty|failure` selector may carry a query; a bare query marker
 is denied. Static assets, client routes, and REST routes reject every query
 mutation. Chat upgrades accept one non-empty safe opaque ticket bounded to 512
-characters; PTY upgrades require ticket plus resume and allow one non-empty
-attach value in any key order, with bounded safe opaque values and no duplicate,
-extra, empty, or `fresh` parameters.
+characters. The current browser PTY client sends only ticket plus resume and an
+optional non-empty attach value in any key order, with bounded safe opaque
+values; duplicate, extra, empty, and `fresh` parameters are edge-denied.
 
 Caddy removes inbound `Forwarded`, every `X-Forwarded-*` field, and `X-Real-IP`
 before rebuilding trusted public forwarding metadata. Traversal, encoded

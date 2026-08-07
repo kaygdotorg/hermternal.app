@@ -11,7 +11,7 @@
     },
     {
       "path": "contracts/fixtures/compatibility-attestation/revision_attestation.json",
-      "sha256": "3969cf7fb5bb4845b8f2b77e85f367e3040dc1d6157494f34edeeba02109b9bc",
+      "sha256": "42f2180a804386dc51c43ebd86078f0092a4bbb15f81cea6cd398ae2742581a0",
       "size_bytes": 1679
     },
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "contracts/fixtures/compatibility-attestation/validate.py",
-      "sha256": "da997795d5fa478ca0eeaab2e9a236e5a990355a97ce20f5d800df7805ea8781",
+      "sha256": "e82e2e305068906e6f86547d68430160ac802765c8d73f69ad5f875c4eb51065",
       "size_bytes": 45544
     },
     {

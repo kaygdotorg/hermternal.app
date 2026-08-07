@@ -99,8 +99,8 @@ EVIDENCE = {
     "route_manifest": {
         "path": "contracts/hermes-dashboard/manifest.md",
         "contract_revision": CONTRACT,
-        "sha256": "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197",
-        "size_bytes": 17859,
+        "sha256": "680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5",
+        "size_bytes": 18163,
     },
     "source_review": {
         "path": "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
@@ -109,8 +109,8 @@ EVIDENCE = {
     },
     "proxy_proof": {
         "path": "docs/deployment/proof-matrix.md",
-        "sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
-        "size_bytes": 16167,
+        "sha256": "99945f3193f5ea9aa72c00c786d4c447c117774803ac036b1617575f0da8944d",
+        "size_bytes": 18047,
     },
 }
 

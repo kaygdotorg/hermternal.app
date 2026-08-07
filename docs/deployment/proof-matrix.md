@@ -37,8 +37,10 @@ the build SHA, static build digest, runtime Caddyfile digest
 reproducible runtime-input manifest. Canonical session and message deep links
 rewrite to `200.html`; only the reviewed root scenario selector accepts a
 query; static, client, and REST routes reject query mutations. Chat and PTY
-upgrades use separate exact grammars, and the proxy resets all inbound
-forwarding headers before rebuilding trusted public metadata. Local black-box
+upgrades use separate exact grammars. The current browser PTY client sends only
+`ticket` plus `resume` and optional non-empty `attach`; `fresh` is unsupported
+and remains edge-denied. The proxy resets all inbound forwarding headers before
+rebuilding trusted public metadata. Local black-box
 Caddy/mock-upstream tests assert these behaviors against the shared static
 route and deep-link fixture identities. The browser journey remains
 `blocked_provider`: authentication, ticket acquisition, one WebSocket upgrade,

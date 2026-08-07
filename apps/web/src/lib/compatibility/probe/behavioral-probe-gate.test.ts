@@ -341,8 +341,8 @@ describe('canonical fixture bindings', () => {
   it('uses the reviewed SHA-256 implementation', () => {
     expect(CANONICAL_ROUTE_MANIFEST_BYTES).toBe(routeManifestBytes);
     expect(sha256ForTest('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
-    expect(sha256ForTest(routeManifestBytes)).toBe('3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197');
-    expect(behavioralProbeFixtureDigestForTest(behavioralProbeFixture)).toBe('293756e6b2573f59b7747c38cc0cda0f6602236ed93aae442f0022ad850d40e7');
+    expect(sha256ForTest(routeManifestBytes)).toBe('680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5');
+    expect(behavioralProbeFixtureDigestForTest(behavioralProbeFixture)).toBe('9ad68e9da893f9a24ebff16fe5a36d036055f90a2ce3330fb5e6db71e77dfb0d');
   });
 
   it('accepts only the checked-in fixture and exact route-manifest bytes', () => {

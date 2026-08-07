@@ -140,6 +140,15 @@ class CaddyProofRendererTests(unittest.TestCase):
         for query in rejected:
             self.assertFalse(any(re.fullmatch(pattern, query) for pattern in caddy_proof.PTY_QUERY_PATTERNS))
 
+    def test_normative_pty_docs_match_current_browser_query(self) -> None:
+        manifest = (ROOT / "contracts/hermes-dashboard/manifest.md").read_text(encoding="utf-8")
+        terminal = (ROOT / "contracts/state-models/terminal.md").read_text(encoding="utf-8")
+        self.assertIn("`ticket` plus `resume`", manifest)
+        self.assertIn("optional non-empty `attach`", manifest)
+        self.assertIn("must not send a `fresh` query parameter", terminal)
+        self.assertNotIn("`fresh=1`", manifest)
+        self.assertNotIn("`fresh=1`", terminal)
+
     def test_upstream_authority_and_cookie_policy_are_fixed(self) -> None:
         rendered = self._render()
         self.assertEqual(rendered.count("header_up Host 127.0.0.1:19256"), 2)
@@ -487,6 +496,7 @@ class CaddyBlackBoxTests(unittest.TestCase):
             ("/?", 404, b"not found"),
             ("/?scenario=success", 200, b"INDEX-SHELL"),
             ("/?scenario=empty", 200, b"INDEX-SHELL"),
+            ("/?scenario=failure", 200, b"INDEX-SHELL"),
             ("/?cache=synthetic", 404, b"not found"),
             ("/?scenario=success&cache=synthetic", 404, b"not found"),
             ("/manifest.webmanifest", 200, b"{}"),
@@ -608,7 +618,10 @@ class CaddyBlackBoxTests(unittest.TestCase):
         denied_queries = (
             "/api/ws?",
             "/api/ws?ticket=fixtureTicket&resume=fixtureResume",
+            "/api/ws?ticket=fixtureTicket&ticket=otherTicket",
+            "/api/ws?ticket=",
             "/api/ws?ticket=" + ("A" * 513),
+            "/api/pty?",
             "/api/pty?ticket=fixtureTicket",
             "/api/pty?ticket=fixtureTicket&resume=fixtureResume&fresh=1",
             "/api/pty?ticket=fixtureTicket&resume=fixtureResume&ticket=otherTicket",

@@ -44,9 +44,10 @@ uses exact method/path matchers at `/` and under one `/hermes` prefix. Canonical
 session and message deep links fall back to `200.html`; only the reviewed root
 scenario selector accepts a query; bare query markers are denied. Static
 assets, client routes, and REST routes reject query mutations. Chat uses one
-non-empty safe opaque ticket bounded to 512 characters; PTY uses the reviewed
-ticket/resume/optional-attach grammar with bounded values, any key
-order, and no duplicates, extras, empty values, or `fresh` parameter. Unknown
+non-empty safe opaque ticket bounded to 512 characters. The current browser PTY
+client sends only `ticket` plus `resume` and an optional non-empty `attach`, in
+any key order; duplicates, extras, empty values, and the unsupported `fresh`
+parameter are denied. Unknown
 methods and paths, duplicate prefixes, traversal, encoded separators, and
 malformed upgrades are edge-denied without an upstream request. Wrong Host is
 `421`; wrong WebSocket Origin is `403`; missing tickets are edge `404`; and

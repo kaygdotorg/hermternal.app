@@ -16,8 +16,8 @@ export const PINNED_DEPLOYMENT_SCOPE = 'fixture_only' as const;
 const EXPECTED_ROUTE_MANIFEST = {
   path: 'contracts/hermes-dashboard/manifest.md',
   contractRevision: PINNED_DASHBOARD_CONTRACT,
-  sha256: '3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197',
-  sizeBytes: 17_859
+  sha256: '680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5',
+  sizeBytes: 18_163
 } as const;
 const EXPECTED_SOURCE_REVIEW = {
   path: 'contracts/fixtures/source-audit/planning-reconciliation/planning_review.json',
@@ -26,8 +26,8 @@ const EXPECTED_SOURCE_REVIEW = {
 } as const;
 const EXPECTED_PROXY_PROOF = {
   path: 'docs/deployment/proof-matrix.md',
-  sha256: '52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212',
-  sizeBytes: 16_167
+  sha256: '99945f3193f5ea9aa72c00c786d4c447c117774803ac036b1617575f0da8944d',
+  sizeBytes: 18_047
 } as const;
 
 const ROOT_KEYS = [
