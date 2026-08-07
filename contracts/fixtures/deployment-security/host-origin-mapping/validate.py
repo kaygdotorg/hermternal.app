@@ -170,6 +170,13 @@ STRUCTURAL_FILENAMES = (
     "README.md", "cases.json", "test_validate.py", "validate.py", "validation-baseline.json",
     "proof-matrix.md", "index.json",
 )
+# Structural tokens are exempt only when both adjacent characters cannot extend
+# a URL, authority, route, path, or filename. Backslash and bracket-like
+# delimiters are included because the generic URL detector treats them as
+# payload characters even though they are not valid RFC URL delimiters.
+_STRUCTURAL_TOKEN_CONTINUATION = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~:/?#@!$&'()*+,;=%[]\\^-"
+)
 
 SENSITIVE_ASSIGNMENT = re.compile(r"(?i)(?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential(?:s)?)\s*[:=]\s*[^\s,;}]+")
 CREDENTIAL_HEADER = re.compile(r"(?i)\bauthorization\s*:\s*(?:basic|bearer)\s+[A-Za-z0-9._~+/-]{4,}")
@@ -278,6 +285,30 @@ def scan_json_nesting(text: str) -> None:
     require(not in_string and not escaped and depth == 0, "JSON structure is malformed")
 
 
+def _inspect_unicode_string(value: str, label: str, *, allow_whitespace: bool = False) -> None:
+    for character in value:
+        codepoint = ord(character)
+        if codepoint < 0x20:
+            if allow_whitespace and codepoint in (0x09, 0x0A, 0x0D):
+                continue
+            raise ValidationError(f"{label} contains a control character")
+        if 0x7F <= codepoint <= 0x9F:
+            raise ValidationError(f"{label} contains a control character")
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise ValidationError(f"{label} contains a lone surrogate")
+
+
+def _inspect_text_artifact(value: str) -> None:
+    for character in value:
+        codepoint = ord(character)
+        if codepoint in (0x09, 0x0A, 0x0D):
+            continue
+        if codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
+            raise ValidationError("retained artifact contains a control character")
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise ValidationError("retained artifact contains a lone surrogate")
+
+
 def inspect_shape(value: Any) -> None:
     nodes = 0
     stack: list[tuple[Any, int]] = [(value, 1)]
@@ -288,7 +319,7 @@ def inspect_shape(value: Any) -> None:
         require(depth <= MAX_DEPTH, "JSON nesting limit exceeded")
         if type(current) is str:
             require(len(current) <= MAX_STRING, "JSON string limit exceeded")
-            require(not any(ord(char) < 32 for char in current), "JSON string contains a control character")
+            _inspect_unicode_string(current, "JSON string")
         elif type(current) is list:
             require(len(current) <= MAX_ARRAY, "JSON array limit exceeded")
             stack.extend((item, depth + 1) for item in current)
@@ -296,7 +327,7 @@ def inspect_shape(value: Any) -> None:
             require(len(current) <= MAX_OBJECT, "JSON object limit exceeded")
             for key, item in current.items():
                 require(type(key) is str and len(key) <= MAX_STRING, "JSON object key is invalid")
-                require(not any(ord(char) < 32 for char in key), "JSON key contains a control character")
+                _inspect_unicode_string(key, "JSON key")
                 stack.append((item, depth + 1))
         else:
             require(current is None or type(current) in (bool, int, float), "JSON scalar type is unsupported")
@@ -685,8 +716,12 @@ _CANONICAL_NEGATIVE_SCAFFOLD_DIGESTS = {
     ("assignment", "mutations"): frozenset({
         "37e8bf3535282d91e6b8345cfde1c8dc3482776cede8775a206d852974d787c5",
         "cf8b464e479cf64fc506bc90a45af777e3e829b828563a732117e7f5d4fbb61d",
+        "503dde10bb0563df4cf63f684c06cbcdb810cc1ae3560be05b4de835c9d3893e",
     }),
-    ("assignment", "payloads"): frozenset({"9eb8ec19600054704dc350579ba8b031cfbc53283c9245ead45eca2431679c60"}),
+    ("assignment", "payloads"): frozenset({
+        "9eb8ec19600054704dc350579ba8b031cfbc53283c9245ead45eca2431679c60",
+        "7835816659f21e608b3af9f9f338458d466cfeb8319bfcd0dba717b4201d429d",
+    }),
     ("for", "arguments"): frozenset({"64f72a7163adb5caa6620588b9c2ad4bcb85000495c09731fc0d9248598e7090"}),
     ("for", "value"): frozenset({"98ef0847e7b74ced04c087844843b6b3e158fe1a6fd9176aa87ed137d88d0bbb"}),
 }
@@ -879,6 +914,45 @@ def _python_source_spans(text: str, source_name: str) -> list[tuple[int, int, st
     return spans
 
 
+def _python_literal_exempt_nodes(tree: ast.AST, source_name: str, parents: dict[int, ast.AST]) -> set[int]:
+    roots: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if source_name == "validate.py" and isinstance(node, ast.Assign):
+            if isinstance(parents.get(id(node)), ast.Module) and _canonical_detector_assignment(node):
+                roots.append(node)
+        elif source_name == "test_validate.py" and isinstance(node, ast.Assign):
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                if _ast_digest(node.value) in _CANONICAL_NEGATIVE_SCAFFOLD_DIGESTS.get(("assignment", name), ()):
+                    roots.append(node.value)
+        elif source_name == "test_validate.py" and isinstance(node, ast.For):
+            if isinstance(node.target, ast.Name):
+                name = node.target.id
+                if _ast_digest(node.iter) in _CANONICAL_NEGATIVE_SCAFFOLD_DIGESTS.get(("for", name), ()):
+                    roots.append(node.iter)
+    exempt: set[int] = set()
+    for root in roots:
+        exempt.update(id(descendant) for descendant in ast.walk(root))
+    return exempt
+
+
+def _scan_python_string_literals(text: str, source_name: str) -> None:
+    try:
+        tree = ast.parse(text)
+    except (IndentationError, SyntaxError, ValueError, TypeError, RecursionError):
+        return
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    exempt = _python_literal_exempt_nodes(tree, source_name, parents)
+    for node in ast.walk(tree):
+        if id(node) in exempt or not isinstance(node, ast.Constant) or type(node.value) is not str:
+            continue
+        _inspect_unicode_string(node.value, "retained Python string", allow_whitespace=True)
+        _scan_text_detectors(node.value)
+
+
 def _normalize_python_code_members(text: str) -> str:
     """Hide dotted members only when AST and token context prove code syntax.
 
@@ -892,20 +966,33 @@ def _normalize_python_code_members(text: str) -> str:
     return _apply_source_spans(text, spans)
 
 
+def _replace_exact_structural_tokens(text: str, values: tuple[str, ...], replacement: str) -> str:
+    continuation = "".join(re.escape(character) for character in sorted(_STRUCTURAL_TOKEN_CONTINUATION))
+    pattern = rf"(?<![{continuation}])(?:{'|'.join(re.escape(value) for value in sorted(values, key=len, reverse=True))})(?![{continuation}])"
+    return re.sub(pattern, replacement, text)
+
+
+def _reject_adjacent_structural_tokens(text: str) -> None:
+    values = tuple(sorted({
+        *STRUCTURAL_URLS, *STRUCTURAL_HOSTS, *STRUCTURAL_PATHS,
+        *STRUCTURAL_ARTIFACT_PATHS, *STRUCTURAL_FILENAMES,
+    }, key=len, reverse=True))
+    pattern = re.compile("|".join(re.escape(value) for value in values))
+    for match in pattern.finditer(text):
+        if ((match.start() > 0 and text[match.start() - 1] in _STRUCTURAL_TOKEN_CONTINUATION)
+                or (match.end() < len(text) and text[match.end()] in _STRUCTURAL_TOKEN_CONTINUATION)):
+            raise ValidationError("retained artifact contains an adjacent structural token")
+
+
 def _normalize_structural_text(text: str, *, source_name: str | None = None) -> str:
     normalized = text
     if source_name is not None and source_name.endswith(".py"):
         normalized = _apply_source_spans(text, _python_source_spans(text, source_name))
-    for value in sorted(STRUCTURAL_URLS, key=len, reverse=True):
-        normalized = re.sub(rf"(?<![A-Za-z0-9._~:/?#@!$&'()*+,;=%-]){re.escape(value)}(?![A-Za-z0-9._~:/?#@!$&'()*+,;=%-])", "<reserved-invalid-url>", normalized)
-    for value in sorted(STRUCTURAL_HOSTS, key=len, reverse=True):
-        normalized = re.sub(rf"(?<![A-Za-z0-9.@/_:%?+#=&~-]){re.escape(value)}(?![A-Za-z0-9.@/_:%?+#=&~-])", "<reserved-invalid-host>", normalized)
-    for value in STRUCTURAL_PATHS:
-        normalized = re.sub(rf"(?<![A-Za-z0-9._/-]){re.escape(value)}(?![A-Za-z0-9._/-])", "<reviewed-route>", normalized)
-    for value in STRUCTURAL_ARTIFACT_PATHS:
-        normalized = re.sub(rf"(?<![A-Za-z0-9._/-]){re.escape(value)}(?![A-Za-z0-9._/-])", "<reviewed-artifact-path>", normalized)
-    for value in STRUCTURAL_FILENAMES:
-        normalized = re.sub(rf"(?<![A-Za-z0-9._/@:?#=&%+~-]){re.escape(value)}(?![A-Za-z0-9._/@:?#=&%+~-])", "<reviewed-artifact-name>", normalized)
+    normalized = _replace_exact_structural_tokens(normalized, STRUCTURAL_URLS, "<reserved-invalid-url>")
+    normalized = _replace_exact_structural_tokens(normalized, STRUCTURAL_HOSTS, "<reserved-invalid-host>")
+    normalized = _replace_exact_structural_tokens(normalized, STRUCTURAL_PATHS, "<reviewed-route>")
+    normalized = _replace_exact_structural_tokens(normalized, STRUCTURAL_ARTIFACT_PATHS, "<reviewed-artifact-path>")
+    normalized = _replace_exact_structural_tokens(normalized, STRUCTURAL_FILENAMES, "<reviewed-artifact-name>")
     return normalized
 
 
@@ -926,6 +1013,7 @@ def _scan_text_detectors(text: str, *, source_name: str | None = None) -> None:
         (ABSOLUTE_PATH, "filesystem path"), (HOSTNAME, "hostname"),
     ):
         require(not pattern.search(normalized), f"retained artifact contains forbidden {label}")
+    _reject_adjacent_structural_tokens(normalized)
 
 
 def _scan_structured_json(value: Any, path: str = "$") -> None:
@@ -963,9 +1051,12 @@ def scan_artifact_bytes(name: str, payload: bytes) -> None:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValidationError("retained artifact is not valid UTF-8") from exc
+    _inspect_text_artifact(text)
     if name.endswith(".json"):
         _scan_structured_json(parse_json_bytes(payload))
     _scan_text_detectors(text, source_name=name)
+    if name.endswith(".py"):
+        _scan_python_string_literals(text, name)
 
 
 def scan_all_artifacts(captured: CapturedArtifacts | None = None) -> None:

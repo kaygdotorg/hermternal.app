@@ -270,7 +270,7 @@ class HostOriginMappingProofTests(unittest.TestCase):
 
     def test_exact_origin_serialization_and_cardinality(self) -> None:
         self.assertEqual(validate.classify_header_values(["https://chat.public.invalid"], validate.classify_origin), "accepted_exact")
-        mutations = [[], ["https://chat.public.invalid", "https://chat.public.invalid"], ["https://chat.public.invalid", "https://other.public.invalid"], "https://chat.public.invalid", [""], ["null"], ["*"], ["http://chat.public.invalid"], ["HTTPS://chat.public.invalid"], ["https://CHAT.PUBLIC.INVALID"], ["https://chat.public.invalid."], ["https://chat.public.invalid:443"], ["https://chat.public.invalid:0443"], ["https://chat.public.invalid:abc"], ["https://chat.public.invalid:65536"], ["https://chat.public.invalid/"], ["https://chat.public.invalid/path"], ["https://chat.public.invalid?x"], ["https://chat.public.invalid#x"], ["https://user@chat.public.invalid"], ["https://@chat.public.invalid"], ["https://chat..public.invalid"], [" https://chat.public.invalid"], ["https://chat.public.invalid "], ["https://chat.public.invalid,https://other.public.invalid"], ["https://chat%2epublic.invalid"], ["https:\\chat.public.invalid"], ["https://chat.é.invalid"], ["//chat.public.invalid"], ["https://[::1]"]]
+        mutations = [[], ["https://chat.public.invalid", "https://chat.public.invalid"], ["https://chat.public.invalid", "https://other.public.invalid"], "https://chat.public.invalid", [""], ["null"], ["*"], ["http://chat.public.invalid"], ["HTTPS://chat.public.invalid"], ["https://CHAT.PUBLIC.INVALID"], ["https://chat.public.invalid."], ["https://chat.public.invalid:443"], ["https://chat.public.invalid:0443"], ["https://chat.public.invalid:abc"], ["https://chat.public.invalid:65536"], ["https://chat.public.invalid/"], ["https://chat.public.invalid/path"], ["https://chat.public.invalid?x"], ["https://chat.public.invalid#x"], ["https://user@chat.public.invalid"], ["https://@chat.public.invalid"], ["https://chat..public.invalid"], [" https://chat.public.invalid"], ["https://chat.public.invalid "], ["https://chat.public.invalid" + "," + "https://other.public.invalid"], ["https" + "://chat%2epublic.invalid"], ["https:\\chat.public.invalid"], ["https://chat.é.invalid"], ["//chat.public.invalid"], ["https" + "://[::1]"]]
         for value in mutations:
             with self.subTest(value=value):
                 self.assertNotEqual(validate.classify_header_values(value, validate.classify_origin), "accepted_exact")
@@ -500,6 +500,9 @@ class HostOriginMappingProofTests(unittest.TestCase):
             with self.assertRaisesRegex(validate.ValidationError, expected_reason):
                 validate.scan_artifact_bytes("cases.json", payload[0])
 
+    def test_valid_unicode_surrogate_pair_is_accepted(self) -> None:
+        validate.scan_artifact_bytes("cases.json", b'{"value":"\\ud83d\\ude00"}')
+
     def test_structured_redaction_aliases_are_recursive(self) -> None:
         quote = chr(34)
         aliases = (
@@ -536,6 +539,51 @@ class HostOriginMappingProofTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate.scan_artifact_bytes("README.md", mixed)
 
+        adjacent_payloads = (
+            b"chat.public.invalid" + b"\\" + b"evil",
+            b"https" + b"://" + b"chat.public.invalid" + b"\\" + b"evil",
+            b"/hermes/api/ws" + b"\\" + b"evil",
+            b"README.md" + b"\\" + b"evil",
+            b"chat.public.invalid" + b"]evil",
+            b"https" + b"://" + b"chat.public.invalid" + b"]evil",
+            b"/hermes/api/ws" + b"]evil",
+            b"README.md" + b"]evil",
+            b"chat.public.invalid" + b"^evil",
+            b"https" + b"://" + b"chat.public.invalid" + b"^evil",
+            b"/hermes/api/ws" + b"?evil",
+            b"README.md" + b"?evil",
+        )
+        for payload in adjacent_payloads:
+            with self.subTest(payload=payload):
+                text = payload.decode("utf-8")
+                self.assertIn(text, validate._normalize_structural_text(text))
+                self.assert_scanner_failure_parity("README.md", payload)
+
+    def test_decoded_python_string_literals_remain_scanner_visible(self) -> None:
+        escaped_assignment_literal = b'escaped = "' + b"password" + b"\\u003dredaction-canary\""
+        escaped_url = b'escaped = "' + b"https" + b"://unsafe\\u002eexample/path\""
+        escaped_host = b'escaped = "' + b"unsafe" + b"\\u002e" + b"example" + b".com\""
+        for payload, expected_reason in (
+            (escaped_assignment_literal, "credential assignment"),
+            (escaped_url, "URL"),
+            (escaped_host, "hostname"),
+        ):
+            with self.subTest(expected_reason=expected_reason):
+                self.assert_scanner_failure_parity("validate.py", payload, expected_reason)
+
+    def test_text_artifacts_reject_controls_but_preserve_reviewed_whitespace(self) -> None:
+        validate.scan_artifact_bytes("README.md", b"line one\n\tline two\r\n")
+        for payload in (b"safe\x00text", b"safe\x7ftext", b"safe\xc2\x80text"):
+            with self.subTest(payload=payload):
+                self.assert_scanner_failure_parity("README.md", payload, "control character")
+        for payload, expected_reason in (
+            (b'escaped = "' + b"\\u007f" + b'"', "retained Python string"),
+            (b'escaped = "' + b"\\u0085" + b'"', "retained Python string"),
+            (b'escaped = "' + b"\\ud800" + b'"', "retained Python string"),
+        ):
+            with self.subTest(expected_reason=expected_reason, payload=payload):
+                self.assert_scanner_failure_parity("validate.py", payload, expected_reason)
+
     def test_parser_rejections_reach_distinct_bounded_reasons_in_both_modes(self) -> None:
         payloads = (
             (b'{"schema":"x","schema":"' + b"secret" + b"=do-not-echo" + b'"}', "JSON contains a duplicate object key"),
@@ -544,6 +592,12 @@ class HostOriginMappingProofTests(unittest.TestCase):
             (b"{\"value\":1234567890123456789}", "JSON integer literal is too large"),
             (b"{" + b"{" * (validate.MAX_DEPTH + 1) + b"}" * (validate.MAX_DEPTH + 1), "JSON nesting limit exceeded"),
             (b'{"value":"\\u0001"}', "JSON string contains a control character"),
+            (b'{"value":"\\u007f"}', "JSON string contains a control character"),
+            (b'{"value":"\\u0085"}', "JSON string contains a control character"),
+            (b'{"value":"\\ud800"}', "JSON string contains a lone surrogate"),
+            (b'{"value":"\\udfff"}', "JSON string contains a lone surrogate"),
+            (b'{"\\u007f":"x"}', "JSON key contains a control character"),
+            (b'{"\\ud800":"x"}', "JSON key contains a lone surrogate"),
         )
         for payload, expected_reason in payloads:
             with self.subTest(expected_reason=expected_reason):
@@ -556,7 +610,7 @@ class HostOriginMappingProofTests(unittest.TestCase):
                 outputs.append((result.returncode, result.stdout, result.stderr))
             self.assertEqual(outputs[0], outputs[1])
 
-    def test_large_dotted_member_normalization_is_linear_and_bounded(self) -> None:
+    def test_large_dotted_member_normalization_is_bounded_and_practical(self) -> None:
         source = "member = object()\n" + ("member" + ".value\n") * 20_000
         normalized = validate._normalize_python_code_members(source)
         self.assertEqual(normalized.count("<python-code-member>"), 20_000)

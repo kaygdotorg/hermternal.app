@@ -98,8 +98,9 @@ Exemptions are narrow and structural:
 
 - exact reserved `.invalid` fixture authorities and their frozen mutation forms;
 - the exact reviewed WebSocket route;
-- exact reviewed artifact paths and filenames, with boundaries that do not
-  match an email address, URL, absolute path, or credential assignment;
+- exact reviewed artifact paths and filenames, with exact-token boundaries
+  that do not match an email address, URL, absolute path, credential
+  assignment, backslash continuation, or other URI/path/filename continuation;
 - canonical detector assignments only when a module-level AST assignment has
   the expected detector name and exactly matches the loaded pattern and flags;
   a same-looking assignment in a string, docstring, comment, or trailing
@@ -112,9 +113,17 @@ Python artifacts use tokens plus AST source context to recognize dotted
 identifiers in real code. A bare unreviewed dotted-host payload is not code and
 is scanned. String, docstring, HTML-comment, and comment contents remain
 scanner-visible, including content adjacent to an otherwise canonical
-assignment. Prefix, suffix, alternate host, alternate URL, and adjacent
-content do not inherit an exemption. Tests append each forbidden class to
-every artifact and require rejection.
+assignment. Python string literals are also parsed with the Python AST so
+Unicode-escaped credential, URL, host, control, and surrogate payloads are
+checked after Python decoding; only the exact canonical detector and negative
+scaffold subtrees are excluded. Prefix, suffix, alternate host, alternate URL,
+backslash continuation, and adjacent content do not inherit an exemption.
+Tests append each forbidden class to every artifact and require rejection.
+
+Every retained UTF-8 text artifact rejects C0 controls other than reviewed
+newline, tab, and carriage-return whitespace, plus DEL, C1 controls, and lone
+surrogates. JSON string values and keys use the stricter JSON string policy,
+while valid surrogate pairs remain accepted Unicode scalar values.
 
 JSON artifacts are parsed before raw scanning. The validator recursively scans
 decoded scalar strings, dictionary keys, nested objects, and list elements, so
@@ -150,7 +159,13 @@ must therefore be supplied by the aggregate registry owner in a separately
 reviewed prior Git object; this fixture does not edit `contracts/fixtures/index.json`
 or claim to close that trust boundary before that owner-controlled registration.
 The baseline and identity must be regenerated only after the source is stable and
-only through that external predecessor anchor.
+only through that external predecessor anchor. Until that authority is merged,
+the default validator is expected to stop at its bounded stale-pin failure;
+`--skip-baseline` and the focused normal/optimized suites exercise the local
+correction lane without rotating those external pins. The comma-joined origin
+cardinality canary is assembled from separate Python string fragments so the
+aggregate registry scanner does not mistake two synthetic URLs for one live
+host; its runtime mutation value is unchanged.
 
 Run from the repository root:
 
