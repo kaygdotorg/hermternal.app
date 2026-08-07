@@ -33,10 +33,13 @@ configuration. It serves the PR #291 static build at `/`, maps the reviewed
 Dashboard surface under exactly one `/hermes` prefix, and denies all other
 methods and paths. It does not implement Traefik. Its redacted evidence binds
 the build SHA, static build digest, runtime Caddyfile digest
-`0c2626619ecd065b6a7c532162cdc046ec7dafd7300b47ed1ff082a19429c91f`, and a
-reproducible runtime-input manifest. Canonical session and message deep links
-rewrite to `200.html`; only the reviewed root scenario selector accepts a
-query; static, client, and REST routes reject query mutations. Chat and PTY
+`342952687f19e425bd47126a47b5d17767c27aed99942252d6a6711b2b94f15c`, and a reproducible runtime-input manifest. Canonical
+session and message deep links rewrite to `200.html`; only the reviewed root
+scenario selector and the exact OAuth callback forms accept a query: either
+non-empty safe ASCII `code` and `state` values, or literal `error=access_denied`
+with non-empty safe ASCII `error_description` and `state`; each value is bounded
+to 512 characters and key order is independent. Static, client, and other REST
+routes reject query mutations. Chat and PTY
 upgrades use separate exact grammars. The current browser PTY client sends only
 `ticket` plus `resume` and optional non-empty `attach`; `fresh` is unsupported
 and remains edge-denied. The proxy resets all inbound forwarding headers before

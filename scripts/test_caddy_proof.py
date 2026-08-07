@@ -39,7 +39,7 @@ EVIDENCE_PATH = ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence.json
 EVIDENCE_ANCHOR_PATH = ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence-sha256.txt"
 EXPECTED_BUILD_SHA = "521ede32b904a42e22eebb279fd7d404074cd318"
 EXPECTED_BUILD_DIGEST = "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
-EXPECTED_CADDYFILE_DIGEST = "0c2626619ecd065b6a7c532162cdc046ec7dafd7300b47ed1ff082a19429c91f"
+EXPECTED_CADDYFILE_DIGEST = "342952687f19e425bd47126a47b5d17767c27aed99942252d6a6711b2b94f15c"
 
 
 class CaddyProofRendererTests(unittest.TestCase):
@@ -105,6 +105,49 @@ class CaddyProofRendererTests(unittest.TestCase):
         self.assertIn(caddy_proof.QUERY_PRESENT_GUARD, rendered)
         self.assertIn("rewrite * /200.html", rendered)
         self.assertNotIn("path /v1/c/*", rendered)
+
+    def test_oauth_callback_query_allowlist_is_narrow_and_order_independent(self) -> None:
+        rendered = self._render()
+        self.assertEqual(rendered.count(caddy_proof.AUTH_CALLBACK_QUERY_GUARD), 2)
+        accepted = {
+            "code=fixture-code-success&state=fixture-state-success",
+            "state=fixture-state-success&code=fixture-code-success",
+            "error=access_denied&error_description=fixture-user-cancelled&state=fixture-state-cancelled",
+            "error=access_denied&state=fixture-state-cancelled&error_description=fixture-user-cancelled",
+            "error_description=fixture-user-cancelled&error=access_denied&state=fixture-state-cancelled",
+            "error_description=fixture-user-cancelled&state=fixture-state-cancelled&error=access_denied",
+            "state=fixture-state-cancelled&error=access_denied&error_description=fixture-user-cancelled",
+            "state=fixture-state-cancelled&error_description=fixture-user-cancelled&error=access_denied",
+            "code=" + ("A" * 512) + "&state=" + ("B" * 512),
+        }
+        rejected = {
+            "",
+            "code=",
+            "state=",
+            "code=&state=fixture-state-malformed",
+            "state=&code=fixture-code-missing-state",
+            "code=fixture-code-success",
+            "state=fixture-state-success",
+            "code=fixture-code-success&state=fixture-state-success&extra=value",
+            "code=fixture-code-success&code=other-code&state=fixture-state-success",
+            "error=access_denied&state=fixture-state-cancelled",
+            "error=access_denied&error_description=&state=fixture-state-cancelled",
+            "error=access_denied&error_description=fixture-user-cancelled&state=",
+            "error=provider_failure&error_description=fixture-user-cancelled&state=fixture-state-cancelled",
+            "error=access_denied&error_description=fixture-user-cancelled&state=fixture-state-cancelled&code=extra",
+            "code=fixture%2Dcode&state=fixture-state-success",
+            "code=fixture/code&state=fixture-state-success",
+            "code=" + ("A" * 513) + "&state=fixture-state-success",
+            "code=fixture-code-success&state=" + ("B" * 513),
+            "error=access_denied&error_description=" + ("D" * 513) + "&state=fixture-state-cancelled",
+        }
+        for query in accepted:
+            self.assertTrue(any(re.fullmatch(pattern, query) for pattern in caddy_proof.AUTH_CALLBACK_QUERY_PATTERNS), query)
+        for query in rejected:
+            self.assertFalse(any(re.fullmatch(pattern, query) for pattern in caddy_proof.AUTH_CALLBACK_QUERY_PATTERNS), query)
+        self.assertIn("/auth/callback", rendered)
+        self.assertIn("/hermes/auth/callback", rendered)
+        self.assertNotIn("/auth/callback /api/auth/me", rendered)
 
     def test_websocket_boundary_has_distinct_chat_and_pty_queries(self) -> None:
         rendered = self._render()
@@ -267,6 +310,7 @@ class CaddyProofEvidenceTests(unittest.TestCase):
             "deep_link_message": {"id", "status", "layer", "upstream_request", "fallback"},
             "dashboard_provider_discovery": {"id", "status", "layer", "upstream_request"},
             "password_login": {"id", "status", "layer", "upstream_request"},
+            "oauth_callback": {"id", "status", "layer", "upstream_request", "query_policy"},
             "ws_ticket": {"id", "status", "layer", "upstream_request"},
             "ws_upgrade": {"id", "status", "layer", "upstream_request", "query_policy"},
             "pty_upgrade": {"id", "status", "layer", "upstream_request", "query_policy"},
@@ -693,9 +737,48 @@ class CaddyBlackBoxTests(unittest.TestCase):
         self.assertEqual((status, body), (404, b"not found"))
         self.assertEqual(self._record_count(), denied_before)
 
+    def test_oauth_callback_queries_reach_upstream_only_for_reviewed_forms(self) -> None:
+        accepted = (
+            "/auth/callback?code=fixture-code-success&state=fixture-state-success",
+            "/hermes/auth/callback?state=fixture-state-success&code=fixture-code-success",
+            "/auth/callback?error=access_denied&error_description=fixture-user-cancelled&state=fixture-state-cancelled",
+        )
+        for target in accepted:
+            with self.subTest(target=target):
+                before = self._record_count()
+                status, _headers, body = self._request(target)
+                self.assertEqual((status, body), (200, b"upstream:/auth/callback"))
+                record = self._record_after(before)
+                self.assertEqual(record["path"], "/auth/callback")
+                self.assertEqual(record["query"], target.split("?", 1)[1])
+
+        denied_queries = (
+            "/auth/callback?",
+            "/auth/callback?code=fixture-code-success",
+            "/auth/callback?state=fixture-state-success",
+            "/auth/callback?code=fixture-code-success&state=fixture-state-success&extra=value",
+            "/auth/callback?code=fixture-code-success&code=other-code&state=fixture-state-success",
+            "/auth/callback?error=access_denied&state=fixture-state-cancelled",
+            "/auth/callback?error=access_denied&error_description=&state=fixture-state-cancelled",
+            "/auth/callback?error=access_denied&error_description=fixture-user-cancelled&state=",
+            "/auth/callback?error=provider_failure&error_description=fixture-user-cancelled&state=fixture-state-cancelled",
+            "/auth/callback?code=&state=fixture-state-malformed",
+            "/auth/callback?state=&code=fixture-code-missing-state",
+            "/auth/callback?code=fixture%2Dcode&state=fixture-state-success",
+            "/hermes/auth/callback?code=fixture-code-success&state=fixture-code-success&ticket=extra",
+        )
+        for target in denied_queries:
+            with self.subTest(target=target):
+                before = self._record_count()
+                status, _headers, body = self._request(target)
+                self.assertEqual((status, body), (404, b"not found"))
+                self.assertEqual(self._record_count(), before)
+
     def test_every_rest_query_mutation_is_edge_denied(self) -> None:
         targets: list[tuple[str, str]] = []
         for method, path in caddy_proof.EXACT_REST_ROUTES:
+            if path == "/auth/callback":
+                continue
             for prefix in ("", "/hermes"):
                 targets.append((method, f"{prefix}{path}?"))
                 targets.append((method, f"{prefix}{path}?cache=synthetic"))

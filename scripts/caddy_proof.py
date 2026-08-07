@@ -101,7 +101,35 @@ NO_QUERY_GUARD = "{http.request.uri.query} == ''"
 QUERY_PRESENT_GUARD = "{http.request.uri.query} != ''"
 ROOT_SCENARIO_QUERY_GUARD = "{http.request.uri.query}.matches('^scenario=(?:success|empty|failure)$')"
 ROOT_QUERY_GUARD = f"({NO_QUERY_GUARD} || {ROOT_SCENARIO_QUERY_GUARD})"
+# Every REST route is query-free except the OAuth callback. The callback's
+# source-owned handler receives either the reviewed code/state pair or the
+# reviewed provider-error triple; keeping those forms explicit prevents an
+# arbitrary callback query from becoming a proxy bypass.
 REST_QUERY_GUARD = NO_QUERY_GUARD
+AUTH_CALLBACK_CODE_STATE_PATTERN = (
+    rf"^code=[A-Za-z0-9._~-]{{1,512}}&state=[A-Za-z0-9._~-]{{1,512}}$"
+)
+AUTH_CALLBACK_STATE_CODE_PATTERN = (
+    rf"^state=[A-Za-z0-9._~-]{{1,512}}&code=[A-Za-z0-9._~-]{{1,512}}$"
+)
+AUTH_CALLBACK_ERROR_DESCRIPTION_PATTERN = r"[A-Za-z0-9._~-]{1,512}"
+AUTH_CALLBACK_STATE_PATTERN = r"[A-Za-z0-9._~-]{1,512}"
+AUTH_CALLBACK_ERROR_QUERY_PATTERNS = (
+    rf"^error=access_denied&error_description={AUTH_CALLBACK_ERROR_DESCRIPTION_PATTERN}&state={AUTH_CALLBACK_STATE_PATTERN}$",
+    rf"^error=access_denied&state={AUTH_CALLBACK_STATE_PATTERN}&error_description={AUTH_CALLBACK_ERROR_DESCRIPTION_PATTERN}$",
+    rf"^error_description={AUTH_CALLBACK_ERROR_DESCRIPTION_PATTERN}&error=access_denied&state={AUTH_CALLBACK_STATE_PATTERN}$",
+    rf"^error_description={AUTH_CALLBACK_ERROR_DESCRIPTION_PATTERN}&state={AUTH_CALLBACK_STATE_PATTERN}&error=access_denied$",
+    rf"^state={AUTH_CALLBACK_STATE_PATTERN}&error=access_denied&error_description={AUTH_CALLBACK_ERROR_DESCRIPTION_PATTERN}$",
+    rf"^state={AUTH_CALLBACK_STATE_PATTERN}&error_description={AUTH_CALLBACK_ERROR_DESCRIPTION_PATTERN}&error=access_denied$",
+)
+AUTH_CALLBACK_QUERY_PATTERNS = (
+    AUTH_CALLBACK_CODE_STATE_PATTERN,
+    AUTH_CALLBACK_STATE_CODE_PATTERN,
+    *AUTH_CALLBACK_ERROR_QUERY_PATTERNS,
+)
+AUTH_CALLBACK_QUERY_GUARD = " || ".join(
+    f"{{http.request.uri.query}}.matches('{pattern}')" for pattern in AUTH_CALLBACK_QUERY_PATTERNS
+)
 CHAT_TICKET_VALUE_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._~-]{0,511}"
 CHAT_TICKET_QUERY_GUARD = f"{{http.request.uri.query}}.matches('^ticket={CHAT_TICKET_VALUE_PATTERN}$')"
 PTY_TICKET_VALUE_PATTERN = CHAT_TICKET_VALUE_PATTERN
@@ -351,11 +379,22 @@ def render_caddyfile(
         "",
     ]
 
-    root_get = [path for method, path in EXACT_REST_ROUTES if method == "GET"]
+    root_get = [
+        path for method, path in EXACT_REST_ROUTES if method == "GET" and path != "/auth/callback"
+    ]
     root_post = [path for method, path in EXACT_REST_ROUTES if method == "POST"]
     root_patch = [path for method, path in EXACT_REST_ROUTES if method == "PATCH"]
     lines.extend(_exact_matcher("root_rest_get", "GET", root_get))
     lines.extend(_handler("root_rest_get", "root_hermes"))
+    lines.extend(
+        _exact_matcher(
+            "root_auth_callback",
+            "GET",
+            ("/auth/callback",),
+            query_guard=AUTH_CALLBACK_QUERY_GUARD,
+        )
+    )
+    lines.extend(_handler("root_auth_callback", "root_hermes"))
     lines.extend(_exact_matcher("root_rest_post", "POST", root_post))
     lines.extend(_handler("root_rest_post", "root_hermes"))
     if root_patch:
@@ -373,11 +412,24 @@ def render_caddyfile(
     lines.extend(_exact_matcher("root_pty_ws", "GET", ("/api/pty",), websocket=True, query_guard=PTY_QUERY_GUARD))
     lines.extend(_handler("root_pty_ws", "root_hermes"))
 
-    dashboard_get = [f"/hermes{path}" for method, path in EXACT_REST_ROUTES if method == "GET"]
+    dashboard_get = [
+        f"/hermes{path}"
+        for method, path in EXACT_REST_ROUTES
+        if method == "GET" and path != "/auth/callback"
+    ]
     dashboard_post = [f"/hermes{path}" for method, path in EXACT_REST_ROUTES if method == "POST"]
     dashboard_patch = [f"/hermes{path}" for method, path in EXACT_REST_ROUTES if method == "PATCH"]
     lines.extend(_exact_matcher("dashboard_rest_get", "GET", dashboard_get))
     lines.extend(_handler("dashboard_rest_get", "dashboard_hermes", strip_prefix=True))
+    lines.extend(
+        _exact_matcher(
+            "dashboard_auth_callback",
+            "GET",
+            ("/hermes/auth/callback",),
+            query_guard=AUTH_CALLBACK_QUERY_GUARD,
+        )
+    )
+    lines.extend(_handler("dashboard_auth_callback", "dashboard_hermes", strip_prefix=True))
     lines.extend(_exact_matcher("dashboard_rest_post", "POST", dashboard_post))
     lines.extend(_handler("dashboard_rest_post", "dashboard_hermes", strip_prefix=True))
     if dashboard_patch:

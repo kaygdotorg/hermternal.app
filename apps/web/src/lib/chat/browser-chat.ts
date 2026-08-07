@@ -33,8 +33,8 @@ const OFFICIAL_COMPATIBILITY_EVIDENCE: JsonRpcChatOptions["compatibilityEvidence
       path: "contracts/hermes-dashboard/manifest.md",
       revision: DASHBOARD_CONTRACT,
       sha256:
-        "680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5",
-      sizeBytes: 18_163,
+        "0f2f1ea3af722cf2d14f6a43754a8430d20bae98d335b961c64b3f1229bd07c1",
+      sizeBytes: 18_396,
     },
     sourceReview: {
       path: "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
@@ -45,8 +45,8 @@ const OFFICIAL_COMPATIBILITY_EVIDENCE: JsonRpcChatOptions["compatibilityEvidence
     proxyProof: {
       path: "docs/deployment/proof-matrix.md",
       sha256:
-        "e32dc3e4e2049b1dd92b03a4ea83568d314da58c54b95441004bbc393f77f84d",
-      sizeBytes: 18_275,
+        "01a12174bf770e5380505a5c89930d36b8ba4e43b22b27df1b89dbf9623055a9",
+      sizeBytes: 18_532,
     },
   };
 

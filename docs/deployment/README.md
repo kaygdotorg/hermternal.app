@@ -30,7 +30,7 @@ It binds the observed edge and upstream results to the exact PR #291 build
 commit `521ede32b904a42e22eebb279fd7d404074cd318`, static build digest
 `77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21`, and
 runtime Caddyfile digest
-`0c2626619ecd065b6a7c532162cdc046ec7dafd7300b47ed1ff082a19429c91f`.
+`342952687f19e425bd47126a47b5d17767c27aed99942252d6a6711b2b94f15c`.
 The committed runtime input manifest has digest
 `94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4`, so the
 runtime file can be reconstructed without retaining VM or user paths. The
@@ -42,8 +42,11 @@ The renderer and offline regression tests are in
 [`scripts/test_caddy_proof.py`](../../scripts/test_caddy_proof.py). The proof
 uses exact method/path matchers at `/` and under one `/hermes` prefix. Canonical
 session and message deep links fall back to `200.html`; only the reviewed root
-scenario selector accepts a query; bare query markers are denied. Static
-assets, client routes, and REST routes reject query mutations. Chat uses one
+scenario selector and the exact OAuth callback forms accept a query: either
+non-empty safe ASCII `code` and `state` values, or literal `error=access_denied`
+with non-empty safe ASCII `error_description` and `state`; each value is bounded
+to 512 characters and key order is independent. Bare query markers are denied.
+Static assets, client routes, and other REST routes reject query mutations. Chat uses one
 non-empty safe opaque ticket bounded to 512 characters. The current browser PTY
 client sends only `ticket` plus `resume` and an optional non-empty `attach`, in
 any key order; duplicates, extras, empty values, and the unsupported `fresh`
