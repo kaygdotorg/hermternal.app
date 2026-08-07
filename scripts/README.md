@@ -246,11 +246,24 @@ touch-target surface; accessibility checks are N/A.
 `scripts/caddy_proof.py` is a proof-only renderer for issue #156. It is not a
 production deployment file and it does not implement Traefik. It emits exact
 method/path matchers for the PR #291 static client at `/`, the reviewed Hermes
-routes under one `/hermes` prefix, and the ticket-only WebSocket upgrades. It
-also fixes the private upstream Host/Origin mapping, forwarded headers, Secure
-cookie rewrite, and final edge `404` fallback. Caddy's canonical formatter uses
-tabs, so the renderer emits that form directly; the runtime digest therefore
-covers the exact file that was validated.
+routes under one `/hermes` prefix, and separate chat and PTY WebSocket
+contracts. Canonical session and message deep links rewrite to `200.html`; only
+the reviewed root `scenario=success|empty|failure` selector accepts a query;
+static assets, client routes, and REST routes reject query mutations. PTY
+requires ticket plus resume with optional attach, accepts any key order, and
+rejects duplicate, extra, empty, and `fresh` parameters. The renderer strips
+all inbound `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` headers before
+rebuilding trusted public metadata, and applies the private upstream
+Host/Origin mapping and Secure cookie rewrite. Caddy's canonical formatter
+uses tabs, so the renderer emits that form directly; the runtime digest
+therefore covers the exact file that was validated.
+
+The evidence also records a deterministic runtime-input manifest and the
+SHA-256 identities of the shared static-route grammar and deep-link fixture.
+The black-box test starts local Caddy beside a recording mock upstream and
+checks actual paths, bodies, prefixes, headers, deep links, query denials, and
+upgrade results. It does not contact Hermes or the disposable VM during this
+correction lane.
 
 Offline verification from the repository root:
 
@@ -270,7 +283,10 @@ in redacted evidence is
 build commit `521ede32b904a42e22eebb279fd7d404074cd318`, static build digest
 `77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21`, and
 runtime Caddyfile digest
-`b3585c4b91d7656d5bcb6adedda29af63d60ca488ec99ef162ec4f74e2611e82`.
+`066564a4faea5455021c50f00eb6c0a6985663a8b4b799ed617a03312715000d`.
+The runtime input manifest digest is
+`94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4`; its
+paths are deterministic proof placeholders, not retained user or VM paths.
 The retained browser state is `blocked_provider`: it does not claim
 `message.delta` or `message.complete`, and it contains no credential, cookie,
 ticket, ticket fragment, provider payload, or transcript.

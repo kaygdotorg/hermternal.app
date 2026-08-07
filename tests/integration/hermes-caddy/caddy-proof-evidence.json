@@ -4,9 +4,31 @@
   "contract": "dashboard-v0.0.1",
   "deployment": {
     "proxy": "caddy",
+    "caddy_version": "v2.11.4",
     "official_image_digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
     "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
-    "runtime_config_sha256": "b3585c4b91d7656d5bcb6adedda29af63d60ca488ec99ef162ec4f74e2611e82",
+    "runtime_config_sha256": "066564a4faea5455021c50f00eb6c0a6985663a8b4b799ed617a03312715000d",
+    "runtime_inputs_schema": "hermternal.caddy-proof.runtime-inputs.v1",
+    "runtime_inputs": {
+      "host": "caddy-156.test",
+      "https_port": 19443,
+      "hermes_port": 19256,
+      "site_root": "/opt/hermternal/caddy-proof/site",
+      "cert_path": "/opt/hermternal/caddy-proof/tls.crt",
+      "key_path": "/opt/hermternal/caddy-proof/tls.key",
+      "storage_root": "/opt/hermternal/caddy-proof"
+    },
+    "runtime_inputs_sha256": "94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4",
+    "parity_fixtures": {
+      "static_route_grammar": {
+        "path": "apps/web/src/lib/static-route-grammar.mjs",
+        "sha256": "f0542d97b363b8e2a921e93001d72dd0f56d5f30001f15e95bbca5b2f4165165"
+      },
+      "deep_link_cases": {
+        "path": "contracts/fixtures/deep-link-grammar/cases.json",
+        "sha256": "91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96"
+      }
+    },
     "hermes_listener": "loopback-only",
     "public_listener": "loopback-only-disposable"
   },
@@ -21,6 +43,27 @@
       "status": 200,
       "layer": "static",
       "upstream_request": false
+    },
+    {
+      "id": "root_scenario_static",
+      "status": 200,
+      "layer": "static",
+      "upstream_request": false,
+      "query_policy": "reviewed scenario selector only"
+    },
+    {
+      "id": "deep_link_session",
+      "status": 200,
+      "layer": "static",
+      "upstream_request": false,
+      "fallback": "/200.html"
+    },
+    {
+      "id": "deep_link_message",
+      "status": 200,
+      "layer": "static",
+      "upstream_request": false,
+      "fallback": "/200.html"
     },
     {
       "id": "dashboard_provider_discovery",
@@ -44,7 +87,23 @@
       "id": "ws_upgrade",
       "status": 101,
       "layer": "hermes",
-      "upstream_request": true
+      "upstream_request": true,
+      "query_policy": "chat ticket-only"
+    },
+    {
+      "id": "pty_upgrade",
+      "status": 101,
+      "layer": "hermes",
+      "upstream_request": true,
+      "query_policy": "ticket plus resume with optional attach; order-independent"
+    },
+    {
+      "id": "mock_upstream_header_rebuild",
+      "status": 200,
+      "layer": "hermes",
+      "upstream_request": true,
+      "forwarding_policy": "client forwarding metadata deleted before trusted public metadata is rebuilt",
+      "prefix_policy": "single /hermes prefix"
     }
   ],
   "negative_cases": [
@@ -109,6 +168,60 @@
       "upstream_request": false
     },
     {
+      "id": "root_query_mutation",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "static_asset_query_mutation",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "client_route_query_mutation",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "rest_query_mutation",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_missing_resume",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_extra_parameter",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_duplicate_parameter",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_empty_value",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_fresh_parameter",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
       "id": "invalid_ticket",
       "status": 400,
       "layer": "hermes",
@@ -133,6 +246,19 @@
       "upstream_request": false
     }
   ],
+  "black_box": {
+    "scope": "local Caddy plus recording mock-upstream only",
+    "route_vectors": "shared static-route grammar and deep-link fixture identities",
+    "assertions": [
+      "valid session and message deep links serve 200.html",
+      "root-only scenario query is accepted",
+      "static, client, and REST query mutations are edge 404",
+      "mock upstream receives exact path, query, body, and single prefix",
+      "Forwarded, X-Forwarded-*, and X-Real-IP spoofing is absent upstream",
+      "chat and PTY upgrades use separate exact query grammars"
+    ],
+    "request_material": "redacted"
+  },
   "cookie_attributes": {
     "secure": true,
     "http_only": true,

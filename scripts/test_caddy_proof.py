@@ -9,11 +9,21 @@ evidence; this file proves that the renderer cannot silently widen it.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
+import re
+import shutil
+import socket
+import ssl
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +37,7 @@ EVIDENCE_PATH = ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence.json
 EVIDENCE_ANCHOR_PATH = ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence-sha256.txt"
 EXPECTED_BUILD_SHA = "521ede32b904a42e22eebb279fd7d404074cd318"
 EXPECTED_BUILD_DIGEST = "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
-EXPECTED_CADDYFILE_DIGEST = "b3585c4b91d7656d5bcb6adedda29af63d60ca488ec99ef162ec4f74e2611e82"
+EXPECTED_CADDYFILE_DIGEST = "066564a4faea5455021c50f00eb6c0a6985663a8b4b799ed617a03312715000d"
 
 
 class CaddyProofRendererTests(unittest.TestCase):
@@ -45,12 +55,18 @@ class CaddyProofRendererTests(unittest.TestCase):
         )
 
     def test_renderer_inputs_reject_ambiguous_hosts_ports_and_paths(self) -> None:
+        self.assertEqual(caddy_proof._validate_host("caddy-156.test"), "caddy-156.test")
         with self.assertRaises(ValueError):
             caddy_proof._validate_host("caddy..test")
+        with self.assertRaises(ValueError):
+            caddy_proof._validate_host(123)  # type: ignore[arg-type]
+        self.assertEqual(caddy_proof._validate_port(19443, "https_port"), 19443)
         with self.assertRaises(ValueError):
             caddy_proof._validate_port(443, "https_port")
         with self.assertRaises(ValueError):
             caddy_proof._validate_path("relative/site", "site_root")
+        with self.assertRaises(ValueError):
+            caddy_proof._validate_runtime_inputs({})
 
     def test_host_origin_and_raw_uri_denials_are_explicit(self) -> None:
         rendered = self._render()
@@ -78,13 +94,49 @@ class CaddyProofRendererTests(unittest.TestCase):
         self.assertIn("header_up X-Forwarded-Prefix /hermes", rendered)
         self.assertNotIn("try_files", rendered)
 
-    def test_websocket_boundary_requires_one_ticket_and_one_upgrade(self) -> None:
+    def test_root_and_client_route_queries_are_exact(self) -> None:
         rendered = self._render()
-        self.assertEqual(rendered.count(caddy_proof.TICKET_QUERY_GUARD), 4)
+        self.assertIn(caddy_proof.ROOT_SCENARIO_QUERY_GUARD, rendered)
+        self.assertIn(caddy_proof.ROOT_QUERY_GUARD, rendered)
+        self.assertIn(caddy_proof.CLIENT_ROUTE_PATTERN, rendered)
+        self.assertIn(caddy_proof.CLIENT_ROUTE_PREFIX_PATTERN, rendered)
+        self.assertIn(caddy_proof.QUERY_PRESENT_GUARD, rendered)
+        self.assertIn("rewrite * /200.html", rendered)
+        self.assertNotIn("path /v1/c/*", rendered)
+
+    def test_websocket_boundary_has_distinct_chat_and_pty_queries(self) -> None:
+        rendered = self._render()
+        self.assertEqual(rendered.count(caddy_proof.CHAT_TICKET_QUERY_GUARD), 2)
+        self.assertEqual(rendered.count(caddy_proof.PTY_QUERY_GUARD), 2)
+        self.assertIn("resume=", rendered)
+        self.assertIn("attach=", rendered)
+        self.assertNotIn("fresh=", rendered)
         self.assertIn("header Upgrade websocket", rendered)
         self.assertIn("header Connection *Upgrade*", rendered)
         self.assertNotIn("lb_retries", rendered)
         self.assertNotIn("lb_try_duration", rendered)
+
+    def test_pty_query_patterns_are_exact_and_order_independent(self) -> None:
+        self.assertEqual(len(caddy_proof.PTY_QUERY_PATTERNS), 8)
+        accepted = {
+            "ticket=fixtureTicket&resume=fixtureResume",
+            "resume=fixtureResume&ticket=fixtureTicket",
+            "ticket=fixtureTicket&resume=fixtureResume&attach=fixtureAttach",
+            "attach=fixtureAttach&ticket=fixtureTicket&resume=fixtureResume",
+        }
+        rejected = {
+            "ticket=fixtureTicket",
+            "ticket=fixtureTicket&resume=fixtureResume&fresh=1",
+            "ticket=fixtureTicket&resume=fixtureResume&ticket=otherTicket",
+            "ticket=&resume=fixtureResume",
+            "ticket=fixtureTicket&resume=",
+            "ticket=fixtureTicket&resume=fixtureResume&attach=",
+            "ticket=fixtureTicket&resume=fixtureResume&extra=value",
+        }
+        for query in accepted:
+            self.assertTrue(any(re.fullmatch(pattern, query) for pattern in caddy_proof.PTY_QUERY_PATTERNS))
+        for query in rejected:
+            self.assertFalse(any(re.fullmatch(pattern, query) for pattern in caddy_proof.PTY_QUERY_PATTERNS))
 
     def test_upstream_authority_and_cookie_policy_are_fixed(self) -> None:
         rendered = self._render()
@@ -93,10 +145,10 @@ class CaddyProofRendererTests(unittest.TestCase):
         self.assertEqual(rendered.count("header_up X-Forwarded-Proto https"), 2)
         self.assertEqual(rendered.count("header_up X-Forwarded-Host {http.request.host}"), 2)
         self.assertEqual(rendered.count('header_down Set-Cookie "(?i)(.*)" "$1; Secure"'), 2)
-        self.assertIn("header_up -Origin", rendered)
-        self.assertIn("header_up -X-Forwarded-Host", rendered)
-        self.assertIn("header_up -X-Forwarded-Proto", rendered)
-        self.assertIn("header_up -X-Forwarded-Prefix", rendered)
+        self.assertNotIn("header_up -Origin", rendered)
+        self.assertEqual(rendered.count("request_header -Forwarded"), 2)
+        self.assertEqual(rendered.count("request_header -X-Forwarded-*"), 2)
+        self.assertEqual(rendered.count("request_header -X-Real-IP"), 2)
 
     def test_static_digest_is_order_independent_and_content_bound(self) -> None:
         with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
@@ -129,6 +181,17 @@ class CaddyProofEvidenceTests(unittest.TestCase):
         self.assertEqual(self.evidence["product"]["static_manifest_sha256"], EXPECTED_BUILD_DIGEST)
         self.assertEqual(self.evidence["deployment"]["runtime_config_sha256"], EXPECTED_CADDYFILE_DIGEST)
         self.assertEqual(self.evidence["browser_journey"], "blocked_provider")
+
+    def test_evidence_reconstructs_runtime_and_parity_inputs(self) -> None:
+        deployment = self.evidence["deployment"]
+        self.assertEqual(deployment["runtime_inputs_schema"], caddy_proof.RUNTIME_INPUT_SCHEMA)
+        self.assertEqual(deployment["runtime_inputs"], caddy_proof.reconstruction_inputs())
+        self.assertEqual(
+            deployment["runtime_inputs_sha256"],
+            caddy_proof.runtime_input_digest(caddy_proof.reconstruction_inputs()),
+        )
+        self.assertEqual(deployment["parity_fixtures"], caddy_proof.parity_fixture_manifest())
+        self.assertNotIn("/Users/", json.dumps(deployment, sort_keys=True))
 
     def test_edge_negative_matrix_has_no_upstream_request(self) -> None:
         expected = {
@@ -167,6 +230,412 @@ class CaddyProofEvidenceTests(unittest.TestCase):
                 self.assertNotIn(forbidden, raw)
         retention = self.evidence["retention"]
         self.assertTrue(all(value == "redacted" for value in retention.values()))
+
+
+def _free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+class _RecordingMockUpstream(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+    def __init__(self, server_address, request_handler):
+        super().__init__(server_address, request_handler)
+        self.records: list[dict[str, object]] = []
+        self.record_lock = threading.Lock()
+
+
+class _MockUpstreamHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def _handle_request(self) -> None:
+        parsed = urlsplit(self.path)
+        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(content_length)
+        record = {
+            "method": self.command,
+            "path": parsed.path,
+            "query": parsed.query,
+            "headers": {key.lower(): value for key, value in self.headers.items()},
+            "body": body,
+        }
+        with self.server.record_lock:  # type: ignore[attr-defined]
+            self.server.records.append(record)  # type: ignore[attr-defined]
+
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            self.send_response(101, "Switching Protocols")
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.end_headers()
+            return
+
+        payload = f"upstream:{parsed.path}".encode("ascii")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+
+    do_GET = _handle_request
+    do_HEAD = _handle_request
+    do_POST = _handle_request
+    do_PATCH = _handle_request
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+def _https_request(
+    port: int,
+    host: str,
+    target: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+) -> tuple[int, dict[str, str], bytes]:
+    context = ssl._create_unverified_context()
+    connection = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=3)
+    request_headers = {"Host": host, "Connection": "close"}
+    if headers:
+        request_headers.update(headers)
+    try:
+        connection.request(method, target, body=body, headers=request_headers)
+        response = connection.getresponse()
+        response_headers = {key.lower(): value for key, value in response.getheaders()}
+        response_body = b"" if response.status == 101 else response.read()
+        return response.status, response_headers, response_body
+    finally:
+        connection.close()
+
+
+@unittest.skipUnless(shutil.which("caddy") and shutil.which("openssl"), "Caddy black-box tools are unavailable")
+class CaddyBlackBoxTests(unittest.TestCase):
+    """Exercise the rendered boundary against Caddy and a recording upstream."""
+
+    host = "caddy-156.test"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tempdir = tempfile.TemporaryDirectory(prefix="caddy-proof-black-box-")
+        root = Path(cls.tempdir.name)
+        cls.site_root = root / "site"
+        cls.site_root.mkdir()
+        (cls.site_root / "_app").mkdir()
+        (cls.site_root / "index.html").write_text("INDEX-SHELL", encoding="utf-8")
+        (cls.site_root / "200.html").write_text("CLIENT-SHELL", encoding="utf-8")
+        (cls.site_root / "_app" / "app.js").write_text("static-app", encoding="utf-8")
+        (cls.site_root / "service-worker.js").write_text("addEventListener", encoding="utf-8")
+        (cls.site_root / "manifest.webmanifest").write_text("{}", encoding="utf-8")
+        (cls.site_root / "icon.svg").write_text("<svg/>", encoding="utf-8")
+
+        cls.upstream = _RecordingMockUpstream(("127.0.0.1", 0), _MockUpstreamHandler)
+        cls.upstream_thread = threading.Thread(target=cls.upstream.serve_forever, daemon=True)
+        cls.upstream_thread.start()
+        cls.upstream_port = int(cls.upstream.server_address[1])
+
+        cls.caddy_port = _free_tcp_port()
+        cls.cert_path = root / "tls.crt"
+        cls.key_path = root / "tls.key"
+        cls.storage_root = root / "storage"
+        cls.storage_root.mkdir()
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                str(cls.key_path),
+                "-out",
+                str(cls.cert_path),
+                "-days",
+                "1",
+                "-subj",
+                f"/CN={cls.host}",
+                "-addext",
+                f"subjectAltName=DNS:{cls.host}",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        cls.caddyfile_path = root / "Caddyfile"
+        cls.caddyfile_path.write_text(
+            caddy_proof.render_caddyfile(
+                host=cls.host,
+                https_port=cls.caddy_port,
+                hermes_port=cls.upstream_port,
+                site_root=str(cls.site_root),
+                cert_path=str(cls.cert_path),
+                key_path=str(cls.key_path),
+                storage_root=str(cls.storage_root),
+            ),
+            encoding="utf-8",
+        )
+        format_result = subprocess.run(
+            ["caddy", "fmt", "--overwrite", str(cls.caddyfile_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if format_result.returncode != 0:
+            raise RuntimeError("Caddy formatter rejected the rendered proof file")
+        cls.caddyfile = cls.caddyfile_path.read_text(encoding="utf-8")
+        validate_result = subprocess.run(
+            ["caddy", "validate", "--config", str(cls.caddyfile_path), "--adapter", "caddyfile"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if validate_result.returncode != 0:
+            raise RuntimeError("Caddy validation rejected the formatted proof file")
+        cls.caddy_process = subprocess.Popen(
+            ["caddy", "run", "--config", str(cls.caddyfile_path), "--adapter", "caddyfile"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(50):
+            if cls.caddy_process.poll() is not None:
+                raise RuntimeError("Caddy exited before the black-box listener became ready")
+            try:
+                status, _headers, _body = _https_request(cls.caddy_port, cls.host, "/")
+            except (OSError, http.client.HTTPException):
+                time.sleep(0.1)
+                continue
+            if status == 200:
+                return
+            time.sleep(0.1)
+        raise RuntimeError("Caddy black-box listener did not become ready")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        process = getattr(cls, "caddy_process", None)
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        upstream = getattr(cls, "upstream", None)
+        if upstream is not None:
+            upstream.shutdown()
+            upstream.server_close()
+        thread = getattr(cls, "upstream_thread", None)
+        if thread is not None:
+            thread.join(timeout=3)
+        tempdir = getattr(cls, "tempdir", None)
+        if tempdir is not None:
+            tempdir.cleanup()
+
+    def _request(self, target: str, **kwargs: object) -> tuple[int, dict[str, str], bytes]:
+        return _https_request(self.caddy_port, self.host, target, **kwargs)  # type: ignore[arg-type]
+
+    def _record_count(self) -> int:
+        with self.upstream.record_lock:
+            return len(self.upstream.records)
+
+    def _record_after(self, previous_count: int) -> dict[str, object]:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with self.upstream.record_lock:
+                if len(self.upstream.records) > previous_count:
+                    return self.upstream.records[previous_count]
+            time.sleep(0.01)
+        self.fail("expected the allowed request to reach the mock upstream")
+        raise AssertionError("unreachable")
+
+    def test_deep_link_fixture_vectors_match_edge_results(self) -> None:
+        fixture_path = ROOT / caddy_proof.PARITY_FIXTURE_PATHS["deep_link_cases"]
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        before = self._record_count()
+        probed = 0
+        for case in fixture["cases"]:
+            expected = case["expected"]
+            parsed = urlsplit(case["link"])
+            reasons = set(expected["reasons"])
+            if (
+                expected.get("kind") != "web"
+                or parsed.netloc != "synthetic.hermternal.test"
+                or parsed.username is not None
+                or parsed.password is not None
+                or "fragment" in reasons
+                or reasons.intersection({"authority", "origin", "scheme"})
+                or any(ord(character) < 0x20 or ord(character) > 0x7e for character in case["link"])
+            ):
+                continue
+            target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            status, _headers, _body = self._request(target)
+            expected_status = 200 if expected["valid"] else 404
+            with self.subTest(case=case["id"], target=target):
+                self.assertEqual(status, expected_status)
+            probed += 1
+        self.assertGreaterEqual(probed, 15)
+        self.assertEqual(self._record_count(), before)
+
+    def test_static_and_deep_link_boundary_is_query_exact(self) -> None:
+        cases = (
+            ("/", 200, b"INDEX-SHELL"),
+            ("/?scenario=success", 200, b"INDEX-SHELL"),
+            ("/?scenario=empty", 200, b"INDEX-SHELL"),
+            ("/?cache=synthetic", 404, b"not found"),
+            ("/?scenario=success&cache=synthetic", 404, b"not found"),
+            ("/manifest.webmanifest", 200, b"{}"),
+            ("/manifest.webmanifest?cache=synthetic", 404, b"not found"),
+            ("/service-worker.js?cache=synthetic", 404, b"not found"),
+            ("/_app/app.js?cache=synthetic", 404, b"not found"),
+            ("/v1/c/abcdefghijklmnop", 200, b"CLIENT-SHELL"),
+            ("/v1/c/abcdefghijkl..mnop", 200, b"CLIENT-SHELL"),
+            ("/v1/c/abcdefghijklmnop/m/qrstuvwxyzabcdef", 200, b"CLIENT-SHELL"),
+            ("/v1/c/abcdefghijklmnop?cache=synthetic", 404, b"not found"),
+            ("/v1/c/short", 404, b"not found"),
+            ("/v1/c/abcdefghijklmnop/", 404, b"not found"),
+            ("/v1/c/abcdefghijklmnop/m/qrstuvwxyzabcdef/extra", 404, b"not found"),
+            ("/apiary/v1/c/abcdefghijklmnop", 404, b"not found"),
+        )
+        before = self._record_count()
+        for target, expected_status, expected_body in cases:
+            with self.subTest(target=target):
+                status, _headers, body = self._request(target)
+                self.assertEqual(status, expected_status)
+                self.assertEqual(body, expected_body)
+        self.assertEqual(self._record_count(), before)
+
+    def test_allowed_rest_request_rebuilds_trusted_headers_and_body(self) -> None:
+        spoofed = {
+            "Forwarded": "for=spoof;host=evil;proto=http",
+            "X-Forwarded-For": "spoof",
+            "X-Forwarded-Host": "evil",
+            "X-Forwarded-Proto": "http",
+            "X-Forwarded-Prefix": "/evil",
+            "X-Forwarded-Debug": "spoof",
+            "X-Real-IP": "spoof",
+        }
+        before = self._record_count()
+        status, _headers, body = self._request(
+            "/hermes/api/auth/ws-ticket",
+            method="POST",
+            headers=spoofed,
+            body=b"{}",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"upstream:/api/auth/ws-ticket")
+        record = self._record_after(before)
+        self.assertEqual(record["method"], "POST")
+        self.assertEqual(record["path"], "/api/auth/ws-ticket")
+        self.assertEqual(record["query"], "")
+        self.assertEqual(record["body"], b"{}")
+        upstream_headers = record["headers"]
+        self.assertEqual(upstream_headers["host"], f"127.0.0.1:{self.upstream_port}")
+        self.assertEqual(upstream_headers["origin"], f"http://127.0.0.1:{self.upstream_port}")
+        self.assertEqual(upstream_headers["x-forwarded-host"], self.host)
+        self.assertEqual(upstream_headers["x-forwarded-proto"], "https")
+        self.assertEqual(upstream_headers["x-forwarded-prefix"], "/hermes")
+        self.assertEqual(upstream_headers["x-real-ip"], "127.0.0.1")
+        self.assertIn(f"host={self.host}", upstream_headers["forwarded"])
+        self.assertIn("proto=https", upstream_headers["forwarded"])
+        for value in ("spoof", "evil", "/evil"):
+            self.assertNotIn(value, " ".join(upstream_headers.values()))
+        self.assertNotIn("x-forwarded-debug", upstream_headers)
+
+        denied_before = self._record_count()
+        status, _headers, body = self._request("/hermes/api/auth/ws-ticket?cache=synthetic", method="POST", body=b"{}")
+        self.assertEqual((status, body), (404, b"not found"))
+        self.assertEqual(self._record_count(), denied_before)
+
+    def test_every_rest_query_mutation_is_edge_denied(self) -> None:
+        targets: list[tuple[str, str]] = []
+        for method, path in caddy_proof.EXACT_REST_ROUTES:
+            for prefix in ("", "/hermes"):
+                targets.append((method, f"{prefix}{path}?cache=synthetic"))
+                targets.append((method, f"{prefix}{path}?ticket=synthetic"))
+        for method, path in caddy_proof.SESSION_ROUTES:
+            suffix = path.replace("{session_id}", "abcdefghijklmnop")
+            for prefix in ("", "/hermes"):
+                targets.append((method, f"{prefix}{suffix}?cache=synthetic"))
+                targets.append((method, f"{prefix}{suffix}?ticket=synthetic"))
+
+        for method, target in targets:
+            with self.subTest(method=method, target=target):
+                before = self._record_count()
+                body = b"{}" if method in {"POST", "PATCH"} else None
+                status, _headers, response_body = self._request(target, method=method, body=body)
+                self.assertEqual((status, response_body), (404, b"not found"))
+                self.assertEqual(self._record_count(), before)
+
+    def test_chat_and_pty_upgrade_queries_are_distinct_and_edge_denied(self) -> None:
+        upgrade_headers = {
+            "Origin": f"https://{self.host}:{self.caddy_port}",
+            "Upgrade": "websocket",
+            "Connection": "Upgrade",
+            "Sec-WebSocket-Version": "13",
+            "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        }
+        before = self._record_count()
+        status, _headers, _body = self._request(
+            "/api/ws?ticket=fixtureTicket",
+            headers=upgrade_headers,
+        )
+        self.assertEqual(status, 101)
+        chat_record = self._record_after(before)
+        self.assertEqual((chat_record["path"], chat_record["query"]), ("/api/ws", "ticket=fixtureTicket"))
+        self.assertEqual(chat_record["headers"]["origin"], f"http://127.0.0.1:{self.upstream_port}")
+
+        before = self._record_count()
+        status, _headers, _body = self._request(
+            "/hermes/api/pty?attach=fixtureAttach&ticket=fixtureTicket&resume=fixtureResume",
+            headers=upgrade_headers,
+        )
+        self.assertEqual(status, 101)
+        pty_record = self._record_after(before)
+        self.assertEqual(pty_record["path"], "/api/pty")
+        self.assertEqual(pty_record["query"], "attach=fixtureAttach&ticket=fixtureTicket&resume=fixtureResume")
+        self.assertEqual(pty_record["headers"]["x-forwarded-prefix"], "/hermes")
+
+        denied_queries = (
+            "/api/ws?ticket=fixtureTicket&resume=fixtureResume",
+            "/api/pty?ticket=fixtureTicket",
+            "/api/pty?ticket=fixtureTicket&resume=fixtureResume&fresh=1",
+            "/api/pty?ticket=fixtureTicket&resume=fixtureResume&ticket=otherTicket",
+            "/api/pty?ticket=&resume=fixtureResume",
+            "/api/pty?ticket=fixtureTicket&resume=fixtureResume&extra=value",
+        )
+        for target in denied_queries:
+            with self.subTest(target=target):
+                denied_before = self._record_count()
+                status, _headers, body = self._request(target, headers=upgrade_headers)
+                self.assertEqual((status, body), (404, b"not found"))
+                self.assertEqual(self._record_count(), denied_before)
+
+        denied_before = self._record_count()
+        status, _headers, body = self._request(
+            "/api/ws?ticket=fixtureTicket",
+            headers={"Origin": f"https://{self.host}:{self.caddy_port}"},
+        )
+        self.assertEqual((status, body), (404, b"not found"))
+        self.assertEqual(self._record_count(), denied_before)
+
+        status, _headers, body = _https_request(
+            self.caddy_port,
+            "evil.example",
+            "/api/ws?ticket=fixtureTicket",
+            headers=upgrade_headers,
+        )
+        self.assertEqual((status, body), (421, b"host denied"))
+        self.assertEqual(self._record_count(), denied_before)
+
+        status, _headers, body = self._request(
+            "/api/ws?ticket=fixtureTicket",
+            headers={**upgrade_headers, "Origin": "https://evil.example"},
+        )
+        self.assertEqual((status, body), (403, b"origin denied"))
+        self.assertEqual(self._record_count(), denied_before)
 
 
 if __name__ == "__main__":

@@ -15,14 +15,28 @@ import hashlib
 import json
 import re
 import sys
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Iterable
 
 
 SCHEMA = "hermternal.caddy-proof.v1"
+RUNTIME_INPUT_SCHEMA = "hermternal.caddy-proof.runtime-inputs.v1"
 DEFAULT_HOST = "caddy-156.test"
 DEFAULT_HTTPS_PORT = 19443
 DEFAULT_HERMES_PORT = 19256
+
+# These are deterministic proof paths, not operator or user home paths. Keeping
+# them committed makes the retained runtime digest reproducible without storing
+# the disposable VM's filesystem layout in evidence.
+DEFAULT_RUNTIME_INPUTS: dict[str, object] = {
+    "host": DEFAULT_HOST,
+    "https_port": DEFAULT_HTTPS_PORT,
+    "hermes_port": DEFAULT_HERMES_PORT,
+    "site_root": "/opt/hermternal/caddy-proof/site",
+    "cert_path": "/opt/hermternal/caddy-proof/tls.crt",
+    "key_path": "/opt/hermternal/caddy-proof/tls.key",
+    "storage_root": "/opt/hermternal/caddy-proof",
+}
 
 STATIC_PATHS = (
     "/",
@@ -32,8 +46,12 @@ STATIC_PATHS = (
     "/service-worker.js",
     "/manifest.webmanifest",
     "/icon.svg",
-    "/v1/c/*",
 )
+
+# The client and worker intentionally share this exact grammar. Caddy's
+# ``path_regexp`` is lexical and therefore cannot normalize or decode IDs.
+CLIENT_ROUTE_PATTERN = rf"^/v1/c/[A-Za-z0-9._~-]{{16,}}(?:/m/[A-Za-z0-9._~-]{{16,}})?$"
+CLIENT_ROUTE_PREFIX_PATTERN = r"^/v1/c/.*$"
 
 EXACT_REST_ROUTES = (
     ("GET", "/login"),
@@ -64,21 +82,68 @@ WEBSOCKET_ROUTES = (
 )
 
 # No percent decoding or path normalization is accepted at the edge. The
-# strict guard is deliberately conservative: all reviewed ticket and pagination
+# strict guard is deliberately conservative: all reviewed ticket and route
 # values are ASCII-safe, so a percent sign is never needed by this proof lane.
+# Dot checks are segment-bounded so opaque IDs containing two consecutive dots
+# remain valid. The shared deep-link contract separately rejects the ellipsis
+# marker, so three consecutive dots remain an explicit edge denial.
 RAW_URI_GUARD = (
     "{http.request.orig_uri}.contains('%') || "
     "{http.request.orig_uri}.contains('\\\\') || "
     "{http.request.orig_uri}.contains('//') || "
-    "{http.request.orig_uri}.contains('..')"
+    "{http.request.orig_uri}.contains('...') || "
+    "{http.request.orig_uri}.matches('(?:^|/)(?:\\\\.|\\\\.\\\\.)(?:/|\\\\?|$)')"
 )
-TICKET_QUERY_GUARD = "{http.request.uri.query}.matches('^ticket=[A-Za-z0-9._~-]+$')"
+NO_QUERY_GUARD = "{http.request.uri.query} == ''"
+QUERY_PRESENT_GUARD = "{http.request.uri.query} != ''"
+ROOT_SCENARIO_QUERY_GUARD = "{http.request.uri.query}.matches('^scenario=(?:success|empty|failure)$')"
+ROOT_QUERY_GUARD = f"({NO_QUERY_GUARD} || {ROOT_SCENARIO_QUERY_GUARD})"
+REST_QUERY_GUARD = NO_QUERY_GUARD
+CHAT_TICKET_QUERY_GUARD = "{http.request.uri.query}.matches('^ticket=[A-Za-z0-9._~-]+$')"
+PTY_TICKET_VALUE_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._~-]{0,511}"
+PTY_RESUME_VALUE_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}"
+PTY_ATTACH_VALUE_PATTERN = PTY_TICKET_VALUE_PATTERN
+PTY_QUERY_PARAMETER_PATTERNS = {
+    "ticket": rf"ticket={PTY_TICKET_VALUE_PATTERN}",
+    "resume": rf"resume={PTY_RESUME_VALUE_PATTERN}",
+    "attach": rf"attach={PTY_ATTACH_VALUE_PATTERN}",
+}
+
+
+def _pty_query_patterns() -> tuple[str, ...]:
+    """Return every order-independent exact PTY key-set permutation."""
+
+    two_keys = (
+        ("ticket", "resume"),
+        ("resume", "ticket"),
+    )
+    three_keys = (
+        ("ticket", "resume", "attach"),
+        ("ticket", "attach", "resume"),
+        ("resume", "ticket", "attach"),
+        ("resume", "attach", "ticket"),
+        ("attach", "ticket", "resume"),
+        ("attach", "resume", "ticket"),
+    )
+    patterns = []
+    for keys in (*two_keys, *three_keys):
+        body = "&".join(PTY_QUERY_PARAMETER_PATTERNS[key] for key in keys)
+        patterns.append(rf"^{body}$")
+    return tuple(patterns)
+
+
+PTY_QUERY_PATTERNS = _pty_query_patterns()
+PTY_QUERY_GUARD = " || ".join(
+    f"{{http.request.uri.query}}.matches('{pattern}')" for pattern in PTY_QUERY_PATTERNS
+)
+# Kept as a compatibility alias for callers of the original proof fixture.
+TICKET_QUERY_GUARD = CHAT_TICKET_QUERY_GUARD
 
 HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$")
 
 
 def _validate_host(host: str) -> str:
-    if not HOST_RE.fullmatch(host) or ".." in host or host.endswith("."):
+    if type(host) is not str or not HOST_RE.fullmatch(host) or ".." in host or host.endswith("."):
         raise ValueError("host must be a concrete lowercase DNS label")
     return host
 
@@ -90,28 +155,85 @@ def _validate_port(value: int, name: str) -> int:
 
 
 def _validate_path(value: str, name: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{name} must be an absolute path without newlines")
     path = Path(value)
     if not value or not path.is_absolute() or "\n" in value or "\r" in value:
         raise ValueError(f"{name} must be an absolute path without newlines")
     return value
 
 
+def _validate_runtime_inputs(value: Mapping[str, object]) -> dict[str, object]:
+    """Validate the complete non-sensitive renderer input contract."""
+
+    if not isinstance(value, Mapping) or set(value) != set(DEFAULT_RUNTIME_INPUTS):
+        raise ValueError("runtime_inputs must contain the exact renderer input keys")
+    return {
+        "host": _validate_host(value["host"]),
+        "https_port": _validate_port(value["https_port"], "https_port"),
+        "hermes_port": _validate_port(value["hermes_port"], "hermes_port"),
+        "site_root": _validate_path(value["site_root"], "site_root"),
+        "cert_path": _validate_path(value["cert_path"], "cert_path"),
+        "key_path": _validate_path(value["key_path"], "key_path"),
+        "storage_root": _validate_path(value["storage_root"], "storage_root"),
+    }
+
+
+def reconstruction_inputs() -> dict[str, object]:
+    """Return the committed, safe inputs used to reconstruct retained evidence."""
+
+    return dict(DEFAULT_RUNTIME_INPUTS)
+
+
+def runtime_input_digest(value: Mapping[str, object]) -> str:
+    """Hash normalized renderer inputs without retaining the rendered config."""
+
+    normalized = _validate_runtime_inputs(value)
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return digest_bytes(encoded)
+
+
+PARITY_FIXTURE_PATHS = {
+    "static_route_grammar": "apps/web/src/lib/static-route-grammar.mjs",
+    "deep_link_cases": "contracts/fixtures/deep-link-grammar/cases.json",
+}
+
+
+def parity_fixture_manifest() -> dict[str, dict[str, str]]:
+    """Return relative source identities used by the local Caddy parity proof."""
+
+    project_root = Path(__file__).resolve().parents[1]
+    return {
+        name: {
+            "path": relative_path,
+            "sha256": digest_bytes((project_root / relative_path).read_bytes()),
+        }
+        for name, relative_path in PARITY_FIXTURE_PATHS.items()
+    }
+
+
 def _proxy_snippet(name: str, hermes_port: int, *, prefix: str) -> list[str]:
     upstream = f"127.0.0.1:{hermes_port}"
     lines = [
         f"({name}) {{",
+        # Caddy's request_header handler runs before reverse_proxy. Keeping the
+        # wildcard deletion outside header_up is important: Caddy coalesces
+        # header_up deletes and sets into one operation map, so deleting and
+        # rebuilding the same field there would silently drop the trusted value.
+        "    request_header -Forwarded",
+        "    request_header -X-Forwarded-*",
+        "    request_header -X-Real-IP",
         "    reverse_proxy " + upstream + " {",
         f"        header_up Host {upstream}",
-        "        header_up -Origin",
         f"        header_up Origin http://{upstream}",
-        "        header_up -X-Forwarded-Host",
+        "        header_up Forwarded \"for={http.request.remote.host};host={http.request.host};proto=https\"",
+        "        header_up X-Forwarded-For {http.request.remote.host}",
         "        header_up X-Forwarded-Host {http.request.host}",
-        "        header_up -X-Forwarded-Proto",
         "        header_up X-Forwarded-Proto https",
-        "        header_up -X-Forwarded-Prefix",
+        "        header_up X-Real-IP {http.request.remote.host}",
     ]
     if prefix:
-        lines.append(f"        header_up X-Forwarded-Prefix {prefix}")
+        lines.append("        header_up X-Forwarded-Prefix " + prefix)
     lines.extend(
         [
             '        header_down Set-Cookie "(?i)(.*)" "$1; Secure"',
@@ -122,26 +244,46 @@ def _proxy_snippet(name: str, hermes_port: int, *, prefix: str) -> list[str]:
     return lines
 
 
-def _exact_matcher(name: str, method: str, paths: Iterable[str], *, websocket: bool = False) -> list[str]:
-    lines = [f"        @{name} {{", f"            method {method}", "            path " + " ".join(paths)]
+def _exact_matcher(
+    name: str,
+    method: str,
+    paths: Iterable[str],
+    *,
+    websocket: bool = False,
+    query_guard: str | None = None,
+) -> list[str]:
+    lines = [
+        f"        @{name} {{",
+        f"            method {method}",
+        "            path " + " ".join(paths),
+    ]
     if websocket:
         lines.extend(
             [
                 "            header Upgrade websocket",
                 "            header Connection *Upgrade*",
-                f"            expression `{TICKET_QUERY_GUARD}`",
+                f"            expression `{query_guard or CHAT_TICKET_QUERY_GUARD}`",
             ]
         )
+    else:
+        lines.append(f"            expression `{query_guard or REST_QUERY_GUARD}`")
     lines.append("        }")
     return lines
 
 
-def _session_matcher(name: str, method: str, suffix: str) -> list[str]:
-    expression = f"^/api/sessions/{SESSION_ID_PATTERN}{suffix}$"
+def _session_matcher(
+    name: str,
+    method: str,
+    suffix: str,
+    *,
+    prefix: str = "/api",
+) -> list[str]:
+    expression = f"^{prefix}/sessions/{SESSION_ID_PATTERN}{suffix}$"
     return [
         f"        @{name} {{",
         f"            method {method}",
         f"            path_regexp {name} {expression}",
+        f"            expression `{REST_QUERY_GUARD}`",
         "        }",
     ]
 
@@ -222,9 +364,10 @@ def render_caddyfile(
     lines.extend(_session_matcher("root_session_patch", "PATCH", ""))
     lines.extend(_handler("root_session_patch", "root_hermes"))
 
-    for name, path in (("root_chat_ws", "/api/ws"), ("root_pty_ws", "/api/pty")):
-        lines.extend(_exact_matcher(name, "GET", (path,), websocket=True))
-        lines.extend(_handler(name, "root_hermes"))
+    lines.extend(_exact_matcher("root_chat_ws", "GET", ("/api/ws",), websocket=True, query_guard=CHAT_TICKET_QUERY_GUARD))
+    lines.extend(_handler("root_chat_ws", "root_hermes"))
+    lines.extend(_exact_matcher("root_pty_ws", "GET", ("/api/pty",), websocket=True, query_guard=PTY_QUERY_GUARD))
+    lines.extend(_handler("root_pty_ws", "root_hermes"))
 
     dashboard_get = [f"/hermes{path}" for method, path in EXACT_REST_ROUTES if method == "GET"]
     dashboard_post = [f"/hermes{path}" for method, path in EXACT_REST_ROUTES if method == "POST"]
@@ -236,27 +379,62 @@ def render_caddyfile(
     if dashboard_patch:
         lines.extend(_exact_matcher("dashboard_rest_patch", "PATCH", dashboard_patch))
         lines.extend(_handler("dashboard_rest_patch", "dashboard_hermes", strip_prefix=True))
-    lines.extend(_session_matcher("dashboard_session_get", "GET", ""))
-    # The regex above is rooted at /api; dashboard routes use an explicit prefix.
-    lines[-2] = "            path_regexp dashboard_session_get ^/hermes/api/sessions/" + SESSION_ID_PATTERN + "$"
+    lines.extend(_session_matcher("dashboard_session_get", "GET", "", prefix="/hermes/api"))
     lines.extend(_handler("dashboard_session_get", "dashboard_hermes", strip_prefix=True))
-    lines.extend(_session_matcher("dashboard_messages_get", "GET", "/messages"))
-    lines[-2] = "            path_regexp dashboard_messages_get ^/hermes/api/sessions/" + SESSION_ID_PATTERN + "/messages$"
+    lines.extend(_session_matcher("dashboard_messages_get", "GET", "/messages", prefix="/hermes/api"))
     lines.extend(_handler("dashboard_messages_get", "dashboard_hermes", strip_prefix=True))
-    lines.extend(_session_matcher("dashboard_session_patch", "PATCH", ""))
-    lines[-2] = "            path_regexp dashboard_session_patch ^/hermes/api/sessions/" + SESSION_ID_PATTERN + "$"
+    lines.extend(_session_matcher("dashboard_session_patch", "PATCH", "", prefix="/hermes/api"))
     lines.extend(_handler("dashboard_session_patch", "dashboard_hermes", strip_prefix=True))
 
-    for name, path in (("dashboard_chat_ws", "/hermes/api/ws"), ("dashboard_pty_ws", "/hermes/api/pty")):
-        lines.extend(_exact_matcher(name, "GET", (path,), websocket=True))
-        lines.extend(_handler(name, "dashboard_hermes", strip_prefix=True))
+    lines.extend(_exact_matcher("dashboard_chat_ws", "GET", ("/hermes/api/ws",), websocket=True, query_guard=CHAT_TICKET_QUERY_GUARD))
+    lines.extend(_handler("dashboard_chat_ws", "dashboard_hermes", strip_prefix=True))
+    lines.extend(_exact_matcher("dashboard_pty_ws", "GET", ("/hermes/api/pty",), websocket=True, query_guard=PTY_QUERY_GUARD))
+    lines.extend(_handler("dashboard_pty_ws", "dashboard_hermes", strip_prefix=True))
 
+    # Root is the one reviewed static exception that may carry a synthetic
+    # scenario query. All other assets and canonical client routes are strictly
+    # query-free and never fall through to a shell rewrite.
+    static_asset_paths = tuple(path for path in STATIC_PATHS if path != "/")
     lines.extend(
         [
             "",
+            "        @root_static {",
+            "            method GET HEAD",
+            "            path /",
+            f"            expression `{ROOT_QUERY_GUARD}`",
+            "        }",
+            "        handle @root_static {",
+            "            file_server",
+            "        }",
+            "",
+            "        @static_query_mutation {",
+            "            method GET HEAD",
+            "            path " + " ".join(static_asset_paths),
+            f"            expression `{QUERY_PRESENT_GUARD}`",
+            "        }",
+            '        respond @static_query_mutation "not found" 404',
+            "",
+            "        @client_query_mutation {",
+            "            method GET HEAD",
+            f"            path_regexp client_query_mutation {CLIENT_ROUTE_PREFIX_PATTERN}",
+            f"            expression `{QUERY_PRESENT_GUARD}`",
+            "        }",
+            '        respond @client_query_mutation "not found" 404',
+            "",
+            "        @client_deep_link {",
+            "            method GET HEAD",
+            f"            path_regexp client_deep_link {CLIENT_ROUTE_PATTERN}",
+            f"            expression `{NO_QUERY_GUARD}`",
+            "        }",
+            "        handle @client_deep_link {",
+            "            rewrite * /200.html",
+            "            file_server",
+            "        }",
+            "",
             "        @static {",
             "            method GET HEAD",
-            "            path " + " ".join(STATIC_PATHS),
+            "            path " + " ".join(static_asset_paths),
+            f"            expression `{NO_QUERY_GUARD}`",
             "        }",
             "        handle @static {",
             "            file_server",
@@ -289,7 +467,21 @@ def digest_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def render_manifest(*, build_sha: str, build_digest: str, caddyfile_digest: str, browser_journey: str) -> dict[str, object]:
+def render_from_inputs(value: Mapping[str, object]) -> str:
+    """Render the exact Caddyfile represented by a safe input manifest."""
+
+    inputs = _validate_runtime_inputs(value)
+    return render_caddyfile(**inputs)
+
+
+def render_manifest(
+    *,
+    build_sha: str,
+    build_digest: str,
+    caddyfile_digest: str,
+    browser_journey: str,
+    runtime_inputs: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     """Create redacted evidence metadata; values are never request material."""
 
     if not re.fullmatch(r"[0-9a-f]{40}", build_sha):
@@ -299,6 +491,14 @@ def render_manifest(*, build_sha: str, build_digest: str, caddyfile_digest: str,
             raise ValueError(f"{name} must be a SHA-256 digest")
     if browser_journey not in {"passed", "blocked_provider", "blocked_empty_session", "failed"}:
         raise ValueError("browser_journey is outside the fixed proof vocabulary")
+
+    normalized_inputs = _validate_runtime_inputs(
+        reconstruction_inputs() if runtime_inputs is None else runtime_inputs
+    )
+    rendered_digest = digest_bytes(render_from_inputs(normalized_inputs).encode("utf-8"))
+    if caddyfile_digest != rendered_digest:
+        raise ValueError("caddyfile_digest does not match the committed runtime inputs")
+
     return {
         "schema": SCHEMA,
         "contract": "dashboard-v0.0.1",
@@ -307,6 +507,10 @@ def render_manifest(*, build_sha: str, build_digest: str, caddyfile_digest: str,
             "proxy": "caddy",
             "official_image_digest": "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
             "runtime_config_sha256": caddyfile_digest,
+            "runtime_inputs_schema": RUNTIME_INPUT_SCHEMA,
+            "runtime_inputs": normalized_inputs,
+            "runtime_inputs_sha256": runtime_input_digest(normalized_inputs),
+            "parity_fixtures": parity_fixture_manifest(),
         },
         "product": {
             "build_commit": build_sha,
