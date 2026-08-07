@@ -6,13 +6,18 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   BenchmarkError,
+  assertSourceIdentityUnchanged,
+  captureInputSnapshot,
   distribution,
+  inputIdentity,
   measureArtifacts,
   mountArtifactQuota,
   parseArguments,
   protectedRuntime,
+  readPackageVersion,
   removeWorkspace,
   roundRationalHalfEven,
+  runBuildSeries,
   sandboxLauncher,
   terminateProcessGroup,
   validateWorkload,
@@ -84,6 +89,55 @@ describe('production-build benchmark contract', () => {
     expect(() => validateWorkload(candidate)).toThrow(new BenchmarkError('resource_limit_invalid'));
   });
 
+  test('freezes input identity before samples can observe a later source edit', async () => {
+    const candidate = structuredClone(await workload());
+    candidate.build.input_files = ['package.json'];
+    candidate.build.input_roots = ['src'];
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-input-snapshot-'));
+    const source = join(root, 'source');
+    const snapshot = join(root, 'snapshot');
+    try {
+      await mkdir(join(source, 'src'), { recursive: true });
+      await writeFile(join(source, 'package.json'), 'before');
+      await writeFile(join(source, 'src', 'entry.ts'), 'before');
+      const captured = await captureInputSnapshot(candidate, source, snapshot, 1024);
+      expect(captured.identity).toEqual(await inputIdentity(candidate, snapshot));
+      await writeFile(join(source, 'package.json'), 'after');
+      await writeFile(join(source, 'src', 'entry.ts'), 'after');
+      expect(await inputIdentity(candidate, snapshot)).toEqual(captured.identity);
+      expect(await inputIdentity(candidate, source)).not.toEqual(captured.identity);
+    } finally {
+      Bun.spawnSync(['/bin/chmod', '-R', 'u+w', root], { stdout: 'ignore', stderr: 'ignore' });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rechecks source commit and input identity after the run', () => {
+    const expected = { bytes: 12, sha256: 'a'.repeat(64) };
+    expect(() => assertSourceIdentityUnchanged('a'.repeat(40), expected, 'a'.repeat(40), expected)).not.toThrow();
+    expect(() => assertSourceIdentityUnchanged('a'.repeat(40), expected, 'b'.repeat(40), expected)).toThrow(
+      new BenchmarkError('source_input_mutated')
+    );
+    expect(() => assertSourceIdentityUnchanged('a'.repeat(40), expected, 'a'.repeat(40), { bytes: 13, sha256: expected.sha256 })).toThrow(
+      new BenchmarkError('source_input_mutated')
+    );
+  });
+
+  test('reads Vite version metadata without executing the package bin', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-vite-metadata-'));
+    const packageRoot = join(root, 'vite');
+    try {
+      await mkdir(join(packageRoot, 'bin'), { recursive: true });
+      const marker = join(root, 'executed');
+      await writeFile(join(packageRoot, 'package.json'), JSON.stringify({ name: 'vite', version: '9.9.9' }));
+      await writeFile(join(packageRoot, 'bin', 'vite.js'), `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed')`);
+      expect(await readPackageVersion(root)).toBe('9.9.9');
+      expect(await Bun.file(marker).exists()).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('snapshots exact plain data and rejects executable object shapes', async () => {
     const original = structuredClone(await workload());
     const snapshot = validateWorkload(original);
@@ -132,6 +186,77 @@ describe('production-build benchmark contract', () => {
   test('OS sandbox denies direct TCP and descendants clearing NODE_OPTIONS', async () => {
     expect(await sandboxNetworkAttempt(false)).toBe(0);
     expect(await sandboxNetworkAttempt(true)).toBe(0);
+  });
+
+  test('Linux warm series preserves generated state inside one tmpfs sandbox', async () => {
+    if (process.platform !== 'linux' || !(await Bun.file('/usr/bin/bwrap').exists())) return;
+    const candidate = structuredClone(await workload());
+    candidate.build.entrypoint = 'warm-state-test.js';
+    candidate.build.arguments = [];
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-linux-warm-state-'));
+    const workspace = join(root, 'workspace');
+    const dependencyRoot = join(root, 'dependencies');
+    try {
+      await mkdir(workspace, { recursive: true });
+      await mkdir(dependencyRoot, { recursive: true });
+      await writeFile(
+        join(workspace, 'warm-state-test.js'),
+        "const fs=require('node:fs');fs.mkdirSync('.artifact-output/build',{recursive:true});const state='.artifact-output/.svelte-kit/warm-state';if(!fs.existsSync(state)){fs.writeFileSync(state,'warm');process.exit(0)}fs.writeFileSync('.artifact-output/build/survived.txt','warm');"
+      );
+      const runtime = await protectedRuntime(candidate);
+      const observations = await runBuildSeries(workspace, dependencyRoot, candidate, runtime, 2);
+      expect(observations).toHaveLength(2);
+      expect(observations[0]?.artifact_files).toBe(0);
+      expect(observations[1]?.artifact_files).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('immutable dependency snapshot binaries execute only inside the OS boundary', async () => {
+    const sandboxAvailable = process.platform === 'darwin'
+      ? await Bun.file('/usr/bin/sandbox-exec').exists()
+      : process.platform === 'linux' && await Bun.file('/usr/bin/bwrap').exists();
+    if (!sandboxAvailable) return;
+    const candidate = await workload();
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-snapshot-binary-'));
+    const workspace = join(root, 'workspace');
+    const dependencyRoot = join(root, 'dependencies');
+    const marker = join(root, 'outside-marker');
+    try {
+      await mkdir(join(workspace, '.artifact-output', 'build'), { recursive: true });
+      await mkdir(dependencyRoot, { recursive: true });
+      await writeFile(
+        join(dependencyRoot, 'probe.js'),
+        `const fs=require('node:fs');try{fs.writeFileSync(${JSON.stringify(marker)},'escaped');process.exit(9)}catch{fs.writeFileSync('.artifact-output/build/probe-ran','yes')}`
+      );
+      const runtime = await protectedRuntime(candidate);
+      const launcher = sandboxLauncher(
+        runtime,
+        workspace,
+        dependencyRoot,
+        candidate.limits.artifact_bytes,
+        [runtime.nodePath, join(dependencyRoot, 'probe.js')],
+        1,
+        candidate.limits.artifact_files,
+        1,
+        candidate.limits.stdout_bytes,
+        candidate.limits.stderr_bytes
+      );
+      const child = Bun.spawn([launcher.command, ...launcher.args], {
+        cwd: workspace,
+        env: process.env,
+        stdout: 'pipe',
+        stderr: 'pipe'
+      });
+      const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+      expect(exitCode).toBe(0);
+      expect(await Bun.file(marker).exists()).toBe(false);
+      expect(stdout).toContain('HERMTERNAL_RESULT ');
+    } finally {
+      Bun.spawnSync(['/bin/chmod', '-R', 'u+w', root], { stdout: 'ignore', stderr: 'ignore' });
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test('enters the OS boundary before any PATH-selected Python shim can execute', async () => {

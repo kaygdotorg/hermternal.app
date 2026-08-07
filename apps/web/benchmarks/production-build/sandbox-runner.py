@@ -14,6 +14,7 @@ import argparse
 import ctypes
 import json
 import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -173,8 +174,20 @@ def _scan(arguments: argparse.Namespace) -> dict[str, object]:
     return result
 
 
-def _write_result(fd: int, payload: dict[str, object]) -> None:
-    encoded = b"HERMTERNAL_RESULT " + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+def _forward_output(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            fail()
+        view = view[written:]
+
+
+def _write_results(fd: int, payloads: list[dict[str, object]]) -> None:
+    encoded = b"".join(
+        b"HERMTERNAL_RESULT " + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+        for payload in payloads
+    )
     view = memoryview(encoded)
     while view:
         written = os.write(fd, view)
@@ -182,6 +195,112 @@ def _write_result(fd: int, payload: dict[str, object]) -> None:
             fail()
         view = view[written:]
     os.close(fd)
+
+
+def _run_once(arguments: argparse.Namespace, command: list[str]) -> dict[str, object] | None:
+    started_ns = time.monotonic_ns()
+    child = subprocess.Popen(
+        command,
+        cwd=arguments.workspace,
+        env=os.environ.copy(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        close_fds=True,
+        pass_fds=(),
+    )
+    tracked = {child.pid}
+    output_selector = selectors.DefaultSelector()
+    assert child.stdout is not None and child.stderr is not None
+    output_selector.register(child.stdout, selectors.EVENT_READ, "stdout")
+    output_selector.register(child.stderr, selectors.EVENT_READ, "stderr")
+    output_bytes = {"stdout": 0, "stderr": 0}
+    output_limited = False
+    exit_code: int | None = None
+    try:
+        while exit_code is None and _stop_signal is None:
+            for key, _events in output_selector.select(TRACK_INTERVAL_SECONDS):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    output_selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                stream = key.data
+                output_bytes[stream] += len(chunk)
+                try:
+                    _forward_output(1 if stream == "stdout" else 2, chunk)
+                except BrokenPipeError:
+                    fail()
+                if output_bytes[stream] > getattr(arguments, f"max_{stream}"):
+                    output_limited = True
+            tracked.update(_descendants(os.getpid()))
+            exit_code = child.poll()
+            if output_limited:
+                _terminate_tracked(os.getpid(), tracked)
+                try:
+                    child.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    fail()
+                return None
+        duration_us = max(1, (time.monotonic_ns() - started_ns) // 1000)
+        if _stop_signal is not None:
+            _terminate_tracked(os.getpid(), tracked)
+            try:
+                child.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                fail()
+            return None
+        assert exit_code is not None
+        _terminate_tracked(os.getpid(), tracked)
+        while output_selector.get_map():
+            for key, _events in output_selector.select(TRACK_INTERVAL_SECONDS):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    output_selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                stream = key.data
+                output_bytes[stream] += len(chunk)
+                try:
+                    _forward_output(1 if stream == "stdout" else 2, chunk)
+                except BrokenPipeError:
+                    fail()
+                if output_bytes[stream] > getattr(arguments, f"max_{stream}"):
+                    output_limited = True
+        if output_limited or exit_code != 0:
+            return None
+        if arguments.result_fd < 0:
+            # Probe-only callers still need the lifecycle and output limits, but
+            # do not request an artifact scan or authenticated result line.
+            return {
+                "exit_code": exit_code,
+                "duration_us": duration_us,
+                "stdout_bytes": output_bytes["stdout"],
+                "stderr_bytes": output_bytes["stderr"],
+                "artifact_files": 0,
+                "artifact_bytes": 0,
+                "artifact_sha256": "0" * 64,
+            }
+        artifact = _scan(arguments)
+        return {
+            "exit_code": exit_code,
+            "duration_us": duration_us,
+            "stdout_bytes": output_bytes["stdout"],
+            "stderr_bytes": output_bytes["stderr"],
+            "artifact_files": artifact["files"],
+            "artifact_bytes": artifact["bytes"],
+            "artifact_sha256": artifact["sha256"],
+        }
+    finally:
+        output_selector.close()
+        if child.poll() is None:
+            _terminate_tracked(os.getpid(), tracked)
+            try:
+                child.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
+        _reap_adopted()
 
 
 def main() -> int:
@@ -192,12 +311,22 @@ def main() -> int:
     parser.add_argument("--artifact-root", required=True)
     parser.add_argument("--max-files", required=True, type=int)
     parser.add_argument("--max-bytes", required=True, type=int)
+    parser.add_argument("--max-stdout", required=True, type=int)
+    parser.add_argument("--max-stderr", required=True, type=int)
+    parser.add_argument("--repetitions", required=True, type=int)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     command = arguments.command
     if command and command[0] == "--":
         command = command[1:]
     if not command or not all(isinstance(item, str) and item for item in command):
+        fail()
+    if (
+        arguments.repetitions < 1
+        or arguments.repetitions > 100
+        or arguments.max_stdout <= 0
+        or arguments.max_stderr <= 0
+    ):
         fail()
 
     workspace = Path(arguments.workspace).resolve(strict=True)
@@ -213,57 +342,17 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
-    started_ns = time.monotonic_ns()
-    child = subprocess.Popen(
-        command,
-        cwd=workspace,
-        env=os.environ.copy(),
-        stdin=subprocess.DEVNULL,
-        stdout=None,
-        stderr=None,
-        start_new_session=True,
-        close_fds=True,
-        pass_fds=(),
-    )
-    tracked = {child.pid}
-    exit_code: int | None = None
-    try:
-        while exit_code is None and _stop_signal is None:
-            tracked.update(_descendants(os.getpid()))
-            exit_code = child.poll()
-            if exit_code is None:
-                time.sleep(TRACK_INTERVAL_SECONDS)
-        duration_us = max(1, (time.monotonic_ns() - started_ns) // 1000)
+    results: list[dict[str, object]] = []
+    for _ in range(arguments.repetitions):
+        result = _run_once(arguments, command)
         if _stop_signal is not None:
-            _terminate_tracked(os.getpid(), tracked)
-            try:
-                child.wait(timeout=0.1)
-            except subprocess.TimeoutExpired:
-                fail()
             return 128 + _stop_signal
-        assert exit_code is not None
-        _terminate_tracked(os.getpid(), tracked)
-        if exit_code == 0 and arguments.result_fd >= 0:
-            artifact = _scan(arguments)
-            _write_result(
-                arguments.result_fd,
-                {
-                    "exit_code": exit_code,
-                    "duration_us": duration_us,
-                    "artifact_files": artifact["files"],
-                    "artifact_bytes": artifact["bytes"],
-                    "artifact_sha256": artifact["sha256"],
-                },
-            )
-        return exit_code if 0 <= exit_code <= 125 else 125
-    finally:
-        if child.poll() is None:
-            _terminate_tracked(os.getpid(), tracked)
-            try:
-                child.wait(timeout=0.1)
-            except subprocess.TimeoutExpired:
-                pass
-        _reap_adopted()
+        if result is None:
+            return 125
+        results.append(result)
+    if arguments.result_fd >= 0:
+        _write_results(arguments.result_fd, results)
+    return 0
 
 
 if __name__ == "__main__":
