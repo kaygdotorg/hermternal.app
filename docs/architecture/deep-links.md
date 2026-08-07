@@ -220,9 +220,11 @@ containers, excessive nodes, and excessive depth. The bounded walk is iterative.
 The resolver proof streams each regular non-symlink artifact once. It enforces
 the byte limit before full allocation. It hashes and parses the same immutable
 bytes. It rejects a symlink or special file before a blocking open. It also
-rejects replacement or metadata changes during a read. An independent review
-root binds cases, tests, exact validator source, evidence, baseline,
-documentation, and dependencies. Its digest anchor is outside the mutable local
+compares device, inode, size, modification time, and change time before and
+after the read and against the final path. It rejects path replacement and
+same-inode overwrite even when a writer restores the modification time. An
+independent review root binds cases, tests, exact validator source, evidence,
+baseline, documentation, and dependencies. Its digest anchor is outside the mutable local
 proof set. Cases, baselines, source, and local root copies cannot authorize a
 coordinated replacement.
 

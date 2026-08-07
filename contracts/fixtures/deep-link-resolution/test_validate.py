@@ -129,6 +129,19 @@ class DeepLinkResolutionTests(unittest.TestCase):
     return chunk
    with mock.patch('validate.os.read',side_effect=racing_read):
     with self.assertRaises(validate.ContractError): validate.read_artifact_once(path)
+   in_place=root/'in-place'; in_place.write_bytes(b'a'*70_000); original_stat=in_place.stat(); overwritten=False
+   def overwrite_in_place(fd:int,size:int)->bytes:
+    nonlocal overwritten
+    chunk=original_read(fd,size)
+    if chunk and not overwritten:
+     overwritten=True; time.sleep(0.01)
+     with in_place.open('r+b') as writer:
+      writer.write(b'b'*70_000); writer.flush(); os.fsync(writer.fileno())
+     os.utime(in_place,ns=(original_stat.st_atime_ns,original_stat.st_mtime_ns))
+    return chunk
+   with mock.patch('validate.os.read',side_effect=overwrite_in_place):
+    with self.assertRaisesRegex(validate.ContractError,'^contract rejected$'): validate.read_artifact_once(in_place)
+   final_stat=in_place.stat(); self.assertEqual(final_stat.st_ino,original_stat.st_ino); self.assertEqual(final_stat.st_mtime_ns,original_stat.st_mtime_ns); self.assertNotEqual(final_stat.st_ctime_ns,original_stat.st_ctime_ns); self.assertTrue(overwritten)
  def test_store_reads_each_path_once(self)->None:
   store=validate.ArtifactStore(); path=FIXTURE_DIR/'cases.json'
   with mock.patch('validate.read_artifact_once',wraps=validate.read_artifact_once) as reader:

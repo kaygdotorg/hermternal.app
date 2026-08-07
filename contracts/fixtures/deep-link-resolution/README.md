@@ -85,8 +85,9 @@ containers, excessive nodes, and excessive depth. The JSON walk is iterative.
 Every artifact is opened once. The validator rejects symlinks and special files
 before a blocking open. It reads regular files in bounded 64 KiB chunks. It
 enforces the one MiB limit before full allocation. It hashes and parses the same
-immutable bytes. It rejects inode replacement, size changes, and modification-
-time changes during a read.
+immutable bytes. It compares device, inode, size, modification time, and change
+time before and after the read and against the final path. It rejects replacement,
+in-place overwrite, restored modification time, and other metadata drift.
 
 `review-root.json` binds the cases, tests, exact validator source, raw evidence,
 baseline, documentation, and exact dependency bytes. Its durable digest anchor

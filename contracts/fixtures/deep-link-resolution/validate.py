@@ -72,17 +72,17 @@ def read_artifact_once(path:Path,limit:int=MAX_FILE_BYTES)->Artifact:
  except (OSError,ContractError) as exc: raise ContractError("contract rejected") from exc
  try:
   before=os.fstat(descriptor); require(stat.S_ISREG(before.st_mode) and before.st_size<=limit)
-  require((path_before.st_dev,path_before.st_ino)==(before.st_dev,before.st_ino))
+  metadata=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+  require(metadata(path_before)==metadata(before))
   chunks=[]; total=0; digest=hashlib.sha256()
   while True:
    chunk=os.read(descriptor,min(READ_CHUNK_BYTES,limit+1-total))
    if not chunk: break
    total+=len(chunk); require(total<=limit); digest.update(chunk); chunks.append(chunk)
-  after=os.fstat(descriptor)
-  require((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns))
+  after=os.fstat(descriptor); require(metadata(before)==metadata(after))
   current=os.stat(path,follow_symlinks=False)
   require(stat.S_ISREG(current.st_mode) and not stat.S_ISLNK(current.st_mode))
-  require((current.st_dev,current.st_ino)==(after.st_dev,after.st_ino))
+  require(metadata(current)==metadata(after))
   data=b"".join(chunks); require(len(data)==after.st_size)
   return Artifact(path,data,digest.hexdigest())
  except OSError as exc: raise ContractError("contract rejected") from exc
