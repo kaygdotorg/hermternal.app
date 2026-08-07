@@ -1612,6 +1612,42 @@ describe('LiveWorkspaceSession', () => {
     expect(chat.createChat).not.toHaveBeenCalled();
   });
 
+  it('keeps factory retry offline when history resolves after cancellation', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Existing history' }]);
+    const chat = createChatHarness();
+    let attempts = 0;
+    const createChat = vi.fn((options: BrowserChatOptions) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('first factory failure');
+      return chat.createChat(options);
+    });
+    const lateHistory = createDeferred<SessionMessages>();
+    vi.mocked(rest.getSessionMessages)
+      .mockResolvedValueOnce(sessionMessages([{ role: 'assistant', content: 'Existing history' }]))
+      .mockImplementationOnce(() => lateHistory.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat });
+    await session.initialize();
+
+    const retry = session.retryConnection();
+    await flush();
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(2);
+    expect(session.current.state).toBe('reconnecting');
+
+    session.cancelReconnect();
+    lateHistory.resolve(sessionMessages([{ role: 'assistant', content: 'Late history' }]));
+    await retry;
+
+    expect(session.current.state).toBe('offline');
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'assistant-message', text: 'Existing history' })
+    );
+    expect(session.current.timeline).not.toContainEqual(
+      expect.objectContaining({ text: 'Late history' })
+    );
+    expect(attempts).toBe(1);
+    expect(chat.createChat).not.toHaveBeenCalled();
+  });
+
   it('closes a connect result once when invalidation races an abort-ignoring connector', async () => {
     const rest = createRest([]);
     const chat = createChatHarness();

@@ -471,7 +471,10 @@ export class LiveWorkspaceSession {
     operation: { readonly generation: number; readonly signal: AbortSignal }
   ): Promise<void> {
     const response = await this.rest.getSessionMessages(session.id, { limit: 500, offset: 0 }, operation.signal);
-    if (!this.isCurrent(operation.generation)) return;
+    // Cancellation may leave the generation unchanged while aborting the
+    // controller. Do not publish a late provisional timeline over the user's
+    // explicit offline state when a REST adapter resolves after abort.
+    if (!this.ownsOperation(operation)) return;
 
     const model = session.model?.trim() || 'Hermes';
     const timeline = mapLiveMessages(session.id, response.messages, model);
