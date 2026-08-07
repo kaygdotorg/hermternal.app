@@ -572,13 +572,13 @@
         },
         {
           "path": "deployment-security/host-origin-mapping/validate.py",
-          "sha256": "35c13483844ac97d98fac34f3a58de2c1625cac88fdeef33fe1d61fe0167a1b6",
-          "size_bytes": 60432
+          "sha256": "afcf83a2e8fd7f343317e9ec7c5c75e87b2cfdf2564bfd3025970b85d8fb8c84",
+          "size_bytes": 60433
         },
         {
           "path": "deployment-security/host-origin-mapping/validation-baseline.json",
-          "sha256": "b79897e192b320157af65a130df442f5d48c52b0d1058a506a1d93dc5b3dfbc2",
-          "size_bytes": 3031
+          "sha256": "fe639d2bf83cd8cc12c5b9ed9ad102a66e2445a2d165f64ec6f5d9c313e1db60",
+          "size_bytes": 3032
         }
       ]
     },

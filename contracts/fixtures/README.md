@@ -168,12 +168,20 @@ mechanically derived bytes, and the twelve overlapping Caddy-owned records are
 bound to the approved `5b923fd38e056c37bdb86766f05551cd83687b66` descendant.
 
 The validator emits one bounded semantic JSON line. Failures do not echo
-arguments, paths, keys, values, secrets, or tracebacks. Normal and optimized
-Python runs share the same checks:
+arguments, paths, keys, values, secrets, or tracebacks. The aggregate authority
+also requires a separate canonical plain Git object repository; the checkout
+being scanned must not be reused as that object repository. Supply the protected
+active authority pins and the object repository for both CLI modes:
 
 ```sh
-python3 contracts/fixtures/validator/validate.py
-python3 -O contracts/fixtures/validator/validate.py
+CHECKOUT="$PWD"
+OBJECT_REPO=/absolute/path/to/separate/plain-clone
+export HERMTERNAL_FIXTURE_AUTHORITY_COMMIT=<protected-authority-introduction>
+export HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT=<protected-source-predecessor>
+python3 contracts/fixtures/validator/validate.py \
+  --repo-root "$CHECKOUT" --object-repo "$OBJECT_REPO"
+python3 -O contracts/fixtures/validator/validate.py \
+  --repo-root "$CHECKOUT" --object-repo "$OBJECT_REPO"
 python3 contracts/fixtures/validator/test_validate.py
 python3 -O contracts/fixtures/validator/test_validate.py
 python3 -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
@@ -182,6 +190,11 @@ python3 -m py_compile \
   contracts/fixtures/validator/validate.py \
   contracts/fixtures/validator/test_validate.py
 ```
+
+The protected values are review/CI inputs, not values inferred from a branch,
+tag, or the checkout. The plain clone must not be a linked worktree and must
+not use alternates, shallow or promisor metadata, replacement refs, grafts, or
+redirecting Git configuration.
 
 The repository does not yet have a checked-in GitHub Actions workflow that
 runs this aggregate validator, its test suite, and the `python -O` equivalents.
