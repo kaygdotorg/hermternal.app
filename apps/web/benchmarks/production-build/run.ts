@@ -19,6 +19,7 @@ const SYSTEM_PYTHON_PATH = '/usr/bin/python3';
 const MACOS_SANDBOX_PATH = '/usr/bin/sandbox-exec';
 const LINUX_SANDBOX_PATH = '/usr/bin/bwrap';
 const SIGNAL_CLEANUP_DEADLINE_MS = 10_000;
+const SERIES_CLEANUP_GRACE_MS = 2_000;
 const MAX_WORKLOAD_BYTES = 16 * 1024;
 const MAX_ERROR_BYTES = 512;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -28,6 +29,35 @@ const activeRunRoots = new Set<string>();
 const quotaDevices = new Map<string, string>();
 let activeChild: ChildProcess | undefined;
 let handlingSignal = false;
+
+export interface FileIdentity {
+  bytes: number;
+  sha256: string;
+}
+
+export interface TreeIdentity extends FileIdentity {
+  files: number;
+  symlinks: number;
+}
+
+interface RuntimeIdentity {
+  node: FileIdentity;
+  bun: FileIdentity;
+  python: FileIdentity;
+  sandbox: FileIdentity;
+}
+
+interface IntegrityAnchors {
+  package_json: FileIdentity;
+  bun_lock: FileIdentity;
+  dependencies: TreeIdentity;
+  vite: TreeIdentity;
+  sveltekit: TreeIdentity;
+  vite_svelte_plugin: TreeIdentity;
+  svelte: TreeIdentity;
+  typescript_native: TreeIdentity;
+  runtime: Partial<Record<'darwin' | 'linux', RuntimeIdentity>>;
+}
 
 export interface Workload {
   schema: string;
@@ -53,6 +83,7 @@ export interface Workload {
   };
   network: { mode: string; boundary: string };
   launcher: { supervisor_sha256: string; scanner_sha256: string };
+  integrity: IntegrityAnchors;
   hermes_source_sha: string;
 }
 
@@ -170,10 +201,18 @@ export function validateWorkload(untrusted: unknown): Workload {
   const limits = candidate.limits;
   const network = candidate.network;
   const launcher = candidate.launcher;
-  if (!isRecord(build) || !isRecord(repetitions) || !isRecord(limits) || !isRecord(network) || !isRecord(launcher)) {
+  const integrity = candidate.integrity;
+  if (
+    !isRecord(build) || !isRecord(repetitions) || !isRecord(limits) || !isRecord(network) ||
+    !isRecord(launcher) || !isRecord(integrity) || !isRecord(integrity.runtime)
+  ) {
     throw new BenchmarkError('workload_shape_invalid');
   }
-  requireExactKeys(candidate, ['schema', 'fixture_id', 'fixture_version', 'build', 'repetitions', 'limits', 'network', 'launcher', 'hermes_source_sha'], 'workload_keys_invalid');
+  requireExactKeys(
+    candidate,
+    ['schema', 'fixture_id', 'fixture_version', 'build', 'repetitions', 'limits', 'network', 'launcher', 'integrity', 'hermes_source_sha'],
+    'workload_keys_invalid'
+  );
   requireExactKeys(build, ['entrypoint', 'arguments', 'input_files', 'input_roots', 'output_root', 'version_name'], 'build_keys_invalid');
   requireExactKeys(repetitions, ['cold', 'warm', 'maximum'], 'repetition_keys_invalid');
   requireExactKeys(
@@ -183,6 +222,53 @@ export function validateWorkload(untrusted: unknown): Workload {
   );
   requireExactKeys(network, ['mode', 'boundary'], 'network_keys_invalid');
   requireExactKeys(launcher, ['supervisor_sha256', 'scanner_sha256'], 'launcher_keys_invalid');
+  requireExactKeys(
+    integrity,
+    ['package_json', 'bun_lock', 'dependencies', 'vite', 'sveltekit', 'vite_svelte_plugin', 'svelte', 'typescript_native', 'runtime'],
+    'integrity_keys_invalid'
+  );
+  requireExactKeys(integrity.runtime, ['darwin'], 'runtime_anchor_keys_invalid');
+  const fileAnchors = [integrity.package_json, integrity.bun_lock];
+  const treeAnchors = [
+    integrity.dependencies,
+    integrity.vite,
+    integrity.sveltekit,
+    integrity.vite_svelte_plugin,
+    integrity.svelte,
+    integrity.typescript_native
+  ];
+  if (
+    fileAnchors.some((value) => !isRecord(value)) ||
+    treeAnchors.some((value) => !isRecord(value)) ||
+    !isRecord(integrity.runtime.darwin)
+  ) {
+    throw new BenchmarkError('integrity_shape_invalid');
+  }
+  for (const anchor of fileAnchors) {
+    requireExactKeys(anchor, ['bytes', 'sha256'], 'file_integrity_keys_invalid');
+    if (!Number.isSafeInteger(anchor.bytes) || anchor.bytes <= 0 || typeof anchor.sha256 !== 'string' || !SHA256_PATTERN.test(anchor.sha256)) {
+      throw new BenchmarkError('file_integrity_invalid');
+    }
+  }
+  for (const anchor of treeAnchors) {
+    requireExactKeys(anchor, ['files', 'symlinks', 'bytes', 'sha256'], 'tree_integrity_keys_invalid');
+    if (
+      !Number.isSafeInteger(anchor.files) || anchor.files <= 0 ||
+      !Number.isSafeInteger(anchor.symlinks) || anchor.symlinks < 0 ||
+      !Number.isSafeInteger(anchor.bytes) || anchor.bytes <= 0 ||
+      typeof anchor.sha256 !== 'string' || !SHA256_PATTERN.test(anchor.sha256)
+    ) {
+      throw new BenchmarkError('tree_integrity_invalid');
+    }
+  }
+  requireExactKeys(integrity.runtime.darwin, ['node', 'bun', 'python', 'sandbox'], 'runtime_integrity_keys_invalid');
+  for (const anchor of Object.values(integrity.runtime.darwin)) {
+    if (!isRecord(anchor)) throw new BenchmarkError('runtime_integrity_invalid');
+    requireExactKeys(anchor, ['bytes', 'sha256'], 'runtime_integrity_keys_invalid');
+    if (!Number.isSafeInteger(anchor.bytes) || anchor.bytes <= 0 || typeof anchor.sha256 !== 'string' || !SHA256_PATTERN.test(anchor.sha256)) {
+      throw new BenchmarkError('runtime_integrity_invalid');
+    }
+  }
   const pathLists = [build.input_files, build.input_roots, build.arguments];
   if (
     candidate.fixture_id !== 'web-production-build' ||
@@ -597,10 +683,15 @@ export function sandboxLauncher(
   artifactFiles = 10_000,
   repetitions = 1,
   stdoutBytes = 1_048_576,
-  stderrBytes = 1_048_576
+  stderrBytes = 1_048_576,
+  timeoutMs = 120_000
 ): { command: string; args: string[] } {
-  if (!Number.isSafeInteger(repetitions) || repetitions < 1 || repetitions > 100 ||
-      !Number.isSafeInteger(stdoutBytes) || stdoutBytes < 1 || !Number.isSafeInteger(stderrBytes) || stderrBytes < 1) {
+  if (
+    !Number.isSafeInteger(repetitions) || repetitions < 1 || repetitions > 100 ||
+    !Number.isSafeInteger(stdoutBytes) || stdoutBytes < 1 ||
+    !Number.isSafeInteger(stderrBytes) || stderrBytes < 1 ||
+    !Number.isSafeInteger(timeoutMs) || timeoutMs < 1
+  ) {
     throw new BenchmarkError('repetition_limit_invalid');
   }
   const canonicalWorkspace = realpathSync(workspace);
@@ -626,6 +717,8 @@ export function sandboxLauncher(
     String(stdoutBytes),
     '--max-stderr',
     String(stderrBytes),
+    '--timeout-ms',
+    String(timeoutMs),
     '--repetitions',
     String(repetitions),
     '--',
@@ -762,7 +855,8 @@ export async function runBuildSeries(
     workload.limits.artifact_files,
     repetitions,
     workload.limits.stdout_bytes,
-    workload.limits.stderr_bytes
+    workload.limits.stderr_bytes,
+    workload.limits.build_timeout_ms
   );
   const child = spawn(launcher.command, launcher.args, {
     cwd: workspace,
@@ -774,10 +868,11 @@ export async function runBuildSeries(
   let timedOut = false;
   let outputExceeded = false;
   const stopTree = () => void terminateProcessGroup(child);
+  const seriesTimeoutMs = workload.limits.build_timeout_ms * repetitions + SERIES_CLEANUP_GRACE_MS;
   const timer = setTimeout(() => {
     timedOut = true;
     stopTree();
-  }, workload.limits.build_timeout_ms * repetitions);
+  }, seriesTimeoutMs);
   const onOverflow = () => {
     outputExceeded = true;
     stopTree();
@@ -805,7 +900,7 @@ export async function runBuildSeries(
       1000,
       'process_pipe_drain_timeout'
     );
-    if (timedOut) throw new BenchmarkError('build_timeout');
+    if (timedOut || exitCode === 124) throw new BenchmarkError('build_timeout');
     if (outputExceeded) throw new BenchmarkError('process_output_limit_exceeded');
     if (exitCode !== 0) throw new BenchmarkError('production_build_failed');
     const resultLines = stdoutResult.tail
@@ -920,13 +1015,22 @@ export async function readPackageVersion(dependencySnapshot: string): Promise<st
   return parsed.version;
 }
 
-function sourceCommit(): string {
-  const result = Bun.spawnSync(['/usr/bin/git', '-C', resolve(APP_ROOT, '..', '..'), 'rev-parse', 'HEAD'], {
+export function sourceCommit(): string {
+  const repositoryRoot = resolve(APP_ROOT, '..', '..');
+  const result = Bun.spawnSync(['/usr/bin/git', '-C', repositoryRoot, 'rev-parse', 'HEAD'], {
     stdout: 'pipe',
     stderr: 'ignore'
   });
   const commit = new TextDecoder().decode(result.stdout).trim();
   if (result.exitCode !== 0 || !/^[0-9a-f]{40}$/.test(commit)) throw new BenchmarkError('source_commit_unavailable');
+  // HEAD alone is not provenance: a modified tracked runner, helper, workload,
+  // or web input can execute while rev-parse still reports the same commit.
+  // Bind the entire measured web tree to that commit before and after samples.
+  const clean = Bun.spawnSync(['/usr/bin/git', '-C', repositoryRoot, 'diff-index', '--quiet', 'HEAD', '--', 'apps/web'], {
+    stdout: 'ignore',
+    stderr: 'ignore'
+  });
+  if (clean.exitCode !== 0) throw new BenchmarkError('source_tree_dirty');
   return commit;
 }
 
@@ -940,8 +1044,6 @@ export function assertSourceIdentityUnchanged(
     throw new BenchmarkError('source_input_mutated');
   }
 }
-
-interface TreeIdentity { files: number; symlinks: number; bytes: number; sha256: string }
 
 async function treeIdentity(root: string): Promise<TreeIdentity> {
   const resolvedRoot = await realpath(root);
@@ -995,6 +1097,49 @@ async function fileIdentity(path: string): Promise<{ bytes: number; sha256: stri
     return { bytes: metadata.size, sha256: sha256(await handle.readFile()) };
   } finally {
     await handle.close();
+  }
+}
+
+function sameIdentity(actual: FileIdentity | TreeIdentity, expected: FileIdentity | TreeIdentity): boolean {
+  return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+async function verifyDependencySnapshot(
+  workload: Workload,
+  dependencySnapshot: string,
+  inputSnapshot: string,
+  runtime: ProtectedRuntime
+): Promise<void> {
+  const expected = workload.integrity;
+  const actualFiles = {
+    package_json: await fileIdentity(join(inputSnapshot, 'package.json')),
+    bun_lock: await fileIdentity(join(inputSnapshot, 'bun.lock'))
+  };
+  if (!sameIdentity(actualFiles.package_json, expected.package_json) || !sameIdentity(actualFiles.bun_lock, expected.bun_lock)) {
+    throw new BenchmarkError('dependency_identity_mismatch');
+  }
+  const actualTrees = {
+    dependencies: await treeIdentity(dependencySnapshot),
+    vite: await treeIdentity(join(dependencySnapshot, 'vite')),
+    sveltekit: await treeIdentity(join(dependencySnapshot, '@sveltejs', 'kit')),
+    vite_svelte_plugin: await treeIdentity(join(dependencySnapshot, '@sveltejs', 'vite-plugin-svelte')),
+    svelte: await treeIdentity(join(dependencySnapshot, 'svelte')),
+    typescript_native: await treeIdentity(join(dependencySnapshot, '@typescript', 'native'))
+  };
+  for (const key of Object.keys(actualTrees) as Array<keyof typeof actualTrees>) {
+    if (!sameIdentity(actualTrees[key], expected[key])) throw new BenchmarkError('dependency_identity_mismatch');
+  }
+  const runtimeAnchor = expected.runtime[platform() as 'darwin' | 'linux'];
+  if (runtimeAnchor) {
+    const actualRuntime = {
+      node: await fileIdentity(runtime.nodePath),
+      bun: await fileIdentity(process.execPath),
+      python: await fileIdentity(runtime.pythonPath),
+      sandbox: await fileIdentity(runtime.sandboxPath)
+    };
+    for (const key of Object.keys(actualRuntime) as Array<keyof typeof actualRuntime>) {
+      if (!sameIdentity(actualRuntime[key], runtimeAnchor[key])) throw new BenchmarkError('runtime_identity_mismatch');
+    }
   }
 }
 
@@ -1284,12 +1429,14 @@ async function main(): Promise<void> {
       join(runRoot, 'input-snapshot'),
       workload.limits.workspace_input_bytes
     );
-    assertSourceIdentityUnchanged(sourceCommitSha, sourceInput, sourceCommit(), sourceInput);
+    const capturedInputAfterSnapshot = await inputIdentity(workload);
+    assertSourceIdentityUnchanged(sourceCommitSha, sourceInput, sourceCommit(), capturedInputAfterSnapshot);
     if (JSON.stringify(sourceInput) !== JSON.stringify(inputSnapshot.identity)) {
       throw new BenchmarkError('source_input_mutated');
     }
     const dependencySnapshot = await cloneDependencySnapshot(runRoot);
     const runtime = await protectedRuntime(workload);
+    await verifyDependencySnapshot(workload, dependencySnapshot, inputSnapshot.root, runtime);
     const toolchain = await toolchainIdentity(dependencySnapshot, inputSnapshot.root, runtime);
     const readinessFile = process.env.HERMTERNAL_BENCHMARK_READY_FILE;
     if (readinessFile) {

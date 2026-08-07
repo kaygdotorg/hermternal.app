@@ -17,6 +17,7 @@ import {
   readPackageVersion,
   removeWorkspace,
   roundRationalHalfEven,
+  sourceCommit,
   runBuildSeries,
   sandboxLauncher,
   terminateProcessGroup,
@@ -123,6 +124,19 @@ describe('production-build benchmark contract', () => {
     );
   });
 
+  test('rejects a tracked runner edit even when HEAD is unchanged', async () => {
+    const runnerPath = join(benchmarkRoot, 'run.ts');
+    const original = await readFile(runnerPath);
+    const expectedCommit = sourceCommit();
+    try {
+      await writeFile(runnerPath, Buffer.concat([original, Buffer.from('\\n')]));
+      expect(() => sourceCommit()).toThrow(new BenchmarkError('source_tree_dirty'));
+    } finally {
+      await writeFile(runnerPath, original);
+    }
+    expect(sourceCommit()).toBe(expectedCommit);
+  });
+
   test('reads Vite version metadata without executing the package bin', async () => {
     const root = await mkdtemp(join(tmpdir(), 'hermternal-vite-metadata-'));
     const packageRoot = join(root, 'vite');
@@ -186,6 +200,41 @@ describe('production-build benchmark contract', () => {
   test('OS sandbox denies direct TCP and descendants clearing NODE_OPTIONS', async () => {
     expect(await sandboxNetworkAttempt(false)).toBe(0);
     expect(await sandboxNetworkAttempt(true)).toBe(0);
+  });
+
+  test('enforces a per-build timeout before the series deadline', async () => {
+    const sandboxAvailable = process.platform === 'darwin'
+      ? await Bun.file('/usr/bin/sandbox-exec').exists()
+      : process.platform === 'linux' && await Bun.file('/usr/bin/bwrap').exists();
+    if (!sandboxAvailable) return;
+    const candidate = await workload();
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-timeout-test-'));
+    const workspace = join(root, 'workspace');
+    const dependencyRoot = join(root, 'dependencies');
+    try {
+      await mkdir(join(workspace, '.artifact-output'), { recursive: true });
+      await mkdir(dependencyRoot, { recursive: true });
+      const runtime = await protectedRuntime(candidate);
+      const launcher = sandboxLauncher(
+        runtime,
+        workspace,
+        dependencyRoot,
+        candidate.limits.artifact_bytes,
+        [runtime.nodePath, '-e', 'setTimeout(() => {}, 5000)'],
+        -1,
+        candidate.limits.artifact_files,
+        1,
+        candidate.limits.stdout_bytes,
+        candidate.limits.stderr_bytes,
+        100
+      );
+      const started = performance.now();
+      const child = Bun.spawn([launcher.command, ...launcher.args], { cwd: workspace, stdout: 'pipe', stderr: 'pipe' });
+      expect(await child.exited).toBe(124);
+      expect(performance.now() - started).toBeLessThan(3000);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test('Linux warm series preserves generated state inside one tmpfs sandbox', async () => {
@@ -256,6 +305,24 @@ describe('production-build benchmark contract', () => {
     } finally {
       Bun.spawnSync(['/bin/chmod', '-R', 'u+w', root], { stdout: 'ignore', stderr: 'ignore' });
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects installed Vite bytes changed under an unchanged lockfile', async () => {
+    const appRoot = resolve(benchmarkRoot, '../..');
+    const vitePackage = join(appRoot, 'node_modules', 'vite', 'package.json');
+    const original = await readFile(vitePackage);
+    try {
+      await writeFile(vitePackage, Buffer.concat([original, Buffer.from('\\n')]));
+      const result = Bun.spawnSync([process.execPath, join(benchmarkRoot, 'run.ts'), '--cold', '1', '--warm', '1'], {
+        cwd: appRoot,
+        stdout: 'pipe',
+        stderr: 'pipe'
+      });
+      expect(result.exitCode).toBe(2);
+      expect(new TextDecoder().decode(result.stderr)).toContain('dependency_identity_mismatch');
+    } finally {
+      await writeFile(vitePackage, original);
     }
   });
 

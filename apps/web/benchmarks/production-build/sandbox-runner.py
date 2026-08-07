@@ -25,6 +25,7 @@ from pathlib import Path
 TERMINATION_GRACE_SECONDS = 0.5
 TRACK_INTERVAL_SECONDS = 0.02
 _stop_signal: int | None = None
+_timed_out = False
 
 
 def fail() -> "None":
@@ -198,7 +199,9 @@ def _write_results(fd: int, payloads: list[dict[str, object]]) -> None:
 
 
 def _run_once(arguments: argparse.Namespace, command: list[str]) -> dict[str, object] | None:
+    global _timed_out
     started_ns = time.monotonic_ns()
+    deadline_ns = started_ns + arguments.timeout_ms * 1_000_000
     child = subprocess.Popen(
         command,
         cwd=arguments.workspace,
@@ -236,6 +239,14 @@ def _run_once(arguments: argparse.Namespace, command: list[str]) -> dict[str, ob
                     output_limited = True
             tracked.update(_descendants(os.getpid()))
             exit_code = child.poll()
+            if exit_code is None and time.monotonic_ns() >= deadline_ns:
+                _timed_out = True
+                _terminate_tracked(os.getpid(), tracked)
+                try:
+                    child.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    fail()
+                return None
             if output_limited:
                 _terminate_tracked(os.getpid(), tracked)
                 try:
@@ -313,6 +324,7 @@ def main() -> int:
     parser.add_argument("--max-bytes", required=True, type=int)
     parser.add_argument("--max-stdout", required=True, type=int)
     parser.add_argument("--max-stderr", required=True, type=int)
+    parser.add_argument("--timeout-ms", required=True, type=int)
     parser.add_argument("--repetitions", required=True, type=int)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
@@ -326,6 +338,7 @@ def main() -> int:
         or arguments.repetitions > 100
         or arguments.max_stdout <= 0
         or arguments.max_stderr <= 0
+        or arguments.timeout_ms <= 0
     ):
         fail()
 
@@ -348,7 +361,7 @@ def main() -> int:
         if _stop_signal is not None:
             return 128 + _stop_signal
         if result is None:
-            return 125
+            return 124 if _timed_out else 125
         results.append(result)
     if arguments.result_fd >= 0:
         _write_results(arguments.result_fd, results)
