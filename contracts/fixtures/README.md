@@ -43,8 +43,10 @@ the legacy path readable and places the new multi-artifact authority at
 `hermternal.fixture-registry-authority.v2`.
 
 The standalone v2 verifier loads that separate path from its immutable Git
-introduction object. It can read the legacy v1 shape for migration checks, but
-it never treats the legacy path as a v2 fallback. The v2 trust root accepts
+introduction object. The aggregate validator applies the same v2 schema, role,
+approved-source, exact-artifact-order, blob-OID, byte-size, and SHA-256 checks
+before comparing checkout bytes. It can read the legacy v1 shape for migration
+checks, but it never treats the legacy path as a v2 fallback. The v2 trust root accepts
 only the approved external predecessor
 `abb6754bddd1cf18927b0172ed9fa3456235b035`; an arbitrary self-consistent
 ancestor is rejected. The trust root remains independent of the
@@ -111,9 +113,14 @@ hosts decode only bounded literal escapes and fail closed for escaped letters,
 uncertain character classes, verbose whitespace, comments, or other recovery
 gaps. Detector regex definitions and explicit domain negative-test markers are
 not treated as retained credentials. Reviewed source markers and negative-test
-samples use exact path/value allowances only. Domain validators remain
-authoritative for case semantics; the aggregate layer does not run them and
-makes no network request.
+samples use exact path/value allowances only. Reserved `.invalid` hosts are not
+accepted by suffix; comma-joined URLs, IPv6/address canaries, malformed ports,
+and backslash/bracket continuations are admitted only as exact raw URL tokens
+in the reviewed artifact that owns the negative case. Unknown Python runtime
+values use the exact synthetic host `synthetic.invalid` plus an explicit
+Authorization probe, so dynamic credential checks do not widen the URL policy.
+Domain validators remain authoritative for case semantics; the aggregate layer
+does not run them and makes no network request.
 
 The `--index`, `--schema`, and `--baseline` inputs are bound to their canonical
 reviewed paths. The exact central-validator and baseline bytes are pinned by
