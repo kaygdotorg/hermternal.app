@@ -22,6 +22,7 @@ import re
 import statistics
 import subprocess
 import tokenize
+import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -156,7 +157,7 @@ INTENTIONALLY_SEPARATE_ARTIFACTS = frozenset({
 # immutable Git commit that introduced it. Checkout edits cannot rewrite those
 # object-database bytes, while later reviewed commits may update implementation
 # files without silently moving the authority root.
-VALIDATOR_AUTHORITY_PATH = "scripts/fixture_registry_authority.json"
+VALIDATOR_AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.json"
 VALIDATOR_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v1"
 BASELINE_CANONICAL_SHA256 = "7704ec403074906dbff0a186f939eff9e1a4df8f86298c3929654481087aa8a7"
 
@@ -165,6 +166,13 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SAFE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SAFE_PATH = re.compile(r"^[A-Za-z0-9._/-]+$")
 URL_PATTERN = re.compile(r"(?:https?|wss?)://[^\s\"'<>]+", re.IGNORECASE)
+# Regex source may encode a literal dot as ``\\N{FULL STOP}``, whose name
+# contains a space. Keep that named escape inside one URL token for host
+# validation rather than truncating at the internal whitespace.
+REGEX_URL_PATTERN = re.compile(
+    r"(?:https?|wss?)://(?:\\N\{[^}]+\}|[^\s\"'<>])+",
+    re.IGNORECASE,
+)
 REGEX_HOST_LITERAL_PATTERN = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+"
 )
@@ -556,9 +564,27 @@ def load_json(
     return _parse_json_bytes(data, require_object=require_object, reject_nul=reject_nul)
 
 
+_FULLWIDTH_ASCII_TRANSLATION = str.maketrans(
+    {chr(code): chr(code - 0xFEE0) for code in range(0xFF01, 0xFF5F)}
+    | {"　": " "}
+)
+
+
 def _normalize_key(key: str) -> str:
-    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    # Compatibility forms can spell both credential aliases and separators with
+    # full-width Unicode. Normalize before case/separator folding so JSON keys
+    # cannot evade sensitive-field routing through presentation variants.
+    normalized = unicodedata.normalize("NFKC", key)
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
     return re.sub(r"[-.:/\s]+", "_", separated).casefold()
+
+
+def _normalize_scanned_text(value: str) -> str:
+    # Translate only full-width ASCII forms. Whole-string NFKC would turn a
+    # reviewed Unicode ellipsis into three ASCII periods and change exact
+    # negative-test allowances, while this bounded map closes the credential
+    # alias/assignment bypass without rewriting unrelated prose.
+    return value.translate(_FULLWIDTH_ASCII_TRANSLATION)
 
 
 def _is_explicit_synthetic_marker(value: str) -> bool:
@@ -639,6 +665,8 @@ def _regex_host_literals(raw_url: str) -> tuple[str, ...]:
         "\\u002E",
         r"\U0000002e",
         r"\U0000002E",
+        r"\N{FULL STOP}",
+        r"\N{full stop}",
         r"\056",
     ):
         host_text = host_text.replace(encoded_dot, ".")
@@ -667,7 +695,8 @@ def _validate_url_hosts(
     allow_synthetic_markers: bool = False,
     regex_pattern: bool = False,
 ) -> None:
-    for match in URL_PATTERN.finditer(value):
+    pattern = REGEX_URL_PATTERN if regex_pattern else URL_PATTERN
+    for match in pattern.finditer(value):
         raw_url = match.group(0)
         if regex_pattern:
             for host in _regex_host_literals(raw_url):
@@ -693,10 +722,11 @@ def _validate_text_value(
     allowed_synthetic_full_values: frozenset[str] = frozenset(),
     regex_pattern: bool = False,
 ) -> None:
-    # Strip every C0/C1 control before matching. Retained fixtures may contain
-    # malformed-input bytes, but controls must never split a credential or URL
-    # into fragments that evade the shared scanners.
-    scanned_value = UNSAFE_CONTROL_PATTERN.sub("", value)
+    # Strip every C0/C1 control and normalize Unicode compatibility forms before
+    # matching. Retained fixtures may contain malformed-input bytes, but controls
+    # and full-width separators must never split or disguise a credential, key,
+    # assignment, or URL token at the shared scanner boundary.
+    scanned_value = _normalize_scanned_text(UNSAFE_CONTROL_PATTERN.sub("", value))
     for match in PRIVATE_KEY_PATTERN.finditer(scanned_value):
         candidate = match.group(0)
         require(
@@ -963,6 +993,14 @@ def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
                 return _bounded_static_text(receiver.format(*args, **keywords))
             except (IndexError, KeyError, ValueError, TypeError, OverflowError):
                 return _STATIC_UNKNOWN
+        if method == "format_map" and type(receiver) is str and len(node.args) == 1 and not node.keywords:
+            mapping = _static_value(node.args[0], bindings)
+            if not isinstance(mapping, dict) or _contains_static_unknown(mapping):
+                return _STATIC_UNKNOWN
+            try:
+                return _bounded_static_text(receiver.format_map(mapping))
+            except (IndexError, KeyError, ValueError, TypeError, OverflowError):
+                return _STATIC_UNKNOWN
         if method == "join" and type(receiver) is str and len(node.args) == 1 and not node.keywords:
             values = _static_value(node.args[0], bindings)
             if isinstance(values, (list, tuple)) and all(type(value) is str for value in values):
@@ -977,12 +1015,34 @@ def _percent_mapping_probe(key: Any) -> str:
     return "AAAAAAAAAAAAAAAA"
 
 
-def _percent_probe_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
+def _mapping_probe_from_template(template: str, *, format_map: bool = False) -> dict[str, str]:
+    """Build a bounded mapping probe for unresolved source expressions.
+
+    A runtime mapping is not executed, but known template fields still reveal
+    where credential-shaped values can flow. Probe scheme-like fields as Basic
+    and all other fields with detector-length data so mapping syntax cannot
+    erase an Authorization header from the conservative scan.
+    """
+    if format_map:
+        fields = re.findall(r"{([^{}!:]+)(?:![^}:]+)?(?:\s*:[^}]*)?}", template)
+    else:
+        fields = re.findall(r"%\(([^()]+)\)", template)
+    return {field: _percent_mapping_probe(field) for field in dict.fromkeys(fields)}
+
+
+def _percent_probe_value(
+    node: ast.AST,
+    bindings: dict[str, Any],
+    *,
+    template: str = "",
+) -> Any:
     """Render unresolved percent operands as credential-shaped probes.
 
     Positional operands can occupy an authorization-scheme slot. Mapping
     operands additionally preserve their keys so scheme fields become `Basic`
-    while token/secret fields become a detector-length candidate.
+    while token/secret fields become a detector-length candidate. For an
+    unresolved mapping name, the percent template supplies the bounded field
+    inventory without executing retained source.
     """
     if isinstance(node, ast.Dict):
         result: dict[Any, Any] = {}
@@ -1005,6 +1065,8 @@ def _percent_probe_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
         return value
     if isinstance(node, ast.Tuple):
         return tuple(_percent_probe_value(child, bindings) for child in node.elts)
+    if template and "%(" in template:
+        return _mapping_probe_from_template(template)
     return "Basic"
 
 
@@ -1104,7 +1166,7 @@ def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
         except (IndexError, KeyError, TypeError, ValueError, OverflowError):
             rendered = left + " " + right
         try:
-            credential_probe = left % _percent_probe_value(node.right, bindings)
+            credential_probe = left % _percent_probe_value(node.right, bindings, template=left)
         except (IndexError, KeyError, TypeError, ValueError, OverflowError):
             credential_probe = left
         # Scan both ordinary conservative rendering and the auth-scheme probe.
@@ -1125,6 +1187,23 @@ def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
                 rendered = receiver.format(*args, **keywords)
             except (IndexError, KeyError, ValueError, TypeError, OverflowError):
                 rendered = receiver + " " + " ".join(args + list(keywords.values()))
+            return _with_dynamic_authorization_probe(node, bindings, rendered)
+        if method == "format_map" and len(node.args) == 1 and not node.keywords:
+            mapping = _static_value(node.args[0], bindings)
+            if isinstance(mapping, dict) and not _contains_static_unknown(mapping):
+                try:
+                    return _with_dynamic_authorization_probe(
+                        node,
+                        bindings,
+                        receiver.format_map(mapping),
+                    )
+                except (IndexError, KeyError, ValueError, TypeError, OverflowError):
+                    pass
+            probe = _mapping_probe_from_template(receiver, format_map=True)
+            try:
+                rendered = receiver.format_map(probe)
+            except (IndexError, KeyError, ValueError, TypeError, OverflowError):
+                rendered = receiver + " " + " ".join(probe.values())
             return _with_dynamic_authorization_probe(node, bindings, rendered)
         if method == "join" and len(node.args) == 1 and not node.keywords:
             sequence = node.args[0]
@@ -1553,6 +1632,10 @@ def _validate_fixture_roots(
         if item["status"] == "pending":
             require(validator is None and files == [], "pending fixture must not claim artifacts")
             continue
+        # Ready roots are executable evidence, not merely artifact folders. A
+        # missing validator would let a root claim ready coverage without an
+        # entry point that can validate its listed cases.
+        require(type(validator) is str and bool(validator), "ready fixture must name a validator")
         require(bool(files), "ready fixture must list artifacts")
         actual_files = _actual_fixture_files(path, fixtures_root)
         listed: list[str] = []
