@@ -250,115 +250,39 @@ class CliTests(unittest.TestCase):
             subprocess.run(command, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return temporary
 
-    def _rebind_copy(
-        self,
-        repo_root: Path,
-        *,
-        refresh_anchor: bool = False,
-        refresh_authority: bool = False,
-    ) -> tuple[dict[str, object], dict[str, object]]:
-        """Refresh copied records, optionally pinning a fresh scanner authority.
-
-        Scanner regressions must reach the scanner under test instead of failing
-        at the immutable checkout authority first. The fresh authority is
-        created as the sole Git introduction of its path, while the dedicated
-        trust-root regression keeps the historical authority unchanged.
-        """
-        fixtures_root = repo_root / "contracts/fixtures"
-        index_path = fixtures_root / "index.json"
-        baseline_path = fixtures_root / "validator/validation-baseline.json"
-        index = json.loads(index_path.read_text(encoding="utf-8"))
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-
-        for fixture in index["fixture_roots"]:
-            for record in fixture["files"]:
-                artifact = fixtures_root / record["path"]
-                if artifact.is_file():
-                    data = artifact.read_bytes()
-                    record["size_bytes"] = len(data)
-                    record["sha256"] = hashlib.sha256(data).hexdigest()
-        index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
-
-        total = 0
-        for record in baseline["artifact_manifest"]:
-            artifact = repo_root / record["path"]
-            data = artifact.read_bytes()
-            record["size_bytes"] = len(data)
-            record["sha256"] = hashlib.sha256(data).hexdigest()
-            total += len(data)
-        baseline["artifact_size_bytes"] = total
-        baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-        if refresh_anchor:
-            validator_path = repo_root / "contracts/fixtures/validator/validate.py"
-            source = validator_path.read_text(encoding="utf-8")
-            old_anchor = f'BASELINE_CANONICAL_SHA256 = "{validate.BASELINE_CANONICAL_SHA256}"'
-            digest = validate._canonical_baseline_digest(baseline)
-            source = source.replace(old_anchor, f'BASELINE_CANONICAL_SHA256 = "{digest}"', 1)
-            validator_path.write_text(source, encoding="utf-8")
-            for record in baseline["artifact_manifest"]:
-                if record["path"] == validate.BASELINE_SELF_MANIFEST_PATH:
-                    data = validator_path.read_bytes()
-                    record["size_bytes"] = len(data)
-                    record["sha256"] = hashlib.sha256(data).hexdigest()
-            baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
-            baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-        if refresh_authority:
-            validator_path = repo_root / validate.BASELINE_SELF_MANIFEST_PATH
-            validator_bytes = validator_path.read_bytes()
-            baseline_bytes = baseline_path.read_bytes()
-            authority_path = repo_root / validate.VALIDATOR_AUTHORITY_PATH
-            authority_path.parent.mkdir(parents=True, exist_ok=True)
-            authority_path.write_text(
-                json.dumps(
-                    {
-                        "schema": validate.VALIDATOR_AUTHORITY_SCHEMA,
-                        "validator_path": validate.BASELINE_SELF_MANIFEST_PATH,
-                        "validator_size_bytes": len(validator_bytes),
-                        "validator_sha256": hashlib.sha256(validator_bytes).hexdigest(),
-                        "baseline_path": "contracts/fixtures/validator/validation-baseline.json",
-                        "baseline_size_bytes": len(baseline_bytes),
-                        "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
-                    },
-                    indent=2,
+    def _scan_artifact_bytes(self, relative_path: str, data: bytes) -> None:
+        """Run one artifact scanner without manufacturing a replacement trust root."""
+        with tempfile.TemporaryDirectory(prefix="fixture-scanner-") as directory:
+            path = Path(directory) / Path(relative_path).name
+            path.write_bytes(data)
+            allowed_assignments = validate.EXACT_ASSIGNMENT_ALLOWANCES.get(relative_path, frozenset())
+            allowed_full_values = validate.SYNTHETIC_FULL_VALUE_ALLOWANCES.get(relative_path, frozenset())
+            suffix = path.suffix.casefold()
+            if suffix == ".py":
+                validate._validate_python_file(
+                    path,
+                    allow_synthetic_markers=relative_path in validate.SYNTHETIC_MARKER_PATHS,
+                    allow_test_negative_basic_auth=relative_path in validate.TEST_NEGATIVE_BASIC_AUTH_PATHS,
+                    allow_test_negative_rfc7617_token=relative_path in validate.TEST_NEGATIVE_RFC7617_TOKEN_PATHS,
+                    allowed_assignment_values=allowed_assignments,
+                    allowed_synthetic_full_values=allowed_full_values,
                 )
-                + "\n",
-                encoding="utf-8",
-            )
-            shutil.rmtree(repo_root / ".git", ignore_errors=True)
-            subprocess.run(
-                ["git", "-C", str(repo_root), "init", "--quiet"],
-                check=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            subprocess.run(
-                ["git", "-C", str(repo_root), "add", "--", validate.VALIDATOR_AUTHORITY_PATH],
-                check=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(repo_root),
-                    "-c",
-                    "user.name=fixture-registry-tests",
-                    "-c",
-                    "user.email=fixture-registry-tests@example.invalid",
-                    "commit",
-                    "--quiet",
-                    "-m",
-                    "test authority",
-                ],
-                check=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        return index, baseline
+            elif suffix == ".json":
+                document = validate.load_json(path, require_object=False, reject_nul=False)
+                validate._validate_redaction_tree(document, allowed_assignment_values=allowed_assignments)
+                validate._reject_live_claims(document)
+            else:
+                validate._validate_text_file(path, allowed_assignment_values=allowed_assignments)
+
+    def _assert_scanner_rejects(self, relative_path: str, data: bytes) -> None:
+        with self.assertRaises(validate.ValidationError):
+            self._scan_artifact_bytes(relative_path, data)
+
+    def _assert_json_document_rejects(self, relative_path: str, document: dict[str, object]) -> None:
+        self._assert_scanner_rejects(
+            relative_path,
+            (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+        )
 
     def _assert_blocked_in_both_modes(self, repo_root: Path, *args: str) -> None:
         for optimized in (False, True):
@@ -373,11 +297,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["evidence_status"], "blocked")
 
     def _append_artifact_and_block(self, relative_path: str, addition: str) -> None:
-        repo_root = self._copy_fixture_repo()
-        artifact = repo_root / "contracts/fixtures" / relative_path
-        artifact.write_text(artifact.read_text(encoding="utf-8") + addition, encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-        self._assert_blocked_in_both_modes(repo_root)
+        artifact = validate.FIXTURES_ROOT / relative_path
+        self._assert_scanner_rejects(
+            relative_path,
+            artifact.read_bytes() + addition.encode("utf-8"),
+        )
 
     @staticmethod
     def _add_json_expected_value(document: dict[str, object], key: str, value: object) -> None:
@@ -453,27 +377,17 @@ class CliTests(unittest.TestCase):
         self._assert_blocked_in_both_modes(repo_root, "--schema", str(alternate_schema))
 
     def test_registered_python_sensitive_value_is_rejected_in_both_modes(self) -> None:
-        repo_root = self._copy_fixture_repo()
-        python_artifact = repo_root / "contracts/fixtures/connection-restoration/validate.py"
-        python_artifact.write_text(
-            python_artifact.read_text(encoding="utf-8")
-            + '\nFORGED_RETAINED_VALUE = "Bearer unredacted-secret-value-123456"\n',
-            encoding="utf-8",
+        self._append_artifact_and_block(
+            "connection-restoration/validate.py",
+            '\nFORGED_RETAINED_VALUE = "Bearer unredacted-secret-value-123456"\n',
         )
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-        self._assert_blocked_in_both_modes(repo_root)
 
     def test_registered_python_assignment_literal_and_comment_are_rejected_in_both_modes(self) -> None:
-        repo_root = self._copy_fixture_repo()
-        python_artifact = repo_root / "contracts/fixtures/connection-restoration/validate.py"
-        python_artifact.write_text(
-            python_artifact.read_text(encoding="utf-8")
-            + '\nFORGED_TICKET_LITERAL = "ticket=unredacted-secret-value-123456"\n'
+        self._append_artifact_and_block(
+            "connection-restoration/validate.py",
+            '\nFORGED_TICKET_LITERAL = "ticket=unredacted-secret-value-123456"\n'
             + '# token=unredacted-comment-secret-123456\n',
-            encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-        self._assert_blocked_in_both_modes(repo_root)
 
     def test_synthetic_marker_allowances_are_not_global(self) -> None:
         snippets = (
@@ -489,15 +403,10 @@ class CliTests(unittest.TestCase):
                 self._append_artifact_and_block("connection-restoration/validate.py", "\n" + snippet)
 
     def test_registered_validate_python_rejects_rfc7617_sample_in_both_modes(self) -> None:
-        repo_root = self._copy_fixture_repo()
-        python_artifact = repo_root / "contracts/fixtures/deployment-security/external-allowlist/validate.py"
-        python_artifact.write_text(
-            python_artifact.read_text(encoding="utf-8")
-            + '\nFORGED_BASIC = "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="\n',
-            encoding="utf-8",
+        self._append_artifact_and_block(
+            "deployment-security/external-allowlist/validate.py",
+            '\nFORGED_BASIC = "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="\n',
         )
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-        self._assert_blocked_in_both_modes(repo_root)
 
     def test_raw_rfc7617_token_is_rejected_in_indexed_python_and_text(self) -> None:
         token = validate.TEST_NEGATIVE_BASIC_AUTH_CANDIDATE
@@ -512,13 +421,11 @@ class CliTests(unittest.TestCase):
         token = validate.TEST_NEGATIVE_BASIC_AUTH_CANDIDATE
         for key, value in ((token, "redacted"), ("raw_token", token)):
             with self.subTest(key=key):
-                repo_root = self._copy_fixture_repo()
-                json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
-                document = json.loads(json_path.read_text(encoding="utf-8"))
+                document = json.loads(
+                    (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
+                )
                 self._add_json_expected_value(document, key, value)
-                json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-                self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-                self._assert_blocked_in_both_modes(repo_root)
+                self._assert_json_document_rejects("connection-restoration/cases.json", document)
 
     def test_regex_calls_and_static_string_construction_are_rejected_in_both_modes(self) -> None:
         snippets = (
@@ -532,6 +439,8 @@ class CliTests(unittest.TestCase):
             're.compile(r"https://live\\U0000002eexample\\U0000002enet/v1/.*")\n',
             're.compile(r"https://live\\N{FULL STOP}example\\N{FULL STOP}net/v1/.*")\n',
             're.compile(r"https://live\\056example\\056net/v1/.*")\n',
+            're.compile(r"https://l\\i\\v\\e\\.example\\.net/v1/.*")\n',
+            're.compile(r"https://live\\ .example\\ .net/v1/.*", re.X)\n',
             'FORGED_PLUS = "Authorization: " + "Basic AAAAAAAAAAAAAAAA"\n',
             'FORGED_RUNTIME_PLUS = "Authorization: Basic " + runtime_secret\n',
             'FORGED_RUNTIME_SCHEME_PLUS = "Authorization: " + runtime_scheme + " AAAAAAAAAAAAAAAA"\n',
@@ -609,13 +518,11 @@ class CliTests(unittest.TestCase):
             "connection-restoration/README.md",
             f"\n{split_bearer}\n",
         )
-        repo_root = self._copy_fixture_repo()
-        json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
-        document = json.loads(json_path.read_text(encoding="utf-8"))
+        document = json.loads(
+            (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
+        )
         self._add_json_expected_value(document, "control", split_bearer)
-        json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-        self._assert_blocked_in_both_modes(repo_root)
+        self._assert_json_document_rejects("connection-restoration/cases.json", document)
 
     def test_markdown_assignment_value_is_rejected_in_both_modes(self) -> None:
         self._append_artifact_and_block(
@@ -638,33 +545,66 @@ class CliTests(unittest.TestCase):
         )
         for alias in aliases:
             with self.subTest(alias=alias):
-                repo_root = self._copy_fixture_repo()
-                json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
-                document = json.loads(json_path.read_text(encoding="utf-8"))
+                document = json.loads(
+                    (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
+                )
                 # A boolean is otherwise ignored by the generic tree walk, so
                 # rejection proves the compact alias reached sensitive routing.
                 self._add_json_expected_value(document, alias, True)
-                json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-                self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-                self._assert_blocked_in_both_modes(repo_root)
+                self._assert_json_document_rejects("connection-restoration/cases.json", document)
+
+    def test_assignment_and_query_aliases_are_scanned_across_text(self) -> None:
+        for key in ("api_key", "x-api-key", "access_token", "refresh_token", "client_secret"):
+            with self.subTest(key=key):
+                self._assert_scanner_rejects(
+                    "connection-restoration/README.md",
+                    f"{key}=AAAAAAAAAAAAAAAA\n".encode("utf-8"),
+                )
+                self._assert_scanner_rejects(
+                    "connection-restoration/README.md",
+                    f"https://synthetic.invalid/?{key}=AAAAAAAAAAAAAAAA\n".encode("utf-8"),
+                )
+
+    def test_python_ast_credential_targets_and_flow_reassignment_fail_closed(self) -> None:
+        source = (
+            "api_key = runtime_secret\n"
+            "headers['x-api-key'] = runtime_secret\n"
+            "send(client_secret=runtime_secret)\n"
+            "payload = {'access_token': runtime_secret}\n"
+            "token = runtime_secret\n"
+            "forged = f'Authorization: Bearer {token}'\n"
+            "token = '<redacted>'\n"
+        )
+        self._assert_scanner_rejects("connection-restoration/validate.py", source.encode("utf-8"))
+
+    def test_sensitive_json_keys_reject_format_and_control_aliases(self) -> None:
+        for key in ("api​_key", "x-api⁠-key", "refresh_token"):
+            with self.subTest(key=key):
+                document = json.loads(
+                    (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
+                )
+                self._add_json_expected_value(document, key, True)
+                self._assert_json_document_rejects("connection-restoration/cases.json", document)
+
+    def test_url_userinfo_is_rejected_even_on_synthetic_hosts(self) -> None:
+        self._assert_scanner_rejects(
+            "connection-restoration/README.md",
+            b"https://fixture:password@synthetic.invalid/v1\n",
+        )
 
     def test_unicode_compatibility_forms_cannot_bypass_credential_scanners(self) -> None:
-        repo_root = self._copy_fixture_repo()
-        json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
-        document = json.loads(json_path.read_text(encoding="utf-8"))
-        self._add_json_expected_value(document, "ａｐｉ＿ｋｅｙ", True)
-        json_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-        self._assert_blocked_in_both_modes(repo_root)
-
-        repo_root = self._copy_fixture_repo()
-        readme = repo_root / "contracts/fixtures/connection-restoration/README.md"
-        readme.write_text(
-            readme.read_text(encoding="utf-8") + "\nｔｏｋｅｎ＝AAAAAAAAAAAAAAAA\n",
-            encoding="utf-8",
+        document = json.loads(
+            (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
         )
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-        self._assert_blocked_in_both_modes(repo_root)
+        self._add_json_expected_value(document, "ａｐｉ＿ｋｅｙ", True)
+        self._assert_json_document_rejects("connection-restoration/cases.json", document)
+        self._assert_scanner_rejects(
+            "connection-restoration/README.md",
+            (
+                (validate.FIXTURES_ROOT / "connection-restoration/README.md").read_text(encoding="utf-8")
+                + "\nｔｏｋｅｎ＝AAAAAAAAAAAAAAAA\n"
+            ).encode("utf-8"),
+        )
 
     def test_sensitive_json_values_still_receive_generic_scanning(self) -> None:
         for value in (
@@ -675,13 +615,11 @@ class CliTests(unittest.TestCase):
             "synthetic-unreviewed-marker",
         ):
             with self.subTest(value=value):
-                repo_root = self._copy_fixture_repo()
-                json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
-                document = json.loads(json_path.read_text(encoding="utf-8"))
+                document = json.loads(
+                    (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
+                )
                 self._add_json_expected_value(document, "token", value)
-                json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-                self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
-                self._assert_blocked_in_both_modes(repo_root)
+                self._assert_json_document_rejects("connection-restoration/cases.json", document)
 
     def test_central_validator_sources_must_remain_in_baseline_binding(self) -> None:
         repo_root = self._copy_fixture_repo()
@@ -694,7 +632,6 @@ class CliTests(unittest.TestCase):
         ]
         baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_unreviewed_central_validator_artifacts_are_rejected_in_both_modes(self) -> None:
@@ -735,7 +672,6 @@ class CliTests(unittest.TestCase):
         })
         fixture["files"].sort(key=lambda record: record["path"])
         index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_registered_non_test_source_rejects_rfc7617_sample_in_both_modes(self) -> None:
@@ -746,7 +682,6 @@ class CliTests(unittest.TestCase):
             + '\nAuthorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==\n',
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_nested_json_key_with_credential_shaped_text_is_rejected_in_both_modes(self) -> None:
@@ -759,7 +694,6 @@ class CliTests(unittest.TestCase):
             },
         }
         json_artifact.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_registered_ws_and_wss_live_hosts_are_rejected_in_both_modes(self) -> None:
@@ -770,7 +704,6 @@ class CliTests(unittest.TestCase):
             + "\nws://live.example.net and wss://live.example.net must never be retained.\n",
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_canonical_baseline_sample_distribution_manifest_replacement_is_rejected_in_both_modes(self) -> None:
@@ -809,7 +742,6 @@ class CliTests(unittest.TestCase):
             + 'TRUSTED_BASELINE_SHA256 = "' + ("0" * 64) + '"\n',
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_coverage_links_and_support_must_match_referenced_roots(self) -> None:
@@ -827,7 +759,6 @@ class CliTests(unittest.TestCase):
                 else:
                     coverage["required_states"] = ["pending", "success", "failure"]
                 index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
-                self._rebind_copy(repo_root, refresh_anchor=True)
                 self._assert_blocked_in_both_modes(repo_root)
 
     def test_ready_coverage_cannot_reference_pending_root_in_both_modes(self) -> None:
@@ -841,7 +772,6 @@ class CliTests(unittest.TestCase):
         provider["validator"] = None
         provider["files"] = []
         index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_ready_fixture_must_name_a_validator_in_both_modes(self) -> None:
@@ -851,8 +781,83 @@ class CliTests(unittest.TestCase):
         ready = next(item for item in index["fixture_roots"] if item["status"] == "ready")
         ready["validator"] = None
         index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)
+
+    def test_validator_role_requires_supported_executable_python(self) -> None:
+        """Keep metadata from promoting a data file or helper as the validator."""
+        with tempfile.TemporaryDirectory(prefix="fixture-validator-role-") as directory:
+            fixtures_root = Path(directory)
+            fixture_root = fixtures_root / "synthetic"
+            fixture_root.mkdir()
+            valid_source = (
+                "import sys\n"
+                "def main():\n"
+                "    return 0\n"
+                "if __name__==\"__main__\":sys.exit(main())\n"
+            )
+            for validator_name in ("validate.py", "test_role.py"):
+                path = fixture_root / validator_name
+                path.write_text(valid_source, encoding="utf-8")
+                validate._validate_validator_role(
+                    validator_name,
+                    fixture_root="synthetic",
+                    actual_files=[f"synthetic/{validator_name}"],
+                    fixtures_root=fixtures_root,
+                )
+                path.unlink()
+
+            invalid_roles = {
+                "README.md": "fixture documentation\n",
+                "cases.json": "{}\n",
+                "validate.sh": "#!/bin/sh\n",
+                "helper.py": "def main():\n    return 0\n",
+                "test_helper.py": "def main():\n    return 0\n",
+            }
+            for validator_name, source in invalid_roles.items():
+                with self.subTest(validator_name=validator_name):
+                    path = fixture_root / validator_name
+                    path.write_text(source, encoding="utf-8")
+                    with self.assertRaises(validate.ValidationError):
+                        validate._validate_validator_role(
+                            validator_name,
+                            fixture_root="synthetic",
+                            actual_files=[f"synthetic/{validator_name}"],
+                            fixtures_root=fixtures_root,
+                        )
+                    path.unlink()
+
+    def test_fixture_inventory_covers_ordinary_artifacts_and_rejects_special_files(self) -> None:
+        """Keep hidden, cache, bytecode, and binary entries inside the reviewed boundary."""
+        with tempfile.TemporaryDirectory(prefix="fixture-inventory-") as directory:
+            fixtures_root = Path(directory)
+            fixture_root = fixtures_root / "synthetic"
+            cache_root = fixture_root / "__pycache__"
+            cache_root.mkdir(parents=True)
+            expected = (
+                "synthetic/.DS_Store",
+                "synthetic/__pycache__/case.pyc",
+                "synthetic/cases.json",
+                "synthetic/payload.bin",
+            )
+            (fixture_root / ".DS_Store").write_bytes(b"synthetic cache marker\n")
+            (cache_root / "case.pyc").write_bytes(b"synthetic bytecode\n")
+            (fixture_root / "cases.json").write_text("{}\n", encoding="utf-8")
+            (fixture_root / "payload.bin").write_bytes(b"\\x00synthetic\\xff")
+            self.assertEqual(tuple(validate._actual_fixture_files("synthetic", fixtures_root)), expected)
+
+            symlink = fixture_root / "linked"
+            symlink.symlink_to("cases.json")
+            with self.assertRaises(validate.ValidationError):
+                validate._actual_fixture_files("synthetic", fixtures_root)
+            symlink.unlink()
+
+            fifo = fixture_root / "stream"
+            os.mkfifo(fifo)
+            try:
+                with self.assertRaises(validate.ValidationError):
+                    validate._actual_fixture_files("synthetic", fixtures_root)
+            finally:
+                fifo.unlink()
 
     def test_unknown_flag_is_one_bounded_redacted_line(self) -> None:
         normal = self._run("--unknown-flag=synthetic-secret-value")
