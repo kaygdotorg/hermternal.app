@@ -218,6 +218,25 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         bad_manifest["artifact_manifest_sha256"] = "0" * 64
         self._assert_rejected(bad_manifest)
 
+    def test_web_toolchain_identity_mutation_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for portable_path in validate.EXPECTED_ARTIFACT_PATHS[validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID]:
+                source = validate.WEB_BENCHMARK_ROOT / portable_path
+                destination = root / portable_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            trace_path = root / "evidence" / "raw-trace.json"
+            trace = validate.load_json(trace_path)
+            trace["toolchain"]["vite"]["sha256"] = "0" * 64
+            trace_path.write_text(json.dumps(trace, separators=(",", ":")), encoding="utf-8")
+            with self.assertRaises(validate.ValidationError):
+                validate.validate_evidence(
+                    self.web_document,
+                    root=root,
+                    expected_id=validate.WEB_PRODUCTION_BUILD_EVIDENCE_ID,
+                )
+
         traversal = copy.deepcopy(self.document)
         traversal["artifacts"][0]["path"] = "../outside.json"
         self._assert_rejected(traversal)

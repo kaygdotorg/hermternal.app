@@ -121,7 +121,7 @@ REDACTION_KEYS = (
     "contains_transcripts",
 )
 WEB_WORKLOAD_KEYS = (
-    "schema", "fixture_id", "fixture_version", "build", "repetitions", "limits", "network", "launcher", "hermes_source_sha"
+    "schema", "fixture_id", "fixture_version", "build", "repetitions", "limits", "network", "launcher", "integrity", "hermes_source_sha"
 )
 WEB_TRACE_KEYS = (
     "schema", "recorded_at_utc", "source_commit_sha", "fixture_sha256", "environment", "build_input", "toolchain",
@@ -132,6 +132,10 @@ WEB_TOOLCHAIN_KEYS = (
     "bun_executable", "python_executable", "sandbox_executable", "dependencies", "vite", "sveltekit",
     "vite_svelte_plugin", "svelte", "typescript_native"
 )
+WEB_INTEGRITY_KEYS = (
+    "package_json", "bun_lock", "dependencies", "vite", "sveltekit", "vite_svelte_plugin", "svelte", "typescript_native", "runtime"
+)
+WEB_RUNTIME_ANCHOR_KEYS = ("node", "bun", "python", "sandbox")
 WEB_FILE_IDENTITY_KEYS = ("bytes", "sha256")
 WEB_TREE_IDENTITY_KEYS = ("files", "symlinks", "bytes", "sha256")
 WEB_OBSERVATION_KEYS = (
@@ -894,6 +898,34 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
         "output_root": ".artifact-output/build",
         "version_name": "hermternal-web-production-build-v1",
     }, "web workload build changed")
+    integrity = _strict_keys(workload["integrity"], WEB_INTEGRITY_KEYS, "web workload.integrity")
+    for key in WEB_INTEGRITY_KEYS[:-1]:
+        if key in {"package_json", "bun_lock"}:
+            _strict_keys(integrity[key], WEB_FILE_IDENTITY_KEYS, f"web workload.integrity.{key}")
+        else:
+            _strict_keys(integrity[key], WEB_TREE_IDENTITY_KEYS, f"web workload.integrity.{key}")
+    runtime = _strict_keys(integrity["runtime"], ("darwin",), "web workload.integrity.runtime")
+    darwin_runtime = _strict_keys(runtime["darwin"], WEB_RUNTIME_ANCHOR_KEYS, "web workload.integrity.runtime.darwin")
+    for key in WEB_RUNTIME_ANCHOR_KEYS:
+        _strict_keys(darwin_runtime[key], WEB_FILE_IDENTITY_KEYS, f"web workload.integrity.runtime.darwin.{key}")
+    require(integrity == {
+        "package_json": {"bytes": 1546, "sha256": "bb6f27b61e87d4cd3af84a54b52ec3c0d78c4018a903114fc5cfb7887875f113"},
+        "bun_lock": {"bytes": 46368, "sha256": "f9999f93386967986d0393b34b008af2f71472fb4eb825062575fb9f822f8d3e"},
+        "dependencies": {"files": 5790, "symlinks": 15, "bytes": 156657114, "sha256": "a5f2903bdd8c2dd0a2654fb039e632cd053b1235f91afff2d21f77513cd70ad1"},
+        "vite": {"files": 42, "symlinks": 0, "bytes": 2500530, "sha256": "50fae63c7384b51a88596f83fbef112bfcf119371164e1817f383ab77a024145"},
+        "sveltekit": {"files": 194, "symlinks": 0, "bytes": 1295253, "sha256": "0ec64b01924815c0fc77e956a89751182da0ca44314723183fc48fae96e208cc"},
+        "vite_svelte_plugin": {"files": 38, "symlinks": 0, "bytes": 145592, "sha256": "909f391b0a3b76eb71c1d9b82538fface1ca76cad9e4c96ab4cb5dfb27c1f542"},
+        "svelte": {"files": 546, "symlinks": 0, "bytes": 3049600, "sha256": "2f9abf26cca39a363d037b2bb8e6194828e4dfb4168a8a48b870afbfee6e1b62"},
+        "typescript_native": {"files": 416, "symlinks": 0, "bytes": 2497498, "sha256": "d32f5c97c4752aa2d962de11058d4cda2737d0b92e5d1cb381a880f0e5fa28ad"},
+        "runtime": {
+            "darwin": {
+                "node": {"bytes": 50320, "sha256": "1ef99ea25fe70c9b67e7efe768ef8ee22148d3cabc703db6131b57aeb617d040"},
+                "bun": {"bytes": 61512816, "sha256": "fb46ac6497104821512b67a3b3157c9fbbab8a99e311fb38da5b7039a373d860"},
+                "python": {"bytes": 118928, "sha256": "179301dcb41ea78accc3fa0048a7e6f6710d891945a751a34addd622020c1818"},
+                "sandbox": {"bytes": 102560, "sha256": "8290e4be7387a0df83cd1559e86afd880464f269450573d012795761fe298f16"},
+            },
+        },
+    }, "web workload integrity anchors changed")
     repetitions = _strict_keys(workload["repetitions"], ("cold", "warm", "maximum"), "web workload.repetitions")
     require(repetitions == {"cold": 30, "warm": 30, "maximum": 100}, "web workload repetitions changed")
     limits = _strict_keys(workload["limits"], ("build_timeout_ms", "stdout_bytes", "stderr_bytes", "workspace_input_bytes", "artifact_files", "artifact_bytes", "node_heap_megabytes"), "web workload.limits")
@@ -902,7 +934,7 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     require(network == {"mode": "deny", "boundary": "os_sandbox"}, "web workload network boundary changed")
     launcher = _strict_keys(workload["launcher"], ("supervisor_sha256", "scanner_sha256"), "web workload.launcher")
     require(launcher == {
-        "supervisor_sha256": "b38eb87ef2e3395a31ae0223675ab0506ea2cdd5c40ed4720f76f5fa535a4869",
+        "supervisor_sha256": "e12eb3f7ec3e499802a27027cab6d188d4d60af544920b58be7fd48b8ff6c44b",
         "scanner_sha256": "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb",
     }, "web workload protected helper identities changed")
 
@@ -929,6 +961,24 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
         _integer(identity["symlinks"], f"web trace.toolchain.{key}.symlinks", minimum=0)
         _integer(identity["bytes"], f"web trace.toolchain.{key}.bytes", minimum=1)
         _text(identity["sha256"], f"web trace.toolchain.{key}.sha256", pattern=SHA256_RE)
+    anchored_toolchain = {
+        "package_json": integrity["package_json"],
+        "bun_lock": integrity["bun_lock"],
+        "node_executable": darwin_runtime["node"],
+        "bun_executable": darwin_runtime["bun"],
+        "python_executable": darwin_runtime["python"],
+        "sandbox_executable": darwin_runtime["sandbox"],
+        "dependencies": integrity["dependencies"],
+        "vite": integrity["vite"],
+        "sveltekit": integrity["sveltekit"],
+        "vite_svelte_plugin": integrity["vite_svelte_plugin"],
+        "svelte": integrity["svelte"],
+        "typescript_native": integrity["typescript_native"],
+    }
+    require(
+        {key: toolchain[key] for key in anchored_toolchain} == anchored_toolchain,
+        "web trace toolchain identities changed",
+    )
     require(trace["network_mode"] == "os_sandbox_deny", "web trace network mode changed")
     require(trace["limits"] == limits, "web trace limits changed")
     artifact_identities: set[str] = set()
