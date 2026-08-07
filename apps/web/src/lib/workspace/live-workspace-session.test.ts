@@ -259,6 +259,17 @@ describe('LiveWorkspaceSession', () => {
     expect(chat.sendPrompt).toHaveBeenNthCalledWith(2, 'Second prompt');
   });
 
+  it('maps authentication-required chat state to a permanent workspace error', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+
+    chat.changeState({ status: 'auth_required', generation: 1 });
+
+    expect(session.current.state).toBe('permanent-error');
+  });
+
   it('marks uncertain delivery without reconnecting or replaying the prompt', async () => {
     const rest = createRest([]);
     const chat = createChatHarness();

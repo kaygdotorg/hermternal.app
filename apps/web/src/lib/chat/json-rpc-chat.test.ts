@@ -951,6 +951,20 @@ describe("createJsonRpcChatTransport", () => {
     }
   });
 
+  it("publishes authentication-required ticket failures as auth_required", async () => {
+    const harness = makeHarness({
+      ticketProvider: async () => {
+        throw new JsonRpcChatError("authentication-required");
+      },
+    });
+
+    await expect(harness.transport.connect()).rejects.toMatchObject({
+      code: "authentication-required",
+    });
+    expect(harness.transport.state.status).toBe("auth_required");
+    expect(harness.sockets).toHaveLength(0);
+  });
+
   it("classifies every pinned close code and rejects unknown codes as incompatible", async () => {
     const cases: Array<[number, string]> = [
       [4401, "auth_required"],

@@ -25,6 +25,11 @@ retain a ticket, or reuse a ticket after the factory call. Every explicit
 `connect()` and `reconnect()` obtains a fresh ticket. Reconnect is never
 automatic.
 
+A genuine unauthenticated ticket response (`HTTP 401`) is represented as
+`authentication-required` and publishes `auth_required`; it is not downgraded to
+the generic retryable `failed` state. Other ticket failures, including `HTTP 403`,
+remain distinct from that unauthenticated state.
+
 The W-05 ticket client remains the owner of the authenticated
 `POST /api/auth/ws-ticket` boundary. `browser-chat.ts` composes that client with
 this transport for the pinned official Hermes image. It gives the real upgrade
@@ -34,6 +39,13 @@ history, callbacks, diagnostics, or retained evidence. W-05 issue
 [#119](https://github.com/kaygdotorg/hermternal/issues/119) and PR
 [#271](https://github.com/kaygdotorg/hermternal/pull/271) are integrated in
 `dev` at merge commit `965da31ba433c95c99ce85ef85f0485fa44e42e6`.
+
+While the browser adapter is between ticket acquisition and JSON-RPC socket
+consumption, it owns the prepared socket. Abort or provider failure clears and
+closes that socket exactly once. Successful `createWebSocket` consumption
+removes the browser abort listener before transferring ownership to JSON-RPC;
+this prevents a cancellation race from double-closing the underlying socket or
+poisoning the next explicit retry.
 
 The `official_image` evidence scope binds the immutable upstream image reference
 to the reviewed route manifest, source review, and proxy proof. The behavioral
@@ -229,6 +241,11 @@ The observable connection states are:
 `offline`, `auth_required`, `connecting`, `handshaking`, `ready`, `restoring`,
 `reconnecting`, `delivery_uncertain`, `incompatible`, `failed`, and `closing`.
 
+The browser ticket adapter maps only a genuine `401` ticket response to
+`authentication-required` and `auth_required`. The workspace treats that state
+as permanent until the user restores authentication; a `403` or transport
+failure remains a separate failure classification.
+
 A transport loss, send failure, or acknowledgement timeout after prompt send
 sets the prompt to `uncertain-delivery`. The completion rejects with that
 semantic error. Reconnect preserves only the selected session identifier and
@@ -330,8 +347,8 @@ The unit suite uses a deterministic fake WebSocket and covers:
 - disconnect before and after acknowledgement;
 - fresh-ticket reconnect, stale-generation suppression, explicit close/offline
   cleanup, reconnect suppression, and no prompt replay;
-- abort-triggered socket closure, send-failure cleanup, and late control-ack
-  suppression;
+- abort-triggered socket closure, send-failure cleanup, late control-ack
+  suppression, and genuine-401 `auth_required` publication;
 - complete compatibility evidence, missing-evidence failure, bounded gate
   timeout, route-manifest session-ID validation, approval/clarification owner
   validation, and acknowledgement deadlines;

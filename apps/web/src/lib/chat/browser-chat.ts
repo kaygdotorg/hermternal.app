@@ -11,6 +11,7 @@ import {
   type JsonRpcWebSocket,
 } from "./json-rpc-chat";
 import {
+  WsTicketError,
   createWsTicketClient,
   createWsTicketRequestBoundary,
   type WsTicketFetch,
@@ -78,19 +79,40 @@ export function createBrowserChatTransport(
   }
   const createSocket = options.createSocket ?? defaultSocketFactory;
   let preparedSocket: JsonRpcWebSocket | undefined;
+  let unlinkPreparedAbort: (() => void) | undefined;
+  const unlinkSocketAbort = new WeakMap<JsonRpcWebSocket, () => void>();
+
+  const releaseSocketAbort = (socket: JsonRpcWebSocket): void => {
+    unlinkSocketAbort.get(socket)?.();
+    unlinkSocketAbort.delete(socket);
+  };
+
+  const closePreparedSocket = (): void => {
+    const socket = preparedSocket;
+    preparedSocket = undefined;
+    unlinkPreparedAbort?.();
+    unlinkPreparedAbort = undefined;
+    if (socket) {
+      releaseSocketAbort(socket);
+      closeSocket(socket);
+    }
+  };
 
   const ticketClient = createWsTicketClient<JsonRpcWebSocket>({
     request: createWsTicketRequestBoundary(fetcher),
     connect: (upgradeUrl, signal) => {
-      const socket = createSocket(upgradeUrl.toString());
+      // Both the ticket boundary's late-result hook and this adapter's abort
+      // ownership can observe one cancellation. The wrapper makes that shared
+      // boundary idempotent before either path reaches the real socket.
+      const socket = createIdempotentSocket(createSocket(upgradeUrl.toString()));
       const closeOnAbort = (): void => {
-        try {
-          socket.close(1000, "cancelled");
-        } catch {
-          // The transport reports only its fixed cancellation diagnostic.
-        }
+        releaseSocketAbort(socket);
+        socket.close(1000, "cancelled");
       };
       signal.addEventListener("abort", closeOnAbort, { once: true });
+      unlinkSocketAbort.set(socket, () =>
+        signal.removeEventListener("abort", closeOnAbort),
+      );
       return socket;
     },
   });
@@ -99,9 +121,48 @@ export function createBrowserChatTransport(
     ...options,
     ticketProvider: async (signal) => {
       if (preparedSocket) {
+        closePreparedSocket();
         throw new JsonRpcChatError("invalid-options");
       }
-      preparedSocket = await ticketClient.open(signal);
+
+      let socket: JsonRpcWebSocket;
+      try {
+        socket = await ticketClient.open(signal);
+      } catch (error) {
+        closePreparedSocket();
+        // Only a genuine 401 means the browser is unauthenticated. Keep 403
+        // and other ticket failures out of the permanent auth-required state.
+        if (
+          error instanceof WsTicketError &&
+          error.code === "authentication-failed" &&
+          error.status === 401
+        ) {
+          throw new JsonRpcChatError("authentication-required");
+        }
+        throw error;
+      }
+
+      // The ticket client can resolve immediately before the outer JSON-RPC
+      // await observes cancellation. Do not publish a marker while retaining
+      // an unowned socket in that gap.
+      if (signal.aborted) {
+        releaseSocketAbort(socket);
+        closeSocket(socket);
+        throw new JsonRpcChatError("aborted");
+      }
+
+      preparedSocket = socket;
+      const onAbort = (): void => {
+        if (preparedSocket === socket) {
+          closePreparedSocket();
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      unlinkPreparedAbort = () => signal.removeEventListener("abort", onAbort);
+      if (signal.aborted) {
+        closePreparedSocket();
+        throw new JsonRpcChatError("aborted");
+      }
       return CONSUMED_TICKET_MARKER;
     },
     createWebSocket: (upgrade, signal) => {
@@ -111,10 +172,16 @@ export function createBrowserChatTransport(
         upgrade.query.ticket !== CONSUMED_TICKET_MARKER ||
         !preparedSocket
       ) {
-        throw new JsonRpcChatError("connection-failed");
+        closePreparedSocket();
+        throw new JsonRpcChatError(
+          signal.aborted ? "aborted" : "connection-failed",
+        );
       }
       const socket = preparedSocket;
       preparedSocket = undefined;
+      unlinkPreparedAbort?.();
+      unlinkPreparedAbort = undefined;
+      releaseSocketAbort(socket);
       return socket;
     },
     compatibilityEvidence: OFFICIAL_COMPATIBILITY_EVIDENCE,
@@ -124,6 +191,57 @@ export function createBrowserChatTransport(
     runBehavioralProbe: (evidence) =>
       verifyGatewayReadyBehavior(evidence.gatewayReadyPayload),
   });
+}
+
+function createIdempotentSocket(socket: JsonRpcWebSocket): JsonRpcWebSocket {
+  let closed = false;
+  return {
+    get onopen() {
+      return socket.onopen;
+    },
+    set onopen(handler: ((event?: unknown) => void) | null) {
+      socket.onopen = handler;
+    },
+    get onmessage() {
+      return socket.onmessage;
+    },
+    set onmessage(handler: ((event: { readonly data: unknown }) => void) | null) {
+      socket.onmessage = handler;
+    },
+    get onerror() {
+      return socket.onerror;
+    },
+    set onerror(handler: ((event?: unknown) => void) | null) {
+      socket.onerror = handler;
+    },
+    get onclose() {
+      return socket.onclose;
+    },
+    set onclose(handler: ((event?: { readonly code?: number; readonly reason?: string }) => void) | null) {
+      socket.onclose = handler;
+    },
+    send: (data) => socket.send(data),
+    close: (code, reason) => {
+      if (closed) return;
+      closed = true;
+      try {
+        socket.close(code, reason);
+      } catch {
+        // The first close owns the bounded cancellation outcome.
+      }
+    },
+    get readyState() {
+      return socket.readyState;
+    },
+  };
+}
+
+function closeSocket(socket: JsonRpcWebSocket): void {
+  try {
+    socket.close(1000, "cancelled");
+  } catch {
+    // Cleanup cannot replace the bounded connection diagnostic.
+  }
 }
 
 function defaultSocketFactory(url: string): JsonRpcWebSocket {

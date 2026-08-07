@@ -26,13 +26,18 @@ integration.
   an internal five-second deadline, including calls without a caller signal, so a
   stuck request or connector clears the coalescing slot and an explicit retry can
   acquire a fresh ticket. A connector result that arrives after cancellation is
-  closed through an idempotent late-resolution cleanup. After an attempt settles,
-  the next explicit call acquires a fresh ticket instead of reusing the old one.
+  closed through an idempotent late-resolution cleanup. The browser adapter shares
+  that idempotent close boundary with its own abort listener, owns a prepared
+  socket until JSON-RPC consumes it, and clears/closes it before retry when abort
+  happens in that handoff window. After an attempt settles, the next explicit call
+  acquires a fresh ticket instead of reusing the old one.
 - Propagate an `AbortSignal`; cancellation discards an unverified response and
   never starts an upgrade or an automatic retry.
 - Expose only bounded semantic errors. Response bodies, cookie or bearer values,
   ticket values, ticket fragments, URLs, and provider text are not copied into
-  errors or retained client state.
+  errors or retained client state. The browser consumer preserves a genuine
+  `HTTP 401` as unauthenticated/permanent state; `HTTP 403` remains a distinct
+  non-401 failure.
 
 The server contract remains authoritative for the exact 30-second, single-use
 lifetime. This client enforces the client-side half of that rule by never

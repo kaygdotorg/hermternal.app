@@ -98,6 +98,96 @@ describe("createBrowserChatTransport", () => {
     );
   });
 
+  it("closes a synchronous connector exactly once when abort wins before promise fulfillment", async () => {
+    const socket = new FakeWebSocket();
+    let transport: ReturnType<typeof createBrowserChatTransport>;
+    const connection = (transport = createBrowserChatTransport({
+      fetch: async () =>
+        new Response('{"ticket":"fresh-ticket-1","ttl_seconds":30}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      createSocket: () => {
+        queueMicrotask(() => transport.close());
+        return socket;
+      },
+    })).connect();
+
+    await expect(connection).rejects.toMatchObject({ code: "aborted" });
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(socket.close).toHaveBeenCalledWith(1000, "cancelled");
+  });
+
+  it("clears an unconsumed prepared socket on abort so the next connect is fresh", async () => {
+    const sockets = [new FakeWebSocket(), new FakeWebSocket()];
+    let transport: ReturnType<typeof createBrowserChatTransport>;
+    let connectCalls = 0;
+    const connection = (transport = createBrowserChatTransport({
+      fetch: async () =>
+        new Response('{"ticket":"fresh-ticket-1","ttl_seconds":30}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      createSocket: () => {
+        const socket = sockets[connectCalls];
+        connectCalls += 1;
+        if (!socket) throw new Error("missing socket");
+        if (connectCalls === 1) {
+          queueMicrotask(() => queueMicrotask(() => transport.close()));
+        }
+        return socket;
+      },
+    })).connect();
+
+    await expect(connection).rejects.toMatchObject({ code: "aborted" });
+    expect(sockets[0]?.close).toHaveBeenCalledTimes(1);
+
+    const retry = transport.connect();
+    const second = sockets[1];
+    await waitForAttachedSocket(sockets, 1);
+    second.emitOpen();
+    second.emitGatewayReady();
+    await retry;
+
+    expect(connectCalls).toBe(2);
+    expect(sockets[0]?.close).toHaveBeenCalledTimes(1);
+    expect(transport.state.status).toBe("ready");
+  });
+
+  it("maps a genuine ticket HTTP 401 to authentication-required state", async () => {
+    const socket = new FakeWebSocket();
+    const transport = createBrowserChatTransport({
+      fetch: async () =>
+        new Response("unauthenticated", {
+          status: 401,
+          headers: { "content-type": "text/plain" },
+        }),
+      createSocket: () => socket,
+    });
+
+    await expect(transport.connect()).rejects.toMatchObject({
+      code: "authentication-required",
+    });
+    expect(transport.state.status).toBe("auth_required");
+    expect(socket.close).not.toHaveBeenCalled();
+  });
+
+  it("does not classify a ticket HTTP 403 as authentication-required", async () => {
+    const transport = createBrowserChatTransport({
+      fetch: async () =>
+        new Response("forbidden", {
+          status: 403,
+          headers: { "content-type": "text/plain" },
+        }),
+      createSocket: () => new FakeWebSocket(),
+    });
+
+    await expect(transport.connect()).rejects.toMatchObject({
+      code: "connection-failed",
+    });
+    expect(transport.state.status).toBe("failed");
+  });
+
   it("fails closed when gateway.ready omits source-backed behavior keys", async () => {
     const socket = new FakeWebSocket();
     const transport = createBrowserChatTransport({

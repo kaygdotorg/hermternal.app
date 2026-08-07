@@ -153,6 +153,7 @@ export type JsonRpcCompatibilityGate = (
 export type JsonRpcChatErrorCode =
   | "aborted"
   | "ack-timeout"
+  | "authentication-required"
   | "cancelled"
   | "closed"
   | "connection-failed"
@@ -172,6 +173,7 @@ export type JsonRpcChatErrorCode =
 const ERROR_MESSAGES: Record<JsonRpcChatErrorCode, string> = {
   aborted: "The chat connection attempt was cancelled.",
   "ack-timeout": "The chat operation acknowledgement timed out.",
+  "authentication-required": "Chat authentication is required.",
   cancelled: "The chat request was cancelled.",
   closed: "The chat connection is closing.",
   "connection-failed": "The chat WebSocket connection failed.",
@@ -726,9 +728,12 @@ export function createJsonRpcChatTransport(
     context: SocketContext,
     code: JsonRpcChatErrorCode,
     reason: JsonRpcCloseReason,
-    status: JsonRpcConnectionStatus = code === "incompatible"
-      ? "incompatible"
-      : "failed",
+    status: JsonRpcConnectionStatus =
+      code === "incompatible"
+        ? "incompatible"
+        : code === "authentication-required"
+          ? "auth_required"
+          : "failed",
   ): void => {
     if (context.closed) {
       return;
@@ -1433,9 +1438,11 @@ export function createJsonRpcChatTransport(
           const status =
             sanitized.code === "incompatible"
               ? "incompatible"
-              : sanitized.code === "aborted"
-                ? "offline"
-                : "failed";
+              : sanitized.code === "authentication-required"
+                ? "auth_required"
+                : sanitized.code === "aborted"
+                  ? "offline"
+                  : "failed";
           invalidateContext(
             context,
             sanitized.code === "incompatible"
@@ -1447,7 +1454,11 @@ export function createJsonRpcChatTransport(
         }
         if (generation === currentGeneration && sanitized.code !== "aborted") {
           setState(
-            sanitized.code === "incompatible" ? "incompatible" : "failed",
+            sanitized.code === "incompatible"
+              ? "incompatible"
+              : sanitized.code === "authentication-required"
+                ? "auth_required"
+                : "failed",
             generation,
           );
         } else if (
