@@ -419,6 +419,62 @@ describe('createLiveRestTransport', () => {
     expect(omitted.messages[0]).not.toHaveProperty('toolCalls');
   });
 
+  it('preserves omitted, null, and valid tool metadata across roles while rejecting malformed types', async () => {
+    const roles = ['user', 'assistant', 'system', 'tool'] as const;
+    const messages = roles.flatMap((role) => [
+      { role, content: `Synthetic ${role} omitted` },
+      { role, content: `Synthetic ${role} null`, tool_name: null, tool_call_id: null },
+      {
+        role,
+        content: `Synthetic ${role} strings`,
+        tool_name: `${role}-tool`,
+        tool_call_id: `${role}-call`
+      }
+    ]);
+    const payload = {
+      session_id: LIVE_SESSION_MESSAGES_FIXTURE.sessionId,
+      messages,
+      pagination: { limit: null, offset: 0, returned: messages.length }
+    };
+
+    const parsed = await createLiveRestTransport({
+      fetch: fetchSequence(response(JSON.stringify(payload))).fetch
+    }).getSessionMessages(LIVE_SESSION_MESSAGES_FIXTURE.sessionId);
+
+    expect(parsed.messages).toHaveLength(roles.length * 3);
+    roles.forEach((role, roleIndex) => {
+      const omitted = parsed.messages[roleIndex * 3];
+      const nulled = parsed.messages[roleIndex * 3 + 1];
+      const valued = parsed.messages[roleIndex * 3 + 2];
+
+      expect(omitted).not.toHaveProperty('toolName');
+      expect(omitted).not.toHaveProperty('toolCallId');
+      expect(nulled).toMatchObject({ toolName: null, toolCallId: null });
+      expect(valued).toMatchObject({
+        toolName: `${role}-tool`,
+        toolCallId: `${role}-call`
+      });
+    });
+
+    const malformedValues = [true, 42, [], {}] as const;
+    for (const role of roles) {
+      for (const field of ['tool_name', 'tool_call_id'] as const) {
+        for (const malformedValue of malformedValues) {
+          const invalidPayload = {
+            session_id: LIVE_SESSION_MESSAGES_FIXTURE.sessionId,
+            messages: [{ role, content: 'Synthetic malformed metadata', [field]: malformedValue }],
+            pagination: { limit: null, offset: 0, returned: 1 }
+          };
+          await expect(
+            createLiveRestTransport({
+              fetch: fetchSequence(response(JSON.stringify(invalidPayload))).fetch
+            }).getSessionMessages(LIVE_SESSION_MESSAGES_FIXTURE.sessionId)
+          ).rejects.toMatchObject({ code: 'invalid-response' });
+        }
+      }
+    }
+  });
+
   it('accepts bounded fractional Unix timestamps emitted by the official Hermes session store', async () => {
     const session = JSON.parse(rawSession()) as Record<string, unknown>;
     session.started_at = 1_767_225_600.125;

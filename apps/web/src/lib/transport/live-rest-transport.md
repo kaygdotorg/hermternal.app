@@ -67,12 +67,13 @@ Pinned source citations at `f5be9236e00ddf2f2a412697f267078fc4ee068e`:
   activity/token counters, and optional `parent_session_id`.
 - The same pinned web type defines `SessionMessage.content` as `string | null`
   and permits optional `tool_calls`, `tool_name`, `tool_call_id`, and numeric
-  `timestamp`. Official history can serialize the optional `tool_calls` field as
-  explicit `null` when no tool calls exist, so this client accepts omitted,
-  `null`, or bounded array values and preserves the distinction between omitted
-  and explicit null. That type remains authoritative for the non-null array
-  shape: arbitrary arrays or dictionaries at the content root are rejected
-  rather than preserved as an invented multimodal schema.
+  `timestamp`. Official history can serialize any of those optional tool fields
+  as explicit `null` when they have no value. This client accepts omitted,
+  `null`, or bounded array/string values as appropriate and preserves the
+  distinction between omitted and explicit null. The non-null `tool_calls` array
+  shape remains source-authoritative: arbitrary arrays or dictionaries at the
+  content root are rejected rather than preserved as an invented multimodal
+  schema.
 - [`dashboard_auth/routes.py#L778-L791`](https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/dashboard_auth/routes.py#L778-L791)
   returns the verified identity, including non-null source fields and numeric
   `expires_at`, from the authenticated session.
@@ -108,9 +109,10 @@ budgets:
   as provider names and session IDs.
 - Message content is `null` or a bounded string. Optional `tool_calls` is
   projected as omitted, explicit `null`, or a bounded array whose members have
-  the pinned scalar/object shapes. Optional tool metadata is otherwise
-  projected only when its fields have those shapes; arbitrary arrays and
-  dictionaries at the content root are rejected.
+  the pinned scalar/object shapes. Optional `tool_name` and `tool_call_id` are
+  projected as omitted, explicit `null`, or bounded strings; their source values
+  are not coerced. Other types fail closed, and arbitrary arrays or dictionaries
+  at the content root are rejected.
 - Duplicate keys, non-finite or unsafe numbers, excessive depth, nodes, strings,
   arrays, and object keys are rejected before these conversions. Unknown additive
   fields are ignored only after those parser budgets pass.
