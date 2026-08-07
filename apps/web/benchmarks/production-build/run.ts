@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants as fsConstants, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
-import { copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises';
 import { arch, cpus, platform, release, tmpdir, type } from 'node:os';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -1073,7 +1073,10 @@ export async function treeIdentity(root: string): Promise<TreeIdentity> {
         if (target !== resolvedRoot && !target.startsWith(`${resolvedRoot}${sep}`)) {
           throw new BenchmarkError('dependency_symlink_escape');
         }
-        const targetText = relative(dirname(path), target).split(sep).join('/');
+        // Hash the stored link text, not the resolved absolute path. Clone
+        // destinations vary per run; the raw relative link is the stable
+        // dependency identity while realpath above still rejects escapes.
+        const targetText = (await readlink(path)).split(sep).join('/');
         records.push({ path: relative(root, path).split(sep).join('/'), type: 'symlink', bytes: 0, sha256: sha256(targetText) });
       } else throw new BenchmarkError('dependency_type_invalid');
     }
