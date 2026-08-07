@@ -371,6 +371,41 @@ describe("C-20 TypeScript contract parity", () => {
     }
   });
 
+  it("rejects a coordinated compatibility record and registry authority substitution", async () => {
+    const temporaryRoot = await writeParityFixtureTree();
+    try {
+      const artifact = "source-audit/compatibility-gate/compatibility_record.json";
+      const path = join(temporaryRoot, "contracts/fixtures", artifact);
+      const record = await Bun.file(path).json() as Record<string, unknown>;
+      const observations = record.observations as Record<string, unknown>;
+      const durations = observations.validator_duration_ms as Record<string, Record<string, unknown>>;
+      const normal = durations.normal!;
+      const samples = normal.samples_ms as number[];
+      samples[0] = Number((samples[0]! + 0.123).toFixed(3));
+      const ordered = [...samples].sort((left, right) => left - right);
+      const percentile = (fraction: number): number =>
+        ordered[Math.min(ordered.length - 1, Math.max(0, Math.ceil(fraction * ordered.length) - 1))]!;
+      normal.distribution = {
+        min: Number(ordered[0]!.toFixed(3)),
+        p50: Number(percentile(0.5).toFixed(3)),
+        p95: Number(percentile(0.95).toFixed(3)),
+        p99: Number(percentile(0.99).toFixed(3)),
+        max: Number(ordered[ordered.length - 1]!.toFixed(3)),
+        mean: Number((samples.reduce((sum, sample) => sum + sample, 0) / samples.length).toFixed(3)),
+      };
+      await Bun.write(path, `${JSON.stringify(record)}\n`);
+      await refreshManifest(temporaryRoot, artifact);
+
+      const registry = await loadRegistry(temporaryRoot);
+      await expect(loadCompatibilityRecord(temporaryRoot, registry)).rejects.toMatchObject({
+        code: "incompatible_input",
+        message: "compatibility record differs from its canonical Git authority",
+      });
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
   it("matches normal and optimized Python decisions for checked-in compatibility evidence", async () => {
     const validator = join(repoRoot, "contracts/fixtures/source-audit/compatibility-gate/validate.py");
     const record = join(repoRoot, "contracts/fixtures/source-audit/compatibility-gate/compatibility_record.json");

@@ -89,10 +89,13 @@ require lexical JSON integers, so values such as PR number `221.0` are rejected
 rather than normalized to `221`. The compatibility record pins its canonical
 source and revision snapshots, merged PR sequence, artifact paths and manifest
 digest, benchmark commands and recomputed distributions, status, redaction, and
-blocker contracts before any evidence is projected. The checker reads every pinned
-artifact directly from the reviewed merged and integration Git revisions. When it
-runs against this repository, it also checks current `HEAD`, matching the normal
-and `-O` Python validator's captured-snapshot decision. Report decisions and
+blocker contracts before any evidence is projected. The record itself must also
+match the canonical captured `HEAD` blob byte-for-byte, including its independently
+pinned size and SHA-256. This prevents a coordinated record plus registry-digest
+rewrite from substituting self-consistent benchmark evidence. The checker reads
+every pinned artifact directly from the reviewed merged and integration Git
+revisions. When it runs against this repository, it also checks current `HEAD`,
+matching the normal and `-O` Python validator's captured-snapshot decision. Report decisions and
 compatibility fields are bounded. Contract error codes and messages normalize
 controls and lone surrogates, then enforce their limit against serialized UTF-8
 bytes rather than UTF-16 units. The CLI therefore emits one small JSON line on

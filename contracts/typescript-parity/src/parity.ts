@@ -433,6 +433,11 @@ const EXPECTED_COMPATIBILITY_MERGED_HEAD = "8465bd4cacc87fe62ff952c38d7f3c2b5927
 const EXPECTED_COMPATIBILITY_MERGED_TREE = "aede9b87932f5cc28462120ef28be52a9a4aba7f";
 const EXPECTED_COMPATIBILITY_INTEGRATION_HEAD = "0671593b42235d4fbad2f7f3e04255c9f51b257d";
 const EXPECTED_COMPATIBILITY_INTEGRATION_TREE = "16fac2e9d6aa64dd2631b9f4b445146c115acfb0";
+const EXPECTED_COMPATIBILITY_RECORD = {
+  path: "contracts/fixtures/source-audit/compatibility-gate/compatibility_record.json",
+  sha256: "baddfc67cb92cfe024dc64310a4f9b6f6ea28dab26652a1965fcf7579084559f",
+  sizeBytes: 11_030,
+} as const;
 const EXPECTED_COMPATIBILITY_MERGED_PRS = [
   [221, "203dfca63eb073e5d4ddc27921447b5d0ab64a51"],
   [216, "8465bd4cacc87fe62ff952c38d7f3c2b5927bfbd"],
@@ -2112,6 +2117,33 @@ async function validateCompatibilityGitEvidence(repoRoot: string): Promise<void>
   }
 }
 
+async function validateCompatibilityRecordAuthority(repoRoot: string, root: FixtureRoot): Promise<void> {
+  const registered = registeredArtifact(root);
+  const expectedRelativePath = EXPECTED_COMPATIBILITY_RECORD.path.replace("contracts/fixtures/", "");
+  if (registered.path !== expectedRelativePath) {
+    fail("incompatible_input", "compatibility record path changed from the canonical authority");
+  }
+  const candidateBytes = await readBoundedBytes(
+    join(repoRoot, "contracts/fixtures", registered.path),
+    "compatibility canonical record",
+    registered,
+    MAX_COMPATIBILITY_JSON_BYTES,
+  );
+  const capturedBytes = await gitBlob("HEAD", EXPECTED_COMPATIBILITY_RECORD.path);
+  if (
+    candidateBytes.byteLength !== EXPECTED_COMPATIBILITY_RECORD.sizeBytes
+    || sha256(candidateBytes) !== EXPECTED_COMPATIBILITY_RECORD.sha256
+    || capturedBytes.byteLength !== EXPECTED_COMPATIBILITY_RECORD.sizeBytes
+    || sha256(capturedBytes) !== EXPECTED_COMPATIBILITY_RECORD.sha256
+    || candidateBytes.some((byte, index) => byte !== capturedBytes[index])
+  ) {
+    // The focused Python validator binds the record to the captured HEAD blob.
+    // Requiring the same bytes prevents a caller from recomputing internally
+    // consistent benchmark metadata and then blessing it through a changed index.
+    fail("incompatible_input", "compatibility record differs from its canonical Git authority");
+  }
+}
+
 function validateCompatibilityArtifact(artifact: JsonRecord): JsonRecord {
   const entry = exactRecord(artifact, "compatibility record", COMPATIBILITY_RECORD_KEYS);
   literal(entry.schema, "hermternal.compatibility-gate.v1", "compatibility schema");
@@ -2227,8 +2259,10 @@ export async function loadCompatibilityRecord(repoRoot: string, registry: Fixtur
     return blockedCompatibilityRecord(blockedStatus);
   }
 
-  const artifact = await loadArtifact(await canonicalRepositoryRoot(repoRoot), root, registry);
+  const canonicalRoot = await canonicalRepositoryRoot(repoRoot);
+  const artifact = await loadArtifact(canonicalRoot, root, registry);
   const status = validateCompatibilityArtifact(artifact);
+  await validateCompatibilityRecordAuthority(canonicalRoot, root);
   await validateCompatibilityGitEvidence(repoRoot);
   return immutableSnapshot({
     compatible: false,
