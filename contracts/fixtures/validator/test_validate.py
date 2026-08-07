@@ -19,6 +19,42 @@ from pathlib import Path
 import validate
 
 
+AUTHORITY_PIN_PATH = validate.REPO_ROOT / "scripts/fixture_registry_authority.v2.hardened.pin.json"
+
+
+def _active_authority_environment() -> dict[str, str]:
+    """Load the post-rotation runtime pin used by local synthetic tests."""
+
+    pin = json.loads(AUTHORITY_PIN_PATH.read_text(encoding="utf-8"))
+    if pin.get("schema") != "hermternal.fixture-registry-authority-pin.v1":
+        raise AssertionError("active authority pin schema changed")
+    if pin.get("authority_path") != validate.VALIDATOR_AUTHORITY_PATH:
+        raise AssertionError("active authority pin path changed")
+    authority_commit = pin.get("authority_commit")
+    source_commit = pin.get("source_commit")
+    if not isinstance(authority_commit, str) or not validate.HEX40.fullmatch(authority_commit):
+        raise AssertionError("active authority introduction pin is invalid")
+    if not isinstance(source_commit, str) or not validate.HEX40.fullmatch(source_commit):
+        raise AssertionError("active authority source pin is invalid")
+    return {
+        validate.ACTIVE_AUTHORITY_COMMIT_ENV: authority_commit,
+        validate.ACTIVE_SOURCE_COMMIT_ENV: source_commit,
+    }
+
+
+def _install_active_authority_environment(test_case: unittest.TestCase) -> None:
+    previous = {name: os.environ.get(name) for name in _active_authority_environment()}
+    os.environ.update(_active_authority_environment())
+
+    def restore() -> None:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    test_case.addClassCleanup(restore)
+
 
 class StrictJsonTests(unittest.TestCase):
     def _write(self, payload: bytes) -> Path:
@@ -69,9 +105,23 @@ class StrictJsonTests(unittest.TestCase):
 class RegistryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        _install_active_authority_environment(cls)
         cls.index = validate.load_json(validate.INDEX_PATH)
         cls.schema = validate.load_json(validate.SCHEMA_PATH)
         cls.baseline = validate.load_json(validate.BASELINE_PATH)
+        cls.object_repo_temporary = tempfile.TemporaryDirectory(prefix="fixture-validator-object-repo-")
+        cls.object_repo = Path(cls.object_repo_temporary.name) / "repo"
+        completed = subprocess.run(
+            ["git", "clone", "--no-hardlinks", "--quiet", str(validate.REPO_ROOT), str(cls.object_repo)],
+            cwd=validate.REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            cls.object_repo_temporary.cleanup()
+            raise AssertionError(completed.stderr or completed.stdout)
+        cls.addClassCleanup(cls.object_repo_temporary.cleanup)
 
     def test_checked_in_registry_is_valid_and_partial_is_not_success(self) -> None:
         fixture_count, coverage_count = validate.validate_all(
@@ -80,6 +130,7 @@ class RegistryTests(unittest.TestCase):
             self.baseline,
             repo_root=validate.REPO_ROOT,
             baseline_path=validate.BASELINE_PATH,
+            object_repo=self.object_repo,
         )
         self.assertEqual(fixture_count, len(self.index["fixture_roots"]))
         self.assertEqual(coverage_count, len(self.index["coverage"]))
@@ -229,20 +280,21 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
 
     def test_git_object_authority_matches_direct_v2_predecessor(self) -> None:
-        authority = validate._trusted_authority(validate.REPO_ROOT)
+        authority = validate._trusted_authority(validate.REPO_ROOT, self.object_repo)
         self.assertEqual(authority["schema"], validate.VALIDATOR_AUTHORITY_SCHEMA)
         self.assertEqual(authority["role"], validate.VALIDATOR_AUTHORITY_ROLE)
-        introduction = validate._authority_commit(validate.REPO_ROOT)
-        first_parent = validate._git(validate.REPO_ROOT, "rev-parse", f"{introduction}^1").decode("ascii").strip()
-        self.assertEqual(authority["source_commit"], first_parent)
+        self.assertEqual(authority["authority_path"], validate.VALIDATOR_AUTHORITY_PATH)
+        self.assertNotEqual(authority["authority_commit"], authority["source_commit"])
         records = {record["path"]: record for record in authority["artifact_manifest"]}
         self.assertEqual(tuple(records), validate.AUTHORITY_ARTIFACT_PATHS)
         for path in validate.AUTHORITY_ARTIFACT_PATHS:
-            blob_oid, data = validate._git_blob(
-                validate.REPO_ROOT,
-                authority["source_commit"],
-                path,
+            data = subprocess.check_output(
+                ["git", "-C", str(self.object_repo), "show", f"{authority['source_commit']}:{path}"],
             )
+            blob_oid = subprocess.check_output(
+                ["git", "-C", str(self.object_repo), "rev-parse", f"{authority['source_commit']}:{path}"],
+                text=True,
+            ).strip()
             record = records[path]
             self.assertEqual(blob_oid, record["blob_oid"])
             self.assertEqual(len(data), record["size_bytes"])
@@ -250,18 +302,49 @@ class RegistryTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        _install_active_authority_environment(cls)
+        cls.object_repo_temporary = tempfile.TemporaryDirectory(prefix="fixture-validator-cli-object-repo-")
+        cls.object_repo = Path(cls.object_repo_temporary.name) / "repo"
+        completed = subprocess.run(
+            ["git", "clone", "--no-hardlinks", "--quiet", str(validate.REPO_ROOT), str(cls.object_repo)],
+            cwd=validate.REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            cls.object_repo_temporary.cleanup()
+            raise AssertionError(completed.stderr or completed.stdout)
+        cls.addClassCleanup(cls.object_repo_temporary.cleanup)
+
     def _run(
         self,
         *args: str,
         optimized: bool = False,
         repo_root: Path = validate.REPO_ROOT,
+        object_repo: Path | None = None,
+        environment_overrides: dict[str, str | None] | None = None,
+        include_object_repo: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         command = [sys.executable]
         if optimized:
             command.append("-O")
         script = repo_root / "contracts/fixtures/validator/validate.py"
-        command.extend([str(script), *args])
+        object_repo = self.object_repo if object_repo is None else object_repo
+        command.append(str(script))
+        if include_object_repo:
+            command.extend(["--object-repo", str(object_repo)])
+        command.extend(args)
         environment = dict(os.environ)
+        environment.update(_active_authority_environment())
+        if environment_overrides:
+            for name, value in environment_overrides.items():
+                if value is None:
+                    environment.pop(name, None)
+                else:
+                    environment[name] = value
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         return subprocess.run(
             command,
@@ -281,23 +364,11 @@ class CliTests(unittest.TestCase):
             validate.REPO_ROOT / "contracts/fixtures",
             temporary / "contracts/fixtures",
         )
-        authority_commit = validate._authority_commit(validate.REPO_ROOT)
-        for command in (
-            ["git", "-C", str(temporary), "init", "--quiet"],
-            [
-                "git",
-                "-C",
-                str(temporary),
-                "fetch",
-                "--quiet",
-                "--no-tags",
-                str(validate.REPO_ROOT),
-                authority_commit,
-            ],
-            ["git", "-C", str(temporary), "update-ref", "refs/heads/authority-test", "FETCH_HEAD"],
-            ["git", "-C", str(temporary), "symbolic-ref", "HEAD", "refs/heads/authority-test"],
-        ):
-            subprocess.run(command, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        (temporary / "scripts").mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(
+            validate.REPO_ROOT / "scripts/verify_fixture_registry_authority.py",
+            temporary / "scripts/verify_fixture_registry_authority.py",
+        )
         return temporary
 
     def _scan_artifact_bytes(self, relative_path: str, data: bytes) -> None:
@@ -355,6 +426,44 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertFalse(payload["live_claim"])
             self.assertEqual(payload["evidence_status"], "blocked")
+
+    def test_active_authority_runtime_pins_are_required_and_exact(self) -> None:
+        valid = _active_authority_environment()
+        pin_cases = (
+            {
+                validate.ACTIVE_AUTHORITY_COMMIT_ENV: None,
+                validate.ACTIVE_SOURCE_COMMIT_ENV: None,
+            },
+            {
+                validate.ACTIVE_AUTHORITY_COMMIT_ENV: "0" * 40,
+                validate.ACTIVE_SOURCE_COMMIT_ENV: valid[validate.ACTIVE_SOURCE_COMMIT_ENV],
+            },
+            {
+                validate.ACTIVE_AUTHORITY_COMMIT_ENV: valid[validate.ACTIVE_AUTHORITY_COMMIT_ENV],
+                validate.ACTIVE_SOURCE_COMMIT_ENV: "0" * 40,
+            },
+        )
+        for overrides in pin_cases:
+            with self.subTest(overrides=overrides):
+                normal = self._run(environment_overrides=overrides)
+                optimized = self._run(optimized=True, environment_overrides=overrides)
+                self.assertEqual(normal.stdout, optimized.stdout)
+                self.assertEqual(normal.returncode, 1)
+                self.assertEqual(optimized.returncode, 1)
+                self.assertEqual(normal.stderr, "")
+                self.assertEqual(optimized.stderr, "")
+                self.assertEqual(json.loads(normal.stdout), json.loads(optimized.stdout))
+
+    def test_plain_object_repository_is_required_and_separate(self) -> None:
+        missing = self._run(include_object_repo=False)
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(missing.stderr, "")
+        self.assertEqual(json.loads(missing.stdout)["evidence_status"], "blocked")
+
+        same = self._run(object_repo=validate.REPO_ROOT)
+        self.assertEqual(same.returncode, 1)
+        self.assertEqual(same.stderr, "")
+        self.assertEqual(json.loads(same.stdout)["evidence_status"], "blocked")
 
     def _append_artifact_and_block(self, relative_path: str, addition: str) -> None:
         artifact = validate.FIXTURES_ROOT / relative_path
@@ -707,6 +816,56 @@ class CliTests(unittest.TestCase):
                     (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
                 )
                 self._add_json_expected_value(document, "token", value)
+                self._assert_json_document_rejects("connection-restoration/cases.json", document)
+
+    def test_retained_content_aliases_preserve_shape_but_reject_content(self) -> None:
+        allowed = {
+            "messages": "<redacted>",
+            "conversation": "not_retained",
+            "chat_history": None,
+            "terminal": True,
+            "terminal_output": "<placeholder>",
+            "tool_output": False,
+            "provider": "fixture-provider",
+            "provider_state": "registered_password",
+            "user_data": False,
+            "transcript_text": "not_recorded",
+            "pty_transcript": None,
+        }
+        for key, value in allowed.items():
+            with self.subTest(key=key, value=value):
+                document = json.loads(
+                    (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
+                )
+                self._add_json_expected_value(document, key, value)
+                self._scan_artifact_bytes(
+                    "connection-restoration/cases.json",
+                    (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+                )
+
+        for key in (
+            "messages",
+            "conversation",
+            "chat_history",
+            "terminal_output",
+            "tool_output",
+            "user_data",
+            "transcript_text",
+            "pty_transcript",
+        ):
+            with self.subTest(key=key):
+                document = json.loads(
+                    (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
+                )
+                self._add_json_expected_value(document, key, "unreviewed retained content")
+                self._assert_json_document_rejects("connection-restoration/cases.json", document)
+
+        for key, value in (("terminal", "true"), ("provider", "opaque provider secret"), ("provider_state", "opaque provider secret")):
+            with self.subTest(key=key):
+                document = json.loads(
+                    (validate.FIXTURES_ROOT / "connection-restoration/cases.json").read_text(encoding="utf-8")
+                )
+                self._add_json_expected_value(document, key, value)
                 self._assert_json_document_rejects("connection-restoration/cases.json", document)
 
     def test_central_validator_sources_must_remain_in_baseline_binding(self) -> None:

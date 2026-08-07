@@ -18,10 +18,14 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
+import stat
 import statistics
 import subprocess
+import sys
 import tokenize
+import types
 import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
@@ -154,16 +158,31 @@ CENTRAL_VALIDATOR_ARTIFACTS = frozenset({
 INTENTIONALLY_SEPARATE_ARTIFACTS = frozenset({
     "review-anchors/deep-link-resolution.sha256",
 })
-# The authority manifest is outside the fixture tree and is loaded from the one
-# immutable Git commit that introduced its distinct path. Checkout edits cannot
-# rewrite those object-database bytes. The final v2 predecessor is introduced in
-# a commit after the finalized scanner, index, tests, and baseline; its explicit
-# source commit must be that authority commit's first parent before checkout bytes
-# are compared. The historical bootstrap path remains readable in Git history,
-# but this lane consumes only the final path below.
-VALIDATOR_AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.final.json"
+# The historical final authority remains immutable evidence. Corrected scanner
+# bytes use a distinct path introduced after a new source predecessor; the old
+# path cannot be overwritten because its introduction commit is fixed forever.
+HISTORICAL_VALIDATOR_AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.final.json"
+VALIDATOR_AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.hardened.json"
 VALIDATOR_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
 VALIDATOR_AUTHORITY_ROLE = "aggregate_predecessor"
+# These historical pins are external to the authority JSON and anchor the new
+# rotation to the reviewed chain without attempting a self-referential intro hash.
+EXPECTED_HISTORICAL_AUTHORITY_COMMIT = "285acdcf9c11c049180a7844e689eee0f1490de4"
+EXPECTED_HISTORICAL_SOURCE_COMMIT = "263cb75adcf153d6fe252636b064e5fbc3e3f877"
+# The active rotation is pinned by the protected runtime environment rather
+# than by source bytes that would need to contain their own future commit OID.
+# Missing or malformed pins fail closed; they are never inferred from HEAD.
+ACTIVE_AUTHORITY_COMMIT_ENV = "HERMTERNAL_FIXTURE_AUTHORITY_COMMIT"
+ACTIVE_SOURCE_COMMIT_ENV = "HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT"
+# The standalone verifier is executed only after its exact bytes are captured
+# through a stable descriptor and match this source-level pin. It is not imported
+# by path, so a checkout edit cannot execute before authentication.
+HARDENED_AUTHORITY_VERIFIER_PATH = "scripts/verify_fixture_registry_authority.py"
+HARDENED_AUTHORITY_VERIFIER_SHA256 = "003617a4c83c9b2d84b96ad735aa856c58d3740cdf8a2490b04262f8a93b76dc"
+HARDENED_AUTHORITY_VERIFIER_MAX_BYTES = 256 * 1024
+# Temporary-directory roots on macOS may expose /tmp through one of these
+# system aliases. All other ancestors stay no-follow descriptor anchored.
+TRUSTED_PATH_ALIASES = frozenset({Path("/tmp"), Path("/var"), Path("/var/folders"), Path("/var/tmp")})
 AUTHORITY_KEYS = (
     "schema",
     "role",
@@ -180,7 +199,7 @@ AUTHORITY_ARTIFACT_PATHS = (
     "contracts/fixtures/validator/validate.py",
     "contracts/fixtures/validator/validation-baseline.json",
 )
-BASELINE_CANONICAL_SHA256 = "bf247e2c26c9eb616f48f9653dacf32c97c3d5b916ee9f75dcadf2a2fd528142"
+BASELINE_CANONICAL_SHA256 = "12fa18758211596d09a9e90021080f15721f0a94d00cea3304183e665cae1050"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -346,6 +365,29 @@ SENSITIVE_KEYS = frozenset(
         "xapitokens",
     }
 )
+
+# Retained-content aliases are broader than credential fields. Some fixture
+# schemas use these names for structural booleans or finite provider labels, so
+# route them through a contract-aware policy instead of treating every value as
+# a sensitive marker and rejecting legitimate protocol shape.
+RETAINED_CONTENT_ALIASES = frozenset({
+    "messages",
+    "conversation",
+    "chat_history",
+    "terminal",
+    "terminal_output",
+    "tool_output",
+    "provider",
+    "provider_state",
+    "user_data",
+    "transcript_text",
+    "pty_transcript",
+})
+SAFE_PROVIDER_LABELS = frozenset({
+    "pinned Nous",
+    "reviewed OIDC provider",
+})
+SAFE_PROVIDER_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,63}$")
 
 # These are credential-bearing names, kept separate from broader redaction
 # fields such as ``prompt`` or ``host``. The compact form is used only for
@@ -829,6 +871,49 @@ def _is_placeholder(
     )
 
 
+def _validate_retained_content_alias(value: Any, *, key: str) -> None:
+    """Reject retained transcript/content values while preserving shape fields."""
+
+    if key == "terminal":
+        require(type(value) is bool, "terminal content must remain a structural boolean")
+        return
+    if key in {"provider", "provider_state"}:
+        # Protocol fixtures use null, empty, or false to represent an absent
+        # provider slot. Those structural sentinels are not retained content.
+        if value is None or value is False or value == "":
+            return
+        require(type(value) is str, "provider metadata must remain a bounded label")
+        _validate_text_value(value)
+        require(
+            SAFE_PROVIDER_VALUE_PATTERN.fullmatch(value) is not None or value in SAFE_PROVIDER_LABELS,
+            "provider metadata must not retain content",
+        )
+        return
+    if value is None or type(value) is bool:
+        require(value is False or value is None, "retained content must be absent")
+        return
+    if type(value) is str:
+        _validate_text_value(value)
+        require(
+            value.casefold() in SENSITIVE_MARKERS
+            or _is_placeholder(value, allow_structural_placeholders=True)
+            or _is_explicit_synthetic_marker(value),
+            "retained content is not a reviewed marker",
+        )
+        return
+    if type(value) is list:
+        require(len(value) <= 128, "retained content list is too large")
+        for child in value:
+            _validate_retained_content_alias(child, key=key)
+        return
+    if type(value) is dict:
+        require(len(value) <= 64, "retained content object is too large")
+        for child in value.values():
+            _validate_retained_content_alias(child, key=key)
+        return
+    raise ValidationError()
+
+
 def _validate_sensitive_marker(value: Any, *, key: str = "") -> None:
     if value is None:
         return
@@ -1139,6 +1224,8 @@ def _validate_redaction_tree(
                 allowed_structural_urls=allowed_structural_urls,
             )
             normalized = _validated_key_for_routing(key)
+            if normalized in RETAINED_CONTENT_ALIASES:
+                _validate_retained_content_alias(child, key=normalized)
             if normalized in SENSITIVE_KEYS:
                 _validate_sensitive_marker(child, key=normalized)
             else:
@@ -1167,10 +1254,11 @@ def _validate_redaction_tree(
 def _validate_text_file(
     path: Path,
     *,
+    data: bytes | None = None,
     allowed_assignment_values: frozenset[str] = frozenset(),
     allowed_structural_urls: frozenset[str] = frozenset(),
 ) -> None:
-    data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES)
+    data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES) if data is None else data
     try:
         text = data.decode("utf-8")
     except UnicodeError as exc:
@@ -1780,6 +1868,7 @@ def _validate_ast_sensitive_assignment(
 def _validate_python_file(
     path: Path,
     *,
+    data: bytes | None = None,
     allow_synthetic_markers: bool = False,
     allow_test_negative_basic_auth: bool = False,
     allow_test_negative_rfc7617_token: bool = False,
@@ -1795,7 +1884,7 @@ def _validate_python_file(
     when checking URL hosts. The two exact negative-test allowances are passed
     by the manifest path, never inferred from a string's synthetic marker.
     """
-    data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES)
+    data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES) if data is None else data
     try:
         text = data.decode("utf-8")
         tree = ast.parse(text, filename=path.as_posix())
@@ -1915,56 +2004,151 @@ def _canonical_validator_source_digest(data: bytes) -> str:
     return hashlib.sha256(normalized).hexdigest()
 
 
-def _git(repo_root: Path, *arguments: str) -> bytes:
-    """Run one bounded, non-interactive local Git object-database query."""
+def _open_stable_directory(root: Path) -> int:
+    """Open a directory chain without following caller-controlled ancestors."""
 
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(repo_root), *arguments],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValidationError() from exc
-    require(completed.returncode == 0 and completed.stderr == b"", "validator authority is unavailable")
-    require(len(completed.stdout) <= MAX_ARTIFACT_BYTES, "validator authority exceeds the byte limit")
-    return completed.stdout
-
-
-def _authority_commit(repo_root: Path) -> str:
-    """Return the sole ancestor commit that introduced the authority path."""
-
-    output = _git(
-        repo_root.resolve(),
-        "log",
-        "--format=%H",
-        "--diff-filter=A",
-        "--first-parent",
-        "HEAD",
-        "--",
-        VALIDATOR_AUTHORITY_PATH,
+    root = Path(root)
+    require(root.is_absolute(), "stable root must be absolute")
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    require(
+        type(no_follow) is int and type(directory_flag) is int and type(nonblock) is int,
+        "descriptor flags unavailable",
     )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock | directory_flag
+    current: int | None = None
+    current_path = Path(root.anchor)
+    transferred = False
     try:
-        commits = output.decode("ascii").splitlines()
-    except UnicodeError as exc:
+        current = os.open(root.anchor, flags)
+        for component in root.parts[1:]:
+            candidate = current_path / component
+            try:
+                next_descriptor = os.open(component, flags, dir_fd=current)
+            except OSError:
+                require(candidate in TRUSTED_PATH_ALIASES, "unstable path ancestor")
+                next_descriptor = os.open(component, flags & ~no_follow, dir_fd=current)
+            os.close(current)
+            current = next_descriptor
+            current_path = candidate
+        require(current is not None and stat.S_ISDIR(os.fstat(current).st_mode), "stable root is not a directory")
+        transferred = True
+        return current
+    except ValidationError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
         raise ValidationError() from exc
-    require(len(commits) == 1 and HEX40.fullmatch(commits[0]) is not None, "validator authority history changed")
-    return commits[0]
+    finally:
+        if current is not None and not transferred:
+            try:
+                os.close(current)
+            except OSError:
+                pass
 
 
-def _git_blob(repo_root: Path, revision: str, path: str) -> tuple[str, bytes]:
-    """Read one bounded blob and verify its Git object type before trusting it."""
+def _stable_file_bytes(root: Path, relative_path: str, limit: int) -> bytes:
+    """Capture one regular checkout file through stable directory descriptors."""
 
+    parts = relative_path.split("/")
+    require(parts and all(part not in {"", ".", ".."} for part in parts), "authority helper path is invalid")
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    require(type(no_follow) is int and type(directory_flag) is int and type(nonblock) is int, "descriptor flags unavailable")
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock | directory_flag
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock
+    descriptors: list[int] = []
+    file_descriptor: int | None = None
     try:
-        blob_oid = _git(repo_root, "rev-parse", f"{revision}:{path}").decode("ascii").strip()
-    except UnicodeError as exc:
+        current = _open_stable_directory(Path(root))
+        descriptors.append(current)
+        for part in parts[:-1]:
+            current = os.open(part, directory_flags, dir_fd=current)
+            descriptors.append(current)
+        file_descriptor = os.open(parts[-1], file_flags, dir_fd=current)
+        before = os.fstat(file_descriptor)
+        require(stat.S_ISREG(before.st_mode), "authority helper is not a regular file")
+        require(0 <= before.st_size <= limit, "authority helper exceeds the byte limit")
+        data = bytearray()
+        while len(data) < limit + 1:
+            chunk = os.read(file_descriptor, min(64 * 1024, limit + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        require(len(data) <= limit, "authority helper exceeds the byte limit")
+        after = os.fstat(file_descriptor)
+        require(
+            (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            == (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+            "authority helper changed during capture",
+        )
+        return bytes(data)
+    except ValidationError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
         raise ValidationError() from exc
-    require(HEX40.fullmatch(blob_oid) is not None, "validator authority blob is invalid")
-    require(_git(repo_root, "cat-file", "-t", blob_oid) == b"blob\n", "validator authority object type changed")
-    return blob_oid, _git(repo_root, "cat-file", "blob", blob_oid)
+    finally:
+        if file_descriptor is not None:
+            try:
+                os.close(file_descriptor)
+            except OSError:
+                pass
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _authenticated_authority_verifier(repo_root: Path) -> types.ModuleType:
+    """Execute only the standalone verifier bytes authenticated before compile."""
+
+    source = _stable_file_bytes(repo_root, HARDENED_AUTHORITY_VERIFIER_PATH, HARDENED_AUTHORITY_VERIFIER_MAX_BYTES)
+    require(
+        HARDENED_AUTHORITY_VERIFIER_SHA256 != "__pending__"
+        and hashlib.sha256(source).hexdigest() == HARDENED_AUTHORITY_VERIFIER_SHA256,
+        "authority verifier source changed",
+    )
+    module_name = "_hermternal_authenticated_fixture_authority"
+    module = types.ModuleType(module_name)
+    module.__file__ = f"<authenticated:{HARDENED_AUTHORITY_VERIFIER_PATH}>"
+    sys.modules[module_name] = module
+    try:
+        exec(compile(source, module.__file__, "exec"), module.__dict__)
+    except (OSError, RuntimeError, TypeError, ValueError, SyntaxError) as exc:
+        sys.modules.pop(module_name, None)
+        raise ValidationError() from exc
+    return module
+
+
+def _git(repo_root: Path, *arguments: str) -> bytes:
+    """Expose only the authenticated verifier's bounded Git command for tests."""
+
+    verifier = _authenticated_authority_verifier(repo_root)
+    try:
+        return verifier._git(repo_root, *arguments)
+    except Exception as exc:
+        raise ValidationError() from exc
+
+
+def _authority_commit(repo_root: Path, object_repo: Path | None = None) -> str:
+    """Return the active authority introduction from the plain object repository."""
+
+    require(object_repo is not None, "a separate plain object repository is required")
+    return _trusted_authority(repo_root, object_repo)["authority_commit"]
+
+
+def _git_blob(repo_root: Path, revision: str, path: str, object_repo: Path | None = None) -> tuple[str, bytes]:
+    """Read one blob only through the authenticated verifier boundary."""
+
+    require(object_repo is not None, "a separate plain object repository is required")
+    verifier = _authenticated_authority_verifier(repo_root)
+    try:
+        with verifier._validate_object_repository(object_repo) as isolated_repo:
+            return verifier._git_blob(isolated_repo, revision, path)
+    except Exception as exc:
+        raise ValidationError() from exc
 
 
 def _validate_authority_manifest(authority: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -2000,31 +2184,52 @@ def _validate_authority_manifest(authority: dict[str, Any]) -> tuple[str, list[d
     return source_commit, records
 
 
-def _trusted_authority(repo_root: Path) -> dict[str, Any]:
-    """Load v2 authority and its predecessor blobs from immutable Git history."""
+def _active_authority_pins() -> tuple[str, str]:
+    """Read exact active authority pins from the protected runtime boundary."""
 
-    root = repo_root.resolve()
-    introduction = _authority_commit(root)
-    _, authority_bytes = _git_blob(root, introduction, VALIDATOR_AUTHORITY_PATH)
-    authority = _parse_json_bytes(authority_bytes)
-    source_commit, records = _validate_authority_manifest(authority)
-    require(source_commit != introduction, "validator authority source is self-referential")
-    require(_git(root, "cat-file", "-t", source_commit) == b"commit\n", "validator authority source is not a commit")
+    authority_commit = os.environ.get(ACTIVE_AUTHORITY_COMMIT_ENV)
+    source_commit = os.environ.get(ACTIVE_SOURCE_COMMIT_ENV)
+    require(
+        type(authority_commit) is str and HEX40.fullmatch(authority_commit) is not None,
+        "active authority introduction pin is missing",
+    )
+    require(
+        type(source_commit) is str and HEX40.fullmatch(source_commit) is not None,
+        "active authority source pin is missing",
+    )
+    return authority_commit, source_commit
+
+
+def _trusted_authority(repo_root: Path, object_repo: Path | None = None) -> dict[str, Any]:
+    """Load the active v2 authority through authenticated plain-repo Git code."""
+
+    require(object_repo is not None, "a separate plain object repository is required")
+    checkout_root = repo_root.resolve()
+    object_root = object_repo.resolve()
+    require(checkout_root != object_root, "checkout and object repository must be separate")
+    verifier = _authenticated_authority_verifier(checkout_root)
+    expected_authority_commit, expected_source_commit = _active_authority_pins()
     try:
-        first_parent = _git(root, "rev-parse", f"{introduction}^1").decode("ascii").strip()
-    except UnicodeError as exc:
+        historical = verifier.load_trusted_authority(
+            object_root,
+            authority_path=HISTORICAL_VALIDATOR_AUTHORITY_PATH,
+            expected_authority_commit=EXPECTED_HISTORICAL_AUTHORITY_COMMIT,
+            expected_source_commit=EXPECTED_HISTORICAL_SOURCE_COMMIT,
+        )
+        authority = verifier.load_trusted_authority(
+            object_root,
+            authority_path=VALIDATOR_AUTHORITY_PATH,
+            expected_authority_commit=expected_authority_commit,
+            expected_source_commit=expected_source_commit,
+            required_ancestor_commit=historical["authority_commit"],
+        )
+    except verifier.AuthorityError as exc:
         raise ValidationError() from exc
-    require(first_parent == source_commit, "validator authority source is not the direct predecessor")
-    # Requiring the authority introduction's first parent, rather than merely
-    # any ancestor, keeps the final binding explicit while allowing this source
-    # commit to be identified from the immutable authority bytes without a
-    # cyclic hash constant inside the authorized validator itself.
-    _git(root, "merge-base", "--is-ancestor", source_commit, introduction)
-    for record in records:
-        blob_oid, data = _git_blob(root, source_commit, record["path"])
-        require(blob_oid == record["blob_oid"], "validator authority blob changed")
-        require(len(data) == record["size_bytes"], "validator authority artifact size changed")
-        require(hashlib.sha256(data).hexdigest() == record["sha256"], "validator authority artifact digest changed")
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValidationError() from exc
+    require(authority["schema"] == VALIDATOR_AUTHORITY_SCHEMA, "validator authority schema changed")
+    require(authority["authority_path"] == VALIDATOR_AUTHORITY_PATH, "validator authority path changed")
+    authority["role"] = VALIDATOR_AUTHORITY_ROLE
     return authority
 
 
@@ -2104,13 +2309,16 @@ def _validate_manifest_file(
     path, digest, size = _validate_file_record(record, 0)
     require(path == fixture_relative_root or path.startswith(fixture_relative_root + "/"), "artifact escapes fixture root")
     actual = _safe_child(fixtures_root, path)
-    data = _read_bounded_bytes(actual, MAX_ARTIFACT_BYTES)
+    # Hashing, parsing, and redaction scanning must consume the same
+    # descriptor-anchored bytes. Reopening ``actual`` after hashing would let a
+    # replacement race authorize one file and scan another.
+    relative_path = actual.relative_to(fixtures_root).as_posix()
+    data = _stable_file_bytes(fixtures_root, relative_path, MAX_ARTIFACT_BYTES)
     require(size == len(data), "artifact size changed")
     require(digest == hashlib.sha256(data).hexdigest(), "artifact digest changed")
     total_bytes[0] += len(data)
     require(total_bytes[0] <= MAX_TOTAL_ARTIFACT_BYTES, "fixture artifacts exceed aggregate byte limit")
-    relative_path = actual.relative_to(fixtures_root).as_posix()
-    suffix = actual.suffix.casefold()
+    suffix = Path(relative_path).suffix.casefold()
     # A registered file must have a scanner with defined semantics. Digesting
     # an unknown extension without inspecting its content would create an
     # unscanned credential boundary, so fail closed instead.
@@ -2119,7 +2327,7 @@ def _validate_manifest_file(
     allowed_synthetic_full_values = SYNTHETIC_FULL_VALUE_ALLOWANCES.get(relative_path, frozenset())
     allowed_structural_urls = STRUCTURAL_URL_ALLOWANCES.get(relative_path, frozenset())
     if suffix == ".json":
-        document = load_json(actual, require_object=False, limit=MAX_ARTIFACT_BYTES, reject_nul=False)
+        document = _parse_json_bytes(data, require_object=False, reject_nul=False)
         _validate_redaction_tree(
             document,
             allowed_assignment_values=allowed_assignment_values,
@@ -2129,6 +2337,7 @@ def _validate_manifest_file(
     elif suffix == ".py":
         _validate_python_file(
             actual,
+            data=data,
             allow_synthetic_markers=relative_path in SYNTHETIC_MARKER_PATHS,
             allow_test_negative_basic_auth=relative_path in TEST_NEGATIVE_BASIC_AUTH_PATHS,
             allow_test_negative_rfc7617_token=relative_path in TEST_NEGATIVE_RFC7617_TOKEN_PATHS,
@@ -2139,6 +2348,7 @@ def _validate_manifest_file(
     else:
         _validate_text_file(
             actual,
+            data=data,
             allowed_assignment_values=allowed_assignment_values,
             allowed_structural_urls=allowed_structural_urls,
         )
@@ -2498,10 +2708,11 @@ def _validate_baseline(
     baseline_path: Path,
     *,
     canonical_baseline_path: Path | None = None,
+    object_repo: Path | None = None,
 ) -> None:
     canonical = (canonical_baseline_path or (repo_root / "contracts/fixtures/validator/validation-baseline.json")).resolve()
     require(baseline_path.resolve() == canonical, "baseline path is not canonical")
-    authority = _trusted_authority(repo_root)
+    authority = _trusted_authority(repo_root, object_repo)
     authority_records = {record["path"]: record for record in authority["artifact_manifest"]}
     baseline_record = authority_records["contracts/fixtures/validator/validation-baseline.json"]
     baseline_bytes = _read_bounded_bytes(canonical, MAX_JSON_BYTES)
@@ -2575,6 +2786,8 @@ def validate_baseline_document(
     baseline: dict[str, Any],
     repo_root: Path = REPO_ROOT,
     baseline_path: Path = BASELINE_PATH,
+    *,
+    object_repo: Path | None = None,
 ) -> None:
     """Validate observed benchmark evidence without inventing a threshold."""
     root = repo_root.resolve()
@@ -2583,6 +2796,7 @@ def validate_baseline_document(
         root,
         baseline_path.resolve(),
         canonical_baseline_path=(root / "contracts/fixtures/validator/validation-baseline.json"),
+        object_repo=object_repo,
     )
 
 
@@ -2593,6 +2807,7 @@ def validate_all(
     *,
     repo_root: Path = REPO_ROOT,
     baseline_path: Path = BASELINE_PATH,
+    object_repo: Path | None = None,
 ) -> tuple[int, int]:
     _validate_schema_document(schema)
     root = repo_root.resolve()
@@ -2603,6 +2818,7 @@ def validate_all(
         root,
         baseline_path.resolve(),
         canonical_baseline_path=canonical_baseline_path,
+        object_repo=object_repo,
     )
     return counts
 
@@ -2639,9 +2855,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--schema", type=Path, default=SCHEMA_PATH)
     parser.add_argument("--baseline", type=Path, default=BASELINE_PATH)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    parser.add_argument("--object-repo", type=Path, default=None)
     try:
         args = parser.parse_args(argv)
         repo_root = args.repo_root.resolve()
+        object_repo = args.object_repo.resolve() if args.object_repo is not None else None
+        require(object_repo is not None, "a separate plain object repository is required")
+        require(object_repo != repo_root, "checkout and object repository must be separate")
         canonical_index_path = (repo_root / "contracts/fixtures/index.json").resolve()
         canonical_schema_path = (repo_root / "contracts/fixtures/schema.json").resolve()
         require(args.index.resolve() == canonical_index_path, "index path is not canonical")
@@ -2660,6 +2880,7 @@ def main(argv: list[str] | None = None) -> int:
             baseline,
             repo_root=repo_root,
             baseline_path=canonical_baseline_path,
+            object_repo=object_repo,
         )
     except ArgumentParseError:
         emit_failure("fixture_validator_cli_invalid")
