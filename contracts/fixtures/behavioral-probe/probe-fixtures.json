@@ -3,7 +3,7 @@
   "contract": "dashboard-v0.0.1",
   "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
   "route_manifest": "contracts/hermes-dashboard/manifest.md",
-  "route_manifest_sha256": "680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5",
+  "route_manifest_sha256": "0f2f1ea3af722cf2d14f6a43754a8430d20bae98d335b961c64b3f1229bd07c1",
   "synthetic_only": true,
   "probe": {
     "id": "c-04a-behavioral-compatibility",
@@ -45,7 +45,7 @@
     {
       "id": "attestation-pinned-match",
       "source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
-      "manifest_sha256": "680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5",
+      "manifest_sha256": "0f2f1ea3af722cf2d14f6a43754a8430d20bae98d335b961c64b3f1229bd07c1",
       "observed_result": "match",
       "gate_decision": "blocked_live_compatibility",
       "live_claim": false
@@ -53,7 +53,7 @@
     {
       "id": "attestation-source-mismatch",
       "source_sha": "mismatch_not_pinned",
-      "manifest_sha256": "680e1ef387c403538a8fa0959243f7414ad12c4d33cecae4fb1081a509c3f1b5",
+      "manifest_sha256": "0f2f1ea3af722cf2d14f6a43754a8430d20bae98d335b961c64b3f1229bd07c1",
       "observed_result": "mismatch",
       "gate_decision": "blocked",
       "live_claim": false
