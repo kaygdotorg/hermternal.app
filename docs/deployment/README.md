@@ -30,16 +30,32 @@ It binds the observed edge and upstream results to the exact PR #291 build
 commit `521ede32b904a42e22eebb279fd7d404074cd318`, static build digest
 `77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21`, and
 runtime Caddyfile digest
-`b3585c4b91d7656d5bcb6adedda29af63d60ca488ec99ef162ec4f74e2611e82`.
+`066564a4faea5455021c50f00eb6c0a6985663a8b4b799ed617a03312715000d`.
+The committed runtime input manifest has digest
+`94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4`, so the
+runtime file can be reconstructed without retaining VM or user paths. The
+static-route grammar and deep-link fixture identities are also recorded in the
+evidence.
 
 The renderer and offline regression tests are in
 [`scripts/caddy_proof.py`](../../scripts/caddy_proof.py) and
 [`scripts/test_caddy_proof.py`](../../scripts/test_caddy_proof.py). The proof
-uses exact method/path matchers at `/` and under one `/hermes` prefix. Unknown
+uses exact method/path matchers at `/` and under one `/hermes` prefix. Canonical
+session and message deep links fall back to `200.html`; only the reviewed root
+scenario selector accepts a query. Static assets, client routes, and REST
+routes reject query mutations. Chat uses a ticket-only upgrade; PTY uses the
+reviewed ticket/resume/optional-attach grammar with bounded values, any key
+order, and no duplicates, extras, empty values, or `fresh` parameter. Unknown
 methods and paths, duplicate prefixes, traversal, encoded separators, and
 malformed upgrades are edge-denied without an upstream request. Wrong Host is
 `421`; wrong WebSocket Origin is `403`; missing tickets are edge `404`; and
 invalid, expired, or reused tickets remain Hermes-layer results.
+
+The proxy strips all inbound `Forwarded`, `X-Forwarded-*`, and `X-Real-IP`
+headers before rebuilding trusted public metadata. The black-box test runs only
+locally with Caddy and a recording mock upstream, and asserts the actual
+upstream path, body, prefix, query policy, and rebuilt headers. It does not
+contact the disposable VM during correction work.
 
 The official launcher intentionally publishes Hermes only on VM loopback. The
 empty durable-session state in a fresh instance prevents the PR #291 workspace

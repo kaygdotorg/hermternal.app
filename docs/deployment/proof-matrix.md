@@ -32,11 +32,19 @@ The checked-in Caddy renderer is an exact proof fixture, not a deployable
 configuration. It serves the PR #291 static build at `/`, maps the reviewed
 Dashboard surface under exactly one `/hermes` prefix, and denies all other
 methods and paths. It does not implement Traefik. Its redacted evidence binds
-the build SHA, static build digest, and runtime Caddyfile digest. The browser
-journey remains `blocked_provider`: authentication, ticket acquisition, one
-WebSocket upgrade, `gateway.ready`, `session.resume`, and `prompt.submit` were
-observed, but the official launcher has no provider credential and the turn did
-not produce `message.delta` or `message.complete`.
+the build SHA, static build digest, runtime Caddyfile digest
+`066564a4faea5455021c50f00eb6c0a6985663a8b4b799ed617a03312715000d`, and a
+reproducible runtime-input manifest. Canonical session and message deep links
+rewrite to `200.html`; only the reviewed root scenario selector accepts a
+query; static, client, and REST routes reject query mutations. Chat and PTY
+upgrades use separate exact grammars, and the proxy resets all inbound
+forwarding headers before rebuilding trusted public metadata. Local black-box
+Caddy/mock-upstream tests assert these behaviors against the shared static
+route and deep-link fixture identities. The browser journey remains
+`blocked_provider`: authentication, ticket acquisition, one WebSocket upgrade,
+`gateway.ready`, `session.resume`, and `prompt.submit` were observed, but the
+official launcher has no provider credential and the turn did not produce
+`message.delta` or `message.complete`.
 
 ## Public origin and private bind
 
