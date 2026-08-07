@@ -747,10 +747,10 @@ function validateMessage(value: StrictJsonValue): LiveMessage {
     content: requireMessageContent(object.content),
     ...(object.tool_calls !== undefined && { toolCalls: requireToolCalls(object.tool_calls) }),
     ...(object.tool_name !== undefined && {
-      toolName: requireBoundedString(object.tool_name, MAX_SHORT_TEXT_LENGTH)
+      toolName: requireNullableString(object.tool_name, MAX_SHORT_TEXT_LENGTH)
     }),
     ...(object.tool_call_id !== undefined && {
-      toolCallId: requireBoundedString(object.tool_call_id, MAX_ID_LENGTH)
+      toolCallId: requireNullableString(object.tool_call_id, MAX_ID_LENGTH)
     }),
     ...(object.timestamp !== undefined && {
       timestamp: requireBoundedTimestamp(object.timestamp)

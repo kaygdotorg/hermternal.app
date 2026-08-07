@@ -114,8 +114,9 @@ export interface LiveMessage {
   role: LiveMessageRole;
   content: LiveMessageContent;
   toolCalls?: LiveToolCalls;
-  toolName?: string;
-  toolCallId?: string;
+  /** Official history may emit null for either optional tool metadata field. */
+  toolName?: NullableString;
+  toolCallId?: NullableString;
   timestamp?: number;
 }
 
