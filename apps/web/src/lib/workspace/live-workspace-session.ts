@@ -1249,6 +1249,7 @@ export class LiveWorkspaceSession {
     const generation = this.generation;
     this.advanceRefreshEpoch();
     this.supersedeRetry();
+    this.factoryRetryGeneration = undefined;
     this.controller?.abort();
     this.controller = new AbortController();
     const operation = { generation, signal: this.controller.signal };
@@ -1298,6 +1299,7 @@ export class LiveWorkspaceSession {
     const generation = this.generation;
     this.advanceRefreshEpoch();
     this.supersedeRetry();
+    this.factoryRetryGeneration = undefined;
     this.controller?.abort();
     this.controller = undefined;
     this.lastChatState = { generation, state: { status: 'offline', generation: 0 } };
