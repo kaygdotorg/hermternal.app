@@ -15,7 +15,7 @@ The evidence is bound to:
 
 - PR #291 build commit `521ede32b904a42e22eebb279fd7d404074cd318`;
 - static build digest `77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21`;
-- runtime Caddyfile SHA-256 `066564a4faea5455021c50f00eb6c0a6985663a8b4b799ed617a03312715000d`;
+- runtime Caddyfile SHA-256 `0c2626619ecd065b6a7c532162cdc046ec7dafd7300b47ed1ff082a19429c91f`;
 - deterministic runtime-input digest `94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4`;
 - shared static-route grammar digest `f0542d97b363b8e2a921e93001d72dd0f56d5f30001f15e95bbca5b2f4165165`;
 - deep-link fixture digest `91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96`;
@@ -35,9 +35,10 @@ reviewed Dashboard routes under one `/hermes` prefix, and rejects unknown
 methods and paths at the edge. Canonical session and message links matching
 `/v1/c/<opaque-id>` and `/v1/c/<opaque-id>/m/<opaque-id>` rewrite to
 `/200.html`; reserved prefixes never use that fallback. Only the reviewed root
-`scenario=success|empty|failure` selector may carry a query. Static assets,
-client routes, and REST routes reject every query mutation. Chat upgrades accept
-one ticket; PTY upgrades require ticket plus resume and allow one non-empty
+`scenario=success|empty|failure` selector may carry a query; a bare query marker
+is denied. Static assets, client routes, and REST routes reject every query
+mutation. Chat upgrades accept one non-empty safe opaque ticket bounded to 512
+characters; PTY upgrades require ticket plus resume and allow one non-empty
 attach value in any key order, with bounded safe opaque values and no duplicate,
 extra, empty, or `fresh` parameters.
 

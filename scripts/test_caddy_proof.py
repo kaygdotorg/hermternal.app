@@ -37,7 +37,7 @@ EVIDENCE_PATH = ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence.json
 EVIDENCE_ANCHOR_PATH = ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence-sha256.txt"
 EXPECTED_BUILD_SHA = "521ede32b904a42e22eebb279fd7d404074cd318"
 EXPECTED_BUILD_DIGEST = "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
-EXPECTED_CADDYFILE_DIGEST = "066564a4faea5455021c50f00eb6c0a6985663a8b4b799ed617a03312715000d"
+EXPECTED_CADDYFILE_DIGEST = "0c2626619ecd065b6a7c532162cdc046ec7dafd7300b47ed1ff082a19429c91f"
 
 
 class CaddyProofRendererTests(unittest.TestCase):
@@ -117,6 +117,8 @@ class CaddyProofRendererTests(unittest.TestCase):
         self.assertNotIn("lb_try_duration", rendered)
 
     def test_pty_query_patterns_are_exact_and_order_independent(self) -> None:
+        self.assertTrue(re.fullmatch(caddy_proof.CHAT_TICKET_VALUE_PATTERN, "A" * 512))
+        self.assertFalse(re.fullmatch(caddy_proof.CHAT_TICKET_VALUE_PATTERN, "A" * 513))
         self.assertEqual(len(caddy_proof.PTY_QUERY_PATTERNS), 8)
         accepted = {
             "ticket=fixtureTicket&resume=fixtureResume",
@@ -482,17 +484,20 @@ class CaddyBlackBoxTests(unittest.TestCase):
     def test_static_and_deep_link_boundary_is_query_exact(self) -> None:
         cases = (
             ("/", 200, b"INDEX-SHELL"),
+            ("/?", 404, b"not found"),
             ("/?scenario=success", 200, b"INDEX-SHELL"),
             ("/?scenario=empty", 200, b"INDEX-SHELL"),
             ("/?cache=synthetic", 404, b"not found"),
             ("/?scenario=success&cache=synthetic", 404, b"not found"),
             ("/manifest.webmanifest", 200, b"{}"),
+            ("/manifest.webmanifest?", 404, b"not found"),
             ("/manifest.webmanifest?cache=synthetic", 404, b"not found"),
             ("/service-worker.js?cache=synthetic", 404, b"not found"),
             ("/_app/app.js?cache=synthetic", 404, b"not found"),
             ("/v1/c/abcdefghijklmnop", 200, b"CLIENT-SHELL"),
             ("/v1/c/abcdefghijkl..mnop", 200, b"CLIENT-SHELL"),
             ("/v1/c/abcdefghijklmnop/m/qrstuvwxyzabcdef", 200, b"CLIENT-SHELL"),
+            ("/v1/c/abcdefghijklmnop?", 404, b"not found"),
             ("/v1/c/abcdefghijklmnop?cache=synthetic", 404, b"not found"),
             ("/v1/c/short", 404, b"not found"),
             ("/v1/c/abcdefghijklmnop/", 404, b"not found"),
@@ -553,11 +558,13 @@ class CaddyBlackBoxTests(unittest.TestCase):
         targets: list[tuple[str, str]] = []
         for method, path in caddy_proof.EXACT_REST_ROUTES:
             for prefix in ("", "/hermes"):
+                targets.append((method, f"{prefix}{path}?"))
                 targets.append((method, f"{prefix}{path}?cache=synthetic"))
                 targets.append((method, f"{prefix}{path}?ticket=synthetic"))
         for method, path in caddy_proof.SESSION_ROUTES:
             suffix = path.replace("{session_id}", "abcdefghijklmnop")
             for prefix in ("", "/hermes"):
+                targets.append((method, f"{prefix}{suffix}?"))
                 targets.append((method, f"{prefix}{suffix}?cache=synthetic"))
                 targets.append((method, f"{prefix}{suffix}?ticket=synthetic"))
 
@@ -599,7 +606,9 @@ class CaddyBlackBoxTests(unittest.TestCase):
         self.assertEqual(pty_record["headers"]["x-forwarded-prefix"], "/hermes")
 
         denied_queries = (
+            "/api/ws?",
             "/api/ws?ticket=fixtureTicket&resume=fixtureResume",
+            "/api/ws?ticket=" + ("A" * 513),
             "/api/pty?ticket=fixtureTicket",
             "/api/pty?ticket=fixtureTicket&resume=fixtureResume&fresh=1",
             "/api/pty?ticket=fixtureTicket&resume=fixtureResume&ticket=otherTicket",

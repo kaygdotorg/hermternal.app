@@ -299,7 +299,8 @@ touch-target surface; accessibility checks are N/A.
 production deployment file and it does not implement Traefik. It emits exact
 method/path matchers for the PR #291 static client at `/`, the reviewed Hermes
 routes under one `/hermes` prefix, and separate chat and PTY WebSocket
-contracts. Canonical session and message deep links rewrite to `200.html`; only
+contracts. Chat accepts one non-empty safe opaque ticket bounded to 512
+characters; bare query markers are denied. Canonical session and message deep links rewrite to `200.html`; only
 the reviewed root `scenario=success|empty|failure` selector accepts a query;
 static assets, client routes, and REST routes reject query mutations. PTY
 requires ticket plus resume with optional attach, accepts any key order, and
@@ -335,7 +336,7 @@ in redacted evidence is
 build commit `521ede32b904a42e22eebb279fd7d404074cd318`, static build digest
 `77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21`, and
 runtime Caddyfile digest
-`066564a4faea5455021c50f00eb6c0a6985663a8b4b799ed617a03312715000d`.
+`0c2626619ecd065b6a7c532162cdc046ec7dafd7300b47ed1ff082a19429c91f`.
 The runtime input manifest digest is
 `94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4`; its
 paths are deterministic proof placeholders, not retained user or VM paths.

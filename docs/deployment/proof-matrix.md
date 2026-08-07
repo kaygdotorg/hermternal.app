@@ -33,7 +33,7 @@ configuration. It serves the PR #291 static build at `/`, maps the reviewed
 Dashboard surface under exactly one `/hermes` prefix, and denies all other
 methods and paths. It does not implement Traefik. Its redacted evidence binds
 the build SHA, static build digest, runtime Caddyfile digest
-`066564a4faea5455021c50f00eb6c0a6985663a8b4b799ed617a03312715000d`, and a
+`0c2626619ecd065b6a7c532162cdc046ec7dafd7300b47ed1ff082a19429c91f`, and a
 reproducible runtime-input manifest. Canonical session and message deep links
 rewrite to `200.html`; only the reviewed root scenario selector accepts a
 query; static, client, and REST routes reject query mutations. Chat and PTY
