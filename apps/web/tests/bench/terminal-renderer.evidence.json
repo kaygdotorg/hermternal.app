@@ -1,14 +1,14 @@
 {
   "schema": "hermternal.web-terminal-renderer-benchmark.v1",
   "revision": {
-    "source_commit": "646067b1b5c509a6c8dfefb2c7ab7afb5d1a9573",
+    "source_commit": "fca2b21d9d804d5815a116fa04ed4dee7ec5f24d",
     "browser_entry": "apps/web/tests/bench/terminal-renderer.browser.ts",
     "renderer_module": "apps/web/src/lib/terminal/renderer.ts",
     "execution_inputs": [
       {
         "path": "apps/web/src/lib/terminal/renderer.ts",
-        "bytes": 30783,
-        "sha256": "3a7d39ef15b6730fabbd22e76deda0cd062fb9e8b397496300651fa17799c9a6"
+        "bytes": 32450,
+        "sha256": "0be7f1d4c3d1267cafb080cf16f23a53f3824d3cdd0b6415abe1ca29d11ccf9c"
       },
       {
         "path": "apps/web/src/lib/terminal/terminal.css",
@@ -16,19 +16,29 @@
         "sha256": "f7b0bef99b64c0a8d8195f818753dd1192579a7a8440a25017180d0a8de9601e"
       },
       {
+        "path": "apps/web/package.json",
+        "bytes": 1862,
+        "sha256": "341032290c8487bb831ef2619b8385a5ecfa72f928f6e57076392bfac528bf97"
+      },
+      {
+        "path": "apps/web/bun.lock",
+        "bytes": 47009,
+        "sha256": "76a2e956462387ce42f7183c2894a4e99ec3981797060001fc25ff76b996d8bf"
+      },
+      {
         "path": "apps/web/tests/bench/terminal-renderer.browser.ts",
-        "bytes": 9121,
-        "sha256": "ef9740e316d06097d0a9fd408901da5315144ebf9c0c990a91171e40cd8bb562"
+        "bytes": 9181,
+        "sha256": "da663de929dd40a4c04be8468d262ce210d066c0db3e471eb4c6441c21039a5a"
       },
       {
         "path": "apps/web/tests/bench/terminal-renderer.bench.ts",
-        "bytes": 11760,
-        "sha256": "cf83d573314c2bca0689a8cfc2e528ec862d87ad51d9dc41fa614b6c361d72b5"
+        "bytes": 12067,
+        "sha256": "0f6f620347e6fcfc5138632ba071df8364bc204a54d73070760800783c5fdb73"
       },
       {
         "path": "apps/web/tests/bench/terminal-renderer.provenance.ts",
-        "bytes": 1741,
-        "sha256": "174c83d5556be0734c34e95c576e9033904d1e46b0b85addf32c92e26c59bff8"
+        "bytes": 2560,
+        "sha256": "db08d592a9b14f1c7218c9d96369c9ba0e0b09df75502299f02ac6cef8929f6c"
       }
     ]
   },
@@ -67,11 +77,11 @@
       },
       {
         "path": "entry.js",
-        "bytes": 17201,
-        "sha256": "5849eb3ee963833a5a23627f636c827b86319c9d5d9d6fac14c47c0c50d9bbe3"
+        "bytes": 17747,
+        "sha256": "a8c680c2a8031fda52914fe15b38a38f273ed9c62fcc69acd3855b4bb5a2bf45"
       }
     ],
-    "entry_bytes": 17201,
+    "entry_bytes": 17747,
     "lazy_chunk_bytes": 51003,
     "wasm_bytes": 429514,
     "css_bytes": 4112
@@ -88,131 +98,131 @@
     "samples": {
       "cold_initialization": {
         "raw_samples": [
-          23.2,
-          4.7,
-          4.1,
-          4.1,
-          4.1
+          23.5,
+          4.6,
+          3.6,
+          4,
+          4.5
         ],
         "distribution": {
-          "min": 4.1,
-          "p50": 4.1,
-          "p95": 19.5,
-          "p99": 22.46,
-          "max": 23.2,
+          "min": 3.6,
+          "p50": 4.5,
+          "p95": 19.72,
+          "p99": 22.744,
+          "max": 23.5,
           "mean": 8.04
         }
       },
       "first_byte_to_first_glyph": {
         "raw_samples": [
-          110.2,
-          77.1,
-          95.6,
-          100.6,
-          57.5
+          118.6,
+          123.1,
+          54.5,
+          112.6,
+          120.5
         ],
         "distribution": {
-          "min": 57.5,
-          "p50": 95.6,
-          "p95": 108.28,
-          "p99": 109.816,
-          "max": 110.2,
-          "mean": 88.2
+          "min": 54.5,
+          "p50": 118.6,
+          "p95": 122.58,
+          "p99": 122.996,
+          "max": 123.1,
+          "mean": 105.86
         }
       },
       "sustained_output": {
         "raw_samples": [
-          4739.1,
-          1627.1,
+          5533.7,
+          1724.8,
+          232.5,
+          183.3,
+          266.6,
+          258.4,
+          100,
           199.9,
-          200.1,
-          199.9,
-          200.1,
-          199.9,
-          200,
-          200,
-          199.9
+          58.3,
+          141.6
         ],
         "distribution": {
-          "min": 199.9,
-          "p50": 200,
-          "p95": 3338.7,
-          "p99": 4459.02,
-          "max": 4739.1,
-          "mean": 796.6
+          "min": 58.3,
+          "p50": 216.2,
+          "p95": 3819.695,
+          "p99": 5190.899,
+          "max": 5533.7,
+          "mean": 869.91
         }
       },
       "resize_settling": {
         "raw_samples": [
-          203,
-          218.1,
-          145.8,
-          199.8,
-          200,
-          200,
-          200.1,
-          199.9,
-          200.1,
-          199.9
+          225.6,
+          87.4,
+          137.6,
+          177.5,
+          147.5,
+          191.7,
+          175.1,
+          83.2,
+          71.4,
+          120.3
         ],
         "distribution": {
-          "min": 145.8,
-          "p50": 200,
-          "p95": 211.305,
-          "p99": 216.741,
-          "max": 218.1,
-          "mean": 196.67
+          "min": 71.4,
+          "p50": 142.55,
+          "p95": 210.345,
+          "p99": 222.549,
+          "max": 225.6,
+          "mean": 141.73
         }
       },
       "replay_1_mib": {
         "raw_samples": [
-          132.3,
-          200,
-          199.9,
-          200.1,
-          199.9
+          66,
+          171.8,
+          61.5,
+          58.4,
+          249.3
         ],
         "distribution": {
-          "min": 132.3,
-          "p50": 199.9,
-          "p95": 200.08,
-          "p99": 200.096,
-          "max": 200.1,
-          "mean": 186.44
+          "min": 58.4,
+          "p50": 66,
+          "p95": 233.8,
+          "p99": 246.2,
+          "max": 249.3,
+          "mean": 121.4
         }
       },
       "repeated_mount_dispose": {
         "raw_samples": [
           4.1,
+          3.1,
+          2.9,
+          2.6,
           2.7,
-          2.6,
+          5.2,
+          2.8,
+          2.4,
           2.5,
-          2.6,
-          5.9,
-          2.7,
-          2.6,
-          2.5,
-          2.4
+          2.6
         ],
         "distribution": {
           "min": 2.4,
-          "p50": 2.6,
-          "p95": 5.09,
-          "p99": 5.738,
-          "max": 5.9,
-          "mean": 3.06
+          "p50": 2.75,
+          "p95": 4.705,
+          "p99": 5.101,
+          "max": 5.2,
+          "mean": 3.09
         }
       }
     },
     "long_tasks_ms": [
-      4692,
-      1489
+      5485,
+      1665
     ],
     "memory": {
       "supported": true,
-      "before_replay_bytes": 4792600,
-      "after_replay_bytes": 4806292,
-      "after_dispose_bytes": 5640521,
+      "before_replay_bytes": 4795850,
+      "after_replay_bytes": 4809458,
+      "after_dispose_bytes": 5645955,
       "reason": null
     },
     "workload": {
