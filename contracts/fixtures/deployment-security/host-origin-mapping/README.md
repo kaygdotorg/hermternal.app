@@ -86,10 +86,13 @@ header, or value.
 
 The validator scans every retained artifact: `README.md`, `cases.json`,
 `validate.py`, `test_validate.py`, and `validation-baseline.json`. It rejects
-credential assignments, Basic or Bearer payloads, Cookie payloads, ticket
-payloads, private-key material, URLs, hostnames, IPv4 and IPv6 addresses,
-absolute filesystem paths, email addresses, user data, and transcript-shaped
-material.
+credential assignments, structured JSON credential keys such as `password`,
+`token`, and `api_key`, Basic or Bearer payloads, Cookie payloads, ticket
+payloads, private-key material, URLs, hostnames including unreviewed TLDs and
+loopback names, IPv4 and IPv6 addresses, email addresses, and sensitive
+absolute filesystem paths. JSON is also walked recursively so `user`,
+`role: user`, `content`, `transcript`, `messages`, and related user/transcript
+payloads fail closed.
 
 Exemptions are narrow and structural:
 
@@ -98,7 +101,9 @@ Exemptions are narrow and structural:
 - exact artifact filenames and validator command paths; and
 - complete detector-definition or explicit negative-test-canary source lines.
 
-Prefix, suffix, alternate host, alternate URL, and adjacent content do not inherit
+Python artifacts are tokenized only to recognize dotted identifiers in code;
+string and comment contents remain scanner-visible. Prefix, suffix, alternate
+host, alternate URL, and adjacent content do not inherit
 an exemption. Tests append each forbidden class to every artifact and require
 rejection.
 
@@ -119,10 +124,14 @@ independently computed outcomes, plus the baseline digest. The baseline repeats
 the semantic digest and binds the normalized README, cases, validator, and
 tests. Artifact bytes are captured once through bounded regular-file reads and
 that immutable capture feeds parsing, hashing, baseline, and redaction checks.
-Coordinated fixture, expected-result, semantic, and baseline mutations fail
-unless an independent reviewed root is also updated. Aggregate registration
-supplies that independent five-file raw digest and size root after the aggregate
-owner releases exclusive ownership.
+The local pins are reproducibility checks, not an independent trust root. A
+coordinated change can otherwise refresh validator logic, cases, baseline, and
+local pins together. The independent five-file identity and rotation authority
+must therefore be supplied by the aggregate registry owner in a separately
+reviewed prior Git object; this fixture does not edit `contracts/fixtures/index.json`
+or claim to close that trust boundary before that owner-controlled registration.
+The baseline and identity must be regenerated only after the source is stable and
+only through that external predecessor anchor.
 
 Run from the repository root:
 

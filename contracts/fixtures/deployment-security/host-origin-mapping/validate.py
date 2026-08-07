@@ -11,6 +11,7 @@ observe different bytes.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -19,6 +20,7 @@ import re
 import stat
 import subprocess
 import sys
+import tokenize
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -151,18 +153,37 @@ STRUCTURAL_URLS = (
     "https://other.public.invalid", "https://user@chat.public.invalid", "http://attacker.private.invalid",
 )
 STRUCTURAL_PATHS = ("/hermes/api/ws",)
+STRUCTURAL_FILENAMES = (
+    "README.md", "cases.json", "test_validate.py", "validate.py", "validation-baseline.json",
+    "proof-matrix.md", "index.json",
+)
 
-SENSITIVE_ASSIGNMENT = re.compile(r"(?i)(?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key)\s*[:=]\s*[^\s,;}]+")
+SENSITIVE_ASSIGNMENT = re.compile(r"(?i)(?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key)\s*[:=]\s*[^\s,;}]+")
 CREDENTIAL_HEADER = re.compile(r"(?i)\bauthorization\s*:\s*(?:basic|bearer)\s+[A-Za-z0-9._~+/-]{4,}")
 COOKIE_HEADER = re.compile(r"(?i)\bcookie\s*:\s*[^\s,;}]+")
+STRUCTURED_CREDENTIAL_KEY = re.compile(r"(?i)[\"'](?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential|credentials)[\"']\s*:\s*")
+STRUCTURED_USER_DATA = re.compile(r"(?i)[\"'](?:user[_-]?data|user[_-]?content|personal[_-]?data|prompt|message|content)[\"']\s*:\s*")
+STRUCTURED_TRANSCRIPT = re.compile(r"(?i)[\"'](?:transcript|transcripts|conversation|chat[_-]?history|messages|turns|tool[_-]?output)[\"']\s*:\s*")
+USER_ROLE = re.compile(r"(?i)[\"']role[\"']\s*:\s*[\"']user[\"']")
 PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 IPV4 = re.compile(r"(?<![A-Za-z0-9_])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_])")
-IPV6 = re.compile(r"(?i)(?<![A-Za-z0-9_])(?:[0-9a-f]{0,4}:){2,}[0-9a-f:]{0,4}(?![A-Za-z0-9_])")
+IPV6 = re.compile(r"(?i)(?<![A-Za-z0-9_])(?=[0-9a-f:]*[0-9a-f])(?:[0-9a-f]{0,4}:){2,}[0-9a-f:]{0,4}(?![A-Za-z0-9_])")
 EMAIL = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 LIVE_URL = re.compile(r"(?i)\b(?:https?|wss?)://[^\s'\"<>)]+")
-HOSTNAME = re.compile(r"(?i)(?<![A-Za-z0-9_])(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|app|local|invalid)(?::\d{1,5})?(?![A-Za-z0-9_])")
-ABSOLUTE_PATH = re.compile(r"(?:^|[\s'\"=])(?:/(?:tmp|private|Users|home|var|etc|opt|root)(?:/[A-Za-z0-9._-]+)+)")
+HOSTNAME = re.compile(r"(?i)(?<![A-Za-z0-9._-])(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})(?::\d{1,5})?(?![A-Za-z0-9._/-])")
+ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_])/(?:srv|tmp|private|Users|home|var|etc|opt|root|run|System|Library)(?:/[A-Za-z0-9._~+-]+)+(?![A-Za-z0-9_/-])")
 VALIDATOR_PIN_LINE = re.compile(r"(?m)^PINNED_(?:CASES|BASELINE|SEMANTICS|BASELINE_EVIDENCE|VALIDATOR_SOURCE)_SHA256 = \"[0-9a-f]{64}\"$")
+REDACTION_DETECTOR_NAMES = frozenset({
+    "SENSITIVE_ASSIGNMENT", "CREDENTIAL_HEADER", "COOKIE_HEADER", "STRUCTURED_CREDENTIAL_KEY",
+    "STRUCTURED_USER_DATA", "STRUCTURED_TRANSCRIPT", "USER_ROLE", "PRIVATE_KEY", "IPV4", "IPV6",
+    "EMAIL", "LIVE_URL", "HOSTNAME", "ABSOLUTE_PATH", "VALIDATOR_PIN_LINE",
+})
+SENSITIVE_STRUCTURED_KEYS = frozenset({
+    "password", "passwd", "secret", "token", "ticket", "cookie", "authorization", "api_key",
+    "access_token", "refresh_token", "client_secret", "private_key", "credential", "credentials",
+})
+USER_DATA_STRUCTURED_KEYS = frozenset({"user", "user_data", "user_content", "personal_data", "prompt", "message", "content"})
+TRANSCRIPT_STRUCTURED_KEYS = frozenset({"transcript", "transcripts", "conversation", "chat_history", "messages", "turns", "tool_output"})
 
 
 class ValidationError(Exception):
@@ -647,7 +668,46 @@ def artifact_manifest(captured: CapturedArtifacts | None = None) -> dict[str, An
     return {"files": files, "bytes": total, "sha256": digest.hexdigest()}
 
 
-def _normalize_structural_text(text: str) -> str:
+def _normalize_python_code_members(text: str) -> str:
+    """Hide only dotted Python identifiers outside strings and comments.
+
+    The hostname detector also matches ordinary module/member syntax. Tokenizing
+    code avoids a broad text exemption: literals
+    and comments remain unchanged, so a host, credential, or path payload in a
+    source string still reaches the fail-closed scanner.
+    """
+
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (IndentationError, SyntaxError, tokenize.TokenError):
+        return text
+    lines = text.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+
+    def absolute(position: tuple[int, int]) -> int:
+        line, column = position
+        return offsets[line - 1] + column
+
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index + 2 < len(tokens):
+        first, dot, last = tokens[index : index + 3]
+        if first.type != tokenize.NAME or dot.string != "." or last.type != tokenize.NAME:
+            index += 1
+            continue
+        end = index + 3
+        while end + 1 < len(tokens) and tokens[end].string == "." and tokens[end + 1].type == tokenize.NAME:
+            end += 2
+        spans.append((absolute(first.start), absolute(tokens[end - 1].end)))
+        index = end
+    for start, end in reversed(spans):
+        text = text[:start] + "<python-code-member>" + text[end:]
+    return text
+
+
+def _normalize_structural_text(text: str, *, source_name: str | None = None) -> str:
     normalized = text
     for value in sorted(STRUCTURAL_URLS, key=len, reverse=True):
         normalized = re.sub(rf"(?<![A-Za-z0-9._~:/?#@!$&'()*+,;=%-]){re.escape(value)}(?![A-Za-z0-9._~:/?#@!$&'()*+,;=%-])", "<reserved-invalid-url>", normalized)
@@ -655,16 +715,61 @@ def _normalize_structural_text(text: str) -> str:
         normalized = re.sub(rf"(?<![A-Za-z0-9.-]){re.escape(value)}(?![A-Za-z0-9.-])", "<reserved-invalid-host>", normalized)
     for value in STRUCTURAL_PATHS:
         normalized = re.sub(rf"(?<![A-Za-z0-9._/-]){re.escape(value)}(?![A-Za-z0-9._/-])", "<reviewed-route>", normalized)
-    # Detector definitions and explicit negative-test canaries are security-test
-    # syntax. Exempt only their complete source lines, never adjacent content.
-    normalized = re.sub(r"(?m)^[A-Z_]+ = re\.compile\(.*$", "<detector-definition>", normalized)
-    normalized = re.sub(r"(?m)^\s*mutations = \[.*$", "<parser-negative-matrix>", normalized)
-    normalized = re.sub(r"(?m)^\s*payloads = \(b'.*$", "<malformed-json-negative-canary>", normalized)
-    normalized = re.sub(r"(?m)^\s*for arguments in \(\[\"--unknown\".*$", "<cli-negative-canary>", normalized)
-    normalized = re.sub(r"(?m)^\s*for value in \(\"evilchat\.public\.invalid\".*$", "<structural-boundary-negative-canary>", normalized)
-    normalized = re.sub(r"(?m)^\s*[\"'](?:credential|bearer|cookie|ticket|url|host|ipv4|ipv6|path|email|key)[\"']:\s.*$", "<redaction-negative-canary>", normalized)
-    normalized = re.sub(r"(?m)^.*<negative-test-canary>.*$", "<negative-test-detector-definition>", normalized)
+    # Detector definitions are security-test syntax, but a definition with an
+    # adjacent payload must remain visible. Normalize only a complete assignment
+    # line whose final parenthesis is the end of that line; appended credentials,
+    # hosts, user data, or paths are intentionally left for the scanner.
+    lines: list[str] = []
+    for line in normalized.splitlines(keepends=True):
+        if re.fullmatch(rf"\s*(?:{'|'.join(sorted(REDACTION_DETECTOR_NAMES))})\s*=\s*re\.compile\(.*\)(?:,\s*re\.[A-Za-z]+)?\s*\n?", line):
+            lines.append("<detector-definition>\n" if line.endswith("\n") else "<detector-definition>")
+        else:
+            lines.append(line)
+    normalized = "".join(lines)
+    for value in STRUCTURAL_FILENAMES:
+        normalized = re.sub(rf"(?<![A-Za-z0-9._-]){re.escape(value)}(?![A-Za-z0-9._-])", "<reviewed-artifact-name>", normalized)
+    if source_name is not None and source_name.endswith(".py"):
+        normalized = _normalize_python_code_members(normalized)
+
+    # The remaining exemptions are exact, named negative-test source forms. Do
+    # not use a wildcard line exemption: mixed-line payload regressions must be
+    # scanned even when they share a line with a test helper.
+    normalized = re.sub(r"(?m)^\s*mutations = \[.*\]\s*$", "<parser-negative-matrix>", normalized)
+    normalized = re.sub(r"(?m)^\s*payloads = \(b'.*\)\s*$", "<malformed-json-negative-canary>", normalized)
+    normalized = re.sub(r"(?m)^\s*for arguments in \(\[\"--unknown\".*\)\s*$", "<cli-negative-canary>", normalized)
+    normalized = re.sub(r"(?m)^\s*for value in \(\"evilchat\.public\.invalid\".*\)\s*$", "<structural-boundary-negative-canary>", normalized)
+    normalized = re.sub(r"(?m)^.*<negative-test-canary>\s*$", "<negative-test-detector-definition>", normalized)
     return normalized
+
+
+def _normalize_redaction_key(key: str) -> str:
+    split_acronym = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    split_camel = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", split_acronym)
+    return re.sub(r"[^a-z0-9]+", "_", split_camel.lower()).strip("_")
+
+
+def _scan_structured_json(value: Any, path: str = "$") -> None:
+    """Reject sensitive object keys and user/transcript payload shapes.
+
+    Raw regexes catch textual artifacts, but JSON keys can otherwise hide a
+    credential or conversation payload behind harmless-looking values. Walk
+    parsed JSON with bounded parser limits and reject normalized key aliases so
+    camelCase, hyphenated, and underscored spellings share one fail-closed rule.
+    """
+
+    if type(value) is dict:
+        for key, child in value.items():
+            normalized = _normalize_redaction_key(key)
+            require(normalized not in SENSITIVE_STRUCTURED_KEYS, f"retained artifact contains forbidden structured credential at {path}")
+            require(normalized not in USER_DATA_STRUCTURED_KEYS, f"retained artifact contains forbidden user data at {path}")
+            require(normalized not in TRANSCRIPT_STRUCTURED_KEYS, f"retained artifact contains forbidden transcript data at {path}")
+            if normalized == "role" and child == "user":
+                raise ValidationError(f"retained artifact contains forbidden user transcript at {path}")
+            _scan_structured_json(child, f"{path}.<field>")
+        return
+    if type(value) is list:
+        for child in value:
+            _scan_structured_json(child, f"{path}[]")
 
 
 def scan_artifact_bytes(name: str, payload: bytes) -> None:
@@ -673,10 +778,14 @@ def scan_artifact_bytes(name: str, payload: bytes) -> None:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValidationError("retained artifact is not valid UTF-8") from exc
-    normalized = _normalize_structural_text(text)
+    if name.endswith(".json"):
+        _scan_structured_json(parse_json_bytes(payload))
+    normalized = _normalize_structural_text(text, source_name=name)
     for pattern, label in (
         (SENSITIVE_ASSIGNMENT, "credential assignment"), (CREDENTIAL_HEADER, "credential header"),
-        (COOKIE_HEADER, "cookie header"), (PRIVATE_KEY, "private key"), (LIVE_URL, "URL"),
+        (COOKIE_HEADER, "cookie header"), (STRUCTURED_CREDENTIAL_KEY, "structured credential"),
+        (STRUCTURED_USER_DATA, "structured user data"), (STRUCTURED_TRANSCRIPT, "structured transcript"),
+        (USER_ROLE, "user transcript"), (PRIVATE_KEY, "private key"), (LIVE_URL, "URL"),
         (IPV4, "IPv4 address"), (IPV6, "IPv6 address"), (EMAIL, "email address"),
         (HOSTNAME, "hostname"), (ABSOLUTE_PATH, "filesystem path"),
     ):
