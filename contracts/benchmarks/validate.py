@@ -234,10 +234,10 @@ EXPECTED_REVISIONS = {
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: {
-        "commit_sha": "45a5414cf9f0370b8c98f9b2bae3a3538e919696",
+        "commit_sha": "d6bdc55d882a913774a8e7b7e61fde0c77ebd8c4",
         "fixture_id": "web-production-build",
         "fixture_version": "1.0.0",
-        "fixture_sha256": "422794f7c168253347336d3e13a8024fbd57be37c73fb71b94e853379c636498",
+        "fixture_sha256": "838a3df292f0a004a46de7c281ed8d6d58676b099f344ea10fa0cb14a4cdb689",
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
 }
@@ -287,11 +287,11 @@ EXPECTED_ARTIFACT_METADATA = {
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: (
-        ("workload.json", 1002, "422794f7c168253347336d3e13a8024fbd57be37c73fb71b94e853379c636498"),
-        ("run.ts", 52327, "a9a09b909ed91d715b90804d8da5ce918b257043d888057f46e2268a3fe80d56"),
-        ("sandbox-runner.py", 8891, "be288563be9c5b782fad1b1d50a584d28538d3d5af7a67bcaa6fc0f5c6b0ca7e"),
+        ("workload.json", 1002, "838a3df292f0a004a46de7c281ed8d6d58676b099f344ea10fa0cb14a4cdb689"),
+        ("run.ts", 59504, "2b94482f4ee4e60e5657fe53b7de0bf4d48977d2b8d40acb42d74e864adbc539"),
+        ("sandbox-runner.py", 12446, "b38eb87ef2e3395a31ae0223675ab0506ea2cdd5c40ed4720f76f5fa535a4869"),
         ("artifact-scanner.py", 5994, "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb"),
-        ("evidence/raw-trace.json", 17588, "ea3b3bedc3f68b110c4343947f4931ee3454d14af3e1edf28563f63544e6843f"),
+        ("evidence/raw-trace.json", 17602, "1110d9a851569f68d8dc3ae996eae13efd80b6d0905ca7636e449bc064561e74"),
     ),
 }
 SELF_AUTHENTICATED_ARTIFACT_PATHS = {
@@ -902,7 +902,7 @@ def _validate_web_provenance(record: dict[str, Any], root: Path) -> None:
     require(network == {"mode": "deny", "boundary": "os_sandbox"}, "web workload network boundary changed")
     launcher = _strict_keys(workload["launcher"], ("supervisor_sha256", "scanner_sha256"), "web workload.launcher")
     require(launcher == {
-        "supervisor_sha256": "be288563be9c5b782fad1b1d50a584d28538d3d5af7a67bcaa6fc0f5c6b0ca7e",
+        "supervisor_sha256": "b38eb87ef2e3395a31ae0223675ab0506ea2cdd5c40ed4720f76f5fa535a4869",
         "scanner_sha256": "79e68fabb9e8c83a171783eeb9eec5e5593a4871b05eebd46d18bff8feef87cb",
     }, "web workload protected helper identities changed")
 

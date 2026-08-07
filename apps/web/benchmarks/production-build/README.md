@@ -46,7 +46,7 @@ The canonical B-01 validator at `contracts/benchmarks/validate.py` validates che
 
 All inputs are repository source, static assets, and synthetic prototype data. Evidence contains no credentials, cookies, tokens, user data, transcripts, live hosts, network traces, or provider data.
 
-The checked-in observation used an Apple M2 Max with Bun 1.3.14, Node 26.7.0, and Vite 8.2.0. Cold p50/p95/p99 were `2255.144/2603.909/2758.666 ms`. Warm p50/p95/p99 were `2064.690/2325.234/2478.198 ms`. The excluded warm-up and all 60 measured builds produced artifact digest `78ae81588063c7327dcee1f04832d255f01bb8f48518777670d1c92ce2099cb9`. These observations from one local machine do not establish a regression threshold or approved budget.
+The checked-in observation used an Apple M2 Max with Bun 1.3.14, Node 26.7.0, and Vite 8.2.0. Cold p50/p95/p99 were `1759.434/2196.081/3147.994 ms`. Warm p50/p95/p99 were `1985.502/4302.615/4748.263 ms`. The excluded warm-up and all 60 measured builds produced artifact digest `78ae81588063c7327dcee1f04832d255f01bb8f48518777670d1c92ce2099cb9`. These observations from one local machine do not establish a regression threshold or approved budget.
 
 ## Run and verify
 
