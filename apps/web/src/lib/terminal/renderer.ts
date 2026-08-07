@@ -57,6 +57,8 @@ export type TerminalAdapterOptions = Readonly<{
   onInput: (data: string) => void;
   /** Lets a lazy adapter stop before constructing into a released host. */
   isCurrent?: () => boolean;
+  /** Internal renderer ownership token used for the shared host registry. */
+  ownerToken?: object;
 }>;
 
 export type MountedTerminalDisposeOptions = Readonly<{
@@ -88,7 +90,10 @@ export interface TerminalRenderer {
   write(data: Uint8Array): void;
   resize(cols: number, rows: number): void;
   focus(): void;
-  /** Resolve after queued ready-state writes and resizes have drained. */
+  /**
+   * Resolve after queued renderer calls have drained. This is not a DOM paint
+   * fence; browser workloads pair it with a visible text sentinel/render fence.
+   */
   whenIdle(): Promise<void>;
   dispose(): void;
 }
@@ -130,20 +135,26 @@ type WTermModules = Readonly<{
 let wTermModulesPromise: Promise<WTermModules> | null = null;
 const WTERM_HOST_CLASSES = ['wterm', 'cursor-blink', 'has-scrollback', 'focused'] as const;
 const wTermHostRecords = new WeakMap<HTMLElement, WTermHostRecord>();
-// Direct adapter callers do not pass through rendererHostOwners, so the
-// exported adapter keeps its own host arbitration token. A pending token is
-// claimed before lazy loading and a mounted token is disposed on takeover.
+// Renderer instances and exported direct adapters share one host arbitration
+// token. A pending or mounted owner is claimed before lazy loading; takeover
+// cancels the previous owner before the new owner mutates the host. Keeping one
+// registry prevents cross-mode stale writes, focus, paste, resize, and teardown
+// from reaching a disposed backend or clearing a newer owner's DOM.
 type DirectAdapterHostOwner = {
+  readonly kind: 'direct';
+  readonly renderer: null;
   canceled: boolean;
   backend: MountedTerminal | null;
   cancelCleanup: (() => void) | null;
   cancel: () => void;
 };
-const directAdapterHostOwners = new WeakMap<HTMLElement, DirectAdapterHostOwner>();
-// One renderer generation owns host-level loading/error/restore mutations at a
-// time. This prevents an older renderer instance from clearing a newer owner's
-// content when both instances are pointed at the same host.
-const rendererHostOwners = new WeakMap<HTMLElement, ManagedTerminalRenderer>();
+type RendererHostOwner = {
+  readonly kind: 'renderer';
+  readonly renderer: ManagedTerminalRenderer;
+  cancel: () => void;
+};
+type HostOwner = DirectAdapterHostOwner | RendererHostOwner;
+const hostOwners = new WeakMap<HTMLElement, HostOwner>();
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const typedArrayNameGetter = Object.getOwnPropertyDescriptor(
   typedArrayPrototype,
@@ -589,9 +600,17 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
   return {
     async mount(host, options): Promise<MountedTerminal> {
       const initialSize = normalizeSize(options.initialSize);
-      const previousOwner = directAdapterHostOwners.get(host);
-      previousOwner?.cancel();
+      const previousOwner = hostOwners.get(host);
+      const managedOwner =
+        options.ownerToken &&
+        previousOwner?.kind === 'renderer' &&
+        previousOwner === options.ownerToken
+          ? previousOwner
+          : null;
+      if (previousOwner && previousOwner !== managedOwner) previousOwner.cancel();
       const owner: DirectAdapterHostOwner = {
+        kind: 'direct',
+        renderer: null,
         canceled: false,
         backend: null,
         cancelCleanup: null,
@@ -600,13 +619,13 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
           owner.canceled = true;
           owner.cancelCleanup?.();
           owner.backend = null;
-          if (directAdapterHostOwners.get(host) === owner) directAdapterHostOwners.delete(host);
+          if (hostOwners.get(host) === owner) hostOwners.delete(host);
         }
       };
-      directAdapterHostOwners.set(host, owner);
+      if (!managedOwner) hostOwners.set(host, owner);
       const isCurrent = (): boolean =>
         !owner.canceled &&
-        directAdapterHostOwners.get(host) === owner &&
+        hostOwners.get(host) === (managedOwner ?? owner) &&
         (!options.isCurrent || options.isCurrent());
       const { WTerm, GhosttyCore, wasmPath } = await loadWTermModules().catch((error: unknown) => {
         owner.cancel();
@@ -737,7 +756,7 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
             owner.canceled = true;
             owner.backend = null;
             owner.cancelCleanup = null;
-            if (directAdapterHostOwners.get(host) === owner) directAdapterHostOwners.delete(host);
+            if (hostOwners.get(host) === owner) hostOwners.delete(host);
             // A stale dispose must not learn values restored or written by a
             // later host owner. A direct dispose can capture the final known
             // class state synchronously; the observer covers async W-Term
@@ -764,7 +783,7 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         owner.canceled = true;
         owner.backend = null;
         owner.cancelCleanup = null;
-        if (directAdapterHostOwners.get(host) === owner) directAdapterHostOwners.delete(host);
+        if (hostOwners.get(host) === owner) hostOwners.delete(host);
         throw error;
       }
     }
@@ -808,7 +827,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       !backend ||
       !host ||
       event.currentTarget !== host ||
-      rendererHostOwners.get(host) !== this
+      hostOwners.get(host)?.renderer !== this
     ) return;
     const clipboardEvent = event as ClipboardEvent;
     const text = clipboardEvent.clipboardData?.getData('text/plain') ?? '';
@@ -862,7 +881,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       this.state === 'ready' &&
       this.host === host &&
       this.backend &&
-      rendererHostOwners.get(host) === this
+      hostOwners.get(host)?.renderer === this
     ) {
       const backend = this.backend;
       if (this.restoreFocusOnMount || this.focusRequested) {
@@ -878,27 +897,45 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       this.focusRequested = false;
       return;
     }
+    const wasFocused = this.host?.contains(document.activeElement) ?? false;
+    this.restoreFocusOnMount ||= wasFocused;
+    const hasActiveGeneration = this.pendingMount !== null || this.backend !== null || this.host !== null;
+    if (hasActiveGeneration) {
+      // Every host-generation transition must release active and queued paste
+      // approvals before teardown or adoption. In particular, a ready renderer
+      // remounted to a different host has no pendingMount marker to trigger
+      // this cancellation otherwise.
+      this.resetPasteConfirmationQueue();
+    }
     if (this.pendingMount) {
       // A lazy adapter may never settle. Invalidate it instead of awaiting a
       // promise that would make dispose/remount hang forever; its eventual
       // backend is rejected by the generation/ownership guard below.
       this.mountGeneration += 1;
       this.pendingMount = null;
-      this.resetPasteConfirmationQueue();
       this.teardownCurrentHost();
     }
 
-    const wasFocused = this.host?.contains(document.activeElement) ?? false;
     if (this.backend || this.host) {
       this.restoreFocusOnMount ||= wasFocused;
       this.teardownCurrentHost();
     }
 
-    const previousOwner = rendererHostOwners.get(host);
-    if (previousOwner && previousOwner !== this) previousOwner.dispose();
+    const previousOwner = hostOwners.get(host);
+    if (
+      previousOwner &&
+      !(previousOwner.kind === 'renderer' && previousOwner.renderer === this)
+    ) {
+      previousOwner.cancel();
+    }
 
     const generation = ++this.mountGeneration;
-    rendererHostOwners.set(host, this);
+    const owner: RendererHostOwner = {
+      kind: 'renderer',
+      renderer: this,
+      cancel: () => this.dispose()
+    };
+    hostOwners.set(host, owner);
     this.host = host;
     this.hostSnapshot = captureHostSnapshot(host);
     applyHostState(host, 'loading', this.label);
@@ -907,7 +944,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     this.setState('loading');
     if (!this.isCurrentMount(generation, host)) return;
 
-    const load = this.mountAdapter(host, generation);
+    const load = this.mountAdapter(host, generation, owner);
     this.pendingMount = load;
     try {
       await load;
@@ -922,7 +959,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       throw new TypeError('terminal writes require Uint8Array data');
     }
     if (bytes.byteLength === 0) return;
-    if (this.state === 'ready' && this.host && rendererHostOwners.get(this.host) !== this) return;
+    if (this.state === 'ready' && this.host && hostOwners.get(this.host)?.renderer !== this) return;
     if (this.state === 'ready' && this.backend) {
       this.enqueueReadyWrite(bytes);
       return;
@@ -942,7 +979,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
 
   resize(cols: number, rows: number): void {
     const size = normalizeSize({ cols, rows });
-    if (this.state === 'ready' && this.host && rendererHostOwners.get(this.host) !== this) return;
+    if (this.state === 'ready' && this.host && hostOwners.get(this.host)?.renderer !== this) return;
     if (this.state === 'ready' && this.backend) {
       if (this.readyOperations.length > 0) {
         const last = this.readyOperations.at(-1);
@@ -977,7 +1014,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   }
 
   focus(): void {
-    if (this.state === 'ready' && this.host && rendererHostOwners.get(this.host) !== this) return;
+    if (this.state === 'ready' && this.host && hostOwners.get(this.host)?.renderer !== this) return;
     if (this.state === 'ready' && this.backend) {
       try {
         this.backend.focus();
@@ -1021,19 +1058,24 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     return (
       generation === this.mountGeneration &&
       this.host === host &&
-      rendererHostOwners.get(host) === this &&
+      hostOwners.get(host)?.renderer === this &&
       this.state !== 'disposed' &&
       (!backend || this.backend === backend)
     );
   }
 
-  private async mountAdapter(host: HTMLElement, generation: number): Promise<void> {
+  private async mountAdapter(
+    host: HTMLElement,
+    generation: number,
+    owner: RendererHostOwner
+  ): Promise<void> {
     try {
       const backend = await this.adapter.mount(host, {
         initialSize: this.initialSize,
         scrollbackLimitBytes: this.scrollbackLimitBytes,
         onInput: this.onInput,
-        isCurrent: () => this.isCurrentMount(generation, host)
+        isCurrent: () => this.isCurrentMount(generation, host),
+        ownerToken: owner
       });
       if (!this.isCurrentMount(generation, host)) {
         // The async adapter may have constructed W-Term after this renderer
@@ -1074,7 +1116,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       if (
         generation !== this.mountGeneration ||
         this.state === 'disposed' ||
-        rendererHostOwners.get(host) !== this
+        hostOwners.get(host)?.renderer !== this
       ) {
         this.restoreErrorIfOwned(host);
         return;
@@ -1141,7 +1183,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       this.state !== 'ready' ||
       !host ||
       !backend ||
-      rendererHostOwners.get(host) !== this
+      hostOwners.get(host)?.renderer !== this
     ) {
       this.clearReadyOperations();
       return;
@@ -1228,7 +1270,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       this.state !== 'error' ||
       !this.error ||
       this.host !== host ||
-      rendererHostOwners.get(host) !== this
+      hostOwners.get(host)?.renderer !== this
     ) return;
     applyHostState(host, 'error', this.label);
     renderError(host);
@@ -1302,7 +1344,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       code,
       message: code === 'pending-output-limit' ? 'Terminal output was not ready in time.' : 'Terminal could not start.'
     };
-    if (this.host && rendererHostOwners.get(this.host) === this) {
+    if (this.host && hostOwners.get(this.host)?.renderer === this) {
       applyHostState(this.host, 'error', this.label);
       renderError(this.host);
     }
@@ -1313,7 +1355,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     this.clearReadyOperations();
     const host = this.host;
     const snapshot = this.hostSnapshot;
-    const ownsHost = host !== null && rendererHostOwners.get(host) === this;
+    const ownsHost = host !== null && hostOwners.get(host)?.renderer === this;
     if (host) host.removeEventListener('paste', this.onPasteCapture, true);
     safeDispose(this.backend, !ownsHost);
     this.backend = null;
@@ -1322,7 +1364,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       if (snapshot) restoreHostSnapshot(host, snapshot);
     }
     if (!keepHost) {
-      if (host && ownsHost) rendererHostOwners.delete(host);
+      if (host && ownsHost) hostOwners.delete(host);
       this.host = null;
       this.hostSnapshot = null;
     }

@@ -37,6 +37,7 @@ type Samples = Readonly<{
 type BrowserBenchmarkResult = Readonly<{
   schema: string;
   environment: Readonly<Record<string, string>>;
+  render_fence: 'visible-text-sentinel';
   samples: Readonly<Record<string, Samples>>;
   long_tasks_ms: number[];
   memory: Readonly<{

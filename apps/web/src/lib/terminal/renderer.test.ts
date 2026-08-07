@@ -1,14 +1,20 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { build } from 'vite';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createTerminalRenderer,
   createWTermGhosttyAdapter,
+  MAX_DANGEROUS_PASTE_BYTES,
+  MAX_PENDING_PASTE_BYTES,
+  MAX_PENDING_PASTE_COUNT,
   MAX_READY_WRITE_CHUNK_BYTES,
   MAX_READY_WRITE_BUFFER_BYTES,
   type MountedTerminal,
+  type PasteRequest,
   type TerminalRendererAdapter,
   type TerminalSize
 } from './renderer';
@@ -296,7 +302,70 @@ function clipboardPaste(host: HTMLElement, text: string): Event {
   return event;
 }
 
-function recomputeBenchmarkCheckout(commit: string, build: BenchmarkBuild): BenchmarkCheckout {
+function benchmarkFiles(root: string, relativePath = ''): string[] {
+  const directory = join(root, relativePath);
+  const files: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const child = join(relativePath, entry.name);
+    if (entry.isDirectory()) files.push(...benchmarkFiles(root, child));
+    else files.push(child);
+  }
+  return files;
+}
+
+async function recomputeBenchmarkBuild(commit: string, repoRoot: string): Promise<BenchmarkBuild> {
+  const checkoutRoot = mkdtempSync(join(tmpdir(), 'hermternal-terminal-checkout-'));
+  try {
+    const archive = execFileSync('git', ['-C', repoRoot, 'archive', commit], { maxBuffer: 64 * 1024 * 1024 });
+    execFileSync('tar', ['-x', '-C', checkoutRoot], { input: archive });
+    symlinkSync(resolve(repoRoot, 'apps/web/node_modules'), join(checkoutRoot, 'apps/web/node_modules'), 'dir');
+    // Vite's TypeScript transform follows the SvelteKit tsconfig even though
+    // this isolated entry contains no Svelte component. Reuse generated config
+    // metadata from the current dependency-compatible checkout without using
+    // any source files from the working tree.
+    symlinkSync(resolve(repoRoot, 'apps/web/.svelte-kit'), join(checkoutRoot, 'apps/web/.svelte-kit'), 'dir');
+    const webRoot = join(checkoutRoot, 'apps/web');
+    const outputDirectory = join(checkoutRoot, '.terminal-renderer-benchmark-build');
+    await build({
+      root: webRoot,
+      configFile: false,
+      logLevel: 'error',
+      build: {
+        outDir: outputDirectory,
+        emptyOutDir: true,
+        assetsInlineLimit: 0,
+        cssCodeSplit: true,
+        minify: true,
+        rollupOptions: {
+          input: join(webRoot, 'tests/bench/terminal-renderer.browser.ts'),
+          output: {
+            entryFileNames: 'entry.js',
+            chunkFileNames: 'chunks/[name]-[hash].js',
+            assetFileNames: 'assets/[name]-[hash][extname]'
+          }
+        }
+      }
+    });
+    const files = benchmarkFiles(outputDirectory).map((path) => {
+      const bytes = readFileSync(join(outputDirectory, path));
+      return { path, bytes: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') };
+    }).sort((left, right) => left.path.localeCompare(right.path));
+    const sumFiles = (predicate: (path: string) => boolean): number =>
+      files.reduce((total, file) => total + (predicate(file.path) ? file.bytes : 0), 0);
+    return {
+      command: 'vite build --configFile false --minify',
+      files,
+      entry_bytes: sumFiles((path) => path === 'entry.js'),
+      lazy_chunk_bytes: sumFiles((path) => path.startsWith('chunks/')),
+      wasm_bytes: sumFiles((path) => path.endsWith('.wasm')),
+      css_bytes: sumFiles((path) => path.endsWith('.css'))
+    };
+  } finally {
+    rmSync(checkoutRoot, { recursive: true, force: true });
+  }
+}
+
+async function recomputeBenchmarkCheckout(commit: string): Promise<BenchmarkCheckout> {
   const repoRoot = resolve(process.cwd(), '../..');
   const executionInputs = BENCHMARK_EXECUTION_INPUT_PATHS.map((path) => {
     const bytes = execFileSync('git', ['-C', repoRoot, 'show', `${commit}:${path}`]);
@@ -306,13 +375,21 @@ function recomputeBenchmarkCheckout(commit: string, build: BenchmarkBuild): Benc
       sha256: createHash('sha256').update(bytes).digest('hex')
     };
   });
+  const evidenceHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD']).toString().trim();
+  const evidenceChangedPaths = execFileSync('git', ['-C', repoRoot, 'diff', '--name-only', `${commit}..${evidenceHead}`])
+    .toString()
+    .split('\n')
+    .map((path) => path.trim())
+    .filter(Boolean);
   return {
     head: commit,
     // The Git commit tree is the reviewed clean checkout; current working-tree
     // dirtiness is covered independently by assertCleanExecutionInputs tests.
     clean: true,
     execution_inputs: executionInputs,
-    build
+    build: await recomputeBenchmarkBuild(commit, repoRoot),
+    evidence_head: evidenceHead,
+    evidence_changed_paths: evidenceChangedPaths
   };
 }
 
@@ -870,6 +947,122 @@ describe('TerminalRenderer', () => {
     await vi.waitFor(() => expect(terminals[1]?.operations).toContainEqual({ type: 'paste', text: 'fresh command\n' }));
   });
 
+  it('releases stalled paste state before a direct ready-host remount', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    let resolveStalled!: (accepted: boolean) => void;
+    const stalledConfirmation = new Promise<boolean>((resolve) => {
+      resolveStalled = resolve;
+    });
+    const confirmPaste = vi.fn()
+      .mockImplementationOnce(() => stalledConfirmation)
+      .mockResolvedValue(true);
+    const renderer = createTerminalRenderer({ adapter, confirmPaste });
+    const firstHost = document.createElement('div');
+    const secondHost = document.createElement('div');
+    document.body.append(firstHost, secondHost);
+    await renderer.mount(firstHost);
+
+    const maximumPayload = `${'x'.repeat(MAX_DANGEROUS_PASTE_BYTES - 1)}\n`;
+    clipboardPaste(firstHost, maximumPayload);
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(1));
+
+    const runtime = renderer as unknown as {
+      pasteQueue: unknown[];
+      pasteQueueBytes: number;
+      activePaste: { request: PasteRequest | null } | null;
+    };
+    expect(confirmPaste).toHaveBeenCalledWith(expect.objectContaining({ text: maximumPayload }));
+    expect(runtime.activePaste).not.toBeNull();
+    expect(runtime.pasteQueue).toHaveLength(0);
+    expect(runtime.pasteQueueBytes).toBe(new TextEncoder().encode(maximumPayload).byteLength);
+
+    await renderer.mount(secondHost);
+    expect(runtime.activePaste).toBeNull();
+    expect(runtime.pasteQueue).toHaveLength(0);
+    expect(runtime.pasteQueueBytes).toBe(0);
+
+    resolveStalled(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(terminals[0]?.operations.filter((operation) => operation.type === 'paste')).toHaveLength(0);
+
+    const staleEvent = clipboardPaste(firstHost, 'stale\ncommand');
+    expect(staleEvent.defaultPrevented).toBe(false);
+    expect(confirmPaste).toHaveBeenCalledTimes(1);
+
+    clipboardPaste(secondHost, 'fresh\ncommand');
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(terminals[1]?.operations).toContainEqual({ type: 'paste', text: 'fresh\ncommand' }));
+  });
+
+  it('enforces dangerous paste count, aggregate-byte, and single-payload boundaries', async () => {
+    const { adapter } = createDeterministicAdapter();
+    let resolveFirst!: (accepted: boolean) => void;
+    const stalledConfirmation = new Promise<boolean>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const confirmPaste = vi.fn().mockImplementation(() => stalledConfirmation);
+    const renderer = createTerminalRenderer({ adapter, confirmPaste });
+    const host = document.createElement('div');
+    await renderer.mount(host);
+
+    const oneByteUnderLimit = `${'a'.repeat(MAX_DANGEROUS_PASTE_BYTES - 2)}\n`;
+    const atLimit = `${'b'.repeat(MAX_DANGEROUS_PASTE_BYTES - 1)}\n`;
+    const oversized = `${'c'.repeat(MAX_DANGEROUS_PASTE_BYTES)}\n`;
+    expect(new TextEncoder().encode(atLimit).byteLength).toBe(MAX_DANGEROUS_PASTE_BYTES);
+    expect(new TextEncoder().encode(oversized).byteLength).toBeGreaterThan(MAX_DANGEROUS_PASTE_BYTES);
+
+    for (let index = 0; index < MAX_PENDING_PASTE_COUNT; index += 1) {
+      clipboardPaste(host, `${String(index)}\n`);
+    }
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(1));
+    const runtime = renderer as unknown as {
+      pasteQueue: unknown[];
+      pasteQueueBytes: number;
+      activePaste: unknown;
+    };
+    expect(runtime.pasteQueue).toHaveLength(MAX_PENDING_PASTE_COUNT - 1);
+    expect(runtime.pasteQueueBytes).toBeGreaterThan(0);
+
+    clipboardPaste(host, `${MAX_PENDING_PASTE_COUNT}\n`);
+    await Promise.resolve();
+    expect(runtime.pasteQueue).toHaveLength(MAX_PENDING_PASTE_COUNT - 1);
+    expect(confirmPaste).toHaveBeenCalledTimes(1);
+
+    renderer.dispose();
+    await renderer.mount(host);
+    expect(runtime.activePaste).toBeNull();
+    expect(runtime.pasteQueue).toHaveLength(0);
+    expect(runtime.pasteQueueBytes).toBe(0);
+
+    const exactLimitEvent = clipboardPaste(host, atLimit);
+    expect(exactLimitEvent.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(confirmPaste).toHaveBeenCalledTimes(2));
+    renderer.dispose();
+    await renderer.mount(host);
+    expect(runtime.pasteQueueBytes).toBe(0);
+
+    const oversizedEvent = clipboardPaste(host, oversized);
+    expect(oversizedEvent.defaultPrevented).toBe(true);
+    expect(confirmPaste).toHaveBeenCalledTimes(2);
+
+    // Aggregate bytes at the limit are admitted, while one additional byte is
+    // rejected without retaining a second payload. Use two stalled entries so
+    // the active confirmation remains visible to the bounded accounting.
+    const aggregateRenderer = createTerminalRenderer({
+      adapter: createDeterministicAdapter().adapter,
+      confirmPaste: vi.fn(() => stalledConfirmation)
+    });
+    const aggregateHost = document.createElement('div');
+    await aggregateRenderer.mount(aggregateHost);
+    clipboardPaste(aggregateHost, oneByteUnderLimit);
+    clipboardPaste(aggregateHost, '\n');
+    await vi.waitFor(() => expect((aggregateRenderer as unknown as { pasteQueueBytes: number }).pasteQueueBytes).toBe(MAX_PENDING_PASTE_BYTES));
+    clipboardPaste(aggregateHost, 'x\n');
+    expect((aggregateRenderer as unknown as { pasteQueueBytes: number }).pasteQueueBytes).toBe(MAX_PENDING_PASTE_BYTES);
+    resolveFirst(false);
+    aggregateRenderer.dispose();
+  });
+
   it('catches backend paste failures without an unhandled rejection', async () => {
     const backend: MountedTerminal = {
       write: vi.fn(),
@@ -922,6 +1115,86 @@ describe('TerminalRenderer', () => {
     await renderer.mount(firstHost);
     expect(renderer.state).toBe('ready');
     expect(firstHost).toHaveFocus();
+  });
+
+  it('keeps a loading callback remount from overwriting the pending mount', async () => {
+    const firstBackend: MountedTerminal = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      focus: vi.fn(),
+      paste: vi.fn(),
+      dispose: vi.fn()
+    };
+    const secondBackend: MountedTerminal = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      focus: vi.fn(),
+      paste: vi.fn(),
+      dispose: vi.fn()
+    };
+    let resolveFirst!: (backend: MountedTerminal) => void;
+    let calls = 0;
+    const adapter: TerminalRendererAdapter = {
+      mount: vi.fn(() => {
+        calls += 1;
+        if (calls === 1) return new Promise<MountedTerminal>((resolve) => { resolveFirst = resolve; });
+        return Promise.resolve(secondBackend);
+      })
+    };
+    const firstHost = document.createElement('div');
+    const secondHost = document.createElement('div');
+    document.body.append(firstHost, secondHost);
+    let remounted = false;
+    let renderer!: ReturnType<typeof createTerminalRenderer>;
+    renderer = createTerminalRenderer({
+      adapter,
+      onStateChange: (state) => {
+        if (state === 'loading' && !remounted) {
+          remounted = true;
+          queueMicrotask(() => { void renderer.mount(secondHost); });
+        }
+      }
+    });
+
+    const firstMount = renderer.mount(firstHost);
+    await vi.waitFor(() => expect(adapter.mount).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(adapter.mount).toHaveBeenCalledTimes(2));
+    resolveFirst(firstBackend);
+    await firstMount;
+    await vi.waitFor(() => expect(renderer.state).toBe('ready'));
+
+    expect(firstBackend.dispose).toHaveBeenCalledTimes(1);
+    expect(secondBackend.dispose).not.toHaveBeenCalled();
+    expect(renderer.state).toBe('ready');
+    expect(firstHost).toBeEmptyDOMElement();
+    expect(secondHost).toHaveAttribute('data-terminal-state', 'ready');
+  });
+
+  it('restores focus once when a ready callback remounts after focusing the old host', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    const firstHost = document.createElement('div');
+    const secondHost = document.createElement('div');
+    document.body.append(firstHost, secondHost);
+    let remounted = false;
+    let renderer!: ReturnType<typeof createTerminalRenderer>;
+    renderer = createTerminalRenderer({
+      adapter,
+      onStateChange: (state) => {
+        if (state === 'ready' && !remounted) {
+          remounted = true;
+          renderer.focus();
+          void renderer.mount(secondHost);
+        }
+      }
+    });
+
+    await renderer.mount(firstHost);
+    await vi.waitFor(() => expect(terminals).toHaveLength(2));
+    await vi.waitFor(() => expect(renderer.state).toBe('ready'));
+
+    expect(firstHost).not.toHaveFocus();
+    expect(secondHost).toHaveFocus();
+    expect(terminals[0]?.operations.filter((operation) => operation.type === 'write')).toHaveLength(0);
   });
 
   it('rechecks ownership after onStateChange synchronously disposes at ready', async () => {
@@ -1121,6 +1394,96 @@ describe('TerminalRenderer', () => {
     expect(host).toHaveClass('shell-host');
   });
 
+  it('makes a prior renderer inert when a direct adapter takes over its host', async () => {
+    moduleMocks.MockGhosttyCore.load.mockResolvedValue(new moduleMocks.MockGhosttyCore());
+    const host = document.createElement('div');
+    host.className = 'shell-host';
+    host.setAttribute('role', 'group');
+    host.setAttribute('aria-label', 'Original host');
+    document.body.appendChild(host);
+    const confirmPaste = vi.fn().mockResolvedValue(true);
+    const { adapter, terminals } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter, confirmPaste });
+    await renderer.mount(host);
+    renderer.write(new Uint8Array([0x41]));
+    renderer.resize(90, 30);
+    renderer.focus();
+    const rendererTerminal = terminals[0]!;
+    const writeCount = rendererTerminal.operations.filter((operation) => operation.type === 'write').length;
+    const resizeCount = rendererTerminal.operations.filter((operation) => operation.type === 'resize').length;
+
+    const direct = await createWTermGhosttyAdapter().mount(host, {
+      initialSize: { cols: 80, rows: 24 },
+      scrollbackLimitBytes: 64 * 1024,
+      onInput: vi.fn()
+    });
+    const directInstance = moduleMocks.MockWTerm.instances.at(-1)!;
+    expect(renderer.state).toBe('disposed');
+    expect(host).toContainElement(directInstance._container);
+
+    renderer.write(new Uint8Array([0x42]));
+    renderer.resize(91, 31);
+    renderer.focus();
+    clipboardPaste(host, 'stale\nrenderer paste');
+    expect(confirmPaste).toHaveBeenCalledTimes(0);
+    expect(rendererTerminal.operations.filter((operation) => operation.type === 'write')).toHaveLength(writeCount);
+    expect(rendererTerminal.operations.filter((operation) => operation.type === 'resize')).toHaveLength(resizeCount);
+
+    renderer.dispose();
+    expect(host).toContainElement(directInstance._container);
+    direct.dispose();
+    expect(host).toHaveClass('shell-host');
+    expect(host).toHaveAttribute('role', 'group');
+    expect(host).toHaveAttribute('aria-label', 'Original host');
+  });
+
+  it('makes a prior direct adapter inert when a renderer takes over its host', async () => {
+    moduleMocks.MockGhosttyCore.load.mockResolvedValue(new moduleMocks.MockGhosttyCore());
+    const host = document.createElement('div');
+    host.className = 'shell-host';
+    host.setAttribute('role', 'group');
+    host.setAttribute('aria-label', 'Original host');
+    document.body.appendChild(host);
+    const direct = await createWTermGhosttyAdapter().mount(host, {
+      initialSize: { cols: 80, rows: 24 },
+      scrollbackLimitBytes: 64 * 1024,
+      onInput: vi.fn()
+    });
+    const directInstance = moduleMocks.MockWTerm.instances.at(-1)!;
+    direct.write(new Uint8Array([0x41]));
+    direct.resize(90, 30);
+    direct.focus();
+
+    const { adapter, terminals } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter });
+    await renderer.mount(host);
+    // The pinned adapter uses host-preserving cleanup instead of W-Term's
+    // upstream innerHTML teardown. Its owned listeners, input, bridge, and
+    // container are released before the renderer mutates the shared host.
+    expect(directInstance.input).toBeNull();
+    expect(directInstance.bridge).toBeNull();
+    expect(host.querySelector('[data-test-terminal-screen]')).toBeInTheDocument();
+
+    const directWritesBefore = directInstance.writes.length;
+    const directResizesBefore = directInstance.resizes.length;
+    direct.write(new Uint8Array([0x42]));
+    direct.resize(91, 31);
+    direct.focus();
+    direct.paste('stale direct paste');
+    expect(directInstance.writes).toHaveLength(directWritesBefore);
+    expect(directInstance.resizes).toHaveLength(directResizesBefore);
+
+    renderer.write(new Uint8Array([0x43]));
+    await renderer.whenIdle();
+    expect(terminals[0]?.operations).toContainEqual({ type: 'write', bytes: new Uint8Array([0x43]) });
+    direct.dispose();
+    expect(host.querySelector('[data-test-terminal-screen]')).toBeInTheDocument();
+    renderer.dispose();
+    expect(host).toHaveClass('shell-host');
+    expect(host).toHaveAttribute('role', 'group');
+    expect(host).toHaveAttribute('aria-label', 'Original host');
+  });
+
   it('direct adapter disposal preserves host values and cleans only its own nodes once', async () => {
     moduleMocks.MockGhosttyCore.load.mockResolvedValue(new moduleMocks.MockGhosttyCore());
     const host = document.createElement('div');
@@ -1261,13 +1624,13 @@ describe('TerminalRenderer', () => {
     );
   });
 
-  it('independently validates and binds the checked-in benchmark evidence trace', () => {
+  it('independently validates and binds the checked-in benchmark evidence trace', async () => {
     const evidencePath = resolve(process.cwd(), 'tests/bench/terminal-renderer.evidence.json');
     const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as {
       revision: { source_commit: string };
       build: BenchmarkBuild;
     };
-    const checkout = recomputeBenchmarkCheckout(evidence.revision.source_commit, evidence.build);
+    const checkout = await recomputeBenchmarkCheckout(evidence.revision.source_commit);
     expect(() => assertBenchmarkTrace(evidence, checkout)).not.toThrow();
     expect(() => assertBenchmarkTrace(evidence, undefined as never)).toThrow(
       'checked-in benchmark evidence checkout was not a clean full-commit source'

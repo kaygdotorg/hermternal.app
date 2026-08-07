@@ -18,6 +18,8 @@ type Samples = Readonly<{
 type BrowserBenchmarkResult = Readonly<{
   schema: 'hermternal.web-terminal-renderer-browser-benchmark.v1';
   environment: Readonly<Record<string, string>>;
+  /** A visible text mutation plus observer/paint fence proves glyph completion. */
+  render_fence: 'visible-text-sentinel';
   samples: Readonly<Record<string, Samples>>;
   long_tasks_ms: number[];
   memory: Readonly<{
@@ -91,10 +93,25 @@ function waitForText(host: HTMLElement, text: string): Promise<void> {
 }
 
 async function waitForRendererIdle(renderer: ReturnType<typeof createTerminalRenderer>): Promise<void> {
+  // whenIdle() is a call-drain fence only; production W-Term schedules its
+  // actual DOM render on a timer/rAF. Callers must add a visible sentinel when
+  // measuring glyph completion.
   await renderer.whenIdle();
   if (renderer.state !== 'ready' || renderer.error !== null) {
     throw new Error(`terminal renderer was not ready after workload: ${renderer.error?.code ?? renderer.state}`);
   }
+}
+
+async function waitForVisibleSentinel(
+  host: HTMLElement,
+  renderer: ReturnType<typeof createTerminalRenderer>,
+  sentinel: string
+): Promise<void> {
+  renderer.write(encoder.encode(`\n${sentinel}`));
+  await waitForRendererIdle(renderer);
+  await waitForText(host, sentinel);
+  await waitForPaint();
+  await waitForRendererIdle(renderer);
 }
 
 async function run(): Promise<BrowserBenchmarkResult> {
@@ -155,9 +172,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
     workloadPhase = `sustained-output-${index}`;
     const started = performance.now();
     renderer.write(replay.subarray(0, 64 * 1024));
-    await waitForRendererIdle(renderer);
-    await waitForPaint();
-    await waitForRendererIdle(renderer);
+    await waitForVisibleSentinel(host, renderer, `sustained-fence-${index}`);
     sustainedOutputSamples.push(performance.now() - started);
   }
 
@@ -168,9 +183,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
     for (let offset = 0; offset < replay.byteLength; offset += 64 * 1024) {
       renderer.write(replay.subarray(offset, Math.min(replay.byteLength, offset + 64 * 1024)));
     }
-    await waitForRendererIdle(renderer);
-    await waitForPaint();
-    await waitForRendererIdle(renderer);
+    await waitForVisibleSentinel(host, renderer, `replay-fence-${index}`);
     replaySamples.push(performance.now() - started);
   }
   const afterReplay = memoryBytes();
@@ -213,6 +226,7 @@ async function run(): Promise<BrowserBenchmarkResult> {
       device_pixel_ratio: String(window.devicePixelRatio),
       cross_origin_isolated: String(window.crossOriginIsolated)
     },
+    render_fence: 'visible-text-sentinel',
     samples,
     long_tasks_ms: longTasks,
     memory: {
@@ -253,6 +267,7 @@ void run().catch((error: unknown) => {
   browserWindow[resultKey] = {
     schema: 'hermternal.web-terminal-renderer-browser-benchmark.v1',
     environment: { error: error instanceof Error ? error.message : 'benchmark failed' },
+    render_fence: 'visible-text-sentinel',
     samples: {},
     long_tasks_ms: [],
     memory: {

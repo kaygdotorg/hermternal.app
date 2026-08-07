@@ -64,6 +64,10 @@ export type BenchmarkCheckout = Readonly<{
   execution_inputs: readonly BenchmarkExecutionInput[];
   /** Artifact bytes and hashes collected from the exact produced build output. */
   build: BenchmarkBuild;
+  /** Optional checked-in evidence head used to enforce evidence-only ancestry. */
+  evidence_head?: string;
+  /** Git paths changed between source and evidence heads. */
+  evidence_changed_paths?: readonly string[];
 }>;
 
 const DISTRIBUTION_KEYS = ['min', 'p50', 'p95', 'p99', 'max', 'mean'] as const;
@@ -266,6 +270,91 @@ function assertBuildMatchesExpected(actual: unknown, expected: unknown): void {
   }
 }
 
+const RENDER_FENCE = 'visible-text-sentinel';
+const REPLAY_BYTES = 1024 * 1024;
+const REPLAY_CHUNK_BYTES = 64 * 1024;
+const INITIAL_COLS = 80;
+const INITIAL_ROWS = 24;
+const SCROLLBACK_BYTES = 64 * 1024;
+
+function assertBrowserEnvironment(environment: Record<string, unknown>): void {
+  const stringKeys = ['user_agent', 'platform', 'viewport', 'device_pixel_ratio', 'cross_origin_isolated'] as const;
+  if (stringKeys.some((key) => typeof environment[key] !== 'string' || environment[key] === '')) {
+    throw new Error('checked-in benchmark evidence browser environment metadata was invalid');
+  }
+  const viewport = String(environment.viewport).match(/^(\\d+)x(\\d+)$/u);
+  if (!viewport || Number(viewport[1]) < 1 || Number(viewport[2]) < 1) {
+    throw new Error('checked-in benchmark evidence browser viewport metadata was invalid');
+  }
+  const devicePixelRatio = Number(environment.device_pixel_ratio);
+  if (!Number.isFinite(devicePixelRatio) || devicePixelRatio <= 0) {
+    throw new Error('checked-in benchmark evidence browser device-pixel-ratio metadata was invalid');
+  }
+  if (environment.cross_origin_isolated !== 'true' && environment.cross_origin_isolated !== 'false') {
+    throw new Error('checked-in benchmark evidence browser isolation metadata was invalid');
+  }
+  if (environment.disallowed_network_requests !== '0') {
+    throw new Error('checked-in benchmark evidence browser network policy was invalid');
+  }
+}
+
+function assertLongTaskMetadata(value: unknown): void {
+  if (!Array.isArray(value)) {
+    throw new Error('checked-in benchmark evidence long-task samples were invalid');
+  }
+  for (const duration of value) {
+    if (typeof duration !== 'number' || !Number.isFinite(duration) || duration < 0) {
+      throw new Error('checked-in benchmark evidence long-task samples were invalid');
+    }
+  }
+}
+
+function assertMemoryMetadata(value: unknown): void {
+  if (!isRecord(value) || typeof value.supported !== 'boolean' || !(value.reason === null || typeof value.reason === 'string')) {
+    throw new Error('checked-in benchmark evidence memory metadata was invalid');
+  }
+  const fields = ['before_replay_bytes', 'after_replay_bytes', 'after_dispose_bytes'] as const;
+  for (const field of fields) {
+    const bytes = value[field];
+    if (bytes !== null && (typeof bytes !== 'number' || !Number.isInteger(bytes) || bytes < 0)) {
+      throw new Error('checked-in benchmark evidence memory metadata was invalid');
+    }
+  }
+  const hasSample = fields.some((field) => value[field] !== null);
+  if (value.supported !== hasSample || (value.supported && value.reason !== null) || (!value.supported && !value.reason)) {
+    throw new Error('checked-in benchmark evidence memory support metadata was inconsistent');
+  }
+}
+
+function assertWorkloadMetadata(value: unknown): void {
+  if (!isRecord(value) || !isRecord(value.initial_size)) {
+    throw new Error('checked-in benchmark evidence workload metadata was invalid');
+  }
+  const integerFields = ['replay_bytes', 'replay_chunks', 'mount_dispose_repetitions', 'scrollback_limit_bytes'] as const;
+  for (const field of integerFields) {
+    const number = value[field];
+    if (typeof number !== 'number' || !Number.isInteger(number) || number < 0) {
+      throw new Error('checked-in benchmark evidence workload metadata was invalid');
+    }
+  }
+  if (
+    value.replay_bytes !== REPLAY_BYTES ||
+    value.replay_chunks !== REPLAY_BYTES / REPLAY_CHUNK_BYTES ||
+    value.mount_dispose_repetitions !== BENCHMARK_REPETITIONS.repeated_mount_dispose ||
+    value.scrollback_limit_bytes !== SCROLLBACK_BYTES
+  ) {
+    throw new Error('checked-in benchmark evidence workload metadata did not match the reviewed workload');
+  }
+  const cols = value.initial_size.cols;
+  const rows = value.initial_size.rows;
+  if (
+    typeof cols !== 'number' || !Number.isInteger(cols) || cols !== INITIAL_COLS ||
+    typeof rows !== 'number' || !Number.isInteger(rows) || rows !== INITIAL_ROWS
+  ) {
+    throw new Error('checked-in benchmark evidence initial terminal size was invalid');
+  }
+}
+
 /** Validate the checked-in trace against a clean, recomputed source checkout. */
 export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout): void {
   if (!isRecord(value) || value.schema !== 'hermternal.web-terminal-renderer-benchmark.v1') {
@@ -281,11 +370,41 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
   ) {
     throw new Error('checked-in benchmark evidence revision paths were invalid');
   }
-  if (!checkout || !FULL_COMMIT_SHA.test(checkout.head) || !checkout.clean || !isRecord(checkout.build)) {
+  if (
+    !checkout ||
+    !FULL_COMMIT_SHA.test(checkout.head) ||
+    !checkout.clean ||
+    !Array.isArray(checkout.execution_inputs) ||
+    !isRecord(checkout.build)
+  ) {
     throw new Error('checked-in benchmark evidence checkout was not a clean full-commit source');
   }
   if (String(revision.source_commit).toLowerCase() !== checkout.head.toLowerCase()) {
     throw new Error('checked-in benchmark evidence source commit did not match the reviewed checkout HEAD');
+  }
+  if (checkout.evidence_head !== undefined || checkout.evidence_changed_paths !== undefined) {
+    if (
+      typeof checkout.evidence_head !== 'string' ||
+      !FULL_COMMIT_SHA.test(checkout.evidence_head) ||
+      !Array.isArray(checkout.evidence_changed_paths) ||
+      checkout.evidence_changed_paths.some((path) => path !== 'apps/web/tests/bench/terminal-renderer.evidence.json')
+    ) {
+      throw new Error('checked-in benchmark evidence source relationship was not evidence-only');
+    }
+  }
+  if (
+    checkout.execution_inputs.length !== BENCHMARK_EXECUTION_INPUT_PATHS.length ||
+    checkout.execution_inputs.some((input, index) =>
+      !isRecord(input) ||
+      input.path !== BENCHMARK_EXECUTION_INPUT_PATHS[index] ||
+      typeof input.bytes !== 'number' ||
+      !Number.isInteger(input.bytes) ||
+      input.bytes < 0 ||
+      typeof input.sha256 !== 'string' ||
+      !INPUT_SHA256.test(input.sha256)
+    )
+  ) {
+    throw new Error('recomputed checkout execution inputs were invalid');
   }
   const inputs = revision.execution_inputs;
   if (!Array.isArray(inputs) || inputs.length !== BENCHMARK_EXECUTION_INPUT_PATHS.length) {
@@ -325,11 +444,15 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
     !isRecord(browser) ||
     browser.schema !== 'hermternal.web-terminal-renderer-browser-benchmark.v1' ||
     !isRecord(browser.environment) ||
-    browser.environment.disallowed_network_requests !== '0' ||
+    browser.render_fence !== RENDER_FENCE ||
     !isRecord(browser.samples)
   ) {
-    throw new Error('checked-in benchmark evidence browser network policy or samples were invalid');
+    throw new Error('checked-in benchmark evidence browser metadata or samples were invalid');
   }
+  assertBrowserEnvironment(browser.environment);
+  assertLongTaskMetadata(browser.long_tasks_ms);
+  assertMemoryMetadata(browser.memory);
+  assertWorkloadMetadata(browser.workload);
   assertBuildMatchesExpected(value.build, checkout.build);
   const sampleNames = Object.keys(browser.samples).sort();
   const expectedNames = Object.keys(BENCHMARK_REPETITIONS).sort();
@@ -348,10 +471,17 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
     method.percentile !== 'inclusive-linear-r7' ||
     method.rounding !== 'decimal-half-even-to-three-places' ||
     !Array.isArray(method.quantiles) ||
+    method.quantiles.length !== 3 ||
+    method.quantiles.some((quantile) => typeof quantile !== 'number' || !Number.isFinite(quantile)) ||
     method.quantiles.join(',') !== '0.5,0.95,0.99' ||
     !isRecord(method.repetitions)
   ) {
     throw new Error('checked-in benchmark evidence method metadata was invalid');
+  }
+  const repetitionNames = Object.keys(method.repetitions).sort();
+  const expectedRepetitionNames = Object.keys(BENCHMARK_REPETITIONS).sort();
+  if (repetitionNames.join('\\n') !== expectedRepetitionNames.join('\\n')) {
+    throw new Error('checked-in benchmark evidence repetition metadata was incomplete');
   }
   for (const [name, expected] of Object.entries(BENCHMARK_REPETITIONS)) {
     if (method.repetitions[name] !== expected) {
