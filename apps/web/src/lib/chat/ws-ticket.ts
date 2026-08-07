@@ -372,26 +372,36 @@ async function runAttempt<Connection>(
   // attempt and lets the explicit retry path acquire a fresh ticket.
   const deadline = setTimeout(() => controller.abort(), DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS);
 
+  let acquiredConnection: Connection | undefined;
+  let connectionAcquired = false;
+
   try {
-    throwIfAborted(callerSignal);
+    throwIfAborted(controller.signal);
 
     const response = await requestTicket(options.request, controller.signal);
-    throwIfAborted(callerSignal);
+    throwIfAborted(controller.signal);
     const ticket = parseTicketResponse(response);
     const upgradeUrl = createUpgradeUrl(origin, ticket);
 
     // The URL is handed directly to the connector and is not stored on the
     // client. Connector implementations must honor the supplied signal.
-    throwIfAborted(callerSignal);
-    const connection = await upgradeTicket(
+    throwIfAborted(controller.signal);
+    acquiredConnection = await upgradeTicket(
       options.connect,
       upgradeUrl,
       controller.signal,
       closeLateConnection,
     );
-    throwIfAborted(callerSignal);
-    return connection;
+    connectionAcquired = true;
+    // The connector may resolve, then the caller can abort before this outer
+    // continuation observes it. Treat the result as unadopted until return;
+    // the catch boundary closes it exactly once when cancellation wins.
+    throwIfAborted(controller.signal);
+    return acquiredConnection;
   } catch (error) {
+    if (connectionAcquired) {
+      closeLateConnection(acquiredConnection as Connection);
+    }
     if (
       callerSignal?.aborted ||
       controller.signal.aborted ||

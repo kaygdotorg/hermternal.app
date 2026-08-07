@@ -8,6 +8,7 @@
   import SessionList from './SessionList.svelte';
   import StateBanner from './StateBanner.svelte';
   import Timeline from './Timeline.svelte';
+  import type { LiveWorkspacePermanentFailure } from './live-workspace-session';
   import { DEFAULT_SESSIONS, timelineForState } from './fixtures';
   import type {
     Appearance,
@@ -28,6 +29,7 @@
   export let sessions: SessionSummary[] = DEFAULT_SESSIONS;
   export let timelineItems: TimelineItem[] | undefined = undefined;
   export let timelineEmptyLabel = 'No messages in this synthetic session.';
+  export let permanentFailure: LiveWorkspacePermanentFailure | undefined = undefined;
   export let dataMode: 'fixture' | 'live' = 'fixture';
   export let interactionEnabled = true;
   export let artifactInspectorEnabled = true;
@@ -199,7 +201,7 @@
           class="state-layer"
         >
           {#if !compatibilityBlocked}
-            <StateBanner {dataMode} {dataSource} {state} onAction={handleAction} />
+            <StateBanner {dataMode} {dataSource} {permanentFailure} {state} onAction={handleAction} />
           {/if}
         </div>
 

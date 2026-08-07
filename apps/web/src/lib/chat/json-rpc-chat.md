@@ -244,8 +244,12 @@ The observable connection states are:
 `reconnecting`, `delivery_uncertain`, `incompatible`, `failed`, and `closing`.
 
 The browser ticket adapter maps only a genuine `401` ticket response to
-`authentication-required` and `auth_required`. The workspace treats that state
-as permanent until the user restores authentication; a `403` or transport
+`authentication-required` and `auth_required`. Close observations remain attached
+to the connection state, so the workspace can retain the terminal reason and
+classification separately from its broad `permanent-error` state: `4401` carries
+sign-in guidance, while `4403` carries incompatible-origin guidance. The
+workspace treats authentication and compatibility failures as permanent until
+the user takes the matching recovery action; a `403` or generic transport
 failure remains a separate failure classification.
 
 A transport loss, send failure, or acknowledgement timeout after prompt send
@@ -355,7 +359,8 @@ The unit suite uses a deterministic fake WebSocket and covers:
 - complete compatibility evidence, missing-evidence failure, bounded gate
   timeout, route-manifest session-ID validation, approval/clarification owner
   validation, and acknowledgement deadlines;
-- all pinned close-code classifications and the exact JSON depth bound;
+- all pinned close-code classifications, including terminal state propagation for
+  active prompts, and the exact JSON depth bound;
 - a browser-like no-network module import that does not touch `fetch` or
   `WebSocket` globals.
 

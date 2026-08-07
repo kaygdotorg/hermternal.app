@@ -5,6 +5,7 @@ import {
   type JsonRpcChatEvent,
   type JsonRpcChatRequest,
   type JsonRpcChatTransport,
+  type JsonRpcCloseClassification,
   type JsonRpcConnectionState
 } from '$lib/chat/json-rpc-chat';
 import type { LiveRestTransport, LiveSession } from '$lib/transport';
@@ -18,6 +19,8 @@ export interface LiveWorkspaceSnapshot {
   readonly title: string;
   readonly model: string;
   readonly timeline: TimelineItem[];
+  /** Semantic terminal cause retained separately from the broad UI state. */
+  readonly permanentFailure?: LiveWorkspacePermanentFailure;
 }
 
 export interface LiveWorkspaceSessionOptions {
@@ -26,6 +29,14 @@ export interface LiveWorkspaceSessionOptions {
 }
 
 type LiveWorkspaceSubscriber = (snapshot: Readonly<LiveWorkspaceSnapshot>) => void;
+
+export type LiveWorkspacePermanentReason = 'authentication-required' | 'incompatible';
+
+export interface LiveWorkspacePermanentFailure {
+  readonly reason: LiveWorkspacePermanentReason;
+  readonly closeCode?: number;
+  readonly closeClassification?: JsonRpcCloseClassification;
+}
 
 interface PendingApproval {
   readonly requestId: string;
@@ -94,7 +105,13 @@ export class LiveWorkspaceSession {
   async selectSession(sessionId: string): Promise<void> {
     this.assertActive();
     const operation = this.begin();
-    this.publish({ ...this.snapshot, activeSessionId: sessionId, state: 'loading', timeline: [] });
+    this.publish({
+      ...this.snapshot,
+      activeSessionId: sessionId,
+      state: 'loading',
+      timeline: [],
+      permanentFailure: undefined
+    });
 
     try {
       const session = await this.rest.getSession(sessionId, operation.signal);
@@ -210,7 +227,7 @@ export class LiveWorkspaceSession {
     const sessionId = this.snapshot.activeSessionId;
     if (!chat || !sessionId) return;
 
-    this.publish({ ...this.snapshot, state: 'reconnecting' });
+    this.publish({ ...this.snapshot, state: 'reconnecting', permanentFailure: undefined });
     // Subscribers can synchronously invalidate or replace the workspace from
     // the reconnecting publication. Do not call an old transport after that
     // re-entry has changed the ownership boundary.
@@ -398,7 +415,13 @@ export class LiveWorkspaceSession {
     if (!this.isCurrent(generation)) return;
     if (state.status === 'reconnecting') this.publish({ ...this.snapshot, state: 'reconnecting' });
     if (state.status === 'incompatible' || state.status === 'auth_required') {
-      this.publish({ ...this.snapshot, state: 'permanent-error' });
+      this.publishPermanentFailure(generation, {
+        reason: state.status === 'auth_required' ? 'authentication-required' : 'incompatible',
+        ...(state.closeCode !== undefined ? { closeCode: state.closeCode } : {}),
+        ...(state.closeClassification !== undefined
+          ? { closeClassification: state.closeClassification }
+          : {})
+      });
     }
     if (state.status === 'failed' || state.status === 'delivery_uncertain') {
       this.publish({ ...this.snapshot, state: 'retryable-error' });
@@ -455,13 +478,18 @@ export class LiveWorkspaceSession {
     if (this.activeRequest !== request) return;
     this.activeRequest = undefined;
     const uncertain = error instanceof JsonRpcChatError && error.code === 'uncertain-delivery';
-    const authenticationRequired = this.snapshot.state === 'permanent-error';
+    const permanentFailure = this.snapshot.permanentFailure;
+    const authenticationRequired = permanentFailure?.reason === 'authentication-required';
+    const incompatibleOrigin =
+      permanentFailure?.reason === 'incompatible' &&
+      permanentFailure.closeClassification === 'host-or-origin-rejected';
+    const permanent = this.snapshot.state === 'permanent-error';
     this.publish({
       ...this.snapshot,
-      // A close-code 4401 callback can publish permanent auth state before the
-      // rejected completion reaches this handler. Never downgrade that terminal
-      // state while removing the stale streaming item.
-      state: authenticationRequired ? 'permanent-error' : 'retryable-error',
+      // Preserve the terminal classification published by the transport before
+      // the rejected completion reaches this handler. A broad permanent state
+      // is not enough to choose safe sign-in versus origin guidance.
+      state: permanent ? 'permanent-error' : 'retryable-error',
       timeline: [
         ...withoutStreamingItem(this.snapshot.timeline, request.id),
         {
@@ -469,17 +497,33 @@ export class LiveWorkspaceSession {
           id: `${request.id}:error`,
           title: authenticationRequired
             ? 'Authentication required'
-            : uncertain
-              ? 'Delivery is uncertain'
-              : 'Response interrupted',
+            : incompatibleOrigin
+              ? 'Incompatible origin'
+              : permanent
+                ? 'Incompatible deployment'
+                : uncertain
+                  ? 'Delivery is uncertain'
+                  : 'Response interrupted',
           detail: authenticationRequired
             ? 'Sign in again before sending another prompt.'
-            : uncertain
-              ? 'Hermes may have received this prompt. Reconnect and inspect server history before sending again.'
-              : 'Reconnect before sending another prompt. No prompt was replayed.'
+            : incompatibleOrigin
+              ? 'Hermes rejected this origin for chat. Use a reviewed origin before sending another prompt.'
+              : permanent
+                ? 'This Hermes deployment is outside the reviewed chat contract. No prompt was replayed.'
+                : uncertain
+                  ? 'Hermes may have received this prompt. Reconnect and inspect server history before sending again.'
+                  : 'Reconnect before sending another prompt. No prompt was replayed.'
         }
       ]
     });
+  }
+
+  private publishPermanentFailure(
+    generation: number,
+    permanentFailure: LiveWorkspacePermanentFailure
+  ): void {
+    if (!this.isCurrent(generation)) return;
+    this.publish({ ...this.snapshot, state: 'permanent-error', permanentFailure });
   }
 
   private publishUncertainDelivery(generation: number): void {
@@ -494,16 +538,16 @@ export class LiveWorkspaceSession {
     // callback before rejecting. The surrounding load catch must not downgrade
     // that state to a generic retryable error; this also preserves the barrier
     // if a transport rejects before its state callback runs.
-    if (
-      this.snapshot.state === 'permanent-error' ||
-      (error instanceof JsonRpcChatError && error.code === 'authentication-required')
-    ) {
-      if (this.snapshot.state !== 'permanent-error') {
-        this.publish({ ...this.snapshot, state: 'permanent-error' });
-      }
+    if (this.snapshot.state === 'permanent-error') return;
+    if (error instanceof JsonRpcChatError && error.code === 'authentication-required') {
+      this.publishPermanentFailure(generation, { reason: 'authentication-required' });
       return;
     }
-    this.publish({ ...this.snapshot, state: 'retryable-error' });
+    if (error instanceof JsonRpcChatError && error.code === 'incompatible') {
+      this.publishPermanentFailure(generation, { reason: 'incompatible' });
+      return;
+    }
+    this.publish({ ...this.snapshot, state: 'retryable-error', permanentFailure: undefined });
   }
 
   private begin(): { readonly generation: number; readonly signal: AbortSignal } {

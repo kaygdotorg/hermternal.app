@@ -469,6 +469,63 @@ describe('LiveWorkspaceSession', () => {
 
     expect(transport?.state.status).toBe('auth_required');
     expect(session.current.state).toBe('permanent-error');
+    expect(session.current.permanentFailure).toEqual({
+      reason: 'authentication-required',
+      closeCode: 4401,
+      closeClassification: 'authentication-rejected'
+    });
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'error', title: 'Authentication required' })
+    );
+  });
+
+  it('keeps an active prompt origin rejection permanently incompatible after close 4403', async () => {
+    const rest = createRest([]);
+    const socket = new BrowserChatSocket();
+    let transport: JsonRpcChatTransport | undefined;
+    const createChat = vi.fn((options: BrowserChatOptions) => {
+      transport = createBrowserChatTransport({
+        ...options,
+        fetch: async () =>
+          new Response('{"ticket":"fresh-ticket-1","ttl_seconds":30}', {
+            headers: { 'content-type': 'application/json' }
+          }),
+        createSocket: () => socket
+      });
+      return transport;
+    });
+    const session = new LiveWorkspaceSession({ rest, createChat });
+
+    const initialization = session.initialize();
+    const attached = await waitForSocket([socket]);
+    attached.emitOpen();
+    attached.emitGatewayReady();
+    await flush();
+    const resumeFrame = JSON.parse(attached.sent[0] ?? '{}') as { id?: string };
+    if (!resumeFrame.id) throw new Error('session resume frame was not sent');
+    attached.emitResponse(resumeFrame.id);
+    await initialization;
+
+    session.sendPrompt('origin rejection');
+    attached.emitClose(4403, 'redacted');
+    await flush();
+
+    expect(transport?.state.status).toBe('incompatible');
+    expect(transport?.state.closeCode).toBe(4403);
+    expect(transport?.state.closeClassification).toBe('host-or-origin-rejected');
+    expect(session.current.state).toBe('permanent-error');
+    expect(session.current.permanentFailure).toEqual({
+      reason: 'incompatible',
+      closeCode: 4403,
+      closeClassification: 'host-or-origin-rejected'
+    });
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({
+        kind: 'error',
+        title: 'Incompatible origin',
+        detail: expect.stringContaining('origin')
+      })
+    );
   });
 
   it('marks uncertain delivery without reconnecting or replaying the prompt', async () => {

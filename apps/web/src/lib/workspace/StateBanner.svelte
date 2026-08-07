@@ -2,11 +2,13 @@
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
+  import type { LiveWorkspacePermanentFailure } from './live-workspace-session';
   import type { WorkspaceActionHandler, WorkspaceDataSource, WorkspaceRuntimeState } from './types';
 
   export let state: WorkspaceRuntimeState = 'ready';
   export let dataSource: WorkspaceDataSource = 'synthetic-preview';
   export let dataMode: 'fixture' | 'live' = 'fixture';
+  export let permanentFailure: LiveWorkspacePermanentFailure | undefined = undefined;
   export let onAction: WorkspaceActionHandler = () => {};
 
   let recoveryAction: HTMLButtonElement | undefined;
@@ -208,8 +210,24 @@
   <div aria-live="assertive" class="state-card error-state" data-testid="permanent-error-state" role="alert">
     <span aria-hidden="true" class="state-icon"><Icon name="warning" size={18} /></span>
     <div class="error-copy">
-      <strong>Session state rejected</strong>
-      <span>Hermes rejected the session state. No prompt was resent.</span>
+      <strong>
+        {permanentFailure?.reason === 'authentication-required'
+          ? 'Authentication required'
+          : permanentFailure?.closeClassification === 'host-or-origin-rejected'
+            ? 'Incompatible origin'
+            : permanentFailure?.reason === 'incompatible'
+              ? 'Incompatible deployment'
+              : 'Session state rejected'}
+      </strong>
+      <span>
+        {permanentFailure?.reason === 'authentication-required'
+          ? 'Sign in again before sending another prompt.'
+          : permanentFailure?.closeClassification === 'host-or-origin-rejected'
+            ? 'Hermes rejected this origin for chat. Use a reviewed origin before sending another prompt.'
+            : permanentFailure?.reason === 'incompatible'
+              ? 'This Hermes deployment is outside the reviewed chat contract. No prompt was resent.'
+              : 'Hermes rejected the session state. No prompt was resent.'}
+      </span>
       <small>Focus order: status → Back to sessions → Dismiss. No automatic recovery.</small>
     </div>
     <div class="state-actions">

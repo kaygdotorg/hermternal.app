@@ -43,6 +43,7 @@
   dataMode="live"
   interactionEnabled={snapshot.activeSessionId !== undefined}
   model={snapshot.model}
+  permanentFailure={snapshot.permanentFailure}
   sessions={snapshot.sessions}
   state={snapshot.state}
   timelineEmptyLabel="No messages in this chat yet."

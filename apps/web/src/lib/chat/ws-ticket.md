@@ -28,12 +28,15 @@ integration.
   acquire a fresh ticket. If a caller aborts before the old request or connector
   promise settles, a replacement attempt does not coalesce into that canceled
   slot; the old bounded cleanup and the new ticket request run independently. A
-  connector result that arrives after cancellation is
-  closed through an idempotent late-resolution cleanup. The browser adapter shares
-  that idempotent close boundary with its own abort listener, owns a prepared
-  socket until JSON-RPC consumes it, and clears/closes it before retry when abort
-  happens in that handoff window. After an attempt settles, the next explicit call
-  acquires a fresh ticket instead of reusing the old one.
+  connector result that arrives after cancellation is closed through an
+  idempotent late-resolution cleanup. If the connector has already returned a
+  connection but the caller aborts before the outer attempt returns it, the
+  attempt boundary treats that connection as unadopted and closes it exactly
+  once. The browser adapter shares that idempotent close boundary with its own
+  abort listener, owns a prepared socket until JSON-RPC consumes it, and
+  clears/closes it before retry when abort happens in that handoff window. After
+  an attempt settles, the next explicit call acquires a fresh ticket instead of
+  reusing the old one.
 - Propagate an `AbortSignal`; cancellation discards an unverified response and
   never starts an upgrade or an automatic retry.
 - Expose only bounded semantic errors. Response bodies, cookie or bearer values,
@@ -50,8 +53,8 @@ injected `WsTicketRequestBoundary`; W-05 does not edit or depend on W-06 files.
 ## Verification scope
 
 `ws-ticket.test.ts` covers request shape, strict response parsing, fresh-ticket
-retry, duplicate-attempt coalescing, cancellation, invalid authentication, and
-redacted errors. `apps/web/tests/e2e/ws-ticket.browser.spec.ts` loads the same
+retry, duplicate-attempt coalescing, cancellation, post-upgrade connection
+cleanup, invalid authentication, and redacted errors. `apps/web/tests/e2e/ws-ticket.browser.spec.ts` loads the same
 source into a real browser and checks same-origin acquisition, cancellation,
 explicit retry, and the absence of ticket material from storage, DOM, history,
 console observations, and error text. Browser tests generate opaque values at

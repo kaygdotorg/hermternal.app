@@ -406,6 +406,30 @@ describe("createWsTicketClient", () => {
     firstRequest.resolve({ ticket: opaqueTicket() });
   });
 
+  it("closes an acquired connection when caller abort wins after upgrade resolution", async () => {
+    const caller = new AbortController();
+    const connection = { close: vi.fn() };
+    const connect = vi.fn(() => {
+      // Let the upgrade result settle, then abort before runAttempt's outer
+      // continuation reaches its post-upgrade adoption boundary.
+      queueMicrotask(() => queueMicrotask(() => caller.abort()));
+      return connection;
+    });
+    const client = createWsTicketClient({
+      request: async () => ({ ticket: opaqueTicket() }),
+      connect
+    });
+
+    const attempt = client.open(caller.signal);
+    await expect(attempt).rejects.toMatchObject({
+      code: "cancelled",
+      name: "AbortError"
+    });
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(connection.close).toHaveBeenCalledTimes(1);
+    expect(connection.close).toHaveBeenCalledWith(1000, "cancelled");
+  });
+
   it("requires an explicit retry after authentication failure and redacts arbitrary boundary errors", async () => {
     const rawErrorMarker = opaqueTicket();
     const freshTicket = opaqueTicket();
