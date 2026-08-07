@@ -1,0 +1,124 @@
+{
+  "schema": "hermternal.chat-stream-completion-baseline.v1",
+  "validator": "contracts/fixtures/chat-stream-completion/validate.py",
+  "command": "python3 contracts/fixtures/chat-stream-completion/validate.py",
+  "build_mode": "N/A",
+  "artifact_files": [
+    {
+      "path": "README.md",
+      "sha256": "e35db6fb2d0b53eb770710105fe24dbd408927b12d93509dc258e4de1789e437",
+      "size_bytes": 5484
+    },
+    {
+      "path": "cases.json",
+      "sha256": "7b19df2b8ad000f94f7521da12f30a0d013683f799244c470ae539cea8cae384",
+      "size_bytes": 29766
+    },
+    {
+      "path": "source-audit.json",
+      "sha256": "a4722049299599c6fefb42047d05f0304eeccc473d6066bb3d0492e8d2c7ff61",
+      "size_bytes": 2719
+    },
+    {
+      "path": "validate.py",
+      "sha256": "b6ec003a3b961b33b1141d16ec7aa1c80cf5e2ac70924413b900474e596b8014",
+      "size_bytes": 26635
+    },
+    {
+      "path": "test_validate.py",
+      "sha256": "f208b898fd0f9ec114ef0c65931acefbd73262635d20922983dbe6ea2ffed06c",
+      "size_bytes": 17416
+    }
+  ],
+  "artifact_bytes": 82020,
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6"
+  },
+  "repetitions": 30,
+  "normal": {
+    "command": "python3 contracts/fixtures/chat-stream-completion/validate.py",
+    "samples_ms": [
+      49.108834,
+      50.1775,
+      47.730875,
+      49.76625,
+      49.052875,
+      47.668625,
+      46.150958,
+      47.354,
+      48.901583,
+      47.157542,
+      47.818125,
+      47.721083,
+      48.165916,
+      47.891375,
+      49.119792,
+      48.267291,
+      48.515958,
+      48.904,
+      47.226959,
+      48.62775,
+      49.369125,
+      47.874417,
+      49.175208,
+      47.970167,
+      48.867458,
+      46.008584,
+      48.200375,
+      48.341458,
+      49.001041,
+      46.40775
+    ],
+    "distribution": {
+      "min": 46.008584,
+      "p50": 48.233833,
+      "p95": 49.76625,
+      "max": 50.1775,
+      "mean": 48.218096
+    }
+  },
+  "optimized": {
+    "command": "python3 -O contracts/fixtures/chat-stream-completion/validate.py",
+    "samples_ms": [
+      47.808,
+      49.633541,
+      47.480208,
+      48.191583,
+      47.994041,
+      47.016375,
+      48.55225,
+      50.019542,
+      47.302875,
+      48.22825,
+      63.777083,
+      76.974292,
+      48.147542,
+      49.743125,
+      47.844458,
+      48.872875,
+      46.930584,
+      48.026583,
+      47.716834,
+      49.3365,
+      45.907625,
+      47.215791,
+      47.048292,
+      55.452667,
+      48.291125,
+      47.52025,
+      47.283125,
+      47.767541,
+      47.2605,
+      46.650709
+    ],
+    "distribution": {
+      "min": 45.907625,
+      "p50": 47.91925,
+      "p95": 63.777083,
+      "max": 76.974292,
+      "mean": 49.666472
+    }
+  },
+  "threshold": null
+}

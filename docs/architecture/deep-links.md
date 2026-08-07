@@ -5,8 +5,8 @@ Status: normative planning contract for Hermternal v1 deep links.
 Deep links identify Hermternal content. They do not identify a Hermes HTTP
 route, carry authentication material, or create a session. The grammar is
 versioned separately from the product release and the Hermes Dashboard
-protocol. This document freezes the parse boundary only; resolution, access
-results, lineage, and message-result boards belong to dependent contract work.
+protocol. This document freezes the parse boundary and the synthetic resolver
+contract. Runtime resolution and message-result boards remain later work.
 
 The companion synthetic proof is
 [`contracts/fixtures/deep-link-grammar/README.md`](../../contracts/fixtures/deep-link-grammar/README.md).
@@ -120,9 +120,15 @@ These diagnostics omit the configured origin, every ID, query, fragment, and
 invalid suffix. They are not hashes, shortened IDs, or reconstructible links.
 A diagnostic must never permit a lookup or reveal whether a session exists.
 
-## Resolution boundary
+## Resolution contract
 
-A later resolver MUST process a candidate in this order:
+The companion synthetic resolver proof is
+[`contracts/fixtures/deep-link-resolution/README.md`](../../contracts/fixtures/deep-link-resolution/README.md).
+It consumes the frozen grammar and session-lineage artifacts by exact SHA-256
+identity. It does not change them. It makes no network call and does not claim
+a live Hermes integration.
+
+A resolver MUST process a candidate in this order:
 
 1. Parse the URI without following redirects.
 2. Apply the scheme, authority, exact-origin, path, ID, version, and lexical
@@ -136,15 +142,49 @@ A later resolver MUST process a candidate in this order:
    it does not exist, open the session and show a clear **message not found**
    state.
 6. Use the same safe **session not found** or **not available** result for an
-   unknown or unauthorised target. Do not reveal another user's IDs.
-7. Remove the pending target from memory after success, failure, cancellation,
-   expiry, or logout.
+   unknown or unauthorized target. Do not reveal another user's IDs.
+7. Erase the pending raw link, session ID, message ID, and deadline after
+   success, failure, cancellation, expiry, or logout.
 
 A deep link MUST NOT create a session, select another server profile, read a
 filesystem or local `~/.hermes` directory, act as a bearer credential, or
-follow an external redirect. Opening the same valid link twice is idempotent:
-it targets the same full IDs and does not duplicate a session, prompt, or
-message.
+follow an external redirect. It MUST NOT create a sharing route or local
+transcript mirror. Opening the same valid link twice is idempotent: it targets
+the same full IDs and does not duplicate a session, prompt, or message.
+
+A valid target may wait for authentication in process memory for at most 300
+seconds. The resolver records the receive time and the exact receive-plus-300
+second deadline. The receive time MUST leave room for the 300-second addition
+inside the bounded integer range. An overflowing receive time fails closed.
+Authentication, lookup, message focus, completion, interruption, recovery,
+cancellation, and logout require `now < deadline`.
+At exact second 300, every pending path expires before it can act. Success,
+failure, cancellation, expiry, and logout erase the raw link and all target IDs.
+
+A direct load and reload use the same steps. Before new resolution, reload MUST
+erase the prior opened session ID, root ID, parent ID, focused message ID, and
+focus state. Reload MUST then parse the link again, confirm authentication again,
+and perform a new exact lookup. A later failure MUST NOT expose the prior success.
+Reload MUST NOT reuse erased pending values. An interrupted lookup may recover only before its
+recorded deadline. Recovery confirms authentication before an idempotent retry.
+
+A latest-descendant lookup requires explicit bounded lineage ordering evidence.
+Each node has an exact session ID, root ID, parent ID, and integer sequence. The
+resolver walks parent links and selects one unique descendant with the highest
+sequence. Every child sequence MUST be greater than its parent sequence. The
+requested root is not its own latest descendant when descendants exist. The
+resolver MUST prove the requested node, every supplied node, and every parent
+edge against pinned canonical lineage. A parentless or self-rooted known branch
+and a fabricated descendant fail closed. A tie, cycle, missing parent, wrong
+root, duplicate node, decreasing sequence, or malformed sequence also fails
+closed. The resolver MUST NOT use a hard-coded descendant,
+rewrite lineage, or infer lineage from display IDs.
+
+Unknown and unauthorized sessions return the same `session_not_found` result.
+The result MUST NOT state whether the session exists. A missing message returns
+`message_not_found` after the resolved session opens. The client then focuses
+the session start or another stable session fallback. It does not create a
+replacement session.
 
 ## Platform boundary
 
@@ -162,16 +202,40 @@ raw links in shared persistence.
 
 ## Proof coverage and limits
 
-The synthetic fixture proof covers valid web/native session links, optional
-message anchors, exact origin and authority checks, wrong schemes and
-versions, wrong paths, traversal and normalisation, trailing forms, empty and
-short IDs, all lexical rejection classes, stable reason order, strict
-recursive JSON shape, mutation regressions, and non-reversible diagnostics.
+The grammar proof covers valid web and native forms, exact origin and
+authority checks, opaque full IDs, optional message anchors, stable failures,
+and non-reversible diagnostics.
 
-It does not resolve a session, test authentication, prove ownership, inspect
-Hermes, call a network, create universal-link entitlements, implement iOS,
-iPadOS, or macOS routing, or define unknown-session/message result boards.
-Those behaviors require the approved downstream fixtures and platform work.
+The resolver proof covers authenticated exact lookup, latest-descendant
+selection, lineage preservation, authorization-safe session-not-found results,
+message focus, message-not-found fallback, pending target cleanup, direct load,
+reload, idempotent reopen, interruption, recovery, and empty input. It also
+proves zero session creation, zero sharing, zero transcript mirroring, and zero
+network use for every synthetic trace.
+
+Both proofs use strict bounded JSON validation. They reject duplicate keys,
+non-finite values, overflow, wrong exact types, oversized strings or
+containers, excessive nodes, and excessive depth. The bounded walk is iterative.
+
+The resolver proof streams each regular non-symlink artifact once. It enforces
+the byte limit before full allocation. It hashes and parses the same immutable
+bytes. It rejects a symlink or special file before a blocking open. It also
+compares device, inode, size, modification time, and change time before and
+after the read and against the final path. It rejects path replacement and
+same-inode overwrite even when a writer restores the modification time. An
+independent review root binds cases, tests, exact validator source, evidence,
+baseline, documentation, and dependencies. Its digest anchor is outside the mutable local
+proof set. Cases, baselines, source, and local root copies cannot authorize a
+coordinated replacement.
+
+Argument parsing is inside the fixed redaction boundary. Unknown arguments that
+contain links or IDs return one fixed JSON error on standard output and no raw
+standard-error text. Performance evidence uses inclusive linear interpolation
+R-7 and has a null threshold.
+
+The proofs do not authenticate a user, prove ownership, inspect Hermes, call a
+network, create universal-link entitlements, or implement web, iOS, iPadOS, or
+macOS routing. Runtime clients and result boards remain later platform work.
 
 ## Non-UI accessibility evidence
 

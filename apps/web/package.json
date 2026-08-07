@@ -19,8 +19,8 @@
     "test:watch": "vitest",
     "test:component": "vitest run src/lib/components",
     "test:e2e": "playwright test",
-    "test:a11y": "playwright test tests/e2e/accessibility.spec.ts",
-    "test:no-network": "bun run test && playwright test tests/e2e/no-network.spec.ts",
+    "test:a11y": "playwright test tests/e2e/accessibility.spec.ts tests/e2e/ui-preview.spec.ts --grep \"axe violations\"",
+    "test:no-network": "bun run test && playwright test tests/e2e/no-network.spec.ts && playwright test tests/e2e/ui-preview.spec.ts --grep \"stays local\"",
     "test:static": "bun run build && node tests/static/assert-static-build.mjs && node tests/static/assert-css-tokens.mjs && node tests/static/assert-static-routes.mjs",
     "prepare": "svelte-kit sync"
   },

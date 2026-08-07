@@ -2,21 +2,29 @@
 
 ## Status
 
-This directory now contains the W-01 scaffold only. It is a planning, mock, and proof artifact:
+This directory contains the W-01 static scaffold and a separate high-fidelity presentation preview. Both are planning, mock, and proof artifacts:
 
 - Svelte 5 + SvelteKit 2 + Vite + Bun
 - `@sveltejs/adapter-static` with a distinct `200.html` client-route fallback
 - a web app manifest and same-origin static-asset service worker with a closed allowlist
 - normal app-startup service-worker registration that fails closed without blocking input or logging URLs/errors
-- a prototype-labelled shell, not a Runtime or Authentication screen
-- deterministic in-memory fixtures with no live transport
+- a prototype-labelled root shell backed by deterministic in-memory transport fixtures
+- `/ui-preview`, a selector-driven Runtime and Authentication presentation surface backed only by local fixtures
 
-The final user-facing Runtime and Authentication surfaces are intentionally absent. The D-15W
-artboard-to-implementation manifest is merged at `../../contracts/design-tokens/web/artboards.json`
-with token hash `cb15f2b1`; this scaffold consumes its shipped runtime token set but does not claim
-Runtime or Authentication screen parity. Those surfaces remain separate in #267.
+The `/ui-preview` route renders the approved D-15W Runtime and Authentication states for responsive, interaction, accessibility, dark-mode, and no-network review. It is not a production sign-in or Hermes client. Provider choices, password submission, callback progress, compatibility evidence, retries, and workspace actions are synthetic state transitions. They do not call a provider or gateway, inspect callback parameters, retain credentials, or send transcript data.
+
+The canonical artboard-to-implementation manifest is `../../contracts/design-tokens/web/artboards.json`. The preview consumes the matching semantic presentation tokens and implements the approved desktop and narrow state inventory, including fail-closed compatibility gates. Runtime behavior that Paper cannot prove remains covered by local component and browser tests.
 
 The planned chat surface has one profile, provider-neutral discovery, session restore, streaming, approvals, clarification, interruption, images only for attachments, and no transcript mirror.
+
+## Presentation packages
+
+- `src/lib/auth-ui/` owns typed authentication view states, fail-closed validation of synthetic provider arrays, provider cards, password-manager-resistant fixture fields, credential-free form actions, deliberate focus transfer, and live-region semantics. Empty, duplicate, malformed, missing-kind, and future-kind provider data resolves to the unavailable state. The Paper-approved password states begin empty and show `Cleared` while submitting. The primary control is a native reset action with a non-navigating default method: click or focused Enter clears both live values synchronously even if script execution stops, while hydrated submission emits only a fixture action. Live discovery accepts only exact bounded JSON syntax and schemas; malformed declared lengths, rejected responses, caller cancellation, and timeout all cancel active body work before the adapter returns a fixed credential-free diagnostic.
+- `src/lib/workspace/` owns the shared pill primitive, runtime-state fixtures, compatibility gates, timeline, composer, session navigation, artifact inspector, and responsive narrow workspace chrome. Compatibility gates guard both emitted actions and local drawer/editor mutation against forced events. A pointer gesture activates a pill once on pointer down while its compatibility click remains consumed across leave, re-entry, and cancellation; keyboard and assistive activation remain independent. The reduced-transparency fallback uses fully opaque computed materials and removes blur and saturation rather than only changing token declarations.
+- `src/routes/ui-preview/` composes both packages and exposes local selectors for state and appearance. It records only action type names as visible test evidence.
+- `src/lib/transport/` remains the independent W-01 mock transport for the root scaffold. The presentation packages do not import it and do not create a hidden production transport path.
+
+These packages are presentation-only and transport-independent. Do not add provider SDKs, gateway calls, browser-readable reusable credentials, callback parsing, production authentication, or live data to them.
 
 Internal stable session and message IDs remain allowed. Required authentication callback routing also remains allowed.
 

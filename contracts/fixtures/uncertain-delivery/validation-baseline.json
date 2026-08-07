@@ -1,0 +1,135 @@
+{
+  "schema": "hermternal.uncertain-delivery-baseline.v1",
+  "operation": "C-06",
+  "contract": "dashboard-v0.0.1",
+  "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "synthetic_only": true,
+  "metric": "validator_process_duration_ms",
+  "deterministic_fixture": "cases.json",
+  "environment": {
+    "platform": "Darwin-25.5.0-arm64",
+    "python": "3.14.6",
+    "device": "Mac14,6",
+    "build_mode": "N/A"
+  },
+  "threshold": null,
+  "artifacts": {
+    "README.md": {
+      "bytes": 14275,
+      "sha256": "98ddbd6db92f6871a78d677b4cb524894c0505305f09d0470f9878a5f8019001"
+    },
+    "cases.json": {
+      "bytes": 68653,
+      "sha256": "5c9d277359434183150b6405776b83a345f9268ac1e5b31e85f1815968f0d31b"
+    },
+    "preflight.py": {
+      "bytes": 13222,
+      "sha256": "5c8400ce1253d4993191751bb636ad97115bd603cb90f95480eb7055b48f715e"
+    },
+    "validate.py": {
+      "bytes": 95524,
+      "sha256": "9cd7b600c7cd59e19d72499bf25d351b8fab94289b959e371350bb8960e2c82e"
+    },
+    "test_validate.py": {
+      "bytes": 86372,
+      "sha256": "a1097f202c1593441a2508fb623006c35e5ebb6927fcfd52f552f4521583b906"
+    },
+    "chat.md": {
+      "bytes": 12644,
+      "sha256": "0b3d15c17524de0097441e34e62524731bce737c4ae1d423f1520d3054747a64"
+    }
+  },
+  "artifact_manifest_sha256": "138b3e92c0dd5bff34012656ad2a0d0494adc85517e03752883d5cc3068a189b",
+  "normal": {
+    "external_launcher_sha256": "71315991b361057f6af4b902654d2385e4d283454cf0c040dc1bfa188cf57ae0",
+    "python_flags": "-I -B",
+    "target": "validate.py",
+    "repetitions": 30,
+    "samples_ms": [
+      1418.643167,
+      1261.548458,
+      1214.156,
+      1352.720292,
+      1252.886292,
+      1036.665042,
+      1247.388167,
+      1177.262,
+      1177.922917,
+      1343.140917,
+      1039.640042,
+      1243.124625,
+      1294.903541,
+      1320.135791,
+      1210.576167,
+      1045.253667,
+      939.988542,
+      976.676417,
+      1099.331666,
+      1089.057875,
+      1128.64525,
+      1159.966875,
+      983.685542,
+      943.039208,
+      935.897875,
+      981.606125,
+      979.120458,
+      943.0575,
+      981.267875,
+      908.546875
+    ],
+    "distribution": {
+      "count": 30,
+      "minimum_ms": 908.546875,
+      "maximum_ms": 1418.643167,
+      "mean_ms": 1122.861839,
+      "median_ms": 1113.988458,
+      "p95_ms": 1352.720292
+    }
+  },
+  "optimized": {
+    "external_launcher_sha256": "71315991b361057f6af4b902654d2385e4d283454cf0c040dc1bfa188cf57ae0",
+    "python_flags": "-I -B -O",
+    "target": "validate.py",
+    "repetitions": 30,
+    "samples_ms": [
+      1217.253375,
+      892.014833,
+      1310.569291,
+      1613.117666,
+      1547.6025,
+      1451.993708,
+      1237.058167,
+      1265.638834,
+      1260.244334,
+      1157.53175,
+      1136.078917,
+      1075.649458,
+      1158.035209,
+      860.388708,
+      913.053542,
+      898.000708,
+      823.177583,
+      943.25875,
+      934.404375,
+      918.4605,
+      970.386,
+      1008.766125,
+      874.381167,
+      1022.364125,
+      896.05725,
+      927.640833,
+      898.825584,
+      1086.825542,
+      1206.024834,
+      1094.94925
+    ],
+    "distribution": {
+      "count": 30,
+      "minimum_ms": 823.177583,
+      "maximum_ms": 1613.117666,
+      "mean_ms": 1086.658431,
+      "median_ms": 1049.006791,
+      "p95_ms": 1547.6025
+    }
+  }
+}
