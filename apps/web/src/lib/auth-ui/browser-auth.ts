@@ -9,6 +9,9 @@ export const AUTH_ME_PATH = '/api/auth/me';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 2 * 1024;
+// Stream cancellation is best effort. It must not keep a caller waiting after
+// the bounded authentication operation has already been aborted.
+const RESPONSE_CANCEL_TIMEOUT_MS = 100;
 const MAX_PROVIDER_LENGTH = 96;
 const MAX_USERNAME_LENGTH = 512;
 const MAX_PASSWORD_LENGTH = 8_192;
@@ -110,7 +113,7 @@ export function createBrowserAuthClient(options: BrowserAuthClientOptions = {}):
     passwordActionActive = true;
 
     try {
-      const response = await requestWithDeadline(
+      const parsed = await requestWithDeadline(
         fetcher,
         PASSWORD_LOGIN_PATH,
         {
@@ -127,23 +130,24 @@ export function createBrowserAuthClient(options: BrowserAuthClientOptions = {}):
           body: JSON.stringify({ ...normalized, next: '/' })
         },
         timeoutMs,
-        signal
+        signal,
+        async (response, responseSignal) => {
+          if (isUnsafeResponse(response)) {
+            await cancelBody(response);
+            throw new BrowserAuthError('invalid-response', response.status);
+          }
+          if (response.status !== 200) {
+            await cancelBody(response);
+            throw mapPasswordStatus(response.status);
+          }
+          if (!hasJsonContentType(response)) {
+            await cancelBody(response);
+            throw new BrowserAuthError('invalid-response', response.status);
+          }
+
+          return parseResponse(await readBoundedResponse(response, responseSignal));
+        }
       );
-
-      if (isUnsafeResponse(response)) {
-        await cancelBody(response);
-        throw new BrowserAuthError('invalid-response', response.status);
-      }
-      if (response.status !== 200) {
-        await cancelBody(response);
-        throw mapPasswordStatus(response.status);
-      }
-      if (!hasJsonContentType(response)) {
-        await cancelBody(response);
-        throw new BrowserAuthError('invalid-response', response.status);
-      }
-
-      const parsed = parseResponse(await readBoundedResponse(response));
       const next = validatePasswordSuccess(parsed);
       let identity: AuthIdentity;
       try {
@@ -180,7 +184,7 @@ async function performLogout(
 ): Promise<void> {
   let requestError: unknown;
   try {
-    const response = await requestWithDeadline(
+    await requestWithDeadline(
       fetcher,
       LOGOUT_PATH,
       {
@@ -193,14 +197,31 @@ async function performLogout(
         headers: { accept: 'application/json' }
       },
       timeoutMs,
-      signal
+      signal,
+      async (response) => {
+        if (
+          response.redirected ||
+          response.type === 'opaqueredirect' ||
+          response.type === 'opaque' ||
+          response.status !== 302 ||
+          response.headers.get('location') !== '/login'
+        ) {
+          await cancelBody(response);
+          throw new BrowserAuthError('invalid-response', response.status);
+        }
+        await cancelBody(response);
+      }
     );
-    await cancelBody(response);
   } catch (error) {
     requestError = error;
   }
 
   if (signal?.aborted) throw new BrowserAuthError('aborted');
+  if (requestError instanceof BrowserAuthError && requestError.code === 'invalid-response') {
+    // A response that violates the reviewed manual-redirect contract is not an
+    // ambiguous transport outcome. Fail closed even if a later probe is stale.
+    throw requestError;
+  }
 
   // Logout returns a manual redirect. The identity probe is the authority for
   // success, including ambiguous network and redirect outcomes.
@@ -216,36 +237,41 @@ async function performLogout(
   throw new BrowserAuthError('logout-failed');
 }
 
-async function requestWithDeadline(
+async function requestWithDeadline<T>(
   fetcher: LiveRestFetch,
   path: string,
   init: RequestInit,
   timeoutMs: number,
-  signal?: AbortSignal
-): Promise<Response> {
+  signal: AbortSignal | undefined,
+  consume: (response: Response, signal: AbortSignal) => Promise<T>
+): Promise<T> {
   if (signal?.aborted) throw new BrowserAuthError('aborted');
 
   const controller = new AbortController();
-  let abortCode: 'aborted' | 'timeout' | undefined;
+  let abortError: BrowserAuthError | undefined;
   let rejectAbort: ((error: BrowserAuthError) => void) | undefined;
   const abortPromise = new Promise<never>((_, reject) => {
     rejectAbort = reject;
   });
   const abort = (code: 'aborted' | 'timeout'): void => {
-    if (abortCode) return;
-    abortCode = code;
-    controller.abort();
-    rejectAbort?.(new BrowserAuthError(code));
+    if (abortError) return;
+    abortError = new BrowserAuthError(code);
+    controller.abort(abortError);
+    rejectAbort?.(abortError);
   };
   const onCallerAbort = (): void => abort('aborted');
   signal?.addEventListener('abort', onCallerAbort, { once: true });
   const timeout = setTimeout(() => abort('timeout'), timeoutMs);
 
   try {
-    return await Promise.race([fetcher(path, { ...init, signal: controller.signal }), abortPromise]);
+    const response = await Promise.race([
+      fetcher(path, { ...init, signal: controller.signal }),
+      abortPromise
+    ]);
+    return await consume(response, controller.signal);
   } catch (error) {
     if (error instanceof BrowserAuthError) throw error;
-    if (abortCode) throw new BrowserAuthError(abortCode);
+    if (abortError) throw abortError;
     throw new BrowserAuthError('network');
   } finally {
     clearTimeout(timeout);
@@ -321,7 +347,7 @@ function hasJsonContentType(response: Response): boolean {
   return response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() === 'application/json';
 }
 
-async function readBoundedResponse(response: Response): Promise<string> {
+async function readBoundedResponse(response: Response, signal: AbortSignal): Promise<string> {
   const declared = response.headers.get('content-length');
   if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > MAX_RESPONSE_BYTES)) {
     await cancelBody(response);
@@ -332,16 +358,40 @@ async function readBoundedResponse(response: Response): Promise<string> {
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let cancelReader = false;
+  let rejectAbort: ((error: BrowserAuthError) => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    rejectAbort = reject;
+  });
+  const onAbort = (): void => {
+    cancelReader = true;
+    void reader.cancel().catch(() => undefined);
+    rejectAbort?.(browserAuthAbortError(signal));
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+
   try {
+    if (signal.aborted) onAbort();
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const result = await Promise.race([reader.read(), abortPromise]);
+      const abortError = abortErrorFromSignal(signal);
+      if (abortError) throw abortError;
+      if (result.done) break;
+      const value = result.value;
+      if (!value || !Number.isSafeInteger(value.byteLength) || value.byteLength < 0) {
+        throw new BrowserAuthError('invalid-response', response.status);
+      }
+      if (total + value.byteLength > MAX_RESPONSE_BYTES) {
+        throw new BrowserAuthError('invalid-response', response.status);
+      }
       total += value.byteLength;
-      if (total > MAX_RESPONSE_BYTES) throw new BrowserAuthError('invalid-response', response.status);
-      chunks.push(value);
+      chunks.push(Uint8Array.from(value));
     }
-    if (declared !== null && Number(declared) !== total)
+    const abortError = abortErrorFromSignal(signal);
+    if (abortError) throw abortError;
+    if (declared !== null && Number(declared) !== total) {
       throw new BrowserAuthError('invalid-response', response.status);
+    }
     const body = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) {
@@ -350,11 +400,15 @@ async function readBoundedResponse(response: Response): Promise<string> {
     }
     return new TextDecoder('utf-8', { fatal: true }).decode(body);
   } catch (error) {
-    await reader.cancel().catch(() => undefined);
+    cancelReader = true;
     if (error instanceof BrowserAuthError) throw error;
+    const abortError = abortErrorFromSignal(signal);
+    if (abortError) throw abortError;
     throw new BrowserAuthError('invalid-response', response.status);
   } finally {
-    reader.releaseLock();
+    signal.removeEventListener('abort', onAbort);
+    if (cancelReader) await cancelReaderBounded(reader);
+    else releaseReader(reader);
   }
 }
 
@@ -388,5 +442,42 @@ async function cancelBody(response: Response): Promise<void> {
     await response.body?.cancel();
   } catch {
     // Rejection diagnostics are closed; cleanup failure must not replace them.
+  }
+}
+
+function abortErrorFromSignal(signal: AbortSignal): BrowserAuthError | undefined {
+  if (!signal.aborted) return undefined;
+  return signal.reason instanceof BrowserAuthError ? signal.reason : new BrowserAuthError('aborted');
+}
+
+function browserAuthAbortError(signal: AbortSignal): BrowserAuthError {
+  return abortErrorFromSignal(signal) ?? new BrowserAuthError('aborted');
+}
+
+async function cancelReaderBounded(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  let cancellation: Promise<unknown>;
+  try {
+    cancellation = Promise.resolve(reader.cancel());
+  } catch {
+    cancellation = Promise.resolve();
+  }
+
+  try {
+    await Promise.race([
+      cancellation,
+      new Promise<void>((resolve) => setTimeout(resolve, RESPONSE_CANCEL_TIMEOUT_MS))
+    ]);
+  } catch {
+    // The response is already failing closed; cleanup cannot replace its error.
+  } finally {
+    releaseReader(reader);
+  }
+}
+
+function releaseReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    reader.releaseLock();
+  } catch {
+    // Synthetic readers may not implement the platform release contract.
   }
 }

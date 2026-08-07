@@ -158,4 +158,34 @@ describe('BrowserAuthSession', () => {
 
     expect(session.current).toEqual({ status: 'provider_unavailable', providers: [] });
   });
+
+  it('keeps logout non-interruptible and does not start retry discovery while it is pending', async () => {
+    const logoutPending = deferred<void>();
+    let logoutSignal: AbortSignal | undefined;
+    const logout = vi.fn((signal?: AbortSignal) => {
+      logoutSignal = signal;
+      return logoutPending.promise;
+    });
+    const discoverProviders = vi.fn(async () => ({ providers: [passwordProvider] }));
+    const session = new BrowserAuthSession({
+      client: client({ logout }),
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+    await session.initialize();
+
+    const pendingLogout = session.logout();
+    expect(session.current.status).toBe('logging_out');
+
+    await session.retryDiscovery();
+    session.cancel();
+
+    expect(discoverProviders).not.toHaveBeenCalled();
+    expect(logoutSignal?.aborted).toBe(false);
+    expect(session.current.status).toBe('logging_out');
+
+    logoutPending.resolve();
+    await pendingLogout;
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
 });

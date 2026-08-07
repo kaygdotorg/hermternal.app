@@ -217,21 +217,28 @@ export class LiveWorkspaceSession {
 
   async approve(itemId: string, approved: boolean): Promise<void> {
     const owner = this.approvals.get(itemId);
-    if (!owner || !this.chat) return;
+    const chat = this.chat;
+    const generation = this.generation;
+    if (!owner || !chat) return;
     try {
-      await this.chat.respondToApproval(owner.requestId, owner.approvalId, approved);
+      await chat.respondToApproval(owner.requestId, owner.approvalId, approved);
+      if (!this.isCurrent(generation) || this.chat !== chat || this.approvals.get(itemId) !== owner) return;
       this.approvals.delete(itemId);
       this.updateApprovalStatus(itemId, approved ? 'approved' : 'rejected');
     } catch {
+      if (!this.isCurrent(generation) || this.chat !== chat || this.approvals.get(itemId) !== owner) return;
       this.publish({ ...this.snapshot, state: 'retryable-error' });
     }
   }
 
   async answerClarification(itemId: string, answer: string): Promise<void> {
     const owner = this.clarifications.get(itemId);
-    if (!owner || !this.chat) return;
+    const chat = this.chat;
+    const generation = this.generation;
+    if (!owner || !chat) return;
     try {
-      await this.chat.answerClarification(owner.requestId, owner.clarificationId, answer);
+      await chat.answerClarification(owner.requestId, owner.clarificationId, answer);
+      if (!this.isCurrent(generation) || this.chat !== chat || this.clarifications.get(itemId) !== owner) return;
       this.clarifications.delete(itemId);
       this.publish({
         ...this.snapshot,
@@ -240,28 +247,24 @@ export class LiveWorkspaceSession {
         )
       });
     } catch {
+      if (!this.isCurrent(generation) || this.chat !== chat || this.clarifications.get(itemId) !== owner) return;
       this.publish({ ...this.snapshot, state: 'retryable-error' });
     }
   }
 
   invalidate(): void {
     if (this.disposed) return;
-    this.generation += 1;
-    this.controller?.abort();
-    this.controller = undefined;
-    this.chat?.close();
-    this.chat = undefined;
-    this.activeRequest = undefined;
-    this.approvals.clear();
-    this.clarifications.clear();
-    this.publish(initialSnapshot());
+    this.resetForInvalidation(true);
   }
 
   dispose(): void {
     if (this.disposed) return;
-    this.invalidate();
+    // Mark disposed and detach subscribers before closing the transport. Hermes
+    // close callbacks can synchronously re-enter; no callback may publish or
+    // observe a still-active workspace during disposal.
     this.disposed = true;
     this.subscribers.clear();
+    this.resetForInvalidation(false);
   }
 
   private async openSession(
@@ -456,13 +459,31 @@ export class LiveWorkspaceSession {
     this.assertActive();
     this.generation += 1;
     this.controller?.abort();
-    this.chat?.close();
+    const chat = this.chat;
     this.chat = undefined;
     this.activeRequest = undefined;
     this.approvals.clear();
     this.clarifications.clear();
+    chat?.close();
     this.controller = new AbortController();
     return { generation: this.generation, signal: this.controller.signal };
+  }
+
+  private resetForInvalidation(publishSnapshot: boolean): void {
+    this.generation += 1;
+    this.controller?.abort();
+    this.controller = undefined;
+    const chat = this.chat;
+    // Detach the identity before close so close callbacks cannot act on the
+    // transport that is being invalidated or trigger a second close.
+    this.chat = undefined;
+    this.activeRequest = undefined;
+    this.approvals.clear();
+    this.clarifications.clear();
+    chat?.close();
+    const cleared = initialSnapshot();
+    if (publishSnapshot) this.publish(cleared);
+    else this.snapshot = cleared;
   }
 
   private isCurrent(generation: number): boolean {

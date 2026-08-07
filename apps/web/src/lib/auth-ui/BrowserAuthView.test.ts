@@ -121,4 +121,27 @@ describe('BrowserAuthView', () => {
     expect(screen.getByText('invalid-credentials')).toBeInTheDocument();
     expect(document.body.textContent).not.toContain('must-not-render');
   });
+
+  it('does not expose retry discovery while logout verification is pending', async () => {
+    const pendingLogout = deferred<void>();
+    const client: BrowserAuthClient = {
+      verify: vi.fn(async () => identity),
+      loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
+      logout: vi.fn(() => pendingLogout.promise)
+    };
+    const session = new BrowserAuthSession({
+      client,
+      discoverProviders: vi.fn(async () => ({ providers: [] })),
+      invalidateLocalSession: vi.fn()
+    });
+    render(BrowserAuthView, { session });
+    await waitFor(() => expect(session.current.status).toBe('authenticated'));
+
+    const pending = session.logout();
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'logout-pending'));
+    expect(screen.queryByRole('button', { name: /retry discovery/i })).not.toBeInTheDocument();
+
+    pendingLogout.resolve();
+    await pending;
+  });
 });

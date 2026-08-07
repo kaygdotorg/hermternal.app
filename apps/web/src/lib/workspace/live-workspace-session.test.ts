@@ -277,6 +277,82 @@ describe('LiveWorkspaceSession', () => {
     expect(chat.transport.reconnect).not.toHaveBeenCalled();
   });
 
+  it('ignores a late approval completion after the chat generation is invalidated', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const pending = createDeferred<void>();
+    vi.mocked(chat.transport.respondToApproval).mockImplementation(() => pending.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    chat.emit({
+      type: 'approval.request',
+      requestId: 'approval-request',
+      approvalId: 'approval-1',
+      payload: { title: 'Permission', description: 'Confirm once' }
+    });
+
+    const approval = session.approve('approval:approval-1', true);
+    session.invalidate();
+    pending.resolve();
+    await approval;
+
+    expect(session.current.state).toBe('loading');
+    expect(session.current.timeline).toEqual([]);
+  });
+
+  it('ignores a late clarification failure after disposal and reentrant chat close', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const pending = createDeferred<void>();
+    vi.mocked(chat.transport.answerClarification).mockImplementation(() => pending.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    chat.emit({
+      type: 'clarify.request',
+      requestId: 'clarify-request',
+      clarificationId: 'clarification-1',
+      payload: { question: 'Choose one', options: ['one', 'two'] }
+    });
+    chat.transport.close = vi.fn(() => session.dispose());
+
+    const clarification = session.answerClarification('clarification:clarification-1', 'one');
+    session.dispose();
+    pending.reject(new Error('late clarification failure'));
+    await clarification;
+
+    expect(chat.transport.close).toHaveBeenCalledTimes(1);
+    expect(session.current.state).toBe('loading');
+    expect(session.current.timeline).toEqual([]);
+  });
+
+  it('rejects an approval completion from a replaced chat identity', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const pending = createDeferred<void>();
+    vi.mocked(chat.transport.respondToApproval).mockImplementation(() => pending.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    chat.emit({
+      type: 'approval.request',
+      requestId: 'approval-request',
+      approvalId: 'approval-2',
+      payload: { title: 'Permission', description: 'Confirm once' }
+    });
+    const approval = session.approve('approval:approval-2', true);
+    const replacement: JsonRpcChatTransport = {
+      ...chat.transport,
+      connect: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn()
+    };
+    vi.mocked(chat.createChat).mockImplementationOnce(() => replacement);
+    await session.selectSession('session-1');
+    pending.resolve();
+    await approval;
+
+    expect(session.current.state).toBe('empty');
+    expect(session.current.timeline).toEqual([]);
+  });
+
   it('closes chat and drops local session references before invalidation is published', async () => {
     const rest = createRest([{ role: 'user', content: 'Temporary local view' }]);
     const chat = createChatHarness();

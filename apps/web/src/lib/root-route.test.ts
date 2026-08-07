@@ -72,7 +72,7 @@ describe('root route composition', () => {
       if (path === '/auth/logout' && init?.method === 'POST') {
         events.push('logout-request');
         identityActive = false;
-        return new Response(null, { status: 302, headers: { location: '/auth/login' } });
+        return new Response(null, { status: 302, headers: { location: '/login' } });
       }
       throw new Error('unexpected request');
     });

@@ -22,6 +22,7 @@
   }
 
   function handleAction(action: AuthAction): void {
+    if (snapshot.status === 'logging_out') return;
     if (action.type === 'choose-provider') {
       session.chooseProvider(action.providerId);
       return;
@@ -75,7 +76,8 @@
     if (value.status === 'provider_unavailable') return 'provider-unavailable';
     if (value.status === 'password_submitting') return 'password-submitting';
     if (value.status === 'expired') return 'session-expired';
-    if (value.status === 'failed' || value.status === 'logging_out') return 'failure';
+    if (value.status === 'logging_out') return 'logout-pending';
+    if (value.status === 'failed') return 'failure';
     if (value.selectedProviderId) return 'password';
     return 'provider-selection';
   }

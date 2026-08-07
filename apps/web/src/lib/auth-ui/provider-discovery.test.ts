@@ -224,6 +224,18 @@ describe('discoverProviders', () => {
     await vi.waitFor(() => expect(timeoutTracked.wasCancelled()).toBe(true));
   });
 
+  it('observes cancellation in the synthetic no-body text path', async () => {
+    const response = new Response(null, { status: 200, headers: { 'content-type': 'application/json' } });
+    vi.spyOn(response, 'text').mockImplementation(() => new Promise<string>(() => {}));
+    const fetcher = vi.fn<ProviderDiscoveryFetch>().mockResolvedValue(response);
+    const controller = new AbortController();
+    const pending = discoverProviders({ fetch: fetcher, signal: controller.signal, timeoutMs: 1_000 });
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' });
+  });
+
   it('maps network failures, caller aborts, and timeouts to bounded diagnostics', async () => {
     const network = vi.fn<ProviderDiscoveryFetch>().mockRejectedValue(new Error('private server detail'));
     await expect(discoverProviders({ fetch: network })).rejects.toMatchObject({ code: 'network' });

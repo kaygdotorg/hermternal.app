@@ -8,7 +8,8 @@
 - The controller replaces presentation arrays after each server read. It does not keep a secondary transcript store.
 - One JSON-RPC transport belongs to one selected session. A session change closes that transport before creating another one.
 - Generation numbers and abort signals prevent stale session reads from publishing after a newer selection.
-- `invalidate()` aborts reads, closes chat, and removes session and timeline references before subscribers receive the signed-out view.
+- Approval and clarification replies capture their generation, transport identity, and pending-map owner. A late completion or failure cannot mutate a replacement chat, disposed workspace, or newer interactive item.
+- `invalidate()` detaches the chat identity before close, aborts reads, and removes session and timeline references before subscribers receive the signed-out view. `dispose()` marks the workspace closed and clears subscribers before close callbacks can re-enter.
 
 ## Prompt delivery
 

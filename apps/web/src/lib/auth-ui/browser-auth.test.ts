@@ -31,6 +31,19 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
+function pendingBodyResponse(): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      }
+    }),
+    { status: 200, headers: { 'content-type': 'application/json' } }
+  );
+  return { response, wasCancelled: () => cancelled };
+}
+
 describe('browser authentication boundary', () => {
   it('submits one same-origin password request and verifies the cookie identity', async () => {
     const requests: Array<{ path: string; init?: RequestInit }> = [];
@@ -175,6 +188,58 @@ describe('browser authentication boundary', () => {
     await expect(first).rejects.toMatchObject({ code: 'logout-failed' });
     await expect(second).rejects.toMatchObject({ code: 'logout-failed' });
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [200, undefined],
+    [302, undefined],
+    [302, 'https://evil.example/login'],
+    [302, '/auth/login']
+  ] as const)('rejects a logout response outside the exact 302 /login contract (%s, %s)', async (status, location) => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) !== LOGOUT_PATH) throw new Error('identity probe must not run');
+      return new Response(null, {
+        status,
+        ...(location ? { headers: { location } } : {})
+      });
+    });
+    const client = createBrowserAuthClient({ fetch: fetcher });
+
+    await expect(client.logout()).rejects.toMatchObject({ code: 'invalid-response', status });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a password response reader when the caller aborts after headers', async () => {
+    const tracked = pendingBodyResponse();
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === PASSWORD_LOGIN_PATH) return tracked.response;
+      throw new Error('identity probe must not run');
+    });
+    const controller = new AbortController();
+    const client = createBrowserAuthClient({ fetch: fetcher });
+    const pending = client.loginWithPassword(
+      { provider: 'basic', username: 'synthetic-user', password: 'synthetic-password' },
+      controller.signal
+    );
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' });
+    await vi.waitFor(() => expect(tracked.wasCancelled()).toBe(true));
+  });
+
+  it('cancels a password response reader when the operation deadline expires', async () => {
+    const tracked = pendingBodyResponse();
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === PASSWORD_LOGIN_PATH) return tracked.response;
+      throw new Error('identity probe must not run');
+    });
+    const client = createBrowserAuthClient({ fetch: fetcher, timeoutMs: 5 });
+
+    await expect(
+      client.loginWithPassword({ provider: 'basic', username: 'synthetic-user', password: 'synthetic-password' })
+    ).rejects.toMatchObject({ code: 'timeout' });
+    await vi.waitFor(() => expect(tracked.wasCancelled()).toBe(true));
   });
 
   it('does not issue a request for malformed or already-aborted input', async () => {

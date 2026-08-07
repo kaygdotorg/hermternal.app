@@ -53,11 +53,13 @@
       ? 'Signing in. The synthetic form is disabled while the local state completes.'
       : effectiveState === 'callback'
         ? 'Completing sign-in in a mocked local callback state.'
-        : effectiveState === 'discovery-pending'
-          ? 'Discovering sign-in methods. Provider actions are unavailable while the request is pending.'
-          : effectiveState === 'discovery-retry'
-            ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
-            : '';
+        : effectiveState === 'logout-pending'
+          ? 'Signing out. Provider discovery and retry actions are unavailable until logout is verified.'
+          : effectiveState === 'discovery-pending'
+            ? 'Discovering sign-in methods. Provider actions are unavailable while the request is pending.'
+            : effectiveState === 'discovery-retry'
+              ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
+              : '';
   $: assertiveAnnouncement =
     effectiveState === 'failure'
       ? 'Sign-in did not complete. Try again or choose another provider.'
@@ -447,6 +449,16 @@
           <span aria-hidden="true" class="note-dot"></span>Prototype-only state · no draft or prompt was persisted after
           expiry.
         </p>
+      {:else if effectiveState === 'logout-pending'}
+        <div class="callback-progress" aria-hidden="true"><span></span></div>
+        <div class="callback-message">
+          <h1 bind:this={stateHeading} tabindex="-1">Signing out</h1>
+          <p>Logout is being verified with the same-origin Hermes session boundary.</p>
+        </div>
+        <div class="privacy-note">
+          <span aria-hidden="true" class="info-icon"><Icon name="info" size={16} /></span>
+          <p>Retry and provider discovery stay unavailable until the server identity probe confirms logout.</p>
+        </div>
       {:else if isDiscoveryFailureState(effectiveState)}
         <div class="failure-icon" aria-hidden="true">
           <Icon name={effectiveState === 'discovery-retry' ? 'refresh' : 'warning'} size={20} />

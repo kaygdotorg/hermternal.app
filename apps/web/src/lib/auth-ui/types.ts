@@ -12,7 +12,8 @@ export type AuthViewState =
   | 'discovery-malformed'
   | 'discovery-aborted'
   | 'provider-unavailable'
-  | 'password-submitting';
+  | 'password-submitting'
+  | 'logout-pending';
 
 export type AuthProviderKind = 'oauth' | 'password' | 'unavailable';
 export type AuthDiscoveryMode = 'fixture' | 'live';

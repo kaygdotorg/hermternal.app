@@ -209,6 +209,18 @@ describe('AuthPreview', () => {
     expect(onAction).toHaveBeenCalledWith({ type: 'retry-authentication' });
   });
 
+  it('renders logout pending without exposing retry or cancellation actions', async () => {
+    const onAction = vi.fn();
+    render(AuthPreview, { state: 'logout-pending', discoveryMode: 'live', onAction });
+
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'logout-pending');
+    expect(screen.getByRole('heading', { name: 'Signing out' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Signing out');
+    expect(screen.queryByRole('button', { name: /retry discovery/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /cancel/i })).not.toBeInTheDocument();
+    expect(onAction).not.toHaveBeenCalled();
+  });
+
   it('renders live success, pending, empty, malformed, unavailable, aborted, and retry states truthfully', () => {
     const liveProviders = [
       {

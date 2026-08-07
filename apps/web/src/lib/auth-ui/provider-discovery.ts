@@ -83,8 +83,9 @@ export async function discoverProviders(options: ProviderDiscoveryOptions = {}):
   const abort = (code: 'aborted' | 'timeout'): void => {
     if (abortCode) return;
     abortCode = code;
-    controller.abort();
-    rejectAbort?.(new ProviderDiscoveryError(code));
+    const error = new ProviderDiscoveryError(code);
+    controller.abort(error);
+    rejectAbort?.(error);
   };
 
   const onCallerAbort = (): void => abort('aborted');
@@ -253,42 +254,67 @@ async function readBoundedBody(response: Response, maxBodyBytes: number, signal:
     }
   }
 
+  const bodyAbort = createBodyAbort(signal);
   if (!response.body) {
-    const text = await response.text();
-    if (new TextEncoder().encode(text).byteLength > maxBodyBytes) {
-      throw new ProviderDiscoveryError('body-too-large');
+    try {
+      // `Response.text()` has no native signal parameter. Race it with the same
+      // operation signal so a synthetic no-body response cannot outlive a caller
+      // cancellation or deadline.
+      const text = await Promise.race([response.text(), bodyAbort.promise]);
+      if (new TextEncoder().encode(text).byteLength > maxBodyBytes) {
+        throw new ProviderDiscoveryError('body-too-large');
+      }
+      return text;
+    } finally {
+      bodyAbort.cleanup();
     }
-    return text;
   }
 
   const reader = response.body.getReader();
-  const cancelReader = (): void => {
+  let cancelReader = false;
+  const onAbort = (): void => {
+    cancelReader = true;
     // An injected fetch may return a stream that is not wired to the request
     // signal. Cancel the active reader as well so abort and timeout still stop
     // response work instead of leaving an unbounded body open in the background.
-    void reader.cancel().catch(() => {});
+    void reader.cancel().catch(() => undefined);
   };
-  signal.addEventListener('abort', cancelReader, { once: true });
-  if (signal.aborted) cancelReader();
+  signal.addEventListener('abort', onAbort, { once: true });
+  if (signal.aborted) onAbort();
 
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBodyBytes) {
-        await reader.cancel();
+      const result = await Promise.race([reader.read(), bodyAbort.promise]);
+      if (signal.aborted) throw providerAbortError(signal);
+      if (result.done) break;
+      const value = result.value;
+      if (!value || !Number.isSafeInteger(value.byteLength) || value.byteLength < 0) {
+        throw new ProviderDiscoveryError('invalid-response');
+      }
+      if (total + value.byteLength > maxBodyBytes) {
         throw new ProviderDiscoveryError('body-too-large');
       }
-      chunks.push(value);
+      total += value.byteLength;
+      chunks.push(Uint8Array.from(value));
     }
+  } catch (error) {
+    cancelReader = true;
+    if (error instanceof ProviderDiscoveryError) throw error;
+    throw new ProviderDiscoveryError('network');
   } finally {
-    signal.removeEventListener('abort', cancelReader);
-    reader.releaseLock();
+    bodyAbort.cleanup();
+    signal.removeEventListener('abort', onAbort);
+    if (cancelReader) void reader.cancel().catch(() => undefined);
+    try {
+      reader.releaseLock();
+    } catch {
+      // Synthetic readers may not implement the platform release contract.
+    }
   }
 
+  if (signal.aborted) throw providerAbortError(signal);
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
@@ -310,6 +336,31 @@ async function cancelResponseBody(response: Response): Promise<void> {
     // The response is already being rejected; a failed cleanup must not expose
     // an implementation detail or replace the bounded diagnostic.
   }
+}
+
+function createBodyAbort(signal: AbortSignal): {
+  promise: Promise<never>;
+  cleanup: () => void;
+} {
+  let onAbort: (() => void) | undefined;
+  const promise = signal.aborted
+    ? Promise.reject<never>(providerAbortError(signal))
+    : new Promise<never>((_, reject) => {
+        onAbort = () => reject(providerAbortError(signal));
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+  return {
+    promise,
+    cleanup: () => {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
+  };
+}
+
+function providerAbortError(signal: AbortSignal): ProviderDiscoveryError {
+  return signal.reason instanceof ProviderDiscoveryError
+    ? signal.reason
+    : new ProviderDiscoveryError('aborted');
 }
 
 function normalizeTimeout(value: number | undefined): number {

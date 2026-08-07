@@ -90,6 +90,10 @@ export class BrowserAuthSession {
   }
 
   async retryDiscovery(): Promise<void> {
+    // Logout owns the generation until its identity probe completes. Discovery
+    // is read-only, but starting it here would abort the logout request and
+    // expose a retry action over a pending sign-out state.
+    if (this.snapshot.status === 'logging_out') return;
     const operation = this.begin('discovering', { providers: [] });
     await this.discover(operation);
   }
@@ -164,6 +168,9 @@ export class BrowserAuthSession {
 
   cancel(): void {
     this.assertActive();
+    // A logout is a protected boundary: the caller may not abort it or replace
+    // its pending state with discovery or signed-out UI before verification.
+    if (this.snapshot.status === 'logging_out') return;
     this.generation += 1;
     this.controller?.abort();
     this.controller = undefined;

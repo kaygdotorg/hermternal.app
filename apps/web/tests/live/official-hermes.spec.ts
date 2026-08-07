@@ -157,11 +157,15 @@ test('browser auth logs out of the official Hermes session', async ({ page }) =>
     });
     return {
       logoutStatus: response.status,
+      logoutLocation: response.headers.get('location'),
       logoutRedirected: response.redirected,
       identityStatus: identity.status
     };
   });
 
+  expect(logout.logoutStatus).toBe(302);
+  expect(logout.logoutLocation).toBe('/login');
+  expect(logout.logoutRedirected).toBe(false);
   expect(logout.identityStatus).toBe(401);
   expect(requests).toContain('POST /auth/logout');
   expect(requests).toContain('GET /api/auth/me');
