@@ -72,6 +72,16 @@ interface CommittedHistoryOwnership {
 }
 
 /**
+ * Keeps only the opaque persisted session identity needed to route Retry back
+ * through restore after history loading fails before the session is published.
+ * No transcript, prompt, ticket, or transport payload belongs here.
+ */
+interface FailedRestoreOwnership {
+  readonly generation: number;
+  readonly sessionId: string;
+}
+
+/**
  * Coordinates REST restoration and one user-led browser chat connection.
  * Server reads replace local presentation arrays. Disconnects never reconnect or
  * replay a prompt automatically, and disposal drops every session reference.
@@ -103,6 +113,7 @@ export class LiveWorkspaceSession {
   // barrier is cleared by every newer operation and never covers auth/origin
   // failures or a history read that is still pending.
   private committedHistory: CommittedHistoryOwnership | undefined;
+  private failedRestore: FailedRestoreOwnership | undefined;
   private disposed = false;
 
   constructor(options: LiveWorkspaceSessionOptions) {
@@ -343,8 +354,13 @@ export class LiveWorkspaceSession {
     const sessionId = this.snapshot.activeSessionId;
 
     if (!chat) {
-      if (sessionId) {
-        await this.retryActiveSession(sessionId);
+      const failedRestoreSessionId =
+        this.failedRestore?.generation === this.generation ? this.failedRestore.sessionId : undefined;
+      if (sessionId ?? failedRestoreSessionId) {
+        // A history failure can happen before openSession publishes the active
+        // identity. Retry that same opaque persisted session instead of routing
+        // the action to createSession and silently creating a second session.
+        await this.retryActiveSession(sessionId ?? failedRestoreSessionId!);
       } else {
         // A new-session factory can fail before a stored session ID exists.
         // Retry the guarded create path instead of leaving the visible Retry
@@ -396,6 +412,10 @@ export class LiveWorkspaceSession {
     // operation and stale callbacks cannot create or publish a replacement.
     const operation = this.begin();
     const sessions = this.snapshot.sessions;
+    // Preserve the opaque restore target across the new retry generation. If
+    // the session lookup or history read fails again before identity is shown,
+    // the next Retry must still address this persisted session.
+    this.failedRestore = { generation: operation.generation, sessionId };
     this.factoryRetryGeneration = operation.generation;
     this.publish({ ...this.snapshot, state: 'reconnecting', permanentFailure: undefined });
     if (!this.ownsFactoryRetry(operation)) return;
@@ -470,14 +490,21 @@ export class LiveWorkspaceSession {
     sessions: SessionSummary[],
     operation: { readonly generation: number; readonly signal: AbortSignal }
   ): Promise<void> {
+    // Keep only the opaque persisted identity until the first bounded history
+    // read succeeds. This private retry target covers failures that occur
+    // before the active session can be published to the presentation state.
+    if (!this.ownsOperation(operation)) return;
+    this.failedRestore = { generation: operation.generation, sessionId: session.id };
     const response = await this.rest.getSessionMessages(session.id, { limit: 500, offset: 0 }, operation.signal);
     // Cancellation may leave the generation unchanged while aborting the
     // controller. Do not publish a late provisional timeline over the user's
     // explicit offline state when a REST adapter resolves after abort.
     if (!this.ownsOperation(operation)) return;
-
     const model = session.model?.trim() || 'Hermes';
     const timeline = mapLiveMessages(session.id, response.messages, model);
+    // Once history is available, the normal snapshot now carries the selected
+    // identity and subsequent retry routing can use that public session ID.
+    this.failedRestore = undefined;
     // Publish the successful REST projection before ticket or WebSocket setup.
     // A synchronous factory failure can happen before a ticket request exists;
     // retaining this bounded server view avoids replacing a valid reload with
@@ -860,6 +887,7 @@ export class LiveWorkspaceSession {
   private begin(): { readonly generation: number; readonly signal: AbortSignal } {
     this.assertActive();
     this.generation += 1;
+    this.failedRestore = undefined;
     this.advanceRefreshEpoch();
     this.supersedeRetry();
     this.controller?.abort();
@@ -876,6 +904,7 @@ export class LiveWorkspaceSession {
 
   private resetForInvalidation(publishSnapshot: boolean): void {
     this.generation += 1;
+    this.failedRestore = undefined;
     this.advanceRefreshEpoch();
     this.supersedeRetry();
     this.controller?.abort();
