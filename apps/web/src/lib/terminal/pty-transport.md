@@ -39,16 +39,21 @@ operations:
   Cleanup and state observers are generation-guarded so a synchronous retry or
   replacement cannot be overwritten by the old failure or Close path. A new
   attempt claims its generation and active slot before aborting the old adapter,
-  and reattach notices/readiness are rechecked after observer callbacks. Late
-  socket-factory values are closed exactly once even when cancellation wins before
-  the abort listener is installed. Coalesced callers share one ticket and socket,
-  but each caller's abort signal only rejects that caller's wait; the shared
-  attempt continues while another caller still owns a wait. State events capture
-  the intended transition before reentrant observers can publish a newer one.
-  If an established reattach is cancelled after `onopen`, its exact identity's
-  detach-retention evidence is restored. `outputMayBeTruncated` is true only for
-  the current successful reattach and resets on detach, Close, cancellation,
-  failure, replacement, and unrelated generations.
+  and reattach notices/readiness are rechecked after observer callbacks. State
+  events are captured before observers, but `onStateChange` runs only if that
+  transition still owns the generation after `onEvent`. Ticket-pending
+  cancellation is rechecked before ticket minting or socket creation. A detach
+  timestamp is recorded only if adapter-controlled socket close returns without
+  a replacement claiming the generation, so an old A cleanup cannot write
+  evidence after reentrant B connects. Late socket-factory values are closed
+  exactly once even when cancellation wins before the abort listener is
+  installed. Coalesced callers share one ticket and socket, but each caller's
+  abort signal only rejects that caller's wait; the shared attempt continues
+  while another caller still owns a wait. If an established reattach is
+  cancelled after `onopen`, its exact identity's detach-retention evidence is
+  restored. `outputMayBeTruncated` is true only for the current successful
+  reattach and resets on detach, Close, cancellation, failure, replacement, and
+  unrelated generations.
 
 The transport never queues input or resize frames. It has no prompt or tool
 action method, so reconnect cannot replay those actions. The structured
@@ -82,10 +87,12 @@ replay, `4409` stale cleanup, close-code classification, cancellation, Close,
 and callback cleanup. Lifecycle regressions cover already-aborted attempts,
 pre-open retry races, pre-open failure classification, established `onerror`
 detach semantics, identity-scoped expiry evidence, reentrant Close replacement,
-observer cancellation during reattach, abort-listener replacement races,
-post-ticket stale continuations, late socket ownership, duplicate-caller
-cancellation, adapter-close reentrancy, reattach-retention restoration, and
-prior-true truncation resets across failure and replacement transitions. Tests
+observer cancellation during `ticket_pending` and reattach, stale
+`onStateChange` suppression after `onEvent` Close, A-close/B replacement
+retention evidence, abort-listener replacement races, post-ticket stale
+continuations, late socket ownership, duplicate-caller cancellation,
+adapter-close reentrancy, reattach-retention restoration, and prior-true
+truncation resets across failure and replacement transitions. Tests
 also verify that terminal bytes and ticket material are not logged or retained
 in public state.
 

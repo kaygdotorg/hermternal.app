@@ -352,6 +352,9 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     // replace it. The observer still receives the same intended value, while
     // currentState remains owned by the newest reentrant transition.
     emit({ type: "state", state: nextState });
+    // onEvent runs before onStateChange and may synchronously Close or replace
+    // this generation. Never deliver an obsolete callback after that handoff.
+    if (currentState !== nextState || currentGeneration !== generation) return;
     observe(
       options.onStateChange
         ? () => options.onStateChange?.(nextState)
@@ -674,6 +677,9 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
         );
         throwIfNotCurrent();
         setState("ticket_pending", generation, normalized);
+        // The ticket-pending event is observable and can abort, Close, or
+        // replace this attempt before the provider is allowed to mint a ticket.
+        throwIfNotCurrent();
         const ticket = await awaitWithAbort(
           Promise.resolve(options.ticketProvider(controller.signal)),
           controller.signal,
@@ -776,7 +782,12 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       invalidateContext(context);
       context.rejectReady(new PtyTransportError("closed", context.generation));
       safeClose(context.socket);
-      if (detachedOpenedSocket) markDetached(context.input, now());
+      // Adapter close is reentrant. If it started a replacement, the old
+      // generation no longer owns detach evidence and must not write A after B
+      // has claimed the transport.
+      if (detachedOpenedSocket && currentGeneration === generation) {
+        markDetached(context.input, now());
+      }
     }
 
     // Close invalidates the old socket before exposing its transient state. A

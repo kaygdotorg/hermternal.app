@@ -282,6 +282,24 @@ describe("PTY transport", () => {
     expect(harness.transport.state.status).toBe("detached");
   });
 
+  it("does not mint a ticket after a ticket-pending observer aborts", async () => {
+    const controller = new AbortController();
+    const harness = makeHarness({
+      onEvent: (event) => {
+        if (event.type === "state" && event.state.status === "ticket_pending") {
+          controller.abort();
+        }
+      },
+    });
+
+    const pending = harness.transport.connect(ATTACH_INPUT, controller.signal);
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    await flush();
+    expect(harness.ticketProvider).not.toHaveBeenCalled();
+    expect(harness.sockets).toHaveLength(0);
+    expect(harness.transport.state.status).toBe("detached");
+  });
+
   it("rejects malformed tickets with bounded semantic errors before upgrade", async () => {
     const fragment = "credential-shaped-ticket-fragment";
     const harness = makeHarness({ ticketProvider: async () => `${fragment}!` });
@@ -736,6 +754,35 @@ describe("PTY transport", () => {
     expect(harness.transport.state.status).toBe("detached");
   });
 
+  it("does not invoke a stale onStateChange after onEvent closes", async () => {
+    let harness!: Harness;
+    const stateChanges: string[] = [];
+    harness = makeHarness({
+      onEvent: (event) => {
+        if (event.type === "state" && event.state.status === "attached") {
+          harness.transport.close();
+        }
+      },
+      onStateChange: (state) => {
+        stateChanges.push(`${state.status}:${state.generation}`);
+      },
+    });
+
+    const pending = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    const socket = harness.sockets[0]!;
+    socket.open();
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    expect(stateChanges).toEqual([
+      "ticket_pending:1",
+      "connecting:1",
+      "starting:1",
+      "closing:2",
+      "detached:2",
+    ]);
+    expect(harness.transport.state.status).toBe("detached");
+  });
+
   it("does not emit a stale reattach notice after an attached observer closes", async () => {
     let attachedCount = 0;
     let harness!: Harness;
@@ -921,6 +968,45 @@ describe("PTY transport", () => {
       status: "attached",
       sessionId: replacementInput.sessionId,
       processIdentity: replacementInput.processIdentity,
+    });
+  });
+
+  it("does not retain A detach evidence after A Close reentrantly starts B", async () => {
+    let now = 100_000;
+    let harness!: Harness;
+    let replacementPending: Promise<void> | undefined;
+    const replacementInput: PtyConnectionInput = {
+      sessionId: "session-current-reentrant-replacement",
+      attach: "attach-current-reentrant-replacement",
+      processIdentity: "process-current-reentrant-replacement",
+    };
+    harness = makeHarness({ now: () => now, validateAttachment: async () => true });
+    const original = await open(harness);
+    const originalClose = original.close.bind(original);
+    original.close = (code, reason) => {
+      if (!replacementPending) {
+        replacementPending = harness.transport.connect(replacementInput);
+      }
+      originalClose(code, reason);
+    };
+
+    harness.transport.close();
+    expect(replacementPending).toBeDefined();
+    await flush();
+    const replacement = harness.sockets[1]!;
+    replacement.open();
+    await replacementPending;
+
+    now += PTY_DETACH_RETENTION_MS + 1;
+    const reconnectOriginal = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    const reconnected = harness.sockets[2]!;
+    reconnected.open();
+    await reconnectOriginal;
+    expect(harness.transport.state).toMatchObject({
+      status: "attached",
+      sessionId: ATTACH_INPUT.sessionId,
+      processIdentity: ATTACH_INPUT.processIdentity,
     });
   });
 
