@@ -64,6 +64,13 @@ interface RetryOwnership {
   readonly removeOperationAbort: () => void;
 }
 
+interface CommittedHistoryOwnership {
+  readonly generation: number;
+  readonly sessionId: string;
+  readonly chat: JsonRpcChatTransport;
+  readonly refreshEpoch: number;
+}
+
 /**
  * Coordinates REST restoration and one user-led browser chat connection.
  * Server reads replace local presentation arrays. Disconnects never reconnect or
@@ -88,6 +95,11 @@ export class LiveWorkspaceSession {
   // overlap: a newer prompt, reconnect, terminal connection state, or
   // lifecycle reset revokes every older refresh's publication authority.
   private refreshEpoch = 0;
+  // A successful REST replacement is a narrow commit barrier. A late generic
+  // transport callback may not regress that committed server view, but the
+  // barrier is cleared by every newer operation and never covers auth/origin
+  // failures or a history read that is still pending.
+  private committedHistory: CommittedHistoryOwnership | undefined;
   private disposed = false;
 
   constructor(options: LiveWorkspaceSessionOptions) {
@@ -415,6 +427,21 @@ export class LiveWorkspaceSession {
 
     const model = session.model?.trim() || 'Hermes';
     const timeline = mapLiveMessages(session.id, response.messages, model);
+    // Publish the successful REST projection before ticket or WebSocket setup.
+    // A synchronous factory failure can happen before a ticket request exists;
+    // retaining this bounded server view avoids replacing a valid reload with
+    // an empty error screen. The restore is not committed until connect/resume
+    // succeeds below, so transport failure remains retryable.
+    this.publish({
+      state: 'loading',
+      sessions,
+      activeSessionId: session.id,
+      title: session.title?.trim() || 'Untitled chat',
+      model,
+      timeline
+    });
+    if (!this.ownsOperation(operation)) return;
+
     let chat: JsonRpcChatTransport;
     try {
       chat = this.createChat({
@@ -434,14 +461,6 @@ export class LiveWorkspaceSession {
       return;
     }
     this.chat = chat;
-    this.publish({
-      state: 'loading',
-      sessions,
-      activeSessionId: session.id,
-      title: session.title?.trim() || 'Untitled chat',
-      model,
-      timeline
-    });
     if (!this.ownsChatOperation(operation, chat)) {
       this.closeChatIfOwned(chat);
       return;
@@ -451,6 +470,11 @@ export class LiveWorkspaceSession {
       this.closeChatIfOwned(chat);
       return;
     }
+    // REST history is only a committed restore after the gateway connection
+    // and session resume have succeeded. A pre-ticket/connect failure must
+    // remain retryable; a late generic callback after this commit must not
+    // erase the server-owned timeline that is already on screen.
+    this.commitHistory(operation.generation, session.id, chat);
     this.publish({ ...this.snapshot, state: timeline.length === 0 ? 'empty' : 'ready' });
   }
 
@@ -543,11 +567,17 @@ export class LiveWorkspaceSession {
   private handleConnectionState(generation: number, state: JsonRpcConnectionState): void {
     if (!this.isCurrent(generation)) return;
 
-    // A terminal transport transition is newer lifecycle information even
-    // when the workspace generation and selected session are unchanged. It
-    // revokes pending REST history reads and prompt continuations before they
-    // can hide the boundary.
-    if (isTerminalConnectionStatus(state.status)) {
+    // A completed REST replacement is a narrow server-history commit. Hermes
+    // can report a generic failed/uncertain callback after that commit because
+    // prompt events, acknowledgements, and socket close notifications are not
+    // ordered as one client transaction. Preserve the committed view only for
+    // the exact generation/session/chat; pending history must still lose to a
+    // failure, and auth/origin classifications always remain authoritative.
+    const preserveCommittedHistory =
+      (state.status === 'failed' || state.status === 'delivery_uncertain') &&
+      this.ownsCommittedHistory();
+
+    if (isTerminalConnectionStatus(state.status) && !preserveCommittedHistory) {
       this.advanceRefreshEpoch();
       this.supersedeRetry();
     }
@@ -562,7 +592,10 @@ export class LiveWorkspaceSession {
           : {})
       });
     }
-    if (state.status === 'failed' || state.status === 'delivery_uncertain') {
+    if (
+      (state.status === 'failed' || state.status === 'delivery_uncertain') &&
+      !preserveCommittedHistory
+    ) {
       this.publish({ ...this.snapshot, state: 'retryable-error' });
     }
   }
@@ -617,6 +650,8 @@ export class LiveWorkspaceSession {
       );
       if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
       const timeline = mapLiveMessages(sessionId, response.messages, this.snapshot.model);
+      if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
+      if (expectedChat) this.commitHistory(generation, sessionId, expectedChat);
       this.publish({ ...this.snapshot, timeline, state: timeline.length === 0 ? 'empty' : 'ready' });
     } catch (error) {
       // Abort and stale non-abort failures are both deliberately silent. A
@@ -716,8 +751,13 @@ export class LiveWorkspaceSession {
     // transport may publish delivery_uncertain before a terminal close state;
     // the latter must still be able to render the exact prompt error without
     // letting the stale promise mint a new refresh owner. If no prompt is
-    // active, revoke any pending history read immediately.
-    if (!this.activePromptOwnership) this.advanceRefreshEpoch();
+    // active, revoke any pending history read immediately. A completed REST
+    // commit is the one exception: a late generic uncertainty callback cannot
+    // erase that exact server-owned view.
+    const preserveCommittedHistory =
+      !this.activePromptOwnership && this.ownsCommittedHistory();
+    if (!this.activePromptOwnership && !preserveCommittedHistory) this.advanceRefreshEpoch();
+    if (preserveCommittedHistory) return;
     this.supersedeRetry();
     if (this.snapshot.state !== 'permanent-error') {
       this.publish({ ...this.snapshot, state: 'retryable-error' });
@@ -728,8 +768,8 @@ export class LiveWorkspaceSession {
     if (!this.isCurrent(generation) || isAbort(error)) return;
     // `connect()` reports a terminal auth/incompatibility state through its
     // callback before rejecting. The surrounding load catch must not downgrade
-    // that state to a generic retryable error; this also preserves the barrier
-    // if a transport rejects before its state callback runs.
+    // that state to a generic retryable error; generic load failures still
+    // revoke same-generation history ownership below.
     if (this.snapshot.state === 'permanent-error') return;
     if (
       (error instanceof LiveRestError &&
@@ -792,6 +832,7 @@ export class LiveWorkspaceSession {
 
   private advanceRefreshEpoch(): number {
     this.refreshEpoch += 1;
+    this.committedHistory = undefined;
     return this.refreshEpoch;
   }
 
@@ -895,6 +936,31 @@ export class LiveWorkspaceSession {
     if (this.chat !== chat) return;
     this.chat = undefined;
     closeChat(chat);
+  }
+
+  private commitHistory(
+    generation: number,
+    sessionId: string,
+    chat: JsonRpcChatTransport
+  ): void {
+    if (!this.ownsChat(generation, chat, sessionId)) return;
+    this.committedHistory = {
+      generation,
+      sessionId,
+      chat,
+      refreshEpoch: this.refreshEpoch
+    };
+  }
+
+  private ownsCommittedHistory(): boolean {
+    const committed = this.committedHistory;
+    return (
+      committed !== undefined &&
+      committed.generation === this.generation &&
+      committed.sessionId === this.snapshot.activeSessionId &&
+      committed.chat === this.chat &&
+      committed.refreshEpoch === this.refreshEpoch
+    );
   }
 
   private ownsRefresh(

@@ -777,6 +777,200 @@ describe('LiveWorkspaceSession', () => {
     expect(JSON.stringify(session.current.timeline)).not.toContain('late history');
   });
 
+  it('keeps a committed completion history ready after a late generic terminal callback', async () => {
+    const rest = createRest([]);
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce(
+      sessionMessages([
+        { role: 'user', content: 'Completed prompt' },
+        { role: 'assistant', content: 'Completed answer' }
+      ])
+    );
+
+    session.sendPrompt('Completed prompt');
+    const requestId = latestPromptId(socket);
+    socket.emitEvent('message.complete', requestId, { text: 'Completed answer' });
+    await flush();
+    await flush();
+
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline.filter((item) => item.kind === 'assistant-message')).toEqual([
+      expect.objectContaining({ text: 'Completed answer' })
+    ]);
+
+    // Official Hermes may report a generic close after the REST replacement has
+    // committed. It must not downgrade or duplicate the committed history.
+    socket.emitClose(1011, 'redacted');
+
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline.filter((item) => item.kind === 'assistant-message')).toEqual([
+      expect.objectContaining({ text: 'Completed answer' })
+    ]);
+    expect(JSON.stringify(session.current)).not.toContain('redacted');
+
+    // The committed view remains readable, but a dead transport cannot accept
+    // another prompt. The next user action must surface recovery, not replay.
+    const sentBeforeBlockedPrompt = socket.sent.length;
+    session.sendPrompt('must reconnect');
+    expect(socket.sent).toHaveLength(sentBeforeBlockedPrompt);
+    expect(session.current.state).toBe('retryable-error');
+  });
+
+  it('retains one completed assistant marker after a reload-like session replacement', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    vi.mocked(rest.getSessionMessages)
+      .mockResolvedValueOnce(sessionMessages([]))
+      .mockResolvedValue(
+        sessionMessages([
+          { role: 'user', content: 'Completed prompt' },
+          { role: 'assistant', content: 'Completed answer' }
+        ])
+      );
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+
+    session.sendPrompt('Completed prompt');
+    const completion: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'Completed answer' }
+    };
+    chat.emit(completion);
+    chat.complete(completion);
+    await flush();
+    await flush();
+
+    const countAssistantMarkers = (): number =>
+      session.current.timeline.filter(
+        (item) => item.kind === 'assistant-message' && item.text === 'Completed answer'
+      ).length;
+    expect(countAssistantMarkers()).toBe(1);
+
+    // A reload starts a new workspace generation and re-reads the server; it
+    // must replace rather than append the already-completed marker.
+    session.invalidate();
+    await session.initialize();
+
+    expect(session.current.state).toBe('ready');
+    expect(countAssistantMarkers()).toBe(1);
+  });
+
+  it('keeps committed persisted history ready after a late generic terminal callback', async () => {
+    const rest = createRest([
+      { role: 'user', content: 'Persisted prompt' },
+      { role: 'assistant', content: 'Persisted answer' }
+    ]);
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+
+    expect(JSON.parse(socket.sent[0] ?? '{}')).toMatchObject({ method: 'session.resume' });
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline).toEqual([
+      { kind: 'user-message', id: 'session-1:message:0', text: 'Persisted prompt' },
+      {
+        kind: 'assistant-message',
+        id: 'session-1:message:1',
+        text: 'Persisted answer',
+        model: 'Hermes 4',
+        status: 'complete'
+      }
+    ]);
+
+    socket.emitClose(1011, 'redacted');
+
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline).toEqual([
+      { kind: 'user-message', id: 'session-1:message:0', text: 'Persisted prompt' },
+      {
+        kind: 'assistant-message',
+        id: 'session-1:message:1',
+        text: 'Persisted answer',
+        model: 'Hermes 4',
+        status: 'complete'
+      }
+    ]);
+  });
+
+  it('does not let committed history suppress permanent authentication or origin closes', async () => {
+    for (const [closeCode, reason, expectedFailure] of [
+      [4401, 'authentication-rejected', 'authentication-required'],
+      [4403, 'host-or-origin-rejected', 'incompatible']
+    ] as const) {
+      const rest = createRest([{ role: 'assistant', content: 'Persisted answer' }]);
+      const { session, socket } = await createConnectedSocketWorkspace(rest);
+
+      socket.emitClose(closeCode, 'redacted');
+
+      expect(session.current.state).toBe('permanent-error');
+      expect(session.current.permanentFailure).toMatchObject({
+        reason: expectedFailure,
+        closeCode,
+        closeClassification: reason
+      });
+      expect(session.current.timeline).toEqual([
+        {
+          kind: 'assistant-message',
+          id: 'session-1:message:0',
+          text: 'Persisted answer',
+          model: 'Hermes 4',
+          status: 'complete'
+        }
+      ]);
+    }
+  });
+
+  it('keeps a committed history ready after a late uncertain-delivery callback', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce(
+      sessionMessages([
+        { role: 'user', content: 'Completed prompt' },
+        { role: 'assistant', content: 'Completed answer' }
+      ])
+    );
+
+    session.sendPrompt('Completed prompt');
+    const completion: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'Completed answer' }
+    };
+    chat.emit(completion);
+    chat.complete(completion);
+    await flush();
+    await flush();
+
+    expect(session.current.state).toBe('ready');
+    chat.changeState({ status: 'delivery_uncertain', generation: 1 });
+
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline.filter((item) => item.kind === 'assistant-message')).toEqual([
+      expect.objectContaining({ text: 'Completed answer' })
+    ]);
+  });
+
+  it('does not commit REST history before a pre-ticket connection failure', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Persisted answer' }]);
+    const chat = createChatHarness();
+    vi.mocked(chat.transport.connect).mockRejectedValue(new JsonRpcChatError('connection-failed'));
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+
+    expect(session.current.state).toBe('retryable-error');
+    expect(session.current.timeline).toEqual([
+      {
+        kind: 'assistant-message',
+        id: 'session-1:message:0',
+        text: 'Persisted answer',
+        model: 'Hermes 4',
+        status: 'complete'
+      }
+    ]);
+  });
+
   it('maps authentication-required chat state to a permanent workspace error', async () => {
     const rest = createRest([]);
     const chat = createChatHarness();
@@ -1250,6 +1444,29 @@ describe('LiveWorkspaceSession', () => {
     expect(staleChat.transport.close).toHaveBeenCalledTimes(1);
     expect(staleChat.transport.connect).not.toHaveBeenCalled();
     expect(session.current.state).toBe('loading');
+  });
+
+  it('retains parsed REST history when chat factory fails before ticket acquisition', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Persisted answer' }]);
+    const failure = new Error('synthetic factory failure');
+    const createChat = vi.fn(() => {
+      throw failure;
+    });
+    const session = new LiveWorkspaceSession({ rest, createChat });
+
+    await session.initialize();
+
+    expect(session.current.state).toBe('retryable-error');
+    expect(session.current.timeline).toEqual([
+      {
+        kind: 'assistant-message',
+        id: 'session-1:message:0',
+        text: 'Persisted answer',
+        model: 'Hermes 4',
+        status: 'complete'
+      }
+    ]);
+    expect(JSON.stringify(session.current)).not.toContain('synthetic factory failure');
   });
 
   it('publishes a bounded retryable state for a current synchronous chat factory failure', async () => {
