@@ -11,17 +11,17 @@ standalone verifier in this change. Neither format is a production attestation;
 ## Version and path history
 
 The legacy authority was established at commit `a96889c` with this exact path
-and six-key shape:
+and a schema plus six legacy fields (seven total keys):
 
 - path: `scripts/fixture_registry_authority.json`;
 - schema: `hermternal.fixture-registry-authority.v1`;
-- keys: `schema`, `validator_path`, `validator_size_bytes`,
+- six legacy fields: `validator_path`, `validator_size_bytes`,
   `validator_sha256`, `baseline_path`, `baseline_size_bytes`, and
   `baseline_sha256`.
 
-Commit `3600975` introduced a `.v2.json` filename but retained that legacy v1
-schema and six-key document. That was a filename-only rotation, not a real v2
-schema. Scanner preparation commit `70d5963` carried that historical distinction
+Commit `3600975` introduced a `.v2.json` filename but retained the legacy v1
+schema plus six legacy fields (seven total keys). That was a filename-only
+rotation, not a real v2 schema. Scanner preparation commit `70d5963` carried that historical distinction
 forward: it referred to the separate `.v2.json` path while leaving the authority,
 index, and baseline rotation unresolved.
 
@@ -29,8 +29,8 @@ The independent bootstrap commit `8dad73e` introduced the new multi-artifact
 shape at the legacy path while still claiming the v1 schema. Its Git object and
 published history are preserved unchanged. This follow-up supersedes that
 mislabelled stage without rewriting its history: the current legacy path is
-restored to the readable six-key v1 shape, and the new multi-artifact authority
-is introduced at:
+restored to the readable v1 schema plus six legacy fields (seven total keys),
+and the new multi-artifact authority is introduced at:
 
 `scripts/fixture_registry_authority.v2.json`
 
@@ -77,7 +77,7 @@ The regression suite copies the legacy v1 record, v2 authority, and four v2
 trust-input paths to a temporary directory. It proves that normal and optimized
 verification:
 
-- can still read the exact legacy v1 path and six-key shape;
+- can still read the exact legacy v1 path and schema plus six legacy fields (seven total keys);
 - selects v2 even when the temporary legacy path is rewritten;
 - rejects a checkout-only rewrite of the v2 authority;
 - rejects a checkout-only rewrite of the aggregate index; and

@@ -12,12 +12,14 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +47,14 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             *verifier.EXPECTED_ARTIFACT_PATHS,
         )
 
-    def run_cli(self, checkout_root: Path, *, optimized: bool) -> subprocess.CompletedProcess[str]:
+    def run_cli(
+        self,
+        checkout_root: Path,
+        *,
+        optimized: bool,
+        object_repo: Path = ROOT,
+        environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         command = [sys.executable]
         if optimized:
             command.append("-O")
@@ -53,18 +62,37 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             [
                 str(SCRIPT),
                 "--repo-root",
-                str(ROOT),
+                str(object_repo),
                 "--checkout-root",
                 str(checkout_root),
             ]
         )
+        child_environment = os.environ.copy()
+        if environment:
+            child_environment.update(environment)
         return subprocess.run(
             command,
             cwd=ROOT,
             check=False,
             capture_output=True,
             text=True,
+            env=child_environment,
         )
+
+    def copy_object_repo(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-object-repo-")
+        object_repo = Path(temporary.name) / "repo"
+        completed = subprocess.run(
+            ["git", "clone", "--no-hardlinks", "--quiet", str(ROOT), str(object_repo)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            temporary.cleanup()
+            raise AssertionError(completed.stderr or completed.stdout)
+        return temporary, object_repo
 
     def copy_checkout(self) -> tempfile.TemporaryDirectory[str]:
         temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-")
@@ -124,7 +152,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         self.assertNotEqual(normal_payload["authority_commit"], normal_payload["source_commit"])
         self.assertEqual(normal_payload["source_commit"], self.authority["source_commit"])
 
-    def test_legacy_v1_path_and_shape_remain_readable(self) -> None:
+    def test_legacy_v1_path_and_fields_remain_readable(self) -> None:
         legacy = verifier.load_legacy_authority(ROOT)
         self.assertEqual(verifier.LEGACY_AUTHORITY_PATH, "scripts/fixture_registry_authority.json")
         self.assertEqual(verifier.LEGACY_AUTHORITY_SCHEMA, "hermternal.fixture-registry-authority.v1")
@@ -157,6 +185,218 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             self.assertEqual(normal.stdout, optimized.stdout)
             self.assert_success(normal)
             self.assert_success(optimized)
+
+    def test_v2_path_missing_fails_in_both_modes(self) -> None:
+        with self.copy_checkout() as temporary:
+            checkout = Path(temporary)
+            (checkout / verifier.AUTHORITY_PATH).unlink()
+            normal = self.run_cli(checkout, optimized=False)
+            optimized = self.run_cli(checkout, optimized=True)
+            self.assertEqual(normal.stdout, optimized.stdout)
+            self.assert_bounded_failure(normal)
+            self.assert_bounded_failure(optimized)
+
+    def test_v2_schema_rewrite_fails_in_both_modes(self) -> None:
+        with self.copy_checkout() as temporary:
+            checkout = Path(temporary)
+            authority_path = checkout / verifier.AUTHORITY_PATH
+            authority = json.loads(authority_path.read_text(encoding="utf-8"))
+            authority["schema"] = verifier.LEGACY_AUTHORITY_SCHEMA
+            authority_path.write_text(json.dumps(authority, indent=2) + "\\n", encoding="utf-8")
+            normal = self.run_cli(checkout, optimized=False)
+            optimized = self.run_cli(checkout, optimized=True)
+            self.assertEqual(normal.stdout, optimized.stdout)
+            self.assert_bounded_failure(normal)
+            self.assert_bounded_failure(optimized)
+
+    def test_git_blob_rejects_non_blob_object_types(self) -> None:
+        with mock.patch.object(verifier, "_git", side_effect=(b"a" * 40 + b"\\n", b"tree\\n")):
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._git_blob(ROOT, "0" * 40, "contracts/fixtures/index.json")
+
+    def test_strict_git_environment_removes_hostile_overrides(self) -> None:
+        hostile = {
+            "GIT_DIR": "/tmp/hostile-git",
+            "GIT_COMMON_DIR": "/tmp/hostile-common",
+            "GIT_OBJECT_DIRECTORY": "/tmp/hostile-objects",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/tmp/hostile-alternates",
+            "GIT_NAMESPACE": "hostile",
+            "GIT_WORK_TREE": "/tmp/hostile-worktree",
+            "GIT_INDEX_FILE": "/tmp/hostile-index",
+            "GIT_CEILING_DIRECTORIES": "/tmp",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+            "GIT_REPLACE_REF_BASE": "refs/replace-hostile",
+            "GIT_PROMISOR_REMOTE": "hostile-promisor",
+            "GIT_CONFIG_PARAMETERS": "'core.bare=true'",
+            "GIT_NO_REPLACE_OBJECTS": "0",
+            "GIT_NO_LAZY_FETCH": "0",
+        }
+        captured: dict[str, str] = {}
+        real_run = verifier.subprocess.run
+
+        def capture_environment(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
+            command = args[0] if args else kwargs.get("args")
+            if isinstance(command, list) and command and command[0] == "git":
+                captured.update(kwargs["env"])
+            return real_run(*args, **kwargs)
+
+        with (
+            mock.patch.dict(os.environ, hostile, clear=False),
+            mock.patch.object(verifier.subprocess, "run", side_effect=capture_environment),
+        ):
+            self.assertTrue(verifier.verify_checkout(ROOT, ROOT)["ok"])
+        self.assertEqual(captured["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(captured["GIT_NO_LAZY_FETCH"], "1")
+        for variable in hostile:
+            if variable not in {"GIT_NO_REPLACE_OBJECTS", "GIT_NO_LAZY_FETCH"}:
+                self.assertNotIn(variable, captured)
+
+    def test_promisor_missing_object_fails_closed_without_fetch(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-promisor-")
+        self.addCleanup(temporary.cleanup)
+        origin = Path(temporary.name) / "origin"
+        client = Path(temporary.name) / "client"
+        for repository in (origin, client):
+            subprocess.run(["git", "init", "--quiet", str(repository)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "fixture-tests"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "fixture-tests@example.invalid"],
+                check=True,
+                capture_output=True,
+            )
+        blob = subprocess.check_output(
+            ["git", "-C", str(origin), "hash-object", "-w", "--stdin"],
+            input=b"promised object\n",
+        ).decode("ascii").strip()
+        tree = subprocess.check_output(
+            ["git", "-C", str(origin), "mktree"],
+            input=f"100644 blob {blob}\tfixture.txt\n".encode("ascii"),
+        ).decode("ascii").strip()
+        commit = subprocess.check_output(
+            ["git", "-C", str(origin), "hash-object", "-t", "commit", "-w", "--stdin"],
+            input=(
+                f"tree {tree}\n"
+                "author fixture-tests <fixture-tests@example.invalid> 0 +0000\n"
+                "committer fixture-tests <fixture-tests@example.invalid> 0 +0000\n"
+                "\npromisor commit\n"
+            ).encode("utf-8"),
+        ).decode("ascii").strip()
+        for object_type, object_id in (("tree", tree), ("commit", commit)):
+            object_bytes = subprocess.check_output(
+                ["git", "-C", str(origin), "cat-file", object_type, object_id],
+            )
+            subprocess.run(
+                ["git", "-C", str(client), "hash-object", "-t", object_type, "-w", "--stdin"],
+                input=object_bytes,
+                check=True,
+                capture_output=True,
+            )
+        subprocess.run(
+            ["git", "-C", str(client), "update-ref", "refs/heads/main", commit],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(client), "symbolic-ref", "HEAD", "refs/heads/main"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(client), "remote", "add", "origin", str(origin)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(client), "config", "extensions.partialClone", "origin"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(client), "config", "remote.origin.promisor", "true"],
+            check=True,
+            capture_output=True,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"GIT_PROMISOR_REMOTE": "origin", "GIT_NO_LAZY_FETCH": "0"},
+            clear=False,
+        ):
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._git(client, "cat-file", "blob", blob)
+        missing = subprocess.run(
+            ["git", "-C", str(client), "cat-file", "-e", blob],
+            check=False,
+            capture_output=True,
+            env=verifier._strict_git_environment(),
+        )
+        self.assertNotEqual(missing.returncode, 0)
+
+    def test_hostile_git_redirects_replace_refs_and_promisor_are_ignored(self) -> None:
+        with self.copy_checkout() as temporary:
+            object_temporary, object_repo = self.copy_object_repo()
+            self.addCleanup(object_temporary.cleanup)
+            checkout = Path(temporary)
+            decoy = object_repo.parent / "decoy"
+            subprocess.run(
+                ["git", "init", "--quiet", str(decoy)],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+            )
+            authority_commit = subprocess.check_output(
+                ["git", "-C", str(object_repo), "rev-parse", "HEAD"],
+                text=True,
+            ).strip()
+            subprocess.run(
+                ["git", "-C", str(object_repo), "replace", authority_commit, "0f3a05ff5468fb9a3bd238cf788d746ec383e01a"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+            )
+            hostile = {
+                "GIT_DIR": str(decoy / ".git"),
+                "GIT_COMMON_DIR": str(decoy / ".git"),
+                "GIT_OBJECT_DIRECTORY": str(decoy / ".git" / "objects"),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(decoy / ".git" / "objects"),
+                "GIT_NAMESPACE": "decoy",
+                "GIT_WORK_TREE": str(decoy),
+                "GIT_INDEX_FILE": str(decoy / ".git" / "index"),
+                "GIT_CEILING_DIRECTORIES": str(object_repo.parent),
+                "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+                "GIT_REPLACE_REF_BASE": "refs/replace",
+                "GIT_PROMISOR_REMOTE": "hostile-promisor",
+                "GIT_NO_REPLACE_OBJECTS": "0",
+                "GIT_NO_LAZY_FETCH": "0",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.bare",
+                "GIT_CONFIG_VALUE_0": "true",
+                "GIT_CONFIG_PARAMETERS": "'core.bare=true'",
+            }
+            normal = self.run_cli(checkout, optimized=False, object_repo=object_repo, environment=hostile)
+            optimized = self.run_cli(checkout, optimized=True, object_repo=object_repo, environment=hostile)
+            self.assertEqual(normal.stdout, optimized.stdout)
+            self.assert_success(normal)
+            self.assert_success(optimized)
+
+    def test_checkout_reads_are_bounded_and_reject_parent_symlinks(self) -> None:
+        with self.copy_checkout() as temporary:
+            checkout = Path(temporary)
+            oversized = checkout / "contracts/fixtures/index.json"
+            oversized.write_bytes(b"x" * (verifier.MAX_GIT_OUTPUT + 1))
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._read_checkout_file(checkout, "contracts/fixtures/index.json")
+
+            shutil.rmtree(checkout / "contracts")
+            outside = checkout / "outside-fixtures"
+            (outside / "fixtures").mkdir(parents=True)
+            (outside / "fixtures" / "index.json").write_bytes(b"outside\\n")
+            (checkout / "contracts").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(verifier.AuthorityError):
+                verifier._read_checkout_file(checkout, "contracts/fixtures/index.json")
 
     def test_authority_relationship_is_external_and_exact(self) -> None:
         trusted = verifier.load_trusted_authority(ROOT)

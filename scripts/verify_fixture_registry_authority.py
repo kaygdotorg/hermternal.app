@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Verify the v2 aggregate fixture authority from immutable Git objects.
 
-This verifier is intentionally separate from the aggregate scanner. The legacy
-six-key v1 authority remains readable at its historical path, while the new
-multi-artifact bootstrap uses the distinct v2 path and schema. Stage two pins
+This verifier is intentionally separate from the aggregate scanner. The legacy v1 authority (its schema plus six legacy fields) remains readable
+at its historical path, while the new multi-artifact bootstrap uses the distinct
+v2 path and schema. Stage two pins
 the checked-in predecessor bytes only; the later scanner correction must rebase
 onto the merged predecessor and create its next authority independently. The
 checkout is compared with authority bytes read from the local Git object
@@ -16,9 +16,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -59,6 +61,19 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_GIT_OUTPUT = 512 * 1024
 MAX_ERROR_LENGTH = 220
 SAFE_ERROR_MESSAGE = "fixture registry authority rejected"
+GIT_REDIRECT_ENV_VARS = (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PROMISOR_REMOTE",
+)
 
 
 class AuthorityError(ValueError):
@@ -93,6 +108,25 @@ def _parse_json(data: bytes) -> dict[str, Any]:
     return value
 
 
+def _strict_git_environment() -> dict[str, str]:
+    """Keep every Git read on this checkout's local object database."""
+
+    environment = os.environ.copy()
+    # Git variables can redirect repository discovery, object lookup, config,
+    # replacement refs, or promisor behavior. Purge all of them, not only the
+    # currently known redirect list, before setting the two required safety
+    # flags. Non-Git process variables such as PATH remain available so the
+    # standard Git executable can be resolved without trusting Git overrides.
+    for variable in tuple(environment):
+        if variable.startswith("GIT_"):
+            environment.pop(variable, None)
+    for variable in GIT_REDIRECT_ENV_VARS:
+        environment.pop(variable, None)
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["GIT_NO_LAZY_FETCH"] = "1"
+    return environment
+
+
 def _git(repo_root: Path, *arguments: str) -> bytes:
     """Read only bounded data from the local object database; never fetches."""
 
@@ -104,6 +138,7 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
             stderr=subprocess.PIPE,
             check=False,
             timeout=10,
+            env=_strict_git_environment(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise AuthorityError() from exc
@@ -137,7 +172,8 @@ def _git_blob(object_repo: Path, revision: str, path: str) -> tuple[str, bytes]:
     except UnicodeError as exc:
         raise AuthorityError() from exc
     _require(HEX40.fullmatch(blob_oid) is not None)
-    data = _git(object_repo, "cat-file", "-p", blob_oid)
+    _require(_git(object_repo, "cat-file", "-t", blob_oid) == b"blob\n")
+    data = _git(object_repo, "cat-file", "blob", blob_oid)
     return blob_oid, data
 
 
@@ -171,7 +207,7 @@ def _validate_manifest(authority: dict[str, Any]) -> tuple[str, list[dict[str, A
 
 
 def _validate_legacy_manifest(authority: dict[str, Any]) -> dict[str, Any]:
-    """Read the historical six-key v1 shape without treating it as v2 trust."""
+    """Read the historical v1 schema plus six legacy fields (seven total keys) without treating it as v2 trust."""
 
     _require(tuple(authority.keys()) == LEGACY_AUTHORITY_KEYS)
     _require(authority["schema"] == LEGACY_AUTHORITY_SCHEMA)
@@ -189,7 +225,7 @@ def load_legacy_authority(checkout_root: Path) -> dict[str, Any]:
     """Load the preserved legacy v1 authority for migration compatibility."""
 
     return _validate_legacy_manifest(
-        _parse_json(_read_checkout_file(checkout_root.resolve(), LEGACY_AUTHORITY_PATH))
+        _parse_json(_read_checkout_file(checkout_root, LEGACY_AUTHORITY_PATH))
     )
 
 
@@ -219,23 +255,60 @@ def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
 
 
 def _read_checkout_file(checkout_root: Path, path: str) -> bytes:
-    target = checkout_root / path
-    _require(not target.is_symlink() and target.is_file())
+    """Read a bounded regular file without traversing checkout symlinks."""
+
+    _require(type(path) is str and path and "\\" not in path and "\x00" not in path)
+    relative = PurePosixPath(path)
+    _require(not relative.is_absolute() and all(part not in ("", ".", "..") for part in relative.parts))
+    _require(not checkout_root.is_symlink())
+    root = checkout_root.resolve(strict=True)
+    _require(root.is_dir())
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fds: list[int] = []
+    file_fd: int | None = None
     try:
-        data = target.read_bytes()
-    except (OSError, ValueError) as exc:
+        current_fd = os.open(root, directory_flags)
+        directory_fds.append(current_fd)
+        for component in relative.parts[:-1]:
+            current_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            directory_fds.append(current_fd)
+        file_fd = os.open(relative.parts[-1], file_flags, dir_fd=current_fd)
+        mode = os.fstat(file_fd).st_mode
+        _require(stat.S_ISREG(mode))
+        data = bytearray()
+        while len(data) < MAX_GIT_OUTPUT + 1:
+            chunk = os.read(file_fd, min(64 * 1024, MAX_GIT_OUTPUT + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        _require(len(data) <= MAX_GIT_OUTPUT)
+        return bytes(data)
+    except AuthorityError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
         raise AuthorityError() from exc
-    _require(len(data) <= MAX_GIT_OUTPUT)
-    return data
+    finally:
+        if file_fd is not None:
+            try:
+                os.close(file_fd)
+            except OSError:
+                pass
+        for descriptor in reversed(directory_fds):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def verify_checkout(checkout_root: Path, object_repo: Path) -> dict[str, Any]:
     """Compare checkout trust inputs with the immutable predecessor manifest."""
 
     authority = load_trusted_authority(object_repo)
-    _require(_read_checkout_file(checkout_root.resolve(), AUTHORITY_PATH) == authority["authority_bytes"])
+    _require(_read_checkout_file(checkout_root, AUTHORITY_PATH) == authority["authority_bytes"])
     for record in authority["artifact_manifest"]:
-        data = _read_checkout_file(checkout_root.resolve(), record["path"])
+        data = _read_checkout_file(checkout_root, record["path"])
         _require(len(data) == record["size_bytes"])
         _require(hashlib.sha256(data).hexdigest() == record["sha256"])
     return {

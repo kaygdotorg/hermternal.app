@@ -28,14 +28,14 @@ Use synthetic data only. Do not commit credentials, cookies, WebSocket tickets, 
 
 The legacy aggregate authority remains readable at
 `scripts/fixture_registry_authority.json`. Its historical v1 contract was
-introduced at `a96889c` and has the six-key shape
-`validator_path`/`validator_size_bytes`/`validator_sha256` plus
+introduced at `a96889c` and has the schema plus six legacy fields (seven total
+keys): `validator_path`/`validator_size_bytes`/`validator_sha256` plus
 `baseline_path`/`baseline_size_bytes`/`baseline_sha256` under the schema
 `hermternal.fixture-registry-authority.v1`.
 
 The `.v2.json` filename used by commits `3600975` and `70d5963` was a
 filename-only rotation: those historical documents still declared the v1
-schema and six legacy keys. The independent bootstrap commit `8dad73e` then
+schema plus six legacy fields (seven total keys). The independent bootstrap commit `8dad73e` then
 introduced a multi-artifact document at the legacy path while still claiming
 v1. Its published Git object is not rewritten. The corrective bootstrap keeps
 the legacy path readable and places the new multi-artifact authority at
