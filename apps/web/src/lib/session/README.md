@@ -21,8 +21,14 @@ Hermes session, or mirror transcript content.
   late completions from the previous generation. Cleanup is rechecked before the
   replacement identity is installed because adapter invalidation or release may
   synchronously log out or dispose the coordinator. Each attach gets a fresh
-  lease, so an adapter may reuse one raw binding object across sessions without
-  suppressing later cleanup.
+  lease, so an adapter may reuse one raw binding object after an earlier lease
+  settles without suppressing later cleanup. If overlapping attaches return the
+  same raw object, a stale completion never cleans the raw binding owned by the
+  active lease; a distinct stale binding still receives exactly-once cleanup.
+- `logout()` and `dispose()` claim lifecycle state before adapter cleanup. They
+  close Chat and clean the active Terminal lease at most once, increment the
+  session generation once, and treat `disposed` as higher precedence than
+  `logged-out` when cleanup reenters the coordinator.
 - A Terminal attach failure is reported as `terminal-attach-failed`; the Chat
   transport remains open and usable. Switching back to Chat focuses the composer
   without retrying or replaying a prompt.
@@ -79,9 +85,13 @@ const coordinator = createSessionCoordinator({
 `terminal` adapter returns an opaque `{ sessionId, invalidate() }` binding. It
 must not return PTY bytes or transcript data. The coordinator owns each returned
 binding through an attachment lease. One lease calls `invalidate()` and then
-optional `release()` exactly once; a later lease may wrap the same raw object.
-This ordering applies on session replacement, logout, disposal, and a stale
-asynchronous completion; a late binding is never installed into the new session.
+optional `release()` exactly once; a later lease may wrap the same raw object
+after the earlier lease settles. During overlapping attaches, a stale result
+that matches the raw binding currently owned by the active lease is not wrapped
+in a second lease or cleaned; a distinct stale result receives its own lease and
+is cleaned exactly once. This ordering applies on session replacement, logout,
+disposal, and a stale asynchronous completion; a late binding is never installed
+into the new session.
 
 This is offline prototype evidence. The injected adapters are the only places
 where a later runtime may connect to a server or renderer; this change itself

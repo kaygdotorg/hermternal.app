@@ -322,6 +322,8 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   const latestModeActivationSequence: Record<WorkspaceMode, number> = { chat: 0, terminal: 0 };
   let disposed = false;
   let loggedOut = false;
+  let chatClosed = false;
+  let lifecycleCleanupInProgress = false;
   let lifecycle: SessionCoordinatorStatus;
   let pendingSession: PendingSessionOperation | undefined;
   let pendingTerminal: PendingTerminalAttach | undefined;
@@ -450,8 +452,14 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     }
   };
 
+  const ownsActiveTerminalLease = (value: unknown): boolean =>
+    terminalBinding !== undefined &&
+    !terminalBinding.cleaned &&
+    terminalBinding.binding === value;
+
   const cleanupUnknownBinding = (value: unknown): void => {
     if (!value || typeof value !== 'object') return;
+    if (ownsActiveTerminalLease(value)) return;
     const invalidate = (value as { invalidate?: unknown }).invalidate;
     if (typeof invalidate !== 'function') return;
     cleanupBinding({ binding: value as TerminalBinding, cleaned: false });
@@ -522,6 +530,9 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     lifecycle = 'activating';
     lastError = undefined;
     publish();
+    if (!current(generation, sessionId)) {
+      return Promise.reject(new SessionCoordinatorError('stale-operation'));
+    }
 
     const controller = new AbortController();
     const pending = {
@@ -625,6 +636,9 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     terminalStatus = 'attaching';
     lastError = undefined;
     publish();
+    if (!current(generation, sessionId)) {
+      return Promise.reject(new SessionCoordinatorError('stale-operation'));
+    }
     const controller = new AbortController();
     const pending = {
       generation,
@@ -691,6 +705,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     latestModeActivationSequence[nextMode] = activation.sequence;
     lastError = undefined;
     clearFocus();
+    if (!current(generation, sessionId)) return activation;
     lifecycle = 'activating';
     publish();
     return activation;
@@ -714,6 +729,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     const activation = beginModeActivation(nextMode, generation, sessionId);
 
     try {
+      if (!current(generation, sessionId)) return state();
       await ensureChatForCurrentSession(false, signal);
       assertCurrent(generation, sessionId);
       if (activation.mode === 'terminal') {
@@ -763,13 +779,15 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     sessionGeneration += 1;
     terminalStatus = 'detached';
     lastError = undefined;
-    clearFocus();
-    lifecycle = 'activating';
-    publish();
     const generation = sessionGeneration;
+    clearFocus();
+    if (!current(generation, sessionId)) return state();
+    lifecycle = 'activating';
     const activation = captureModeActivation(generation, sessionId);
+    publish();
 
     try {
+      if (!current(generation, sessionId)) return state();
       await ensureChatForCurrentSession(false, signal);
       assertCurrent(generation, sessionId);
       if (activation.mode === 'terminal') {
@@ -794,13 +812,15 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     const sessionId = normalizeSessionId(requestedSessionId);
     if (sessionId !== activeSessionId) return setSession(sessionId, signal);
 
+    const generation = sessionGeneration;
+    const activation = captureModeActivation(generation, sessionId);
     clearFocus();
+    if (!current(generation, sessionId)) return state();
     lastError = undefined;
     lifecycle = 'activating';
     publish();
-    const generation = sessionGeneration;
-    const activation = captureModeActivation(generation, sessionId);
     try {
+      if (!current(generation, sessionId)) return state();
       await ensureChatForCurrentSession(true, signal);
       assertCurrent(generation, sessionId);
       lifecycle = 'active';
@@ -832,7 +852,9 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     lifecycle = 'reconnecting';
     lastError = undefined;
     clearFocus();
+    if (!current(generation, sessionId)) return state();
     publish();
+    if (!current(generation, sessionId)) return state();
     const controller = new AbortController();
     const pending = {
       generation,
@@ -887,48 +909,83 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     }
   };
 
+  const closeChatOnce = (): void => {
+    if (chatClosed) return;
+    chatClosed = true;
+    try {
+      chat.close();
+    } catch {
+      // Terminal cleanup remains deterministic even if Chat cleanup throws.
+    }
+  };
+
   const logout = (): void => {
     if (disposed || loggedOut) return;
-    cancelSession();
-    cancelTerminal();
-    cancelReconnect();
-    invalidateBinding();
+
+    // Claim the terminal lifecycle before adapter cleanup can reenter logout or
+    // dispose. A nested dispose may promote this transition, but never repeats
+    // its generation increment, binding cleanup, or Chat close.
+    loggedOut = true;
     activeSessionId = undefined;
     sessionGeneration += 1;
     terminalStatus = 'detached';
     lastError = undefined;
     lastFocusIntent = undefined;
     mode = 'chat';
-    loggedOut = true;
     lifecycle = 'logged-out';
-    try {
-      chat.close();
-    } catch {
-      // Logout remains deterministic even if an adapter cleanup hook throws.
+    lifecycleCleanupInProgress = true;
+
+    cancelSession();
+    cancelTerminal();
+    cancelReconnect();
+    invalidateBinding();
+    closeChatOnce();
+
+    lifecycleCleanupInProgress = false;
+    if (disposed) {
+      lifecycle = 'disposed';
+      publish();
+      listeners.clear();
+      return;
     }
+    lifecycle = 'logged-out';
     publish();
   };
 
   const dispose = (): void => {
     if (disposed) return;
-    cancelSession();
-    cancelTerminal();
-    cancelReconnect();
-    invalidateBinding();
+    if (loggedOut) {
+      // Disposal has precedence over a completed or in-flight logout. The
+      // logout owner already claimed cleanup and incremented the generation.
+      disposed = true;
+      lifecycle = 'disposed';
+      if (!lifecycleCleanupInProgress) {
+        publish();
+        listeners.clear();
+      }
+      return;
+    }
+
+    // Claim disposal before adapter cleanup so nested logout/dispose calls are
+    // idempotent and cannot overwrite the final disposed lifecycle.
+    disposed = true;
     activeSessionId = undefined;
     sessionGeneration += 1;
     terminalStatus = 'detached';
     lastError = undefined;
     lastFocusIntent = undefined;
     mode = 'chat';
-    disposed = true;
-    loggedOut = false;
     lifecycle = 'disposed';
-    try {
-      chat.close();
-    } catch {
-      // Disposal is idempotent and cannot expose adapter error text.
-    }
+    lifecycleCleanupInProgress = true;
+
+    cancelSession();
+    cancelTerminal();
+    cancelReconnect();
+    invalidateBinding();
+    closeChatOnce();
+
+    lifecycleCleanupInProgress = false;
+    lifecycle = 'disposed';
     publish();
     listeners.clear();
   };
