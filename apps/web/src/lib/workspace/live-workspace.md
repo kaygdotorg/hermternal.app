@@ -11,6 +11,28 @@
 - Approval and clarification replies capture their generation, transport identity, and pending-map owner. A late completion or failure cannot mutate a replacement chat, disposed workspace, or newer interactive item.
 - `invalidate()` detaches the chat identity before close, aborts reads, and removes session and timeline references before subscribers receive the signed-out view. `dispose()` marks the workspace closed and clears subscribers before close callbacks can re-enter. The route root owns final disposal: an authenticated view borrows its injected workspace, so expiry may unmount and later remount that view without closing the reusable root session. Route teardown alone permanently disposes Chat, PTY, coordinator subscriptions, and sockets, and it is idempotent.
 
+## Chat and Terminal mode continuity
+
+The normal route keeps one `LiveWorkspaceSession` mounted while the user switches
+between Chat and Terminal. The session's coordinator receives a façade over the
+existing Chat transport and a single current-session PTY bridge. Mode actions
+reuse the selected opaque session; they do not call `createSession()`, create a
+second Chat transport, or dispose Chat.
+
+`TerminalSurface` remains mounted while Chat is selected and hides only its
+presentation layer. It owns the host, lazy W-Term/Ghostty import, renderer mount
+and disposal, resize forwarding, focus intents, lifecycle notices, native
+selection/copy, and accessible recovery actions. The bridge forwards raw
+`Uint8Array` output directly to that renderer and stores only redacted
+lifecycle state. The renderer-ready gate delays the first PTY connection until
+the lazy sink is mounted; generation changes reset the renderer before the next
+session's output is accepted.
+
+`4401` remains an authentication-required recovery path for Chat and PTY. `4403`
+remains an incompatible-origin failure and never invokes sign-in recovery. These
+are prototype boundaries backed by synthetic tests; same-session proof against
+hermternal-dev is still required after review and merge.
+
 ## Prompt delivery
 
 A prompt is submitted only after REST restoration and the explicit JSON-RPC connection and `session.resume` sequence complete. Streaming text is transient presentation data. Official Hermes may omit `request_id` from delta and completion events; the JSON-RPC transport exposes its fail-closed sole-operation correlation as the public request ID before this controller applies prompt ownership. A successful completion triggers a new REST message read so server-owned history replaces it. While a prompt owns completion reconciliation, a synchronous subscriber cannot send another prompt: the controller rejects it before the transport boundary. The post-call ownership check remains necessary for callbacks that originate inside the transport call itself. The prompt allocates its refresh epoch only after the synchronous transport call returns; completion and failure continuations consume that exact owner instead of minting a new one from a promise reaction. That read receives the prompt operation's abort signal, so invalidation, session replacement, logout, and disposal cancel it and stale authenticated data cannot repopulate the timeline.

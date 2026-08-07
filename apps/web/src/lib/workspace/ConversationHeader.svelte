@@ -2,10 +2,13 @@
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
+  import type { WorkspaceMode } from '$lib/session/coordinator';
   import type { WorkspaceActionHandler } from './types';
 
   export let title = 'Quarterly analysis';
   export let model = 'Atlas · balanced';
+  export let mode: WorkspaceMode = 'chat';
+  export let modeActionsEnabled = false;
   export let onAction: WorkspaceActionHandler = () => {};
 
   let editing = false;
@@ -77,26 +80,31 @@
     {/if}
   </div>
 
+  <!-- Keep the approved preview pill geometry while enabling live mode actions only when wired. -->
   <div aria-label="Workspace mode" class="mode-controls">
     <Pill
-      ariaLabel="Chat mode selected"
+      ariaLabel={mode === 'chat' ? 'Chat mode selected' : 'Switch to Chat mode'}
       icon="conversation"
       iconOnly
       label="Chat"
       revealLabel
-      selected
-      title="Chat mode is current in this preview"
+      selected={mode === 'chat'}
+      title={modeActionsEnabled ? (mode === 'chat' ? 'Chat mode is current' : 'Switch to Chat mode') : 'Chat mode is current in this preview'}
       toggleable
-      variant="selected"
+      variant={mode === 'chat' ? 'selected' : 'ghost'}
+      onActivate={modeActionsEnabled ? () => { if (mode !== 'chat') onAction({ type: 'set-mode', mode: 'chat' }); } : undefined}
     />
     <Pill
-      ariaLabel="Open terminal mode"
+      ariaLabel={mode === 'terminal' ? 'Terminal mode selected' : 'Open terminal mode'}
       icon="terminal"
       iconOnly
       label="Terminal"
       revealLabel
-      title="Terminal mode is deferred in this preview"
-      variant="ghost"
+      selected={mode === 'terminal'}
+      title={modeActionsEnabled ? (mode === 'terminal' ? 'Terminal mode is current' : 'Open the current-session terminal') : 'Terminal mode is deferred in this preview'}
+      toggleable
+      variant={mode === 'terminal' ? 'selected' : 'ghost'}
+      onActivate={modeActionsEnabled ? () => { if (mode !== 'terminal') onAction({ type: 'set-mode', mode: 'terminal' }); } : undefined}
     />
   </div>
 

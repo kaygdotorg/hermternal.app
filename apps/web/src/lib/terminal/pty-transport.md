@@ -93,6 +93,24 @@ capacity and marks every received byte event as potentially retained or live.
 It preserves receive order and inserts no replay separator because the pinned
 source exposes no replay boundary.
 
+## Current-session browser adapter
+
+`current-session-terminal.ts` composes this transport for the normal Svelte
+workspace. `createBrowserPtyTransport()` requests a fresh same-origin ticket for
+each transport attempt and constructs the same-origin `/api/pty` upgrade without
+exposing the ticket, URL, socket, attach handle, or process identity to
+presentation state. `CurrentSessionTerminalBridge` owns one transport and one
+same-session binding at a time. It rejects stale PTY generations before byte
+forwarding, invalidates a binding after unsolicited detach/failure/exit, and
+maps `4401` to `authentication-required` while leaving `4403` as
+`incompatible-origin`.
+
+The bridge can wait for the lazy TerminalSurface renderer-ready signal before
+its first `connect()`. This prevents replay bytes from arriving before a
+renderer sink exists without adding a second application-level replay buffer.
+The renderer owns bounded output queues; the bridge and workspace snapshot do
+not retain terminal bytes.
+
 ## Verification scope
 
 `pty-transport.test.ts` uses deterministic fake sockets. It covers fresh ticket

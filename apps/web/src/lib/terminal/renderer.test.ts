@@ -377,7 +377,27 @@ async function recomputeBenchmarkCheckout(commit: string): Promise<BenchmarkChec
       sha256: createHash('sha256').update(bytes).digest('hex')
     };
   });
-  const evidenceHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD']).toString().trim();
+  const evidencePath = 'apps/web/tests/bench/terminal-renderer.evidence.json';
+  // Evidence is intentionally allowed to sit below later unrelated commits on
+  // the integration branch. Bind the relationship to the commit that last
+  // changed this trace, not to the current branch tip.
+  const branchHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const traceHead = execFileSync(
+    'git',
+    ['-C', repoRoot, 'log', '-1', '--format=%H', '--', evidencePath],
+    { encoding: 'utf8' }
+  ).trim();
+  let evidenceHead = branchHead;
+  // Use the trace commit when the candidate source predates it. For a
+  // deliberately arbitrary source selected after the trace, retain the branch
+  // tip so the provenance assertion can report the non-evidence path changes.
+  try {
+    execFileSync('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', commit, traceHead]);
+    evidenceHead = traceHead;
+  } catch {
+    // The source may be newer than the checked-in trace; the branch tip is the
+    // only descendant available for the negative provenance assertion.
+  }
   try {
     execFileSync('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', commit, evidenceHead]);
   } catch {
@@ -390,10 +410,10 @@ async function recomputeBenchmarkCheckout(commit: string): Promise<BenchmarkChec
     .filter(Boolean);
   const status = execFileSync(
     'git',
-    ['-C', repoRoot, 'status', '--porcelain=v1', '--untracked-files=all', '--', ...BENCHMARK_EXECUTION_INPUT_PATHS],
+    ['-C', repoRoot, 'status', '--porcelain=v1', '--untracked-files=all', '--', ...BENCHMARK_EXECUTION_INPUT_PATHS, evidencePath],
     { encoding: 'utf8' }
   );
-  if (status.trim()) throw new Error('benchmark execution inputs were dirty during evidence recomputation');
+  if (status.trim()) throw new Error('benchmark execution inputs or evidence were dirty during recomputation');
   return {
     head: commit,
     // The Git commit tree is the reviewed clean checkout; current working-tree

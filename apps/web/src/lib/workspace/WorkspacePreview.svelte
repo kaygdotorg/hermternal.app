@@ -7,7 +7,10 @@
   import Pill from './Pill.svelte';
   import SessionList from './SessionList.svelte';
   import StateBanner from './StateBanner.svelte';
+  import TerminalSurface from './TerminalSurface.svelte';
   import Timeline from './Timeline.svelte';
+  import type { FocusIntent, SessionCoordinatorState, WorkspaceMode } from '$lib/session/coordinator';
+  import type { CurrentSessionTerminalBridge } from '$lib/terminal/current-session-terminal';
   import type { LiveWorkspacePermanentFailure } from './live-workspace-session';
   import { DEFAULT_SESSIONS, timelineForState } from './fixtures';
   import type {
@@ -22,6 +25,11 @@
 
   export let appearance: Appearance = 'light';
   export let dataSource: WorkspaceDataSource = 'synthetic-preview';
+  export let mode: WorkspaceMode = 'chat';
+  export let modeActionsEnabled = false;
+  export let coordinator: SessionCoordinatorState | undefined = undefined;
+  export let terminal: CurrentSessionTerminalBridge | undefined = undefined;
+  export let focusIntent: FocusIntent | undefined = undefined;
   export let state: WorkspaceRuntimeState = 'stopped';
   export let title = 'Quarterly analysis';
   export let model = 'Atlas · balanced';
@@ -281,33 +289,55 @@
     />
   </div>
 
+    <!-- Chat stays the underlay; the PTY bridge replaces only the conversation layer. -->
     <div class:inspector-hidden={!artifactInspectorEnabled || !inspectorVisible} class="workspace-grid">
-      <aside class="sidebar">
+      <aside class:open={mobileSidebarOpen} class="sidebar">
         <SessionList {activeSessionId} {sessions} onAction={handleAction} />
       </aside>
 
       <div class="conversation-panel">
-        <ConversationHeader model={localModel} title={localTitle} onAction={handleAction} />
+        <ConversationHeader
+          mode={mode}
+          modeActionsEnabled={modeActionsEnabled}
+          model={localModel}
+          title={localTitle}
+          onAction={handleAction}
+        />
 
         <div class="conversation-body">
-          <Timeline {dataSource} emptyLabel={timelineEmptyLabel} items={timeline} runtimeState={state} onAction={handleAction} />
+          <div class:hidden-mode={mode === 'terminal' && terminal !== undefined} class="mode-layer chat-mode-layer">
+            <Timeline {dataSource} emptyLabel={timelineEmptyLabel} items={timeline} runtimeState={state} onAction={handleAction} />
 
-          <div
-            class:empty-layer={state === 'empty'}
-            class:visible={state !== 'ready' && !compatibilityBlocked}
-            class="state-layer"
-          >
-            {#if !compatibilityBlocked}
-              <StateBanner {dataMode} {dataSource} {permanentFailure} {state} onAction={handleAction} />
-            {/if}
+            <div
+              class:empty-layer={state === 'empty'}
+              class:visible={state !== 'ready' && !compatibilityBlocked}
+              class="state-layer"
+            >
+              {#if !compatibilityBlocked}
+                <StateBanner {dataMode} {dataSource} {permanentFailure} {state} onAction={handleAction} />
+              {/if}
+            </div>
+
+            <Composer
+              disabled={composerDisabled}
+              isStreaming={state === 'streaming'}
+              model={localModel}
+              onAction={handleAction}
+            />
           </div>
 
-          <Composer
-            disabled={composerDisabled}
-            isStreaming={state === 'streaming'}
-            model={localModel}
-            onAction={handleAction}
-          />
+          {#if terminal}
+            <div class:hidden-mode={mode !== 'terminal'} class="mode-layer terminal-mode-layer">
+              <TerminalSurface
+                active={mode === 'terminal'}
+                bridge={terminal}
+                coordinator={coordinator}
+                focusIntent={focusIntent}
+                onAction={handleAction}
+                title={localTitle}
+              />
+            </div>
+          {/if}
         </div>
       </div>
 
@@ -317,7 +347,6 @@
         </div>
       {/if}
     </div>
-  </div>
 
   {#if mobileSidebarOpen || mobileWorkspaceOpen}
     <button
@@ -571,6 +600,18 @@
     min-height: 0;
     flex: 0 0 856px;
     flex-direction: column;
+  }
+
+  .mode-layer {
+    position: relative;
+    display: flex;
+    min-height: 0;
+    flex: 1 1 auto;
+    flex-direction: column;
+  }
+
+  .mode-layer.hidden-mode {
+    display: none;
   }
 
   .conversation-body :global(.timeline) {
