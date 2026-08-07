@@ -255,8 +255,15 @@ class CliTests(unittest.TestCase):
         repo_root: Path,
         *,
         refresh_anchor: bool = False,
+        refresh_authority: bool = False,
     ) -> tuple[dict[str, object], dict[str, object]]:
-        """Refresh copied local records while Git-object authority stays immutable."""
+        """Refresh copied records, optionally pinning a fresh scanner authority.
+
+        Scanner regressions must reach the scanner under test instead of failing
+        at the immutable checkout authority first. The fresh authority is
+        created as the sole Git introduction of its path, while the dedicated
+        trust-root regression keeps the historical authority unchanged.
+        """
         fixtures_root = repo_root / "contracts/fixtures"
         index_path = fixtures_root / "index.json"
         baseline_path = fixtures_root / "validator/validation-baseline.json"
@@ -295,6 +302,62 @@ class CliTests(unittest.TestCase):
                     record["sha256"] = hashlib.sha256(data).hexdigest()
             baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
             baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        if refresh_authority:
+            validator_path = repo_root / validate.BASELINE_SELF_MANIFEST_PATH
+            validator_bytes = validator_path.read_bytes()
+            baseline_bytes = baseline_path.read_bytes()
+            authority_path = repo_root / validate.VALIDATOR_AUTHORITY_PATH
+            authority_path.parent.mkdir(parents=True, exist_ok=True)
+            authority_path.write_text(
+                json.dumps(
+                    {
+                        "schema": validate.VALIDATOR_AUTHORITY_SCHEMA,
+                        "validator_path": validate.BASELINE_SELF_MANIFEST_PATH,
+                        "validator_size_bytes": len(validator_bytes),
+                        "validator_sha256": hashlib.sha256(validator_bytes).hexdigest(),
+                        "baseline_path": "contracts/fixtures/validator/validation-baseline.json",
+                        "baseline_size_bytes": len(baseline_bytes),
+                        "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            shutil.rmtree(repo_root / ".git", ignore_errors=True)
+            subprocess.run(
+                ["git", "-C", str(repo_root), "init", "--quiet"],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo_root), "add", "--", validate.VALIDATOR_AUTHORITY_PATH],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo_root),
+                    "-c",
+                    "user.name=fixture-registry-tests",
+                    "-c",
+                    "user.email=fixture-registry-tests@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "test authority",
+                ],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         return index, baseline
 
     def _assert_blocked_in_both_modes(self, repo_root: Path, *args: str) -> None:
@@ -313,7 +376,7 @@ class CliTests(unittest.TestCase):
         repo_root = self._copy_fixture_repo()
         artifact = repo_root / "contracts/fixtures" / relative_path
         artifact.write_text(artifact.read_text(encoding="utf-8") + addition, encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     @staticmethod
@@ -397,7 +460,7 @@ class CliTests(unittest.TestCase):
             + '\nFORGED_RETAINED_VALUE = "Bearer unredacted-secret-value-123456"\n',
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_registered_python_assignment_literal_and_comment_are_rejected_in_both_modes(self) -> None:
@@ -409,7 +472,7 @@ class CliTests(unittest.TestCase):
             + '# token=unredacted-comment-secret-123456\n',
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_synthetic_marker_allowances_are_not_global(self) -> None:
@@ -433,7 +496,7 @@ class CliTests(unittest.TestCase):
             + '\nFORGED_BASIC = "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="\n',
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_raw_rfc7617_token_is_rejected_in_indexed_python_and_text(self) -> None:
@@ -454,7 +517,7 @@ class CliTests(unittest.TestCase):
                 document = json.loads(json_path.read_text(encoding="utf-8"))
                 self._add_json_expected_value(document, key, value)
                 json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-                self._rebind_copy(repo_root, refresh_anchor=True)
+                self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
                 self._assert_blocked_in_both_modes(repo_root)
 
     def test_regex_calls_and_static_string_construction_are_rejected_in_both_modes(self) -> None:
@@ -467,6 +530,7 @@ class CliTests(unittest.TestCase):
             're.compile(r"https://live\\x2eexample\\x2enet/v1/.*")\n',
             're.compile(r"https://live\\u002eexample\\u002enet/v1/.*")\n',
             're.compile(r"https://live\\U0000002eexample\\U0000002enet/v1/.*")\n',
+            're.compile(r"https://live\\N{FULL STOP}example\\N{FULL STOP}net/v1/.*")\n',
             're.compile(r"https://live\\056example\\056net/v1/.*")\n',
             'FORGED_PLUS = "Authorization: " + "Basic AAAAAAAAAAAAAAAA"\n',
             'FORGED_RUNTIME_PLUS = "Authorization: Basic " + runtime_secret\n',
@@ -485,7 +549,9 @@ class CliTests(unittest.TestCase):
             'FORGED_PERCENT_SCHEME = "Authorization: %s AAAAAAAAAAAAAAAA" % runtime_scheme\n',
             'FORGED_PERCENT_MAPPING = "Authorization: %(scheme)s %(token)s" % {"scheme": runtime_scheme, "token": runtime_secret}\n',
             'FORGED_MAPPING_PARTS = {"scheme": runtime_scheme, "token": runtime_secret}\nFORGED_PERCENT_BOUND_MAPPING = "Authorization: %(scheme)s %(token)s" % FORGED_MAPPING_PARTS\n',
+            'FORGED_PERCENT_UNRESOLVED_MAPPING = "Authorization: %(scheme)s %(token)s" % runtime_mapping_unresolved\n',
             'FORGED_PERCENT_MIXED_MAPPING = "Authorization: %(scheme)s %(secret)s" % {"scheme": "Basic", "secret": runtime_secret}\n',
+            'FORGED_FORMAT_MAP = "Authorization: {scheme} {token}".format_map(runtime_mapping_unresolved)\n',
             'FORGED_PERCENT_LITERAL = "Authorization: Basic %s" % "AAAAAAAAAAAAAAAA"\n',
             'FORGED_STALE = "<redacted>"\nFORGED_STALE = runtime_secret\nFORGED_STALE_HEADER = f"Authorization: Bearer {FORGED_STALE}"\n',
         )
@@ -548,7 +614,7 @@ class CliTests(unittest.TestCase):
         document = json.loads(json_path.read_text(encoding="utf-8"))
         self._add_json_expected_value(document, "control", split_bearer)
         json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_markdown_assignment_value_is_rejected_in_both_modes(self) -> None:
@@ -579,8 +645,26 @@ class CliTests(unittest.TestCase):
                 # rejection proves the compact alias reached sensitive routing.
                 self._add_json_expected_value(document, alias, True)
                 json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-                self._rebind_copy(repo_root, refresh_anchor=True)
+                self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
                 self._assert_blocked_in_both_modes(repo_root)
+
+    def test_unicode_compatibility_forms_cannot_bypass_credential_scanners(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        json_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
+        document = json.loads(json_path.read_text(encoding="utf-8"))
+        self._add_json_expected_value(document, "ａｐｉ＿ｋｅｙ", True)
+        json_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+        repo_root = self._copy_fixture_repo()
+        readme = repo_root / "contracts/fixtures/connection-restoration/README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8") + "\nｔｏｋｅｎ＝AAAAAAAAAAAAAAAA\n",
+            encoding="utf-8",
+        )
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
+        self._assert_blocked_in_both_modes(repo_root)
 
     def test_sensitive_json_values_still_receive_generic_scanning(self) -> None:
         for value in (
@@ -596,7 +680,7 @@ class CliTests(unittest.TestCase):
                 document = json.loads(json_path.read_text(encoding="utf-8"))
                 self._add_json_expected_value(document, "token", value)
                 json_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-                self._rebind_copy(repo_root, refresh_anchor=True)
+                self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
                 self._assert_blocked_in_both_modes(repo_root)
 
     def test_central_validator_sources_must_remain_in_baseline_binding(self) -> None:
@@ -651,7 +735,7 @@ class CliTests(unittest.TestCase):
         })
         fixture["files"].sort(key=lambda record: record["path"])
         index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_registered_non_test_source_rejects_rfc7617_sample_in_both_modes(self) -> None:
@@ -662,7 +746,7 @@ class CliTests(unittest.TestCase):
             + '\nAuthorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==\n',
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_nested_json_key_with_credential_shaped_text_is_rejected_in_both_modes(self) -> None:
@@ -675,7 +759,7 @@ class CliTests(unittest.TestCase):
             },
         }
         json_artifact.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_registered_ws_and_wss_live_hosts_are_rejected_in_both_modes(self) -> None:
@@ -686,7 +770,7 @@ class CliTests(unittest.TestCase):
             + "\nws://live.example.net and wss://live.example.net must never be retained.\n",
             encoding="utf-8",
         )
-        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._rebind_copy(repo_root, refresh_anchor=True, refresh_authority=True)
         self._assert_blocked_in_both_modes(repo_root)
 
     def test_canonical_baseline_sample_distribution_manifest_replacement_is_rejected_in_both_modes(self) -> None:
@@ -756,6 +840,16 @@ class CliTests(unittest.TestCase):
         provider["status"] = "pending"
         provider["validator"] = None
         provider["files"] = []
+        index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_ready_fixture_must_name_a_validator_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        index_path = repo_root / "contracts/fixtures/index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        ready = next(item for item in index["fixture_roots"] if item["status"] == "ready")
+        ready["validator"] = None
         index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
         self._rebind_copy(repo_root, refresh_anchor=True)
         self._assert_blocked_in_both_modes(repo_root)

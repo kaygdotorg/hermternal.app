@@ -98,8 +98,9 @@ unsafe paths, duplicate JSON keys, non-finite numbers, oversized input,
 malformed UTF-8, credential-shaped values, live claims, `http`/`https`/`ws`/`wss`
 live hosts, symlinks, unsupported registered extensions, and unindexed
 artifacts. Registered Python artifacts are parsed and their retained string
-literals and comments are scanned, including assignment-shaped `ticket=`,
-`cookie=`, `password=`, `secret=`, and `token=` values; detector regex
+literals and comments are scanned, including compatibility-normalized
+assignment-shaped `ticket=`, `cookie=`, `password=`, `secret=`, and `token=` values;
+detector regex
 definitions and explicit domain negative-test markers are not treated as
 retained credentials. Reviewed source markers and negative-test samples use
 exact path/value allowances only. Domain validators remain authoritative for
@@ -108,7 +109,7 @@ request.
 
 The `--index`, `--schema`, and `--baseline` inputs are bound to their canonical
 reviewed paths. The exact central-validator and baseline bytes are pinned by
-`scripts/fixture_registry_authority.json` from the sole Git commit that introduced
+`scripts/fixture_registry_authority.v2.json` from the sole Git commit that introduced
 that out-of-tree authority. Validation reads those historical object-database
 bytes rather than checkout constants. Only the validator's own baseline-manifest
 digest and derived byte total are normalized to avoid a self-reference. A
@@ -119,7 +120,7 @@ directory also has an exact artifact allowlist, so caches, dotfiles, binaries,
 symlinks, special files, and unreviewed helpers fail closed. Coverage references
 must be reciprocal, and every coverage platform and required state must be
 supported by every referenced root. Ready coverage may reference only ready
-fixture roots with real manifests. A registry can be structurally valid
+fixture roots with named validators and real manifests. A registry can be structurally valid
 while coverage remains `partial`. A `pending`, `empty`, `failure`, `cancelled`,
 or `unknown` coverage row is never promoted to successful evidence. The
 checked-in index inventories the C-05 connection-restoration, C-06 uncertain
