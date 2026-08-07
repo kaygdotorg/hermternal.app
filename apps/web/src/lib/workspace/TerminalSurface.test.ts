@@ -108,12 +108,36 @@ describe('TerminalSurface', () => {
     await Promise.resolve();
     expect(rendererHarness.createTerminalRenderer).not.toHaveBeenCalled();
 
-    await view.rerender({ bridge, active: true });
+    await view.rerender({
+      bridge,
+      active: true,
+      coordinator: {
+        status: 'active',
+        mode: 'terminal',
+        sessionGeneration: 1,
+        compatibility: 'compatible',
+        chatStatus: 'ready',
+        terminalStatus: 'attached',
+        activeSessionId: 'session-1',
+        terminalSessionId: 'session-1'
+      }
+    });
     await waitFor(() => expect(rendererHarness.createTerminalRenderer).toHaveBeenCalledTimes(1));
     const renderer = rendererHarness.instances[0]!;
     const host = screen.getByRole('region', { name: 'Terminal input and output' });
     setRect(host);
 
+    bridge.emit({
+      type: 'state',
+      state: {
+        status: 'attached',
+        generation: 0,
+        sessionId: 'session-1',
+        outputMayBeTruncated: false,
+        explicitlyClosed: false,
+        reconnectSupported: false
+      }
+    });
     const bytes = new Uint8Array([0xff, 0x00, 0x80]);
     bridge.emit({ type: 'bytes', generation: 0, bytes, outputMayBeTruncated: false });
     renderer.onInput?.('printf ready');
@@ -168,7 +192,7 @@ describe('TerminalSurface', () => {
     expect(onAction).toHaveBeenCalledWith({ type: 'terminal-close' });
   });
 
-  it('resets on PTY generation changes and rewires when the bridge is replaced', async () => {
+  it('keeps the renderer ready across PTY generations and rewires when the bridge is replaced', async () => {
     const firstBridge = createBridge();
     const secondBridge = createBridge();
     const view = render(TerminalSurface, { bridge: firstBridge, active: true });
@@ -185,25 +209,24 @@ describe('TerminalSurface', () => {
         explicitlyClosed: false
       }
     });
+    await waitFor(() => expect(rendererHarness.instances).toHaveLength(1));
+    expect(firstRenderer.dispose).not.toHaveBeenCalled();
+
+    const currentBytes = new Uint8Array([0x41]);
+    firstBridge.emit({ type: 'bytes', generation: 1, bytes: currentBytes, outputMayBeTruncated: false });
+    expect(firstRenderer.write).toHaveBeenCalledWith(currentBytes);
+
+    await view.rerender({ bridge: secondBridge, active: true });
     await waitFor(() => expect(rendererHarness.instances).toHaveLength(2));
     const secondRenderer = rendererHarness.instances[1]!;
     expect(firstRenderer.dispose).toHaveBeenCalledTimes(1);
 
-    const currentBytes = new Uint8Array([0x41]);
-    firstBridge.emit({ type: 'bytes', generation: 1, bytes: currentBytes, outputMayBeTruncated: false });
-    expect(secondRenderer.write).toHaveBeenCalledWith(currentBytes);
-
-    await view.rerender({ bridge: secondBridge, active: true });
-    await waitFor(() => expect(rendererHarness.instances).toHaveLength(3));
-    const thirdRenderer = rendererHarness.instances[2]!;
-    expect(secondRenderer.dispose).toHaveBeenCalledTimes(1);
-
     const staleBytes = new Uint8Array([0x42]);
     firstBridge.emit({ type: 'bytes', generation: 1, bytes: staleBytes, outputMayBeTruncated: false });
-    expect(thirdRenderer.write).not.toHaveBeenCalled();
+    expect(secondRenderer.write).not.toHaveBeenCalled();
     const replacementBytes = new Uint8Array([0x43]);
     secondBridge.emit({ type: 'bytes', generation: 0, bytes: replacementBytes, outputMayBeTruncated: false });
-    expect(thirdRenderer.write).toHaveBeenCalledWith(replacementBytes);
+    expect(secondRenderer.write).toHaveBeenCalledWith(replacementBytes);
 
     view.unmount();
   });

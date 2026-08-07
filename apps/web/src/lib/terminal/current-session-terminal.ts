@@ -26,6 +26,8 @@ export type CurrentSessionTerminalState = Readonly<{
   closeClassification?: PtyCloseClassification;
   outputMayBeTruncated: boolean;
   explicitlyClosed: boolean;
+  /** True only when the transport owns an opaque attach identity. */
+  reconnectSupported?: boolean;
   failure?: 'authentication-required' | 'incompatible-origin';
 }>;
 
@@ -51,8 +53,22 @@ export type BrowserPtyTransportOptions = Readonly<{
   createSocket?: BrowserPtyWebSocketFactory;
 }>;
 
+export type CurrentSessionTerminalAttachment = Readonly<{
+  /** Opaque values remain inside the transport and are never projected to UI state. */
+  attach: string;
+  processIdentity: string;
+  detachedAtMs?: number;
+}>;
+
+export type CurrentSessionTerminalAttachmentProvider = (
+  sessionId: string,
+  signal: AbortSignal
+) => CurrentSessionTerminalAttachment | Promise<CurrentSessionTerminalAttachment>;
+
 export type CurrentSessionTerminalBridgeOptions = Readonly<{
   createTransport: () => PtyTransport;
+  /** Optional reviewed attach issuance seam. Omitted normal-route PTYs stay legacy and cannot reconnect. */
+  createAttachment?: CurrentSessionTerminalAttachmentProvider;
 }>;
 
 interface ActiveBinding extends TerminalBinding {
@@ -68,6 +84,7 @@ interface ActiveBinding extends TerminalBinding {
  */
 export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   private readonly transport: PtyTransport;
+  private readonly createAttachment: CurrentSessionTerminalAttachmentProvider | undefined;
   private readonly listeners = new Set<CurrentSessionTerminalListener>();
   private readonly unsubscribeTransport: () => void;
   private currentState: CurrentSessionTerminalState;
@@ -79,12 +96,13 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   private rendererReadyWaiters = new Set<{
     resolve: () => void;
     reject: (error: PtyTransportError) => void;
-    signal: AbortSignal;
-    onAbort: () => void;
+    signal?: AbortSignal;
+    onAbort?: () => void;
   }>();
 
   constructor(options: CurrentSessionTerminalBridgeOptions) {
     this.transport = options.createTransport();
+    this.createAttachment = options.createAttachment;
     this.currentState = projectState(this.transport.state, false);
     this.unsubscribeTransport = this.transport.subscribe((event) => this.handleTransportEvent(event));
   }
@@ -104,13 +122,9 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     if (!ready) return;
     for (const waiter of [...this.rendererReadyWaiters]) {
       this.rendererReadyWaiters.delete(waiter);
-      waiter.signal.removeEventListener('abort', waiter.onAbort);
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort);
       waiter.resolve();
     }
-  }
-
-  get pty(): PtyTransport {
-    return this.transport;
   }
 
   subscribe(listener: CurrentSessionTerminalListener): () => void {
@@ -153,7 +167,17 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     this.activeBinding = binding;
 
     try {
-      await this.transport.connect({ sessionId }, signal);
+      const attachment = this.createAttachment
+        ? await this.createAttachment(sessionId, signal)
+        : undefined;
+      if (this.disposed || !binding.valid || this.activeBinding?.token !== token) {
+        binding.valid = false;
+        throw new PtyTransportError('aborted');
+      }
+      await this.transport.connect(
+        attachment === undefined ? { sessionId } : { sessionId, ...attachment },
+        signal
+      );
       if (this.disposed || !binding.valid || this.activeBinding?.token !== token) {
         binding.valid = false;
         throw new PtyTransportError('aborted');
@@ -175,24 +199,38 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   }
 
   sendInput(input: string | Uint8Array): void {
+    if (this.disposed) throw new PtyTransportError('closed');
     this.transport.sendInput(input);
   }
 
   resize(cols: number, rows: number): void {
+    if (this.disposed) throw new PtyTransportError('closed');
     this.transport.resize(cols, rows);
   }
 
-  reconnect(signal?: AbortSignal): Promise<void> {
+  async reconnect(signal?: AbortSignal): Promise<void> {
+    if (this.disposed) throw new PtyTransportError('closed');
+    if (!this.currentState.reconnectSupported) {
+      // The pinned server source has no client-visible attach-token issuance
+      // route. Never relabel a legacy PTY as reattachable or silently spawn a
+      // replacement process behind a Reconnect action.
+      throw new PtyTransportError('legacy-reattach-prohibited', this.currentState.generation);
+    }
+    await this.waitForRendererReady(signal);
+    if (this.disposed) throw new PtyTransportError('closed');
+    if (signal?.aborted) throw new PtyTransportError('aborted');
     this.explicitlyClosed = false;
-    return this.transport.reconnect(signal);
+    await this.transport.reconnect(signal);
   }
 
   detach(): void {
+    if (this.disposed) return;
     this.explicitlyClosed = false;
     this.invalidateActiveBinding();
   }
 
   close(): void {
+    if (this.disposed) return;
     this.explicitlyClosed = true;
     this.invalidateActiveBinding(false);
     this.transport.close();
@@ -201,33 +239,44 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
 
   dispose(): void {
     if (this.disposed) return;
+    // Unsubscribe and clear observers before closing the adapter. Some test and
+    // browser WebSocket shims emit synchronously from close(); a disposed bridge
+    // must not publish a final state into a torn-down workspace.
     this.disposed = true;
-    this.invalidateActiveBinding(false);
-    this.transport.close();
     this.unsubscribeTransport();
+    this.listeners.clear();
     for (const waiter of [...this.rendererReadyWaiters]) {
       this.rendererReadyWaiters.delete(waiter);
-      waiter.signal.removeEventListener('abort', waiter.onAbort);
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort);
       waiter.reject(new PtyTransportError('closed'));
     }
-    this.listeners.clear();
+    this.invalidateActiveBinding(false);
+    this.transport.close();
   }
 
-  private waitForRendererReady(signal: AbortSignal): Promise<void> {
+  private waitForRendererReady(signal?: AbortSignal): Promise<void> {
     if (!this.rendererReadyGateEnabled || this.rendererReady) return Promise.resolve();
-    if (signal.aborted) return Promise.reject(new PtyTransportError('aborted'));
+    if (signal?.aborted) return Promise.reject(new PtyTransportError('aborted'));
     return new Promise<void>((resolve, reject) => {
-      const waiter = {
+      const waiter: {
+        resolve: () => void;
+        reject: (error: PtyTransportError) => void;
+        signal?: AbortSignal;
+        onAbort?: () => void;
+      } = {
         resolve,
         reject,
         signal,
-        onAbort: () => {
+        onAbort: undefined
+      };
+      if (signal) {
+        waiter.onAbort = () => {
           this.rendererReadyWaiters.delete(waiter);
           reject(new PtyTransportError('aborted'));
-        }
-      };
+        };
+        signal.addEventListener('abort', waiter.onAbort, { once: true });
+      }
       this.rendererReadyWaiters.add(waiter);
-      signal.addEventListener('abort', waiter.onAbort, { once: true });
     });
   }
 
@@ -239,6 +288,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   }
 
   private handleTransportEvent(event: PtyTransportEvent): void {
+    if (this.disposed) return;
     if (event.type === 'bytes') {
       // Generation is checked before forwarding, while the payload remains an
       // opaque view. The renderer owns its bounded queue; this bridge never
@@ -312,6 +362,7 @@ function projectState(state: PtyConnectionState, explicitlyClosed: boolean): Cur
     ...(state.closeClassification === undefined ? {} : { closeClassification: state.closeClassification }),
     outputMayBeTruncated: state.outputMayBeTruncated,
     explicitlyClosed,
+    reconnectSupported: state.mode === 'attach',
     ...(failure === undefined ? {} : { failure })
   });
 }

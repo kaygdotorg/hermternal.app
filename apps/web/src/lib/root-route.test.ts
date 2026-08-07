@@ -18,6 +18,29 @@ const IDENTITY = {
   expires_at: 4_000_000_000
 };
 
+function createSocketHarness() {
+  const socket = {
+    onopen: null as (() => void) | null,
+    onmessage: null as ((event: { readonly data: unknown }) => void) | null,
+    onerror: null as (() => void) | null,
+    onclose: null as ((event?: { readonly code?: number }) => void) | null,
+    readyState: 1,
+    send: vi.fn((_data: unknown) => undefined),
+    close: vi.fn((code?: number) => socket.onclose?.({ code }))
+  };
+  return {
+    socket,
+    open: () => socket.onopen?.(),
+    closeFromServer: (code: number) => socket.onclose?.({ code })
+  };
+}
+
+async function flush(): Promise<void> {
+  for (let index = 0; index < 32; index += 1) {
+    await Promise.resolve();
+  }
+}
+
 describe('root route composition', () => {
   it('keeps only closed valid scenario values in the deterministic fixture lane', () => {
     expect(resolveRootRoute('?scenario=success')).toEqual({ mode: 'fixture', scenario: 'success', delayMs: 0 });
@@ -107,5 +130,105 @@ describe('root route composition', () => {
     expect(invalidate).toHaveBeenCalledTimes(1);
     expect(context.auth.current.status).toBe('expired');
     expect(context.workspace.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
+  });
+
+  it('routes the shared root socket seam into the normal PTY upgrade', async () => {
+    const harness = createSocketHarness();
+    const urls: string[] = [];
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      if (String(input) === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket' });
+      throw new Error('unexpected request');
+    });
+    const createSocket = vi.fn((url: string) => {
+      urls.push(url);
+      return harness.socket;
+    });
+    const context = createLiveRootContext({ fetch, createSocket });
+    const terminal = context.workspace.terminal;
+    if (!terminal) throw new Error('terminal bridge was not composed');
+
+    const pending = terminal.attach('session-1', new AbortController().signal);
+    await flush();
+
+    expect(createSocket).toHaveBeenCalledTimes(1);
+    const upgrade = new URL(urls[0] ?? 'http://invalid');
+    expect(upgrade.pathname).toBe('/api/pty');
+    expect(upgrade.searchParams.get('resume')).toBe('session-1');
+    expect(upgrade.searchParams.get('ticket')).toBe('pty-ticket');
+
+    harness.open();
+    await pending;
+    expect(terminal.state).toMatchObject({ status: 'attached', sessionId: 'session-1', reconnectSupported: false });
+
+    context.workspace.dispose();
+  });
+
+  it('expires authenticated root state for a hidden TerminalSurface PTY 4401', async () => {
+    const harness = createSocketHarness();
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return jsonResponse(IDENTITY);
+      if (path === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket' });
+      throw new Error('unexpected request');
+    });
+    const context = createLiveRootContext({
+      fetch,
+      createPtySocket: () => harness.socket
+    });
+    await context.auth.initialize();
+    expect(context.auth.current.status).toBe('authenticated');
+
+    const terminal = context.workspace.terminal;
+    if (!terminal) throw new Error('terminal bridge was not composed');
+    const pending = terminal.attach('session-1', new AbortController().signal);
+    await flush();
+    harness.open();
+    await pending;
+
+    const expire = vi.spyOn(context.auth, 'expire');
+    harness.closeFromServer(4401);
+
+    expect(expire).toHaveBeenCalledTimes(1);
+    expect(context.auth.current.status).toBe('expired');
+    expect(context.workspace.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
+    expect(context.workspace.current.terminal).toBeUndefined();
+
+    context.workspace.dispose();
+    context.auth.dispose();
+  });
+
+  it('keeps PTY 4403 outside authenticated recovery', async () => {
+    const harness = createSocketHarness();
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return jsonResponse(IDENTITY);
+      if (path === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket' });
+      throw new Error('unexpected request');
+    });
+    const context = createLiveRootContext({
+      fetch,
+      createPtySocket: () => harness.socket
+    });
+    await context.auth.initialize();
+
+    const terminal = context.workspace.terminal;
+    if (!terminal) throw new Error('terminal bridge was not composed');
+    const pending = terminal.attach('session-1', new AbortController().signal);
+    await flush();
+    harness.open();
+    await pending;
+
+    const expire = vi.spyOn(context.auth, 'expire');
+    harness.closeFromServer(4403);
+
+    expect(expire).not.toHaveBeenCalled();
+    expect(context.auth.current.status).toBe('authenticated');
+    expect(context.workspace.current.terminal).toMatchObject({
+      closeCode: 4403,
+      failure: 'incompatible-origin'
+    });
+
+    context.workspace.dispose();
+    context.auth.dispose();
   });
 });

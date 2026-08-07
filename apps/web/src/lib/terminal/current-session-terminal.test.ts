@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import type {
-  PtyConnectionState,
-  PtyTransport,
-  PtyTransportEvent
+import {
+  PtyTransportError,
+  type PtyConnectionInput,
+  type PtyConnectionState,
+  type PtyTransport,
+  type PtyTransportEvent
 } from './pty-transport';
 import {
   CurrentSessionTerminalBridge,
@@ -18,12 +20,13 @@ function createFakePty() {
     outputMayBeTruncated: false
   };
   let state = initial;
-  const connect = vi.fn(async (input: { sessionId: string }, _signal?: AbortSignal) => {
+  const connect = vi.fn(async (input: PtyConnectionInput, _signal?: AbortSignal) => {
     state = {
       status: 'attached',
       generation: state.generation + 1,
-      mode: 'legacy',
+      mode: input.attach ? 'attach' : 'legacy',
       sessionId: input.sessionId,
+      ...(input.attach && input.processIdentity ? { processIdentity: input.processIdentity } : {}),
       outputMayBeTruncated: false
     };
     for (const listener of listeners) listener({ type: 'state', state });
@@ -42,12 +45,17 @@ function createFakePty() {
     };
     for (const listener of listeners) listener({ type: 'state', state });
   });
+  const reconnect = vi.fn(async () => {
+    if (state.mode !== 'attach') {
+      throw new PtyTransportError('legacy-reattach-prohibited', state.generation);
+    }
+  });
   const pty: PtyTransport = {
     get state() {
       return state;
     },
     connect,
-    reconnect: vi.fn(async () => undefined),
+    reconnect,
     sendInput: vi.fn(),
     resize: vi.fn(),
     detach,
@@ -198,5 +206,78 @@ describe('CurrentSessionTerminalBridge', () => {
     bridge.setRendererReady(true);
     await pending;
     expect(fake.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects reconnect for the normal legacy binding instead of pretending it can reattach', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+
+    await bridge.attach('session-one', new AbortController().signal);
+
+    expect(bridge.state.reconnectSupported).toBe(false);
+    await expect(bridge.reconnect()).rejects.toMatchObject({ code: 'legacy-reattach-prohibited' });
+    expect(fake.pty.reconnect).not.toHaveBeenCalled();
+  });
+
+  it('keeps reviewed attach identity values inside the transport and exposes attach-mode reconnect', async () => {
+    const fake = createFakePty();
+    const createAttachment = vi.fn(async (sessionId: string) => ({
+      attach: `attach-${sessionId}`,
+      processIdentity: `process-${sessionId}`
+    }));
+    const bridge = new CurrentSessionTerminalBridge({
+      createTransport: () => fake.pty,
+      createAttachment
+    });
+
+    await bridge.attach('session-one', new AbortController().signal);
+
+    expect(createAttachment).toHaveBeenCalledWith('session-one', expect.any(AbortSignal));
+    expect(fake.connect).toHaveBeenCalledWith(
+      { sessionId: 'session-one', attach: 'attach-session-one', processIdentity: 'process-session-one' },
+      expect.any(AbortSignal)
+    );
+    expect(bridge.state).toMatchObject({ status: 'attached', reconnectSupported: true });
+
+    await bridge.reconnect();
+    expect(fake.pty.reconnect).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(bridge.state)).not.toContain('attach-session-one');
+    expect(JSON.stringify(bridge.state)).not.toContain('process-session-one');
+  });
+
+  it('waits for renderer readiness before attach-mode reconnect', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({
+      createTransport: () => fake.pty,
+      createAttachment: () => ({ attach: 'attach-one', processIdentity: 'process-one' })
+    });
+
+    await bridge.attach('session-one', new AbortController().signal);
+    bridge.setRendererReady(false);
+    const pending = bridge.reconnect();
+
+    await Promise.resolve();
+    expect(fake.pty.reconnect).not.toHaveBeenCalled();
+    bridge.setRendererReady(true);
+    await pending;
+    expect(fake.pty.reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses synchronous transport events after bridge disposal', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const events: CurrentSessionTerminalEvent[] = [];
+    bridge.subscribe((event) => events.push(event));
+    await bridge.attach('session-one', new AbortController().signal);
+    events.length = 0;
+
+    bridge.dispose();
+
+    expect(events).toEqual([]);
+    expect(() => bridge.sendInput('after dispose')).toThrowError(
+      expect.objectContaining({ code: 'closed' })
+    );
+    expect(() => bridge.resize(80, 24)).toThrowError(expect.objectContaining({ code: 'closed' }));
+    expect(fake.close).toHaveBeenCalledTimes(1);
   });
 });
