@@ -125,10 +125,15 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-")
         checkout = Path(temporary.name)
         for relative_path in self.checkout_paths:
-            source = ROOT / relative_path
             destination = checkout / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
+            if relative_path in verifier.EXPECTED_ARTIFACT_PATHS:
+                data = subprocess.check_output(
+                    ["git", "-C", str(self.object_repo), "show", f"{verifier.EXPECTED_SOURCE_COMMIT}:{relative_path}"],
+                )
+                destination.write_bytes(data)
+            else:
+                shutil.copyfile(ROOT / relative_path, destination)
         return temporary
 
     def make_packed_remote_object_repo(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
@@ -428,8 +433,14 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         return payload
 
     def test_normal_and_optimized_success_are_identical(self) -> None:
-        normal = self.run_cli(ROOT, optimized=False)
-        optimized = self.run_cli(ROOT, optimized=True)
+        # The active checkout may contain corrected scanner bytes that are not
+        # part of the historical v2 authority. Reconstruct the reviewed
+        # predecessor checkout from its pinned source commit before invoking
+        # the standalone verifier.
+        with self.copy_checkout() as checkout_temporary:
+            checkout = Path(checkout_temporary)
+            normal = self.run_cli(checkout, optimized=False)
+            optimized = self.run_cli(checkout, optimized=True)
         self.assertEqual(normal.stdout, optimized.stdout)
         normal_payload = self.assert_success(normal)
         self.assertEqual(normal_payload["stage"], "aggregate_predecessor_v2")
@@ -472,6 +483,17 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(legacy_bytes).hexdigest(), LEGACY_AUTHORITY_SHA256)
         self.assertNotIn("artifact_manifest", legacy)
         self.assertNotIn("source_commit", legacy)
+
+    def test_legacy_v1_same_shape_rewrite_fails_closed(self) -> None:
+        with self.copy_checkout() as temporary:
+            checkout = Path(temporary)
+            path = checkout / verifier.LEGACY_AUTHORITY_PATH
+            rewritten = bytearray(path.read_bytes())
+            rewritten[-2] = ord(" ") if rewritten[-2] != ord(" ") else ord("\\n")
+            self.assertEqual(len(rewritten), verifier.LEGACY_AUTHORITY_SIZE)
+            path.write_bytes(bytes(rewritten))
+            with self.assertRaises(verifier.AuthorityError):
+                verifier.load_legacy_authority(checkout)
 
     def test_v2_path_selection_ignores_legacy_path_rewrites(self) -> None:
         with self.copy_checkout() as temporary:
@@ -541,11 +563,12 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 captured.update(kwargs["env"])
             return real_popen(*args, **kwargs)
 
-        with (
-            mock.patch.dict(os.environ, hostile, clear=False),
-            mock.patch.object(verifier.subprocess, "Popen", side_effect=capture_environment),
-        ):
-            self.assertTrue(verifier.verify_checkout(ROOT, self.object_repo)["ok"])
+        with self.copy_checkout() as checkout_temporary:
+            with (
+                mock.patch.dict(os.environ, hostile, clear=False),
+                mock.patch.object(verifier.subprocess, "Popen", side_effect=capture_environment),
+            ):
+                self.assertTrue(verifier.verify_checkout(Path(checkout_temporary), self.object_repo)["ok"])
         self.assertEqual(captured["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual(captured["GIT_NO_LAZY_FETCH"], "1")
         self.assertEqual(captured["GIT_CONFIG_NOSYSTEM"], "1")
@@ -918,7 +941,8 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(trusted["authority_path"], verifier.AUTHORITY_PATH)
         self.assertEqual(trusted["schema"], verifier.AUTHORITY_SCHEMA)
-        self.assertNotEqual(authority_commit, "8dad73e6da3922d1caa9f37c2a74d8b28e9a32bc")
+        self.assertEqual(authority_commit, verifier.EXPECTED_AUTHORITY_COMMIT)
+        self.assertEqual(source_commit, verifier.EXPECTED_SOURCE_COMMIT)
         first_parent = subprocess.check_output(
             ["git", "-C", str(self.object_repo), "rev-parse", f"{authority_commit}^1"],
             text=True,
@@ -999,6 +1023,15 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         with self.copy_checkout() as temporary:
             with self.assertRaises(verifier.AuthorityError):
                 verifier._read_checkout_file(Path(temporary), ".")
+
+    def test_synthetic_internally_valid_authority_history_fails_external_pins(self) -> None:
+        object_repo, checkout = self.make_synthetic_authority_repo()
+        synthetic_introduction = subprocess.check_output(
+            ["git", "-C", str(object_repo), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        self.assertNotEqual(synthetic_introduction, verifier.EXPECTED_AUTHORITY_COMMIT)
+        self.assert_pair_failure(checkout, object_repo=object_repo)
 
     def test_source_commit_must_be_direct_authority_predecessor(self) -> None:
         object_repo, checkout = self.make_synthetic_authority_repo(non_direct_predecessor=True)

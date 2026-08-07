@@ -32,6 +32,9 @@ from typing import Any, Iterator
 
 LEGACY_AUTHORITY_PATH = "scripts/fixture_registry_authority.json"
 LEGACY_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v1"
+LEGACY_AUTHORITY_SIZE = 442
+LEGACY_AUTHORITY_SHA256 = "3792ee51370ec6b5cf7257d8473f71c7e810e03c7216969d079d933033734a14"
+LEGACY_AUTHORITY_BLOB_OID = "be0abad11385cddd7a93670f9641a77a285d9782"
 LEGACY_AUTHORITY_KEYS = (
     "schema",
     "validator_path",
@@ -46,6 +49,11 @@ LEGACY_BASELINE_PATH = "contracts/fixtures/validator/validation-baseline.json"
 AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.final.json"
 AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
 AUTHORITY_ROLE = "aggregate_predecessor"
+# These pins are outside the v2 manifest bytes. They prevent an otherwise
+# internally consistent synthetic history from selecting a caller-controlled
+# authority introduction and predecessor.
+EXPECTED_AUTHORITY_COMMIT = "285acdcf9c11c049180a7844e689eee0f1490de4"
+EXPECTED_SOURCE_COMMIT = "263cb75adcf153d6fe252636b064e5fbc3e3f877"
 EXPECTED_ARTIFACT_PATHS = (
     "contracts/fixtures/index.json",
     "contracts/fixtures/validator/test_validate.py",
@@ -529,31 +537,63 @@ def _copy_git_tree(
         raise AuthorityError() from exc
 
 
-def _snapshot_object_repository(object_repo: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
-    """Snapshot the caller repository before any path-based Git command runs."""
+def _read_bounded_fd(descriptor: int, limit: int) -> bytes:
+    """Read a stable regular descriptor without following a replacement."""
+
+    try:
+        before = os.fstat(descriptor)
+        _require(stat.S_ISREG(before.st_mode))
+        _require(0 <= before.st_size <= limit)
+        data = bytearray()
+        while len(data) < limit + 1:
+            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        _require(len(data) <= limit)
+        _require(_file_stat_fingerprint(before) == _file_stat_fingerprint(os.fstat(descriptor)))
+        return bytes(data)
+    except AuthorityError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise AuthorityError() from exc
+
+
+def _snapshot_object_repository(
+    object_repo: Path,
+) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    """Snapshot a canonical plain Git repository before path-based commands run.
+
+    Linked worktrees are deliberately outside this trust boundary. Callers must
+    provide a separate ordinary clone whose ``.git`` directory owns its object
+    database, refs, and configuration directly.
+    """
 
     no_follow = getattr(os, "O_NOFOLLOW", None)
     nonblock = getattr(os, "O_NONBLOCK", None)
     directory_flag = getattr(os, "O_DIRECTORY", None)
     _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock | directory_flag
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock | directory_flag
+    entry_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock
     root_fd: int | None = None
-    git_fd: int | None = None
+    marker_fd: int | None = None
+    source_fd: int | None = None
     temporary: tempfile.TemporaryDirectory[str] | None = None
     budget = _SnapshotBudget.start()
     try:
         # Keep the root fd returned by the descriptor chain. Reopening the
         # caller path here would reintroduce an ancestor replacement race.
-        root, _ = _open_directory_chain(object_repo, deadline=budget.deadline)
-        root_fd = root
+        root_fd, _ = _open_directory_chain(object_repo, deadline=budget.deadline)
         budget.check()
-        git_fd = os.open(".git", flags, dir_fd=root_fd)
-        _require(stat.S_ISDIR(os.fstat(git_fd).st_mode))
+        marker_fd = os.open(".git", entry_flags, dir_fd=root_fd)
+        _require(stat.S_ISDIR(os.fstat(marker_fd).st_mode))
+        source_fd = marker_fd
+        marker_fd = None
         temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-snapshot-")
         snapshot_root = Path(temporary.name) / "repo"
         os.mkdir(snapshot_root, 0o700)
         budget.check()
-        _copy_git_tree(git_fd, snapshot_root / ".git", budget, PurePosixPath())
+        _copy_git_tree(source_fd, snapshot_root / ".git", budget, PurePosixPath())
         return temporary, snapshot_root
     except AuthorityError:
         if temporary is not None:
@@ -564,7 +604,7 @@ def _snapshot_object_repository(object_repo: Path) -> tuple[tempfile.TemporaryDi
             temporary.cleanup()
         raise AuthorityError() from exc
     finally:
-        for descriptor in (git_fd, root_fd):
+        for descriptor in (source_fd, marker_fd, root_fd):
             if descriptor is not None:
                 try:
                     os.close(descriptor)
@@ -611,7 +651,7 @@ def _validate_snapshot_repository(snapshot_root: Path) -> Path:
 
 @contextmanager
 def _validate_object_repository(object_repo: Path) -> Iterator[Path]:
-    """Validate a private snapshot so later Git opens cannot race the caller."""
+    """Validate a private plain-repository snapshot before Git reads."""
 
     temporary, snapshot_root = _snapshot_object_repository(object_repo)
     try:
@@ -887,7 +927,10 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
     return stdout
 
 
-def _authority_introduction_commit(object_repo: Path) -> str:
+def _authority_introduction_commit(
+    object_repo: Path,
+    authority_path: str = AUTHORITY_PATH,
+) -> str:
     output = _git(
         object_repo,
         "log",
@@ -896,7 +939,7 @@ def _authority_introduction_commit(object_repo: Path) -> str:
         "--first-parent",
         "HEAD",
         "--",
-        AUTHORITY_PATH,
+        authority_path,
     )
     try:
         commits = output.decode("ascii").splitlines()
@@ -962,28 +1005,55 @@ def _validate_legacy_manifest(authority: dict[str, Any]) -> dict[str, Any]:
     return authority
 
 
+def _legacy_blob_oid(data: bytes) -> str:
+    """Compute Git's SHA-1 blob identity without invoking a mutable Git binary."""
+
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+
 def load_legacy_authority(checkout_root: Path) -> dict[str, Any]:
-    """Load the preserved legacy v1 authority for migration compatibility."""
+    """Load the preserved legacy v1 authority with exact byte identity."""
 
     try:
-        return _validate_legacy_manifest(
-            _parse_json(_read_checkout_file(checkout_root, LEGACY_AUTHORITY_PATH))
-        )
+        authority_bytes = _read_checkout_file(checkout_root, LEGACY_AUTHORITY_PATH)
+        _require(len(authority_bytes) == LEGACY_AUTHORITY_SIZE)
+        _require(hashlib.sha256(authority_bytes).hexdigest() == LEGACY_AUTHORITY_SHA256)
+        _require(_legacy_blob_oid(authority_bytes) == LEGACY_AUTHORITY_BLOB_OID)
+        return _validate_legacy_manifest(_parse_json(authority_bytes))
     except AuthorityError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
         raise AuthorityError() from exc
 
 
-def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
-    """Load and verify the v2 authority from immutable Git history."""
+def load_trusted_authority(
+    object_repo: Path,
+    *,
+    authority_path: str = AUTHORITY_PATH,
+    expected_authority_commit: str | None = EXPECTED_AUTHORITY_COMMIT,
+    expected_source_commit: str | None = EXPECTED_SOURCE_COMMIT,
+    required_ancestor_commit: str | None = None,
+) -> dict[str, Any]:
+    """Load and verify a v2 authority from an isolated immutable Git snapshot."""
 
     try:
+        _require(type(authority_path) is str and authority_path and "\x00" not in authority_path)
+        if expected_authority_commit is not None:
+            _require(HEX40.fullmatch(expected_authority_commit) is not None)
+        if expected_source_commit is not None:
+            _require(HEX40.fullmatch(expected_source_commit) is not None)
+        if required_ancestor_commit is not None:
+            _require(HEX40.fullmatch(required_ancestor_commit) is not None)
         with _validate_object_repository(object_repo) as isolated_repo:
-            introduction = _authority_introduction_commit(isolated_repo)
-            authority_bytes = _git(isolated_repo, "show", f"{introduction}:{AUTHORITY_PATH}")
+            introduction = _authority_introduction_commit(isolated_repo, authority_path)
+            if expected_authority_commit is not None:
+                _require(introduction == expected_authority_commit)
+            authority_bytes = _git(isolated_repo, "show", f"{introduction}:{authority_path}")
             authority = _parse_json(authority_bytes)
             source_commit, records = _validate_manifest(authority)
+            if expected_source_commit is not None:
+                _require(source_commit == expected_source_commit)
             _require(source_commit != introduction)
             _require(_git(isolated_repo, "cat-file", "-t", source_commit) == b"commit\n")
             try:
@@ -992,13 +1062,15 @@ def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
                 raise AuthorityError() from exc
             _require(first_parent == source_commit)
             _require(_git(isolated_repo, "merge-base", "--is-ancestor", source_commit, introduction) == b"")
+            if required_ancestor_commit is not None:
+                _require(_git(isolated_repo, "merge-base", "--is-ancestor", required_ancestor_commit, introduction) == b"")
             for record in records:
                 blob_oid, data = _git_blob(isolated_repo, source_commit, record["path"])
                 _require(blob_oid == record["blob_oid"])
                 _require(len(data) == record["size_bytes"])
                 _require(hashlib.sha256(data).hexdigest() == record["sha256"])
         return {
-            "authority_path": AUTHORITY_PATH,
+            "authority_path": authority_path,
             "schema": AUTHORITY_SCHEMA,
             "authority_commit": introduction,
             "source_commit": source_commit,
