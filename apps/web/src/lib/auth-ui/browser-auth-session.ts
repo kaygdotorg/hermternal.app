@@ -99,7 +99,10 @@ export class BrowserAuthSession {
     // A failed identity barrier has not established signed-out authority. A
     // direct caller must retry verification rather than bypassing it with a
     // provider-registry request.
-    if (this.snapshot.status === 'failed' && !this.snapshot.selectedProviderId) {
+    if (
+      this.snapshot.status === 'failed' &&
+      (this.snapshot.errorCode === 'identity-failed' || !this.snapshot.selectedProviderId)
+    ) {
       await this.initialize();
       return;
     }
