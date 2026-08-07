@@ -37,7 +37,9 @@ operations:
   Detached timestamps are scoped to the exact session, attach, and process
   identity; changing current-session identity discards the old expiry evidence.
   Cleanup and state observers are generation-guarded so a synchronous retry or
-  replacement cannot be overwritten by the old failure or Close path.
+  replacement cannot be overwritten by the old failure or Close path. A new
+  attempt claims its generation and active slot before aborting the old adapter,
+  and reattach notices/readiness are rechecked after observer callbacks.
 
 The transport never queues input or resize frames. It has no prompt or tool
 action method, so reconnect cannot replay those actions. The structured
@@ -68,11 +70,12 @@ preservation, malformed non-binary frames, resize boundaries and malformed
 types, active-session replacement, process-identity continuity, reconnect,
 retention equality and expiry, truncation notice, receive-order races, no action
 replay, `4409` stale cleanup, close-code classification, cancellation, Close,
-and callback cleanup. Lifecycle regressions cover pre-open retry races,
-pre-open failure classification, established `onerror` detach semantics,
-identity-scoped expiry evidence, and reentrant Close replacement. Tests also
-verify that terminal bytes and ticket material are not logged or retained in
-public state.
+and callback cleanup. Lifecycle regressions cover already-aborted attempts,
+pre-open retry races, pre-open failure classification, established `onerror`
+detach semantics, identity-scoped expiry evidence, reentrant Close replacement,
+observer cancellation during reattach, and abort-listener replacement races.
+Tests also verify that terminal bytes and ticket material are not logged or
+retained in public state.
 
 Accessibility is N/A for this transport-only change. It adds no UI nodes and
 does not alter the renderer contract. Keyboard, focus, semantic naming, browser

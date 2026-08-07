@@ -416,6 +416,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       context.opened = true;
       clearDetachedFor(input);
       setState("attached", generation, input, undefined, reattaching);
+      if (!isCurrent(context)) return;
       if (reattaching) {
         emit({
           type: "notice",
@@ -423,6 +424,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
           notice: "output-may-be-truncated",
           replayCapacityBytes: PTY_REPLAY_CAPACITY_BYTES,
         });
+        if (!isCurrent(context)) return;
       }
       context.resolveReady();
     };
@@ -483,16 +485,11 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     signal?: AbortSignal,
   ): Promise<void> => {
     const normalized = validateInput(input);
-    if (activeAttempt) {
+    const staleAttempt = activeAttempt;
+    if (staleAttempt) {
       if (currentInput && sameConnectionInput(currentInput, normalized)) {
-        return activeAttempt.promise;
+        return staleAttempt.promise;
       }
-      // A current-session replacement cancels the old attempt before a new
-      // ticket is minted. A connector that settles late is closed by the abort
-      // guard and cannot install callbacks for the replacement generation.
-      const staleAttempt = activeAttempt;
-      activeAttempt = undefined;
-      staleAttempt.controller.abort();
     }
     if (
       detachedAttachment &&
@@ -502,6 +499,10 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       // session's expiry evidence reject a replacement current-session attach.
       detachedAttachment = undefined;
     }
+
+    // Claim the replacement generation and its active-attempt slot before
+    // aborting the old controller. Adapter abort listeners are synchronous and
+    // must coalesce with this attempt rather than create a competing upgrade.
     const generation = ++currentGeneration;
     const controller = new AbortController();
     const unlinkAbort = linkAbort(signal, controller);
@@ -517,8 +518,17 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       safeClose(stale.socket);
     }
 
+    let resolveAttempt!: () => void;
+    let rejectAttempt!: (error: PtyTransportError) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveAttempt = resolve;
+      rejectAttempt = reject;
+    });
+    activeAttempt = { generation, controller, promise };
+    staleAttempt?.controller.abort();
+
     let attemptContext: SocketContext | undefined;
-    const promise = (async (): Promise<void> => {
+    void (async (): Promise<void> => {
       try {
         throwIfAborted(controller.signal, generation);
         await validateAttachPreflight(
@@ -557,6 +567,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
         activeContext = context;
         setState(reattaching ? "reattaching" : "starting", generation, normalized, undefined, reattaching);
         await awaitWithAbort(context.ready, controller.signal, generation);
+        resolveAttempt();
       } catch (error) {
         const sanitized = sanitizeError(error, controller.signal, generation);
         const contextAlreadyHandled = attemptContext?.closed === true;
@@ -583,13 +594,12 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
             reattaching,
           );
         }
-        throw sanitized;
+        rejectAttempt(sanitized);
       } finally {
         unlinkAbort();
         clearAttempt(generation);
       }
     })();
-    activeAttempt = { generation, controller, promise };
     return promise;
   };
 

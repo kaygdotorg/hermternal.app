@@ -154,6 +154,23 @@ describe("PTY transport", () => {
     }
   });
 
+  it("does not cache an already-aborted external attempt", async () => {
+    const harness = makeHarness();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(harness.transport.connect(ATTACH_INPUT, controller.signal)).rejects.toMatchObject({
+      code: "aborted",
+    });
+    const retry = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+    const socket = harness.sockets[0]!;
+    socket.open();
+    await retry;
+    expect(harness.transport.state.status).toBe("attached");
+  });
+
   it("uses one fresh ticket per upgrade without exposing or reusing it", async () => {
     const harness = makeHarness();
     await open(harness);
@@ -418,6 +435,83 @@ describe("PTY transport", () => {
     });
   });
 
+  it("claims a replacement attempt before abort listeners can duplicate connect", async () => {
+    let harness!: Harness;
+    let ticketCalls = 0;
+    let reentrant!: Promise<void>;
+    const replacementInput: PtyConnectionInput = {
+      sessionId: "session-abort-replacement",
+      attach: "attach-abort-replacement",
+      processIdentity: "process-abort-replacement",
+    };
+    harness = makeHarness({
+      ticketProvider: async (signal) => {
+        ticketCalls += 1;
+        if (ticketCalls === 1) {
+          signal.addEventListener(
+            "abort",
+            () => {
+              reentrant = harness.transport.connect(replacementInput);
+            },
+            { once: true },
+          );
+          return new Promise<string>(() => undefined);
+        }
+        return `ticket-${ticketCalls}`;
+      },
+      validateAttachment: async () => true,
+    });
+
+    const first = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    const replacement = harness.transport.connect(replacementInput);
+    await flush();
+    expect(reentrant).toBe(replacement);
+    expect(ticketCalls).toBe(2);
+    const socket = harness.sockets[0]!;
+    socket.open();
+    await replacement;
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+  });
+
+  it("does not reopen after an abort listener closes a replacement", async () => {
+    let harness!: Harness;
+    let ticketCalls = 0;
+    const replacementInput: PtyConnectionInput = {
+      sessionId: "session-abort-close",
+      attach: "attach-abort-close",
+      processIdentity: "process-abort-close",
+    };
+    harness = makeHarness({
+      ticketProvider: async (signal) => {
+        ticketCalls += 1;
+        if (ticketCalls === 1) {
+          signal.addEventListener("abort", () => harness.transport.close(), {
+            once: true,
+          });
+          return new Promise<string>(() => undefined);
+        }
+        return `ticket-${ticketCalls}`;
+      },
+      validateAttachment: async () => true,
+    });
+
+    const first = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    const replacement = harness.transport.connect(replacementInput);
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+    await expect(replacement).rejects.toMatchObject({ code: "aborted" });
+    expect(ticketCalls).toBe(1);
+    expect(harness.transport.state.status).toBe("detached");
+
+    const fresh = harness.transport.connect(replacementInput);
+    await flush();
+    expect(ticketCalls).toBe(2);
+    const socket = harness.sockets[0]!;
+    socket.open();
+    await fresh;
+  });
+
   it("replaces sessions without allowing stale callbacks to affect the active socket", async () => {
     const harness = makeHarness({
       validateAttachment: async () => true,
@@ -495,6 +589,29 @@ describe("PTY transport", () => {
     expect(attached.transport.state.status).toBe("detached");
     await reattach(attached);
     expect(attached.ticketProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not emit a stale reattach notice after an attached observer closes", async () => {
+    let attachedCount = 0;
+    let harness!: Harness;
+    harness = makeHarness({
+      onStateChange: (state) => {
+        if (state.status === "attached") {
+          attachedCount += 1;
+          if (attachedCount === 2) harness.transport.close();
+        }
+      },
+    });
+
+    await open(harness);
+    harness.transport.detach();
+    const reattachPending = harness.transport.reconnect();
+    await flush();
+    const socket = harness.sockets[1]!;
+    socket.open();
+    await expect(reattachPending).rejects.toMatchObject({ code: "aborted" });
+    expect(harness.events.filter((event) => event.type === "notice")).toHaveLength(0);
+    expect(harness.transport.state.status).toBe("detached");
   });
 
   it("clears a failed pre-open attempt before synchronous retry observers run", async () => {
