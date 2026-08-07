@@ -14,8 +14,8 @@
   "artifact_manifest": [
     {
       "path": "contracts/fixtures/index.json",
-      "sha256": "fa693e25e1c7c24162293311da32999240c406b85e04d14736c113a4504f0782",
-      "size_bytes": 60659
+      "sha256": "59379696a1f112f7e91d1df986143a50fb97689998332b90a130121a01760c20",
+      "size_bytes": 64564
     },
     {
       "path": "contracts/fixtures/schema.json",
@@ -24,11 +24,11 @@
     },
     {
       "path": "contracts/fixtures/validator/validate.py",
-      "sha256": "e4948b68b83b51246774411e532c0a2313f03591f18f77b56d9b6b4949e525f0",
-      "size_bytes": 88495
+      "sha256": "7cc1c730a189c301bdb001748eee6b8f4d2bd97c499e8d5393da0b6fdd62cfdb",
+      "size_bytes": 117384
     }
   ],
-  "artifact_size_bytes": 157953,
+  "artifact_size_bytes": 190747,
   "normal": {
     "command": "python3 contracts/fixtures/validator/validate.py",
     "repetitions": 30,

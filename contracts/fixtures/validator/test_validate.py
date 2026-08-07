@@ -88,9 +88,25 @@ class RegistryTests(unittest.TestCase):
 
     def test_target_roots_are_complete_and_connected(self) -> None:
         expected = {
+            "chat-stream-completion": {
+                "id": "chat-stream-completion",
+                "coverage_id": "chat-stream-and-completion",
+                "coverage_status": "pending",
+                "coverage_fixture_ids": ["chat-stream-completion", "session-persistence"],
+                "states": ["cancelled", "empty", "failure", "pending", "success", "unknown"],
+                "files": [
+                    "chat-stream-completion/README.md",
+                    "chat-stream-completion/cases.json",
+                    "chat-stream-completion/source-audit.json",
+                    "chat-stream-completion/test_validate.py",
+                    "chat-stream-completion/validate.py",
+                    "chat-stream-completion/validation-baseline.json",
+                ],
+            },
             "deployment-security/external-allowlist": {
                 "id": "deployment-security-external-allowlist",
                 "coverage_id": "external-allowlist",
+                "coverage_status": "ready",
                 "states": ["failure", "success"],
                 "files": [
                     "deployment-security/external-allowlist/README.md",
@@ -100,9 +116,23 @@ class RegistryTests(unittest.TestCase):
                     "deployment-security/external-allowlist/validation-baseline.json",
                 ],
             },
+            "deployment-security/host-origin-mapping": {
+                "id": "deployment-security-host-origin-mapping",
+                "coverage_id": "host-origin-mapping",
+                "coverage_status": "ready",
+                "states": ["failure", "success"],
+                "files": [
+                    "deployment-security/host-origin-mapping/README.md",
+                    "deployment-security/host-origin-mapping/cases.json",
+                    "deployment-security/host-origin-mapping/test_validate.py",
+                    "deployment-security/host-origin-mapping/validate.py",
+                    "deployment-security/host-origin-mapping/validation-baseline.json",
+                ],
+            },
             "session-lineage": {
                 "id": "session-lineage",
                 "coverage_id": "session-lineage",
+                "coverage_status": "ready",
                 "states": ["cancelled", "empty", "failure", "pending", "success", "unknown"],
                 "files": [
                     "session-lineage/README.md",
@@ -125,8 +155,17 @@ class RegistryTests(unittest.TestCase):
             self.assertEqual(fixture["coverage_ids"], [details["coverage_id"]])
             self.assertEqual([item["path"] for item in fixture["files"]], details["files"])
             self.assertIn(details["coverage_id"], coverage)
-            self.assertEqual(coverage[details["coverage_id"]]["status"], "ready")
-            self.assertEqual(coverage[details["coverage_id"]]["fixture_ids"], [details["id"]])
+            self.assertEqual(coverage[details["coverage_id"]]["status"], details["coverage_status"])
+            self.assertEqual(
+                coverage[details["coverage_id"]]["fixture_ids"],
+                details.get("coverage_fixture_ids", [details["id"]]),
+            )
+
+    def test_current_index_is_complete_before_authority_rotation(self) -> None:
+        self.assertEqual(
+            validate.validate_index_document(self.index, validate.REPO_ROOT),
+            (30, 29),
+        )
 
     def test_pr_260_compatibility_gate_manifest_is_current(self) -> None:
         fixture = next(item for item in self.index["fixture_roots"] if item["id"] == "source-audit-compatibility-gate")

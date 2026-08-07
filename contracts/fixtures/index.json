@@ -113,6 +113,65 @@
       ]
     },
     {
+      "id": "chat-stream-completion",
+      "path": "chat-stream-completion",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "empty",
+        "failure",
+        "pending",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "chat-stream-and-completion"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "chat-stream-completion/README.md",
+          "sha256": "e35db6fb2d0b53eb770710105fe24dbd408927b12d93509dc258e4de1789e437",
+          "size_bytes": 5484
+        },
+        {
+          "path": "chat-stream-completion/cases.json",
+          "sha256": "7b19df2b8ad000f94f7521da12f30a0d013683f799244c470ae539cea8cae384",
+          "size_bytes": 29766
+        },
+        {
+          "path": "chat-stream-completion/source-audit.json",
+          "sha256": "a4722049299599c6fefb42047d05f0304eeccc473d6066bb3d0492e8d2c7ff61",
+          "size_bytes": 2719
+        },
+        {
+          "path": "chat-stream-completion/test_validate.py",
+          "sha256": "f208b898fd0f9ec114ef0c65931acefbd73262635d20922983dbe6ea2ffed06c",
+          "size_bytes": 17416
+        },
+        {
+          "path": "chat-stream-completion/validate.py",
+          "sha256": "b6ec003a3b961b33b1141d16ec7aa1c80cf5e2ac70924413b900474e596b8014",
+          "size_bytes": 26635
+        },
+        {
+          "path": "chat-stream-completion/validation-baseline.json",
+          "sha256": "77c6d8cc88489809855c61a54becc9158764ebd73d8bf42c62356bfbc4c7723b",
+          "size_bytes": 2747
+        }
+      ]
+    },
+    {
       "id": "compatibility-attestation",
       "path": "compatibility-attestation",
       "status": "ready",
@@ -473,6 +532,53 @@
           "path": "deployment-security/external-allowlist/validation-baseline.json",
           "sha256": "3e43065814627dc0649ad78988e678ca062ba0bf288bf9fb8b6e0d74ae24b252",
           "size_bytes": 2406
+        }
+      ]
+    },
+    {
+      "id": "deployment-security-host-origin-mapping",
+      "path": "deployment-security/host-origin-mapping",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "host-origin-mapping"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/host-origin-mapping/README.md",
+          "sha256": "eeae325b39a4fb627ceec2771f94c7ee7d32b88219e6c268f2cceaf7454d4a01",
+          "size_bytes": 12322
+        },
+        {
+          "path": "deployment-security/host-origin-mapping/cases.json",
+          "sha256": "0cf4f545eef2b9dba17792cef04fb8bfee1f785ada06c44d53a8e116a66b0b34",
+          "size_bytes": 52421
+        },
+        {
+          "path": "deployment-security/host-origin-mapping/test_validate.py",
+          "sha256": "2fdccc34467472d163cd82a98e7f9dd55035d82e5487b69bb02b80908d46e55e",
+          "size_bytes": 43123
+        },
+        {
+          "path": "deployment-security/host-origin-mapping/validate.py",
+          "sha256": "35c13483844ac97d98fac34f3a58de2c1625cac88fdeef33fe1d61fe0167a1b6",
+          "size_bytes": 60432
+        },
+        {
+          "path": "deployment-security/host-origin-mapping/validation-baseline.json",
+          "sha256": "b79897e192b320157af65a130df442f5d48c52b0d1058a506a1d93dc5b3dfbc2",
+          "size_bytes": 3031
         }
       ]
     },
@@ -1515,6 +1621,7 @@
       "id": "chat-stream-and-completion",
       "status": "pending",
       "fixture_ids": [
+        "chat-stream-completion",
         "session-persistence"
       ],
       "platforms": [
@@ -1642,6 +1749,21 @@
         "failure"
       ],
       "notes": "DEP-02 external method and path cases are synthetic default-deny evidence; no proxy or live host is configured."
+    },
+    {
+      "id": "host-origin-mapping",
+      "status": "ready",
+      "fixture_ids": [
+        "deployment-security-host-origin-mapping"
+      ],
+      "platforms": [
+        "web"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "DEP-03 Host/Origin mapping is offline synthetic evidence; local pins remain reproducibility checks, not an independent trust root."
     },
     {
       "id": "image-attachment-lifecycle",
