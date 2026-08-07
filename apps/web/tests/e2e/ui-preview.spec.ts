@@ -299,25 +299,80 @@ test('password preview submits only a credential-free local fixture action', asy
   await expect(page.getByText(/sent only to the configured/i)).not.toBeVisible();
 });
 
-test('password form cannot navigate with credential values after script execution stops', async ({ page }) => {
+test('hydrated password submission remains keyboard accessible and credential-free', async ({ page }) => {
   await page.goto(previewUrl('/ui-preview'));
   await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
-  const originalUrl = page.url();
-  const navigationRequests: string[] = [];
-  page.on('request', (request) => {
-    if (request.isNavigationRequest()) navigationRequests.push(request.url());
-  });
+  const username = page.getByLabel('Username');
+  const password = page.getByRole('textbox', { name: 'Password' });
+  await username.fill('keyboard-fixture');
+  await password.fill('keyboard-only-value');
+  await password.press('Enter');
 
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting');
+  await expect(username).toHaveValue('');
+  await expect(password).toHaveValue('');
+  await expect(page.locator('.section-note').nth(1)).toHaveText('submit-password-fixture');
+  expect(await page.locator('html').textContent()).not.toContain('keyboard-only-value');
+});
+
+test('native password activation clears live values without navigation when script execution stops', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
-  await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
-  await page.getByLabel('Username').fill('url-history-username');
-  await page.getByRole('textbox', { name: 'Password' }).fill('url-history-password');
-  await page.getByRole('button', { name: 'Sign in' }).click();
 
-  await expect(page).toHaveURL(originalUrl);
-  expect(page.url()).not.toContain('url-history-username');
-  expect(page.url()).not.toContain('url-history-password');
-  expect(navigationRequests).toEqual([]);
+  for (const activation of ['click', 'enter'] as const) {
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+    const originalUrl = page.url();
+    const originalHistoryLength = await page.evaluate(() => history.length);
+    const usernameValue = `visible-username-${activation}`;
+    const passwordValue = `raw-password-${activation}`;
+    const navigationRequests: string[] = [];
+    const requestUrls: string[] = [];
+    const consoleMessages: string[] = [];
+    const onRequest = (request: { isNavigationRequest(): boolean; url(): string }) => {
+      requestUrls.push(request.url());
+      if (request.isNavigationRequest()) navigationRequests.push(request.url());
+    };
+    const onConsole = (message: { text(): string }) => consoleMessages.push(message.text());
+    page.on('request', onRequest);
+    page.on('console', onConsole);
+
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+    const username = page.getByLabel('Username');
+    const password = page.getByRole('textbox', { name: 'Password' });
+    await username.fill(usernameValue);
+    await password.fill(passwordValue);
+
+    const signIn = page.getByRole('button', { name: 'Sign in' });
+    if (activation === 'click') await signIn.click();
+    else {
+      await signIn.focus();
+      await signIn.press('Enter');
+    }
+
+    await expect(username).toHaveValue('');
+    await expect(password).toHaveValue('');
+    await expect(page).toHaveURL(originalUrl);
+    expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
+    const liveDom = await page.locator('html').evaluate((root) => ({
+      html: root.outerHTML,
+      values: Array.from(root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea')).map(
+        (field) => field.value
+      )
+    }));
+    expect(JSON.stringify(liveDom)).not.toContain(usernameValue);
+    expect(JSON.stringify(liveDom)).not.toContain(passwordValue);
+    expect(JSON.stringify(consoleMessages)).not.toContain(passwordValue);
+    expect(JSON.stringify(requestUrls)).not.toContain(passwordValue);
+    expect(JSON.stringify(requestUrls)).not.toContain(usernameValue);
+    expect(navigationRequests).toEqual([]);
+    // An empty live username control is the screenshot boundary: the captured
+    // pixels cannot render the previously entered fixture value.
+    expect((await page.screenshot()).byteLength).toBeGreaterThan(0);
+
+    page.off('request', onRequest);
+    page.off('console', onConsole);
+  }
 });
 
 test('Pill consumes one pointer gesture across leave, re-entry, and compatibility click', async ({ page }) => {

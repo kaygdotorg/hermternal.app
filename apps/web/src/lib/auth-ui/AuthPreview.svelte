@@ -20,6 +20,7 @@
   let submissionLocked = false;
   let formResetKey = 0;
   let stateHeading: HTMLElement | undefined;
+  let passwordForm: HTMLFormElement | undefined;
   let usernameInput: HTMLInputElement | undefined;
 
   $: if (effectiveState !== previousState) {
@@ -82,17 +83,27 @@
     onAction(action);
   }
 
-  function handlePasswordSubmit(event: SubmitEvent): void {
-    event.preventDefault();
-    if (effectiveState === 'password-submitting' || submissionLocked) return;
-
-    const form = event.currentTarget as HTMLFormElement;
-    if (!form.checkValidity()) return;
+  function activatePasswordFixture(): void {
+    if (effectiveState === 'password-submitting' || submissionLocked || !passwordForm?.checkValidity()) return;
 
     submissionLocked = true;
+    // Reset synchronously before the state transition. The reset-type action is
+    // also the native no-script boundary for click and focused Enter activation.
+    passwordForm.reset();
     formResetKey += 1;
     passwordVisible = false;
     onAction({ type: 'submit-password-fixture' });
+  }
+
+  function handlePasswordSubmit(event: SubmitEvent): void {
+    event.preventDefault();
+    activatePasswordFixture();
+  }
+
+  function handlePasswordKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement)) return;
+    event.preventDefault();
+    activatePasswordFixture();
   }
 </script>
 
@@ -167,15 +178,16 @@
           <p>
             {effectiveState === 'password-submitting'
               ? 'Static submitting state only · the synthetic values were cleared and no request was made.'
-              : 'Enter synthetic fixture values to review the sign-in state. Nothing is sent or retained by this prototype.'}
+              : 'Static fixture state. No credential values are stored or submitted.'}
           </p>
         </header>
 
         {#key formResetKey}
-          <!-- `dialog` has no native navigation target outside a dialog. This
-               makes the unhydrated/default path inert while the submit event
-               remains available to the accessible local runtime handler. -->
+          <!-- `dialog` has no native navigation target outside a dialog. The
+               reset-type primary action clears live values without script,
+               while hydrated submit handling stays accessible. -->
           <form
+            bind:this={passwordForm}
             aria-busy={effectiveState === 'password-submitting'}
             aria-label="Hermes password sign in"
             autocomplete="off"
@@ -192,8 +204,9 @@
               data-lpignore="true"
               data-fixture-field="username"
               disabled={effectiveState === 'password-submitting'}
-              placeholder="Synthetic username"
+              placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter username'}
               required
+              onkeydown={handlePasswordKeydown}
               bind:this={usernameInput}
               value=""
             />
@@ -201,12 +214,16 @@
             <div class="password-label-row">
               <label class="field-label" for="auth-password">Password</label>
               <button
-                aria-label={passwordVisible ? 'Hide password' : 'Show password'}
+                aria-label={effectiveState === 'password-submitting'
+                  ? 'Password hidden'
+                  : passwordVisible
+                    ? 'Hide password'
+                    : 'Show password'}
                 class="show-password"
                 disabled={effectiveState === 'password-submitting'}
                 type="button"
                 onclick={() => handleAction({ type: 'toggle-password-visibility' })}
-                >{passwordVisible ? 'Hide' : 'Show'}</button
+                >{effectiveState === 'password-submitting' ? 'Hidden' : passwordVisible ? 'Hide' : 'Show'}</button
               >
             </div>
             <input
@@ -216,8 +233,9 @@
               data-lpignore="true"
               data-fixture-field="password"
               disabled={effectiveState === 'password-submitting'}
-              placeholder="Synthetic password"
+              placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter password'}
               required
+              onkeydown={handlePasswordKeydown}
               type={passwordVisible ? 'text' : 'password'}
               value=""
             />
@@ -225,10 +243,11 @@
             <div class="auth-action">
               <Pill
                 ariaLabel={effectiveState === 'password-submitting' ? 'Signing in' : 'Sign in'}
-                buttonType="submit"
+                buttonType="reset"
                 disabled={effectiveState === 'password-submitting'}
                 label={effectiveState === 'password-submitting' ? 'Signing in…' : 'Sign in'}
                 variant="action"
+                onActivate={activatePasswordFixture}
               />
             </div>
             <Pill

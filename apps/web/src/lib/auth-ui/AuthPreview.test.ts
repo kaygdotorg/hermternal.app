@@ -48,6 +48,9 @@ describe('AuthPreview', () => {
       expect(field).toHaveAttribute('data-fixture-field');
     }
     expect(username).toHaveValue('');
+    expect(username).toHaveAttribute('placeholder', 'Enter username');
+    expect(password).toHaveAttribute('placeholder', 'Enter password');
+    expect(screen.getByRole('button', { name: 'Sign in' })).toHaveAttribute('type', 'reset');
   });
 
   it('submits a credential-free fixture action once and resets the form immediately', async () => {
@@ -100,6 +103,9 @@ describe('AuthPreview', () => {
     expect(submitting).toHaveAttribute('aria-atomic', 'true');
     expect(submitting).toHaveTextContent('Signing in');
     expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByLabelText('Username')).toHaveAttribute('placeholder', 'Cleared');
+    expect(screen.getByLabelText('Password')).toHaveAttribute('placeholder', 'Cleared');
+    expect(screen.getByText('Hidden')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Signing in to Hermes' })).toHaveFocus());
 
     await view.rerender({ state: 'failure' });
