@@ -777,7 +777,7 @@ describe('LiveWorkspaceSession', () => {
     expect(JSON.stringify(session.current.timeline)).not.toContain('late history');
   });
 
-  it('keeps a committed completion history ready after a late generic terminal callback', async () => {
+  it('keeps committed completion history visible but non-sendable after a late generic terminal callback', async () => {
     const rest = createRest([]);
     const { session, socket } = await createConnectedSocketWorkspace(rest);
     vi.mocked(rest.getSessionMessages).mockResolvedValueOnce(
@@ -802,7 +802,7 @@ describe('LiveWorkspaceSession', () => {
     // committed. It must not downgrade or duplicate the committed history.
     socket.emitClose(1011, 'redacted');
 
-    expect(session.current.state).toBe('ready');
+    expect(session.current.state).toBe('retryable-error');
     expect(session.current.timeline.filter((item) => item.kind === 'assistant-message')).toEqual([
       expect.objectContaining({ text: 'Completed answer' })
     ]);
@@ -856,7 +856,7 @@ describe('LiveWorkspaceSession', () => {
     expect(countAssistantMarkers()).toBe(1);
   });
 
-  it('keeps committed persisted history ready after a late generic terminal callback', async () => {
+  it('keeps committed persisted history visible but non-sendable after a late generic terminal callback', async () => {
     const rest = createRest([
       { role: 'user', content: 'Persisted prompt' },
       { role: 'assistant', content: 'Persisted answer' }
@@ -878,7 +878,7 @@ describe('LiveWorkspaceSession', () => {
 
     socket.emitClose(1011, 'redacted');
 
-    expect(session.current.state).toBe('ready');
+    expect(session.current.state).toBe('retryable-error');
     expect(session.current.timeline).toEqual([
       { kind: 'user-message', id: 'session-1:message:0', text: 'Persisted prompt' },
       {
@@ -919,7 +919,7 @@ describe('LiveWorkspaceSession', () => {
     }
   });
 
-  it('keeps a committed history ready after a late uncertain-delivery callback', async () => {
+  it('keeps committed history visible but non-sendable after a late uncertain-delivery callback', async () => {
     const rest = createRest([]);
     const chat = createChatHarness();
     const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
@@ -945,7 +945,7 @@ describe('LiveWorkspaceSession', () => {
     expect(session.current.state).toBe('ready');
     chat.changeState({ status: 'delivery_uncertain', generation: 1 });
 
-    expect(session.current.state).toBe('ready');
+    expect(session.current.state).toBe('retryable-error');
     expect(session.current.timeline.filter((item) => item.kind === 'assistant-message')).toEqual([
       expect.objectContaining({ text: 'Completed answer' })
     ]);
@@ -1481,6 +1481,135 @@ describe('LiveWorkspaceSession', () => {
 
     expect(session.current.state).toBe('retryable-error');
     expect(JSON.stringify(session.current)).not.toContain('synthetic factory failure');
+  });
+
+  it('retries a new-session factory failure by rebuilding chat and creating the session', async () => {
+    const rest = createRest();
+    vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+    const chat = createChatHarness();
+    let attempts = 0;
+    const createChat = vi.fn((options: BrowserChatOptions) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('first factory failure');
+      return chat.createChat(options);
+    });
+    const session = new LiveWorkspaceSession({ rest, createChat });
+
+    await session.initialize();
+    await session.createSession();
+
+    expect(session.current.state).toBe('retryable-error');
+    expect(session.current.activeSessionId).toBeUndefined();
+
+    const retry = session.retryConnection();
+    await retry;
+
+    expect(attempts).toBe(2);
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(chat.transport.connect).toHaveBeenCalledTimes(1);
+    expect(chat.transport.createSession).toHaveBeenCalledTimes(1);
+    expect(session.current).toMatchObject({
+      state: 'empty',
+      activeSessionId: 'stored-draft',
+      title: 'Untitled chat',
+      model: 'Hermes 4'
+    });
+  });
+
+  it('retries a factory failure by rebuilding the active session chat and restoring history', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Recovered answer' }]);
+    const chat = createChatHarness();
+    let attempts = 0;
+    const createChat = vi.fn((options: BrowserChatOptions) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('first factory failure');
+      return chat.createChat(options);
+    });
+    const session = new LiveWorkspaceSession({ rest, createChat });
+
+    await session.initialize();
+
+    expect(session.current.state).toBe('retryable-error');
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'assistant-message', text: 'Recovered answer' })
+    );
+
+    const retry = session.retryConnection();
+    expect(session.current.state).toBe('reconnecting');
+    await retry;
+
+    expect(attempts).toBe(2);
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(rest.getSession).toHaveBeenCalledWith('session-1', expect.any(AbortSignal));
+    expect(chat.transport.connect).toHaveBeenCalledTimes(1);
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline).toEqual([
+      {
+        kind: 'assistant-message',
+        id: 'session-1:message:0',
+        text: 'Recovered answer',
+        model: 'Hermes 4',
+        status: 'complete'
+      }
+    ]);
+  });
+
+  it('coalesces a reentrant factory retry so stale restore cannot create a second chat', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Recovered answer' }]);
+    const chat = createChatHarness();
+    let attempts = 0;
+    const createChat = vi.fn((options: BrowserChatOptions) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('first factory failure');
+      return chat.createChat(options);
+    });
+    const session = new LiveWorkspaceSession({ rest, createChat });
+    await session.initialize();
+
+    let nested: Promise<void> | undefined;
+    let reentered = false;
+    const unsubscribe = session.subscribe((snapshot) => {
+      if (snapshot.state === 'reconnecting' && !reentered) {
+        reentered = true;
+        nested = session.retryConnection();
+        void nested.catch(() => undefined);
+      }
+    });
+
+    const first = session.retryConnection();
+    await first;
+    await nested;
+    unsubscribe();
+
+    expect(reentered).toBe(true);
+    expect(attempts).toBe(2);
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(session.current.state).toBe('ready');
+  });
+
+  it('cancels a factory retry without adopting a late active-session result', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Existing history' }]);
+    const chat = createChatHarness();
+    let attempts = 0;
+    const createChat = vi.fn((options: BrowserChatOptions) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('first factory failure');
+      return chat.createChat(options);
+    });
+    const sessionLookup = createDeferred<LiveSession>();
+    vi.mocked(rest.getSession).mockImplementationOnce(() => sessionLookup.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat });
+    await session.initialize();
+
+    const retry = session.retryConnection();
+    expect(session.current.state).toBe('reconnecting');
+    session.cancelReconnect();
+    sessionLookup.resolve(SESSION);
+    await retry;
+
+    expect(session.current.state).toBe('offline');
+    expect(attempts).toBe(1);
+    expect(chat.createChat).not.toHaveBeenCalled();
   });
 
   it('closes a connect result once when invalidation races an abort-ignoring connector', async () => {

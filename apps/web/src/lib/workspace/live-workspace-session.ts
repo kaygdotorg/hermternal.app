@@ -89,6 +89,9 @@ export class LiveWorkspaceSession {
   private activePromptOwnership: ActivePromptOwnership | undefined;
   private retryController: AbortController | undefined;
   private retryToken = 0;
+  // A retry after factory failure owns the workspace controller because there
+  // is no transport-specific reconnect operation to abort.
+  private factoryRetryGeneration: number | undefined;
   private generation = 0;
   // History reads are presentation-owned operations. A generation protects
   // session replacement, while this monotonic epoch also protects same-session
@@ -323,6 +326,12 @@ export class LiveWorkspaceSession {
   cancelReconnect(): void {
     this.assertActive();
     if (this.snapshot.state !== 'reconnecting') return;
+    if (this.factoryRetryGeneration === this.generation) {
+      // Factory retries have no chat identity yet; abort the workspace
+      // operation itself so a late REST result cannot start a new transport.
+      this.controller?.abort();
+      this.factoryRetryGeneration = undefined;
+    }
     this.supersedeRetry();
     this.advanceRefreshEpoch();
     this.publish({ ...this.snapshot, state: 'offline' });
@@ -331,10 +340,24 @@ export class LiveWorkspaceSession {
   async retryConnection(): Promise<void> {
     this.assertActive();
     const chat = this.chat;
-    const generation = this.generation;
     const sessionId = this.snapshot.activeSessionId;
-    if (!chat || !sessionId) return;
 
+    if (!chat) {
+      if (sessionId) {
+        await this.retryActiveSession(sessionId);
+      } else {
+        // A new-session factory can fail before a stored session ID exists.
+        // Retry the guarded create path instead of leaving the visible Retry
+        // action inert; createSession's generation ownership coalesces stale
+        // or reentrant attempts before a transport is adopted.
+        await this.createSession();
+      }
+      return;
+    }
+
+    if (!sessionId) return;
+
+    const generation = this.generation;
     // Reconnect supersedes prompt completion/failure ownership before the
     // transport can synchronously publish its reconnect transition.
     this.revokeActivePrompt(true);
@@ -362,6 +385,31 @@ export class LiveWorkspaceSession {
     } finally {
       retry.removeOperationAbort();
       if (this.retryController === retry.controller) this.retryController = undefined;
+    }
+  }
+
+  private async retryActiveSession(sessionId: string): Promise<void> {
+    // A factory failure leaves no chat identity to reconnect. Start a new
+    // generation so Retry repeats the complete active-session path: REST
+    // session lookup, bounded history read, ticket acquisition, WebSocket
+    // connection, and session resume. A reentrant or newer retry aborts this
+    // operation and stale callbacks cannot create or publish a replacement.
+    const operation = this.begin();
+    const sessions = this.snapshot.sessions;
+    this.factoryRetryGeneration = operation.generation;
+    this.publish({ ...this.snapshot, state: 'reconnecting', permanentFailure: undefined });
+    if (!this.ownsFactoryRetry(operation)) return;
+
+    try {
+      const session = await this.rest.getSession(sessionId, operation.signal);
+      if (!this.ownsFactoryRetry(operation)) return;
+      await this.openSession(session, sessions, operation);
+    } catch (error) {
+      if (this.ownsFactoryRetry(operation)) this.publishLoadFailure(error, operation.generation);
+    } finally {
+      if (this.factoryRetryGeneration === operation.generation) {
+        this.factoryRetryGeneration = undefined;
+      }
     }
   }
 
@@ -592,10 +640,16 @@ export class LiveWorkspaceSession {
           : {})
       });
     }
-    if (
-      (state.status === 'failed' || state.status === 'delivery_uncertain') &&
-      !preserveCommittedHistory
-    ) {
+    if (preserveCommittedHistory) {
+      // Keep the server-owned timeline visible, but do not claim that a dead
+      // transport can accept another prompt. The recovery state disables the
+      // composer, so its draft remains local instead of being cleared by a
+      // send attempt against the closed socket.
+      this.supersedeRetry();
+      this.publish({ ...this.snapshot, state: 'retryable-error' });
+      return;
+    }
+    if (state.status === 'failed' || state.status === 'delivery_uncertain') {
       this.publish({ ...this.snapshot, state: 'retryable-error' });
     }
   }
@@ -757,7 +811,14 @@ export class LiveWorkspaceSession {
     const preserveCommittedHistory =
       !this.activePromptOwnership && this.ownsCommittedHistory();
     if (!this.activePromptOwnership && !preserveCommittedHistory) this.advanceRefreshEpoch();
-    if (preserveCommittedHistory) return;
+    if (preserveCommittedHistory) {
+      // The committed timeline remains readable, but the uncertain transport
+      // is not sendable. Expose recovery so the composer keeps any draft and
+      // cannot clear it by attempting a prompt on a dead socket.
+      this.supersedeRetry();
+      this.publish({ ...this.snapshot, state: 'retryable-error' });
+      return;
+    }
     this.supersedeRetry();
     if (this.snapshot.state !== 'permanent-error') {
       this.publish({ ...this.snapshot, state: 'retryable-error' });
@@ -929,6 +990,15 @@ export class LiveWorkspaceSession {
       this.retryToken === retry.token &&
       this.retryController === retry.controller &&
       !retry.controller.signal.aborted
+    );
+  }
+
+  private ownsFactoryRetry(operation: {
+    readonly generation: number;
+    readonly signal: AbortSignal;
+  }): boolean {
+    return (
+      this.factoryRetryGeneration === operation.generation && this.ownsOperation(operation)
     );
   }
 

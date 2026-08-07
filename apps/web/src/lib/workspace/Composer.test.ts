@@ -36,4 +36,19 @@ describe('Composer', () => {
       expect(onAction).toHaveBeenCalledWith({ type: 'send', text: 'Keyboard fixture' });
     });
   });
+
+  it('keeps a draft when recovery disables the composer before send', async () => {
+    const onAction = vi.fn();
+    const view = render(Composer, { onAction });
+    const editor = screen.getByRole('textbox', { name: 'Message Hermes' });
+    fireEvent.input(editor, { target: { value: 'Keep this draft' } });
+
+    await view.rerender({ onAction, disabled: true });
+
+    expect(editor).toBeDisabled();
+    expect(editor).toHaveValue('Keep this draft');
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    expect(onAction).not.toHaveBeenCalled();
+  });
 });
