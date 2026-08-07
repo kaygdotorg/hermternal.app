@@ -8,6 +8,7 @@ import {
   JSON_RPC_GATEWAY_READY_EVENT,
   JSON_RPC_INTERRUPT_METHOD,
   JSON_RPC_PROMPT_METHOD,
+  JSON_RPC_SESSION_CREATE_METHOD,
   JSON_RPC_SESSION_RESUME_METHOD,
   JSON_RPC_WS_PATH,
   JsonRpcChatError,
@@ -15,6 +16,7 @@ import {
   parseBoundedJsonFrame,
   type JsonRpcChatEvent,
   type JsonRpcChatOptions,
+  type JsonRpcChatRequest,
   type JsonRpcWebSocket,
   type JsonRpcWebSocketUpgradeRequest,
 } from "./json-rpc-chat";
@@ -276,6 +278,46 @@ describe("createJsonRpcChatTransport", () => {
         query: { ticket: "ticket-1" },
       },
     ]);
+  });
+
+  it("creates one empty source-owned session and uses its ephemeral ID for the first prompt", async () => {
+    const harness = makeHarness({ selectedSessionId: undefined });
+    const connection = harness.transport.connect();
+    await flush();
+    const socket = harness.sockets[0];
+    if (!socket) throw new Error("fake socket was not created");
+    socket.emitOpen();
+    emitEvent(socket, JSON_RPC_GATEWAY_READY_EVENT, {
+      skin: "synthetic",
+      change_events: true,
+    });
+    await connection;
+
+    const creation = harness.transport.createSession();
+    const create = frame(socket, 0);
+    expect(create).toMatchObject({
+      jsonrpc: "2.0",
+      method: JSON_RPC_SESSION_CREATE_METHOD,
+      params: {},
+    });
+    emitResponse(socket, create.id as string, {
+      session_id: "live-draft-1",
+      stored_session_id: "stored-draft-1",
+      message_count: 0,
+      messages: [],
+      info: { model: "synthetic/model", additive: true },
+    });
+    await expect(creation).resolves.toEqual({
+      sessionId: "live-draft-1",
+      storedSessionId: "stored-draft-1",
+      model: "synthetic/model",
+    });
+
+    harness.transport.sendPrompt("first persisted prompt");
+    expect(frame(socket, 1)).toMatchObject({
+      method: JSON_RPC_PROMPT_METHOD,
+      params: { session_id: "live-draft-1", text: "first persisted prompt" },
+    });
   });
 
   it("uses exact prompt, interrupt, approval, and clarification methods with opaque source payloads", async () => {
@@ -580,6 +622,9 @@ describe("createJsonRpcChatTransport", () => {
     const harness = makeHarness();
     const socket = await connectHarness(harness);
     emitEvent(socket, "tool.progress", { percent: 50, additive: true });
+    // Official global change broadcasts are session-less and encode that with
+    // an empty session_id rather than omitting the field.
+    emitEvent(socket, "sessions.changed", {}, { session_id: "" });
     expect(socket.closed).toBeUndefined();
     expect(harness.transport.state.status).toBe("ready");
 
@@ -907,6 +952,41 @@ describe("createJsonRpcChatTransport", () => {
     }
   });
 
+  it("closes a socket resolved before the outer abort continuation exactly once", async () => {
+    const caller = new AbortController();
+    const socket = new FakeWebSocket();
+    const close = vi.spyOn(socket, "close");
+    const harness = makeHarness({
+      ticketProvider: async () => "ticket-1",
+      createWebSocket: () => {
+        // The first microtask lets awaitWithAbort adopt the resolved value;
+        // the second aborts before the outer async continuation runs.
+        queueMicrotask(() => queueMicrotask(() => caller.abort()));
+        return socket;
+      },
+    });
+
+    const connection = harness.transport.connect(caller.signal);
+    await expect(connection).rejects.toMatchObject({ code: "aborted" });
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith(1000, "cancelled");
+    expect(harness.transport.state.status).toBe("offline");
+  });
+
+  it("publishes authentication-required ticket failures as auth_required", async () => {
+    const harness = makeHarness({
+      ticketProvider: async () => {
+        throw new JsonRpcChatError("authentication-required");
+      },
+    });
+
+    await expect(harness.transport.connect()).rejects.toMatchObject({
+      code: "authentication-required",
+    });
+    expect(harness.transport.state.status).toBe("auth_required");
+    expect(harness.sockets).toHaveLength(0);
+  });
+
   it("classifies every pinned close code and rejects unknown codes as incompatible", async () => {
     const cases: Array<[number, string]> = [
       [4401, "auth_required"],
@@ -957,5 +1037,169 @@ describe("createJsonRpcChatTransport", () => {
         vi.stubGlobal("WebSocket", existingWebSocket);
       }
     }
+  });
+
+  it("suppresses stale gateway gates when a ready listener reconnects synchronously", async () => {
+    const verifyAttestation = vi.fn(async () => true);
+    const runBehavioralProbe = vi.fn(async () => true);
+    let transport!: ReturnType<typeof createJsonRpcChatTransport>;
+    let reconnectPromise: Promise<void> | undefined;
+    let triggered = false;
+    const harness = makeHarness({
+      verifyAttestation,
+      runBehavioralProbe,
+      onEvent: (event) => {
+        if (event.type === JSON_RPC_GATEWAY_READY_EVENT && !triggered) {
+          triggered = true;
+          reconnectPromise = transport.reconnect();
+          void reconnectPromise.catch(() => undefined);
+        }
+      }
+    });
+    transport = harness.transport;
+    const first = transport.connect();
+    await flush();
+    const firstSocket = harness.sockets[0];
+    if (!firstSocket) throw new Error('first socket was not created');
+    firstSocket.emitOpen();
+    emitEvent(firstSocket, JSON_RPC_GATEWAY_READY_EVENT, { skin: 'first', change_events: true });
+    await flush();
+
+    const replacement = harness.sockets[1];
+    if (!replacement) throw new Error('replacement socket was not created');
+    replacement.emitOpen();
+    emitEvent(replacement, JSON_RPC_GATEWAY_READY_EVENT, { skin: 'replacement', change_events: true });
+    await flush();
+    const resume = frame(replacement, 0);
+    emitResponse(replacement, resume.id as string, { restored: true });
+    await expect(first).rejects.toBeInstanceOf(JsonRpcChatError);
+    await reconnectPromise;
+
+    expect(verifyAttestation).toHaveBeenCalledTimes(1);
+    expect(runBehavioralProbe).toHaveBeenCalledTimes(1);
+    expect(transport.state.status).toBe('ready');
+  });
+
+  it("fails closed without running gates when gateway.ready reentrantly repeats", async () => {
+    const verifyAttestation = vi.fn(async () => true);
+    let socket!: FakeWebSocket;
+    let repeated = false;
+    const harness = makeHarness({
+      verifyAttestation,
+      onEvent: (event) => {
+        if (event.type === JSON_RPC_GATEWAY_READY_EVENT && !repeated) {
+          repeated = true;
+          emitEvent(socket, JSON_RPC_GATEWAY_READY_EVENT, { skin: 'duplicate', change_events: true });
+        }
+      }
+    });
+    const connection = harness.transport.connect();
+    await flush();
+    socket = harness.sockets[0] as FakeWebSocket;
+    socket.emitOpen();
+    emitEvent(socket, JSON_RPC_GATEWAY_READY_EVENT, { skin: 'first', change_events: true });
+
+    await expect(connection).rejects.toMatchObject({ code: 'protocol-violation' });
+    expect(verifyAttestation).not.toHaveBeenCalled();
+  });
+
+  it("preserves cancellation when an error listener aborts the operation", async () => {
+    let transport!: ReturnType<typeof createJsonRpcChatTransport>;
+    let requestId: string | undefined;
+    const harness = makeHarness({
+      onEvent: (event) => {
+        if (event.type === 'error' && requestId) transport.abort(requestId);
+      }
+    });
+    transport = harness.transport;
+    const socket = await connectHarness(harness);
+    const request = transport.sendPrompt('abort from error listener');
+    requestId = request.id;
+    emitEvent(socket, 'error', { message: 'server failed' }, { request_id: request.id });
+
+    await expect(request.completion).rejects.toMatchObject({ code: 'cancelled' });
+    expect(transport.state.status).not.toBe('failed');
+  });
+
+  it("does not overwrite cancellation when a completion listener aborts", async () => {
+    let transport!: ReturnType<typeof createJsonRpcChatTransport>;
+    let request: JsonRpcChatRequest | undefined;
+    const harness = makeHarness({
+      onEvent: (event) => {
+        if (event.type === 'message.complete') request?.abort();
+      }
+    });
+    transport = harness.transport;
+    const socket = await connectHarness(harness);
+    request = transport.sendPrompt('abort from completion listener');
+    emitEvent(socket, 'message.complete', { text: 'done' }, { request_id: request.id });
+
+    await expect(request.completion).rejects.toMatchObject({ code: 'cancelled' });
+    expect(request.state.status).toBe('cancelled');
+    expect(transport.state.status).not.toBe('failed');
+  });
+
+  it("adopts the active attempt before a connecting subscriber reconnects", async () => {
+    let transport!: ReturnType<typeof createJsonRpcChatTransport>;
+    let nested: Promise<void> | undefined;
+    let reentered = false;
+    const harness = makeHarness({
+      onStateChange: (state) => {
+        if (state.status === 'connecting' && !reentered) {
+          reentered = true;
+          nested = transport.reconnect();
+          void nested.catch(() => undefined);
+        }
+      }
+    });
+    transport = harness.transport;
+    const first = transport.connect();
+    await flush();
+
+    const replacement = harness.sockets.at(-1);
+    if (!replacement) throw new Error('replacement socket was not created');
+    replacement.emitOpen();
+    emitEvent(replacement, JSON_RPC_GATEWAY_READY_EVENT, { replacement: true });
+    await flush();
+    const resume = frame(replacement, 0);
+    emitResponse(replacement, resume.id as string, { restored: true });
+
+    await expect(first).rejects.toMatchObject({ code: 'aborted' });
+    await nested;
+    expect(harness.tickets).toEqual(['ticket-1']);
+    expect(transport.state.status).toBe('ready');
+  });
+
+  it("suppresses recursive onReconnect callbacks while allowing the replacement to finish", async () => {
+    let transport!: ReturnType<typeof createJsonRpcChatTransport>;
+    let nested: Promise<void> | undefined;
+    let callbackCount = 0;
+    const harness = makeHarness({
+      onReconnect: () => {
+        callbackCount += 1;
+        if (callbackCount === 1) {
+          nested = transport.reconnect();
+          void nested.catch(() => undefined);
+        }
+      }
+    });
+    transport = harness.transport;
+    await connectHarness(harness);
+
+    const outer = transport.reconnect();
+    void outer.catch(() => undefined);
+    await flush();
+    const replacement = harness.sockets.at(-1);
+    if (!replacement) throw new Error('replacement socket was not created');
+    replacement.emitOpen();
+    emitEvent(replacement, JSON_RPC_GATEWAY_READY_EVENT, { replacement: true });
+    await flush();
+    const resume = frame(replacement, 0);
+    emitResponse(replacement, resume.id as string, { restored: true });
+
+    await expect(outer).rejects.toMatchObject({ code: 'aborted' });
+    await nested;
+    expect(callbackCount).toBe(1);
+    expect(transport.state.status).toBe('ready');
   });
 });

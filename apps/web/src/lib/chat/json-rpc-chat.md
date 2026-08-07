@@ -12,7 +12,7 @@ persist a transcript.
 - WebSocket route: `WS /api/ws`
 - Upgrade mode: same-origin, one fresh ticket in an ephemeral `ticket` query
 - Source event envelope: one text JSON-RPC object per WebSocket message
-- Synthetic evidence only: no live deployment, proxy, provider, or Hermes call
+- Evidence scopes: deterministic `fixture_only` tests and the pinned `official_image` browser lane
 
 The caller injects two boundaries:
 
@@ -25,13 +25,38 @@ retain a ticket, or reuse a ticket after the factory call. Every explicit
 `connect()` and `reconnect()` obtains a fresh ticket. Reconnect is never
 automatic.
 
+A genuine unauthenticated ticket response (`HTTP 401`) is represented as
+`authentication-required` and publishes `auth_required`; it is not downgraded to
+the generic retryable `failed` state. Other ticket failures, including `HTTP 403`,
+remain distinct from that unauthenticated state.
+
 The W-05 ticket client remains the owner of the authenticated
-`POST /api/auth/ws-ticket` boundary. This file only consumes its injected fresh
-ticket provider. W-05 issue [#119](https://github.com/kaygdotorg/hermternal/issues/119)
-and PR [#271](https://github.com/kaygdotorg/hermternal/pull/271) are integrated
-in `dev` at merge commit `965da31ba433c95c99ce85ef85f0485fa44e42e6`.
-This branch still provides a typed, injected seam rather than live production
-authentication or a browser-to-Hermes integration claim.
+`POST /api/auth/ws-ticket` boundary. `browser-chat.ts` composes that client with
+this transport for the pinned official Hermes image. It gives the real upgrade
+URL directly to the browser `WebSocket` constructor, then gives JSON-RPC only a
+fixed consumed marker. The ticket is not copied into controller state, browser
+history, callbacks, diagnostics, or retained evidence. W-05 issue
+[#119](https://github.com/kaygdotorg/hermternal/issues/119) and PR
+[#271](https://github.com/kaygdotorg/hermternal/pull/271) are integrated in
+`dev` at merge commit `965da31ba433c95c99ce85ef85f0485fa44e42e6`.
+
+While the browser adapter is between ticket acquisition and JSON-RPC socket
+consumption, it owns the prepared socket through an attempt token. Abort or
+provider failure clears and closes only that attempt's socket exactly once;
+late cleanup from an older ticket/open attempt cannot close a replacement
+prepared socket. Successful `createWebSocket` consumption removes the browser
+abort listener before transferring ownership to JSON-RPC; this prevents a
+cancellation race from double-closing the underlying socket or poisoning the
+next explicit retry. If the signal aborts after a factory result arrives but
+before JSON-RPC adopts it, the acquired socket is closed exactly once and is
+never attached to a stale generation.
+
+The `official_image` evidence scope binds the immutable upstream image reference
+to the reviewed route manifest, source review, and proxy proof. The behavioral
+gate accepts only the bounded server-first `gateway.ready` event already parsed
+by this transport. This composition enables the browser lane; it does not claim
+end-to-end compatibility until the full Playwright journey passes against that
+exact official image.
 
 ## Deterministic W-07 fixture IDs
 
@@ -78,11 +103,11 @@ After `gateway.ready`, the transport invokes two injected, non-network gates in
 order:
 
 1. deployment attestation against `dashboard-v0.0.1`, the pinned Hermes SHA,
-   the synthetic deployment identity, the reviewed route-manifest revision and
+   the scoped deployment identity, the reviewed route-manifest revision and
    digest, the source-review artifact, and the reviewed proxy proof;
 2. the non-destructive behavioral probe.
 
-The typed evidence record binds the complete synthetic proof boundary:
+The typed evidence record binds the complete proof boundary:
 `deployment.identity`, `deployment.trustChannel`, `deployment.scope`,
 `routeManifest.path`, `routeManifest.revision`, `routeManifest.sha256`,
 `sourceReview.path`, `sourceReview.sha256`, `proxyProof.path`, and
@@ -102,10 +127,18 @@ received. `sendPrompt()` requires `ready` after this response; `restoring` is a
 strict barrier that permits waiting or cancellation only. The server owns the
 durable history; the transport does not mirror it.
 
+An authenticated empty workspace can explicitly call `session.create` after
+readiness. Hermes returns a short-lived live session ID and a distinct stored
+session ID. The first prompt uses only the live ID; REST reconciliation uses the
+stored ID after that prompt makes the row durable. The client validates both
+identifiers, does not retry creation, and does not invent a durable session from
+an empty REST list.
+
 ## Reviewed wire methods and events
 
 The client sends only these methods in this transport:
 
+- `session.create` for one explicit empty draft;
 - `session.resume` for restoration;
 - `prompt.submit` for a prompt;
 - `session.interrupt` for an explicit stop;
@@ -132,9 +165,11 @@ correlation, and optional fixture sequence numbers. It passes the bounded
 payload through as opaque transient data. Unknown additive fields are ignored.
 
 Unknown additive non-interactive event names are ignored without creating UI
-state. Unknown interactive names, including `sudo.request`, `secret.request`,
-and other `*.request` events, fail closed as `incompatible`; they are never
-promoted to approval or clarification.
+state. Official session-less global broadcasts, such as `sessions.changed`, use
+an empty `session_id`; the transport normalizes that source sentinel to absent
+before ignoring the event. Unknown interactive names, including `sudo.request`,
+`secret.request`, and other `*.request` events, fail closed as `incompatible`;
+they are never promoted to approval or clarification.
 
 Server replies and events share the channel. A reply is correlated only by the
 JSON-RPC request `id`. The event `request_id` field is optional source data; it
@@ -209,6 +244,15 @@ The observable connection states are:
 
 `offline`, `auth_required`, `connecting`, `handshaking`, `ready`, `restoring`,
 `reconnecting`, `delivery_uncertain`, `incompatible`, `failed`, and `closing`.
+
+The browser ticket adapter maps only a genuine `401` ticket response to
+`authentication-required` and `auth_required`. Close observations remain attached
+to the connection state, so the workspace can retain the terminal reason and
+classification separately from its broad `permanent-error` state: `4401` carries
+sign-in guidance, while `4403` carries incompatible-origin guidance. The
+workspace treats authentication and compatibility failures as permanent until
+the user takes the matching recovery action; a `403` or generic transport
+failure remains a separate failure classification.
 
 A transport loss, send failure, or acknowledgement timeout after prompt send
 sets the prompt to `uncertain-delivery`. The completion rejects with that
@@ -311,12 +355,14 @@ The unit suite uses a deterministic fake WebSocket and covers:
 - disconnect before and after acknowledgement;
 - fresh-ticket reconnect, stale-generation suppression, explicit close/offline
   cleanup, reconnect suppression, and no prompt replay;
-- abort-triggered socket closure, send-failure cleanup, and late control-ack
-  suppression;
+- abort-triggered socket closure, send-failure cleanup, late control-ack
+  suppression, pre-adoption socket cleanup, reconnect ticket replacement, and
+  genuine-401 `auth_required` publication;
 - complete compatibility evidence, missing-evidence failure, bounded gate
   timeout, route-manifest session-ID validation, approval/clarification owner
   validation, and acknowledgement deadlines;
-- all pinned close-code classifications and the exact JSON depth bound;
+- all pinned close-code classifications, including terminal state propagation for
+  active prompts, and the exact JSON depth bound;
 - a browser-like no-network module import that does not touch `fetch` or
   `WebSocket` globals.
 

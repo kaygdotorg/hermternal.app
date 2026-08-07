@@ -676,9 +676,9 @@ function validateSession(value: StrictJsonValue): LiveSession {
     source: requireNullableString(object.source, MAX_SHORT_TEXT_LENGTH),
     model: requireNullableString(object.model, MAX_SHORT_TEXT_LENGTH),
     title: requireNullableString(object.title, MAX_TEXT_LENGTH),
-    startedAt: requireBoundedInteger(object.started_at, 0, MAX_UNIX_SECONDS),
-    endedAt: requireNullableBoundedInteger(object.ended_at, 0, MAX_UNIX_SECONDS),
-    lastActive: requireBoundedInteger(object.last_active, 0, MAX_UNIX_SECONDS),
+    startedAt: requireBoundedTimestamp(object.started_at),
+    endedAt: requireNullableBoundedTimestamp(object.ended_at),
+    lastActive: requireBoundedTimestamp(object.last_active),
     isActive: requireBoolean(object.is_active),
     messageCount: requireBoundedInteger(object.message_count, 0, 1_000_000_000),
     toolCallCount: requireBoundedInteger(object.tool_call_count, 0, 1_000_000_000),
@@ -743,7 +743,7 @@ function validateMessage(value: StrictJsonValue): LiveMessage {
       toolCallId: requireBoundedString(object.tool_call_id, MAX_ID_LENGTH)
     }),
     ...(object.timestamp !== undefined && {
-      timestamp: requireBoundedInteger(object.timestamp, 0, MAX_UNIX_SECONDS)
+      timestamp: requireBoundedTimestamp(object.timestamp)
     })
   };
 }
@@ -804,6 +804,22 @@ function requireNullableBoundedInteger(value: StrictJsonValue, min: number, max:
     return null;
   }
   return requireBoundedInteger(value, min, max);
+}
+
+function requireNullableBoundedTimestamp(value: StrictJsonValue): number | null {
+  if (value === null) return null;
+  return requireBoundedTimestamp(value);
+}
+
+/**
+ * Hermes stores Unix seconds with sub-second precision. Counts and pagination
+ * remain integers, while timestamp fields accept only finite bounded numbers.
+ */
+function requireBoundedTimestamp(value: StrictJsonValue): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > MAX_UNIX_SECONDS) {
+    throw new LiveRestError('invalid-response');
+  }
+  return value;
 }
 
 function requireMessageContent(value: StrictJsonValue): LiveMessageContent {

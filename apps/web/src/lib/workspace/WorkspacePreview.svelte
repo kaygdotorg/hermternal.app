@@ -8,10 +8,12 @@
   import SessionList from './SessionList.svelte';
   import StateBanner from './StateBanner.svelte';
   import Timeline from './Timeline.svelte';
+  import type { LiveWorkspacePermanentFailure } from './live-workspace-session';
   import { DEFAULT_SESSIONS, timelineForState } from './fixtures';
   import type {
     Appearance,
     SessionSummary,
+    TimelineItem,
     WorkspaceAction,
     WorkspaceDataSource,
     WorkspaceActionHandler,
@@ -25,9 +27,15 @@
   export let model = 'Atlas · balanced';
   export let activeSessionId = 'quarterly-logistics';
   export let sessions: SessionSummary[] = DEFAULT_SESSIONS;
+  export let timelineItems: TimelineItem[] | undefined = undefined;
+  export let timelineEmptyLabel = 'No messages in this synthetic session.';
+  export let permanentFailure: LiveWorkspacePermanentFailure | undefined = undefined;
+  export let dataMode: 'fixture' | 'live' = 'fixture';
+  export let interactionEnabled = true;
+  export let artifactInspectorEnabled = true;
   export let onAction: WorkspaceActionHandler = () => {};
 
-  let inspectorVisible = true;
+  let inspectorVisible = artifactInspectorEnabled;
   let mobileSidebarOpen = false;
   let mobileWorkspaceOpen = false;
   let mobileTitleEditing = false;
@@ -37,8 +45,12 @@
   let localTitle = title;
   let localModel = model;
 
-  $: timeline = timelineForState(state);
+  // Explicit timeline input separates live server reads from deterministic fixtures.
+  // Undefined preserves the Paper preview states; an empty array is a real empty session.
+  $: timeline = timelineItems ?? timelineForState(state);
+  $: if (!artifactInspectorEnabled) inspectorVisible = false;
   $: composerDisabled =
+    !interactionEnabled ||
     state === 'loading' ||
     state === 'offline' ||
     state === 'reconnecting' ||
@@ -118,7 +130,7 @@
     // `inert` is the browser and accessibility boundary; this handler guard is
     // the matching programmatic boundary for synthetic or forced DOM events.
     if (compatibilityBlocked && !recoveryActionAllowed(action)) return;
-    if (action.type === 'toggle-inspector') inspectorVisible = !inspectorVisible;
+    if (action.type === 'toggle-inspector' && artifactInspectorEnabled) inspectorVisible = !inspectorVisible;
     if (action.type === 'select-session') {
       activeSessionId = action.sessionId;
       mobileSidebarOpen = false;
@@ -172,7 +184,7 @@
     />
   </div>
 
-    <div class:inspector-hidden={!inspectorVisible} class="workspace-grid">
+    <div class:inspector-hidden={!artifactInspectorEnabled || !inspectorVisible} class="workspace-grid">
     <aside class:open={mobileSidebarOpen} class="sidebar">
       <SessionList {activeSessionId} {sessions} onAction={handleAction} />
     </aside>
@@ -181,7 +193,7 @@
       <ConversationHeader model={localModel} title={localTitle} onAction={handleAction} />
 
       <div class="conversation-body">
-        <Timeline {dataSource} items={timeline} runtimeState={state} onAction={handleAction} />
+        <Timeline {dataSource} emptyLabel={timelineEmptyLabel} items={timeline} runtimeState={state} onAction={handleAction} />
 
         <div
           class:empty-layer={state === 'empty'}
@@ -189,7 +201,7 @@
           class="state-layer"
         >
           {#if !compatibilityBlocked}
-            <StateBanner {dataSource} {state} onAction={handleAction} />
+            <StateBanner {dataMode} {dataSource} {permanentFailure} {state} onAction={handleAction} />
           {/if}
         </div>
 
@@ -202,7 +214,7 @@
       </div>
     </div>
 
-    {#if inspectorVisible}
+    {#if artifactInspectorEnabled && inspectorVisible}
       <ArtifactInspector onAction={handleAction} />
     {/if}
   </div>

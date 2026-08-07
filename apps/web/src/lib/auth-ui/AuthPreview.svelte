@@ -9,7 +9,8 @@
     AuthActionHandler,
     AuthDiscoveryMode,
     AuthProvider,
-    AuthViewState
+    AuthViewState,
+    PasswordSubmissionHandler
   } from './types';
   import type { Appearance } from '$lib/workspace/types';
 
@@ -18,6 +19,9 @@
   export let providers: AuthProvider[] = DEFAULT_PROVIDERS;
   export let discoveryMode: AuthDiscoveryMode = 'fixture';
   export let onAction: AuthActionHandler = () => {};
+  export let onPasswordSubmit: PasswordSubmissionHandler | undefined = undefined;
+  export let failureMessage: string | undefined = undefined;
+  export let failureCode: string | undefined = undefined;
 
   let passwordVisible = false;
   let previousState: AuthViewState = state;
@@ -41,7 +45,7 @@
   $: isPasswordState = effectiveState === 'password' || effectiveState === 'password-submitting';
   $: panelClass = isProviderState
     ? 'provider-panel'
-    : effectiveState === 'session-expired'
+    : effectiveState === 'session-expired' || effectiveState === 'logout-pending' || effectiveState === 'logout-failed'
       ? 'session-panel'
       : 'narrow-panel';
   $: politeAnnouncement =
@@ -49,15 +53,19 @@
       ? 'Signing in. The synthetic form is disabled while the local state completes.'
       : effectiveState === 'callback'
         ? 'Completing sign-in in a mocked local callback state.'
-        : effectiveState === 'discovery-pending'
-          ? 'Discovering sign-in methods. Provider actions are unavailable while the request is pending.'
-          : effectiveState === 'discovery-retry'
-            ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
-            : '';
+        : effectiveState === 'logout-pending'
+          ? 'Signing out. Provider discovery and retry actions are unavailable until logout is verified.'
+          : effectiveState === 'discovery-pending'
+            ? 'Discovering sign-in methods. Provider actions are unavailable while the request is pending.'
+            : effectiveState === 'discovery-retry'
+              ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
+              : '';
   $: assertiveAnnouncement =
     effectiveState === 'failure'
       ? 'Sign-in did not complete. Try again or choose another provider.'
-      : effectiveState === 'session-expired'
+      : effectiveState === 'logout-failed'
+        ? 'Sign-out could not be verified. Only Retry sign out is available.'
+        : effectiveState === 'session-expired'
         ? 'Session expired. Sign in again or discard the local draft fixture.'
         : effectiveState === 'discovery-empty'
           ? 'Provider discovery returned an invalid empty registry. No sign-in method is available.'
@@ -175,11 +183,25 @@
     if (effectiveState === 'password-submitting' || submissionLocked || !passwordForm?.checkValidity()) return;
 
     submissionLocked = true;
-    // Reset synchronously before the state transition. The reset-type action is
-    // also the native no-script boundary for click and focused Enter activation.
+    const data = new FormData(passwordForm);
+    const username = data.get('username');
+    const password = data.get('password');
+    // Snapshot only the transient live values, then synchronously clear the DOM
+    // before either the fixture action or live authentication callback can run.
     passwordForm.reset();
     formResetKey += 1;
     passwordVisible = false;
+
+    if (discoveryMode === 'live') {
+      if (onPasswordSubmit && typeof username === 'string' && typeof password === 'string') {
+        // The live callback receives transient values once. Auth actions and observable
+        // component state remain credential-free, and the keyed form is cleared now.
+        onPasswordSubmit({ username, password });
+      } else {
+        submissionLocked = false;
+      }
+      return;
+    }
     onAction({ type: 'submit-password-fixture' });
   }
 
@@ -307,8 +329,12 @@
           </h1>
           <p>
             {effectiveState === 'password-submitting'
-              ? 'Static submitting state only · the synthetic values were cleared and no request was made.'
-              : 'Static fixture state. No credential values are stored or submitted.'}
+              ? discoveryMode === 'live'
+                ? 'Your password was cleared from the form and sent only to the configured Hermes origin for this sign-in attempt.'
+                : 'Static submitting state only · the synthetic values were cleared and no request was made.'
+              : discoveryMode === 'live'
+                ? 'Your password is sent only to the configured Hermes origin for this sign-in attempt.'
+                : 'Static fixture state. No credential values are stored or submitted.'}
           </p>
         </header>
 
@@ -335,6 +361,7 @@
               data-fixture-field="username"
               disabled={effectiveState === 'password-submitting'}
               placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter username'}
+              name={discoveryMode === 'live' ? 'username' : undefined}
               required
               onkeydown={handlePasswordKeydown}
               bind:this={usernameInput}
@@ -358,11 +385,12 @@
             </div>
             <input
               id="auth-password"
-              autocomplete="off"
+              autocomplete={discoveryMode === 'live' ? 'current-password' : 'off'}
               data-1p-ignore
               data-lpignore="true"
               data-fixture-field="password"
               disabled={effectiveState === 'password-submitting'}
+              name={discoveryMode === 'live' ? 'password' : undefined}
               placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter password'}
               required
               onkeydown={handlePasswordKeydown}
@@ -423,17 +451,58 @@
           <span aria-hidden="true" class="note-dot"></span>Prototype-only state · no draft or prompt was persisted after
           expiry.
         </p>
+      {:else if effectiveState === 'logout-pending'}
+        <div class="callback-progress" aria-hidden="true"><span></span></div>
+        <div class="callback-message">
+          <h1 bind:this={stateHeading} tabindex="-1">Signing out</h1>
+          <p>Logout is being verified with the same-origin Hermes session boundary.</p>
+        </div>
+        <div class="privacy-note">
+          <span aria-hidden="true" class="info-icon"><Icon name="info" size={16} /></span>
+          <p>Retry and provider discovery stay unavailable until the server identity probe confirms logout.</p>
+        </div>
+      {:else if effectiveState === 'logout-failed'}
+        <div class="failure-icon" aria-hidden="true"><Icon name="warning" size={20} /></div>
+        <div class="failure-heading">
+          <h1 bind:this={stateHeading} tabindex="-1">Sign-out could not be verified</h1>
+          <p>{failureMessage ?? 'The server session could not be confirmed as signed out.'}</p>
+        </div>
+        <div class="failure-detail">
+          <strong>{failureCode ?? 'logout-unverified'}</strong>
+          <p>Retry sign out rechecks the same-origin session boundary. Provider discovery remains unavailable.</p>
+        </div>
+        <div class="failure-actions">
+          <Pill
+            label="Retry sign out"
+            icon="refresh"
+            variant="action"
+            onActivate={() => handleAction({ type: 'retry-logout' })}
+          />
+        </div>
+        <p class="metadata">Live boundary · logout recovery · no provider discovery</p>
       {:else if isDiscoveryFailureState(effectiveState)}
         <div class="failure-icon" aria-hidden="true">
           <Icon name={effectiveState === 'discovery-retry' ? 'refresh' : 'warning'} size={20} />
         </div>
         <div class="failure-heading">
           <h1 bind:this={stateHeading} tabindex="-1">{discoveryFailureHeading(effectiveState)}</h1>
-          <p>{discoveryFailureCopy(effectiveState)}</p>
+          <p>
+            {effectiveState === 'failure' && discoveryMode === 'live' && failureMessage
+              ? failureMessage
+              : discoveryFailureCopy(effectiveState)}
+          </p>
         </div>
         <div class="failure-detail">
-          <strong>{discoveryFailureDetail(effectiveState)}</strong>
-          <p>{discoveryFailureDetailCopy(effectiveState)}</p>
+          <strong
+            >{effectiveState === 'failure' && discoveryMode === 'live' && failureCode
+              ? failureCode
+              : discoveryFailureDetail(effectiveState)}</strong
+          >
+          <p>
+            {effectiveState === 'failure' && discoveryMode === 'live'
+              ? 'The fixed diagnostic contains no credential or provider response detail.'
+              : discoveryFailureDetailCopy(effectiveState)}
+          </p>
         </div>
         <div class="failure-actions">
           <Pill

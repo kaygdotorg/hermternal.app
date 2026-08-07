@@ -1,9 +1,16 @@
+import { parseStrictJson } from "../transport/strict-json";
+
 export const WS_TICKET_PATH = "/api/auth/ws-ticket" as const;
 export const CHAT_WEBSOCKET_PATH = "/api/ws" as const;
 export const WS_TICKET_TTL_SECONDS = 30 as const;
 export const MAX_WS_TICKET_LENGTH = 512 as const;
 export const MAX_WS_TICKET_RESPONSE_BYTES = 2 * 1024;
 export const MAX_WS_TICKET_ERROR_LENGTH = 240 as const;
+export const DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS = 5_000 as const;
+
+// A hostile response stream must not hold the ticket boundary open while its
+// cancellation promise settles. The reader lock is released after this bound.
+const WS_TICKET_RESPONSE_CANCEL_TIMEOUT_MS = 100;
 
 export type WsTicketErrorCode =
   | "cancelled"
@@ -113,6 +120,11 @@ export function createWsTicketRequestBoundary(
       });
 
       if (!response.ok) {
+        // Error responses can contain an unbounded or hostile body even though
+        // the status is already enough to classify the ticket failure. Cancel
+        // it before publishing the fixed status error, with the same bounded
+        // cleanup used by malformed successful responses.
+        await cancelBody(response.body);
         throw new WsTicketError(
           response.status === 401 || response.status === 403
             ? "authentication-failed"
@@ -200,16 +212,41 @@ async function readTicketResponse(
       throw new WsTicketError("response-invalid");
     }
 
-    const match =
-      /^[ \t\r\n]*\{[ \t\r\n]*"ticket"[ \t\r\n]*:[ \t\r\n]*"([A-Za-z0-9_-]{1,512})"[ \t\r\n]*\}[ \t\r\n]*$/.exec(
-        text,
-      );
-    if (!match?.[1]) {
+    let parsed: unknown;
+    try {
+      parsed = parseStrictJson(text, {
+        maxDepth: 2,
+        maxNodes: 8,
+        maxStringLength: MAX_WS_TICKET_LENGTH,
+        maxArrayLength: 1,
+        maxObjectKeys: 2,
+      });
+    } catch {
       throw new WsTicketError("response-invalid");
     }
-    return { ticket: match[1] };
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new WsTicketError("response-invalid");
+    }
+    const record = parsed as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const ticket = record.ticket;
+    if (
+      keys.length !== 2 ||
+      keys[0] !== "ticket" ||
+      keys[1] !== "ttl_seconds" ||
+      typeof ticket !== "string" ||
+      ticket.length === 0 ||
+      ticket.length > MAX_WS_TICKET_LENGTH ||
+      !/^[A-Za-z0-9_-]+$/.test(ticket) ||
+      record.ttl_seconds !== WS_TICKET_TTL_SECONDS
+    ) {
+      throw new WsTicketError("response-invalid");
+    }
+    // TTL is validated at the HTTP boundary, then discarded with other response
+    // metadata so the client seam retains only the one ephemeral ticket value.
+    return { ticket };
   } catch (error) {
-    await reader.cancel().catch(() => undefined);
+    await cancelReader(reader);
     if (signal.aborted || isAbortLike(error)) {
       throw new WsTicketCancelledError();
     }
@@ -239,8 +276,45 @@ function parseContentLength(value: string | null): number | undefined {
 async function cancelBody(
   body: ReadableStream<Uint8Array> | null,
 ): Promise<void> {
-  if (body !== null) {
-    await body.cancel().catch(() => undefined);
+  if (body === null) {
+    return;
+  }
+
+  let cancellation: Promise<unknown>;
+  try {
+    cancellation = Promise.resolve(body.cancel());
+  } catch {
+    return;
+  }
+  await awaitCleanupBounded(cancellation);
+}
+
+async function cancelReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<void> {
+  let cancellation: Promise<unknown>;
+  try {
+    cancellation = Promise.resolve(reader.cancel());
+  } catch {
+    return;
+  }
+  await awaitCleanupBounded(cancellation);
+}
+
+async function awaitCleanupBounded(cleanup: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, WS_TICKET_RESPONSE_CANCEL_TIMEOUT_MS);
+  });
+
+  try {
+    await Promise.race([cleanup, deadline]);
+  } catch {
+    // Cleanup cannot replace the bounded ticket diagnostic.
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -250,24 +324,33 @@ async function cancelBody(
  * assembled and is never copied to client state, storage, DOM, history, logs,
  * fixtures, reports, or error text.
  */
+interface ActiveTicketAttempt<Connection> {
+  readonly controller: AbortController;
+  readonly promise: Promise<Connection>;
+}
+
 export function createWsTicketClient<Connection>(
   options: WsTicketClientOptions<Connection>,
 ): WsTicketClient<Connection> {
-  let activeAttempt: Promise<Connection> | undefined;
+  let activeAttempt: ActiveTicketAttempt<Connection> | undefined;
 
   const startAttempt = (callerSignal?: AbortSignal): Promise<Connection> => {
-    if (activeAttempt) {
-      return activeAttempt;
+    // A reconnect can abort the caller signal while the old request or
+    // connector still has promise work pending. Do not coalesce a replacement
+    // into that canceled attempt; its bounded abort path will finish separately.
+    if (activeAttempt && !activeAttempt.controller.signal.aborted) {
+      return activeAttempt.promise;
     }
 
-    const attempt = runAttempt(options, callerSignal).finally(() => {
-      if (activeAttempt === attempt) {
+    const controller = new AbortController();
+    const promise = runAttempt(options, callerSignal, controller).finally(() => {
+      if (activeAttempt?.promise === promise) {
         activeAttempt = undefined;
       }
     });
 
-    activeAttempt = attempt;
-    return attempt;
+    activeAttempt = { controller, promise };
+    return promise;
   };
 
   return {
@@ -278,31 +361,47 @@ export function createWsTicketClient<Connection>(
 
 async function runAttempt<Connection>(
   options: WsTicketClientOptions<Connection>,
-  callerSignal?: AbortSignal,
+  callerSignal: AbortSignal | undefined,
+  controller: AbortController,
 ): Promise<Connection> {
   const origin = resolveOrigin();
-  const controller = new AbortController();
   const unlinkAbort = linkAbort(callerSignal, controller);
+  const closeLateConnection = createIdempotentConnectionCloser<Connection>();
+  // The coalescing slot must not be held forever when a custom request or
+  // connector ignores the caller signal. The internal deadline aborts the
+  // attempt and lets the explicit retry path acquire a fresh ticket.
+  const deadline = setTimeout(() => controller.abort(), DEFAULT_WS_TICKET_ATTEMPT_TIMEOUT_MS);
+
+  let acquiredConnection: Connection | undefined;
+  let connectionAcquired = false;
 
   try {
-    throwIfAborted(callerSignal);
+    throwIfAborted(controller.signal);
 
     const response = await requestTicket(options.request, controller.signal);
-    throwIfAborted(callerSignal);
+    throwIfAborted(controller.signal);
     const ticket = parseTicketResponse(response);
     const upgradeUrl = createUpgradeUrl(origin, ticket);
 
     // The URL is handed directly to the connector and is not stored on the
     // client. Connector implementations must honor the supplied signal.
-    throwIfAborted(callerSignal);
-    const connection = await upgradeTicket(
+    throwIfAborted(controller.signal);
+    acquiredConnection = await upgradeTicket(
       options.connect,
       upgradeUrl,
       controller.signal,
+      closeLateConnection,
     );
-    throwIfAborted(callerSignal);
-    return connection;
+    connectionAcquired = true;
+    // The connector may resolve, then the caller can abort before this outer
+    // continuation observes it. Treat the result as unadopted until return;
+    // the catch boundary closes it exactly once when cancellation wins.
+    throwIfAborted(controller.signal);
+    return acquiredConnection;
   } catch (error) {
+    if (connectionAcquired) {
+      closeLateConnection(acquiredConnection as Connection);
+    }
     if (
       callerSignal?.aborted ||
       controller.signal.aborted ||
@@ -317,6 +416,7 @@ async function runAttempt<Connection>(
 
     throw new WsTicketError("upgrade-failed");
   } finally {
+    clearTimeout(deadline);
     unlinkAbort();
   }
 }
@@ -354,11 +454,13 @@ async function upgradeTicket<Connection>(
   connect: WsTicketUpgradeBoundary<Connection>,
   upgradeUrl: URL,
   signal: AbortSignal,
+  onLateResolve: (connection: Connection) => void,
 ): Promise<Connection> {
   try {
     return await awaitWithAbort(
       Promise.resolve(connect(upgradeUrl, signal)),
       signal,
+      onLateResolve,
     );
   } catch (error) {
     if (signal.aborted || isAbortLike(error)) {
@@ -373,11 +475,49 @@ async function upgradeTicket<Connection>(
   }
 }
 
+function createIdempotentConnectionCloser<Connection>(): (
+  connection: Connection,
+) => void {
+  const closedConnections = new WeakSet<object>();
+
+  return (connection: Connection): void => {
+    if (typeof connection !== "object" || connection === null) {
+      return;
+    }
+
+    const candidate = connection as object & {
+      close?: (code?: number, reason?: string) => unknown;
+    };
+    if (typeof candidate.close !== "function" || closedConnections.has(candidate)) {
+      return;
+    }
+
+    closedConnections.add(candidate);
+    try {
+      candidate.close(1000, "cancelled");
+    } catch {
+      // A late connector result is already outside the active attempt.
+    }
+  };
+}
+
 function awaitWithAbort<T>(
   promise: Promise<T>,
   signal: AbortSignal,
+  onLateResolve?: (value: T) => void,
 ): Promise<T> {
+  const handleLateResolve = (value: T): void => {
+    try {
+      onLateResolve?.(value);
+    } catch {
+      // Late cleanup cannot replace the bounded cancellation result.
+    }
+  };
+
   if (signal.aborted) {
+    // Attach a rejection handler even for an already-aborted signal. A connector
+    // may still resolve later, and its result must reach the late close hook.
+    promise.then(handleLateResolve, () => undefined);
     return Promise.reject(new WsTicketCancelledError());
   }
 
@@ -403,7 +543,13 @@ function awaitWithAbort<T>(
 
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
-      (value) => settle(() => resolve(value)),
+      (value) => {
+        if (settled) {
+          handleLateResolve(value);
+          return;
+        }
+        settle(() => resolve(value));
+      },
       (error: unknown) => settle(() => reject(error)),
     );
   });
