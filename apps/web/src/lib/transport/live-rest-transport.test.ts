@@ -406,14 +406,13 @@ describe('createLiveRestTransport', () => {
     });
   });
 
-  it('accepts empty source-defined strings while identifier fields remain non-empty', async () => {
+  it('accepts empty profile metadata while stable identity fields remain non-empty', async () => {
     const providers = JSON.parse(rawProviderDiscovery()) as {
       providers: Array<Record<string, unknown>>;
     };
     providers.providers[0].display_name = '';
 
     const auth = JSON.parse(rawAuthIdentity()) as Record<string, unknown>;
-    auth.user_id = '';
     auth.email = '';
     auth.display_name = '';
     auth.org_id = '';
@@ -451,10 +450,11 @@ describe('createLiveRestTransport', () => {
       providers: [{ displayName: '' }]
     });
     await expect(transport.getAuthState()).resolves.toMatchObject({
-      userId: '',
+      userId: 'synthetic-user',
       email: '',
       displayName: '',
-      organizationId: ''
+      organizationId: '',
+      provider: 'synthetic-provider'
     });
     await expect(transport.getSession(LIVE_SESSION_FIXTURE.id)).resolves.toMatchObject({
       source: '',
@@ -578,11 +578,21 @@ describe('createLiveRestTransport', () => {
       createLiveRestTransport({ fetch: fetchSequence(response(JSON.stringify(wrongProvider))).fetch }).getProviders()
     ).rejects.toMatchObject({ code: 'invalid-response' });
 
-    const missingAuth = JSON.parse(rawAuthIdentity()) as Record<string, unknown>;
-    delete missingAuth.provider;
-    await expect(
-      createLiveRestTransport({ fetch: fetchSequence(response(JSON.stringify(missingAuth))).fetch }).getAuthState()
-    ).rejects.toMatchObject({ code: 'invalid-response' });
+    for (const field of ['user_id', 'provider']) {
+      const missingAuth = JSON.parse(rawAuthIdentity()) as Record<string, unknown>;
+      delete missingAuth[field];
+      await expect(
+        createLiveRestTransport({ fetch: fetchSequence(response(JSON.stringify(missingAuth))).fetch }).getAuthState()
+      ).rejects.toMatchObject({ code: 'invalid-response' });
+    }
+
+    for (const field of ['user_id', 'provider']) {
+      const emptyAuth = JSON.parse(rawAuthIdentity()) as Record<string, unknown>;
+      emptyAuth[field] = '';
+      await expect(
+        createLiveRestTransport({ fetch: fetchSequence(response(JSON.stringify(emptyAuth))).fetch }).getAuthState()
+      ).rejects.toMatchObject({ code: 'invalid-response' });
+    }
 
     for (const field of ['email', 'display_name', 'org_id', 'expires_at']) {
       const nullableAuth = JSON.parse(rawAuthIdentity()) as Record<string, unknown>;

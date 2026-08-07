@@ -26,12 +26,49 @@ export interface ProviderDiscovery {
 }
 
 export interface AuthIdentity {
+  /** Stable identity returned only for an authenticated Dashboard session. */
   userId: string;
+  /** Optional profile metadata; the Basic provider may return an empty value. */
   email: string;
+  /** Optional profile metadata; the Basic provider may return an empty value. */
   displayName: string;
+  /** Optional profile metadata; the Basic provider may return an empty value. */
   organizationId: string;
+  /** Stable provider identity returned with an authenticated session. */
   provider: string;
+  /** Stable, bounded session-expiry value returned with an authenticated session. */
   expiresAt: number;
+}
+
+/**
+ * Shared authentication proof for REST and browser-session boundaries.
+ * Profile metadata is present in the source projection but is not proof that a
+ * protected session exists; only the stable user/provider fields and bounded
+ * expiry participate in the authenticated identity invariant.
+ */
+export function isAuthIdentity(value: unknown): value is AuthIdentity {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (Object.keys(candidate).sort().join('|') !== 'displayName|email|expiresAt|organizationId|provider|userId') {
+    return false;
+  }
+
+  const boundedText = (item: unknown): item is string =>
+    typeof item === 'string' && item.length <= 512;
+  const stableText = (item: unknown): item is string =>
+    boundedText(item) && item.length > 0;
+
+  return (
+    stableText(candidate.userId) &&
+    boundedText(candidate.email) &&
+    boundedText(candidate.displayName) &&
+    boundedText(candidate.organizationId) &&
+    stableText(candidate.provider) &&
+    typeof candidate.expiresAt === 'number' &&
+    Number.isInteger(candidate.expiresAt) &&
+    candidate.expiresAt >= 0 &&
+    candidate.expiresAt <= 4_294_967_295
+  );
 }
 
 export interface LiveSession {

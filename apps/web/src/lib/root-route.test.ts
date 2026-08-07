@@ -11,9 +11,9 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 const IDENTITY = {
   user_id: 'user-1',
-  email: 'person@example.test',
+  email: '',
   display_name: 'Test person',
-  org_id: 'org-1',
+  org_id: '',
   provider: 'basic',
   expires_at: 4_000_000_000
 };
@@ -77,8 +77,10 @@ describe('root route composition', () => {
       throw new Error('unexpected request');
     });
     const context = createLiveRootContext({ fetch });
+    const invalidateImplementation = context.workspace.invalidate.bind(context.workspace);
     const invalidate = vi.spyOn(context.workspace, 'invalidate').mockImplementation(() => {
       events.push('local-invalidated');
+      invalidateImplementation();
     });
     await context.auth.initialize();
 
@@ -87,6 +89,8 @@ describe('root route composition', () => {
     expect(invalidate).toHaveBeenCalledTimes(1);
     expect(events).toEqual(['identity-active', 'local-invalidated', 'logout-request', 'identity-cleared']);
     expect(context.auth.current.status).toBe('signed_out');
+    expect(context.workspace.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
+    expect(events.filter((event) => event === 'logout-request')).toHaveLength(1);
   });
 
   it('keeps live auth expiry invalidation inside the composed root boundary', async () => {

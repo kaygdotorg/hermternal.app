@@ -156,15 +156,19 @@ test('browser auth logs out of the official Hermes session', async ({ page }) =>
         : undefined;
     const identityKeys = ['display_name', 'email', 'expires_at', 'org_id', 'provider', 'user_id'];
     const boundedText = (value: unknown): value is string =>
-      typeof value === 'string' && value.length > 0 && value.length <= 512;
+      typeof value === 'string' && value.length <= 512;
+    const stableText = (value: unknown): value is string =>
+      boundedText(value) && value.length > 0;
+    // Basic provider profile metadata may be empty; user/provider/expiry are
+    // the stable fields that prove the authenticated session shape.
     const authenticatedIdentityShape =
       authenticatedRecord !== undefined &&
       JSON.stringify(Object.keys(authenticatedRecord).sort()) === JSON.stringify(identityKeys) &&
-      boundedText(authenticatedRecord.user_id) &&
+      stableText(authenticatedRecord.user_id) &&
       boundedText(authenticatedRecord.email) &&
       boundedText(authenticatedRecord.display_name) &&
       boundedText(authenticatedRecord.org_id) &&
-      boundedText(authenticatedRecord.provider) &&
+      stableText(authenticatedRecord.provider) &&
       typeof authenticatedRecord.expires_at === 'number' &&
       Number.isInteger(authenticatedRecord.expires_at) &&
       authenticatedRecord.expires_at >= 0 &&
