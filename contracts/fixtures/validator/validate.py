@@ -157,9 +157,29 @@ INTENTIONALLY_SEPARATE_ARTIFACTS = frozenset({
 # The authority manifest is outside the fixture tree and is loaded from the one
 # immutable Git commit that introduced it. Checkout edits cannot rewrite those
 # object-database bytes, while later reviewed commits may update implementation
-# files without silently moving the authority root.
+# files without silently moving the authority root. The v2 bootstrap is a
+# multi-artifact predecessor: the source commit and every manifest record are
+# checked against immutable Git objects before checkout bytes are compared.
 VALIDATOR_AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.json"
-VALIDATOR_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v1"
+VALIDATOR_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
+VALIDATOR_AUTHORITY_ROLE = "bootstrap_predecessor"
+APPROVED_AUTHORITY_SOURCE_COMMIT = "abb6754bddd1cf18927b0172ed9fa3456235b035"
+AUTHORITY_KEYS = (
+    "schema",
+    "role",
+    "source_commit",
+    "artifact_manifest",
+    "canonicalization",
+    "synthetic_only",
+    "live_claim",
+)
+AUTHORITY_RECORD_KEYS = ("path", "blob_oid", "sha256", "size_bytes")
+AUTHORITY_ARTIFACT_PATHS = (
+    "contracts/fixtures/index.json",
+    "contracts/fixtures/validator/test_validate.py",
+    "contracts/fixtures/validator/validate.py",
+    "contracts/fixtures/validator/validation-baseline.json",
+)
 BASELINE_CANONICAL_SHA256 = "7704ec403074906dbff0a186f939eff9e1a4df8f86298c3929654481087aa8a7"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -180,15 +200,6 @@ REGEX_HOST_LITERAL_PATTERN = re.compile(
 # these bytes, but they cannot split credential or URL tokens at scan time.
 UNSAFE_CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 BASELINE_ANCHOR_PATTERN = re.compile(rb'^BASELINE_CANONICAL_SHA256 = "[0-9a-f]{64}"$', re.MULTILINE)
-AUTHORITY_KEYS = (
-    "schema",
-    "validator_path",
-    "validator_size_bytes",
-    "validator_sha256",
-    "baseline_path",
-    "baseline_size_bytes",
-    "baseline_sha256",
-)
 PRIVATE_KEY_PATTERN = re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE)
 AWS_KEY_PATTERN = re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.IGNORECASE)
 PROVIDER_TOKEN_PATTERN = re.compile(r"\b(?:ghp|github_pat|glpat|sk|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b", re.IGNORECASE)
@@ -416,6 +427,8 @@ SYNTHETIC_MARKER_PATHS = frozenset({
     "deployment-security/direct-port-denial/test_validate.py",
     "deployment-security/external-allowlist/test_validate.py",
     "deployment-security/private-network-firewall/test_validate.py",
+    "deployment-security/host-origin-mapping/test_validate.py",
+    "chat-stream-completion/test_validate.py",
     "route-allowlist/test_route_allowlist.py",
     "session-lineage/test_validate.py",
     "session-persistence/test_validate.py",
@@ -445,6 +458,82 @@ SYNTHETIC_FULL_VALUE_ALLOWANCES = {
 }
 TEST_NEGATIVE_BASIC_AUTH_CANDIDATE = "QWxhZGRpbjpvcGVuIHNlc2FtZQ" + "=="
 TEST_NEGATIVE_BASIC_AUTH_CANDIDATES = frozenset({TEST_NEGATIVE_BASIC_AUTH_CANDIDATE})
+# Host/Origin keeps a bounded set of malformed and reserved authorities as
+# negative-test source data. These values are structural vocabulary, not a
+# generic ``.invalid`` exemption: the allowance is exact, path-scoped, and
+# includes the comma-joined and IPv6 canaries assembled by its test source.
+STRUCTURAL_URL_ALLOWANCES = {
+    "deployment-security/host-origin-mapping/README.md": frozenset({
+        "https://chat.public.invalid`.",
+        "https://chat.public.invalid`.These",
+    }),
+    "deployment-security/host-origin-mapping/cases.json": frozenset({
+        "https://chat.public.invalid",
+        "http://chat.public.invalid",
+        "https://chat.public.invalid:443",
+        "https://CHAT.PUBLIC.INVALID",
+        "HTTPS://chat.public.invalid",
+        "https://chat.public.invalid.",
+        "https://chat.public.invalid/",
+        "https://other.public.invalid",
+        "https://user@chat.public.invalid",
+        "https://chat.public.invalid?x",
+        "http://attacker.private.invalid",
+    }),
+    "deployment-security/host-origin-mapping/test_validate.py": frozenset({
+        "https://chat.public.invalid",
+        "https://other.public.invalid",
+        "http://chat.public.invalid",
+        "HTTPS://chat.public.invalid",
+        "https://CHAT.PUBLIC.INVALID",
+        "https://chat.public.invalid.",
+        "https://chat.public.invalid:443",
+        "https://chat.public.invalid:0443",
+        "https://chat.public.invalid:abc",
+        "https://chat.public.invalid:65536",
+        "https://chat.public.invalid/",
+        "https://chat.public.invalid/path",
+        "https://chat.public.invalid?x",
+        "https://chat.public.invalid#x",
+        "https://user@chat.public.invalid",
+        "https://@chat.public.invalid",
+        "https://chat..public.invalid",
+        "https://chat.é.invalid",
+        "https://chat.public.invalid,https://other.public.invalid",
+        "https://[::1]",
+        "https://unsafe.xyz",
+        "https://user@unsafe.xyz",
+        "https://README.md",
+        "https://chat.public.invalid\\evil",
+        "https://chat.public.invalid]evil",
+        "https://chat.public.invalid^evil",
+        "https://chat%2epublic.invalid",
+        "https://chat.public.invalid\\",
+        "https://chat.public.invalid,",
+        "https://unsafe\\u002eexample/path",
+    }),
+    "deployment-security/host-origin-mapping/validate.py": frozenset({
+        "https://chat.public.invalid",
+        "http://chat.public.invalid",
+        "https://CHAT.PUBLIC.INVALID",
+        "HTTPS://chat.public.invalid",
+        "https://chat.public.invalid.",
+        "https://chat.public.invalid/",
+        "https://other.public.invalid",
+        "https://user@chat.public.invalid",
+        "http://attacker.private.invalid",
+        "https://chat.public.invalid:443",
+        "https://chat.public.invalid?x",
+    }),
+    # DEP-11 keeps this reserved host only as a negative input for the focused
+    # validator. Its string is assembled in Python, so the allowance applies to
+    # the exact conservative URL result rather than to every ``.invalid`` host.
+    "deployment-security/direct-port-denial/test_validate.py": frozenset({
+        "https://retained.invalid",
+        "https://retained.invalid/",
+        "https://retained.invalid/synthetic.invalid",
+    }),
+}
 EXACT_ASSIGNMENT_ALLOWANCES = {
     # These are retained source-review or negative-test fragments. Every
     # allowance is exact-path and exact-value; no caller can opt into a broad
@@ -452,6 +541,16 @@ EXACT_ASSIGNMENT_ALLOWANCES = {
     "deployment-security/pty-local-adapter/test_validate.py": frozenset({"live-value", "synthetic-value"}),
     "deployment-security/ws-ticket/README.md": frozenset({"Abcdefgh"}),
     "deployment-security/ws-ticket/test_validate.py": frozenset({"Abcdefgh", "never-echo", "sid=qwertyui"}),
+    "deployment-security/host-origin-mapping/test_validate.py": frozenset({
+        "adjacent-canary",
+        "adjacent-canarymutations",
+        "authorization",
+        "credential",
+        "credentials",
+        "do-not-echo",
+        "password",
+        "redaction-canary",
+    }),
     "image-attachment-lifecycle/test_validate.py": frozenset({"session=secret"}),
     "source-audit/native-password-provider/source_audit.json": frozenset({"body.password"}),
     "source-audit/native-password-provider/validate.py": frozenset({"Abcdefgh", "body.password"}),
@@ -459,6 +558,18 @@ EXACT_ASSIGNMENT_ALLOWANCES = {
     "source-audit/oauth-browser/test_oauth_browser.py": frozenset({"request.get", "session.access_token", "session.refresh_token"}),
     "source-audit/pty-attach/validate.py": frozenset({"abcdefghijkl"}),
 }
+# Host/Origin's focused test source intentionally keeps exact private-key and
+# detector canaries to prove its own scanner rejects them. The aggregate layer
+# allows only those exact retained values in that one test artifact.
+SYNTHETIC_FULL_VALUE_ALLOWANCES["chat-stream-completion/test_validate.py"] = frozenset({
+    "ghp_abcdefghijk",
+})
+SYNTHETIC_FULL_VALUE_ALLOWANCES["deployment-security/host-origin-mapping/test_validate.py"] = frozenset({
+    "-----BEGIN PRIVATE KEY-----",
+    "bearer=authorization: Bearer redaction-canary",
+    "authorization: Bearer redaction-canary",
+    "Cookie: redaction-canary",
+})
 RAW_RFC7617_TOKEN_PATTERN = re.compile(re.escape(TEST_NEGATIVE_BASIC_AUTH_CANDIDATE), re.IGNORECASE)
 
 SAFE_ERROR_MESSAGE = "fixture registry input rejected"
@@ -846,7 +957,8 @@ def _regex_host_literals(raw_url: str) -> tuple[str, ...]:
         suffixes = [
             candidate
             for candidate in concrete
-            if candidate.casefold().endswith((".test", ".invalid", ".example"))
+            if candidate.casefold().endswith((".test", ".example"))
+            or candidate.casefold() in ALLOWED_URL_HOSTS
         ]
         require(bool(suffixes), "regex URL host cannot be recovered safely")
     return concrete
@@ -858,7 +970,6 @@ def _require_allowed_url_host(host: str, *, allow_synthetic_markers: bool) -> No
         return
     require(
         lowered.endswith(".test")
-        or lowered.endswith(".invalid")
         or lowered.endswith(".example")
         or lowered.endswith(".example.com")
         or lowered == "host"
@@ -873,6 +984,7 @@ def _validate_url_hosts(
     *,
     allow_synthetic_markers: bool = False,
     regex_pattern: bool = False,
+    allowed_structural_urls: frozenset[str] = frozenset(),
 ) -> None:
     if regex_pattern:
         for match in REGEX_SCHEME_PATTERN.finditer(value):
@@ -882,6 +994,11 @@ def _validate_url_hosts(
         return
     for match in URL_PATTERN.finditer(value):
         raw_url = match.group(0)
+        # Domain validators retain exact malformed and reserved URL values as
+        # negative-test vocabulary. Do not generalize the allowance to a host
+        # suffix: a path-scoped exact token is the only structural bypass.
+        if raw_url in allowed_structural_urls:
+            continue
         try:
             parsed = urlsplit(raw_url)
             host = parsed.hostname
@@ -910,6 +1027,7 @@ def _validate_text_value(
     allowed_assignment_values: frozenset[str] = frozenset(),
     allowed_synthetic_full_values: frozenset[str] = frozenset(),
     regex_pattern: bool = False,
+    allowed_structural_urls: frozenset[str] = frozenset(),
 ) -> None:
     # Scan both a compact representation and one that preserves control
     # boundaries. The compact form catches ``Bearer abc\x00def``; the preserved
@@ -995,6 +1113,7 @@ def _validate_text_value(
             scanned_value,
             allow_synthetic_markers=allow_synthetic_markers,
             regex_pattern=regex_pattern,
+            allowed_structural_urls=allowed_structural_urls,
         )
 
 
@@ -1002,6 +1121,7 @@ def _validate_redaction_tree(
     value: Any,
     *,
     allowed_assignment_values: frozenset[str] = frozenset(),
+    allowed_structural_urls: frozenset[str] = frozenset(),
 ) -> None:
     if type(value) is dict:
         for key, child in value.items():
@@ -1011,6 +1131,7 @@ def _validate_redaction_tree(
             _validate_text_value(
                 key,
                 allowed_assignment_values=allowed_assignment_values,
+                allowed_structural_urls=allowed_structural_urls,
             )
             normalized = _validated_key_for_routing(key)
             if normalized in SENSITIVE_KEYS:
@@ -1019,6 +1140,7 @@ def _validate_redaction_tree(
                 _validate_redaction_tree(
                     child,
                     allowed_assignment_values=allowed_assignment_values,
+                    allowed_structural_urls=allowed_structural_urls,
                     )
         return
     if type(value) is list:
@@ -1026,12 +1148,14 @@ def _validate_redaction_tree(
             _validate_redaction_tree(
                 child,
                 allowed_assignment_values=allowed_assignment_values,
+                allowed_structural_urls=allowed_structural_urls,
             )
         return
     if type(value) is str:
         _validate_text_value(
             value,
             allowed_assignment_values=allowed_assignment_values,
+            allowed_structural_urls=allowed_structural_urls,
         )
 
 
@@ -1039,6 +1163,7 @@ def _validate_text_file(
     path: Path,
     *,
     allowed_assignment_values: frozenset[str] = frozenset(),
+    allowed_structural_urls: frozenset[str] = frozenset(),
 ) -> None:
     data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES)
     try:
@@ -1054,14 +1179,15 @@ def _validate_text_file(
         text,
         check_assignments=True,
         allowed_assignment_values=allowed_assignment_values,
+        allowed_structural_urls=allowed_structural_urls,
     )
 
 
 _STATIC_UNKNOWN = object()
-# Unknown runtime fields are rendered as an explicit synthetic host/value. The
-# pre-dot portion is long enough to trigger Basic detection, while the `.invalid`
-# suffix remains an allowed host boundary for dynamic URL diagnostics.
-_STATIC_DYNAMIC_VALUE = "syntheticinvalid.invalid"
+# Unknown runtime fields are rendered as the one exact synthetic host already
+# accepted by the URL policy. This keeps dynamic URL probes deterministic without
+# turning arbitrary ``.invalid`` suffixes into a global structural allowance.
+_STATIC_DYNAMIC_VALUE = "synthetic.invalid"
 
 
 def _static_scalar(value: Any) -> Any:
@@ -1338,8 +1464,19 @@ def _dynamic_authorization_scheme(node: ast.AST, bindings: dict[str, Any]) -> bo
 
 
 def _with_dynamic_authorization_probe(node: ast.AST, bindings: dict[str, Any], rendered: str) -> str:
-    """Fail closed when an unknown expression can construct Authorization."""
-    if _dynamic_authorization_scheme(node, bindings):
+    """Fail closed when an unknown expression can construct Authorization.
+
+    The dynamic value sentinel is an exact synthetic URL host, so it cannot by
+    itself satisfy the Basic detector's contiguous-token rule. When an unknown
+    expression is rendered in an Authorization-bearing construction, append a
+    bounded Basic probe explicitly instead of weakening the host allowlist or
+    using an arbitrary globally allowed ``.invalid`` label.
+    """
+    dynamic_header_value = (
+        _STATIC_DYNAMIC_VALUE in rendered
+        and re.search(r"authorization\s*:", rendered, re.IGNORECASE) is not None
+    )
+    if _dynamic_authorization_scheme(node, bindings) or dynamic_header_value:
         return rendered + " Authorization: Basic AAAAAAAAAAAAAAAA"
     return rendered
 
@@ -1643,6 +1780,7 @@ def _validate_python_file(
     allow_test_negative_rfc7617_token: bool = False,
     allowed_assignment_values: frozenset[str] = frozenset(),
     allowed_synthetic_full_values: frozenset[str] = frozenset(),
+    allowed_structural_urls: frozenset[str] = frozenset(),
 ) -> None:
     """Scan Python literals, comments, and bounded string constructions.
 
@@ -1683,6 +1821,7 @@ def _validate_python_file(
             allowed_assignment_values=allowed_assignment_values,
             allowed_synthetic_full_values=allowed_synthetic_full_values,
             regex_pattern=regex_pattern,
+            allowed_structural_urls=allowed_structural_urls,
         )
 
     # Route credential-named Python targets, keyword arguments, and literal
@@ -1810,35 +1949,72 @@ def _authority_commit(repo_root: Path) -> str:
     return commits[0]
 
 
-def _trusted_authority(repo_root: Path) -> dict[str, Any]:
-    """Load exact authority bytes from immutable local Git history, not checkout."""
+def _git_blob(repo_root: Path, revision: str, path: str) -> tuple[str, bytes]:
+    """Read one bounded blob and verify its Git object type before trusting it."""
 
-    commit = _authority_commit(repo_root)
-    data = _git(repo_root.resolve(), "show", f"{commit}:{VALIDATOR_AUTHORITY_PATH}")
-    authority = strict_keys(_parse_json_bytes(data), AUTHORITY_KEYS, "validator authority")
+    try:
+        blob_oid = _git(repo_root, "rev-parse", f"{revision}:{path}").decode("ascii").strip()
+    except UnicodeError as exc:
+        raise ValidationError() from exc
+    require(HEX40.fullmatch(blob_oid) is not None, "validator authority blob is invalid")
+    require(_git(repo_root, "cat-file", "-t", blob_oid) == b"blob\n", "validator authority object type changed")
+    return blob_oid, _git(repo_root, "cat-file", "blob", blob_oid)
+
+
+def _validate_authority_manifest(authority: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """Validate the exact v2 bootstrap shape without accepting a v1 fallback."""
+
+    strict_keys(authority, AUTHORITY_KEYS, "validator authority")
     require(authority["schema"] == VALIDATOR_AUTHORITY_SCHEMA, "validator authority schema changed")
-    require(authority["validator_path"] == BASELINE_SELF_MANIFEST_PATH, "validator authority path changed")
-    require(
-        authority["baseline_path"] == "contracts/fixtures/validator/validation-baseline.json",
-        "baseline authority path changed",
-    )
-    for prefix in ("validator", "baseline"):
+    require(authority["role"] == VALIDATOR_AUTHORITY_ROLE, "validator authority role changed")
+    source_commit = authority["source_commit"]
+    require(type(source_commit) is str and HEX40.fullmatch(source_commit) is not None, "validator authority source is invalid")
+    require(source_commit == APPROVED_AUTHORITY_SOURCE_COMMIT, "validator authority source changed")
+    require(authority["canonicalization"] == "exact_bytes", "validator authority canonicalization changed")
+    require(authority["synthetic_only"] is True and authority["live_claim"] is False, "validator authority live boundary changed")
+    manifest = authority["artifact_manifest"]
+    require(type(manifest) is list and len(manifest) == len(AUTHORITY_ARTIFACT_PATHS), "validator authority manifest is invalid")
+    paths: list[str] = []
+    records: list[dict[str, Any]] = []
+    for index, raw in enumerate(manifest):
+        record = strict_keys(raw, AUTHORITY_RECORD_KEYS, f"validator authority artifact[{index}]")
+        path = record["path"]
+        require(type(path) is str and path in AUTHORITY_ARTIFACT_PATHS, "validator authority artifact path is invalid")
+        require(path not in paths, "validator authority artifact is duplicated")
+        paths.append(path)
+        require(type(record["blob_oid"]) is str and HEX40.fullmatch(record["blob_oid"]) is not None, "validator authority blob is invalid")
+        _validate_digest(record["sha256"])
         require(
-            type(authority[f"{prefix}_size_bytes"]) is int
-            and type(authority[f"{prefix}_size_bytes"]) is not bool
-            and 0 < authority[f"{prefix}_size_bytes"] <= MAX_ARTIFACT_BYTES,
-            "validator authority size is invalid",
+            type(record["size_bytes"]) is int
+            and type(record["size_bytes"]) is not bool
+            and 0 < record["size_bytes"] <= MAX_ARTIFACT_BYTES,
+            "validator authority artifact size is invalid",
         )
-        _validate_digest(authority[f"{prefix}_sha256"])
+        records.append(record)
+    require(tuple(paths) == AUTHORITY_ARTIFACT_PATHS, "validator authority artifact order changed")
+    return source_commit, records
+
+
+def _trusted_authority(repo_root: Path) -> dict[str, Any]:
+    """Load v2 authority and its predecessor blobs from immutable Git history."""
+
+    root = repo_root.resolve()
+    introduction = _authority_commit(root)
+    _, authority_bytes = _git_blob(root, introduction, VALIDATOR_AUTHORITY_PATH)
+    authority = _parse_json_bytes(authority_bytes)
+    source_commit, records = _validate_authority_manifest(authority)
+    require(source_commit != introduction, "validator authority source is self-referential")
+    require(_git(root, "cat-file", "-t", source_commit) == b"commit\n", "validator authority source is not a commit")
+    # A self-consistent descendant or unrelated commit must not become the
+    # predecessor. Git's exit status is the check; the command emits no data on
+    # success, preserving the bounded authority read contract.
+    _git(root, "merge-base", "--is-ancestor", source_commit, introduction)
+    for record in records:
+        blob_oid, data = _git_blob(root, source_commit, record["path"])
+        require(blob_oid == record["blob_oid"], "validator authority blob changed")
+        require(len(data) == record["size_bytes"], "validator authority artifact size changed")
+        require(hashlib.sha256(data).hexdigest() == record["sha256"], "validator authority artifact digest changed")
     return authority
-
-
-def _trusted_validator_source_digest(repo_root: Path) -> str:
-    return _trusted_authority(repo_root)["validator_sha256"]
-
-
-def _trusted_baseline_digest(repo_root: Path) -> str:
-    return _trusted_authority(repo_root)["baseline_sha256"]
 
 
 def _validate_schema_document(schema: dict[str, Any]) -> None:
@@ -1930,11 +2106,13 @@ def _validate_manifest_file(
     require(suffix in SCANNED_ARTIFACT_SUFFIXES, "registered artifact extension is unsupported")
     allowed_assignment_values = EXACT_ASSIGNMENT_ALLOWANCES.get(relative_path, frozenset())
     allowed_synthetic_full_values = SYNTHETIC_FULL_VALUE_ALLOWANCES.get(relative_path, frozenset())
+    allowed_structural_urls = STRUCTURAL_URL_ALLOWANCES.get(relative_path, frozenset())
     if suffix == ".json":
         document = load_json(actual, require_object=False, limit=MAX_ARTIFACT_BYTES, reject_nul=False)
         _validate_redaction_tree(
             document,
             allowed_assignment_values=allowed_assignment_values,
+            allowed_structural_urls=allowed_structural_urls,
         )
         _reject_live_claims(document)
     elif suffix == ".py":
@@ -1945,11 +2123,13 @@ def _validate_manifest_file(
             allow_test_negative_rfc7617_token=relative_path in TEST_NEGATIVE_RFC7617_TOKEN_PATHS,
             allowed_assignment_values=allowed_assignment_values,
             allowed_synthetic_full_values=allowed_synthetic_full_values,
+            allowed_structural_urls=allowed_structural_urls,
         )
     else:
         _validate_text_file(
             actual,
             allowed_assignment_values=allowed_assignment_values,
+            allowed_structural_urls=allowed_structural_urls,
         )
     return path
 
@@ -2311,10 +2491,12 @@ def _validate_baseline(
     canonical = (canonical_baseline_path or (repo_root / "contracts/fixtures/validator/validation-baseline.json")).resolve()
     require(baseline_path.resolve() == canonical, "baseline path is not canonical")
     authority = _trusted_authority(repo_root)
+    authority_records = {record["path"]: record for record in authority["artifact_manifest"]}
+    baseline_record = authority_records["contracts/fixtures/validator/validation-baseline.json"]
     baseline_bytes = _read_bounded_bytes(canonical, MAX_JSON_BYTES)
     require(
-        len(baseline_bytes) == authority["baseline_size_bytes"]
-        and hashlib.sha256(baseline_bytes).hexdigest() == authority["baseline_sha256"],
+        len(baseline_bytes) == baseline_record["size_bytes"]
+        and hashlib.sha256(baseline_bytes).hexdigest() == baseline_record["sha256"],
         "baseline bytes changed outside the reviewed trust root",
     )
     strict_keys(document, BASELINE_KEYS, "baseline")
@@ -2351,9 +2533,10 @@ def _validate_baseline(
         _safe_child(repo_root.resolve(), BASELINE_SELF_MANIFEST_PATH),
         MAX_ARTIFACT_BYTES,
     )
+    validator_record = authority_records[BASELINE_SELF_MANIFEST_PATH]
     require(
-        len(validator_source) == authority["validator_size_bytes"]
-        and hashlib.sha256(validator_source).hexdigest() == authority["validator_sha256"],
+        len(validator_source) == validator_record["size_bytes"]
+        and hashlib.sha256(validator_source).hexdigest() == validator_record["sha256"],
         "validator source trust anchor changed",
     )
     for mode in ("normal", "optimized"):

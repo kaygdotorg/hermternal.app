@@ -189,14 +189,23 @@ class RegistryTests(unittest.TestCase):
     def test_canonical_baseline_anchor_matches_checked_in_content(self) -> None:
         self.assertEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
 
-    def test_git_object_authority_matches_exact_checked_in_bytes(self) -> None:
+    def test_git_object_authority_matches_approved_v2_predecessor(self) -> None:
         authority = validate._trusted_authority(validate.REPO_ROOT)
-        validator = (validate.REPO_ROOT / validate.BASELINE_SELF_MANIFEST_PATH).read_bytes()
-        baseline = validate.BASELINE_PATH.read_bytes()
-        self.assertEqual(authority["validator_size_bytes"], len(validator))
-        self.assertEqual(authority["validator_sha256"], hashlib.sha256(validator).hexdigest())
-        self.assertEqual(authority["baseline_size_bytes"], len(baseline))
-        self.assertEqual(authority["baseline_sha256"], hashlib.sha256(baseline).hexdigest())
+        self.assertEqual(authority["schema"], validate.VALIDATOR_AUTHORITY_SCHEMA)
+        self.assertEqual(authority["role"], validate.VALIDATOR_AUTHORITY_ROLE)
+        self.assertEqual(authority["source_commit"], validate.APPROVED_AUTHORITY_SOURCE_COMMIT)
+        records = {record["path"]: record for record in authority["artifact_manifest"]}
+        self.assertEqual(tuple(records), validate.AUTHORITY_ARTIFACT_PATHS)
+        for path in validate.AUTHORITY_ARTIFACT_PATHS:
+            blob_oid, data = validate._git_blob(
+                validate.REPO_ROOT,
+                authority["source_commit"],
+                path,
+            )
+            record = records[path]
+            self.assertEqual(blob_oid, record["blob_oid"])
+            self.assertEqual(len(data), record["size_bytes"])
+            self.assertEqual(hashlib.sha256(data).hexdigest(), record["sha256"])
 
 
 class CliTests(unittest.TestCase):
@@ -257,6 +266,7 @@ class CliTests(unittest.TestCase):
             path.write_bytes(data)
             allowed_assignments = validate.EXACT_ASSIGNMENT_ALLOWANCES.get(relative_path, frozenset())
             allowed_full_values = validate.SYNTHETIC_FULL_VALUE_ALLOWANCES.get(relative_path, frozenset())
+            allowed_structural_urls = validate.STRUCTURAL_URL_ALLOWANCES.get(relative_path, frozenset())
             suffix = path.suffix.casefold()
             if suffix == ".py":
                 validate._validate_python_file(
@@ -266,13 +276,22 @@ class CliTests(unittest.TestCase):
                     allow_test_negative_rfc7617_token=relative_path in validate.TEST_NEGATIVE_RFC7617_TOKEN_PATHS,
                     allowed_assignment_values=allowed_assignments,
                     allowed_synthetic_full_values=allowed_full_values,
+                    allowed_structural_urls=allowed_structural_urls,
                 )
             elif suffix == ".json":
                 document = validate.load_json(path, require_object=False, reject_nul=False)
-                validate._validate_redaction_tree(document, allowed_assignment_values=allowed_assignments)
+                validate._validate_redaction_tree(
+                    document,
+                    allowed_assignment_values=allowed_assignments,
+                    allowed_structural_urls=allowed_structural_urls,
+                )
                 validate._reject_live_claims(document)
             else:
-                validate._validate_text_file(path, allowed_assignment_values=allowed_assignments)
+                validate._validate_text_file(
+                    path,
+                    allowed_assignment_values=allowed_assignments,
+                    allowed_structural_urls=allowed_structural_urls,
+                )
 
     def _assert_scanner_rejects(self, relative_path: str, data: bytes) -> None:
         with self.assertRaises(validate.ValidationError):
@@ -590,6 +609,34 @@ class CliTests(unittest.TestCase):
         self._assert_scanner_rejects(
             "connection-restoration/README.md",
             b"https://fixture:password@synthetic.invalid/v1\n",
+        )
+
+    def test_structural_url_allowances_are_exact_and_path_scoped(self) -> None:
+        relative_path = "deployment-security/host-origin-mapping/test_validate.py"
+        source = (validate.FIXTURES_ROOT / relative_path).read_bytes()
+        # The reviewed negative source contains the exact comma-joined and IPv6
+        # canaries. Both pass only through their exact artifact allowance.
+        self._scan_artifact_bytes(relative_path, source)
+        for mutation in (
+            "https://chat.public.invalid,https://other.public.invalid,https://third.public.invalid",
+            "https://[::1]evil",
+            "https://192.0.2.1",
+            "https://chat.public.invalid\\\\evilx",
+            "https://chat.public.invalid]evilx",
+            "https://chat.public.invalid^evilx",
+        ):
+            with self.subTest(mutation=mutation):
+                self._assert_scanner_rejects(
+                    relative_path,
+                    source + ("\nFORGED_STRUCTURAL_URL = " + repr(mutation) + "\n").encode("utf-8"),
+                )
+
+        # A copied exact `.invalid` token is not accepted in an unrelated path;
+        # structural allowances belong to the reviewed artifact that contains
+        # the domain validator's negative vocabulary.
+        self._assert_scanner_rejects(
+            "connection-restoration/README.md",
+            b"https://chat.public.invalid\n",
         )
 
     def test_unicode_compatibility_forms_cannot_bypass_credential_scanners(self) -> None:
