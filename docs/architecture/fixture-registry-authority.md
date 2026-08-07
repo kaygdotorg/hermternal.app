@@ -4,10 +4,13 @@
 
 The aggregate fixture registry has a staged trust boundary. The legacy v1
 authority remains a readable compatibility record, and the reviewed bootstrap
-v2 authority remains preserved in Git history. The active final binding is a
-separate v2 path introduced after the finalized aggregate predecessor. The
-standalone verifier and aggregate validator consume only that final binding.
-Neither format is a production attestation; `live_claim` remains `false`.
+and final v2 authorities remain preserved historical evidence. The aggregate
+validator uses a distinct hardened v2 path introduced after the corrected
+aggregate predecessor and selects it through protected runtime pins. The
+standalone verifier continues to authenticate the historical final v2 path;
+the aggregate validator authenticates that verifier's bytes before loading the
+hardened path. Neither format is a production attestation; `live_claim` remains
+`false`.
 
 ## Version and path history
 
@@ -37,38 +40,47 @@ and the new multi-artifact authority is introduced at:
 
 The bootstrap document explicitly declares
 `hermternal.fixture-registry-authority.v2` and remains byte-for-byte preserved
-as historical predecessor evidence. The final aggregate binding is introduced
-at:
+as historical predecessor evidence. The historical final aggregate binding is
+preserved at:
 
 `scripts/fixture_registry_authority.v2.final.json`
 
-It uses the same v2 schema with role `aggregate_predecessor`. Its
-`source_commit` is the exact finalized aggregate predecessor and must equal the
-final authority introduction commit's first parent. This direct-parent rule
-keeps the authority path out of the scanner/index/baseline commit it authorizes
-and avoids a self-referential source hash inside `validate.py`.
+The active corrected aggregate binding is introduced at the distinct path:
+
+`scripts/fixture_registry_authority.v2.hardened.json`
+
+Both use the same v2 schema with role `aggregate_predecessor`. Each
+`source_commit` is the exact aggregate predecessor for its introduction commit
+and must equal that commit's first parent. This direct-parent rule keeps an
+authority path out of the scanner/index/baseline commit it authorizes and avoids
+a self-referential source hash inside `validate.py`. The active hardened
+introduction and source commits are supplied through protected runtime pins,
+not inferred from a branch or tag.
 
 ## Active v2 loading rule
 
-The standalone verifier reads only
+The standalone verifier reads the historical
 `scripts/fixture_registry_authority.v2.final.json` from the sole first-parent
 Git commit that introduced that path. It does not use the visible checkout copy
-as its authority source. It reads the final v2 bytes from the local Git object
-database, validates the schema, role, and key order, and requires all of the
-following:
+as its authority source. The aggregate validator authenticates the standalone
+verifier bytes, verifies that historical chain, then reads the active
+`scripts/fixture_registry_authority.v2.hardened.json` from the exact protected
+introduction and source pins. Both paths are read from the local Git object
+database, and each authority must satisfy all of the following:
 
-- the declared `source_commit` is a commit object and exactly equals the final
+- the declared `source_commit` is a commit object and exactly equals that
   authority introduction commit's first parent;
 - the four declared paths resolve at that predecessor to the recorded Git blob
   object IDs;
 - each predecessor object has the recorded byte length and SHA-256 digest; and
-- the checkout copies of the final authority, index, validator tests, validator,
-  and validation baseline exactly match those immutable predecessor records.
+- the checkout copies of the authority, index, validator tests, validator, and
+  validation baseline exactly match those immutable predecessor records.
 
-The legacy v1 path and bootstrap v2 path remain readable historical records,
-but neither is selected as the active trust root. Final path selection is
-therefore explicit and cannot silently fall back to a schema-incompatible or
-stale predecessor record.
+The legacy v1 path and bootstrap v2 path remain readable historical records.
+The final v2 path is the standalone verifier's historical trust input, while
+the hardened v2 path is the aggregate validator's active trust input. Explicit
+path and runtime-pin selection cannot silently fall back to a schema-incompatible
+or stale predecessor record.
 
 The object-repository input is a canonical absolute plain checkout. Before
 running any path-based Git command, the verifier opens `/` and every caller
