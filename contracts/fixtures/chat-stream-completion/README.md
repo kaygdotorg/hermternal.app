@@ -26,11 +26,11 @@ The reducer enforces these rules:
 - `tool.start` must precede one matching `tool.complete`;
 - tools cannot overlap;
 - normal completion is rejected while a tool remains open;
-- `message.complete(status=complete)` is terminal success;
-- `message.complete(status=error)` is terminal error and preserves only synthetic semantic markers;
+- `message.complete(status=complete)` is terminal success and has no `recoverable` field;
+- `message.complete(status=error)` is terminal error, requires `recoverable`, and preserves only synthetic semantic markers;
 - a gateway `error` is terminal without an invented completion;
 - no frame is accepted after completion, error, or confirmed interruption;
-- `interrupt.request` blocks further stream progress until its result;
+- `interrupt.request` blocks every ordinal-bearing progress frame until its result;
 - confirmed interruption may abandon an open tool without fabricating `tool.complete`;
 - rejected interruption resumes the prior active state;
 - unknown additive non-interactive events are ignored but still consume their ordinal;

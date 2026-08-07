@@ -223,7 +223,13 @@ def _event_keys(kind: str, event: dict[str, Any]) -> tuple[str, ...]:
     if kind in {"tool.start", "tool.complete"}:
         return common + ("ordinal", "tool_ref")
     if kind == "message.complete":
-        return common + (("ordinal", "content_ref", "status", "recoverable") if "recoverable" in event else ("ordinal", "content_ref", "status"))
+        # Completion is a status-tagged union: only error carries recoverability.
+        status = event.get("status")
+        if status == "complete":
+            return common + ("ordinal", "content_ref", "status")
+        if status == "error":
+            return common + ("ordinal", "content_ref", "status", "recoverable")
+        raise ContractError("message.complete status changed")
     if kind == "error":
         return common + ("ordinal", "error_code", "recoverable")
     if kind == "interrupt.request":
@@ -268,6 +274,11 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
             return _fail_result(trace, "event_after_terminal")
         if any(event[key] != case[key] for key in ("session_ref", "request_ref", "turn_ref")):
             return _fail_result(trace, "event_not_correlated")
+        # While confirmation is pending, only the unnumbered result can settle
+        # the turn; accepting any ordinal-bearing frame would resume progress
+        # from an unconfirmed interruption boundary.
+        if interrupt_pending and "ordinal" in event:
+            return _fail_result(trace, "event_while_interrupt_pending")
         if kind not in {"interrupt.request", "interrupt.result"}:
             if type(event.get("ordinal")) is not int or event["ordinal"] != expected_ordinal:
                 return _fail_result(trace, "ordinal_not_monotonic")

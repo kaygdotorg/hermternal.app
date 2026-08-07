@@ -6,8 +6,8 @@
   "artifact_files": [
     {
       "path": "README.md",
-      "sha256": "2b3a70adf7b43bd382fae273f53d22a83c0ac0bd963934cb353b547897b81561",
-      "size_bytes": 5415
+      "sha256": "e35db6fb2d0b53eb770710105fe24dbd408927b12d93509dc258e4de1789e437",
+      "size_bytes": 5484
     },
     {
       "path": "cases.json",
@@ -21,16 +21,16 @@
     },
     {
       "path": "validate.py",
-      "sha256": "b73b4c3e92f87c3caee27ae495e965dc3c9751c1c12c2bdb11b75cd8765d4500",
-      "size_bytes": 26056
+      "sha256": "b6ec003a3b961b33b1141d16ec7aa1c80cf5e2ac70924413b900474e596b8014",
+      "size_bytes": 26635
     },
     {
       "path": "test_validate.py",
-      "sha256": "c4b6a792801490039a92d8e98b24edf53b5ebfda6063373dcc79c68474e62226",
-      "size_bytes": 12825
+      "sha256": "f208b898fd0f9ec114ef0c65931acefbd73262635d20922983dbe6ea2ffed06c",
+      "size_bytes": 17416
     }
   ],
-  "artifact_bytes": 76781,
+  "artifact_bytes": 82020,
   "environment": {
     "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
     "python": "3.14.6"

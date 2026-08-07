@@ -53,6 +53,52 @@ print(json.dumps(module.evaluate_case(case), sort_keys=True))
         self.assertEqual(result.stderr, "")
         return json.loads(result.stdout)
 
+    def evaluate_case_subprocess(self, case: dict[str, object], optimized: bool) -> dict[str, object]:
+        script = """
+import importlib.util, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fixture_validate', root / 'validate.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+case = json.loads(sys.argv[2])
+print(json.dumps(module.evaluate_case(case), sort_keys=True))
+"""
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(["-c", script, str(ROOT), json.dumps(case, separators=(",", ":"))])
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        return json.loads(result.stdout)
+
+    def validate_document_subprocess(self, document: dict[str, object], optimized: bool) -> bool:
+        script = """
+import importlib.util, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fixture_validate', root / 'validate.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+document = json.loads(sys.argv[2])
+try:
+    module.validate_document(document)
+except module.ContractError:
+    print('rejected')
+else:
+    print('accepted')
+"""
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(["-c", script, str(ROOT), json.dumps(document, separators=(",", ":"))])
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.strip(), "rejected")
+        return True
+
     def test_checked_in_evidence_validates(self) -> None:
         case_count, artifact_bytes = validate.validate_all(self.document, self.audit, self.baseline)
         self.assertEqual(case_count, 22)
@@ -118,6 +164,55 @@ print(json.dumps(module.evaluate_case(case), sort_keys=True))
             "ordinal": 2, "content_ref": "content-marker-late",
         })
         self.assertEqual(validate.evaluate_case(pending)["contract_error"], "event_while_interrupt_pending")
+
+    def test_every_ordinal_frame_is_rejected_while_interrupt_pending_in_both_modes(self) -> None:
+        base = copy.deepcopy(self.cases["interrupt-after-delta"])
+        base["events"] = base["events"][:-1]
+        common = {
+            "session_ref": base["session_ref"],
+            "request_ref": base["request_ref"],
+            "turn_ref": base["turn_ref"],
+            "ordinal": 2,
+        }
+        frames = [
+            {**common, "kind": "message.delta", "content_ref": "content-marker-late"},
+            {**common, "kind": "reasoning.delta", "content_ref": "reasoning-marker-late"},
+            {**common, "kind": "thinking.delta", "content_ref": "thinking-marker-late"},
+            {**common, "kind": "tool.start", "tool_ref": "tool-marker-late"},
+            {**common, "kind": "tool.complete", "tool_ref": "tool-marker-late"},
+            {**common, "kind": "message.complete", "content_ref": "content-marker-final", "status": "complete"},
+            {**common, "kind": "error", "error_code": "error-marker-late", "recoverable": False},
+            {**common, "kind": "unknown.additive", "name": "telemetry-marker-late"},
+            {**common, "kind": "unknown.interactive", "name": "secret.request-late"},
+        ]
+        for frame in frames:
+            pending = copy.deepcopy(base)
+            pending["events"].append(frame)
+            for optimized in (False, True):
+                with self.subTest(kind=frame["kind"], optimized=optimized):
+                    result = self.evaluate_case_subprocess(pending, optimized)
+                    self.assertEqual(result["contract_error"], "event_while_interrupt_pending")
+                    self.assertEqual(result["segments"], [])
+                    self.assertEqual(result["completed_tools"], [])
+
+    def test_message_complete_schema_is_strictly_status_dependent_in_both_modes(self) -> None:
+        mutations = []
+        complete_with_recoverable = copy.deepcopy(self.document)
+        complete_with_recoverable["cases"][1]["events"][1]["recoverable"] = False
+        mutations.append(complete_with_recoverable)
+
+        error_without_recoverable = copy.deepcopy(self.document)
+        error_without_recoverable["cases"][5]["events"][1].pop("recoverable")
+        mutations.append(error_without_recoverable)
+
+        unsupported_status = copy.deepcopy(self.document)
+        unsupported_status["cases"][1]["events"][1]["status"] = "pending"
+        mutations.append(unsupported_status)
+
+        for index, document in enumerate(mutations):
+            for optimized in (False, True):
+                with self.subTest(mutation=index, optimized=optimized):
+                    self.validate_document_subprocess(document, optimized)
 
     def test_document_rejects_shape_type_order_and_inventory_mutations(self) -> None:
         mutations = []
