@@ -56,8 +56,8 @@ The verifier's object repository must be a canonical absolute plain checkout,
 not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
 `commondir`, object, ref, or config boundaries. Before any path-based Git
 command, it opens `/` and every caller ancestor through a descriptor-relative
-chain with no-follow flags, allowing only the explicit host aliases `/tmp` and
-`/var`; it then opens the caller root and `.git` directory from those held
+chain with no-follow flags, allowing only the explicit host aliases `/tmp`, `/var`, `/var/folders`, and
+`/var/tmp`; it then opens the caller root and `.git` directory from those held
 descriptors. It copies the complete Git metadata tree into a private mode-700
 temporary snapshot. The copy is chunked and bounded to
 `MAX_SNAPSHOT_FILE_BYTES` per regular file and `MAX_SNAPSHOT_TOTAL_BYTES` in

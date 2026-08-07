@@ -66,7 +66,7 @@ record.
 The object-repository input is a canonical absolute plain checkout. Before
 running any path-based Git command, the verifier opens `/` and every caller
 ancestor through a descriptor-relative chain, using `O_NOFOLLOW` except for the
-explicit host aliases `/tmp` and `/var`. It then opens the caller root and
+explicit host aliases `/tmp`, `/var`, `/var/folders`, and `/var/tmp`. It then opens the caller root and
 `.git` directory from the held descriptors and copies the complete Git metadata
 tree into a private mode-700 temporary snapshot. The copy is chunked and
 bounded to `MAX_SNAPSHOT_FILE_BYTES` per regular file and
