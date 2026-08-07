@@ -46,6 +46,7 @@ DEFAULT_USERNAME = "hermternal-test"
 MAX_PROVIDER_BYTES = 64 * 1024
 MAX_STATE_BYTES = 16 * 1024
 MAX_COMMAND_BYTES = 64 * 1024
+CONTAINER_ACTION_TIMEOUT = 60
 
 Runner = Callable[[Sequence[str], Mapping[str, str], float], "CommandResult"]
 ReadinessChecker = Callable[[str, int, float], None]
@@ -114,6 +115,17 @@ class InstanceSpec:
             "data_path": str(self.data_dir),
             "credential_file": str(self.credential_file),
         }
+
+
+@dataclass(frozen=True)
+class RecoverySnapshot:
+    """Safe identity projection used immediately around lifecycle mutations."""
+
+    container_id: str
+    name: str
+    image: str
+    data_source: str
+    status: str
 
 
 def default_roots() -> Roots:
@@ -409,9 +421,11 @@ def inspect_container(
     runner: Runner,
     environment: Mapping[str, str],
     executable: str,
+    *,
+    target: str | None = None,
 ) -> dict[str, object]:
     result = runner(
-        (executable, "container", "inspect", spec.container, "--format", "json"),
+        (executable, "container", "inspect", target or spec.container, "--format", "json"),
         environment,
         20,
     )
@@ -446,6 +460,106 @@ def require_owned_container(spec: InstanceSpec, document: dict[str, object]) -> 
     }
     if any(labels.get(key) != value for key, value in expected.items()):
         raise LauncherError("container_not_launcher_owned")
+
+
+def container_status(document: dict[str, object]) -> str:
+    state = document.get("State")
+    status = state.get("Status") if isinstance(state, dict) else None
+    if type(status) is not str or not status:
+        raise LauncherError("container_inspect_invalid")
+    return status
+
+
+def recovery_snapshot(spec: InstanceSpec, document: dict[str, object]) -> RecoverySnapshot:
+    """Validate only the exact identity needed before a destructive action.
+
+    Ordinary reuse keeps the historical label-only compatibility boundary. A
+    stop or start is different: it needs a fresh inspect projection so a
+    replaced container cannot inherit the launcher-owned name and labels.
+    """
+
+    require_owned_container(spec, document)
+    container_id = document.get("Id")
+    name = document.get("Name")
+    image = document.get("ImageName")
+    if (
+        type(container_id) is not str
+        or not container_id
+        or type(name) is not str
+        or name not in {spec.container, f"/{spec.container}"}
+        or type(image) is not str
+        or image not in {spec.image, expected_repo_digest(spec.image)}
+    ):
+        raise LauncherError("container_identity_unproven")
+
+    mounts = document.get("Mounts")
+    if not isinstance(mounts, list):
+        raise LauncherError("container_identity_unproven")
+    managed_mounts = [
+        mount
+        for mount in mounts
+        if isinstance(mount, dict) and mount.get("Destination") == "/opt/data"
+    ]
+    if len(managed_mounts) != 1:
+        raise LauncherError("container_identity_unproven")
+    managed_mount = managed_mounts[0]
+    if (
+        managed_mount.get("Type") != "bind"
+        or managed_mount.get("Source") != str(spec.data_dir)
+    ):
+        raise LauncherError("container_identity_unproven")
+    # The published port/socket mapping is deliberately not an identity
+    # rejection criterion: this lifecycle action is the narrowly scoped rebind.
+    # Port availability is preflighted, while the exact container state is what
+    # rollback restores; no mapping or listener is edited by this launcher.
+
+    return RecoverySnapshot(
+        container_id=container_id,
+        name=name,
+        image=image,
+        data_source=str(spec.data_dir),
+        status=container_status(document),
+    )
+
+
+def require_same_recovery_snapshot(
+    spec: InstanceSpec,
+    expected: RecoverySnapshot,
+    document: dict[str, object],
+) -> RecoverySnapshot:
+    current = recovery_snapshot(spec, document)
+    if (
+        current.container_id != expected.container_id
+        or current.name != expected.name
+        or current.image != expected.image
+        or current.data_source != expected.data_source
+    ):
+        raise LauncherError("container_recovery_race")
+    return current
+
+
+def _run_container_action(
+    target: str,
+    action: str,
+    runner: Runner,
+    environment: Mapping[str, str],
+    executable: str,
+    failure_code: str,
+) -> None:
+    try:
+        result = runner(
+            (executable, action, target),
+            environment,
+            CONTAINER_ACTION_TIMEOUT,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        # Test runners and signal-aware adapters can fail synchronously. Do not
+        # let their exception text become a launcher diagnostic.
+        raise LauncherError(failure_code) from None
+    if result.returncode != 0:
+        raise LauncherError(failure_code)
 
 
 def run_arguments(spec: InstanceSpec, executable: str) -> tuple[str, ...]:
@@ -558,8 +672,95 @@ def start_instance(
     if container_exists(spec, runner, environment, podman):
         document = inspect_container(spec, runner, environment, podman)
         require_owned_container(spec, document)
-        readiness(spec.endpoint, attempts, interval)
-        write_state(spec)
+        original_status = container_status(document)
+        if original_status == "running":
+            readiness(spec.endpoint, attempts, interval)
+            write_state(spec)
+            return {**spec.public(), "status": "ready", "created": False}, False
+        if original_status not in {"configured", "created", "stopped", "exited", "dead"}:
+            raise LauncherError("container_state_unrecoverable")
+        recovery_identity = recovery_snapshot(spec, document)
+        if not port_checker(spec.port):
+            raise LauncherError("port_unavailable")
+
+        # Starting an existing stopped container is a transaction. Re-inspect
+        # immediately before the action, then address both lifecycle commands
+        # by the pinned ID rather than the mutable name. The rollback re-inspects
+        # that same ID and stops only it if it is still running.
+        fresh_identity = require_same_recovery_snapshot(
+            spec,
+            recovery_identity,
+            inspect_container(spec, runner, environment, podman),
+        )
+        if fresh_identity.status != original_status:
+            raise LauncherError("container_recovery_race")
+        recovery_attempted = False
+        cleanup_done = False
+        rollback_failure: LauncherError | None = None
+
+        def rollback_once() -> LauncherError | None:
+            nonlocal cleanup_done, rollback_failure
+            if cleanup_done:
+                return rollback_failure
+            cleanup_done = True
+            if not recovery_attempted:
+                return None
+            try:
+                current_identity = require_same_recovery_snapshot(
+                    spec,
+                    recovery_identity,
+                    inspect_container(
+                        spec,
+                        runner,
+                        environment,
+                        podman,
+                        target=recovery_identity.container_id,
+                    ),
+                )
+                if current_identity.status == original_status:
+                    return None
+                if current_identity.status != "running":
+                    raise LauncherError("container_recovery_rollback_failed")
+                _run_container_action(
+                    recovery_identity.container_id,
+                    "stop",
+                    runner,
+                    environment,
+                    podman,
+                    "container_recovery_rollback_failed",
+                )
+            except LauncherError as exc:
+                # If the pinned container vanished, the mutable name may now
+                # refer to a foreign replacement. Do not touch it or mask the
+                # already-redacted lifecycle error with inspect details.
+                if exc.code == "container_inspect_failed":
+                    return None
+                rollback_failure = exc
+            except BaseException:
+                rollback_failure = LauncherError("container_recovery_rollback_failed")
+            return rollback_failure
+
+        try:
+            recovery_attempted = True
+            _run_container_action(
+                recovery_identity.container_id,
+                "start",
+                runner,
+                environment,
+                podman,
+                "container_start_failed",
+            )
+            readiness(spec.endpoint, attempts, interval)
+            write_state(spec)
+        except BaseException as exc:
+            failed_rollback = rollback_once()
+            if failed_rollback is not None and isinstance(exc, Exception):
+                raise failed_rollback from None
+            if isinstance(exc, LauncherError):
+                raise
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise LauncherError("container_recovery_failed") from None
         return {**spec.public(), "status": "ready", "created": False}, False
 
     if not port_checker(spec.port):
@@ -633,11 +834,7 @@ def status_instance(
         return {**spec.public(), "status": "absent"}
     document = inspect_container(spec, runner, environment, podman)
     require_owned_container(spec, document)
-    state = document.get("State")
-    status = state.get("Status") if isinstance(state, dict) else None
-    if type(status) is not str:
-        raise LauncherError("container_inspect_invalid")
-    return {**spec.public(), "status": status}
+    return {**spec.public(), "status": container_status(document)}
 
 
 def _remove_owned_path(path: Path) -> None:

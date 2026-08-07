@@ -39,6 +39,19 @@ class FakePodman:
         self.calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
         self.containers: dict[str, dict[str, object]] = {}
         self.fail_run_for: set[str] = set()
+        self.fail_start_for: set[str] = set()
+        self.fail_stop_for: set[str] = set()
+        self.raise_start_for: set[str] = set()
+        self.raise_stop_for: set[str] = set()
+
+    def _resolve(self, target: str) -> tuple[str, dict[str, object]] | None:
+        document = self.containers.get(target)
+        if document is not None:
+            return target, document
+        for name, candidate in self.containers.items():
+            if candidate.get("Id") == target:
+                return name, candidate
+        return None
 
     def __call__(
         self,
@@ -62,12 +75,12 @@ class FakePodman:
                 json.dumps([{"RepoDigests": [launcher.expected_repo_digest(image)]}]),
             )
         if args[:2] == ("container", "exists"):
-            return launcher.CommandResult(0 if args[2] in self.containers else 1, "")
+            return launcher.CommandResult(0 if self._resolve(args[2]) is not None else 1, "")
         if args[:2] == ("container", "inspect"):
-            document = self.containers.get(args[2])
-            if document is None:
+            resolved = self._resolve(args[2])
+            if resolved is None:
                 return launcher.CommandResult(1, "")
-            return launcher.CommandResult(0, json.dumps([document]))
+            return launcher.CommandResult(0, json.dumps([resolved[1]]))
         if args[:1] == ("run",):
             name = args[args.index("--name") + 1]
             if name in self.fail_run_for:
@@ -77,11 +90,53 @@ class FakePodman:
                 if value == "--label":
                     key, label_value = args[index + 1].split("=", 1)
                     labels[key] = label_value
+            volume = args[args.index("--volume") + 1]
+            image = args[-3]
             self.containers[name] = {
+                "Id": f"synthetic-{name}",
+                "Name": f"/{name}",
+                "ImageName": image,
                 "Config": {"Labels": labels},
+                "Mounts": [
+                    {
+                        "Type": "bind",
+                        "Source": volume.removesuffix(":/opt/data"),
+                        "Destination": "/opt/data",
+                    }
+                ],
                 "State": {"Status": "running"},
             }
             return launcher.CommandResult(0, "synthetic-container-id\n")
+        if args[:1] == ("start",):
+            target = args[1]
+            resolved = self._resolve(target)
+            name = resolved[0] if resolved is not None else target
+            if name in self.raise_start_for or target in self.raise_start_for:
+                raise RuntimeError("synthetic-start-output-secret")
+            if name in self.fail_start_for or target in self.fail_start_for:
+                return launcher.CommandResult(125, "synthetic-start-output-secret")
+            if resolved is None:
+                return launcher.CommandResult(125, "synthetic-start-output-secret")
+            state = resolved[1].get("State")
+            if not isinstance(state, dict):
+                raise AssertionError(f"missing fake state for {name}")
+            state["Status"] = "running"
+            return launcher.CommandResult(0, "synthetic-start-id\n")
+        if args[:1] == ("stop",):
+            target = args[1]
+            resolved = self._resolve(target)
+            name = resolved[0] if resolved is not None else target
+            if name in self.raise_stop_for or target in self.raise_stop_for:
+                raise RuntimeError("synthetic-stop-output-secret")
+            if name in self.fail_stop_for or target in self.fail_stop_for:
+                return launcher.CommandResult(125, "synthetic-stop-output-secret")
+            if resolved is None:
+                return launcher.CommandResult(125, "synthetic-stop-output-secret")
+            state = resolved[1].get("State")
+            if not isinstance(state, dict):
+                raise AssertionError(f"missing fake state for {name}")
+            state["Status"] = "exited"
+            return launcher.CommandResult(0, "")
         if args[:2] == ("rm", "--force"):
             self.containers.pop(args[2], None)
             return launcher.CommandResult(0, "")
@@ -148,6 +203,16 @@ class HermesAgentLauncherTests(unittest.TestCase):
     @staticmethod
     def ready(endpoint: str, attempts: int, interval: float) -> None:
         del endpoint, attempts, interval
+
+    def foreign_container(self, spec, *, status: str) -> dict[str, object]:
+        return {
+            "Id": f"foreign-{spec.container}",
+            "Name": f"/{spec.container}",
+            "ImageName": "docker.io/other/hermes-agent:v1@sha256:" + ("b" * 64),
+            "Config": {"Labels": {}},
+            "Mounts": [],
+            "State": {"Status": status},
+        }
 
     def start(self, spec=None, *, readiness=None):
         return launcher.start_instance(
@@ -280,16 +345,285 @@ class HermesAgentLauncherTests(unittest.TestCase):
     def test_existing_exact_container_is_reused_but_mismatch_is_rejected(self) -> None:
         spec = self.make_spec()
         self.start(spec)
+        self.fake.calls.clear()
         result, created = self.start(spec)
         self.assertFalse(created)
         self.assertFalse(result["created"])
         run_count = sum(command[1] == "run" for command, _ in self.fake.calls)
-        self.assertEqual(run_count, 1)
+        self.assertEqual(run_count, 0)
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(lifecycle, [])
 
         self.fake.containers[spec.container]["Config"] = {"Labels": {}}
         with self.assertRaises(launcher.LauncherError) as raised:
             self.start(spec)
         self.assertEqual(raised.exception.code, "container_not_launcher_owned")
+
+    def test_existing_stopped_container_is_started_before_readiness(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.calls.clear()
+
+        result, created = self.start(spec)
+
+        self.assertFalse(created)
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(lifecycle, [("start", f"synthetic-{spec.container}")])
+
+    def test_existing_stopped_container_failure_before_start_preserves_stopped_state(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.calls.clear()
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: False,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+
+        self.assertEqual(raised.exception.code, "port_unavailable")
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(lifecycle, [])
+
+    def test_existing_stopped_container_failure_after_start_rolls_back_once(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.calls.clear()
+
+        def not_ready(endpoint: str, attempts: int, interval: float) -> None:
+            del endpoint, attempts, interval
+            raise launcher.LauncherError("provider_readiness_timeout")
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, readiness=not_ready)
+
+        self.assertEqual(raised.exception.code, "provider_readiness_timeout")
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(
+            lifecycle,
+            [("start", f"synthetic-{spec.container}"), ("stop", f"synthetic-{spec.container}")],
+        )
+
+    def test_existing_stopped_container_start_failure_is_bounded_and_redacted(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.fail_start_for.add(spec.container)
+        self.fake.calls.clear()
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec)
+
+        self.assertEqual(raised.exception.code, "container_start_failed")
+        self.assertNotIn("synthetic-start-output-secret", str(raised.exception))
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(lifecycle, [("start", f"synthetic-{spec.container}")])
+
+    def test_existing_stopped_container_rollback_failure_fails_closed(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.fail_stop_for.add(spec.container)
+        self.fake.calls.clear()
+
+        def not_ready(endpoint: str, attempts: int, interval: float) -> None:
+            del endpoint, attempts, interval
+            raise launcher.LauncherError("provider_readiness_timeout")
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, readiness=not_ready)
+
+        self.assertEqual(raised.exception.code, "container_recovery_rollback_failed")
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(
+            lifecycle,
+            [("start", f"synthetic-{spec.container}"), ("stop", f"synthetic-{spec.container}")],
+        )
+
+    def test_existing_stopped_container_cancellation_rolls_back_once(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.calls.clear()
+
+        def cancelled(endpoint: str, attempts: int, interval: float) -> None:
+            del endpoint, attempts, interval
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.start(spec, readiness=cancelled)
+
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(
+            lifecycle,
+            [("start", f"synthetic-{spec.container}"), ("stop", f"synthetic-{spec.container}")],
+        )
+
+    def test_existing_foreign_container_is_rejected_before_recovery_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.containers[spec.container]["Config"] = {"Labels": {launcher.MANAGED_LABEL: launcher.MANAGED_VERSION}}
+        self.fake.calls.clear()
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec)
+
+        self.assertEqual(raised.exception.code, "container_not_launcher_owned")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(lifecycle, [])
+
+    def test_existing_container_mount_mismatch_fails_closed_before_recovery(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.containers[spec.container]["Mounts"] = [
+            {
+                "Type": "bind",
+                "Source": str(self.roots.data / "foreign"),
+                "Destination": "/opt/data",
+            }
+        ]
+        self.fake.calls.clear()
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec)
+
+        self.assertEqual(raised.exception.code, "container_identity_unproven")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(lifecycle, [])
+
+    def test_existing_container_image_or_name_mismatch_fails_closed_before_recovery(self) -> None:
+        for field, value in (("ImageName", "docker.io/other/hermes-agent:v1@sha256:" + ("a" * 64)), ("Name", "/foreign-container")):
+            with self.subTest(field=field):
+                spec = self.make_spec(instance=f"test-{field.lower()}")
+                self.start(spec)
+                self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+                self.fake.containers[spec.container][field] = value
+                self.fake.calls.clear()
+
+                with self.assertRaises(launcher.LauncherError) as raised:
+                    self.start(spec)
+
+                self.assertEqual(raised.exception.code, "container_identity_unproven")
+                lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+                self.assertEqual(lifecycle, [])
+
+    def test_existing_container_replacement_race_is_rejected_before_start(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.calls.clear()
+        inspect_count = 0
+
+        def racing_runner(command, environment, timeout):
+            nonlocal inspect_count
+            if tuple(command[1:3]) == ("container", "inspect"):
+                inspect_count += 1
+                if inspect_count == 2:
+                    self.fake.containers[spec.container]["Id"] = "synthetic-replacement"
+            return self.fake(command, environment, timeout)
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                runner=racing_runner,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+
+        self.assertEqual(raised.exception.code, "container_recovery_race")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(lifecycle, [])
+
+    def test_existing_container_replacement_after_final_inspect_is_not_started(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        original_id = self.fake.containers[spec.container]["Id"]
+        foreign = self.foreign_container(spec, status="exited")
+        self.fake.calls.clear()
+
+        def racing_runner(command, environment, timeout):
+            if command[1:] == ("start", original_id):
+                self.fake.containers[spec.container] = foreign
+            return self.fake(command, environment, timeout)
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                runner=racing_runner,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+
+        self.assertEqual(raised.exception.code, "container_start_failed")
+        self.assertNotIn("synthetic-start-output-secret", str(raised.exception))
+        self.assertEqual(foreign["State"]["Status"], "exited")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(lifecycle, [("start", original_id)])
+
+    def test_existing_container_replacement_after_rollback_inspect_is_not_stopped(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        original_id = self.fake.containers[spec.container]["Id"]
+        foreign = self.foreign_container(spec, status="running")
+        self.fake.calls.clear()
+
+        def not_ready(endpoint: str, attempts: int, interval: float) -> None:
+            del endpoint, attempts, interval
+            raise launcher.LauncherError("provider_readiness_timeout")
+
+        def racing_runner(command, environment, timeout):
+            if command[1:] == ("stop", original_id):
+                self.fake.containers[spec.container] = foreign
+            return self.fake(command, environment, timeout)
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                runner=racing_runner,
+                readiness=not_ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+
+        self.assertEqual(raised.exception.code, "container_recovery_rollback_failed")
+        self.assertNotIn("synthetic-stop-output-secret", str(raised.exception))
+        self.assertEqual(foreign["State"]["Status"], "running")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
+        self.assertEqual(
+            lifecycle,
+            [("start", original_id), ("stop", original_id)],
+        )
 
     def test_occupied_port_fails_before_run(self) -> None:
         spec = self.make_spec()
