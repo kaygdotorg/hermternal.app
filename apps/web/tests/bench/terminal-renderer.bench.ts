@@ -1,10 +1,16 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { dirname, extname, join, resolve } from 'node:path';
+import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 import { build } from 'vite';
+import {
+  assertCleanExecutionInputs,
+  assertCommitMatchesHead,
+  validateFullCommit
+} from './terminal-renderer.provenance';
 
 type Distribution = Readonly<{
   min: number;
@@ -41,6 +47,7 @@ type Trace = Readonly<{
     source_commit: string;
     browser_entry: string;
     renderer_module: string;
+    execution_inputs: ReadonlyArray<Readonly<{ path: string; bytes: number; sha256: string }>>;
   }>;
   build: Readonly<{
     command: string;
@@ -66,10 +73,19 @@ type Trace = Readonly<{
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const webRoot = resolve(sourceDirectory, '../..');
+const repoRoot = resolve(webRoot, '../..');
 const browserEntry = resolve(sourceDirectory, 'terminal-renderer.browser.ts');
 const rendererModule = resolve(webRoot, 'src/lib/terminal/renderer.ts');
+const terminalStyles = resolve(webRoot, 'src/lib/terminal/terminal.css');
+const provenanceModule = resolve(sourceDirectory, 'terminal-renderer.provenance.ts');
 const outputDirectory = resolve(webRoot, '../../.terminal-renderer-benchmark-build');
-const sourceCommit = process.env.GIT_COMMIT ?? 'unavailable';
+const executionCriticalPaths = [
+  'apps/web/src/lib/terminal/renderer.ts',
+  'apps/web/src/lib/terminal/terminal.css',
+  'apps/web/tests/bench/terminal-renderer.browser.ts',
+  'apps/web/tests/bench/terminal-renderer.bench.ts',
+  'apps/web/tests/bench/terminal-renderer.provenance.ts'
+] as const;
 const repetitions = 5;
 const warmups = 0;
 
@@ -81,8 +97,22 @@ const CONTENT_TYPES: Record<string, string> = {
   '.wasm': 'application/wasm'
 };
 
-function sha256(path: string, bytes: Uint8Array): string {
+function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function gitText(...args: string[]): string {
+  return execFileSync('git', ['-C', repoRoot, ...args], { encoding: 'utf8' }).trim();
+}
+
+async function executionInputs(): Promise<ReadonlyArray<Readonly<{ path: string; bytes: number; sha256: string }>>> {
+  const absolutePaths = [rendererModule, terminalStyles, browserEntry, fileURLToPath(import.meta.url), provenanceModule];
+  const inputs = [];
+  for (const absolutePath of absolutePaths) {
+    const bytes = await fs.readFile(absolutePath);
+    inputs.push({ path: relative(repoRoot, absolutePath), bytes: bytes.byteLength, sha256: sha256(bytes) });
+  }
+  return inputs;
 }
 
 function html(entryFile: string): string {
@@ -192,7 +222,7 @@ async function buildRenderer(): Promise<Readonly<{
   const files = [];
   for (const relative of filePaths) {
     const bytes = await fs.readFile(join(outputDirectory, relative));
-    files.push({ path: relative, bytes: bytes.byteLength, sha256: sha256(relative, bytes) });
+    files.push({ path: relative, bytes: bytes.byteLength, sha256: sha256(bytes) });
   }
   files.sort((left, right) => left.path.localeCompare(right.path));
   return {
@@ -206,6 +236,15 @@ function sumFiles(files: ReadonlyArray<Readonly<{ path: string; bytes: number }>
 }
 
 async function run(): Promise<Trace> {
+  const sourceCommit = validateFullCommit(process.env.GIT_COMMIT);
+  assertCommitMatchesHead(sourceCommit, gitText('rev-parse', 'HEAD'));
+  const status = execFileSync(
+    'git',
+    ['-C', repoRoot, 'status', '--porcelain=v1', '--untracked-files=all', '--', ...executionCriticalPaths],
+    { encoding: 'utf8' }
+  );
+  assertCleanExecutionInputs(status);
+  const inputs = await executionInputs();
   const buildResult = await buildRenderer();
   const server = await listen(outputDirectory, buildResult.entryFile);
   const browser = await chromium.launch({
@@ -232,7 +271,8 @@ async function run(): Promise<Trace> {
       revision: {
         source_commit: sourceCommit,
         browser_entry: 'apps/web/tests/bench/terminal-renderer.browser.ts',
-        renderer_module: 'apps/web/src/lib/terminal/renderer.ts'
+        renderer_module: 'apps/web/src/lib/terminal/renderer.ts',
+        execution_inputs: inputs
       },
       build: {
         command: 'vite build --configFile false --minify',

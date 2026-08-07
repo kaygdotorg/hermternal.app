@@ -102,7 +102,8 @@ type WTermModules = Readonly<{
 }>;
 
 let wTermModulesPromise: Promise<WTermModules> | null = null;
-const wTermHostTokens = new WeakMap<HTMLElement, symbol>();
+const WTERM_HOST_CLASSES = ['wterm', 'cursor-blink', 'has-scrollback', 'focused'] as const;
+const wTermHostRecords = new WeakMap<HTMLElement, WTermHostRecord>();
 
 function loadWTermModules(): Promise<WTermModules> {
   if (wTermModulesPromise) return wTermModulesPromise;
@@ -283,13 +284,113 @@ type WTermRuntime = {
   debug?: unknown;
 };
 
+type WTermHostRecord = {
+  readonly beforeClasses: ReadonlySet<string>;
+  readonly ownedClasses: Set<string>;
+  readonly beforeHeight: string;
+  readonly beforeRowHeight: string;
+  ownedHeight: string | null;
+  ownedRowHeight: string | null;
+  observedHeight: string;
+  observedRowHeight: string;
+  readonly observedClasses: Map<string, boolean>;
+  readonly observedOtherClasses: Set<string>;
+  otherClassesCaptured: boolean;
+  disposed: boolean;
+};
+
 /**
- * Dispose a stale W-Term instance without allowing its upstream `destroy()`
- * method to clear a host that a later mount or another owner may have reused.
- * The renderer has already removed its owned children when it released the
- * host; this path only removes the stale instance's own node/listeners.
+ * Record the host values changed by this adapter generation. The last observed
+ * value is used as an ownership check at cleanup time: if another owner has
+ * restored or changed a value, cleanup leaves it untouched.
  */
-function disposeWTermPreservingHost(term: WTerm, host: HTMLElement, hostToken: symbol): void {
+function recordWTermHostState(host: HTMLElement, record: WTermHostRecord, includeStyles = true): void {
+  for (const className of WTERM_HOST_CLASSES) {
+    const present = host.classList.contains(className);
+    if (!record.beforeClasses.has(className) && present) record.ownedClasses.add(className);
+    if (record.ownedClasses.has(className)) record.observedClasses.set(className, present);
+  }
+  if (!record.otherClassesCaptured) {
+    for (const className of host.classList) {
+      if (!WTERM_HOST_CLASSES.includes(className as (typeof WTERM_HOST_CLASSES)[number])) {
+        record.observedOtherClasses.add(className);
+      }
+    }
+    record.otherClassesCaptured = true;
+  }
+
+  if (!includeStyles) return;
+  const height = host.style.height;
+  record.ownedHeight = height !== record.beforeHeight ? height : null;
+  record.observedHeight = height;
+  const rowHeight = host.style.getPropertyValue('--term-row-height');
+  record.ownedRowHeight = rowHeight !== record.beforeRowHeight ? rowHeight : null;
+  record.observedRowHeight = rowHeight;
+}
+
+function sameClassSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const className of left) {
+    if (!right.has(className)) return false;
+  }
+  return true;
+}
+
+function restoreOwnedStyle(
+  host: HTMLElement,
+  property: 'height' | '--term-row-height',
+  before: string,
+  owned: string | null,
+  observed: string
+): void {
+  const current = property === 'height' ? host.style.height : host.style.getPropertyValue(property);
+  if (owned === null || current !== observed) return;
+  if (before) host.style.setProperty(property, before);
+  else host.style.removeProperty(property);
+}
+
+function restoreWTermHostRecord(host: HTMLElement, record: WTermHostRecord): void {
+  if (wTermHostRecords.get(host) !== record) return;
+
+  const currentOtherClasses = new Set(
+    [...host.classList].filter(
+      (className) => !WTERM_HOST_CLASSES.includes(className as (typeof WTERM_HOST_CLASSES)[number])
+    )
+  );
+  // A foreign class change means host class ownership is no longer provable.
+  // Leave every host class untouched rather than stripping a later owner's
+  // state while still removing the adapter's private nodes below.
+  if (sameClassSet(currentOtherClasses, record.observedOtherClasses)) {
+    for (const className of record.ownedClasses) {
+      // A class can be removed or replaced by a later owner while the async
+      // adapter is settling. Only remove the exact state this generation saw.
+      if (record.observedClasses.get(className) === true && host.classList.contains(className)) {
+        host.classList.remove(className);
+      }
+    }
+    restoreOwnedStyle(host, 'height', record.beforeHeight, record.ownedHeight, record.observedHeight);
+    restoreOwnedStyle(
+      host,
+      '--term-row-height',
+      record.beforeRowHeight,
+      record.ownedRowHeight,
+      record.observedRowHeight
+    );
+  }
+  wTermHostRecords.delete(host);
+}
+
+/**
+ * Dispose a W-Term instance without allowing its upstream `destroy()` method
+ * to clear a host that a later mount or another owner may have reused. The
+ * pinned package keeps its internal fields private, so this compatibility
+ * path removes only the instance's known nodes/listeners and conditionally
+ * restores host values that this exact adapter mount changed.
+ */
+function disposeWTermPreservingHost(term: WTerm, host: HTMLElement, record: WTermHostRecord): void {
+  if (record.disposed) return;
+  record.disposed = true;
+
   const runtime = term as unknown as WTermRuntime;
   runtime._destroyed = true;
   if (runtime._renderTimer != null) clearTimeout(runtime._renderTimer);
@@ -324,12 +425,10 @@ function disposeWTermPreservingHost(term: WTerm, host: HTMLElement, hostToken: s
   runtime.renderer = null;
   runtime.debug = null;
   runtime._coreOption = undefined;
-  if (wTermHostTokens.get(host) === hostToken) {
-    wTermHostTokens.delete(host);
-    host.classList.remove('wterm', 'cursor-blink', 'has-scrollback', 'focused');
-    host.style.removeProperty('height');
-    host.style.removeProperty('--term-row-height');
+  if ((globalThis as typeof globalThis & { __wterm?: WTerm }).__wterm === term) {
+    delete (globalThis as typeof globalThis & { __wterm?: WTerm }).__wterm;
   }
+  restoreWTermHostRecord(host, record);
   term.bridge = null;
 }
 
@@ -368,6 +467,23 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         // reference is the safest available behavior for the stale operation.
         throw new Error('terminal mount became stale');
       }
+
+      const record: WTermHostRecord = {
+        beforeClasses: new Set(host.classList),
+        ownedClasses: new Set(),
+        beforeHeight: host.style.height,
+        beforeRowHeight: host.style.getPropertyValue('--term-row-height'),
+        ownedHeight: null,
+        ownedRowHeight: null,
+        observedHeight: host.style.height,
+        observedRowHeight: host.style.getPropertyValue('--term-row-height'),
+        observedClasses: new Map(),
+        observedOtherClasses: new Set(),
+        otherClassesCaptured: false,
+        disposed: false
+      };
+      wTermHostRecords.set(host, record);
+
       const termOptions: WTermOptions = {
         core,
         cols: options.initialSize.cols,
@@ -376,52 +492,66 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         cursorBlink: true,
         onData: options.onInput
       };
-      const hostToken = Symbol('wterm-host');
-      wTermHostTokens.set(host, hostToken);
-      const term = new WTerm(host, termOptions);
-      await term.init();
-      if (options.isCurrent && !options.isCurrent()) {
-        disposeWTermPreservingHost(term, host, hostToken);
-        throw new Error('terminal mount became stale');
-      }
-      normalizeWTermInputAccessibility(host);
-      relockWTermHeight(host, options.initialSize.rows);
-
-      return {
-        write(data) {
-          term.write(data);
-        },
-        resize(cols, rows) {
-          term.resize(cols, rows);
-          // W-Term locks the initial height when autoResize is false. Re-lock
-          // after every explicit resize so a larger row count is not clipped.
-          relockWTermHeight(host, rows);
-        },
-        focus() {
-          term.focus();
-        },
-        paste(data) {
-          const safe = sanitizePaste(data);
-          const bracketed = term.bridge?.bracketedPaste() ?? false;
-          const payload = bracketed ? `\x1b[200~${safe}\x1b[201~` : safe;
-          options.onInput(payload);
-        },
-        dispose(disposeOptions) {
-          if (disposeOptions?.preserveHost) {
-            disposeWTermPreservingHost(term, host, hostToken);
-            return;
-          }
-          try {
-            term.destroy();
-          } finally {
-            // @wterm/ghostty@0.3.2 has no core disposal API. Drop the active
-            // bridge reference after DOM cleanup; deterministic WASM release
-            // remains an upstream limitation documented by this boundary.
-            if (wTermHostTokens.get(host) === hostToken) wTermHostTokens.delete(host);
-            term.bridge = null;
-          }
+      let term: WTerm | null = null;
+      try {
+        term = new WTerm(host, termOptions);
+        await term.init();
+        normalizeWTermInputAccessibility(host);
+        relockWTermHeight(host, options.initialSize.rows);
+        // Capture W-Term's final initial host state before consulting the
+        // renderer generation guard. No user callback runs between these
+        // statements, so a stale cleanup cannot learn a later owner's values.
+        recordWTermHostState(host, record);
+        if (options.isCurrent && !options.isCurrent()) {
+          disposeWTermPreservingHost(term, host, record);
+          throw new Error('terminal mount became stale');
         }
-      };
+
+        const mountedTerm = term;
+        let disposed = false;
+        return {
+          write(data) {
+            if (disposed) return;
+            mountedTerm.write(data);
+          },
+          resize(cols, rows) {
+            if (disposed) return;
+            mountedTerm.resize(cols, rows);
+            // W-Term locks the initial height when autoResize is false. Re-lock
+            // after every explicit resize so a larger row count is not clipped.
+            relockWTermHeight(host, rows);
+            recordWTermHostState(host, record);
+          },
+          focus() {
+            if (disposed) return;
+            mountedTerm.focus();
+            recordWTermHostState(host, record, false);
+          },
+          paste(data) {
+            if (disposed) return;
+            const safe = sanitizePaste(data);
+            const bracketed = mountedTerm.bridge?.bracketedPaste() ?? false;
+            const payload = bracketed ? `\x1b[200~${safe}\x1b[201~` : safe;
+            options.onInput(payload);
+          },
+          dispose(disposeOptions) {
+            if (disposed) return;
+            disposed = true;
+            // A stale or direct dispose must not learn values restored or
+            // written by a later host owner. Class/style state is recorded at
+            // initialization and only when this adapter explicitly changes it.
+            disposeWTermPreservingHost(mountedTerm, host, record);
+          }
+        };
+      } catch (error) {
+        if (term && !record.disposed) {
+          recordWTermHostState(host, record);
+          disposeWTermPreservingHost(term, host, record);
+        } else if (!term && !record.disposed) {
+          restoreWTermHostRecord(host, record);
+        }
+        throw error;
+      }
     }
   };
 }

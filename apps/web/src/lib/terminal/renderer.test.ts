@@ -6,6 +6,11 @@ import {
   type TerminalRendererAdapter,
   type TerminalSize
 } from './renderer';
+import {
+  assertCleanExecutionInputs,
+  assertCommitMatchesHead,
+  validateFullCommit
+} from '../../../tests/bench/terminal-renderer.provenance';
 
 const moduleMocks = vi.hoisted(() => {
   class MockGhosttyCore {
@@ -19,7 +24,25 @@ const moduleMocks = vi.hoisted(() => {
     static instances: MockWTerm[] = [];
     readonly host: HTMLElement;
     readonly onData: (data: string) => void;
+    readonly _container: HTMLElement;
+    readonly _onClickFocus: EventListener;
     bridge: MockGhosttyCore;
+    input: {
+      textarea: HTMLTextAreaElement;
+      _onKeyDown: EventListener;
+      _onPaste: EventListener;
+      _onCompositionStart: EventListener;
+      _onCompositionEnd: EventListener;
+      _onInput: EventListener;
+      _onFocus: EventListener;
+      _onBlur: EventListener;
+    } | null = null;
+    resizeObserver: ResizeObserver | null = null;
+    _renderTimer: number | null = null;
+    rafId: number | null = null;
+    renderer: unknown = {};
+    debug: unknown = {};
+    _coreOption: unknown;
     readonly writes: Uint8Array[] = [];
     readonly resizes: TerminalSize[] = [];
     destroyed = false;
@@ -27,22 +50,56 @@ const moduleMocks = vi.hoisted(() => {
     constructor(host: HTMLElement, options: { core: MockGhosttyCore; onData: (data: string) => void }) {
       this.host = host;
       this.bridge = options.core;
+      this._coreOption = options.core;
       this.onData = options.onData;
+      this._container = document.createElement('div');
+      this._container.className = 'term-grid';
+      host.appendChild(this._container);
+      this._onClickFocus = vi.fn();
+      host.addEventListener('click', this._onClickFocus);
       MockWTerm.instances.push(this);
     }
 
     async init(): Promise<this> {
       this.host.dataset.mockWterm = 'ready';
       this.host.classList.add('wterm', 'cursor-blink');
+      this.host.style.setProperty('--term-row-height', '17px');
       const row = document.createElement('div');
       row.className = 'term-row';
       row.style.height = '17px';
       row.style.lineHeight = '17px';
-      this.host.appendChild(row);
+      this._container.appendChild(row);
       const input = document.createElement('textarea');
       input.setAttribute('tabindex', '0');
       input.setAttribute('aria-hidden', 'true');
-      this.host.appendChild(input);
+      const onKeyDown: EventListener = () => undefined;
+      const onPaste: EventListener = () => undefined;
+      const onCompositionStart: EventListener = () => undefined;
+      const onCompositionEnd: EventListener = () => undefined;
+      const onInput: EventListener = () => undefined;
+      const onFocus: EventListener = () => this.host.classList.add('focused');
+      const onBlur: EventListener = () => this.host.classList.remove('focused');
+      const listeners: ReadonlyArray<readonly [string, EventListener]> = [
+        ['keydown', onKeyDown],
+        ['paste', onPaste],
+        ['compositionstart', onCompositionStart],
+        ['compositionend', onCompositionEnd],
+        ['input', onInput],
+        ['focus', onFocus],
+        ['blur', onBlur]
+      ];
+      for (const [type, listener] of listeners) input.addEventListener(type, listener);
+      this.input = {
+        textarea: input,
+        _onKeyDown: onKeyDown,
+        _onPaste: onPaste,
+        _onCompositionStart: onCompositionStart,
+        _onCompositionEnd: onCompositionEnd,
+        _onInput: onInput,
+        _onFocus: onFocus,
+        _onBlur: onBlur
+      };
+      this._container.appendChild(input);
       return this;
     }
 
@@ -56,7 +113,7 @@ const moduleMocks = vi.hoisted(() => {
 
     focus(): void {
       this.host.tabIndex = 0;
-      this.host.focus();
+      this.input?.textarea.focus();
     }
 
     destroy(): void {
@@ -322,11 +379,24 @@ describe('TerminalRenderer', () => {
     expect(renderer.state).toBe('ready');
   });
 
-  it('does not let stale async teardown erase a host reused after dispose', async () => {
+  it('does not let stale async teardown erase a reused host or its newer owner state', async () => {
     let resolveMount!: (terminal: MountedTerminal) => void;
     const host = document.createElement('div');
+    host.className = 'shell-host';
+    host.setAttribute('role', 'group');
+    host.setAttribute('aria-label', 'Original host');
+    host.style.height = '91px';
+    host.style.setProperty('--term-row-height', '19px');
+    const ownedNode = document.createElement('pre');
+    ownedNode.textContent = 'stale backend output';
+    const ownedListener = vi.fn();
     const dispose = vi.fn((disposeOptions?: { preserveHost?: boolean }) => {
-      if (!disposeOptions?.preserveHost) host.replaceChildren();
+      if (disposeOptions?.preserveHost) {
+        ownedNode.remove();
+        host.removeEventListener('click', ownedListener);
+      } else {
+        host.replaceChildren();
+      }
     });
     const backend: MountedTerminal = {
       write: vi.fn(),
@@ -336,24 +406,49 @@ describe('TerminalRenderer', () => {
       dispose
     };
     const adapter: TerminalRendererAdapter = {
-      mount: vi.fn(() => new Promise<MountedTerminal>((resolve) => {
-        resolveMount = resolve;
-      }))
+      mount: vi.fn(() => {
+        // The backend has already inserted its own node and listener before
+        // the renderer can release the host, matching a stale constructed
+        // W-Term instance rather than a stale pre-construction promise.
+        host.appendChild(ownedNode);
+        host.addEventListener('click', ownedListener);
+        return new Promise<MountedTerminal>((resolve) => {
+          resolveMount = resolve;
+        });
+      })
     };
     const renderer = createTerminalRenderer({ adapter });
     const mounting = renderer.mount(host);
 
     await vi.waitFor(() => expect(adapter.mount).toHaveBeenCalledTimes(1));
+    expect(host).toContainElement(ownedNode);
     renderer.dispose();
+
     const replacement = document.createElement('p');
     replacement.textContent = 'owned by the next host owner';
+    const newerOwnerListener = vi.fn();
+    host.classList.add('next-owner');
+    host.setAttribute('role', 'article');
+    host.setAttribute('aria-label', 'Next owner');
+    host.style.height = '777px';
+    host.style.setProperty('--term-row-height', '33px');
     host.appendChild(replacement);
+    host.addEventListener('click', newerOwnerListener);
 
     resolveMount(backend);
     await mounting;
 
+    host.dispatchEvent(new Event('click', { bubbles: true }));
     expect(renderer.state).toBe('disposed');
     expect(host).toContainElement(replacement);
+    expect(host).not.toContainElement(ownedNode);
+    expect(host).toHaveClass('shell-host', 'next-owner');
+    expect(host).toHaveAttribute('role', 'article');
+    expect(host).toHaveAttribute('aria-label', 'Next owner');
+    expect(host.style.height).toBe('777px');
+    expect(host.style.getPropertyValue('--term-row-height')).toBe('33px');
+    expect(ownedListener).not.toHaveBeenCalled();
+    expect(newerOwnerListener).toHaveBeenCalledTimes(1);
     expect(dispose).toHaveBeenCalledWith({ preserveHost: true });
   });
 
@@ -620,5 +715,69 @@ describe('TerminalRenderer', () => {
     mounted.dispose({ preserveHost: true });
     expect(host).toContainElement(reusedContent);
     mounted.dispose();
+  });
+
+  it('direct adapter disposal preserves host values and cleans only its own nodes once', async () => {
+    moduleMocks.MockGhosttyCore.load.mockResolvedValue(new moduleMocks.MockGhosttyCore());
+    const host = document.createElement('div');
+    host.className = 'shell-host wterm';
+    host.setAttribute('role', 'group');
+    host.setAttribute('aria-label', 'Existing terminal host');
+    host.style.height = '91px';
+    host.style.setProperty('--term-row-height', '19px');
+    const existingContent = document.createElement('p');
+    existingContent.textContent = 'preexisting content';
+    host.appendChild(existingContent);
+    document.body.appendChild(host);
+
+    const mounted = await createWTermGhosttyAdapter().mount(host, {
+      initialSize: { cols: 80, rows: 24 },
+      scrollbackLimitBytes: 64 * 1024,
+      onInput: vi.fn()
+    });
+    const instance = moduleMocks.MockWTerm.instances.at(-1)!;
+    const clickFocus = instance._onClickFocus;
+    instance.input?.textarea.dispatchEvent(new Event('focus'));
+    const click = new Event('click', { bubbles: true });
+    host.dispatchEvent(click);
+    expect(clickFocus).toHaveBeenCalledTimes(1);
+
+    mounted.dispose();
+
+    expect(host).toContainElement(existingContent);
+    expect(host.querySelector('.term-grid')).not.toBeInTheDocument();
+    expect(host.querySelector('textarea')).not.toBeInTheDocument();
+    expect(host).toHaveClass('shell-host', 'wterm');
+    expect(host).not.toHaveClass('cursor-blink', 'focused');
+    expect(host).toHaveAttribute('role', 'group');
+    expect(host).toHaveAttribute('aria-label', 'Existing terminal host');
+    expect(host.style.height).toBe('91px');
+    expect(host.style.getPropertyValue('--term-row-height')).toBe('19px');
+
+    host.dispatchEvent(new Event('click', { bubbles: true }));
+    expect(clickFocus).toHaveBeenCalledTimes(1);
+    mounted.dispose();
+    expect(host).toContainElement(existingContent);
+    expect(host.style.height).toBe('91px');
+  });
+
+  it('rejects missing or malformed benchmark commit provenance', () => {
+    expect(() => validateFullCommit(undefined)).toThrow('explicit 40-character commit SHA');
+    expect(() => validateFullCommit('not-a-commit')).toThrow('explicit 40-character commit SHA');
+    expect(() => validateFullCommit('a'.repeat(39))).toThrow('explicit 40-character commit SHA');
+    expect(() => validateFullCommit('g'.repeat(40))).toThrow('explicit 40-character commit SHA');
+  });
+
+  it('rejects mismatched revisions and dirty benchmark inputs', () => {
+    const commit = 'a'.repeat(40);
+    expect(() => assertCommitMatchesHead(commit, 'b'.repeat(40))).toThrow('does not match checkout HEAD');
+    expect(() => assertCommitMatchesHead(commit, commit.toUpperCase())).not.toThrow();
+    expect(() => assertCleanExecutionInputs(' M apps/web/src/lib/terminal/renderer.ts')).toThrow(
+      'execution-critical benchmark inputs are dirty'
+    );
+    expect(() => assertCleanExecutionInputs('?? apps/web/tests/bench/terminal-renderer.bench.ts')).toThrow(
+      'execution-critical benchmark inputs are dirty'
+    );
+    expect(() => assertCleanExecutionInputs('')).not.toThrow();
   });
 });
