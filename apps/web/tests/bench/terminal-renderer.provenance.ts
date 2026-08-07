@@ -18,9 +18,11 @@ type Distribution = Readonly<{
   mean: number;
 }>;
 
+const DISTRIBUTION_KEYS = ['min', 'p50', 'p95', 'p99', 'max', 'mean'] as const;
+
 type SampleSet = Readonly<{
-  raw_samples: readonly number[];
-  distribution?: Distribution;
+  raw_samples?: readonly number[];
+  distribution?: Partial<Distribution>;
 }>;
 
 /** Validate counts and finite published values before a trace is emitted. */
@@ -30,7 +32,7 @@ export function assertBenchmarkSampleCounts(
 ): void {
   for (const [name, expected] of Object.entries(repetitions)) {
     const sampleSet = samples[name];
-    const actual = sampleSet?.raw_samples.length;
+    const actual = sampleSet?.raw_samples?.length;
     if (actual !== expected) {
       throw new Error(`benchmark sample count for ${name} was ${actual ?? 0}; expected ${expected}`);
     }
@@ -42,11 +44,16 @@ export function assertBenchmarkSampleCounts(
         throw new Error(`benchmark sample for ${name} was not a finite non-negative number`);
       }
     }
-    if (sampleSet.distribution) {
-      for (const value of Object.values(sampleSet.distribution)) {
-        if (!Number.isFinite(value) || value < 0) {
-          throw new Error(`benchmark distribution for ${name} was not finite and non-negative`);
-        }
+    if (!sampleSet.distribution) {
+      throw new Error(`benchmark distribution for ${name} was missing`);
+    }
+    for (const key of DISTRIBUTION_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(sampleSet.distribution, key)) {
+        throw new Error(`benchmark distribution for ${name} was incomplete; missing ${key}`);
+      }
+      const value = sampleSet.distribution[key];
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new Error(`benchmark distribution for ${name} was not finite and non-negative`);
       }
     }
   }

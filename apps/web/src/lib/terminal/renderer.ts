@@ -108,6 +108,10 @@ const wTermHostRecords = new WeakMap<HTMLElement, WTermHostRecord>();
 // time. This prevents an older renderer instance from clearing a newer owner's
 // content when both instances are pointed at the same host.
 const rendererHostOwners = new WeakMap<HTMLElement, object>();
+const typedArrayNameGetter = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  Symbol.toStringTag
+)?.get;
 
 function loadWTermModules(): Promise<WTermModules> {
   if (wTermModulesPromise) return wTermModulesPromise;
@@ -167,9 +171,15 @@ function sanitizePaste(text: string): string {
 
 function isUint8Array(data: unknown): data is Uint8Array {
   // Vitest, embedded webviews, and iframes can provide a Uint8Array from a
-  // different realm. ArrayBuffer.isView rejects Symbol.toStringTag spoofing,
-  // while the tag distinguishes Uint8Array from other typed-array views.
-  return ArrayBuffer.isView(data) && Object.prototype.toString.call(data) === '[object Uint8Array]';
+  // different realm. Use the intrinsic %TypedArray%.prototype brand getter,
+  // rather than Object#toString, because an instance can spoof toStringTag.
+  if (!ArrayBuffer.isView(data) || !typedArrayNameGetter) return false;
+  try {
+    return typedArrayNameGetter.call(data) === 'Uint8Array';
+  } catch {
+    // Proxies and revoked views must fail closed rather than reaching W-Term.
+    return false;
+  }
 }
 
 function renderLoading(host: HTMLElement): void {
@@ -614,6 +624,14 @@ class ManagedTerminalRenderer implements TerminalRenderer {
   private restoreFocusOnMount = false;
   private focusRequested = false;
   private readonly onPasteCapture = (event: Event): void => {
+    const host = this.host;
+    if (
+      this.state !== 'ready' ||
+      !this.backend ||
+      !host ||
+      event.currentTarget !== host ||
+      rendererHostOwners.get(host) !== this
+    ) return;
     const clipboardEvent = event as ClipboardEvent;
     const text = clipboardEvent.clipboardData?.getData('text/plain') ?? '';
     if (!text || !isDangerousPaste(text)) return;

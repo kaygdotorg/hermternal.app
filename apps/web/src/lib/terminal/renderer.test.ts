@@ -498,11 +498,84 @@ describe('TerminalRenderer', () => {
     expect(secondDispose).not.toHaveBeenCalled();
   });
 
-  it('rejects Symbol.toStringTag spoofed terminal byte inputs', () => {
-    const renderer = createTerminalRenderer({ adapter: createDeterministicAdapter().adapter });
-    const spoof = { byteLength: 1, [Symbol.toStringTag]: 'Uint8Array' } as unknown as Uint8Array;
+  it('does not let a stale shared-host paste listener cancel the current owner', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const firstConfirm = vi.fn().mockResolvedValue(true);
+    const secondConfirm = vi.fn().mockResolvedValue(true);
+    const first = createTerminalRenderer({
+      adapter: createDeterministicAdapter().adapter,
+      confirmPaste: firstConfirm
+    });
+    let resolveSecondMount!: (backend: MountedTerminal) => void;
+    const secondBackend: MountedTerminal = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      focus: vi.fn(),
+      paste: vi.fn(),
+      dispose: vi.fn()
+    };
+    const secondAdapter: TerminalRendererAdapter = {
+      mount: vi.fn(() => new Promise<MountedTerminal>((resolve) => {
+        resolveSecondMount = resolve;
+      }))
+    };
+    const second = createTerminalRenderer({ adapter: secondAdapter, confirmPaste: secondConfirm });
 
-    expect(() => renderer.write(spoof)).toThrow('terminal writes require Uint8Array data');
+    await first.mount(host);
+    const mounting = second.mount(host);
+    await vi.waitFor(() => expect(secondAdapter.mount).toHaveBeenCalledTimes(1));
+
+    const duringHandoff = clipboardPaste(host, 'printf one\nprintf two');
+    expect(duringHandoff.defaultPrevented).toBe(false);
+    expect(firstConfirm).not.toHaveBeenCalled();
+
+    resolveSecondMount(secondBackend);
+    await mounting;
+    const currentPaste = clipboardPaste(host, 'printf three\nprintf four');
+    await vi.waitFor(() => expect(secondConfirm).toHaveBeenCalledTimes(1));
+    expect(currentPaste.defaultPrevented).toBe(true);
+    expect(firstConfirm).not.toHaveBeenCalled();
+  });
+
+  it('rejects spoofed typed-array inputs while accepting a real Uint8Array subclass', async () => {
+    const { adapter, terminals } = createDeterministicAdapter();
+    const renderer = createTerminalRenderer({ adapter });
+    const spoofedUint16 = new Uint16Array([0x1234]);
+    Object.defineProperty(spoofedUint16, Symbol.toStringTag, { value: 'Uint8Array' });
+    const spoofedDataView = new DataView(new ArrayBuffer(2));
+    Object.defineProperty(spoofedDataView, Symbol.toStringTag, { value: 'Uint8Array' });
+    const proxiedUint8 = new Proxy(new Uint8Array([0x41]), {});
+
+    expect(() => renderer.write(spoofedUint16 as unknown as Uint8Array)).toThrow(
+      'terminal writes require Uint8Array data'
+    );
+    expect(() => renderer.write(spoofedDataView as unknown as Uint8Array)).toThrow(
+      'terminal writes require Uint8Array data'
+    );
+    expect(() => renderer.write(proxiedUint8)).toThrow('terminal writes require Uint8Array data');
+
+    const frame = document.createElement('iframe');
+    document.body.appendChild(frame);
+    const foreignWindow = frame.contentWindow as (Window & { Uint8Array?: typeof Uint8Array }) | null;
+    const ForeignUint8Array = foreignWindow?.Uint8Array;
+    expect(ForeignUint8Array).toBeDefined();
+    if (!ForeignUint8Array) return;
+    renderer.write(new ForeignUint8Array([0x43, 0x44]) as unknown as Uint8Array);
+
+    class ExtendedUint8Array extends Uint8Array {}
+    const host = document.createElement('div');
+    await renderer.mount(host);
+    renderer.write(new ExtendedUint8Array([0x41, 0x42]));
+
+    expect(terminals[0]?.operations).toContainEqual({
+      type: 'write',
+      bytes: new Uint8Array([0x43, 0x44])
+    });
+    expect(terminals[0]?.operations).toContainEqual({
+      type: 'write',
+      bytes: new Uint8Array([0x41, 0x42])
+    });
   });
 
   it('does not paste into a remounted backend after an old confirmation resolves', async () => {
@@ -865,6 +938,37 @@ describe('TerminalRenderer', () => {
     };
     expect(() => assertBenchmarkSampleCounts(nonFinite, BENCHMARK_REPETITIONS)).toThrow(
       'benchmark sample for replay_1_mib was not a finite non-negative number'
+    );
+    const missingDistribution = {
+      ...samples,
+      cold_initialization: {
+        raw_samples: Array(BENCHMARK_REPETITIONS.cold_initialization).fill(1)
+      }
+    };
+    expect(() => assertBenchmarkSampleCounts(missingDistribution, BENCHMARK_REPETITIONS)).toThrow(
+      'benchmark distribution for cold_initialization was missing'
+    );
+
+    const incompleteDistribution = {
+      ...samples,
+      resize_settling: {
+        raw_samples: Array(BENCHMARK_REPETITIONS.resize_settling).fill(1),
+        distribution: { min: 1, p50: 1, p95: 1, p99: 1, max: 1 }
+      }
+    };
+    expect(() => assertBenchmarkSampleCounts(incompleteDistribution, BENCHMARK_REPETITIONS)).toThrow(
+      'benchmark distribution for resize_settling was incomplete; missing mean'
+    );
+
+    const invalidDistribution = {
+      ...samples,
+      repeated_mount_dispose: {
+        raw_samples: Array(BENCHMARK_REPETITIONS.repeated_mount_dispose).fill(1),
+        distribution: { min: 1, p50: 1, p95: 1, p99: 1, max: 1, mean: '1' } as unknown as Record<string, number>
+      }
+    };
+    expect(() => assertBenchmarkSampleCounts(invalidDistribution, BENCHMARK_REPETITIONS)).toThrow(
+      'benchmark distribution for repeated_mount_dispose was not finite and non-negative'
     );
   });
 });
