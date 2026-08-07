@@ -100,9 +100,9 @@
     "live_run": false
   },
   "integrity": {
-    "fixture_canonical_sha256": "ab761e28e5aee441322a5e2d63cd02fae1f280b255fe57f6d93a2000b347b03d",
-    "baseline_canonical_sha256": "215b895dffd11e7b82debba6bde30a93729739e74e4e48c994f4dd89d7ddd78a",
-    "artifact_manifest_sha256": "3eb76ba26d01c9319d2a311d774da1d0cfdabe6d40b94ff9643c9c68f9f4be0b",
+    "fixture_canonical_sha256": "ac65551d9b19d1bea5663f778aca95ecc7e453ff40de7d9f88f11a93de98b335",
+    "baseline_canonical_sha256": "5b9030a0c8362f4b4d57187039e430dbf160d7cd65eabaf6ec73da1d87fed18e",
+    "artifact_manifest_sha256": "57d5714edb58c37f4f0e16c8c2d0ed491805fc6574409d458e23dd73fafbaa65",
     "artifact_manifest": [
       {
         "path": "README.md",
@@ -111,12 +111,12 @@
       },
       {
         "path": "probe-baseline.json",
-        "sha256": "215b895dffd11e7b82debba6bde30a93729739e74e4e48c994f4dd89d7ddd78a",
+        "sha256": "5b9030a0c8362f4b4d57187039e430dbf160d7cd65eabaf6ec73da1d87fed18e",
         "size_bytes": 3158
       },
       {
         "path": "ticket-fixtures.json",
-        "sha256": "85b53729852049eb757e9dc76f7a6af21e8460b4b415718bc10702265c3e0287",
+        "sha256": "63492a77b3fa4766a77bdd88ae722ca19bf2c13dbf80e86f4264cfbfb3c94e86",
         "size_bytes": 37600
       },
       {
@@ -126,7 +126,7 @@
       },
       {
         "path": "validate.py",
-        "sha256": "c0a4fe51161d760f4cff42d0c9f0336ad0a2902371e240fa1815125f6bc226f4",
+        "sha256": "9953166f05a26d7a98ca099a4562c33ad26f785c5a2e3e7148440d445f03664f",
         "size_bytes": 55327
       }
     ],
