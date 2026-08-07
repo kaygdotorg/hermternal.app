@@ -237,9 +237,12 @@ function removeLoadingStatus(host: HTMLElement): void {
  * tabbable. That violates aria-hidden-focus, so the renderer owns the small
  * compatibility adaptation until the upstream input contract is corrected.
  */
-export function normalizeWTermInputAccessibility(host: HTMLElement): void {
-  const input = host.querySelector<HTMLTextAreaElement>('textarea[aria-hidden="true"][tabindex="0"]');
-  if (!input) return;
+export function normalizeWTermInputAccessibility(
+  host: HTMLElement,
+  ownedInput?: HTMLTextAreaElement
+): void {
+  const input = ownedInput ?? host.querySelector<HTMLTextAreaElement>('textarea[aria-hidden="true"][tabindex="0"]');
+  if (!input || !host.contains(input)) return;
   input.removeAttribute('aria-hidden');
   input.setAttribute('aria-label', 'Terminal input');
 }
@@ -296,8 +299,24 @@ type WTermHostRecord = {
   readonly observedClasses: Map<string, boolean>;
   readonly observedOtherClasses: Set<string>;
   otherClassesCaptured: boolean;
+  classObserver: MutationObserver | null;
   disposed: boolean;
 };
+
+function recordWTermClasses(host: HTMLElement, record: WTermHostRecord): void {
+  for (const className of WTERM_HOST_CLASSES) {
+    const present = host.classList.contains(className);
+    if (!record.beforeClasses.has(className) && present) record.ownedClasses.add(className);
+    if (record.ownedClasses.has(className)) record.observedClasses.set(className, present);
+  }
+  if (record.otherClassesCaptured) return;
+  for (const className of host.classList) {
+    if (!WTERM_HOST_CLASSES.includes(className as (typeof WTERM_HOST_CLASSES)[number])) {
+      record.observedOtherClasses.add(className);
+    }
+  }
+  record.otherClassesCaptured = true;
+}
 
 /**
  * Record the host values changed by this adapter generation. The last observed
@@ -305,20 +324,7 @@ type WTermHostRecord = {
  * restored or changed a value, cleanup leaves it untouched.
  */
 function recordWTermHostState(host: HTMLElement, record: WTermHostRecord, includeStyles = true): void {
-  for (const className of WTERM_HOST_CLASSES) {
-    const present = host.classList.contains(className);
-    if (!record.beforeClasses.has(className) && present) record.ownedClasses.add(className);
-    if (record.ownedClasses.has(className)) record.observedClasses.set(className, present);
-  }
-  if (!record.otherClassesCaptured) {
-    for (const className of host.classList) {
-      if (!WTERM_HOST_CLASSES.includes(className as (typeof WTERM_HOST_CLASSES)[number])) {
-        record.observedOtherClasses.add(className);
-      }
-    }
-    record.otherClassesCaptured = true;
-  }
-
+  recordWTermClasses(host, record);
   if (!includeStyles) return;
   const height = host.style.height;
   record.ownedHeight = height !== record.beforeHeight ? height : null;
@@ -390,6 +396,8 @@ function restoreWTermHostRecord(host: HTMLElement, record: WTermHostRecord): voi
 function disposeWTermPreservingHost(term: WTerm, host: HTMLElement, record: WTermHostRecord): void {
   if (record.disposed) return;
   record.disposed = true;
+  record.classObserver?.disconnect();
+  record.classObserver = null;
 
   const runtime = term as unknown as WTermRuntime;
   runtime._destroyed = true;
@@ -480,6 +488,7 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
         observedClasses: new Map(),
         observedOtherClasses: new Set(),
         otherClassesCaptured: false,
+        classObserver: null,
         disposed: false
       };
       wTermHostRecords.set(host, record);
@@ -496,12 +505,19 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
       try {
         term = new WTerm(host, termOptions);
         await term.init();
-        normalizeWTermInputAccessibility(host);
+        const ownedInput = (term as unknown as WTermRuntime).input?.textarea;
+        normalizeWTermInputAccessibility(host, ownedInput);
         relockWTermHeight(host, options.initialSize.rows);
         // Capture W-Term's final initial host state before consulting the
         // renderer generation guard. No user callback runs between these
         // statements, so a stale cleanup cannot learn a later owner's values.
         recordWTermHostState(host, record);
+        if (typeof MutationObserver === 'function') {
+          record.classObserver = new MutationObserver(() => {
+            if (!record.disposed) recordWTermClasses(host, record);
+          });
+          record.classObserver.observe(host, { attributes: true, attributeFilter: ['class'] });
+        }
         if (options.isCurrent && !options.isCurrent()) {
           disposeWTermPreservingHost(term, host, record);
           throw new Error('terminal mount became stale');
@@ -537,9 +553,11 @@ export function createWTermGhosttyAdapter(): TerminalRendererAdapter {
           dispose(disposeOptions) {
             if (disposed) return;
             disposed = true;
-            // A stale or direct dispose must not learn values restored or
-            // written by a later host owner. Class/style state is recorded at
-            // initialization and only when this adapter explicitly changes it.
+            // A stale dispose must not learn values restored or written by a
+            // later host owner. A direct dispose can capture the final known
+            // class state synchronously; the observer covers async W-Term
+            // render/focus mutations while the adapter is mounted.
+            if (!disposeOptions?.preserveHost) recordWTermClasses(host, record);
             disposeWTermPreservingHost(mountedTerm, host, record);
           }
         };

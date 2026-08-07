@@ -1,5 +1,29 @@
 const FULL_COMMIT_SHA = /^[0-9a-f]{40}$/iu;
 
+export const BENCHMARK_REPETITIONS = {
+  cold_initialization: 5,
+  first_byte_to_first_glyph: 5,
+  sustained_output: 10,
+  resize_settling: 10,
+  replay_1_mib: 5,
+  repeated_mount_dispose: 10
+} as const;
+
+type SampleSet = Readonly<{ raw_samples: readonly number[] }>;
+
+/** Validate that workload counts match the method metadata in the trace. */
+export function assertBenchmarkSampleCounts(
+  samples: Readonly<Record<string, SampleSet>>,
+  repetitions: Readonly<Record<string, number>>
+): void {
+  for (const [name, expected] of Object.entries(repetitions)) {
+    const actual = samples[name]?.raw_samples.length;
+    if (actual !== expected) {
+      throw new Error(`benchmark sample count for ${name} was ${actual ?? 0}; expected ${expected}`);
+    }
+  }
+}
+
 /** Validate the explicit source revision required for a reproducible trace. */
 export function validateFullCommit(value: string | undefined): string {
   const commit = value?.trim() ?? '';

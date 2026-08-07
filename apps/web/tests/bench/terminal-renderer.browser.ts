@@ -55,20 +55,33 @@ function percentile(sorted: readonly number[], quantile: number): number {
 }
 
 function round(value: number): number {
-  return Number(value.toFixed(3));
+  const scale = 1000;
+  const scaled = value * scale;
+  const sign = scaled < 0 ? -1 : 1;
+  const magnitude = Math.abs(scaled);
+  const lower = Math.floor(magnitude);
+  const fraction = magnitude - lower;
+  const epsilon = Number.EPSILON * Math.max(1, magnitude) * 8;
+  const roundedInteger = fraction > 0.5 + epsilon
+    ? lower + 1
+    : fraction < 0.5 - epsilon
+      ? lower
+      : lower % 2 === 0 ? lower : lower + 1;
+  return sign * roundedInteger / scale;
 }
 
 function summarize(rawSamples: number[]): Samples {
-  const sorted = [...rawSamples].sort((left, right) => left - right);
-  const mean = rawSamples.reduce((total, value) => total + value, 0) / Math.max(1, rawSamples.length);
+  const publishedSamples = rawSamples.map(round);
+  const sorted = [...publishedSamples].sort((left, right) => left - right);
+  const mean = publishedSamples.reduce((total, value) => total + value, 0) / Math.max(1, publishedSamples.length);
   return {
-    raw_samples: rawSamples.map(round),
+    raw_samples: publishedSamples,
     distribution: {
-      min: round(sorted[0] ?? 0),
+      min: sorted[0] ?? 0,
       p50: round(percentile(sorted, 0.5)),
       p95: round(percentile(sorted, 0.95)),
       p99: round(percentile(sorted, 0.99)),
-      max: round(sorted.at(-1) ?? 0),
+      max: sorted.at(-1) ?? 0,
       mean: round(mean)
     }
   };

@@ -7,8 +7,10 @@ import {
   type TerminalSize
 } from './renderer';
 import {
+  assertBenchmarkSampleCounts,
   assertCleanExecutionInputs,
   assertCommitMatchesHead,
+  BENCHMARK_REPETITIONS,
   validateFullCommit
 } from '../../../tests/bench/terminal-renderer.provenance';
 
@@ -105,6 +107,9 @@ const moduleMocks = vi.hoisted(() => {
 
     write(data: Uint8Array): void {
       this.writes.push(data);
+      queueMicrotask(() => {
+        if (!this.destroyed) this.host.classList.add('has-scrollback');
+      });
     }
 
     resize(cols: number, rows: number): void {
@@ -725,9 +730,12 @@ describe('TerminalRenderer', () => {
     host.setAttribute('aria-label', 'Existing terminal host');
     host.style.height = '91px';
     host.style.setProperty('--term-row-height', '19px');
+    const existingInput = document.createElement('textarea');
+    existingInput.setAttribute('aria-hidden', 'true');
+    existingInput.setAttribute('tabindex', '0');
     const existingContent = document.createElement('p');
     existingContent.textContent = 'preexisting content';
-    host.appendChild(existingContent);
+    host.append(existingInput, existingContent);
     document.body.appendChild(host);
 
     const mounted = await createWTermGhosttyAdapter().mount(host, {
@@ -737,6 +745,11 @@ describe('TerminalRenderer', () => {
     });
     const instance = moduleMocks.MockWTerm.instances.at(-1)!;
     const clickFocus = instance._onClickFocus;
+    mounted.write(new Uint8Array([0x41]));
+    await Promise.resolve();
+    expect(host).toHaveClass('has-scrollback');
+    expect(existingInput).toHaveAttribute('aria-hidden', 'true');
+    expect(instance.input?.textarea).toHaveAttribute('aria-label', 'Terminal input');
     instance.input?.textarea.dispatchEvent(new Event('focus'));
     const click = new Event('click', { bubbles: true });
     host.dispatchEvent(click);
@@ -745,10 +758,12 @@ describe('TerminalRenderer', () => {
     mounted.dispose();
 
     expect(host).toContainElement(existingContent);
+    expect(host).toContainElement(existingInput);
     expect(host.querySelector('.term-grid')).not.toBeInTheDocument();
-    expect(host.querySelector('textarea')).not.toBeInTheDocument();
+    expect(host.querySelectorAll('textarea')).toHaveLength(1);
+    expect(host.querySelector('textarea')).toBe(existingInput);
     expect(host).toHaveClass('shell-host', 'wterm');
-    expect(host).not.toHaveClass('cursor-blink', 'focused');
+    expect(host).not.toHaveClass('cursor-blink', 'focused', 'has-scrollback');
     expect(host).toHaveAttribute('role', 'group');
     expect(host).toHaveAttribute('aria-label', 'Existing terminal host');
     expect(host.style.height).toBe('91px');
@@ -779,5 +794,16 @@ describe('TerminalRenderer', () => {
       'execution-critical benchmark inputs are dirty'
     );
     expect(() => assertCleanExecutionInputs('')).not.toThrow();
+  });
+
+  it('validates per-workload benchmark sample counts', () => {
+    const samples = Object.fromEntries(
+      Object.entries(BENCHMARK_REPETITIONS).map(([name, count]) => [name, { raw_samples: Array(count).fill(1) }])
+    );
+    expect(() => assertBenchmarkSampleCounts(samples, BENCHMARK_REPETITIONS)).not.toThrow();
+    const invalid = { ...samples, sustained_output: { raw_samples: [1] } };
+    expect(() => assertBenchmarkSampleCounts(invalid, BENCHMARK_REPETITIONS)).toThrow(
+      'sample count for sustained_output was 1; expected 10'
+    );
   });
 });

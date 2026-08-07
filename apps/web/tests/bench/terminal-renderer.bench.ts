@@ -4,11 +4,13 @@ import { createReadStream, promises as fs } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from '@playwright/test';
+import { chromium, type Browser, type Page } from '@playwright/test';
 import { build } from 'vite';
 import {
+  assertBenchmarkSampleCounts,
   assertCleanExecutionInputs,
   assertCommitMatchesHead,
+  BENCHMARK_REPETITIONS,
   validateFullCommit
 } from './terminal-renderer.provenance';
 
@@ -61,7 +63,7 @@ type Trace = Readonly<{
   method: Readonly<{
     browser: string;
     warmups: number;
-    repetitions: number;
+    repetitions: Readonly<Record<string, number>>;
     percentile: 'inclusive-linear-r7';
     quantiles: [0.5, 0.95, 0.99];
     rounding: 'decimal-half-even-to-three-places';
@@ -86,7 +88,6 @@ const executionCriticalPaths = [
   'apps/web/tests/bench/terminal-renderer.bench.ts',
   'apps/web/tests/bench/terminal-renderer.provenance.ts'
 ] as const;
-const repetitions = 5;
 const warmups = 0;
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -245,26 +246,33 @@ async function run(): Promise<Trace> {
   );
   assertCleanExecutionInputs(status);
   const inputs = await executionInputs();
-  const buildResult = await buildRenderer();
-  const server = await listen(outputDirectory, buildResult.entryFile);
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--enable-precise-memory-info']
-  });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  let server: Awaited<ReturnType<typeof listen>> | null = null;
+  let browser: Browser | null = null;
+  let page: Page | null = null;
   try {
-    await page.goto(server.origin, { waitUntil: 'networkidle' });
-    await page.waitForFunction(() => {
+    const buildResult = await buildRenderer();
+    const activeServer = await listen(outputDirectory, buildResult.entryFile);
+    server = activeServer;
+    const activeBrowser = await chromium.launch({
+      headless: true,
+      args: ['--enable-precise-memory-info']
+    });
+    browser = activeBrowser;
+    const activePage = await activeBrowser.newPage({ viewport: { width: 1280, height: 800 } });
+    page = activePage;
+    await activePage.goto(activeServer.origin, { waitUntil: 'networkidle' });
+    await activePage.waitForFunction(() => {
       const value = (window as Window & { __hermternalTerminalRendererBenchmark?: BrowserBenchmarkResult })
         .__hermternalTerminalRendererBenchmark;
       return Boolean(value?.samples && Object.keys(value.samples).length > 0);
     }, undefined, { timeout: 120_000 });
-    const browserResult = await page.evaluate(() => {
+    const browserResult = await activePage.evaluate(() => {
       const value = (window as Window & { __hermternalTerminalRendererBenchmark?: BrowserBenchmarkResult })
         .__hermternalTerminalRendererBenchmark;
       if (!value) throw new Error('browser benchmark did not publish a result');
       return value;
     });
+    assertBenchmarkSampleCounts(browserResult.samples, BENCHMARK_REPETITIONS);
     const files = buildResult.files;
     return {
       schema: 'hermternal.web-terminal-renderer-benchmark.v1',
@@ -286,7 +294,7 @@ async function run(): Promise<Trace> {
       method: {
         browser: 'Playwright Chromium headless',
         warmups,
-        repetitions,
+        repetitions: BENCHMARK_REPETITIONS,
         percentile: 'inclusive-linear-r7',
         quantiles: [0.5, 0.95, 0.99],
         rounding: 'decimal-half-even-to-three-places'
@@ -305,9 +313,9 @@ async function run(): Promise<Trace> {
       budget: null
     };
   } finally {
-    await page.close();
-    await browser.close();
-    await server.close();
+    if (page) await page.close().catch(() => undefined);
+    if (browser) await browser.close().catch(() => undefined);
+    if (server) await server.close().catch(() => undefined);
     await fs.rm(outputDirectory, { recursive: true, force: true });
   }
 }
