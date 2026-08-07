@@ -4,10 +4,11 @@ import type {
   JsonRpcChatTransport,
   JsonRpcConnectionState
 } from '$lib/chat/json-rpc-chat';
-import type {
-  PtyConnectionState,
-  PtyTransport,
-  PtyTransportEvent
+import {
+  PtyTransportError,
+  type PtyConnectionState,
+  type PtyTransport,
+  type PtyTransportEvent
 } from '$lib/terminal/pty-transport';
 import type {
   CurrentSessionTerminalEvent,
@@ -117,12 +118,17 @@ function createPtyHarness(): {
     state = { ...state, status: 'exited' };
     emit({ type: 'state', state });
   });
+  const reconnect = vi.fn(async () => {
+    if (state.mode !== 'attach') {
+      throw new PtyTransportError('legacy-reattach-prohibited', state.generation);
+    }
+  });
   const pty: PtyTransport = {
     get state() {
       return state;
     },
     connect,
-    reconnect: vi.fn().mockResolvedValue(undefined),
+    reconnect,
     sendInput: vi.fn(),
     resize: vi.fn(),
     detach,
@@ -208,6 +214,7 @@ describe('LiveWorkspaceSession current-session Terminal integration', () => {
       closeClassification: 'authentication-rejected',
       outputMayBeTruncated: false,
       explicitlyClosed: false,
+      reconnectSupported: false,
       failure: 'authentication-required'
     };
     pty.emit({

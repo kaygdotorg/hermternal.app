@@ -25,13 +25,21 @@ and disposal, resize forwarding, focus intents, lifecycle notices, native
 selection/copy, and accessible recovery actions. The bridge forwards raw
 `Uint8Array` output directly to that renderer and stores only redacted
 lifecycle state. The renderer-ready gate delays the first PTY connection until
-the lazy sink is mounted; generation changes reset the renderer before the next
-session's output is accepted.
+the lazy sink is mounted; reconnect keeps that mounted sink in place so a PTY
+generation change cannot open a zero-byte-loss window.
 
-`4401` remains an authentication-required recovery path for Chat and PTY. `4403`
-remains an incompatible-origin failure and never invokes sign-in recovery. These
-are prototype boundaries backed by synthetic tests; same-session proof against
-hermternal-dev is still required after review and merge.
+The pinned server source does not expose a client-visible attach-token issuance
+route. The normal browser composition therefore uses a legacy PTY and labels
+reattach as unavailable instead of presenting a reconnect action that would
+silently create a second process. A reviewed attach provider can opt into the
+transport's exact session/attach/process-identity reconnect contract later.
+
+`4401` remains an authentication-required recovery path for Chat and PTY. The
+root composition expires the authenticated BrowserAuthSession from a PTY `4401`
+even while Chat hides TerminalSurface. `4403` remains an incompatible-origin
+failure and never invokes sign-in recovery. These are prototype boundaries
+backed by synthetic tests; same-session proof against hermternal-dev is still
+required after review and merge.
 
 ## Prompt delivery
 

@@ -1,6 +1,9 @@
 import { createBrowserChatTransport } from '$lib/chat/browser-chat';
 import type { BrowserWebSocketFactory } from '$lib/chat/browser-chat';
-import { createBrowserPtyTransport } from '$lib/terminal/current-session-terminal';
+import {
+  createBrowserPtyTransport,
+  type BrowserPtyWebSocketFactory
+} from '$lib/terminal/current-session-terminal';
 import { createBrowserAuthClient } from '$lib/auth-ui/browser-auth';
 import { BrowserAuthSession } from '$lib/auth-ui/browser-auth-session';
 import { discoverProviders } from '$lib/auth-ui/provider-discovery';
@@ -24,7 +27,10 @@ export interface LiveRootContext {
 
 export interface LiveRootDependencies {
   readonly fetch?: LiveRestFetch;
+  /** Shared browser socket seam used by the Chat adapter and, when no PTY-specific seam is supplied, PTY tests. */
   readonly createSocket?: BrowserWebSocketFactory;
+  /** PTY's binary socket surface; production uses the default browser adapter. */
+  readonly createPtySocket?: BrowserPtyWebSocketFactory;
 }
 
 /**
@@ -50,6 +56,11 @@ export function resolveRootRoute(search: string): RootRouteSelection {
  */
 export function createLiveRootContext(dependencies: LiveRootDependencies = {}): LiveRootContext {
   const rest = createLiveRestTransport({ fetch: dependencies.fetch });
+  const createPtySocket: BrowserPtyWebSocketFactory | undefined =
+    dependencies.createPtySocket ??
+    (dependencies.createSocket
+      ? (url, _signal) => dependencies.createSocket?.(url) as unknown as ReturnType<BrowserPtyWebSocketFactory>
+      : undefined);
   const workspace = new LiveWorkspaceSession({
     rest,
     createChat: (options) =>
@@ -58,7 +69,7 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
         fetch: dependencies.fetch,
         createSocket: dependencies.createSocket
       }),
-    createTerminal: () => createBrowserPtyTransport({ fetch: dependencies.fetch })
+    createTerminal: () => createBrowserPtyTransport({ fetch: dependencies.fetch, createSocket: createPtySocket })
   });
   const auth = new BrowserAuthSession({
     client: createBrowserAuthClient({ fetch: dependencies.fetch }),
@@ -66,6 +77,28 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
     // Authentication invalidation closes chat and drops session presentation
     // references before logout or expiry publishes its next observable state.
     invalidateLocalSession: () => workspace.invalidate()
+  });
+
+  let expiredTerminalGeneration: number | undefined;
+  workspace.subscribe((snapshot) => {
+    // PTY 4401 is an authentication boundary even when TerminalSurface is
+    // hidden behind Chat. Keep it separate from 4403, which remains a
+    // fail-closed origin/deployment error and never expires the root session.
+    const terminal = snapshot.terminal;
+    if (
+      auth.current.status !== 'authenticated' ||
+      terminal?.failure !== 'authentication-required' ||
+      terminal.generation === expiredTerminalGeneration
+    ) {
+      return;
+    }
+    expiredTerminalGeneration = terminal.generation;
+    try {
+      auth.expire();
+    } catch {
+      // Auth may already be transitioning through logout or expiry. The
+      // existing BrowserAuthSession lifecycle remains the authority.
+    }
   });
 
   let disposed = false;
