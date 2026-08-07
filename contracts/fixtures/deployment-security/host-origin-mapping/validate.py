@@ -181,9 +181,9 @@ _STRUCTURAL_TOKEN_CONTINUATION = frozenset(
 SENSITIVE_ASSIGNMENT = re.compile(r"(?i)(?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential(?:s)?)\s*[:=]\s*[^\s,;}]+")
 CREDENTIAL_HEADER = re.compile(r"(?i)\bauthorization\s*:\s*(?:basic|bearer)\s+[A-Za-z0-9._~+/-]{4,}")
 COOKIE_HEADER = re.compile(r"(?i)\bcookie\s*:\s*[^\s,;}]+")
-STRUCTURED_CREDENTIAL_KEY = re.compile(r"(?i)[\"'](?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential|credentials)[\"']\s*:\s*")
-STRUCTURED_USER_DATA = re.compile(r"(?i)[\"'](?:user[_-]?data|user[_-]?content|personal[_-]?data|prompt|message|content)[\"']\s*:\s*")
-STRUCTURED_TRANSCRIPT = re.compile(r"(?i)[\"'](?:transcript|transcripts|conversation|chat[_-]?history|messages|turns|tool[_-]?output)[\"']\s*:\s*")
+STRUCTURED_CREDENTIAL_KEY = re.compile(r"(?i)[\"'](?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential|credentials)[\"']\s*:\s*")
+STRUCTURED_USER_DATA = re.compile(r"(?i)[\"'](?:user[_-]?data|userdata|user[_-]?content|personal[_-]?data|prompt|message|content)[\"']\s*:\s*")
+STRUCTURED_TRANSCRIPT = re.compile(r"(?i)[\"'](?:transcript|transcripts|conversation|chat[_-]?history|chathistory|messages|turns|tool[_-]?output)[\"']\s*:\s*")
 USER_ROLE = re.compile(r"(?i)[\"']role[\"']\s*:\s*[\"']user[\"']")
 PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 IPV4 = re.compile(r"(?<![A-Za-z0-9_])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_])")
@@ -199,11 +199,11 @@ REDACTION_DETECTOR_NAMES = frozenset({
     "EMAIL", "LIVE_URL", "HOSTNAME", "ABSOLUTE_PATH", "VALIDATOR_PIN_LINE",
 })
 SENSITIVE_STRUCTURED_KEYS = frozenset({
-    "password", "passwd", "secret", "token", "ticket", "cookie", "authorization", "api_key",
+    "password", "passwd", "secret", "token", "ticket", "cookie", "authorization", "api_key", "apikey",
     "access_token", "refresh_token", "client_secret", "private_key", "credential", "credentials",
 })
-USER_DATA_STRUCTURED_KEYS = frozenset({"user", "user_data", "user_content", "personal_data", "prompt", "message", "content"})
-TRANSCRIPT_STRUCTURED_KEYS = frozenset({"transcript", "transcripts", "conversation", "chat_history", "messages", "turns", "tool_output"})
+USER_DATA_STRUCTURED_KEYS = frozenset({"user", "user_data", "userdata", "user_content", "personal_data", "prompt", "message", "content"})
+TRANSCRIPT_STRUCTURED_KEYS = frozenset({"transcript", "transcripts", "conversation", "chat_history", "chathistory", "messages", "turns", "tool_output"})
 
 
 class ValidationError(Exception):
@@ -708,7 +708,7 @@ def artifact_manifest(captured: CapturedArtifacts | None = None) -> dict[str, An
         total += len(raw)
         require(total <= MAX_TOTAL_RETAINED_BYTES, "retained artifact byte limit exceeded")
         files.append({"path": name, "bytes": len(raw), "sha256": hashlib.sha256(normalized).hexdigest()})
-        digest.update(name.encode("utf-8")); digest.update(b"\0"); digest.update(normalized); digest.update(b"\0")
+        digest.update(name.encode("utf-8")); digest.update(bytes((0,))); digest.update(normalized); digest.update(bytes((0,)))
     return {"files": files, "bytes": total, "sha256": digest.hexdigest()}
 
 
@@ -936,21 +936,37 @@ def _python_literal_exempt_nodes(tree: ast.AST, source_name: str, parents: dict[
     return exempt
 
 
-def _scan_python_string_literals(text: str, source_name: str) -> None:
+def _scan_python_literal_constants(text: str, source_name: str) -> None:
+    """Scan AST-decoded string and bytes constants without executing code.
+
+    The Python parser resolves literal escape sequences before exposing constant
+    values. Dynamic expressions and calls are never evaluated. A malformed
+    source artifact cannot be safely classified, so it fails closed instead of
+    skipping the decoded-literal scan.
+    """
+
     try:
         tree = ast.parse(text)
-    except (IndentationError, SyntaxError, ValueError, TypeError, RecursionError):
-        return
+    except (IndentationError, SyntaxError, ValueError, TypeError, RecursionError) as exc:
+        raise ValidationError("retained Python source is malformed") from exc
     parents: dict[int, ast.AST] = {}
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             parents[id(child)] = parent
     exempt = _python_literal_exempt_nodes(tree, source_name, parents)
     for node in ast.walk(tree):
-        if id(node) in exempt or not isinstance(node, ast.Constant) or type(node.value) is not str:
+        if id(node) in exempt or not isinstance(node, ast.Constant):
             continue
-        _inspect_unicode_string(node.value, "retained Python string", allow_whitespace=True)
-        _scan_text_detectors(node.value)
+        if type(node.value) is str:
+            _inspect_unicode_string(node.value, "retained Python string", allow_whitespace=True)
+            _scan_text_detectors(node.value)
+        elif type(node.value) is bytes:
+            try:
+                decoded = node.value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValidationError("retained Python bytes constant is not valid UTF-8") from exc
+            _inspect_unicode_string(decoded, "retained Python bytes constant", allow_whitespace=True)
+            _scan_text_detectors(decoded)
 
 
 def _normalize_python_code_members(text: str) -> str:
@@ -1056,7 +1072,7 @@ def scan_artifact_bytes(name: str, payload: bytes) -> None:
         _scan_structured_json(parse_json_bytes(payload))
     _scan_text_detectors(text, source_name=name)
     if name.endswith(".py"):
-        _scan_python_string_literals(text, name)
+        _scan_python_literal_constants(text, name)
 
 
 def scan_all_artifacts(captured: CapturedArtifacts | None = None) -> None:

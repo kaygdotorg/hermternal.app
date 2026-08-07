@@ -113,12 +113,21 @@ Python artifacts use tokens plus AST source context to recognize dotted
 identifiers in real code. A bare unreviewed dotted-host payload is not code and
 is scanned. String, docstring, HTML-comment, and comment contents remain
 scanner-visible, including content adjacent to an otherwise canonical
-assignment. Python string literals are also parsed with the Python AST so
-Unicode-escaped credential, URL, host, control, and surrogate payloads are
-checked after Python decoding; only the exact canonical detector and negative
-scaffold subtrees are excluded. Prefix, suffix, alternate host, alternate URL,
-backslash continuation, and adjacent content do not inherit an exemption.
-Tests append each forbidden class to every artifact and require rejection.
+assignment. Python string and bytes constants are parsed into AST-decoded values,
+so escape sequences supported by Python literal syntax are resolved before
+credential, URL, host, control, and surrogate scanning. Bytes constants must
+also decode as UTF-8. No expression, call, import, or other Python code is
+executed. A SyntaxError or other bounded parser failure is rejected with a
+redacted validation result rather than skipping decoded-literal scanning. Only
+the exact canonical detector and negative scaffold subtrees are excluded.
+Prefix, suffix, alternate host, alternate URL, backslash continuation, and
+adjacent content do not inherit an exemption. Tests append each forbidden class
+to every artifact and require rejection.
+
+Source normalization sorts its bounded AST/token spans (`O(n log n)`) and then
+rebuilds the source once; it makes no strict-linear complexity claim. Literal
+scanning is parse-only and bounded by the retained-artifact cap; the reviewed
+proof source retains its separate 128 KiB cap.
 
 Every retained UTF-8 text artifact rejects C0 controls other than reviewed
 newline, tab, and carriage-return whitespace, plus DEL, C1 controls, and lone
@@ -128,10 +137,11 @@ while valid surrogate pairs remain accepted Unicode scalar values.
 JSON artifacts are parsed before raw scanning. The validator recursively scans
 decoded scalar strings, dictionary keys, nested objects, and list elements, so
 Unicode escapes and separator variants such as dotted access-token,
-spaced user-data, and spaced chat-history aliases cannot hide credentials or
-transcript payloads. Role
-values are compared case-insensitively while the original decoded content
-remains subject to the same fail-closed checks.
+compact `apikey`, compact `userdata`, and compact `chathistory` aliases cannot
+hide credentials or transcript payloads. Escaped keys are normalized only after
+JSON decoding, including keys nested inside arrays and objects. Role values are
+compared case-insensitively while the original decoded content remains subject
+to the same fail-closed checks.
 
 ## Validation, mutation, and identity binding
 
@@ -165,7 +175,11 @@ the default validator is expected to stop at its bounded stale-pin failure;
 correction lane without rotating those external pins. The comma-joined origin
 cardinality canary is assembled from separate Python string fragments so the
 aggregate registry scanner does not mistake two synthetic URLs for one live
-host; its runtime mutation value is unchanged.
+host; its runtime mutation value is unchanged. The local scanner also rejects
+escaped compact JSON aliases such as `apikey`. The current aggregate scanner
+accepts that escaped-apikey canary without decoding its key; this is a documented
+downstream blocker for the registry lane and requires aggregate helper
+coordination. This fixture does not edit aggregate files.
 
 Run from the repository root:
 

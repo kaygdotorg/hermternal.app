@@ -517,6 +517,31 @@ class HostOriginMappingProofTests(unittest.TestCase):
                 with self.assertRaisesRegex(validate.ValidationError, expected_reason):
                     validate.scan_artifact_bytes("cases.json", payload)
 
+    def test_compact_structured_aliases_are_recursive_and_decode_escaped_keys(self) -> None:
+        compact_aliases = (
+            ("api" + "key", "redaction-canary", "forbidden structured credential"),
+            ("user" + "data", "redaction-canary", "forbidden user data"),
+            ("chat" + "history", "redaction-canary", "forbidden transcript data"),
+        )
+        for key, value, expected_reason in compact_aliases:
+            with self.subTest(key=key):
+                payload = json.dumps({"outer": [{key: value}]}, separators=(",", ":")).encode()
+                self.assert_scanner_failure_parity("cases.json", payload)
+                with self.assertRaisesRegex(validate.ValidationError, expected_reason):
+                    validate.scan_artifact_bytes("cases.json", payload)
+
+        escaped_aliases = (
+            (b"api" + b"\\u006b" + b"ey", "forbidden structured credential"),
+            (b"user" + b"\\u0064" + b"ata", "forbidden user data"),
+            (b"chat" + b"\\u0068" + b"istory", "forbidden transcript data"),
+        )
+        for escaped_key, expected_reason in escaped_aliases:
+            with self.subTest(escaped_key=escaped_key):
+                payload = b'{"outer":[{"' + escaped_key + b'":"redaction-canary"}]}'
+                self.assert_scanner_failure_parity("cases.json", payload)
+                with self.assertRaisesRegex(validate.ValidationError, expected_reason):
+                    validate.scan_artifact_bytes("cases.json", payload)
+
     def test_structural_exemptions_are_exact_not_suffix_or_prefix_wildcards(self) -> None:
         validate.scan_artifact_bytes("README.md", b"https://chat.public.invalid")
         validate.scan_artifact_bytes("README.md", b"/hermes/api/ws")
@@ -562,7 +587,7 @@ class HostOriginMappingProofTests(unittest.TestCase):
     def test_decoded_python_string_literals_remain_scanner_visible(self) -> None:
         escaped_assignment_literal = b'escaped = "' + b"password" + b"\\u003dredaction-canary\""
         escaped_url = b'escaped = "' + b"https" + b"://unsafe\\u002eexample/path\""
-        escaped_host = b'escaped = "' + b"unsafe" + b"\\u002e" + b"example" + b".com\""
+        escaped_host = b'escaped = "' + b"unsafe\\u002e" + b"example" + b".com\""
         for payload, expected_reason in (
             (escaped_assignment_literal, "credential assignment"),
             (escaped_url, "URL"),
@@ -571,9 +596,31 @@ class HostOriginMappingProofTests(unittest.TestCase):
             with self.subTest(expected_reason=expected_reason):
                 self.assert_scanner_failure_parity("validate.py", payload, expected_reason)
 
+    def test_decoded_python_bytes_constants_remain_scanner_visible(self) -> None:
+        escaped_assignment = b'escaped = b"password\\x3dredaction-canary"'
+        escaped_url = b'escaped = b"https\\x3a//unsafe\\x2eexample/path"'
+        escaped_control = b'escaped = b"safe\\x00text"'
+        invalid_utf8 = b'escaped = b"\\xff"'
+        for payload, expected_reason in (
+            (escaped_assignment, "credential assignment"),
+            (escaped_url, "URL"),
+            (escaped_control, "retained Python bytes constant"),
+            (invalid_utf8, "retained Python bytes constant is not valid UTF-8"),
+        ):
+            with self.subTest(expected_reason=expected_reason):
+                self.assert_scanner_failure_parity("validate.py", payload, expected_reason)
+
+    def test_malformed_python_literal_scan_fails_closed(self) -> None:
+        payload = b'escaped = b"password\\x3dredaction-canary'
+        self.assert_scanner_failure_parity("validate.py", payload, "retained Python source is malformed")
+
     def test_text_artifacts_reject_controls_but_preserve_reviewed_whitespace(self) -> None:
         validate.scan_artifact_bytes("README.md", b"line one\n\tline two\r\n")
-        for payload in (b"safe\x00text", b"safe\x7ftext", b"safe\xc2\x80text"):
+        for payload in (
+            b"safe" + bytes((0,)) + b"text",
+            b"safe" + bytes((0x7F,)) + b"text",
+            b"safe" + bytes((0xC2, 0x80)) + b"text",
+        ):
             with self.subTest(payload=payload):
                 self.assert_scanner_failure_parity("README.md", payload, "control character")
         for payload, expected_reason in (
