@@ -3,10 +3,11 @@
 ## Purpose
 
 The aggregate fixture registry has a staged trust boundary. The legacy v1
-authority remains a readable compatibility record. The new multi-artifact
-bootstrap is a separate v2 authority and is the only authority consumed by the
-standalone verifier in this change. Neither format is a production attestation;
-`live_claim` remains `false`.
+authority remains a readable compatibility record, and the reviewed bootstrap
+v2 authority remains preserved in Git history. The active final binding is a
+separate v2 path introduced after the finalized aggregate predecessor. The
+standalone verifier and aggregate validator consume only that final binding.
+Neither format is a production attestation; `live_claim` remains `false`.
 
 ## Version and path history
 
@@ -34,34 +35,40 @@ and the new multi-artifact authority is introduced at:
 
 `scripts/fixture_registry_authority.v2.json`
 
-The new document explicitly declares
-`hermternal.fixture-registry-authority.v2`. The implementation accepts only the
-approved external predecessor
-`abb6754bddd1cf18927b0172ed9fa3456235b035`; it does not accept an arbitrary
-self-consistent ancestor. The pin is not the verifier's implementation commit
-and is not the scanner-preparation change.
+The bootstrap document explicitly declares
+`hermternal.fixture-registry-authority.v2` and remains byte-for-byte preserved
+as historical predecessor evidence. The final aggregate binding is introduced
+at:
+
+`scripts/fixture_registry_authority.v2.final.json`
+
+It uses the same v2 schema with role `aggregate_predecessor`. Its
+`source_commit` is the exact finalized aggregate predecessor and must equal the
+final authority introduction commit's first parent. This direct-parent rule
+keeps the authority path out of the scanner/index/baseline commit it authorizes
+and avoids a self-referential source hash inside `validate.py`.
 
 ## Active v2 loading rule
 
-The standalone verifier reads only the v2 authority path from the sole
-first-parent Git commit that introduced that path. It does not use the visible
-checkout copy as its authority source. It reads the v2 bytes from the local Git
-object database, validates the schema and key order, and requires all of the
+The standalone verifier reads only
+`scripts/fixture_registry_authority.v2.final.json` from the sole first-parent
+Git commit that introduced that path. It does not use the visible checkout copy
+as its authority source. It reads the final v2 bytes from the local Git object
+database, validates the schema, role, and key order, and requires all of the
 following:
 
-- the declared predecessor exactly equals the approved external commit
-  `abb6754bddd1cf18927b0172ed9fa3456235b035` and is a distinct ancestor of the
-  v2 authority introduction commit;
+- the declared `source_commit` is a commit object and exactly equals the final
+  authority introduction commit's first parent;
 - the four declared paths resolve at that predecessor to the recorded Git blob
   object IDs;
 - each predecessor object has the recorded byte length and SHA-256 digest; and
-- the checkout copies of the v2 authority, index, validator tests, validator,
+- the checkout copies of the final authority, index, validator tests, validator,
   and validation baseline exactly match those immutable predecessor records.
 
-The legacy v1 path remains readable through the verifier's compatibility loader,
-but it is not selected as the active v2 trust root. The v2 path selection is
-therefore explicit and cannot silently fall back to a schema-incompatible v1
-record.
+The legacy v1 path and bootstrap v2 path remain readable historical records,
+but neither is selected as the active trust root. Final path selection is
+therefore explicit and cannot silently fall back to a schema-incompatible or
+stale predecessor record.
 
 The object-repository input is a canonical absolute plain checkout. Before
 running any path-based Git command, the verifier opens `/` and every caller
@@ -177,33 +184,29 @@ local scanner or baseline rewrite.
 
 ## Current aggregate sequencing
 
-The current aggregate validator remains intentionally blocked in this bootstrap
-change. The present blocked evidence is caused by three stale artifact records
-under `source-audit/compatibility-gate` in the current aggregate index; those
-records are not the future scanner-boundary blockers. Normal and optimized
-validator runs have the same bounded result:
+The final aggregate lane is bound to the combined tree after the approved Caddy
+head `5b923fd38e056c37bdb86766f05551cd83687b66`. Registry records were generated
+from actual Git-tree bytes: twelve overlapping Caddy-owned records were updated
+mechanically, while the three pre-existing `source-audit/compatibility-gate`
+records were checked and required no change. The final index validates as 30
+fixture roots and 29 coverage rows, with C-08 still pending and no streaming
+success claim.
 
-```json
-{"compatible":false,"complete":false,"error":{"code":"fixture_index_invalid","message":"fixture registry input rejected"},"evidence_status":"blocked","live_claim":false,"ok":false}
-```
+The final baseline records the measured normal and optimized process samples,
+its canonical digest, and the four-artifact predecessor manifest. The final v2
+authority path is introduced in a separate descendant commit whose direct
+first parent is the finalized scanner/index/test/baseline commit. Normal and
+optimized aggregate CLI and discovery gates must remain equivalent; a passing
+result is still partial synthetic registry evidence, not live Hermes,
+authentication, deployment, streaming, or Terminal proof.
 
-The existing aggregate launcher remains 22 tests with two CLI failures and one
-checked-in-registry error against the stale index/baseline state. No pending-root
-exemption or scanner weakening is added here.
-
-The exact three scanner blockers owned by the subsequent `70d5963`
-preparation rebase are:
-
-- `contracts/fixtures/chat-stream-completion/test_validate.py`
-- `contracts/fixtures/deployment-security/external-allowlist/test_validate.py`
-- `contracts/fixtures/uncertain-delivery/test_validate.py`
-
-After this v2 authority bootstrap is independently reviewed and merged, the
-scanner-preparation lane must rebase onto the merged external predecessor,
-correct those three scanner cases without weakening aggregate trust, regenerate
-the complete index and baseline, and create its next authority from that merged
-external predecessor. The historical v1 path must remain readable while that
-migration is reviewed.
+DEP-03 Host/Origin remains web-only with `success` and `failure` states. Its
+local pins are reproducibility checks, not a separate trust root, and the
+fixture's default validator continues to fail closed on its intentionally stale
+local pin until that fixture-local identity is independently refreshed. The
+aggregate authority does not reinterpret unrelated browser-chat hashes as Caddy
+metadata, and synthetic Caddy `421`/`403`/no-upstream evidence does not claim a
+live `4403` or public-edge result.
 
 ## Scope and evidence
 

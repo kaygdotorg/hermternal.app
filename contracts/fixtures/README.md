@@ -31,28 +31,28 @@ The legacy aggregate authority remains readable at
 introduced at `a96889c` and has the schema plus six legacy fields (seven total
 keys): `validator_path`/`validator_size_bytes`/`validator_sha256` plus
 `baseline_path`/`baseline_size_bytes`/`baseline_sha256` under the schema
-`hermternal.fixture-registry-authority.v1`.
+`hermternal.fixture-registry-authority.v1`. Its bytes remain unchanged.
 
 The `.v2.json` filename used by commits `3600975` and `70d5963` was a
-filename-only rotation: those historical documents still declared the v1
-schema plus six legacy fields (seven total keys). The independent bootstrap commit `8dad73e` then
-introduced a multi-artifact document at the legacy path while still claiming
-v1. Its published Git object is not rewritten. The corrective bootstrap keeps
-the legacy path readable and places the new multi-artifact authority at
-`scripts/fixture_registry_authority.v2.json` with the explicit schema
-`hermternal.fixture-registry-authority.v2`.
+filename-only rotation, and the corrected bootstrap at
+`scripts/fixture_registry_authority.v2.json` remains preserved as the reviewed
+external predecessor. The active final binding is the distinct
+`scripts/fixture_registry_authority.v2.final.json` path with the explicit
+schema `hermternal.fixture-registry-authority.v2` and role
+`aggregate_predecessor`.
 
-The standalone v2 verifier loads that separate path from its immutable Git
-introduction object. The aggregate validator applies the same v2 schema, role,
-approved-source, exact-artifact-order, blob-OID, byte-size, and SHA-256 checks
-before comparing checkout bytes. It can read the legacy v1 shape for migration
-checks, but it never treats the legacy path as a v2 fallback. The v2 trust root accepts
-only the approved external predecessor
-`abb6754bddd1cf18927b0172ed9fa3456235b035`; an arbitrary self-consistent
-ancestor is rejected. The trust root remains independent of the
-scanner-preparation change; after this authority is merged, that preparation
-must rebase onto the merged external predecessor before regenerating the index,
-baseline, and next authority.
+The standalone verifier and aggregate validator load only that final path from
+its immutable Git introduction object. The authority records the exact source
+commit and four artifact records for the combined checkout:
+`contracts/fixtures/index.json`, `contracts/fixtures/validator/test_validate.py`,
+`contracts/fixtures/validator/validate.py`, and
+`contracts/fixtures/validator/validation-baseline.json`. The source commit must
+be the authority introduction commit's direct first parent, so the authority
+cannot self-authorize scanner or baseline changes in the same commit. Both
+loaders enforce exact key order, blob OIDs, byte sizes, SHA-256 digests,
+`synthetic_only: true`, and `live_claim: false` before comparing checkout bytes.
+The v1 and bootstrap v2 records remain historical compatibility evidence; they
+are not fallbacks for the active final trust root.
 
 The verifier's object repository must be a canonical absolute plain checkout,
 not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
@@ -123,18 +123,17 @@ Domain validators remain authoritative for case semantics; the aggregate layer
 does not run them and makes no network request.
 
 The `--index`, `--schema`, and `--baseline` inputs are bound to their canonical
-reviewed paths. The exact central-validator and baseline bytes are pinned by
-`scripts/fixture_registry_authority.v2.json` from an immutable Git object, not
-from checkout constants. That object is a trust root only when its authority
-rotation was reviewed before, and outside, the scanner change it authorizes: an
-implementation commit must never introduce a weakened scanner and the authority
-that approves it in the same change set. The v1 authority remains historical
-evidence until an independently reviewed rotation establishes the v2 bytes;
-therefore baseline and authority regeneration is blocked until that migration
-exists. Only the validator's own baseline-manifest digest and derived byte total
-are normalized to avoid a self-reference. A schema-valid copy or coordinated
-scanner, manifest, baseline, local anchor, and test-constant replacement cannot
-rebind an immutable external authority.
+reviewed paths. The exact central-validator, validator-test, index, and baseline
+bytes are pinned by `scripts/fixture_registry_authority.v2.final.json` from an
+immutable Git object, not from checkout constants. The final authority is added
+in a commit after the predecessor source commit; its direct-parent check keeps a
+weakened scanner from being introduced together with the authority that would
+approve it. The historical v1 and bootstrap v2 records remain preserved, while
+the final binding supplies the current aggregate trust root. Only the
+validator's own baseline-manifest digest and derived byte total are normalized
+to avoid a self-reference. A schema-valid copy or coordinated scanner,
+manifest, baseline, local anchor, and test-constant replacement cannot rebind
+an immutable external authority.
 
 Every ordinary file under a ready fixture root is inventoried, including hidden
 files, cache contents, bytecode, and binary artifacts. Symlinks and special files
@@ -163,10 +162,10 @@ unindexed review-anchor artifact. The C-05 coverage and C-08 stream-dependent
 coverage remain pending until their dependency gates complete; C-07 is connected
 to the pending chat-stream coverage row. `live_claim` is always `false`; a
 passing validator proves only synthetic artifact integrity and registry
-consistency. The current blocked aggregate evidence is caused by three stale
-artifact records under `source-audit/compatibility-gate`; that current index
-problem is distinct from the three future scanner-preparation blockers listed
-in the authority migration document.
+consistency. The final combined tree has no stale
+`source-audit/compatibility-gate` rows: all three pre-existing records match
+mechanically derived bytes, and the twelve overlapping Caddy-owned records are
+bound to the approved `5b923fd38e056c37bdb86766f05551cd83687b66` descendant.
 
 The validator emits one bounded semantic JSON line. Failures do not echo
 arguments, paths, keys, values, secrets, or tracebacks. Normal and optimized
@@ -186,9 +185,8 @@ python3 -m py_compile \
 
 The repository does not yet have a checked-in GitHub Actions workflow that
 runs this aggregate validator, its test suite, and the `python -O` equivalents.
-That missing normal/optimized CI check is intentional while the independent
-v2 authority rotation is unresolved; it must be added only after the external
-trust root and regenerated baseline are reviewed.
+The local normal/optimized commands above are the required gates for this
+fixture-only lane; no CI workflow is implied by passing them.
 
 The validator is offline. It does not start Hermes, contact a proxy or
 identity provider, open a socket, follow a referenced URL, or claim deployment
