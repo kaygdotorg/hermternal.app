@@ -1394,14 +1394,19 @@ export class LiveWorkspaceSession {
           ? {}
           : { sessionId: coordinatorState.activeSessionId })
       };
+      // The old bridge may have published its synchronous detach above. Do not
+      // carry that presentation state into the replacement session; a late old
+      // PTY callback must not make the new session appear terminal-attached.
       this.snapshot = {
         ...this.snapshot,
         mode: coordinatorState.mode,
-        coordinator: coordinatorState
+        coordinator: coordinatorState,
+        terminal: undefined
       };
     } else {
       this.coordinatorOwnership = undefined;
       this.coordinatorState = undefined;
+      this.snapshot = { ...this.snapshot, terminal: undefined };
     }
     return operation;
   }

@@ -66,6 +66,7 @@ function createBridge() {
     },
     sendInput: vi.fn(),
     resize: vi.fn(),
+    setRendererReady: vi.fn(),
     reconnect: vi.fn().mockResolvedValue(undefined),
     detach: vi.fn(),
     close: vi.fn(),
@@ -149,8 +150,22 @@ describe('TerminalSurface', () => {
     expect(bridge.resize).toHaveBeenCalledWith(100, 20);
 
     view.unmount();
+    expect(bridge.setRendererReady).toHaveBeenLastCalledWith(false);
     expect(renderer.dispose).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
+  });
+
+  it('keeps readiness closed when the renderer sink is torn down', async () => {
+    const bridge = createBridge();
+    const view = render(TerminalSurface, { bridge, active: true });
+    await waitFor(() => expect(rendererHarness.instances).toHaveLength(1));
+
+    bridge.setRendererReady.mockClear();
+    view.unmount();
+
+    expect(bridge.setRendererReady).toHaveBeenCalledTimes(1);
+    expect(bridge.setRendererReady).toHaveBeenCalledWith(false);
+    expect(bridge.setRendererReady).not.toHaveBeenCalledWith(true);
   });
 
   it('applies coordinator focus intent and exposes lifecycle recovery actions', async () => {
