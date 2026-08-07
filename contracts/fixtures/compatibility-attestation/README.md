@@ -102,8 +102,8 @@ python3 contracts/fixtures/compatibility-attestation/validate.py --worktree
 ```
 
 The default validator requires reviewed commit
-`ff31faf186b0a072c4d18297e84fb9bb6b07e977` and tree
-`6a909d73208b2559f493e361d01197366aa51a53`, requires commit/tree Git object
+`4c2c2bc5a91e0432f68ec841b6386ebe6b912f29` and tree
+`b3d4ce3b3144c36f9972eb5a23ca354ac0fbf696`, requires commit/tree Git object
 types, reads all three fixture JSON documents
 and measured artifacts from that reviewed snapshot, and checks that the
 executing `validate.py` bytes equal the current immutable `HEAD` blob. Its
