@@ -107,12 +107,14 @@ case semantics; the aggregate layer does not run them and makes no network
 request.
 
 The `--index`, `--schema`, and `--baseline` inputs are bound to their canonical
-reviewed paths. The aggregate test source is outside the baseline manifest and
-carries independent SHA-256 roots for both the validator's canonical source and
-the baseline's exact bytes. Only the validator's own baseline-manifest digest
-and derived byte total are normalized to avoid a self-reference. A schema-valid
-copy or coordinated validator, sample, distribution, and manifest replacement
-cannot locally rebind the checked-in evidence. The central `validator/`
+reviewed paths. The exact central-validator and baseline bytes are pinned by
+`scripts/fixture_registry_authority.json` from the sole Git commit that introduced
+that out-of-tree authority. Validation reads those historical object-database
+bytes rather than checkout constants. Only the validator's own baseline-manifest
+digest and derived byte total are normalized to avoid a self-reference. A
+schema-valid copy or coordinated scanner, manifest, baseline, local anchor, and
+test-constant replacement cannot rebind the immutable authority. The central
+`validator/`
 directory also has an exact artifact allowlist, so caches, dotfiles, binaries,
 symlinks, special files, and unreviewed helpers fail closed. Coverage references
 must be reciprocal, and every coverage platform and required state must be
@@ -120,13 +122,17 @@ supported by every referenced root. Ready coverage may reference only ready
 fixture roots with real manifests. A registry can be structurally valid
 while coverage remains `partial`. A `pending`, `empty`, `failure`, `cancelled`,
 or `unknown` coverage row is never promoted to successful evidence. The
-checked-in index inventories the C-05 connection-restoration, C-07 session
-persistence, C-07B session-lineage, C-14 image attachment lifecycle, C-18
-PTY detach-race, DEP-02 external method/path allowlist, and DEP-10M PTY
-local-adapter artifacts. The merged PR #260 compatibility-gate artifact
-manifests are also refreshed in this aggregate registry. The C-05 coverage and
-C-08 stream-dependent coverage remain pending until their dependency gates
-complete; C-07 is connected
+checked-in index inventories the C-05 connection-restoration, C-06 uncertain
+delivery, C-07 session persistence, C-07A session search, C-07B session
+lineage, C-14 image attachment lifecycle, C-16 deep-link resolution, C-18 PTY
+detach-race, DEP-02 external method/path allowlist, DEP-10M PTY local-adapter,
+and DEP-11 direct-port-denial artifacts. The merged PR #260 compatibility-gate
+artifact manifests are also refreshed in this aggregate registry.
+`review-anchors/deep-link-resolution.sha256` is intentionally separate: it is
+the C-16 domain validator's reviewed digest authority, not a canonical fixture
+root. The aggregate permits that one exact path and still rejects any other
+unindexed review-anchor artifact. The C-05 coverage and C-08 stream-dependent
+coverage remain pending until their dependency gates complete; C-07 is connected
 to the pending chat-stream coverage row. `live_claim` is always `false`; a
 passing validator proves only synthetic artifact integrity and registry
 consistency. The current blocked aggregate evidence is caused by three stale

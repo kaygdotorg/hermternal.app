@@ -266,6 +266,68 @@
       ]
     },
     {
+      "id": "deep-link-resolution",
+      "path": "deep-link-resolution",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "failure",
+        "pending",
+        "success"
+      ],
+      "coverage_ids": [
+        "deep-link-resolution"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deep-link-resolution/README.md",
+          "sha256": "876268046ffdb40af2380e9f0572195cd792d1e706baca77ed35cc65fbb36829",
+          "size_bytes": 6152
+        },
+        {
+          "path": "deep-link-resolution/baseline-evidence.json",
+          "sha256": "a69e94bff3426015bcc5cc9dcea6deb498d3c88b1664c47c649f4cb4e18da722",
+          "size_bytes": 1585
+        },
+        {
+          "path": "deep-link-resolution/cases.json",
+          "sha256": "6618d3f6077953e0cd5f03970806b8b21fa5f8722627c9696b893f9702995e1a",
+          "size_bytes": 53188
+        },
+        {
+          "path": "deep-link-resolution/review-root.json",
+          "sha256": "cf6f7c8f52deb5ea35514e44b10c3bc8194cee59da77c9fd81db70041648e227",
+          "size_bytes": 1206
+        },
+        {
+          "path": "deep-link-resolution/test_validate.py",
+          "sha256": "9a4be7f657d6212f35e96e46e6d159152621bee53820724d6bc44f4c88c959cf",
+          "size_bytes": 15878
+        },
+        {
+          "path": "deep-link-resolution/validate.py",
+          "sha256": "abd8e144c24da2ca7e0102dbc0a20d978ccfba9fce06606141efe013a494e720",
+          "size_bytes": 29056
+        },
+        {
+          "path": "deep-link-resolution/validation-baseline.json",
+          "sha256": "32d6db975d7566dc83c448b5598c07b1f26e7853b86e308e0eb6e39e21f88b81",
+          "size_bytes": 1993
+        }
+      ]
+    },
+    {
       "id": "deployment-security-browser-auth",
       "path": "deployment-security/browser-auth",
       "status": "ready",
@@ -309,6 +371,58 @@
           "path": "deployment-security/browser-auth/validation-baseline.json",
           "sha256": "32c1e7811e52bb6d59b168aa7da2c094be0782268e727b0d83adc666d6b3bb14",
           "size_bytes": 2308
+        }
+      ]
+    },
+    {
+      "id": "deployment-security-direct-port-denial",
+      "path": "deployment-security/direct-port-denial",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "direct-port-denial"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/direct-port-denial/README.md",
+          "sha256": "315d11253d170e8570e332c4e135bd3697fc5d5caa3430a4955af3d2c9ab4086",
+          "size_bytes": 6658
+        },
+        {
+          "path": "deployment-security/direct-port-denial/cases.json",
+          "sha256": "fdba8da5d759395f20624af5eebb5893f48d015814240faa75456d0aad0c2afb",
+          "size_bytes": 26733
+        },
+        {
+          "path": "deployment-security/direct-port-denial/test_validate.py",
+          "sha256": "c4f039d896f3d2a0272209d2411e28cc89d6162fea815c15c01ab3fc1aec5dd2",
+          "size_bytes": 23398
+        },
+        {
+          "path": "deployment-security/direct-port-denial/validate.py",
+          "sha256": "119afd870724ae22a543242607605bb93ca10566b7a7925f2f1466c1e7d3e937",
+          "size_bytes": 45846
+        },
+        {
+          "path": "deployment-security/direct-port-denial/validation-baseline-sha256.txt",
+          "sha256": "6a34d3b89b568032fad401c9bfc9cd8816e3b870930a8efd94b71ff0b861f7e2",
+          "size_bytes": 65
+        },
+        {
+          "path": "deployment-security/direct-port-denial/validation-baseline.json",
+          "sha256": "f3b4db9cd929118d0adef84ca45758c5d72cc7682d0ac48402b38701ebc04bb1",
+          "size_bytes": 2426
         }
       ]
     },
@@ -873,6 +987,62 @@
       ]
     },
     {
+      "id": "session-search",
+      "path": "session-search",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "empty",
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "session-search"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "session-search/README.md",
+          "sha256": "c1fa9d6665a8112d5e1f3c81487dfd8b3971f363174f90033734fd2e33beafcd",
+          "size_bytes": 7759
+        },
+        {
+          "path": "session-search/baseline-evidence.json",
+          "sha256": "4cd4384cc43f577dde75cfc58fab688bdfee07a261c8c0aacf53e79190fb3243",
+          "size_bytes": 1510
+        },
+        {
+          "path": "session-search/cases.json",
+          "sha256": "bc9dc83c18c9eb2055ef54b789f781822b6836b51427225f47fd00d88b912a2d",
+          "size_bytes": 95236
+        },
+        {
+          "path": "session-search/test_validate.py",
+          "sha256": "1456e0436244c56016ec04fe101cde717db1596caf27e2a5e9a8ce2037822671",
+          "size_bytes": 16443
+        },
+        {
+          "path": "session-search/validate.py",
+          "sha256": "bd6f7bb64e8ed051805f1505cb33277a2d05ba399af4daa4b116d9649e499c6f",
+          "size_bytes": 34247
+        },
+        {
+          "path": "session-search/validation-baseline.json",
+          "sha256": "11745b08de0c5d4093c5e3550aadda57aa37f14d49d48c5ced4d34b358ede6f9",
+          "size_bytes": 2774
+        }
+      ]
+    },
+    {
       "id": "source-audit-compatibility-gate",
       "path": "source-audit/compatibility-gate",
       "status": "ready",
@@ -1221,6 +1391,65 @@
           "size_bytes": 460
         }
       ]
+    },
+    {
+      "id": "uncertain-delivery",
+      "path": "uncertain-delivery",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "empty",
+        "failure",
+        "pending",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "uncertain-delivery"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "uncertain-delivery/README.md",
+          "sha256": "98ddbd6db92f6871a78d677b4cb524894c0505305f09d0470f9878a5f8019001",
+          "size_bytes": 14275
+        },
+        {
+          "path": "uncertain-delivery/cases.json",
+          "sha256": "5c9d277359434183150b6405776b83a345f9268ac1e5b31e85f1815968f0d31b",
+          "size_bytes": 68653
+        },
+        {
+          "path": "uncertain-delivery/preflight.py",
+          "sha256": "5c8400ce1253d4993191751bb636ad97115bd603cb90f95480eb7055b48f715e",
+          "size_bytes": 13222
+        },
+        {
+          "path": "uncertain-delivery/test_validate.py",
+          "sha256": "a1097f202c1593441a2508fb623006c35e5ebb6927fcfd52f552f4521583b906",
+          "size_bytes": 86372
+        },
+        {
+          "path": "uncertain-delivery/validate.py",
+          "sha256": "e831e595b5828cf417cb75accbc2485ad6db949cea19442ad3e4bd581ec39940",
+          "size_bytes": 95638
+        },
+        {
+          "path": "uncertain-delivery/validation-baseline.json",
+          "sha256": "a0003cb8a853500845a5e19738673a2eb0033ad6d1ee0b462f78f773513b94d9",
+          "size_bytes": 3326
+        }
+      ]
     }
   ],
   "coverage": [
@@ -1344,6 +1573,26 @@
       "notes": "C-05 artifacts are indexed and internally validated; coverage remains pending until the C-05 dependency gate is complete."
     },
     {
+      "id": "deep-link-resolution",
+      "status": "ready",
+      "fixture_ids": [
+        "deep-link-resolution"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "success",
+        "failure",
+        "cancelled"
+      ],
+      "notes": "C-16 resolution cases cover synthetic open, auth deferral, expiry, cancellation, and failure without invoking a live route."
+    },
+    {
       "id": "deployment-attestation",
       "status": "ready",
       "fixture_ids": [
@@ -1360,6 +1609,21 @@
         "failure"
       ],
       "notes": "Attestation fixtures record match and mismatch observations without a live claim."
+    },
+    {
+      "id": "direct-port-denial",
+      "status": "ready",
+      "fixture_ids": [
+        "deployment-security-direct-port-denial"
+      ],
+      "platforms": [
+        "web"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "DEP-11 proves only offline synthetic direct-port denial and the configured proxy-path allowance; it opens no socket or firewall."
     },
     {
       "id": "external-allowlist",
@@ -1633,6 +1897,47 @@
         "unknown"
       ],
       "notes": "C-07B session lineage cases are synthetic identity and retry evidence; no server history or transcript mirror is claimed."
+    },
+    {
+      "id": "session-search",
+      "status": "ready",
+      "fixture_ids": [
+        "session-search"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "empty",
+        "success",
+        "failure"
+      ],
+      "notes": "C-07A search cases cover bounded synthetic results, no-results, empty, and failure outcomes without retaining transcripts."
+    },
+    {
+      "id": "uncertain-delivery",
+      "status": "ready",
+      "fixture_ids": [
+        "uncertain-delivery"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "C-06 cases preserve synthetic delivery uncertainty and recovery outcomes without claiming a live send or server result."
     },
     {
       "id": "web-pty",
