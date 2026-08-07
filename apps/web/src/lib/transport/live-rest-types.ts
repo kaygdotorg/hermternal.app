@@ -15,6 +15,13 @@ export interface LiveToolCall {
   };
 }
 
+/**
+ * Official Hermes history may serialize an empty tool-call field as null even
+ * though the pinned source type declares it as optional. Keep that distinction
+ * lossless while retaining a bounded array shape for non-null values.
+ */
+export type LiveToolCalls = LiveToolCall[] | null;
+
 export interface LiveProvider {
   name: string;
   displayName: string;
@@ -106,7 +113,7 @@ export type LiveMessageRole = 'user' | 'assistant' | 'system' | 'tool';
 export interface LiveMessage {
   role: LiveMessageRole;
   content: LiveMessageContent;
-  toolCalls?: LiveToolCall[];
+  toolCalls?: LiveToolCalls;
   toolName?: string;
   toolCallId?: string;
   timestamp?: number;
