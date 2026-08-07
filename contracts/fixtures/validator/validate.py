@@ -20,6 +20,7 @@ import json
 import math
 import re
 import statistics
+import subprocess
 import tokenize
 from pathlib import Path
 from typing import Any, Iterable
@@ -145,12 +146,19 @@ CENTRAL_VALIDATOR_ARTIFACTS = frozenset({
     "validator/validate.py",
     "validator/validation-baseline.json",
 })
-# The separate aggregate test source carries the reviewed canonical validator
-# digest. Keeping this anchor outside validate.py means a local mutation cannot
-# refresh both the scanner and its self-manifest without changing an independent
-# reviewed source boundary as well.
-VALIDATOR_TRUST_ANCHOR_PATH = "contracts/fixtures/validator/test_validate.py"
-BASELINE_CANONICAL_SHA256 = "35aecec135b9dbbdb53ad785e4fb38061637750e3892b0ddcff63941653fee52"
+# This reviewed digest is authority for its domain fixture, not a canonical
+# fixture root. Keep the exemption exact so another review-anchor artifact still
+# fails the aggregate unindexed-file boundary.
+INTENTIONALLY_SEPARATE_ARTIFACTS = frozenset({
+    "review-anchors/deep-link-resolution.sha256",
+})
+# The authority manifest is outside the fixture tree and is loaded from the one
+# immutable Git commit that introduced it. Checkout edits cannot rewrite those
+# object-database bytes, while later reviewed commits may update implementation
+# files without silently moving the authority root.
+VALIDATOR_AUTHORITY_PATH = "scripts/fixture_registry_authority.json"
+VALIDATOR_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v1"
+BASELINE_CANONICAL_SHA256 = "7704ec403074906dbff0a186f939eff9e1a4df8f86298c3929654481087aa8a7"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -165,13 +173,14 @@ REGEX_HOST_LITERAL_PATTERN = re.compile(
 # these bytes, but they cannot split credential or URL tokens at scan time.
 UNSAFE_CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 BASELINE_ANCHOR_PATTERN = re.compile(rb'^BASELINE_CANONICAL_SHA256 = "[0-9a-f]{64}"$', re.MULTILINE)
-TRUST_ANCHOR_PATTERN = re.compile(
-    r'^TRUSTED_VALIDATE_SOURCE_SHA256 = "([0-9a-f]{64})"$',
-    re.MULTILINE,
-)
-BASELINE_TRUST_ANCHOR_PATTERN = re.compile(
-    r'^TRUSTED_BASELINE_SHA256 = "([0-9a-f]{64})"$',
-    re.MULTILINE,
+AUTHORITY_KEYS = (
+    "schema",
+    "validator_path",
+    "validator_size_bytes",
+    "validator_sha256",
+    "baseline_path",
+    "baseline_size_bytes",
+    "baseline_sha256",
 )
 PRIVATE_KEY_PATTERN = re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE)
 AWS_KEY_PATTERN = re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.IGNORECASE)
@@ -348,16 +357,19 @@ SYNTHETIC_MARKER_PATHS = frozenset({
     "behavioral-probe/test_validate.py",
     "compatibility-attestation/test_validate.py",
     "deployment-security/browser-auth/test_validate.py",
+    "deployment-security/direct-port-denial/test_validate.py",
     "deployment-security/external-allowlist/test_validate.py",
     "deployment-security/private-network-firewall/test_validate.py",
     "route-allowlist/test_route_allowlist.py",
     "session-lineage/test_validate.py",
     "session-persistence/test_validate.py",
+    "session-search/test_validate.py",
     "source-audit/compatibility-gate/test_validate.py",
     "source-audit/model-options/test_model_options.py",
     "source-audit/native-bearer/test_native_bearer.py",
     "source-audit/native-password-provider/test_native_password_provider.py",
     "source-audit/oauth-browser/test_oauth_browser.py",
+    "uncertain-delivery/test_validate.py",
 })
 # This source-review fixture keeps a complete synthetic PEM example. Its
 # header itself is intentionally realistic, so retain the full source value as
@@ -365,6 +377,14 @@ SYNTHETIC_MARKER_PATHS = frozenset({
 SYNTHETIC_FULL_VALUE_ALLOWANCES = {
     "source-audit/model-options/test_model_options.py": frozenset({
         "-----BEGIN RSA PRIVATE KEY-----\nsynthetic\n-----END RSA PRIVATE KEY-----",
+    }),
+    # C-06 retains these public credential-shaped negative samples only to prove
+    # that its domain validator rejects them. No other path inherits them.
+    "uncertain-delivery/test_validate.py": frozenset({
+        "api_key=sk_test_123456789",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
+        "ghp_1234567890abcdefghijk",
+        "sk-proj-1234567890abcdef",
     }),
 }
 TEST_NEGATIVE_BASIC_AUTH_CANDIDATE = "QWxhZGRpbjpvcGVuIHNlc2FtZQ" + "=="
@@ -497,14 +517,15 @@ def _validate_json_tree(
     require(value is None or type(value) is bool, "unsupported JSON value type")
 
 
-def load_json(
-    path: Path,
+def _parse_json_bytes(
+    data: bytes,
     *,
     require_object: bool = True,
-    limit: int = MAX_JSON_BYTES,
     reject_nul: bool = True,
 ) -> Any:
-    data = _read_bounded_bytes(path, limit)
+    """Parse already captured bytes with the aggregate strict JSON contract."""
+
+    require(len(data) <= MAX_JSON_BYTES, "input exceeds the byte limit")
     try:
         text = data.decode("utf-8")
         value = json.loads(
@@ -522,6 +543,17 @@ def load_json(
     if require_object:
         require(type(value) is dict, "top-level JSON value must be an object")
     return value
+
+
+def load_json(
+    path: Path,
+    *,
+    require_object: bool = True,
+    limit: int = MAX_JSON_BYTES,
+    reject_nul: bool = True,
+) -> Any:
+    data = _read_bounded_bytes(path, limit)
+    return _parse_json_bytes(data, require_object=require_object, reject_nul=reject_nul)
 
 
 def _normalize_key(key: str) -> str:
@@ -683,10 +715,13 @@ def _validate_text_value(
             candidate = match.group(0)
             require(
                 allow_synthetic_markers
-                and _is_placeholder(
-                    candidate,
-                    allow_synthetic_markers=True,
-                    allow_structural_placeholders=False,
+                and (
+                    value in allowed_synthetic_full_values
+                    or _is_placeholder(
+                        candidate,
+                        allow_synthetic_markers=True,
+                        allow_structural_placeholders=False,
+                    )
                 ),
                 message,
             )
@@ -708,6 +743,7 @@ def _validate_text_value(
                 pattern is ASSIGNMENT_SECRET_PATTERN
                 and candidate in allowed_assignment_values
             )
+            exact_full_allowance = value in allowed_synthetic_full_values
             # Synthetic marker vocabulary is useful only for path-scoped
             # negative fixtures, and never turns a Basic value into a marker.
             placeholder = _is_placeholder(
@@ -720,7 +756,10 @@ def _validate_text_value(
                 allow_structural_placeholders=False,
             )
             require(
-                exact_basic_allowance or exact_assignment_allowance or placeholder,
+                exact_basic_allowance
+                or exact_assignment_allowance
+                or exact_full_allowance
+                or placeholder,
                 "credential-shaped value is not allowed",
             )
     _validate_url_hosts(
@@ -1250,26 +1289,75 @@ def _canonical_validator_source_digest(data: bytes) -> str:
     return hashlib.sha256(normalized).hexdigest()
 
 
-def _trusted_validator_source_digest(repo_root: Path) -> str:
-    anchor_path = _safe_child(repo_root.resolve(), VALIDATOR_TRUST_ANCHOR_PATH)
+def _git(repo_root: Path, *arguments: str) -> bytes:
+    """Run one bounded, non-interactive local Git object-database query."""
+
     try:
-        source = _read_bounded_bytes(anchor_path, MAX_ARTIFACT_BYTES).decode("utf-8")
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValidationError() from exc
+    require(completed.returncode == 0 and completed.stderr == b"", "validator authority is unavailable")
+    require(len(completed.stdout) <= MAX_ARTIFACT_BYTES, "validator authority exceeds the byte limit")
+    return completed.stdout
+
+
+def _authority_commit(repo_root: Path) -> str:
+    """Return the sole ancestor commit that introduced the authority path."""
+
+    output = _git(
+        repo_root.resolve(),
+        "log",
+        "--format=%H",
+        "--diff-filter=A",
+        "--first-parent",
+        "HEAD",
+        "--",
+        VALIDATOR_AUTHORITY_PATH,
+    )
+    try:
+        commits = output.decode("ascii").splitlines()
     except UnicodeError as exc:
         raise ValidationError() from exc
-    matches = TRUST_ANCHOR_PATTERN.findall(source)
-    require(len(matches) == 1, "validator trust anchor is missing")
-    return matches[0]
+    require(len(commits) == 1 and HEX40.fullmatch(commits[0]) is not None, "validator authority history changed")
+    return commits[0]
+
+
+def _trusted_authority(repo_root: Path) -> dict[str, Any]:
+    """Load exact authority bytes from immutable local Git history, not checkout."""
+
+    commit = _authority_commit(repo_root)
+    data = _git(repo_root.resolve(), "show", f"{commit}:{VALIDATOR_AUTHORITY_PATH}")
+    authority = strict_keys(_parse_json_bytes(data), AUTHORITY_KEYS, "validator authority")
+    require(authority["schema"] == VALIDATOR_AUTHORITY_SCHEMA, "validator authority schema changed")
+    require(authority["validator_path"] == BASELINE_SELF_MANIFEST_PATH, "validator authority path changed")
+    require(
+        authority["baseline_path"] == "contracts/fixtures/validator/validation-baseline.json",
+        "baseline authority path changed",
+    )
+    for prefix in ("validator", "baseline"):
+        require(
+            type(authority[f"{prefix}_size_bytes"]) is int
+            and type(authority[f"{prefix}_size_bytes"]) is not bool
+            and 0 < authority[f"{prefix}_size_bytes"] <= MAX_ARTIFACT_BYTES,
+            "validator authority size is invalid",
+        )
+        _validate_digest(authority[f"{prefix}_sha256"])
+    return authority
+
+
+def _trusted_validator_source_digest(repo_root: Path) -> str:
+    return _trusted_authority(repo_root)["validator_sha256"]
 
 
 def _trusted_baseline_digest(repo_root: Path) -> str:
-    anchor_path = _safe_child(repo_root.resolve(), VALIDATOR_TRUST_ANCHOR_PATH)
-    try:
-        source = _read_bounded_bytes(anchor_path, MAX_ARTIFACT_BYTES).decode("utf-8")
-    except UnicodeError as exc:
-        raise ValidationError() from exc
-    matches = BASELINE_TRUST_ANCHOR_PATTERN.findall(source)
-    require(len(matches) == 1, "baseline trust anchor is missing")
-    return matches[0]
+    return _trusted_authority(repo_root)["baseline_sha256"]
 
 
 def _validate_schema_document(schema: dict[str, Any]) -> None:
@@ -1609,13 +1697,18 @@ def _validate_index_document(document: dict[str, Any], repo_root: Path) -> tuple
     require(actual_central == CENTRAL_VALIDATOR_ARTIFACTS, "central validator artifact inventory changed")
 
     all_owned_candidates: set[str] = set()
+    separate_artifacts: set[str] = set()
     for path in fixtures_root.rglob("*"):
         if not path.is_file() or path.is_symlink() or path.name == ".DS_Store" or "__pycache__" in path.parts or path.suffix.casefold() == ".pyc":
             continue
         relative = path.relative_to(fixtures_root).as_posix()
+        if relative in INTENTIONALLY_SEPARATE_ARTIFACTS:
+            separate_artifacts.add(relative)
+            continue
         if relative in {"README.md", "index.json", "schema.json"} or relative.startswith("validator/"):
             continue
         all_owned_candidates.add(relative)
+    require(separate_artifacts == INTENTIONALLY_SEPARATE_ARTIFACTS, "separate authority artifact inventory changed")
     require(all_owned_candidates == owned_files, "unindexed fixture artifact exists")
     return len(fixture_statuses), len(coverage_ids)
 
@@ -1688,9 +1781,11 @@ def _validate_baseline(
 ) -> None:
     canonical = (canonical_baseline_path or (repo_root / "contracts/fixtures/validator/validation-baseline.json")).resolve()
     require(baseline_path.resolve() == canonical, "baseline path is not canonical")
+    authority = _trusted_authority(repo_root)
     baseline_bytes = _read_bounded_bytes(canonical, MAX_JSON_BYTES)
     require(
-        hashlib.sha256(baseline_bytes).hexdigest() == _trusted_baseline_digest(repo_root),
+        len(baseline_bytes) == authority["baseline_size_bytes"]
+        and hashlib.sha256(baseline_bytes).hexdigest() == authority["baseline_sha256"],
         "baseline bytes changed outside the reviewed trust root",
     )
     strict_keys(document, BASELINE_KEYS, "baseline")
@@ -1718,17 +1813,18 @@ def _validate_baseline(
         require(size == len(data) and digest == hashlib.sha256(data).hexdigest(), "baseline artifact manifest is stale")
         total += len(data)
     require(type(document["artifact_size_bytes"]) is int and type(document["artifact_size_bytes"]) is not bool and document["artifact_size_bytes"] == total, "baseline artifact size is stale")
-    # The baseline manifest binds validate.py while test_validate.py remains
-    # outside it as the independent reviewed root. The test source authenticates
-    # both this validator's canonical source and the baseline's exact bytes, so a
-    # coordinated local manifest refresh cannot rebind the scanner trust boundary.
+    # The manifest binds validate.py for local reproducibility, while immutable
+    # Git-object authority outside the fixture tree pins its exact bytes and the
+    # exact baseline bytes. Rebinding scanner, manifests, baseline, anchor, and
+    # checkout tests together therefore cannot rewrite the historical authority.
     require(CENTRAL_VALIDATOR_SOURCE_PATHS.issubset(set(listed)), "central validator source is outside the baseline binding")
     validator_source = _read_bounded_bytes(
         _safe_child(repo_root.resolve(), BASELINE_SELF_MANIFEST_PATH),
         MAX_ARTIFACT_BYTES,
     )
     require(
-        _canonical_validator_source_digest(validator_source) == _trusted_validator_source_digest(repo_root),
+        len(validator_source) == authority["validator_size_bytes"]
+        and hashlib.sha256(validator_source).hexdigest() == authority["validator_sha256"],
         "validator source trust anchor changed",
     )
     for mode in ("normal", "optimized"):
