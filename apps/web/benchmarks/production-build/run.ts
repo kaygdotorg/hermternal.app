@@ -1045,7 +1045,7 @@ export function assertSourceIdentityUnchanged(
   }
 }
 
-async function treeIdentity(root: string): Promise<TreeIdentity> {
+export async function treeIdentity(root: string): Promise<TreeIdentity> {
   const resolvedRoot = await realpath(root);
   const records: Array<{ path: string; type: 'file' | 'symlink'; bytes: number; sha256: string }> = [];
   async function visit(directory: string): Promise<void> {
@@ -1088,7 +1088,7 @@ async function treeIdentity(root: string): Promise<TreeIdentity> {
   };
 }
 
-async function fileIdentity(path: string): Promise<{ bytes: number; sha256: string }> {
+export async function fileIdentity(path: string): Promise<FileIdentity> {
   const resolved = await realpath(path);
   const handle = await open(resolved, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
