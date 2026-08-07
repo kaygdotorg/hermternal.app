@@ -158,16 +158,15 @@ function proxyUpgrade(request, socket, head, target) {
 }
 
 /**
- * Validate the disposable upstream before the host can create an auth proxy.
- * Keep the accepted grammar narrow so URL parsing cannot reinterpret an
- * encoded, numeric, or user-controlled authority into a different host.
- */
-/**
- * @param {string | URL} value
+ * Validate only the original environment/configuration string. URL objects are
+ * rejected because `new URL()` normalizes numeric, octal, short, and padded
+ * authorities before this boundary can inspect their source spelling.
+ *
+ * @param {unknown} value
  * @returns {URL}
  */
 export function validateLiveTarget(value) {
-  const raw = value instanceof URL ? value.href : value;
+  const raw = value;
   if (typeof raw !== 'string' || raw.length === 0 || raw !== raw.trim() || /[\u0000-\u0020\\%]/u.test(raw)) {
     throw new Error('The disposable Hermes target must be a canonical HTTP loopback URL.');
   }
@@ -227,7 +226,7 @@ function isCanonicalLoopbackIpv4(host) {
 }
 
 /**
- * @param {{buildDirectory?: string, target?: string | URL}} [options]
+ * @param {{buildDirectory?: string, target?: string}} [options]
  * @returns {import('node:http').Server}
  */
 export function createLiveHost({
@@ -279,7 +278,7 @@ export function createLiveHost({
 }
 
 /**
- * @param {{buildDirectory?: string, target?: string | URL, port?: number}} [options]
+ * @param {{buildDirectory?: string, target?: string, port?: number}} [options]
  * @returns {Promise<import('node:http').Server>}
  */
 export async function startLiveHost({ port = 4187, ...options } = {}) {

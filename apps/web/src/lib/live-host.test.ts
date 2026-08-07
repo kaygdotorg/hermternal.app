@@ -35,6 +35,20 @@ describe('disposable live proof target', () => {
     expect(() => validateLiveTarget(value)).toThrow();
   });
 
+  it('rejects normalized URL objects instead of trusting their canonical href', () => {
+    const normalizedTargets = [
+      new URL('http://127.0.0.1:19131'),
+      new URL('http://2130706433:19131'),
+      new URL('http://0177.0.0.1:19131'),
+      new URL('http://127.1:19131'),
+      new URL('http://127.0.0.1:00080')
+    ];
+
+    for (const target of normalizedTargets) {
+      expect(() => validateLiveTarget(target)).toThrow();
+    }
+  });
+
   it('rejects an unsafe target synchronously before creating a proxy-capable host', () => {
     expect(() =>
       createLiveHost({

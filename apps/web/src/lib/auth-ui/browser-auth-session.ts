@@ -161,21 +161,38 @@ export class BrowserAuthSession {
     this.assertActive();
     if (this.snapshot.status === 'logging_out') return;
 
-    this.invalidateAndCancel('logging_out');
-    const operation = this.activeOperation();
+    const retry = this.snapshot.status === 'logout_failed';
+    const identity = this.snapshot.identity;
+    if (
+      !isVerifiedIdentity(identity) ||
+      (!retry && this.snapshot.status !== 'authenticated')
+    ) {
+      // Logout is an authenticated boundary. A signed-out, generic failure, or
+      // provider-discovery state must not emit a logout request. Recovery may
+      // retry only with the exact verified identity retained on logout_failed.
+      return;
+    }
+
+    const operation = this.invalidateAndCancel('logging_out', { identity });
+    if (!this.isCurrent(operation.generation)) return;
     try {
       await this.client.logout(operation.signal);
       if (!this.isCurrent(operation.generation)) return;
       this.publish({ status: 'signed_out', providers: [] });
     } catch (error) {
       if (!this.isCurrent(operation.generation) || isAbort(error)) return;
+      if (!isAmbiguousLogout(error)) {
+        this.publishLogoutFailure(mapLogoutFailureCode(error), identity);
+        return;
+      }
+
       const reconciliation = await this.reconcileLogout(operation);
       if (!this.isCurrent(operation.generation)) return;
       if (reconciliation === 'signed_out') {
         this.publish({ status: 'signed_out', providers: [] });
         return;
       }
-      this.publishLogoutFailure(reconciliation === 'authenticated' ? 'logout-failed' : 'logout-unverified');
+      this.publishLogoutFailure(reconciliation === 'authenticated' ? 'logout-failed' : 'logout-unverified', identity);
     }
   }
 
@@ -242,12 +259,18 @@ export class BrowserAuthSession {
     return { generation: this.generation, signal: this.controller.signal };
   }
 
-  private invalidateAndCancel(status: 'expired' | 'logging_out'): void {
+  private invalidateAndCancel(
+    status: 'expired' | 'logging_out',
+    retained: Partial<BrowserAuthSnapshot> = {}
+  ): { generation: number; signal: AbortSignal } {
     this.generation += 1;
     this.controller?.abort();
-    this.controller = new AbortController();
+    const controller = new AbortController();
+    this.controller = controller;
+    const operation = { generation: this.generation, signal: controller.signal };
     this.invalidateLocalSession();
-    this.publish({ status, providers: [] });
+    this.publish({ status, providers: [], ...retained });
+    return operation;
   }
 
   /**
@@ -267,9 +290,13 @@ export class BrowserAuthSession {
     }
   }
 
-  private publishLogoutFailure(errorCode: 'logout-failed' | 'logout-unverified'): void {
+  private publishLogoutFailure(
+    errorCode: 'logout-failed' | 'logout-unverified',
+    identity: AuthIdentity
+  ): void {
     this.publish({
       status: 'logout_failed',
+      identity,
       providers: [],
       errorCode
     });
@@ -328,4 +355,33 @@ function isIdentityUnavailable(error: unknown): boolean {
 
 function isUnauthenticated(error: unknown): boolean {
   return error instanceof BrowserAuthError && error.code === 'identity-unverified' && error.status === 401;
+}
+
+function isAmbiguousLogout(error: unknown): boolean {
+  return error instanceof BrowserAuthError && (error.code === 'network' || error.code === 'timeout');
+}
+
+function mapLogoutFailureCode(error: unknown): 'logout-failed' | 'logout-unverified' {
+  return error instanceof BrowserAuthError && error.code === 'logout-failed' ? 'logout-failed' : 'logout-unverified';
+}
+
+function isVerifiedIdentity(value: AuthIdentity | undefined): value is AuthIdentity {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as unknown as Record<string, unknown>;
+  const keys = Object.keys(candidate).sort().join('|');
+  if (keys !== 'displayName|email|expiresAt|organizationId|provider|userId') return false;
+
+  const validText = (item: unknown): item is string =>
+    typeof item === 'string' && item.length > 0 && item.length <= 512;
+  return (
+    validText(candidate.userId) &&
+    validText(candidate.email) &&
+    validText(candidate.displayName) &&
+    validText(candidate.organizationId) &&
+    validText(candidate.provider) &&
+    typeof candidate.expiresAt === 'number' &&
+    Number.isInteger(candidate.expiresAt) &&
+    candidate.expiresAt >= 0 &&
+    candidate.expiresAt <= 4_294_967_295
+  );
 }

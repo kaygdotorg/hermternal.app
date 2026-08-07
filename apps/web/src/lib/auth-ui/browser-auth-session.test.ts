@@ -120,6 +120,77 @@ describe('BrowserAuthSession', () => {
     expect(session.current).toEqual({ status: 'signed_out', providers: [] });
   });
 
+  it('does not invoke logout before a verified authenticated identity exists', async () => {
+    const logout = vi.fn(async () => undefined);
+    const signedOut = new BrowserAuthSession({
+      client: client({ logout }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession: vi.fn()
+    });
+
+    await signedOut.logout();
+    expect(logout).not.toHaveBeenCalled();
+
+    const failed = new BrowserAuthSession({
+      client: client({
+        logout,
+        verify: vi.fn(async () => {
+          throw new BrowserAuthError('identity-failed', 500);
+        })
+      }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession: vi.fn()
+    });
+    await failed.initialize();
+    await failed.logout();
+    expect(logout).not.toHaveBeenCalled();
+  });
+
+  it('does not reconcile an invalid logout contract into signed_out', async () => {
+    const verify = vi
+      .fn<BrowserAuthClient['verify']>()
+      .mockResolvedValueOnce(identity)
+      .mockRejectedValueOnce(new BrowserAuthError('identity-unverified', 401));
+    const logout = vi.fn(async () => {
+      throw new BrowserAuthError('invalid-response', 302);
+    });
+    const session = new BrowserAuthSession({
+      client: client({ verify, logout }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession: vi.fn()
+    });
+
+    await session.initialize();
+    await session.logout();
+
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(session.current).toEqual({
+      status: 'logout_failed',
+      identity,
+      providers: [],
+      errorCode: 'logout-unverified'
+    });
+  });
+
+  it('permits retry logout only with the retained verified identity', async () => {
+    const logout = vi
+      .fn<BrowserAuthClient['logout']>()
+      .mockRejectedValueOnce(new BrowserAuthError('logout-failed'))
+      .mockResolvedValueOnce(undefined);
+    const session = new BrowserAuthSession({
+      client: client({ logout }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession: vi.fn()
+    });
+
+    await session.initialize();
+    await session.logout();
+    await session.logout();
+
+    expect(logout).toHaveBeenCalledTimes(2);
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
   it('closes local chat immediately on expiry and ignores stale authentication completion', async () => {
     const pending = deferred<AuthIdentity>();
     const invalidateLocalSession = vi.fn();
@@ -214,7 +285,7 @@ describe('BrowserAuthSession', () => {
       .mockResolvedValueOnce(identity)
       .mockRejectedValueOnce(new BrowserAuthError('identity-unverified', 401));
     const logout = vi.fn(async () => {
-      throw new BrowserAuthError('logout-unverified');
+      throw new BrowserAuthError('network');
     });
     const discoverProviders = vi.fn(async () => ({ providers: [passwordProvider] }));
     const session = new BrowserAuthSession({
@@ -248,10 +319,11 @@ describe('BrowserAuthSession', () => {
     await session.retryDiscovery();
     session.cancel();
 
-    expect(verify).toHaveBeenCalledTimes(2);
+    expect(verify).toHaveBeenCalledTimes(1);
     expect(discoverProviders).not.toHaveBeenCalled();
     expect(session.current).toEqual({
       status: 'logout_failed',
+      identity,
       providers: [],
       errorCode: 'logout-failed'
     });

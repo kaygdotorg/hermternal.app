@@ -149,6 +149,26 @@ test('browser auth logs out of the official Hermes session', async ({ page }) =>
       cache: 'no-store',
       redirect: 'error'
     });
+    const authenticatedValue: unknown = await authenticatedIdentity.json();
+    const authenticatedRecord =
+      authenticatedValue !== null && typeof authenticatedValue === 'object' && !Array.isArray(authenticatedValue)
+        ? (authenticatedValue as Record<string, unknown>)
+        : undefined;
+    const identityKeys = ['display_name', 'email', 'expires_at', 'org_id', 'provider', 'user_id'];
+    const boundedText = (value: unknown): value is string =>
+      typeof value === 'string' && value.length > 0 && value.length <= 512;
+    const authenticatedIdentityShape =
+      authenticatedRecord !== undefined &&
+      JSON.stringify(Object.keys(authenticatedRecord).sort()) === JSON.stringify(identityKeys) &&
+      boundedText(authenticatedRecord.user_id) &&
+      boundedText(authenticatedRecord.email) &&
+      boundedText(authenticatedRecord.display_name) &&
+      boundedText(authenticatedRecord.org_id) &&
+      boundedText(authenticatedRecord.provider) &&
+      typeof authenticatedRecord.expires_at === 'number' &&
+      Number.isInteger(authenticatedRecord.expires_at) &&
+      authenticatedRecord.expires_at >= 0 &&
+      authenticatedRecord.expires_at <= 4_294_967_295;
     const response = await fetch('/auth/logout', {
       method: 'POST',
       credentials: 'same-origin',
@@ -163,6 +183,7 @@ test('browser auth logs out of the official Hermes session', async ({ page }) =>
     });
     return {
       authenticatedIdentityStatus: authenticatedIdentity.status,
+      authenticatedIdentityShape,
       logoutStatus: response.status,
       logoutLocation: response.headers.get('location'),
       logoutRedirected: response.redirected,
@@ -171,6 +192,7 @@ test('browser auth logs out of the official Hermes session', async ({ page }) =>
   });
 
   expect(logout.authenticatedIdentityStatus).toBe(200);
+  expect(logout.authenticatedIdentityShape).toBe(true);
   expect(logout.logoutStatus).toBe(302);
   expect(logout.logoutLocation).toBe('/login');
   expect(logout.logoutRedirected).toBe(false);

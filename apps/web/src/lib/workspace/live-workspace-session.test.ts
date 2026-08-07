@@ -277,6 +277,96 @@ describe('LiveWorkspaceSession', () => {
     expect(chat.transport.reconnect).not.toHaveBeenCalled();
   });
 
+  it('ignores a late reconnect completion after workspace invalidation', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const reconnect = createDeferred<void>();
+    vi.mocked(chat.transport.reconnect).mockImplementation(() => reconnect.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockClear();
+
+    const retry = session.retryConnection();
+    expect(session.current.state).toBe('reconnecting');
+    session.invalidate();
+    reconnect.resolve();
+    await retry;
+
+    expect(rest.getSessionMessages).not.toHaveBeenCalled();
+    expect(session.current.state).toBe('loading');
+  });
+
+  it('ignores a late reconnect completion after workspace disposal', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const reconnect = createDeferred<void>();
+    vi.mocked(chat.transport.reconnect).mockImplementation(() => reconnect.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockClear();
+
+    const retry = session.retryConnection();
+    session.dispose();
+    reconnect.reject(new Error('late reconnect failure'));
+    await retry;
+
+    expect(rest.getSessionMessages).not.toHaveBeenCalled();
+    expect(session.current.state).toBe('loading');
+  });
+
+  it('ignores a late reconnect completion after the chat is replaced', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const reconnect = createDeferred<void>();
+    vi.mocked(chat.transport.reconnect).mockImplementation(() => reconnect.promise);
+    const replacement: JsonRpcChatTransport = {
+      ...chat.transport,
+      connect: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn(),
+      reconnect: vi.fn().mockResolvedValue(undefined)
+    };
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSession).mockResolvedValueOnce({ ...SESSION, id: 'session-2', title: 'Replacement' });
+    vi.mocked(chat.createChat).mockImplementationOnce(() => replacement);
+    vi.mocked(rest.getSessionMessages).mockClear();
+
+    const retry = session.retryConnection();
+    await session.selectSession('session-2');
+    reconnect.resolve();
+    await retry;
+
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(1);
+    expect(session.current).toMatchObject({ activeSessionId: 'session-2', title: 'Replacement' });
+    expect(session.current.state).toBe('empty');
+  });
+
+  it('does not reconnect after a subscriber reentrantly invalidates the workspace', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const reconnect = createDeferred<void>();
+    vi.mocked(chat.transport.reconnect).mockImplementation(() => reconnect.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockClear();
+    let invalidated = false;
+    const unsubscribe = session.subscribe((snapshot) => {
+      if (snapshot.state === 'reconnecting' && !invalidated) {
+        invalidated = true;
+        session.invalidate();
+      }
+    });
+
+    const retry = session.retryConnection();
+    reconnect.resolve();
+    await retry;
+    unsubscribe();
+
+    expect(invalidated).toBe(true);
+    expect(rest.getSessionMessages).not.toHaveBeenCalled();
+    expect(session.current.state).toBe('loading');
+  });
+
   it('ignores a late approval completion after the chat generation is invalidated', async () => {
     const rest = createRest([]);
     const chat = createChatHarness();

@@ -205,13 +205,24 @@ export class LiveWorkspaceSession {
 
   async retryConnection(): Promise<void> {
     this.assertActive();
-    if (!this.chat || !this.snapshot.activeSessionId) return;
+    const chat = this.chat;
+    const generation = this.generation;
+    const sessionId = this.snapshot.activeSessionId;
+    if (!chat || !sessionId) return;
+
     this.publish({ ...this.snapshot, state: 'reconnecting' });
+    // Subscribers can synchronously invalidate or replace the workspace from
+    // the reconnecting publication. Do not call an old transport after that
+    // re-entry has changed the ownership boundary.
+    if (!this.ownsChat(generation, chat, sessionId)) return;
+
     try {
-      await this.chat.reconnect();
-      await this.refreshMessages(this.snapshot.activeSessionId, this.generation);
+      await chat.reconnect();
+      if (!this.ownsChat(generation, chat, sessionId)) return;
+      await this.refreshMessages(sessionId, generation, chat);
     } catch {
-      if (!this.disposed) this.publish({ ...this.snapshot, state: 'retryable-error' });
+      if (!this.ownsChat(generation, chat, sessionId)) return;
+      this.publish({ ...this.snapshot, state: 'retryable-error' });
     }
   }
 
@@ -414,14 +425,29 @@ export class LiveWorkspaceSession {
     await this.refreshMessages(this.snapshot.activeSessionId, this.generation);
   }
 
-  private async refreshMessages(sessionId: string, generation: number): Promise<void> {
+  private async refreshMessages(
+    sessionId: string,
+    generation: number,
+    expectedChat?: JsonRpcChatTransport
+  ): Promise<void> {
     try {
       const response = await this.rest.getSessionMessages(sessionId, { limit: 500, offset: 0 });
-      if (!this.isCurrent(generation) || this.snapshot.activeSessionId !== sessionId) return;
+      if (
+        !this.isCurrent(generation) ||
+        this.snapshot.activeSessionId !== sessionId ||
+        (expectedChat !== undefined && this.chat !== expectedChat)
+      )
+        return;
       const timeline = mapLiveMessages(sessionId, response.messages, this.snapshot.model);
       this.publish({ ...this.snapshot, timeline, state: timeline.length === 0 ? 'empty' : 'ready' });
     } catch {
-      if (this.isCurrent(generation)) this.publish({ ...this.snapshot, state: 'retryable-error' });
+      if (
+        this.isCurrent(generation) &&
+        this.snapshot.activeSessionId === sessionId &&
+        (expectedChat === undefined || this.chat === expectedChat)
+      ) {
+        this.publish({ ...this.snapshot, state: 'retryable-error' });
+      }
     }
   }
 
@@ -488,6 +514,10 @@ export class LiveWorkspaceSession {
 
   private isCurrent(generation: number): boolean {
     return !this.disposed && generation === this.generation;
+  }
+
+  private ownsChat(generation: number, chat: JsonRpcChatTransport, sessionId: string): boolean {
+    return this.isCurrent(generation) && this.chat === chat && this.snapshot.activeSessionId === sessionId;
   }
 
   private publish(snapshot: LiveWorkspaceSnapshot): void {
