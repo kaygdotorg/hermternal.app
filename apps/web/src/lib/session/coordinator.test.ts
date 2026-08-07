@@ -100,7 +100,10 @@ interface FakeTerminalHarness {
   attach: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
   events: string[];
-  deferNext(sessionId: string): { deferred: Deferred<TerminalBinding>; binding: TerminalBinding };
+  deferNext(
+    sessionId: string,
+    binding?: TerminalBinding
+  ): { deferred: Deferred<TerminalBinding>; binding: TerminalBinding };
   rejectNext(sessionId: string): Deferred<TerminalBinding>;
 }
 
@@ -119,19 +122,25 @@ function createFakeTerminal(): FakeTerminalHarness {
     queue.push(plan);
     plans.set(sessionId, queue);
   };
-  const makeBinding = (sessionId: string): TerminalBinding => ({
-    sessionId,
-    invalidate: vi.fn(() => {
-      events.push(`invalidate:${sessionId}`);
-    })
-  });
+  const makeBinding = (sessionId: string): TerminalBinding => {
+    const binding = {
+      sessionId,
+      invalidate: vi.fn(() => {
+        events.push(`invalidate:${binding.sessionId}`);
+      })
+    };
+    return binding;
+  };
   const attach = vi.fn(async (sessionId: string, signal: AbortSignal): Promise<TerminalBinding> => {
     const [plan, ...remaining] = plans.get(sessionId) ?? [];
     if (remaining.length > 0) plans.set(sessionId, remaining);
     else plans.delete(sessionId);
     if (signal.aborted) throw new SessionCoordinatorError('aborted');
     if (plan?.kind === 'rejected') return plan.deferred.promise;
-    if (plan?.kind === 'deferred') return plan.deferred.promise;
+    if (plan?.kind === 'deferred') {
+      (plan.binding as TerminalBinding & { sessionId: string }).sessionId = sessionId;
+      return plan.deferred.promise;
+    }
     return makeBinding(sessionId);
   });
   return {
@@ -139,8 +148,7 @@ function createFakeTerminal(): FakeTerminalHarness {
     attach,
     release,
     events,
-    deferNext(sessionId) {
-      const binding = makeBinding(sessionId);
+    deferNext(sessionId, binding = makeBinding(sessionId)) {
       const pending = deferred<TerminalBinding>();
       enqueue(sessionId, { kind: 'deferred', deferred: pending, binding });
       return { deferred: pending, binding };
@@ -364,6 +372,48 @@ describe('createSessionCoordinator', () => {
     await Promise.all([oldActivation, replacement]);
     expect(harness.coordinator.state.terminalSessionId).toBe('session-new');
     expect(newAttach.binding.invalidate).not.toHaveBeenCalled();
+  });
+
+  it('cleans each attachment lease when the adapter reuses one raw binding', async () => {
+    const harness = createCoordinator();
+    const staleAttach = harness.terminal.deferNext('session-old');
+    const replacementAttach = harness.terminal.deferNext('session-new');
+    const oldActivation = harness.coordinator.activate('terminal');
+    await flush();
+
+    const replacement = harness.coordinator.setSession('session-new');
+    await flush();
+    staleAttach.deferred.resolve(staleAttach.binding);
+    await flush();
+    replacementAttach.deferred.resolve(replacementAttach.binding);
+    await Promise.all([oldActivation, replacement]);
+
+    const thirdAttach = harness.terminal.deferNext('session-third', staleAttach.binding);
+    const third = harness.coordinator.setSession('session-third');
+    await flush();
+    thirdAttach.deferred.resolve(thirdAttach.binding);
+    await third;
+    const fourthAttach = harness.terminal.deferNext('session-fourth', staleAttach.binding);
+    const fourth = harness.coordinator.setSession('session-fourth');
+    await flush();
+    fourthAttach.deferred.resolve(fourthAttach.binding);
+    await fourth;
+    harness.coordinator.logout();
+
+    expect(staleAttach.binding.invalidate).toHaveBeenCalledTimes(3);
+    expect(harness.terminal.release).toHaveBeenCalledTimes(4);
+    expect(harness.terminal.release.mock.calls.filter(([binding]) => binding === staleAttach.binding)).toHaveLength(3);
+    expect(harness.terminal.events).toEqual([
+      'invalidate:session-old',
+      'release:session-old',
+      'invalidate:session-new',
+      'release:session-new',
+      'invalidate:session-third',
+      'release:session-third',
+      'invalidate:session-fourth',
+      'release:session-fourth'
+    ]);
+    expect(harness.coordinator.state.status).toBe('logged-out');
   });
 
   it('invalidates and releases a stale Terminal completion after logout', async () => {

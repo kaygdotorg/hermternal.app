@@ -15,8 +15,10 @@ Hermes session, or mirror transcript content.
   until the selected session changes. Repeated Terminal activations transfer
   focus ownership to the latest Terminal request without starting another attach.
 - `setSession()` increments the session generation, invalidates and releases the
-  old Terminal binding before awaiting Chat restoration, and ignores late
-  completions from the previous generation.
+  current Terminal binding lease before awaiting Chat restoration, and ignores
+  late completions from the previous generation. Each attach gets a fresh lease,
+  so an adapter may reuse one raw binding object across sessions without
+  suppressing later cleanup.
 - A Terminal attach failure is reported as `terminal-attach-failed`; the Chat
   transport remains open and usable. Switching back to Chat focuses the composer
   without retrying or replaying a prompt.
@@ -69,10 +71,10 @@ const coordinator = createSessionCoordinator({
 `chat` is the existing `JsonRpcChatTransport` shape from issue #118. The
 `terminal` adapter returns an opaque `{ sessionId, invalidate() }` binding. It
 must not return PTY bytes or transcript data. The coordinator owns each returned
-binding until one cleanup path calls `invalidate()` and then optional `release()`
-exactly once. This ordering applies on session replacement, logout, disposal,
-and a stale asynchronous completion; a late binding is never installed into the
-new session.
+binding through an attachment lease. One lease calls `invalidate()` and then
+optional `release()` exactly once; a later lease may wrap the same raw object.
+This ordering applies on session replacement, logout, disposal, and a stale
+asynchronous completion; a late binding is never installed into the new session.
 
 This is offline prototype evidence. The injected adapters are the only places
 where a later runtime may connect to a server or renderer; this change itself
@@ -91,7 +93,10 @@ bun run build
 
 The benchmark measures 30 repetitions of 1,000 in-memory mode transitions with
 fake adapters. It prints raw samples and min/p50/p95/p99/max/mean milliseconds.
-The observed run is recorded in
-`coordinator-benchmark-evidence.json`. Network calls, renderer operations,
-transcript mirror entries, and the threshold are recorded as zero or `null`; no
-unreviewed performance budget is invented.
+The v2 evidence records the exact `HEAD` used for the run, SHA-256 digests of the
+coordinator source and benchmark harness, a stable workload identity, the
+command, working directory, and environment. Regenerate it only after the
+coordinator and harness are stable, then keep those fields consistent with the
+checked-in `coordinator-benchmark-evidence.json`. Network calls, renderer
+operations, transcript mirror entries, and the threshold are recorded as zero or
+`null`; no unreviewed performance budget is invented.

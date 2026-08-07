@@ -77,7 +77,8 @@ export type ChatSessionPort = Pick<
 /**
  * W-Term owns the concrete PTY/renderer binding. The coordinator only receives
  * an opaque invalidatable handle and never stores terminal bytes or transcript
- * content. The coordinator invalidates and releases each returned handle once.
+ * content. Each attachment receives its own coordinator-owned lease, so the
+ * same raw handle may be reused by an adapter after an earlier lease settles.
  */
 export interface TerminalBinding {
   readonly sessionId: string;
@@ -86,7 +87,7 @@ export interface TerminalBinding {
 
 export interface TerminalSessionPort {
   attach(sessionId: string, signal: AbortSignal): TerminalBinding | Promise<TerminalBinding>;
-  /** Optional renderer/transport cleanup after invalidation; called once per binding. */
+  /** Optional renderer/transport cleanup after invalidation; called once per lease. */
   release?(binding: TerminalBinding): void;
 }
 
@@ -156,6 +157,11 @@ interface PendingSessionOperation {
   readonly controller: AbortController;
   readonly promise: Promise<void>;
   cancelled: boolean;
+}
+
+interface TerminalBindingLease {
+  readonly binding: TerminalBinding;
+  cleaned: boolean;
 }
 
 interface PendingTerminalAttach {
@@ -307,7 +313,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   let mode: WorkspaceMode = options.initialMode ?? 'chat';
   let sessionGeneration = 0;
   let terminalStatus: TerminalBindingStatus = 'detached';
-  let terminalBinding: TerminalBinding | undefined;
+  let terminalBinding: TerminalBindingLease | undefined;
   let terminalBindingFocusOwnerSequence: number | undefined;
   let lastError: SessionCoordinatorErrorCode | undefined;
   let lastFocusIntent: FocusIntent | undefined;
@@ -320,7 +326,6 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   let pendingSession: PendingSessionOperation | undefined;
   let pendingTerminal: PendingTerminalAttach | undefined;
   let pendingReconnect: PendingReconnect | undefined;
-  const cleanedBindings = new WeakSet<object>();
 
   if (!isMode(mode)) {
     throw new SessionCoordinatorError('chat-operation-failed');
@@ -358,7 +363,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
       chatStatus,
       terminalStatus,
       ...(activeSessionId === undefined ? {} : { activeSessionId }),
-      ...(terminalBinding === undefined ? {} : { terminalSessionId: terminalBinding.sessionId }),
+      ...(terminalBinding === undefined ? {} : { terminalSessionId: terminalBinding.binding.sessionId }),
       ...(lastFocusIntent === undefined ? {} : { focusIntent: lastFocusIntent }),
       ...(lastError === undefined ? {} : { lastError })
     };
@@ -426,17 +431,17 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     void pending.promise.catch(() => undefined);
   };
 
-  /** Cleanup is identity-based so each binding is invalidated, then released, once. */
-  const cleanupBinding = (binding: TerminalBinding): void => {
-    if (cleanedBindings.has(binding)) return;
-    cleanedBindings.add(binding);
+  /** Cleanup is lease-based so a reused raw binding gets fresh ownership. */
+  const cleanupBinding = (lease: TerminalBindingLease): void => {
+    if (lease.cleaned) return;
+    lease.cleaned = true;
     try {
-      binding.invalidate();
+      lease.binding.invalidate();
     } catch {
       // Invalidation is best effort; the binding is no longer exposed.
     }
     try {
-      terminal.release?.(binding);
+      terminal.release?.(lease.binding);
     } catch {
       // Renderer cleanup cannot keep Chat or session replacement from settling.
     }
@@ -446,15 +451,15 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     if (!value || typeof value !== 'object') return;
     const invalidate = (value as { invalidate?: unknown }).invalidate;
     if (typeof invalidate !== 'function') return;
-    cleanupBinding(value as TerminalBinding);
+    cleanupBinding({ binding: value as TerminalBinding, cleaned: false });
   };
 
   const invalidateBinding = (): void => {
-    const binding = terminalBinding;
+    const lease = terminalBinding;
     terminalBinding = undefined;
     terminalBindingFocusOwnerSequence = undefined;
     terminalStatus = 'detached';
-    if (binding) cleanupBinding(binding);
+    if (lease) cleanupBinding(lease);
   };
 
   const assertCurrent = (generation: number, sessionId: string): void => {
@@ -595,10 +600,10 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   ): Promise<TerminalBinding> => {
     const sessionId = assertSession();
     const generation = sessionGeneration;
-    if (terminalBinding?.sessionId === sessionId) {
+    if (terminalBinding?.binding.sessionId === sessionId) {
       terminalStatus = 'attached';
       if (focusOwnerSequence !== undefined) terminalBindingFocusOwnerSequence = focusOwnerSequence;
-      return Promise.resolve(terminalBinding);
+      return Promise.resolve(terminalBinding.binding);
     }
 
     const existing = pendingTerminal;
@@ -635,11 +640,12 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
           throw new SessionCoordinatorError('stale-operation');
         }
         const binding = normalizeBinding(value, sessionId);
+        const lease: TerminalBindingLease = { binding, cleaned: false };
         if (!current(generation, sessionId) || pending.cancelled) {
-          cleanupUnknownBinding(binding);
+          cleanupBinding(lease);
           throw new SessionCoordinatorError('stale-operation');
         }
-        terminalBinding = binding;
+        terminalBinding = lease;
         terminalBindingFocusOwnerSequence = pending.focusOwnerSequence;
         terminalStatus = 'attached';
         lastError = undefined;
