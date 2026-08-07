@@ -121,11 +121,18 @@ forwarding, invalidates a binding after unsolicited detach/failure/exit, and
 maps `4401` to `authentication-required` while leaving `4403` as
 `incompatible-origin`.
 
+The pinned source has no client-visible attach-token issuance route. The normal
+browser bridge therefore connects in legacy mode and reports reconnect as
+unsupported; it never fakes an attach identity or silently creates a replacement
+PTY. Callers with a separately reviewed opaque attach/process-identity provider
+may pass it to the bridge, in which case reconnect delegates to the transport's
+exact attach-mode retention and supersession rules.
+
 The bridge can wait for the lazy TerminalSurface renderer-ready signal before
-its first `connect()`. This prevents replay bytes from arriving before a
-renderer sink exists without adding a second application-level replay buffer.
-The renderer owns bounded output queues; the bridge and workspace snapshot do
-not retain terminal bytes.
+its first `connect()` and before an attach-mode `reconnect()`. This prevents
+replay bytes from arriving before a renderer sink exists without adding a second
+application-level replay buffer. The renderer owns bounded output queues; the
+bridge and workspace snapshot do not retain terminal bytes.
 
 ## Verification scope
 

@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { LiveRestFetch } from '$lib/transport';
-import { LiveWorkspaceSession } from '$lib/workspace/live-workspace-session';
 import { createLiveRootContext, resolveRootRoute } from './root-route';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -18,6 +17,29 @@ const IDENTITY = {
   provider: 'basic',
   expires_at: 4_000_000_000
 };
+
+function createSocketHarness() {
+  const socket = {
+    onopen: null as (() => void) | null,
+    onmessage: null as ((event: { readonly data: unknown }) => void) | null,
+    onerror: null as (() => void) | null,
+    onclose: null as ((event?: { readonly code?: number }) => void) | null,
+    readyState: 1,
+    send: vi.fn((_data: unknown) => undefined),
+    close: vi.fn((code?: number) => socket.onclose?.({ code }))
+  };
+  return {
+    socket,
+    open: () => socket.onopen?.(),
+    closeFromServer: (code: number) => socket.onclose?.({ code })
+  };
+}
+
+async function flush(): Promise<void> {
+  for (let index = 0; index < 32; index += 1) {
+    await Promise.resolve();
+  }
+}
 
 describe('root route composition', () => {
   it('keeps only closed valid scenario values in the deterministic fixture lane', () => {
@@ -110,44 +132,103 @@ describe('root route composition', () => {
     expect(context.workspace.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
   });
 
-  it('reuses the root workspace when the authenticated view remounts after expiry', async () => {
+  it('routes the shared root socket seam into the normal PTY upgrade', async () => {
+    const harness = createSocketHarness();
+    const urls: string[] = [];
     const fetch: LiveRestFetch = vi.fn(async (input) => {
-      if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
+      if (String(input) === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket' });
       throw new Error('unexpected request');
     });
-    const context = createLiveRootContext({ fetch });
-    const initialize = vi.spyOn(context.workspace, 'initialize').mockResolvedValue(undefined);
-    const workspace = context.workspace;
+    const createSocket = vi.fn((url: string) => {
+      urls.push(url);
+      return harness.socket;
+    });
+    const context = createLiveRootContext({ fetch, createSocket });
+    const terminal = context.workspace.terminal;
+    if (!terminal) throw new Error('terminal bridge was not composed');
 
-    await context.auth.initialize();
-    context.auth.expire();
-    // The authenticated view may unmount here, but it now only releases its
-    // subscription; root disposal remains the sole permanent lifecycle action.
-    await context.auth.initialize();
-    const unsubscribe = workspace.subscribe(() => {});
-    await workspace.initialize();
+    const pending = terminal.attach('session-1', new AbortController().signal);
+    await flush();
 
-    expect(context.auth.current.status).toBe('authenticated');
-    expect(context.workspace).toBe(workspace);
-    expect(initialize).toHaveBeenCalledTimes(1);
-    unsubscribe();
-    context.dispose();
+    expect(createSocket).toHaveBeenCalledTimes(1);
+    const upgrade = new URL(urls[0] ?? 'http://invalid');
+    expect(upgrade.pathname).toBe('/api/pty');
+    expect(upgrade.searchParams.get('resume')).toBe('session-1');
+    expect(upgrade.searchParams.get('ticket')).toBe('pty-ticket');
+
+    harness.open();
+    await pending;
+    expect(terminal.state).toMatchObject({ status: 'attached', sessionId: 'session-1', reconnectSupported: false });
+
+    context.workspace.dispose();
   });
 
-  it('permanently disposes the root workspace exactly once', async () => {
+  it('expires authenticated root state for a hidden TerminalSurface PTY 4401', async () => {
+    const harness = createSocketHarness();
     const fetch: LiveRestFetch = vi.fn(async (input) => {
-      if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
+      const path = String(input);
+      if (path === '/api/auth/me') return jsonResponse(IDENTITY);
+      if (path === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket' });
       throw new Error('unexpected request');
     });
-    const disposeWorkspace = vi.spyOn(LiveWorkspaceSession.prototype, 'dispose');
-    const context = createLiveRootContext({ fetch });
-    const disposeAuth = vi.spyOn(context.auth, 'dispose');
-
+    const context = createLiveRootContext({
+      fetch,
+      createPtySocket: () => harness.socket
+    });
     await context.auth.initialize();
-    context.dispose();
-    context.dispose();
+    expect(context.auth.current.status).toBe('authenticated');
 
-    expect(disposeWorkspace).toHaveBeenCalledTimes(1);
-    expect(disposeAuth).toHaveBeenCalledTimes(1);
+    const terminal = context.workspace.terminal;
+    if (!terminal) throw new Error('terminal bridge was not composed');
+    const pending = terminal.attach('session-1', new AbortController().signal);
+    await flush();
+    harness.open();
+    await pending;
+
+    const expire = vi.spyOn(context.auth, 'expire');
+    harness.closeFromServer(4401);
+
+    expect(expire).toHaveBeenCalledTimes(1);
+    expect(context.auth.current.status).toBe('expired');
+    expect(context.workspace.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
+    expect(context.workspace.current.terminal).toBeUndefined();
+
+    context.workspace.dispose();
+    context.auth.dispose();
+  });
+
+  it('keeps PTY 4403 outside authenticated recovery', async () => {
+    const harness = createSocketHarness();
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return jsonResponse(IDENTITY);
+      if (path === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket' });
+      throw new Error('unexpected request');
+    });
+    const context = createLiveRootContext({
+      fetch,
+      createPtySocket: () => harness.socket
+    });
+    await context.auth.initialize();
+
+    const terminal = context.workspace.terminal;
+    if (!terminal) throw new Error('terminal bridge was not composed');
+    const pending = terminal.attach('session-1', new AbortController().signal);
+    await flush();
+    harness.open();
+    await pending;
+
+    const expire = vi.spyOn(context.auth, 'expire');
+    harness.closeFromServer(4403);
+
+    expect(expire).not.toHaveBeenCalled();
+    expect(context.auth.current.status).toBe('authenticated');
+    expect(context.workspace.current.terminal).toMatchObject({
+      closeCode: 4403,
+      failure: 'incompatible-origin'
+    });
+
+    context.workspace.dispose();
+    context.auth.dispose();
   });
 });

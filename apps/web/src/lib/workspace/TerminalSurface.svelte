@@ -51,7 +51,7 @@
     void focusRenderer();
   }
   $: if (mounted && subscribedBridge !== bridge) {
-    resetRendererForBoundary();
+    resetRendererForBoundary(bridge);
     subscribeToBridge(bridge);
   }
   $: if (mounted && coordinatorKey !== lastCoordinatorKey) {
@@ -92,17 +92,26 @@
     unsubscribe = nextBridge.subscribe(handleBridgeEvent);
   }
 
-  function resetRendererForBoundary(): void {
+  function resetRendererForBoundary(targetBridge: TerminalSurfaceBridge = bridge): void {
     mountGeneration += 1;
     renderer?.dispose();
     renderer = undefined;
     rendererState = 'idle';
     rendererError = null;
     lastResize = '';
-    bridge.setRendererReady?.(false);
-    currentTerminal = bridge.state;
-    outputMayBeTruncated = bridge.state.outputMayBeTruncated;
+    targetBridge.setRendererReady?.(false);
+    currentTerminal = targetBridge.state;
+    outputMayBeTruncated = targetBridge.state.outputMayBeTruncated;
     if (active) void ensureRenderer();
+  }
+
+  function canForwardTerminalIo(): boolean {
+    if (!active || currentTerminal.status !== 'attached') return false;
+    if (coordinator === undefined) return true;
+    return (
+      coordinator.terminalStatus === 'attached' &&
+      coordinator.activeSessionId === currentTerminal.sessionId
+    );
   }
 
   function handleBridgeEvent(event: CurrentSessionTerminalEvent): void {
@@ -118,12 +127,17 @@
       outputMayBeTruncated = true;
       return;
     }
-    const generationChanged =
-      event.state.generation !== currentTerminal.generation ||
+    const sessionChanged =
+      currentTerminal.sessionId !== undefined &&
+      event.state.sessionId !== undefined &&
       event.state.sessionId !== currentTerminal.sessionId;
     currentTerminal = event.state;
     outputMayBeTruncated = event.state.outputMayBeTruncated;
-    if (generationChanged) resetRendererForBoundary();
+    // A PTY reconnect changes generation but not session identity. Keep the
+    // mounted renderer as the bounded byte sink; resetting it after the
+    // transport has started would create a zero-byte-loss window. Session
+    // replacement and explicit bridge replacement still reset before attach.
+    if (sessionChanged) resetRendererForBoundary();
     if (rendererState === 'ready') void renderer?.whenIdle();
   }
 
@@ -143,6 +157,7 @@
         label: 'Terminal',
         initialSize: { cols: 80, rows: 24 },
         onInput: (data) => {
+          if (!canForwardTerminalIo()) return;
           try {
             bridge.sendInput(data);
           } catch {
@@ -192,6 +207,7 @@
     if (key === lastResize) return;
     lastResize = key;
     renderer.resize(cols, rows);
+    if (!canForwardTerminalIo()) return;
     try {
       bridge.resize(cols, rows);
     } catch {
@@ -242,8 +258,12 @@
     if (value === 'open') return 'Attached · input enabled';
     if (value === 'connecting') return 'Current session · input paused';
     if (value === 'replaying') return 'Replaying retained output · input paused';
-    if (value === 'detached') return 'Detached · reconnect to continue';
-    if (value === 'ended') return 'The PTY process ended';
+    if (value === 'detached') {
+      return state.reconnectSupported ? 'Detached · reconnect to continue' : 'Detached · reattach unavailable';
+    }
+    if (value === 'ended') {
+      return state.reconnectSupported ? 'The PTY process ended' : 'Legacy PTY ended · reattach unavailable';
+    }
     if (value === 'closed') return 'Explicitly closed · no PTY retry';
     if (state.failure === 'authentication-required') return 'Authentication required · sign in again';
     if (state.failure === 'incompatible-origin') return 'Incompatible origin · terminal blocked';
@@ -300,7 +320,7 @@
     <div class="footer-actions">
       {#if terminalState === 'failed' && currentTerminal.failure === 'authentication-required'}
         <Pill ariaLabel="Return to sign in" label="Sign in again" variant="action" onActivate={() => onAction({ type: 'return-to-sign-in' })} />
-      {:else if terminalState === 'detached' || terminalState === 'ended' || terminalState === 'failed'}
+      {:else if currentTerminal.reconnectSupported && (terminalState === 'detached' || terminalState === 'ended' || terminalState === 'failed')}
         <Pill ariaLabel="Reconnect terminal" label="Reconnect" variant="action" onActivate={() => handleTerminalAction('terminal-reconnect')} />
       {/if}
       {#if terminalState !== 'open' && terminalState !== 'connecting' && terminalState !== 'replaying'}
