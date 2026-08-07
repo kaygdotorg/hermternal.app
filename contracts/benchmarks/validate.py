@@ -242,10 +242,10 @@ EXPECTED_REVISIONS = {
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     BASELINE_EVIDENCE_ID: {
-        "commit_sha": "ac4585735948b346a902ec7d2445928666ac1962",
+        "commit_sha": "ced8cc08fde64f2f32302bb5020580885acee610",
         "fixture_id": "shared-benchmark-validator",
         "fixture_version": "1.0.0",
-        "fixture_sha256": "ca3e4e1053f2f7aa210bc0ec858b713d0e2d6ea2ce5a7dfacaf457fc3a6504fd",
+        "fixture_sha256": "08a255d0a2717059e801c2042f3bad9d4eadabf44d4f3193a374b3bbdfd73a1c",
         "hermes_source_sha": PINNED_HERMES_SHA,
     },
     WEB_PRODUCTION_BUILD_EVIDENCE_ID: {
@@ -306,10 +306,10 @@ EXPECTED_ARTIFACT_METADATA = {
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
     BASELINE_EVIDENCE_ID: (
-        ("README.md", 7581, "cea7d5eae37398d0b6f4cad593be5d72b0bebb77c5a3bd73e5e08d4c835e944a"),
+        ("README.md", 7786, "15fe80009cab297973d12e7b1c0d7d8e083342db43e75460a3b07a3f739850da"),
         ("benchmark-evidence.json", 6446, "aa652867dc336467ab07873964f54a9d5000cfb01b1d55756091be2e8797a6eb"),
-        ("test_validate.py", 30629, "4b0368251da4bf33dbbf2605da85475b76c8e381cdb278c4bf52d77e79db1790"),
-        ("sample-provenance.json", 2304, "ca3e4e1053f2f7aa210bc0ec858b713d0e2d6ea2ce5a7dfacaf457fc3a6504fd"),
+        ("test_validate.py", 31689, "8d8bee54c2964e96f87abe112144eefa404a957ad1428d5be14e066b2cd078ac"),
+        ("sample-provenance.json", 2301, "08a255d0a2717059e801c2042f3bad9d4eadabf44d4f3193a374b3bbdfd73a1c"),
         ("synthetic/workload.json", 4042, "7f21daeb684773ae9c9bb81cc7fd0e78ffe6553afdf8508397d4b96f6a447404"),
         ("synthetic/trace.json", 409, "0d94d8af0992133ddff7b48cfe9a3d3dd48846649da5fc8cc378e89193e0e5a7"),
     ),
