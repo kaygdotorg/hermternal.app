@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { authStateForProviderKind } from '$lib/auth-ui/types';
 import PreviewPage from './+page.svelte';
 
@@ -79,5 +79,33 @@ describe('ui preview route', () => {
       expect(screen.getByTestId('runtime-preview')).toHaveAttribute('data-appearance', 'dark');
       expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-appearance', 'dark');
     });
+  });
+
+  it('fails closed when live discovery is requested without the explicit build gate', async () => {
+    const originalPath = `${window.location.pathname}${window.location.search}`;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    window.history.pushState({}, '', '/ui-preview?authDiscovery=live');
+
+    render(PreviewPage);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-discovery-mode', 'live');
+      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
+    });
+    const liveStateOutput = screen.getByRole('combobox', { name: 'Authentication state' });
+    expect(liveStateOutput).toBeDisabled();
+    expect(screen.getByText('live-discovery-disabled')).toBeInTheDocument();
+
+    fireEvent.change(liveStateOutput, { target: { value: 'discovery-empty' } });
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry discovery' }));
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
+    expect(screen.getByText('live-discovery-disabled')).toBeInTheDocument();
+
+    fetchSpy.mockRestore();
+    window.history.replaceState({}, '', originalPath);
   });
 });

@@ -394,6 +394,172 @@ test('Pill consumes one pointer gesture across leave, re-entry, and compatibilit
   await expect(workspace).toHaveAttribute('aria-expanded', 'false');
 });
 
+test('opt-in live provider discovery uses the same-origin GET boundary and transitions from pending to success', async ({
+  page
+}) => {
+  test.skip(
+    process.env.VITE_HERMES_LIVE_AUTH_DISCOVERY !== 'true',
+    'Set VITE_HERMES_LIVE_AUTH_DISCOVERY=true to build the opt-in live discovery lane.'
+  );
+
+  const requests: Array<{ method: string; url: string; headers: Record<string, string> }> = [];
+  let releaseResponse!: () => void;
+  const responseGate = new Promise<void>((resolve) => {
+    releaseResponse = resolve;
+  });
+
+  await page.route('**/api/auth/providers', async (route) => {
+    const request = route.request();
+    requests.push({ method: request.method(), url: request.url(), headers: request.headers() });
+    await responseGate;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        providers: [
+          { name: 'nous', display_name: 'Nous', supports_password: false },
+          { name: 'hermes-password', display_name: 'Hermes password', supports_password: true }
+        ]
+      })
+    });
+  });
+
+  await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-discovery-mode', 'live');
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-pending');
+  await expect(page.getByTestId('auth-preview').getByRole('status')).toContainText('Discovering sign-in methods');
+  await expect(page.getByRole('heading', { name: 'Discovering sign-in methods' })).toBeFocused();
+  const liveStateOutput = page.getByRole('combobox', { name: 'Authentication state' });
+  await expect(liveStateOutput).toBeDisabled();
+
+  releaseResponse();
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
+  await expect(page.getByRole('button', { name: 'Nous, unavailable' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Hermes password' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Connect to Hermes' })).toBeFocused();
+
+  await liveStateOutput.evaluate((select: HTMLSelectElement) => {
+    select.value = 'discovery-empty';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
+
+  // `supports_password: false` does not prove OAuth capability. Only the
+  // password-capable provider advances through this reviewed response shape.
+  await page.getByRole('button', { name: 'Hermes password' }).click();
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
+  await expect(page.getByLabel('Username')).toBeFocused();
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.method).toBe('GET');
+  expect(requests[0]?.url).toBe(`${uiPreviewOrigin}/api/auth/providers`);
+  expect(requests[0]?.headers.authorization).toBeUndefined();
+  expect(requests[0]?.url).not.toContain('?');
+});
+
+test('opt-in live provider discovery fails closed on reviewed 503 and retries idempotently', async ({ page }) => {
+  test.skip(
+    process.env.VITE_HERMES_LIVE_AUTH_DISCOVERY !== 'true',
+    'Set VITE_HERMES_LIVE_AUTH_DISCOVERY=true to build the opt-in live discovery lane.'
+  );
+
+  let requestCount = 0;
+  await page.route('**/api/auth/providers', async (route) => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'no auth providers registered' })
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        providers: [{ name: 'nous', display_name: 'Nous', supports_password: false }]
+      })
+    });
+  });
+
+  await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
+  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('No sign-in method is available');
+  await expect(page.getByRole('heading', { name: 'Provider discovery stopped' })).toBeFocused();
+  await expect(page.getByRole('combobox', { name: 'Authentication state' })).toBeDisabled();
+
+  await page.getByRole('button', { name: 'Retry discovery' }).click();
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
+  await expect(page.getByRole('button', { name: 'Nous' })).toBeVisible();
+  expect(requestCount).toBe(2);
+});
+
+test('opt-in live provider discovery exposes cancellation and retries after abort', async ({ page }) => {
+  test.skip(
+    process.env.VITE_HERMES_LIVE_AUTH_DISCOVERY !== 'true',
+    'Set VITE_HERMES_LIVE_AUTH_DISCOVERY=true to build the opt-in live discovery lane.'
+  );
+
+  let requestCount = 0;
+  let releaseFirstResponse!: () => void;
+  const firstResponseGate = new Promise<void>((resolve) => {
+    releaseFirstResponse = resolve;
+  });
+
+  await page.route('**/api/auth/providers', async (route) => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      await firstResponseGate;
+      try {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ providers: [{ name: 'nous', display_name: 'Nous', supports_password: false }] })
+        });
+      } catch {
+        // The browser cancellation is the behavior under test.
+      }
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ providers: [{ name: 'nous', display_name: 'Nous', supports_password: false }] })
+    });
+  });
+
+  await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-pending');
+  await page.getByRole('button', { name: 'Cancel discovery' }).click();
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-aborted');
+  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('Provider discovery was cancelled');
+  await expect(page.getByRole('heading', { name: 'Provider discovery was cancelled' })).toBeFocused();
+
+  releaseFirstResponse();
+  await page.getByRole('button', { name: 'Retry discovery' }).click();
+  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
+  expect(requestCount).toBe(2);
+});
+
+test('discovery fixture states remain accessible across empty, malformed, unavailable, aborted, and retry variants', async ({
+  page
+}) => {
+  await page.goto(previewUrl('/ui-preview'));
+
+  for (const state of [
+    'discovery-empty',
+    'discovery-malformed',
+    'provider-unavailable',
+    'discovery-aborted',
+    'discovery-retry'
+  ]) {
+    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption(state);
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(results.violations, state).toEqual([]);
+  }
+});
+
 test('UI preview state branches have no axe violations in light, dark, desktop, and narrow layouts', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   for (const fixture of [

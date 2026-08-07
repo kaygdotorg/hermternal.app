@@ -31,6 +31,24 @@ describe('AuthPreview', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Provider discovery stopped' })).toHaveFocus());
   });
 
+  it('renders a provider without reviewed browser capability as visible but unavailable', () => {
+    render(AuthPreview, {
+      state: 'provider-selection',
+      providers: [
+        {
+          id: 'provider-neutral',
+          name: 'Provider Neutral',
+          monogram: 'P',
+          kind: 'unavailable',
+          description: 'Provider reported without a reviewed browser sign-in capability'
+        }
+      ]
+    });
+
+    expect(screen.getByRole('button', { name: 'Provider Neutral, unavailable' })).toBeDisabled();
+    expect(screen.getByText(/without a reviewed browser sign-in capability/i)).toBeInTheDocument();
+  });
+
   it('marks the synthetic password form so password managers do not treat it as reusable credentials', () => {
     render(AuthPreview, { state: 'password' });
 
@@ -118,6 +136,21 @@ describe('AuthPreview', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Session expired');
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Session expired' })).toHaveFocus());
 
+    await view.rerender({ state: 'discovery-pending' });
+    expect(screen.getByRole('status')).toHaveTextContent('Discovering sign-in methods');
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Discovering sign-in methods' })).toHaveFocus());
+
+    for (const [state, heading, announcement] of [
+      ['discovery-empty', 'No sign-in methods available', 'invalid empty registry'],
+      ['discovery-malformed', 'Provider discovery returned incompatible data', 'incompatible data'],
+      ['discovery-aborted', 'Provider discovery was cancelled', 'was cancelled'],
+      ['provider-unavailable', 'Provider discovery stopped', 'No sign-in method is available']
+    ] as const) {
+      await view.rerender({ state });
+      expect(screen.getByRole('alert')).toHaveTextContent(announcement);
+      await waitFor(() => expect(screen.getByRole('heading', { name: heading })).toHaveFocus());
+    }
+
     await view.rerender({ state: 'discovery-retry' });
     expect(screen.getByRole('status')).toHaveTextContent('Provider discovery can be retried');
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Retry provider discovery' })).toHaveFocus());
@@ -133,5 +166,48 @@ describe('AuthPreview', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
 
     expect(onAction).toHaveBeenCalledWith({ type: 'retry-authentication' });
+  });
+
+  it('renders live success, pending, empty, malformed, unavailable, aborted, and retry states truthfully', () => {
+    const liveProviders = [
+      {
+        id: 'codex',
+        name: 'Codex',
+        monogram: 'C',
+        kind: 'oauth' as const,
+        description: 'OAuth provider · same-origin browser boundary'
+      }
+    ];
+    const live = render(AuthPreview, {
+      discoveryMode: 'live',
+      providers: liveProviders,
+      state: 'provider-selection'
+    });
+    expect(screen.getByText(/live same-origin discovery/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Codex' })).toBeInTheDocument();
+    live.unmount();
+
+    const pendingAction = vi.fn();
+    const pending = render(AuthPreview, { discoveryMode: 'live', state: 'discovery-pending', onAction: pendingAction });
+    expect(screen.getByText(/same-origin GET \/api\/auth\/providers request is pending/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Nous, loading' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel discovery' }));
+    expect(pendingAction).toHaveBeenCalledWith({ type: 'cancel-discovery' });
+    pending.unmount();
+
+    const states = [
+      ['discovery-empty', 'No sign-in methods available'],
+      ['discovery-malformed', 'Provider discovery returned incompatible data'],
+      ['provider-unavailable', 'Provider discovery stopped'],
+      ['discovery-aborted', 'Provider discovery was cancelled'],
+      ['discovery-retry', 'Retry provider discovery']
+    ] as const;
+
+    for (const [state, heading] of states) {
+      const view = render(AuthPreview, { discoveryMode: 'live', state });
+      expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Retry discovery' })).toBeInTheDocument();
+      view.unmount();
+    }
   });
 });

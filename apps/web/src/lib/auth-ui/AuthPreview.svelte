@@ -4,18 +4,27 @@
   import Pill from '$lib/workspace/Pill.svelte';
   import ProviderCard from './ProviderCard.svelte';
   import { DEFAULT_PROVIDERS, validateAuthProviders } from './fixtures';
-  import type { AuthAction, AuthActionHandler, AuthProvider, AuthViewState } from './types';
+  import type {
+    AuthAction,
+    AuthActionHandler,
+    AuthDiscoveryMode,
+    AuthProvider,
+    AuthViewState
+  } from './types';
   import type { Appearance } from '$lib/workspace/types';
 
   export let appearance: Appearance = 'light';
   export let state: AuthViewState = 'provider-selection';
   export let providers: AuthProvider[] = DEFAULT_PROVIDERS;
+  export let discoveryMode: AuthDiscoveryMode = 'fixture';
   export let onAction: AuthActionHandler = () => {};
 
   let passwordVisible = false;
   let previousState: AuthViewState = state;
   $: validatedProviders = validateAuthProviders(providers);
-  $: effectiveState = validatedProviders ? state : 'provider-unavailable';
+  // A selectable registry must validate before actions are exposed. Discovery
+  // status screens may intentionally carry no providers while pending or failed.
+  $: effectiveState = state === 'provider-selection' && !validatedProviders ? 'provider-unavailable' : state;
   $: safeProviders = validatedProviders ?? [];
   let submissionLocked = false;
   let formResetKey = 0;
@@ -28,25 +37,104 @@
     previousState = effectiveState;
     void focusEnteredState();
   }
-  $: isProviderState = effectiveState === 'provider-selection' || effectiveState === 'discovery-pending';
+  $: isProviderState = isProviderPanelState(effectiveState);
   $: isPasswordState = effectiveState === 'password' || effectiveState === 'password-submitting';
-  $: panelClass = isProviderState ? 'provider-panel' : effectiveState === 'session-expired' ? 'session-panel' : 'narrow-panel';
+  $: panelClass = isProviderState
+    ? 'provider-panel'
+    : effectiveState === 'session-expired'
+      ? 'session-panel'
+      : 'narrow-panel';
   $: politeAnnouncement =
     effectiveState === 'password-submitting'
       ? 'Signing in. The synthetic form is disabled while the local state completes.'
       : effectiveState === 'callback'
         ? 'Completing sign-in in a mocked local callback state.'
-        : effectiveState === 'discovery-retry'
-          ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
-          : '';
+        : effectiveState === 'discovery-pending'
+          ? 'Discovering sign-in methods. Provider actions are unavailable while the request is pending.'
+          : effectiveState === 'discovery-retry'
+            ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
+            : '';
   $: assertiveAnnouncement =
     effectiveState === 'failure'
       ? 'Sign-in did not complete. Try again or choose another provider.'
       : effectiveState === 'session-expired'
         ? 'Session expired. Sign in again or discard the local draft fixture.'
-        : effectiveState === 'provider-unavailable'
-          ? 'Provider discovery stopped. No sign-in method is available.'
-          : '';
+        : effectiveState === 'discovery-empty'
+          ? 'Provider discovery returned an invalid empty registry. No sign-in method is available.'
+          : effectiveState === 'discovery-malformed'
+            ? 'Provider discovery returned incompatible data. No sign-in method is available.'
+            : effectiveState === 'discovery-aborted'
+              ? 'Provider discovery was cancelled. No sign-in method is available.'
+              : effectiveState === 'provider-unavailable'
+                ? 'Provider discovery stopped. No sign-in method is available.'
+                : '';
+
+  function isProviderPanelState(value: AuthViewState): boolean {
+    return (
+      value === 'provider-selection' ||
+      value === 'discovery-pending' ||
+      value === 'discovery-empty' ||
+      value === 'discovery-malformed' ||
+      value === 'discovery-aborted' ||
+      value === 'discovery-retry' ||
+      value === 'provider-unavailable'
+    );
+  }
+
+  function isDiscoveryFailureState(value: AuthViewState): boolean {
+    return (
+      value === 'failure' ||
+      value === 'discovery-retry' ||
+      value === 'discovery-malformed' ||
+      value === 'discovery-aborted' ||
+      value === 'provider-unavailable'
+    );
+  }
+
+  function discoveryFailureHeading(value: AuthViewState): string {
+    if (value === 'failure') return 'Sign-in did not complete';
+    if (value === 'discovery-retry') return 'Retry provider discovery';
+    if (value === 'discovery-malformed') return 'Provider discovery returned incompatible data';
+    if (value === 'discovery-aborted') return 'Provider discovery was cancelled';
+    return 'Provider discovery stopped';
+  }
+
+  function discoveryFailureCopy(value: AuthViewState): string {
+    if (value === 'failure')
+      return 'Synthetic failure state only. No request was made, no session was created, and no credential was retained.';
+    if (value === 'discovery-retry')
+      return 'A fresh same-origin provider discovery request is ready. Retry is safe because discovery is read-only.';
+    if (value === 'discovery-malformed')
+      return 'The provider response did not match the reviewed schema. The preview fails closed and exposes no invented sign-in method.';
+    if (value === 'discovery-aborted')
+      return 'The provider discovery request was cancelled before a usable registry was received. No provider action is available.';
+    return 'The provider registry is unavailable. The preview fails closed and exposes no invented sign-in method.';
+  }
+
+  function discoveryFailureDetail(value: AuthViewState): string {
+    if (value === 'failure') return 'Synthetic sign-in failure';
+    if (value === 'discovery-retry') return 'Ready to retry provider discovery';
+    if (value === 'discovery-malformed') return 'invalid_response';
+    if (value === 'discovery-aborted') return 'aborted';
+    return 'provider_unavailable';
+  }
+
+  function discoveryFailureDetailCopy(value: AuthViewState): string {
+    if (value === 'failure') return 'Choose another local fixture state. Error details do not include credentials.';
+    if (value === 'discovery-retry') return 'Retry starts only the idempotent GET /api/auth/providers boundary.';
+    if (value === 'discovery-malformed')
+      return 'Unknown fields, malformed data, and unsafe values are rejected after bounded strict parsing.';
+    if (value === 'discovery-aborted') return 'Cancellation leaves no provider list and does not expose response data.';
+    return 'The endpoint did not provide a usable provider registry. No fallback provider is invented.';
+  }
+
+  function discoveryFailureMetadata(value: AuthViewState): string {
+    if (value === 'failure') return 'Synthetic fixture · safe to retry';
+    if (value === 'discovery-retry') return 'Live boundary · user initiated · safe to retry';
+    if (value === 'discovery-malformed') return 'Live boundary · fail closed · no credentials';
+    if (value === 'discovery-aborted') return 'Live boundary · cancelled · no credentials';
+    return 'Live boundary · unavailable · no credentials';
+  }
 
   function resetPasswordEntry(): void {
     passwordVisible = false;
@@ -111,6 +199,7 @@
   aria-label="Hermternal authentication preview"
   class="auth-preview"
   data-appearance={appearance}
+  data-discovery-mode={discoveryMode}
   data-state={effectiveState}
   data-testid="auth-preview"
 >
@@ -135,7 +224,9 @@
           <p class="eyebrow">HERMTERNAL</p>
           <h1 bind:this={stateHeading} tabindex="-1">Connect to Hermes</h1>
           <p>
-            Choose one synthetic sign-in method. This preview never stores reusable credentials or calls a provider.
+            {discoveryMode === 'live'
+              ? 'Choose a sign-in method reported by the same-origin Hermes boundary. This preview never stores reusable credentials or calls a provider.'
+              : 'Choose one synthetic sign-in method. This preview never stores reusable credentials or calls a provider.'}
           </p>
         </header>
 
@@ -146,16 +237,18 @@
         </div>
 
         <p class="provider-note">
-          <span aria-hidden="true" class="note-dot"></span>Synthetic fixture only · provider choices are local
-          presentation data; no discovery request is made.
+          <span aria-hidden="true" class="note-dot"></span>{discoveryMode === 'live'
+            ? 'Live same-origin discovery · provider choices came from GET /api/auth/providers; no credentials are stored.'
+            : 'Synthetic fixture only · provider choices are local presentation data; no discovery request is made.'}
         </p>
       {:else if effectiveState === 'discovery-pending'}
         <header class="panel-heading">
           <p class="eyebrow">PROVIDER DISCOVERY · PENDING</p>
           <h1 bind:this={stateHeading} tabindex="-1">Discovering sign-in methods</h1>
           <p>
-            Static pending state only. No discovery request runs, and controls stay unavailable until the fixture state
-            changes.
+            {discoveryMode === 'live'
+              ? 'A same-origin GET /api/auth/providers request is pending. Provider actions stay unavailable until bounded data is validated.'
+              : 'Static pending state only. No discovery request runs, and controls stay unavailable until the fixture state changes.'}
           </p>
         </header>
 
@@ -165,9 +258,46 @@
           {/each}
         </div>
 
+        {#if discoveryMode === 'live'}
+          <div class="failure-actions">
+            <Pill
+              label="Cancel discovery"
+              variant="ghost"
+              onActivate={() => handleAction({ type: 'cancel-discovery' })}
+            />
+          </div>
+        {/if}
         <p class="provider-note">
-          <span aria-hidden="true" class="note-dot"></span>Prototype-only pending state · no sign-in action is
-          available.
+          <span aria-hidden="true" class="note-dot"></span>{discoveryMode === 'live'
+            ? 'Live boundary · provider actions stay disabled while discovery is pending.'
+            : 'Prototype-only pending state · no sign-in action is available.'}
+        </p>
+      {:else if effectiveState === 'discovery-empty'}
+        <div class="failure-icon" aria-hidden="true"><Icon name="warning" size={20} /></div>
+        <div class="failure-heading">
+          <h1 bind:this={stateHeading} tabindex="-1">No sign-in methods available</h1>
+          <p>
+            A successful empty provider registry is outside the pinned response contract. The preview fails closed and
+            exposes no invented provider.
+          </p>
+        </div>
+        <div class="failure-detail">
+          <strong>invalid_empty_provider_registry</strong>
+          <p>Retry discovery after Hermes reports the reviewed provider registry or exact unavailable response.</p>
+        </div>
+        <div class="failure-actions">
+          <Pill
+            label="Retry discovery"
+            icon="refresh"
+            variant="action"
+            onActivate={() => handleAction({ type: 'retry-discovery' })}
+          />
+          <Pill label="Back to sign-in" variant="ghost" onActivate={() => handleAction({ type: 'back-to-sign-in' })} />
+        </div>
+        <p class="metadata">
+          {discoveryMode === 'live'
+            ? 'Live boundary · empty registry · no credentials'
+            : 'Synthetic fixture · empty registry · no credentials'}
         </p>
       {:else if isPasswordState}
         <header class="panel-heading">
@@ -293,41 +423,17 @@
           <span aria-hidden="true" class="note-dot"></span>Prototype-only state · no draft or prompt was persisted after
           expiry.
         </p>
-      {:else if effectiveState === 'failure' || effectiveState === 'discovery-retry' || effectiveState === 'provider-unavailable'}
+      {:else if isDiscoveryFailureState(effectiveState)}
         <div class="failure-icon" aria-hidden="true">
           <Icon name={effectiveState === 'discovery-retry' ? 'refresh' : 'warning'} size={20} />
         </div>
         <div class="failure-heading">
-          <h1 bind:this={stateHeading} tabindex="-1">
-            {effectiveState === 'failure'
-              ? 'Sign-in did not complete'
-              : effectiveState === 'discovery-retry'
-                ? 'Retry provider discovery'
-                : 'Provider discovery stopped'}
-          </h1>
-          <p>
-            {effectiveState === 'failure'
-              ? 'Synthetic failure state only. No request was made, no session was created, and no credential was retained.'
-              : effectiveState === 'discovery-retry'
-                ? 'Synthetic retry state only. A fresh local action is required before the preview can continue.'
-                : 'No usable fixture provider list is available. The preview fails closed and exposes no invented sign-in method.'}
-          </p>
+          <h1 bind:this={stateHeading} tabindex="-1">{discoveryFailureHeading(effectiveState)}</h1>
+          <p>{discoveryFailureCopy(effectiveState)}</p>
         </div>
         <div class="failure-detail">
-          <strong
-            >{effectiveState === 'failure'
-              ? 'Synthetic sign-in failure'
-              : effectiveState === 'discovery-retry'
-                ? 'Ready to retry locally'
-                : 'provider_unavailable'}</strong
-          >
-          <p>
-            {effectiveState === 'failure'
-              ? 'Choose another local fixture state. Error details do not include credentials.'
-              : effectiveState === 'discovery-retry'
-                ? 'Retry is represented locally; duplicate submits stay blocked until the fixture state changes.'
-                : 'Empty or malformed fixture data is rejected before sign-in actions are exposed.'}
-          </p>
+          <strong>{discoveryFailureDetail(effectiveState)}</strong>
+          <p>{discoveryFailureDetailCopy(effectiveState)}</p>
         </div>
         <div class="failure-actions">
           <Pill
@@ -342,13 +448,7 @@
             onActivate={() => handleAction({ type: effectiveState === 'failure' ? 'choose-provider-again' : 'back-to-sign-in' })}
           />
         </div>
-        <p class="metadata">
-          {effectiveState === 'failure'
-            ? 'Synthetic fixture · safe to retry'
-            : effectiveState === 'discovery-retry'
-              ? 'Synthetic fixture · user initiated · safe to cancel'
-              : 'Synthetic fixture · empty + malformed · no credentials'}
-        </p>
+        <p class="metadata">{discoveryFailureMetadata(effectiveState)}</p>
       {/if}
     </div>
   </div>
