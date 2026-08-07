@@ -240,3 +240,37 @@ provider readiness, existing stopped-container recovery and exact-once rollback,
 partial failure rollback, and exact idempotent teardown. This command-line
 artifact has no UI, focus, screen-reader, browser-zoom, contrast, motion, or
 touch-target surface; accessibility checks are N/A.
+
+## Disposable Caddy proof renderer
+
+`scripts/caddy_proof.py` is a proof-only renderer for issue #156. It is not a
+production deployment file and it does not implement Traefik. It emits exact
+method/path matchers for the PR #291 static client at `/`, the reviewed Hermes
+routes under one `/hermes` prefix, and the ticket-only WebSocket upgrades. It
+also fixes the private upstream Host/Origin mapping, forwarded headers, Secure
+cookie rewrite, and final edge `404` fallback. Caddy's canonical formatter uses
+tabs, so the renderer emits that form directly; the runtime digest therefore
+covers the exact file that was validated.
+
+Offline verification from the repository root:
+
+```sh
+python3 scripts/test_caddy_proof.py
+python3 -O scripts/test_caddy_proof.py
+python3 -m unittest discover -s scripts -p 'test_caddy_proof.py'
+python3 -O -m unittest discover -s scripts -p 'test_caddy_proof.py'
+python3 -m py_compile \
+  scripts/caddy_proof.py \
+  scripts/test_caddy_proof.py
+```
+
+The CLI supports `render`, `digest`, `build-digest`, and `evidence`. The checked-
+in redacted evidence is
+`tests/integration/hermes-caddy/caddy-proof-evidence.json`. It binds
+build commit `521ede32b904a42e22eebb279fd7d404074cd318`, static build digest
+`77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21`, and
+runtime Caddyfile digest
+`b3585c4b91d7656d5bcb6adedda29af63d60ca488ec99ef162ec4f74e2611e82`.
+The retained browser state is `blocked_provider`: it does not claim
+`message.delta` or `message.complete`, and it contains no credential, cookie,
+ticket, ticket fragment, provider payload, or transcript.
