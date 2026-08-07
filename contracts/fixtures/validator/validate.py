@@ -180,7 +180,7 @@ AUTHORITY_ARTIFACT_PATHS = (
     "contracts/fixtures/validator/validate.py",
     "contracts/fixtures/validator/validation-baseline.json",
 )
-BASELINE_CANONICAL_SHA256 = "7704ec403074906dbff0a186f939eff9e1a4df8f86298c3929654481087aa8a7"
+BASELINE_CANONICAL_SHA256 = "de657e69397fa635f493aa021be12dafa55b3dce2bf684d54924daf40733f035"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -458,6 +458,11 @@ SYNTHETIC_FULL_VALUE_ALLOWANCES = {
 }
 TEST_NEGATIVE_BASIC_AUTH_CANDIDATE = "QWxhZGRpbjpvcGVuIHNlc2FtZQ" + "=="
 TEST_NEGATIVE_BASIC_AUTH_CANDIDATES = frozenset({TEST_NEGATIVE_BASIC_AUTH_CANDIDATE})
+# The AST renderer uses this non-secret candidate only as a bounded probe when
+# an unknown dynamic value appears in an Authorization construction. Permit it
+# beside the reviewed Basic sample only in the one registered negative-test
+# source that intentionally exercises that path.
+DYNAMIC_AUTHORIZATION_PROBE_CANDIDATE = "A" * 16
 # Host/Origin keeps a bounded set of malformed and reserved authorities as
 # negative-test source data. These values are structural vocabulary, not a
 # generic ``.invalid`` exemption: the allowance is exact, path-scoped, and
@@ -1800,6 +1805,7 @@ def _validate_python_file(
 
     allowed_basic_auth_candidates = (
         TEST_NEGATIVE_BASIC_AUTH_CANDIDATES
+        | frozenset({DYNAMIC_AUTHORIZATION_PROBE_CANDIDATE})
         if allow_test_negative_basic_auth
         else frozenset()
     )

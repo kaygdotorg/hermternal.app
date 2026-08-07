@@ -150,11 +150,12 @@ structurally valid while coverage remains `partial`. A `pending`, `empty`,
 `failure`, `cancelled`, or `unknown` coverage row is never promoted to
 successful evidence. The checked-in index inventories the C-05
 connection-restoration, C-06 uncertain delivery, C-07 session persistence,
-C-07A session search, C-07B session lineage, C-14 image attachment lifecycle,
-C-16 deep-link resolution, C-18 PTY detach-race, DEP-02 external method/path
-allowlist, DEP-10M PTY local-adapter, and DEP-11 direct-port-denial artifacts.
-The merged PR #260 compatibility-gate artifact manifests are also refreshed in
-this aggregate registry.
+C-07A session search, C-07B session lineage, C-08 chat stream and completion,
+C-14 image attachment lifecycle, C-16 deep-link resolution, C-18 PTY
+detach-race, DEP-02 external method/path allowlist, DEP-03 Host/Origin mapping,
+DEP-10M PTY local-adapter, and DEP-11 direct-port-denial artifacts. The merged
+PR #260 compatibility-gate artifact manifests are also refreshed in this
+aggregate registry.
 `review-anchors/deep-link-resolution.sha256` is intentionally separate: it is
 the C-16 domain validator's reviewed digest authority, not a canonical fixture
 root. The aggregate permits that one exact path and still rejects any other
