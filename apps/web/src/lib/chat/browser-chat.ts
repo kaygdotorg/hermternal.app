@@ -64,6 +64,13 @@ export interface BrowserChatOptions extends Omit<
   readonly createSocket?: BrowserWebSocketFactory;
 }
 
+interface PreparedSocketAttempt {
+  readonly token: number;
+  readonly signal: AbortSignal;
+  socket?: JsonRpcWebSocket;
+  unlinkAbort?: () => void;
+}
+
 /**
  * Compose the reviewed ticket and JSON-RPC boundaries for the official Hermes
  * browser lane. The ticket client constructs the real upgrade URL and hands it
@@ -78,8 +85,10 @@ export function createBrowserChatTransport(
     throw new JsonRpcChatError("invalid-options");
   }
   const createSocket = options.createSocket ?? defaultSocketFactory;
-  let preparedSocket: JsonRpcWebSocket | undefined;
-  let unlinkPreparedAbort: (() => void) | undefined;
+  let preparedAttempt: PreparedSocketAttempt | undefined;
+  let latestAttempt: PreparedSocketAttempt | undefined;
+  let nextAttemptToken = 0;
+  const attemptsBySignal = new WeakMap<AbortSignal, PreparedSocketAttempt>();
   const unlinkSocketAbort = new WeakMap<JsonRpcWebSocket, () => void>();
 
   const releaseSocketAbort = (socket: JsonRpcWebSocket): void => {
@@ -87,15 +96,30 @@ export function createBrowserChatTransport(
     unlinkSocketAbort.delete(socket);
   };
 
-  const closePreparedSocket = (): void => {
-    const socket = preparedSocket;
-    preparedSocket = undefined;
-    unlinkPreparedAbort?.();
-    unlinkPreparedAbort = undefined;
+  const forgetAttempt = (attempt: PreparedSocketAttempt): void => {
+    attempt.unlinkAbort?.();
+    attempt.unlinkAbort = undefined;
+    if (attemptsBySignal.get(attempt.signal) === attempt) {
+      attemptsBySignal.delete(attempt.signal);
+    }
+    if (latestAttempt === attempt) latestAttempt = undefined;
+  };
+
+  const closeAttemptSocket = (attempt: PreparedSocketAttempt): void => {
+    const socket = attempt.socket;
+    attempt.socket = undefined;
+    forgetAttempt(attempt);
     if (socket) {
       releaseSocketAbort(socket);
       closeSocket(socket);
     }
+  };
+
+  const closePreparedSocket = (owner?: PreparedSocketAttempt): void => {
+    const current = preparedAttempt;
+    if (!current || (owner && current !== owner)) return;
+    preparedAttempt = undefined;
+    closeAttemptSocket(current);
   };
 
   const ticketClient = createWsTicketClient<JsonRpcWebSocket>({
@@ -127,16 +151,21 @@ export function createBrowserChatTransport(
   return createJsonRpcChatTransport({
     ...options,
     ticketProvider: async (signal) => {
-      if (preparedSocket) {
-        closePreparedSocket();
-        throw new JsonRpcChatError("invalid-options");
-      }
+      const attempt: PreparedSocketAttempt = {
+        token: ++nextAttemptToken,
+        signal
+      };
+      attemptsBySignal.set(signal, attempt);
+      latestAttempt = attempt;
+      // A newer attempt owns the single prepared slot. Stale ticket/open
+      // continuations retain only their attempt identity and cannot close it.
+      closePreparedSocket();
 
       let socket: JsonRpcWebSocket;
       try {
         socket = await ticketClient.open(signal);
       } catch (error) {
-        closePreparedSocket();
+        closePreparedSocket(attempt);
         // Only a genuine 401 means the browser is unauthenticated. Keep 403
         // and other ticket failures out of the permanent auth-required state.
         if (
@@ -149,45 +178,53 @@ export function createBrowserChatTransport(
         throw error;
       }
 
+      attempt.socket = socket;
       // The ticket client can resolve immediately before the outer JSON-RPC
-      // await observes cancellation. Do not publish a marker while retaining
-      // an unowned socket in that gap.
-      if (signal.aborted) {
-        releaseSocketAbort(socket);
-        closeSocket(socket);
+      // await observes cancellation or a newer attempt. Never install a stale
+      // socket in the shared prepared slot.
+      if (signal.aborted || latestAttempt !== attempt) {
+        closeAttemptSocket(attempt);
         throw new JsonRpcChatError("aborted");
       }
 
-      preparedSocket = socket;
+      preparedAttempt = attempt;
       const onAbort = (): void => {
-        if (preparedSocket === socket) {
-          closePreparedSocket();
+        if (preparedAttempt === attempt) {
+          closePreparedSocket(attempt);
+        } else {
+          closeAttemptSocket(attempt);
         }
       };
       signal.addEventListener("abort", onAbort, { once: true });
-      unlinkPreparedAbort = () => signal.removeEventListener("abort", onAbort);
-      if (signal.aborted) {
-        closePreparedSocket();
+      attempt.unlinkAbort = () => signal.removeEventListener("abort", onAbort);
+      if (signal.aborted || latestAttempt !== attempt) {
+        closePreparedSocket(attempt);
         throw new JsonRpcChatError("aborted");
       }
       return CONSUMED_TICKET_MARKER;
     },
     createWebSocket: (upgrade, signal) => {
+      const attempt = attemptsBySignal.get(signal);
+      const prepared = preparedAttempt;
       if (
         signal.aborted ||
         upgrade.path !== JSON_RPC_WS_PATH ||
         upgrade.query.ticket !== CONSUMED_TICKET_MARKER ||
-        !preparedSocket
+        !attempt ||
+        latestAttempt !== attempt ||
+        prepared !== attempt ||
+        !prepared.socket
       ) {
-        closePreparedSocket();
+        // Cleanup is identity-scoped. An old invalid createWebSocket call must
+        // not close a newer prepared socket.
+        if (attempt) closePreparedSocket(attempt);
         throw new JsonRpcChatError(
           signal.aborted ? "aborted" : "connection-failed",
         );
       }
-      const socket = preparedSocket;
-      preparedSocket = undefined;
-      unlinkPreparedAbort?.();
-      unlinkPreparedAbort = undefined;
+      const socket = prepared.socket;
+      preparedAttempt = undefined;
+      forgetAttempt(attempt);
       releaseSocketAbort(socket);
       return socket;
     },

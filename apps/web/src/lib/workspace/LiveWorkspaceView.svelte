@@ -37,7 +37,8 @@
     if (action.type === 'select-session') void session.selectSession(action.sessionId);
     if (action.type === 'send') session.sendPrompt(action.text);
     if (action.type === 'stop') void session.stop();
-    if (action.type === 'retry') void session.retryConnection();
+    if (action.type === 'retry' || action.type === 'check-connection') void session.retryConnection();
+    if (action.type === 'cancel-reconnect') session.cancelReconnect();
     if (action.type === 'approve-tool') void session.approve(action.itemId, true);
     if (action.type === 'reject-tool') void session.approve(action.itemId, false);
     if (action.type === 'answer-clarification') {

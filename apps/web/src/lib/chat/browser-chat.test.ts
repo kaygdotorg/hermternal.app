@@ -258,6 +258,45 @@ describe("createBrowserChatTransport", () => {
     }));
   });
 
+  it("does not close a newer prepared socket when an older ticket attempt rejects late", async () => {
+    const firstResponse = deferred<Response>();
+    const replacement = new FakeWebSocket();
+    const close = vi.spyOn(replacement, "close");
+    let requestCount = 0;
+    const transport = createBrowserChatTransport({
+      fetch: vi.fn(async () => {
+        requestCount += 1;
+        if (requestCount === 1) return firstResponse.promise;
+        return new Response('{"ticket":"fresh-ticket-2","ttl_seconds":30}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+      createSocket: () => replacement,
+    });
+
+    const first = transport.connect();
+    void first.catch(() => undefined);
+    await Promise.resolve();
+    const second = transport.reconnect();
+    await waitForAttachedSocket([replacement], 0);
+    replacement.emitOpen();
+    replacement.emitGatewayReady();
+    await second;
+
+    firstResponse.resolve(
+      new Response('{"ticket":"stale-ticket","ttl_seconds":30}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+    await Promise.resolve();
+
+    expect(close).not.toHaveBeenCalled();
+    expect(transport.state.status).toBe("ready");
+  });
+
   it("fails closed when gateway.ready omits source-backed behavior keys", async () => {
     const socket = new FakeWebSocket();
     const transport = createBrowserChatTransport({

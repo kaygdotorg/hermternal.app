@@ -321,6 +321,91 @@ describe('BrowserAuthSession', () => {
     expect(session.current).toEqual({ status: 'signed_out', providers: [] });
   });
 
+  it('does not start identity verification after a refreshing subscriber expires auth', async () => {
+    const verify = vi.fn(async () => identity);
+    const session = new BrowserAuthSession({
+      client: client({ verify }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession: vi.fn()
+    });
+    let reentered = false;
+    session.subscribe((snapshot) => {
+      if (snapshot.status === 'refreshing' && !reentered) {
+        reentered = true;
+        session.expire();
+      }
+    });
+
+    await session.initialize();
+
+    expect(verify).not.toHaveBeenCalled();
+    expect(session.current).toEqual({ status: 'expired', providers: [] });
+  });
+
+  it('does not start provider discovery after a discovering subscriber cancels', async () => {
+    const discoverProviders = vi.fn(async () => ({ providers: [passwordProvider] }));
+    const session = new BrowserAuthSession({
+      client: client(),
+      discoverProviders,
+      invalidateLocalSession: vi.fn()
+    });
+    let reentered = false;
+    session.subscribe((snapshot) => {
+      if (snapshot.status === 'discovering' && !reentered) {
+        reentered = true;
+        session.cancel();
+      }
+    });
+
+    await session.retryDiscovery();
+
+    expect(discoverProviders).not.toHaveBeenCalled();
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it('does not start password login after a submitting subscriber cancels', async () => {
+    const loginWithPassword = vi.fn(async () => ({ identity, next: '/' as const }));
+    const session = new BrowserAuthSession({
+      client: client({ loginWithPassword }),
+      discoverProviders: async () => ({ providers: [passwordProvider] }),
+      invalidateLocalSession: vi.fn()
+    });
+    await session.retryDiscovery();
+    session.chooseProvider(passwordProvider.id);
+    let reentered = false;
+    session.subscribe((snapshot) => {
+      if (snapshot.status === 'password_submitting' && !reentered) {
+        reentered = true;
+        session.cancel();
+      }
+    });
+
+    await session.loginWithPassword({ username: 'synthetic-user', password: 'transient-secret' });
+
+    expect(loginWithPassword).not.toHaveBeenCalled();
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it('does not publish an outer expiry after local invalidation starts newer auth work', async () => {
+    const verify = vi.fn(async () => identity);
+    let session!: BrowserAuthSession;
+    const invalidateLocalSession = vi.fn(() => {
+      void session.initialize();
+    });
+    session = new BrowserAuthSession({
+      client: client({ verify }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession
+    });
+
+    session.expire();
+    await Promise.resolve();
+
+    expect(invalidateLocalSession).toHaveBeenCalledTimes(1);
+    expect(session.current.status).toBe('authenticated');
+    expect(session.current.status).not.toBe('expired');
+  });
+
   it('publishes dedicated logout recovery when the server identity remains active', async () => {
     const verify = vi.fn<BrowserAuthClient['verify']>(async () => identity);
     const logout = vi.fn(async () => {

@@ -39,6 +39,11 @@ export interface BrowserAuthSessionOptions {
 
 export type BrowserAuthSubscriber = (snapshot: Readonly<BrowserAuthSnapshot>) => void;
 
+interface AuthOperation {
+  readonly generation: number;
+  readonly signal: AbortSignal;
+}
+
 /**
  * Coordinates the browser-auth lifecycle without storing reusable credentials.
  * Every operation owns one abort controller and generation number, so cancelled
@@ -77,12 +82,13 @@ export class BrowserAuthSession {
   async initialize(): Promise<void> {
     if (this.isLogoutState()) return;
     const operation = this.begin('refreshing');
+    if (!this.ownsOperation(operation)) return;
     try {
       const identity = await this.client.verify(operation.signal);
-      if (!this.isCurrent(operation.generation)) return;
+      if (!this.ownsOperation(operation)) return;
       this.publish({ status: 'authenticated', identity, providers: [] });
     } catch (error) {
-      if (!this.isCurrent(operation.generation) || isAbort(error)) return;
+      if (!this.ownsOperation(operation) || isAbort(error)) return;
       if (isIdentityUnavailable(error)) {
         await this.discover(operation);
         return;
@@ -107,6 +113,7 @@ export class BrowserAuthSession {
       return;
     }
     const operation = this.begin('discovering', { providers: [] });
+    if (!this.ownsOperation(operation)) return;
     await this.discover(operation);
   }
 
@@ -143,16 +150,17 @@ export class BrowserAuthSession {
       providers: this.snapshot.providers,
       selectedProviderId: provider.id
     });
+    if (!this.ownsOperation(operation)) return;
     try {
       const result = await this.client.loginWithPassword({ provider: provider.id, ...input }, operation.signal);
-      if (!this.isCurrent(operation.generation)) return;
+      if (!this.ownsOperation(operation)) return;
       this.publish({
         status: 'authenticated',
         identity: result.identity,
         providers: []
       });
     } catch (error) {
-      if (!this.isCurrent(operation.generation) || isAbort(error)) return;
+      if (!this.ownsOperation(operation) || isAbort(error)) return;
       this.publishFailure(error, provider.id);
     }
   }
@@ -174,20 +182,20 @@ export class BrowserAuthSession {
     }
 
     const operation = this.invalidateAndCancel('logging_out', { identity });
-    if (!this.isCurrent(operation.generation)) return;
+    if (!this.ownsOperation(operation)) return;
     try {
       await this.client.logout(operation.signal);
-      if (!this.isCurrent(operation.generation)) return;
+      if (!this.ownsOperation(operation)) return;
       this.publish({ status: 'signed_out', providers: [] });
     } catch (error) {
-      if (!this.isCurrent(operation.generation) || isAbort(error)) return;
+      if (!this.ownsOperation(operation) || isAbort(error)) return;
       if (!isAmbiguousLogout(error)) {
         this.publishLogoutFailure(mapLogoutFailureCode(error), identity);
         return;
       }
 
       const reconciliation = await this.reconcileLogout(operation);
-      if (!this.isCurrent(operation.generation)) return;
+      if (!this.ownsOperation(operation)) return;
       if (reconciliation === 'signed_out') {
         this.publish({ status: 'signed_out', providers: [] });
         return;
@@ -224,17 +232,21 @@ export class BrowserAuthSession {
     this.subscribers.clear();
   }
 
-  private async discover(operation: { generation: number; signal: AbortSignal }): Promise<void> {
-    if (this.isCurrent(operation.generation)) this.publish({ status: 'discovering', providers: [] });
+  private async discover(operation: AuthOperation): Promise<void> {
+    if (!this.ownsOperation(operation)) return;
+    if (this.snapshot.status !== 'discovering') {
+      this.publish({ status: 'discovering', providers: [] });
+    }
+    if (!this.ownsOperation(operation)) return;
     try {
       const result = await this.discoverProviderRegistry(operation.signal);
-      if (!this.isCurrent(operation.generation)) return;
+      if (!this.ownsOperation(operation)) return;
       this.publish({
         status: result.providers.length === 0 ? 'provider_unavailable' : 'signed_out',
         providers: result.providers
       });
     } catch (error) {
-      if (!this.isCurrent(operation.generation) || isAbort(error)) return;
+      if (!this.ownsOperation(operation) || isAbort(error)) return;
       this.publish({ status: 'provider_unavailable', providers: [] });
     }
   }
@@ -242,33 +254,39 @@ export class BrowserAuthSession {
   private begin(
     status: BrowserAuthStatus,
     retained: Partial<BrowserAuthSnapshot> = {}
-  ): {
-    generation: number;
-    signal: AbortSignal;
-  } {
+  ): AuthOperation {
     this.assertActive();
     this.generation += 1;
     this.controller?.abort();
-    this.controller = new AbortController();
+    const controller = new AbortController();
+    this.controller = controller;
+    const operation: AuthOperation = { generation: this.generation, signal: controller.signal };
     this.publish({ status, providers: [], ...retained, errorCode: undefined });
-    return this.activeOperation();
+    return operation;
   }
 
-  private activeOperation(): { generation: number; signal: AbortSignal } {
-    if (!this.controller) this.controller = new AbortController();
-    return { generation: this.generation, signal: this.controller.signal };
+  private ownsOperation(operation: AuthOperation): boolean {
+    return (
+      this.isCurrent(operation.generation) &&
+      this.controller?.signal === operation.signal &&
+      !operation.signal.aborted
+    );
   }
 
   private invalidateAndCancel(
     status: 'expired' | 'logging_out',
     retained: Partial<BrowserAuthSnapshot> = {}
-  ): { generation: number; signal: AbortSignal } {
+  ): AuthOperation {
     this.generation += 1;
     this.controller?.abort();
     const controller = new AbortController();
     this.controller = controller;
-    const operation = { generation: this.generation, signal: controller.signal };
+    const operation: AuthOperation = { generation: this.generation, signal: controller.signal };
     this.invalidateLocalSession();
+    // The local hook is synchronous and may expire again, dispose, or start a
+    // newer auth operation. The outer lifecycle state is no longer authoritative
+    // after that callback returns.
+    if (!this.ownsOperation(operation)) return operation;
     this.publish({ status, providers: [], ...retained });
     return operation;
   }

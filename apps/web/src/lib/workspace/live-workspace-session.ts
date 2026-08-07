@@ -8,7 +8,7 @@ import {
   type JsonRpcCloseClassification,
   type JsonRpcConnectionState
 } from '$lib/chat/json-rpc-chat';
-import type { LiveRestTransport, LiveSession } from '$lib/transport';
+import { LiveRestError, type LiveRestTransport, type LiveSession } from '$lib/transport';
 import { mapLiveMessages, mapLiveSessions } from './live-workspace';
 import type { SessionSummary, TimelineItem, WorkspaceRuntimeState } from './types';
 
@@ -48,6 +48,22 @@ interface PendingClarification {
   readonly clarificationId: string;
 }
 
+interface ActivePromptOwnership {
+  readonly request: JsonRpcChatRequest;
+  readonly generation: number;
+  readonly sessionId: string;
+  readonly chat: JsonRpcChatTransport;
+  /** Epoch allocated after the synchronous transport send has returned. */
+  readonly promptEpoch: number;
+  readonly signal?: AbortSignal;
+}
+
+interface RetryOwnership {
+  readonly token: number;
+  readonly controller: AbortController;
+  readonly removeOperationAbort: () => void;
+}
+
 /**
  * Coordinates REST restoration and one user-led browser chat connection.
  * Server reads replace local presentation arrays. Disconnects never reconnect or
@@ -63,6 +79,9 @@ export class LiveWorkspaceSession {
   private controller: AbortController | undefined;
   private chat: JsonRpcChatTransport | undefined;
   private activeRequest: JsonRpcChatRequest | undefined;
+  private activePromptOwnership: ActivePromptOwnership | undefined;
+  private retryController: AbortController | undefined;
+  private retryToken = 0;
   private generation = 0;
   // History reads are presentation-owned operations. A generation protects
   // session replacement, while this monotonic epoch also protects same-session
@@ -90,6 +109,7 @@ export class LiveWorkspaceSession {
   async initialize(): Promise<void> {
     const operation = this.begin();
     this.publish({ ...initialSnapshot(), state: 'loading' });
+    if (!this.ownsOperation(operation)) return;
 
     try {
       const response = await this.rest.listSessions({ limit: 100, offset: 0 }, operation.signal);
@@ -117,6 +137,7 @@ export class LiveWorkspaceSession {
       timeline: [],
       permanentFailure: undefined
     });
+    if (!this.ownsOperation(operation)) return;
 
     try {
       const session = await this.rest.getSession(sessionId, operation.signal);
@@ -131,18 +152,38 @@ export class LiveWorkspaceSession {
     this.assertActive();
     const operation = this.begin();
     this.publish({ ...initialSnapshot(), sessions: this.snapshot.sessions, state: 'loading' });
+    if (!this.ownsOperation(operation)) return;
 
-    const chat = this.createChat({
-      onEvent: (event) => this.handleEvent(operation.generation, event),
-      onStateChange: (state) => this.handleConnectionState(operation.generation, state),
-      onUncertainDelivery: () => this.publishUncertainDelivery(operation.generation)
-    });
+    let chat: JsonRpcChatTransport;
+    try {
+      chat = this.createChat({
+        onEvent: (event) => this.handleEvent(operation.generation, event),
+        onStateChange: (state) => this.handleConnectionState(operation.generation, state),
+        onUncertainDelivery: () => this.publishUncertainDelivery(operation.generation)
+      });
+    } catch (error) {
+      this.publishLoadFailure(error, operation.generation);
+      return;
+    }
+
+    // Factory acquisition is an ownership boundary. A synchronous factory may
+    // reenter invalidate/dispose or start another session before returning.
+    if (!this.ownsOperation(operation)) {
+      closeChat(chat);
+      return;
+    }
     this.chat = chat;
     try {
       await chat.connect(operation.signal);
-      if (!this.isCurrent(operation.generation) || this.chat !== chat) return;
+      if (!this.ownsChatOperation(operation, chat)) {
+        this.closeChatIfOwned(chat);
+        return;
+      }
       const created = await chat.createSession(operation.signal);
-      if (!this.isCurrent(operation.generation) || this.chat !== chat) return;
+      if (!this.ownsChatOperation(operation, chat)) {
+        this.closeChatIfOwned(chat);
+        return;
+      }
       const model = created.model?.trim() || 'Hermes';
       const draft: SessionSummary = {
         id: created.storedSessionId,
@@ -167,8 +208,12 @@ export class LiveWorkspaceSession {
   sendPrompt(text: string): void {
     this.assertActive();
     const chat = this.chat;
+    const generation = this.generation;
+    const sessionId = this.snapshot.activeSessionId;
+    const operationSignal = this.controller?.signal;
     if (
       !chat ||
+      !sessionId ||
       (this.snapshot.state !== 'ready' && this.snapshot.state !== 'empty' && this.snapshot.state !== 'stopped')
     )
       return;
@@ -177,16 +222,40 @@ export class LiveWorkspaceSession {
     try {
       request = chat.sendPrompt(text);
     } catch {
+      if (!this.ownsPromptStart(generation, chat, operationSignal) || this.activeRequest !== undefined) return;
       this.advanceRefreshEpoch();
       this.publish({ ...this.snapshot, state: 'retryable-error' });
       return;
     }
 
-    // Starting a newer prompt revokes any completion-history read that was
-    // still in flight for an earlier prompt in the same session.
-    this.advanceRefreshEpoch();
+    // sendPrompt can synchronously deliver callbacks. Do not adopt a returned
+    // request after invalidation, disposal, replacement, or a reentrant prompt.
+    if (
+      !this.ownsPromptStart(generation, chat, operationSignal) ||
+      this.activeRequest !== undefined
+    ) {
+      try {
+        request.abort();
+      } catch {
+        // A stale transport owns cleanup of its own request.
+      }
+      return;
+    }
+
+    // Allocate the prompt epoch only after the synchronous transport call has
+    // returned. Completion and failure continuations consume this exact token;
+    // they must never mint ownership from the promise-reaction turn.
+    const promptEpoch = this.advanceRefreshEpoch();
+    const ownership: ActivePromptOwnership = {
+      request,
+      generation,
+      sessionId,
+      chat,
+      promptEpoch,
+      signal: operationSignal
+    };
     this.activeRequest = request;
-    const operationSignal = this.controller?.signal;
+    this.activePromptOwnership = ownership;
     const userItem: TimelineItem = {
       kind: 'user-message',
       id: `${request.id}:user`,
@@ -205,21 +274,30 @@ export class LiveWorkspaceSession {
     });
 
     void request.completion
-      .then(() => this.refreshMessagesAfterCompletion(request, operationSignal))
-      .catch((error) => this.handlePromptFailure(request, error));
+      .then(() => this.refreshMessagesAfterCompletion(ownership))
+      .catch((error) => this.handlePromptFailure(ownership, error));
   }
 
   async stop(): Promise<void> {
     this.assertActive();
     const request = this.activeRequest;
-    if (!request || !this.chat) return;
+    const chat = this.chat;
+    const generation = this.generation;
+    if (!request || !chat) return;
     try {
-      await this.chat.interrupt(request.id);
+      await chat.interrupt(request.id);
     } catch {
       // The visible stopped state remains local and never fabricates completion.
     }
-    if (this.activeRequest !== request) return;
+    if (
+      this.activeRequest !== request ||
+      !this.isCurrent(generation) ||
+      this.chat !== chat
+    )
+      return;
     this.activeRequest = undefined;
+    this.activePromptOwnership = undefined;
+    this.advanceRefreshEpoch();
     this.publish({
       ...this.snapshot,
       state: 'stopped',
@@ -230,6 +308,14 @@ export class LiveWorkspaceSession {
     });
   }
 
+  cancelReconnect(): void {
+    this.assertActive();
+    if (this.snapshot.state !== 'reconnecting') return;
+    this.supersedeRetry();
+    this.advanceRefreshEpoch();
+    this.publish({ ...this.snapshot, state: 'offline' });
+  }
+
   async retryConnection(): Promise<void> {
     this.assertActive();
     const chat = this.chat;
@@ -237,22 +323,33 @@ export class LiveWorkspaceSession {
     const sessionId = this.snapshot.activeSessionId;
     if (!chat || !sessionId) return;
 
-    // Reconnect owns the next history publication in this generation. This
-    // invalidates a completion refresh that may still be waiting on REST.
-    const refreshEpoch = this.advanceRefreshEpoch();
-    this.publish({ ...this.snapshot, state: 'reconnecting', permanentFailure: undefined });
-    // Subscribers can synchronously invalidate or replace the workspace from
-    // the reconnecting publication. Do not call an old transport after that
-    // re-entry has changed the ownership boundary.
+    // Reconnect supersedes prompt completion/failure ownership before the
+    // transport can synchronously publish its reconnect transition.
+    this.revokeActivePrompt(true);
     if (!this.ownsChat(generation, chat, sessionId)) return;
 
+    const operationSignal = this.controller?.signal;
+    const retry = this.beginRetry(operationSignal);
+    const refreshEpoch = this.advanceRefreshEpoch();
+    this.publish({ ...this.snapshot, state: 'reconnecting', permanentFailure: undefined });
+    // Subscribers can synchronously invalidate, replace, or start retry 2 from
+    // this publication. Only the exact retry token may continue.
+    if (!this.ownsRetry(generation, chat, sessionId, refreshEpoch, retry)) {
+      retry.removeOperationAbort();
+      return;
+    }
+
     try {
-      await chat.reconnect();
-      if (!this.ownsChat(generation, chat, sessionId)) return;
-      await this.refreshMessages(sessionId, generation, chat, undefined, refreshEpoch);
+      await chat.reconnect(retry.controller.signal);
+      if (!this.ownsRetry(generation, chat, sessionId, refreshEpoch, retry)) return;
+      await this.refreshMessages(sessionId, generation, chat, retry.controller.signal, refreshEpoch);
+      if (!this.ownsRetry(generation, chat, sessionId, refreshEpoch, retry)) return;
     } catch (error) {
-      if (!this.ownsChat(generation, chat, sessionId)) return;
+      if (!this.ownsRetry(generation, chat, sessionId, refreshEpoch, retry)) return;
       this.publishLoadFailure(error, generation);
+    } finally {
+      retry.removeOperationAbort();
+      if (this.retryController === retry.controller) this.retryController = undefined;
     }
   }
 
@@ -318,12 +415,24 @@ export class LiveWorkspaceSession {
 
     const model = session.model?.trim() || 'Hermes';
     const timeline = mapLiveMessages(session.id, response.messages, model);
-    const chat = this.createChat({
-      selectedSessionId: session.id,
-      onEvent: (event) => this.handleEvent(operation.generation, event),
-      onStateChange: (state) => this.handleConnectionState(operation.generation, state),
-      onUncertainDelivery: () => this.publishUncertainDelivery(operation.generation)
-    });
+    let chat: JsonRpcChatTransport;
+    try {
+      chat = this.createChat({
+        selectedSessionId: session.id,
+        onEvent: (event) => this.handleEvent(operation.generation, event),
+        onStateChange: (state) => this.handleConnectionState(operation.generation, state),
+        onUncertainDelivery: () => this.publishUncertainDelivery(operation.generation)
+      });
+    } catch (error) {
+      this.publishLoadFailure(error, operation.generation);
+      return;
+    }
+    // A synchronous factory can reenter the workspace. Do not adopt a resource
+    // that belongs to an invalidated or replaced operation.
+    if (!this.ownsOperation(operation)) {
+      closeChat(chat);
+      return;
+    }
     this.chat = chat;
     this.publish({
       state: 'loading',
@@ -333,8 +442,15 @@ export class LiveWorkspaceSession {
       model,
       timeline
     });
+    if (!this.ownsChatOperation(operation, chat)) {
+      this.closeChatIfOwned(chat);
+      return;
+    }
     await chat.connect(operation.signal);
-    if (!this.isCurrent(operation.generation) || this.chat !== chat) return;
+    if (!this.ownsChatOperation(operation, chat)) {
+      this.closeChatIfOwned(chat);
+      return;
+    }
     this.publish({ ...this.snapshot, state: timeline.length === 0 ? 'empty' : 'ready' });
   }
 
@@ -429,8 +545,12 @@ export class LiveWorkspaceSession {
 
     // A terminal transport transition is newer lifecycle information even
     // when the workspace generation and selected session are unchanged. It
-    // revokes pending REST history reads before they can hide the boundary.
-    if (isTerminalConnectionStatus(state.status)) this.advanceRefreshEpoch();
+    // revokes pending REST history reads and prompt continuations before they
+    // can hide the boundary.
+    if (isTerminalConnectionStatus(state.status)) {
+      this.advanceRefreshEpoch();
+      this.supersedeRetry();
+    }
 
     if (state.status === 'reconnecting') this.publish({ ...this.snapshot, state: 'reconnecting' });
     if (state.status === 'incompatible' || state.status === 'auth_required') {
@@ -461,19 +581,25 @@ export class LiveWorkspaceSession {
     if (found) this.publish({ ...this.snapshot, timeline, state: complete ? 'ready' : 'streaming' });
   }
 
-  private async refreshMessagesAfterCompletion(
-    request: JsonRpcChatRequest,
-    signal?: AbortSignal
-  ): Promise<void> {
-    if (this.activeRequest !== request || !this.snapshot.activeSessionId) return;
-    const sessionId = this.snapshot.activeSessionId;
-    const generation = this.generation;
-    // Completion history is one owner in the shared publication sequence. Any
-    // later prompt, reconnect, terminal close, replacement, or reset advances
-    // the epoch and makes this read's result observationally stale.
-    const refreshEpoch = this.advanceRefreshEpoch();
+  private async refreshMessagesAfterCompletion(ownership: ActivePromptOwnership): Promise<void> {
+    // The transport emits message.complete before resolving the request. A
+    // close/reconnect can therefore supersede this token in the same turn.
+    // Never mint a new refresh epoch from a stale promise continuation.
+    if (
+      this.activeRequest !== ownership.request ||
+      this.activePromptOwnership !== ownership ||
+      !this.ownsPromptCompletion(ownership)
+    )
+      return;
     this.activeRequest = undefined;
-    await this.refreshMessages(sessionId, generation, undefined, signal, refreshEpoch);
+    this.activePromptOwnership = undefined;
+    await this.refreshMessages(
+      ownership.sessionId,
+      ownership.generation,
+      ownership.chat,
+      ownership.signal,
+      ownership.promptEpoch
+    );
   }
 
   private async refreshMessages(
@@ -492,18 +618,29 @@ export class LiveWorkspaceSession {
       if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
       const timeline = mapLiveMessages(sessionId, response.messages, this.snapshot.model);
       this.publish({ ...this.snapshot, timeline, state: timeline.length === 0 ? 'empty' : 'ready' });
-    } catch {
+    } catch (error) {
       // Abort and stale non-abort failures are both deliberately silent. A
       // replacement operation owns the visible state and must not be
       // downgraded to retryable-error by an old REST continuation.
       if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
+      if (error instanceof LiveRestError && error.code === 'unauthenticated' && error.status === 401) {
+        this.publishPermanentFailure(generation, { reason: 'authentication-required' });
+        return;
+      }
       this.publish({ ...this.snapshot, state: 'retryable-error' });
     }
   }
 
-  private handlePromptFailure(request: JsonRpcChatRequest, error: unknown): void {
-    if (this.activeRequest !== request) return;
+  private handlePromptFailure(ownership: ActivePromptOwnership, error: unknown): void {
+    if (
+      this.activeRequest !== ownership.request ||
+      this.activePromptOwnership !== ownership ||
+      !this.ownsPromptCompletion(ownership)
+    )
+      return;
     this.activeRequest = undefined;
+    this.activePromptOwnership = undefined;
+    this.advanceRefreshEpoch();
     const uncertain = error instanceof JsonRpcChatError && error.code === 'uncertain-delivery';
     const permanentFailure = this.snapshot.permanentFailure;
     const authenticationRequired = permanentFailure?.reason === 'authentication-required';
@@ -518,10 +655,10 @@ export class LiveWorkspaceSession {
       // is not enough to choose safe sign-in versus origin guidance.
       state: permanent ? 'permanent-error' : 'retryable-error',
       timeline: [
-        ...withoutStreamingItem(this.snapshot.timeline, request.id),
+        ...withoutStreamingItem(this.snapshot.timeline, ownership.request.id),
         {
           kind: 'error',
-          id: `${request.id}:error`,
+          id: `${ownership.request.id}:error`,
           title: authenticationRequired
             ? 'Authentication required'
             : incompatibleOrigin
@@ -551,12 +688,37 @@ export class LiveWorkspaceSession {
   ): void {
     if (!this.isCurrent(generation)) return;
     this.advanceRefreshEpoch();
-    this.publish({ ...this.snapshot, state: 'permanent-error', permanentFailure });
+    const request = this.activeRequest;
+    this.activeRequest = undefined;
+    this.activePromptOwnership = undefined;
+    this.supersedeRetry();
+    const timeline = request
+      ? [
+          ...withoutStreamingItem(this.snapshot.timeline, request.id),
+          {
+            kind: 'error' as const,
+            id: `${request.id}:error`,
+            title: permanentFailure.reason === 'authentication-required'
+              ? 'Authentication required'
+              : 'Incompatible origin',
+            detail: permanentFailure.reason === 'authentication-required'
+              ? 'Sign in again before sending another prompt.'
+              : 'Hermes rejected this origin for chat. Use a reviewed origin before sending another prompt.'
+          }
+        ]
+      : this.snapshot.timeline;
+    this.publish({ ...this.snapshot, state: 'permanent-error', permanentFailure, timeline });
   }
 
   private publishUncertainDelivery(generation: number): void {
     if (!this.isCurrent(generation)) return;
-    this.advanceRefreshEpoch();
+    // Keep the prompt owner until its completion rejection is observed. A
+    // transport may publish delivery_uncertain before a terminal close state;
+    // the latter must still be able to render the exact prompt error without
+    // letting the stale promise mint a new refresh owner. If no prompt is
+    // active, revoke any pending history read immediately.
+    if (!this.activePromptOwnership) this.advanceRefreshEpoch();
+    this.supersedeRetry();
     if (this.snapshot.state !== 'permanent-error') {
       this.publish({ ...this.snapshot, state: 'retryable-error' });
     }
@@ -569,7 +731,12 @@ export class LiveWorkspaceSession {
     // that state to a generic retryable error; this also preserves the barrier
     // if a transport rejects before its state callback runs.
     if (this.snapshot.state === 'permanent-error') return;
-    if (error instanceof JsonRpcChatError && error.code === 'authentication-required') {
+    if (
+      (error instanceof LiveRestError &&
+        error.code === 'unauthenticated' &&
+        error.status === 401) ||
+      (error instanceof JsonRpcChatError && error.code === 'authentication-required')
+    ) {
       this.publishPermanentFailure(generation, { reason: 'authentication-required' });
       return;
     }
@@ -580,6 +747,9 @@ export class LiveWorkspaceSession {
     // A generic terminal load failure also supersedes any same-generation
     // history owner, including one started before an explicit reconnect.
     this.advanceRefreshEpoch();
+    this.activeRequest = undefined;
+    this.activePromptOwnership = undefined;
+    this.supersedeRetry();
     this.publish({ ...this.snapshot, state: 'retryable-error', permanentFailure: undefined });
   }
 
@@ -587,10 +757,12 @@ export class LiveWorkspaceSession {
     this.assertActive();
     this.generation += 1;
     this.advanceRefreshEpoch();
+    this.supersedeRetry();
     this.controller?.abort();
     const chat = this.chat;
     this.chat = undefined;
     this.activeRequest = undefined;
+    this.activePromptOwnership = undefined;
     this.approvals.clear();
     this.clarifications.clear();
     chat?.close();
@@ -601,6 +773,7 @@ export class LiveWorkspaceSession {
   private resetForInvalidation(publishSnapshot: boolean): void {
     this.generation += 1;
     this.advanceRefreshEpoch();
+    this.supersedeRetry();
     this.controller?.abort();
     this.controller = undefined;
     const chat = this.chat;
@@ -608,6 +781,7 @@ export class LiveWorkspaceSession {
     // transport that is being invalidated or trigger a second close.
     this.chat = undefined;
     this.activeRequest = undefined;
+    this.activePromptOwnership = undefined;
     this.approvals.clear();
     this.clarifications.clear();
     chat?.close();
@@ -619,6 +793,108 @@ export class LiveWorkspaceSession {
   private advanceRefreshEpoch(): number {
     this.refreshEpoch += 1;
     return this.refreshEpoch;
+  }
+
+  private revokeActivePrompt(abortRequest = false): void {
+    const request = this.activeRequest;
+    this.activeRequest = undefined;
+    this.activePromptOwnership = undefined;
+    if (!request) return;
+    this.advanceRefreshEpoch();
+    if (abortRequest) {
+      try {
+        request.abort();
+      } catch {
+        // The transport owns cleanup of an already-stale request.
+      }
+    }
+  }
+
+  private beginRetry(operationSignal?: AbortSignal): RetryOwnership {
+    this.retryController?.abort();
+    this.retryToken += 1;
+    const controller = new AbortController();
+    const onOperationAbort = (): void => controller.abort();
+    if (operationSignal) {
+      operationSignal.addEventListener('abort', onOperationAbort, { once: true });
+      if (operationSignal.aborted) controller.abort();
+    }
+    this.retryController = controller;
+    return {
+      token: this.retryToken,
+      controller,
+      removeOperationAbort: () =>
+        operationSignal?.removeEventListener('abort', onOperationAbort)
+    };
+  }
+
+  private supersedeRetry(): void {
+    this.retryToken += 1;
+    this.retryController?.abort();
+    this.retryController = undefined;
+  }
+
+  private ownsOperation(operation: { readonly generation: number; readonly signal: AbortSignal }): boolean {
+    return (
+      this.isCurrent(operation.generation) &&
+      this.controller?.signal === operation.signal &&
+      !operation.signal.aborted
+    );
+  }
+
+  private ownsChatOperation(
+    operation: { readonly generation: number; readonly signal: AbortSignal },
+    chat: JsonRpcChatTransport
+  ): boolean {
+    return this.ownsOperation(operation) && this.chat === chat;
+  }
+
+  private ownsPromptStart(
+    generation: number,
+    chat: JsonRpcChatTransport,
+    signal: AbortSignal | undefined
+  ): boolean {
+    return (
+      this.isCurrent(generation) &&
+      this.chat === chat &&
+      this.controller?.signal === signal &&
+      !signal?.aborted
+    );
+  }
+
+  private ownsPromptCompletion(ownership: ActivePromptOwnership): boolean {
+    return (
+      this.isCurrent(ownership.generation) &&
+      this.chat === ownership.chat &&
+      this.snapshot.activeSessionId === ownership.sessionId &&
+      this.controller?.signal === ownership.signal &&
+      this.refreshEpoch === ownership.promptEpoch &&
+      !ownership.signal?.aborted
+    );
+  }
+
+  private ownsRetry(
+    generation: number,
+    chat: JsonRpcChatTransport,
+    sessionId: string,
+    refreshEpoch: number,
+    retry: RetryOwnership
+  ): boolean {
+    return (
+      this.isCurrent(generation) &&
+      this.chat === chat &&
+      this.snapshot.activeSessionId === sessionId &&
+      this.refreshEpoch === refreshEpoch &&
+      this.retryToken === retry.token &&
+      this.retryController === retry.controller &&
+      !retry.controller.signal.aborted
+    );
+  }
+
+  private closeChatIfOwned(chat: JsonRpcChatTransport): void {
+    if (this.chat !== chat) return;
+    this.chat = undefined;
+    closeChat(chat);
   }
 
   private ownsRefresh(
@@ -702,4 +978,12 @@ function isTerminalConnectionStatus(status: JsonRpcConnectionState['status']): b
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+function closeChat(chat: JsonRpcChatTransport): void {
+  try {
+    chat.close();
+  } catch {
+    // Resource cleanup must not replace the bounded workspace failure.
+  }
 }

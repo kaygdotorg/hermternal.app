@@ -15,6 +15,7 @@ function createSession(snapshot: LiveWorkspaceSnapshot) {
     sendPrompt: vi.fn(),
     stop: vi.fn().mockResolvedValue(undefined),
     retryConnection: vi.fn().mockResolvedValue(undefined),
+    cancelReconnect: vi.fn(),
     approve: vi.fn().mockResolvedValue(undefined),
     answerClarification: vi.fn().mockResolvedValue(undefined),
     dispose: vi.fn()
@@ -57,6 +58,21 @@ describe('LiveWorkspaceView', () => {
     expect(screen.getByText('This Hermes session has no messages yet. Send a message to begin.')).toBeInTheDocument();
     expect(screen.queryByText(/Mocked fixture only/)).not.toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Message Hermes' })).toBeDisabled();
+  });
+
+  it('wires live reconnect recovery controls to retry and cancellation', async () => {
+    const session = createSession({
+      state: 'reconnecting',
+      sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4',
+      timeline: []
+    });
+    render(LiveWorkspaceView, { session });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(session.cancelReconnect).toHaveBeenCalledTimes(1);
   });
 
   it('returns authentication-required permanent errors to the root auth boundary', async () => {

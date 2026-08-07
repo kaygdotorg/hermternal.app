@@ -41,13 +41,15 @@ history, callbacks, diagnostics, or retained evidence. W-05 issue
 `dev` at merge commit `965da31ba433c95c99ce85ef85f0485fa44e42e6`.
 
 While the browser adapter is between ticket acquisition and JSON-RPC socket
-consumption, it owns the prepared socket. Abort or provider failure clears and
-closes that socket exactly once. Successful `createWebSocket` consumption
-removes the browser abort listener before transferring ownership to JSON-RPC;
-this prevents a cancellation race from double-closing the underlying socket or
-poisoning the next explicit retry. If the signal aborts after a factory result
-arrives but before JSON-RPC adopts it, the acquired socket is closed exactly once
-and is never attached to a stale generation.
+consumption, it owns the prepared socket through an attempt token. Abort or
+provider failure clears and closes only that attempt's socket exactly once;
+late cleanup from an older ticket/open attempt cannot close a replacement
+prepared socket. Successful `createWebSocket` consumption removes the browser
+abort listener before transferring ownership to JSON-RPC; this prevents a
+cancellation race from double-closing the underlying socket or poisoning the
+next explicit retry. If the signal aborts after a factory result arrives but
+before JSON-RPC adopts it, the acquired socket is closed exactly once and is
+never attached to a stale generation.
 
 The `official_image` evidence scope binds the immutable upstream image reference
 to the reviewed route manifest, source review, and proxy proof. The behavioral

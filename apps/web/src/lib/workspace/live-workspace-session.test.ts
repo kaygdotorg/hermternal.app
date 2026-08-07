@@ -9,7 +9,7 @@ import {
   type JsonRpcConnectionState,
   type JsonRpcWebSocket
 } from '$lib/chat/json-rpc-chat';
-import type { LiveMessage, LiveRestTransport, LiveSession, SessionMessages } from '$lib/transport';
+import { LiveRestError, type LiveMessage, type LiveRestTransport, type LiveSession, type SessionMessages } from '$lib/transport';
 import { LiveWorkspaceSession } from './live-workspace-session';
 
 const SESSION: LiveSession = {
@@ -196,8 +196,11 @@ function createReconnectUnauthorizedChatFactory() {
   return { createChat, sockets, transports };
 }
 
-function createChatHarness() {
-  let options: BrowserChatOptions | undefined;
+function createChatHarness(options: {
+  readonly onSendPrompt?: () => void;
+  readonly sendPromptError?: unknown;
+} = {}) {
+  let chatOptions: BrowserChatOptions | undefined;
   let requestNumber = 0;
   let activeRequest:
     | { readonly id: string; readonly deferred: ReturnType<typeof createDeferred<JsonRpcCompletionEvent>> }
@@ -211,12 +214,15 @@ function createChatHarness() {
     const deferred = createDeferred<JsonRpcCompletionEvent>();
     activeRequest = { id, deferred };
     pendingRequests.set(id, deferred);
-    return {
+    const request: JsonRpcChatRequest = {
       id,
       completion: deferred.promise,
       state: { id, status: 'submitting' },
       abort: vi.fn()
     };
+    options.onSendPrompt?.();
+    if (options.sendPromptError !== undefined) throw options.sendPromptError;
+    return request;
   });
   const transport: JsonRpcChatTransport = {
     state: { status: 'offline', generation: 0 },
@@ -238,7 +244,7 @@ function createChatHarness() {
     subscribe: vi.fn(() => () => {})
   };
   const createChat = vi.fn((nextOptions: BrowserChatOptions) => {
-    options = nextOptions;
+    chatOptions = nextOptions;
     return transport;
   });
 
@@ -247,10 +253,10 @@ function createChatHarness() {
     transport,
     sendPrompt,
     emit(event: JsonRpcChatEvent) {
-      options?.onEvent?.(event);
+      chatOptions?.onEvent?.(event);
     },
     changeState(state: JsonRpcConnectionState) {
-      options?.onStateChange?.(state);
+      chatOptions?.onStateChange?.(state);
     },
     complete(event: JsonRpcCompletionEvent, requestId?: string) {
       const id = requestId ?? activeRequest?.id;
@@ -1129,6 +1135,37 @@ describe('LiveWorkspaceSession', () => {
     expect(session.current.timeline).toEqual([]);
   });
 
+  it('maps a genuine REST 401 history failure to permanent authentication state', async () => {
+    const rest = createRest([]);
+    vi.mocked(rest.getSessionMessages).mockRejectedValue(new LiveRestError('unauthenticated', 401));
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+
+    expect(session.current.state).toBe('permanent-error');
+    expect(session.current.permanentFailure).toEqual({ reason: 'authentication-required' });
+    expect(chat.transport.connect).not.toHaveBeenCalled();
+  });
+
+  it('cancels an in-flight reconnect without allowing its late history result', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const reconnect = createDeferred<void>();
+    vi.mocked(chat.transport.reconnect).mockImplementation(() => reconnect.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockClear();
+
+    const retry = session.retryConnection();
+    session.cancelReconnect();
+    reconnect.resolve();
+    await retry;
+
+    expect(session.current.state).toBe('offline');
+    expect(rest.getSessionMessages).not.toHaveBeenCalled();
+  });
+
   it('closes chat and drops local session references before invalidation is published', async () => {
     const rest = createRest([{ role: 'user', content: 'Temporary local view' }]);
     const chat = createChatHarness();
@@ -1144,5 +1181,297 @@ describe('LiveWorkspaceSession', () => {
     expect(session.current.sessions).toEqual([]);
     expect(session.current.timeline).toEqual([]);
     expect(observed.at(-1)).not.toContain('Temporary local view');
+  });
+
+  it('drops a request returned after a synchronous prompt invalidation', async () => {
+    let session!: LiveWorkspaceSession;
+    const rest = createRest([]);
+    const chat = createChatHarness({ onSendPrompt: () => session.invalidate() });
+    session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+
+    session.sendPrompt('prompt invalidated during send');
+    const request = chat.sendPrompt.mock.results[0]?.value as JsonRpcChatRequest;
+
+    expect(request.abort).toHaveBeenCalledTimes(1);
+    expect(chat.transport.close).toHaveBeenCalledTimes(1);
+    expect(session.current.state).toBe('loading');
+    expect(session.current.timeline).toEqual([]);
+  });
+
+  it('does not publish a synchronous prompt error after disposal reentry', async () => {
+    let session!: LiveWorkspaceSession;
+    const rest = createRest([]);
+    const chat = createChatHarness({
+      onSendPrompt: () => session.dispose(),
+      sendPromptError: new JsonRpcChatError('connection-failed')
+    });
+    session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+
+    session.sendPrompt('prompt failed during disposal');
+
+    expect(chat.transport.close).toHaveBeenCalledTimes(1);
+    expect(session.current.state).toBe('loading');
+    expect(session.current.timeline).toEqual([]);
+  });
+
+  it('closes a stale open-session factory result exactly once after reentrant invalidation', async () => {
+    const rest = createRest([]);
+    const staleChat = createChatHarness();
+    let session!: LiveWorkspaceSession;
+    const createChat = vi.fn(() => {
+      session.invalidate();
+      return staleChat.transport;
+    });
+    session = new LiveWorkspaceSession({ rest, createChat });
+
+    await session.initialize();
+
+    expect(staleChat.transport.close).toHaveBeenCalledTimes(1);
+    expect(staleChat.transport.connect).not.toHaveBeenCalled();
+    expect(session.current.state).toBe('loading');
+  });
+
+  it('closes a stale empty-session factory result exactly once after reentrant disposal', async () => {
+    const rest = createRest([]);
+    vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+    const staleChat = createChatHarness();
+    let session!: LiveWorkspaceSession;
+    const createChat = vi.fn(() => {
+      session.dispose();
+      return staleChat.transport;
+    });
+    session = new LiveWorkspaceSession({ rest, createChat });
+
+    await session.initialize();
+    await session.createSession();
+
+    expect(staleChat.transport.close).toHaveBeenCalledTimes(1);
+    expect(staleChat.transport.connect).not.toHaveBeenCalled();
+    expect(session.current.state).toBe('loading');
+  });
+
+  it('publishes a bounded retryable state for a current synchronous chat factory failure', async () => {
+    const rest = createRest([]);
+    const failure = new Error('synthetic factory failure');
+    const createChat = vi.fn(() => {
+      throw failure;
+    });
+    const session = new LiveWorkspaceSession({ rest, createChat });
+
+    await session.initialize();
+
+    expect(session.current.state).toBe('retryable-error');
+    expect(JSON.stringify(session.current)).not.toContain('synthetic factory failure');
+  });
+
+  it('closes a connect result once when invalidation races an abort-ignoring connector', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const connect = createDeferred<void>();
+    vi.mocked(chat.transport.connect).mockImplementation(() => connect.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    const initialization = session.initialize();
+    await flush();
+
+    session.invalidate();
+    connect.resolve();
+    await initialization;
+
+    expect(chat.transport.close).toHaveBeenCalledTimes(1);
+    expect(session.current.state).toBe('loading');
+  });
+
+  it('supersedes an older retry when a second retry starts', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Existing history' }]);
+    const chat = createChatHarness();
+    const firstReconnect = createDeferred<void>();
+    const secondReconnect = createDeferred<void>();
+    vi.mocked(chat.transport.reconnect)
+      .mockImplementationOnce(() => firstReconnect.promise)
+      .mockImplementationOnce(() => secondReconnect.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockClear();
+
+    const first = session.retryConnection();
+    await flush();
+    const second = session.retryConnection();
+    firstReconnect.resolve();
+    await first;
+    expect(session.current.state).toBe('reconnecting');
+
+    secondReconnect.resolve();
+    await second;
+    expect(chat.transport.reconnect).toHaveBeenCalledTimes(2);
+    expect(session.current.state).toBe('ready');
+  });
+
+  it('lets a reentrant retry subscriber own one effective reconnect', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Existing history' }]);
+    const chat = createChatHarness();
+    const reconnect = createDeferred<void>();
+    vi.mocked(chat.transport.reconnect).mockImplementation(() => reconnect.promise);
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    let nested: Promise<void> | undefined;
+    let reentered = false;
+    const unsubscribe = session.subscribe((snapshot) => {
+      if (snapshot.state === 'reconnecting' && !reentered) {
+        reentered = true;
+        nested = session.retryConnection();
+        void nested.catch(() => undefined);
+      }
+    });
+
+    const first = session.retryConnection();
+    reconnect.resolve();
+    await first;
+    await nested;
+    unsubscribe();
+
+    expect(reentered).toBe(true);
+    expect(chat.transport.reconnect).toHaveBeenCalledTimes(1);
+    expect(session.current.state).toBe('ready');
+  });
+
+  it('ignores an old prompt failure after reconnect owns a newer prompt', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+
+    session.sendPrompt('old prompt');
+    const oldRequest = chat.sendPrompt.mock.results[0]?.value as JsonRpcChatRequest;
+    await session.retryConnection();
+    session.sendPrompt('new prompt');
+    chat.reject(new Error('late old prompt failure'), oldRequest.id);
+    await flush();
+
+    expect(session.current.state).toBe('streaming');
+    expect(JSON.stringify(session.current.timeline)).not.toContain('late old prompt failure');
+  });
+
+  it('ignores an old prompt failure while reconnect history is pending', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const refresh = createDeferred<SessionMessages>();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockClear();
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+
+    session.sendPrompt('old prompt');
+    const oldRequest = chat.sendPrompt.mock.results[0]?.value as JsonRpcChatRequest;
+    const retry = session.retryConnection();
+    await flush();
+    chat.reject(new Error('late history prompt failure'), oldRequest.id);
+    await flush();
+    expect(session.current.state).toBe('reconnecting');
+
+    refresh.resolve(sessionMessages([{ role: 'assistant', content: 'reconnect history' }]));
+    await retry;
+    expect(session.current.state).toBe('ready');
+    expect(JSON.stringify(session.current.timeline)).toContain('reconnect history');
+    expect(JSON.stringify(session.current.timeline)).not.toContain('late history prompt failure');
+  });
+
+  it('keeps same-turn completion events from starting stale history after a terminal close', async () => {
+    const cases = [
+      [4401, 'permanent-error'],
+      [4403, 'permanent-error'],
+      [1011, 'retryable-error']
+    ] as const;
+
+    for (const [closeCode, expectedState] of cases) {
+      const rest = createRest([]);
+      const { session, socket } = await createConnectedSocketWorkspace(rest);
+      vi.mocked(rest.getSessionMessages).mockClear();
+
+      session.sendPrompt(`same-turn close ${closeCode}`);
+      const requestId = latestPromptId(socket);
+      socket.emitEvent('message.complete', requestId, { text: 'completed before close' });
+      socket.emitClose(closeCode, 'redacted');
+      await flush();
+
+      expect(rest.getSessionMessages).not.toHaveBeenCalled();
+      expect(session.current.state).toBe(expectedState);
+    }
+  });
+
+  it('lets an explicit retry own the same-turn completion before history refresh starts', async () => {
+    const rest = createRest([]);
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+    vi.mocked(rest.getSessionMessages).mockClear();
+
+    session.sendPrompt('same-turn retry');
+    const requestId = latestPromptId(socket);
+    socket.emitEvent('message.complete', requestId, { text: 'completed before retry' });
+    const retry = session.retryConnection();
+    await flush();
+    socket.emitOpen();
+    socket.emitGatewayReady();
+    await flush();
+    const resume = [...socket.sent]
+      .reverse()
+      .map((raw) => JSON.parse(raw) as { id?: string; method?: string })
+      .find((frame) => frame.method === 'session.resume');
+    if (!resume?.id) throw new Error('reconnect resume frame was not sent');
+    socket.emitResponse(resume.id);
+    await retry;
+
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(1);
+    expect(session.current.state).toBe('empty');
+  });
+
+  it('aborts pending reconnect history on invalidation and suppresses late success', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Existing history' }]);
+    const chat = createChatHarness();
+    const history = createDeferred<SessionMessages>();
+    let historySignal: AbortSignal | undefined;
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockClear();
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce((_id, _options, signal) => {
+      historySignal = signal;
+      return history.promise;
+    });
+
+    const retry = session.retryConnection();
+    await flush();
+    expect(historySignal).toBeInstanceOf(AbortSignal);
+    session.invalidate();
+    expect(historySignal?.aborted).toBe(true);
+    history.resolve(sessionMessages([{ role: 'assistant', content: 'late reconnect success' }]));
+    await retry;
+
+    expect(session.current.state).toBe('loading');
+    expect(JSON.stringify(session.current.timeline)).not.toContain('late reconnect success');
+  });
+
+  it('aborts pending reconnect history on disposal and suppresses late failure', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Existing history' }]);
+    const chat = createChatHarness();
+    const history = createDeferred<SessionMessages>();
+    let historySignal: AbortSignal | undefined;
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockClear();
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce((_id, _options, signal) => {
+      historySignal = signal;
+      return history.promise;
+    });
+
+    const retry = session.retryConnection();
+    await flush();
+    expect(historySignal).toBeInstanceOf(AbortSignal);
+    session.dispose();
+    expect(historySignal?.aborted).toBe(true);
+    history.reject(new Error('late reconnect failure'));
+    await retry;
+
+    expect(session.current.state).toBe('loading');
+    expect(session.current.timeline).toEqual([]);
   });
 });
