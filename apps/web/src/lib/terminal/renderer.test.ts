@@ -1,9 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { build } from 'vite';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createTerminalRenderer,
@@ -313,38 +311,42 @@ function benchmarkFiles(root: string, relativePath = ''): string[] {
   return files;
 }
 
-async function recomputeBenchmarkBuild(commit: string, repoRoot: string): Promise<BenchmarkBuild> {
-  const checkoutRoot = mkdtempSync(join(tmpdir(), 'hermternal-terminal-checkout-'));
+async function recomputeBenchmarkBuild(repoRoot: string): Promise<BenchmarkBuild> {
+  const webRoot = resolve(repoRoot, 'apps/web');
+  const outputDirectory = resolve(repoRoot, '.terminal-renderer-test-build');
+  rmSync(outputDirectory, { recursive: true, force: true });
   try {
-    const archive = execFileSync('git', ['-C', repoRoot, 'archive', commit], { maxBuffer: 64 * 1024 * 1024 });
-    execFileSync('tar', ['-x', '-C', checkoutRoot], { input: archive });
-    symlinkSync(resolve(repoRoot, 'apps/web/node_modules'), join(checkoutRoot, 'apps/web/node_modules'), 'dir');
-    // Vite's TypeScript transform follows the SvelteKit tsconfig even though
-    // this isolated entry contains no Svelte component. Reuse generated config
-    // metadata from the current dependency-compatible checkout without using
-    // any source files from the working tree.
-    symlinkSync(resolve(repoRoot, 'apps/web/.svelte-kit'), join(checkoutRoot, 'apps/web/.svelte-kit'), 'dir');
-    const webRoot = join(checkoutRoot, 'apps/web');
-    const outputDirectory = join(checkoutRoot, '.terminal-renderer-benchmark-build');
-    await build({
-      root: webRoot,
-      configFile: false,
-      logLevel: 'error',
-      build: {
-        outDir: outputDirectory,
-        emptyOutDir: true,
-        assetsInlineLimit: 0,
-        cssCodeSplit: true,
-        minify: true,
-        rollupOptions: {
-          input: join(webRoot, 'tests/bench/terminal-renderer.browser.ts'),
-          output: {
-            entryFileNames: 'entry.js',
-            chunkFileNames: 'chunks/[name]-[hash].js',
-            assetFileNames: 'assets/[name]-[hash][extname]'
+    const buildScript = `
+      import { build } from 'vite';
+      import { resolve } from 'node:path';
+      await build({
+        root: process.cwd(),
+        configFile: false,
+        logLevel: 'error',
+        build: {
+          outDir: ${JSON.stringify(outputDirectory)},
+          emptyOutDir: true,
+          assetsInlineLimit: 0,
+          cssCodeSplit: true,
+          minify: true,
+          rollupOptions: {
+            input: resolve(process.cwd(), 'tests/bench/terminal-renderer.browser.ts'),
+            output: {
+              entryFileNames: 'entry.js',
+              chunkFileNames: 'chunks/[name]-[hash].js',
+              assetFileNames: 'assets/[name]-[hash][extname]'
+            }
           }
         }
-      }
+      });
+    `;
+    const buildEnv = { ...process.env };
+    delete buildEnv.NODE_ENV;
+    delete buildEnv.VITEST;
+    execFileSync('bun', ['-e', buildScript], {
+      cwd: webRoot,
+      env: buildEnv,
+      maxBuffer: 64 * 1024 * 1024
     });
     const files = benchmarkFiles(outputDirectory).map((path) => {
       const bytes = readFileSync(join(outputDirectory, path));
@@ -361,7 +363,7 @@ async function recomputeBenchmarkBuild(commit: string, repoRoot: string): Promis
       css_bytes: sumFiles((path) => path.endsWith('.css'))
     };
   } finally {
-    rmSync(checkoutRoot, { recursive: true, force: true });
+    rmSync(outputDirectory, { recursive: true, force: true });
   }
 }
 
@@ -376,18 +378,29 @@ async function recomputeBenchmarkCheckout(commit: string): Promise<BenchmarkChec
     };
   });
   const evidenceHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD']).toString().trim();
+  try {
+    execFileSync('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', commit, evidenceHead]);
+  } catch {
+    throw new Error('benchmark evidence source commit was not an ancestor of the evidence head');
+  }
   const evidenceChangedPaths = execFileSync('git', ['-C', repoRoot, 'diff', '--name-only', `${commit}..${evidenceHead}`])
     .toString()
     .split('\n')
     .map((path) => path.trim())
     .filter(Boolean);
+  const status = execFileSync(
+    'git',
+    ['-C', repoRoot, 'status', '--porcelain=v1', '--untracked-files=all', '--', ...BENCHMARK_EXECUTION_INPUT_PATHS],
+    { encoding: 'utf8' }
+  );
+  if (status.trim()) throw new Error('benchmark execution inputs were dirty during evidence recomputation');
   return {
     head: commit,
     // The Git commit tree is the reviewed clean checkout; current working-tree
     // dirtiness is covered independently by assertCleanExecutionInputs tests.
     clean: true,
     execution_inputs: executionInputs,
-    build: await recomputeBenchmarkBuild(commit, repoRoot),
+    build: await recomputeBenchmarkBuild(repoRoot),
     evidence_head: evidenceHead,
     evidence_changed_paths: evidenceChangedPaths
   };
@@ -1636,6 +1649,21 @@ describe('TerminalRenderer', () => {
       'checked-in benchmark evidence checkout was not a clean full-commit source'
     );
 
+    // A valid but older renderer commit must not self-authorize evidence. The
+    // helper must reject it when any non-evidence path changed before the
+    // checked-in trace, rather than rebuilding current sources under that SHA.
+    const arbitrarySource = execFileSync(
+      'git',
+      ['-C', resolve(process.cwd(), '../..'), 'rev-parse', 'HEAD~2'],
+      { encoding: 'utf8' }
+    ).trim();
+    const arbitraryCheckout = await recomputeBenchmarkCheckout(arbitrarySource);
+    const arbitraryEvidence = JSON.parse(JSON.stringify(evidence)) as {
+      revision: { source_commit: string };
+    };
+    arbitraryEvidence.revision.source_commit = arbitrarySource;
+    expect(() => assertBenchmarkTrace(arbitraryEvidence, arbitraryCheckout)).toThrow('evidence-only');
+
     const tamperedInput = JSON.parse(JSON.stringify(evidence)) as {
       revision: { execution_inputs: Array<{ sha256: string }> };
     };
@@ -1680,6 +1708,55 @@ describe('TerminalRenderer', () => {
       tamperedTotals.build[key] += 1;
       expect(() => assertBenchmarkTrace(tamperedTotals, checkout)).toThrow(/recomputed artifacts|recomputed checkout/);
     }
+
+    type MutablePerformanceEvidence = {
+      browser: {
+        environment: Record<string, string>;
+        render_fence: string;
+        long_tasks_ms: number[];
+        memory: {
+          supported: boolean;
+          before_replay_bytes: number | null;
+          after_replay_bytes: number | null;
+          after_dispose_bytes: number | null;
+          reason: string | null;
+        };
+        workload: {
+          replay_bytes: number;
+          replay_chunks: number;
+          mount_dispose_repetitions: number;
+          initial_size: { cols: number; rows: number };
+          scrollback_limit_bytes: number;
+        };
+      };
+    };
+    const clonePerformanceEvidence = (): MutablePerformanceEvidence => JSON.parse(JSON.stringify(evidence)) as MutablePerformanceEvidence;
+
+    const tamperedFence = clonePerformanceEvidence();
+    tamperedFence.browser.render_fence = 'renderer-call-drain';
+    expect(() => assertBenchmarkTrace(tamperedFence, checkout)).toThrow(/browser metadata/);
+
+    const tamperedLongTask = clonePerformanceEvidence();
+    tamperedLongTask.browser.long_tasks_ms[0] = -1;
+    expect(() => assertBenchmarkTrace(tamperedLongTask, checkout)).toThrow(/long-task/);
+
+    const tamperedMemory = clonePerformanceEvidence();
+    tamperedMemory.browser.memory.supported = false;
+    expect(() => assertBenchmarkTrace(tamperedMemory, checkout)).toThrow(/memory support/);
+
+    const tamperedWorkload = clonePerformanceEvidence();
+    tamperedWorkload.browser.workload.replay_chunks -= 1;
+    expect(() => assertBenchmarkTrace(tamperedWorkload, checkout)).toThrow(/workload metadata/);
+
+    const tamperedNetwork = clonePerformanceEvidence();
+    tamperedNetwork.browser.environment.disallowed_network_requests = '1';
+    expect(() => assertBenchmarkTrace(tamperedNetwork, checkout)).toThrow(/network policy/);
+
+    const nonEvidenceDescendant = {
+      ...checkout,
+      evidence_changed_paths: ['apps/web/src/lib/terminal/renderer.ts']
+    };
+    expect(() => assertBenchmarkTrace(evidence, nonEvidenceDescendant)).toThrow(/evidence-only/);
   });
 
   it('fails closed for outbound benchmark requests', () => {
