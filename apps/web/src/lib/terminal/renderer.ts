@@ -839,7 +839,13 @@ class ManagedTerminalRenderer implements TerminalRenderer {
     const generation = this.mountGeneration;
     const host = this.host;
     const backend = this.backend;
-    if (this.state !== 'ready' || !host || !backend || !this.confirmPaste) return;
+    if (
+      this.state !== 'ready' ||
+      !host ||
+      !backend ||
+      rendererHostOwners.get(host) !== this ||
+      !this.confirmPaste
+    ) return;
     let confirmed = false;
     try {
       confirmed = await this.confirmPaste(request);
@@ -851,6 +857,7 @@ class ManagedTerminalRenderer implements TerminalRenderer {
       this.state !== 'ready' ||
       this.mountGeneration !== generation ||
       this.host !== host ||
+      rendererHostOwners.get(host) !== this ||
       this.backend !== backend
     ) {
       return;
