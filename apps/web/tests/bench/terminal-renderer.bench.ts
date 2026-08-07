@@ -281,6 +281,9 @@ async function run(): Promise<Trace> {
       if (!value) throw new Error('browser benchmark did not publish a result');
       return value;
     });
+    if (typeof browserResult.environment.error === 'string') {
+      throw new Error(`browser benchmark failed: ${browserResult.environment.error}`);
+    }
     assertBenchmarkSampleCounts(browserResult.samples, BENCHMARK_REPETITIONS);
     const files = buildResult.files;
     const trace: Trace = {
