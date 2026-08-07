@@ -148,6 +148,22 @@ async function run(): Promise<BrowserBenchmarkResult> {
     firstGlyphSamples.push(performance.now() - firstGlyphStarted);
   }
 
+  const wTerm = await import('@wterm/dom');
+  const wTermPrototype = wTerm.WTerm.prototype as unknown as {
+    write: (data: unknown) => void;
+  };
+  const originalWTermWrite = wTermPrototype.write;
+  wTermPrototype.write = function (this: { bridge?: unknown; _destroyed?: boolean }, data: unknown): void {
+    try {
+      originalWTermWrite.call(this, data);
+    } catch (error: unknown) {
+      browserErrorKinds.push(
+        `wterm-write:${this._destroyed === true ? 'destroyed' : 'alive'}:${this.bridge ? 'bridge' : 'no-bridge'}:${error instanceof Error ? error.name : 'unknown'}`
+      );
+      throw error;
+    }
+  };
+
   for (let index = 0; index < 10; index += 1) {
     workloadPhase = `sustained-output-${index}`;
     const started = performance.now();
