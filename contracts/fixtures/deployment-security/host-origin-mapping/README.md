@@ -30,11 +30,19 @@ fold case, remove a trailing dot, infer a default port, decode escapes, or
 otherwise normalize input into acceptance.
 
 The edge derives each classification independently. It validates scheme, then
-Host, then browser Origin. Only after all three exact checks pass does it write
-the mapped upstream Host marker `fixed_private_non_loopback_9119` and Origin
-marker `mapped_private_http_origin` from trusted configuration. Any non-null
-request-supplied upstream override rejects. Request input never selects either
-mapped value.
+Host, then browser Origin. Only after those exact checks pass does it validate
+the shape of inbound forwarding headers. Those headers are untrusted: the edge
+strips them and rebuilds semantic proxy markers from trusted configuration. A
+request cannot choose `X-Forwarded-Host`, `X-Forwarded-Proto`,
+`X-Forwarded-Prefix`, or the client-chain value retained for the upstream.
+Malformed forwarding-header structures reject before any request-supplied
+upstream override is considered.
+
+Only after all checks pass does the edge write the mapped upstream Host marker
+`fixed_private_non_loopback_9119` and Origin marker `mapped_private_http_origin`
+from trusted configuration. Any non-null request-supplied upstream override
+rejects. Request input never selects either mapped value or any proxy-generated
+forwarded value.
 
 This order preserves the pinned Hermes source-compatible check while making the
 edge, narrow route allowlist, private bind, and firewall the public-origin
@@ -57,9 +65,10 @@ Rejected cases and parser regressions cover:
   schemes and hosts, explicit ports, trailing dots or slashes, paths, queries,
   fragments, whitespace, userinfo, malformed authorities, escapes, IP literals,
   non-ASCII values, `null`, and wildcard values;
+- inbound forwarded-header spoofing and malformed forwarded-header structures;
 - empty or populated request-supplied upstream Host and Origin overrides; and
-- compound hostile inputs proving scheme, Host, Origin, host override, and
-  origin override precedence.
+- compound hostile inputs proving scheme, Host, Origin, forwarded-header,
+  host-override, and origin-override precedence.
 
 Scheme and Host policy rejection uses synthetic edge status `421`. Origin policy
 rejection uses `403`. Every rejection records `upstream_called: false` and no
@@ -68,10 +77,12 @@ result cannot pass.
 
 ## Bounded and redacted evidence
 
-Retained case evidence is limited to nine reviewed semantic fields and 12288
-canonical UTF-8 bytes. It never contains raw request scheme, Host, Origin, or
-override values. Failure output is one JSON line capped at 240 characters and
-never copies an attacker-controlled argument, key, header, or value.
+Retained case evidence is limited to fourteen reviewed semantic fields and
+16384 canonical UTF-8 bytes. It records only the result of stripping and
+rebuilding inbound forwarding headers; it never contains raw request scheme,
+Host, Origin, forwarded, or override values. Failure output is one JSON line
+capped at 240 characters and never copies an attacker-controlled argument, key,
+header, or value.
 
 The validator scans every retained artifact: `README.md`, `cases.json`,
 `validate.py`, `test_validate.py`, and `validation-baseline.json`. It rejects
@@ -99,14 +110,19 @@ unknown keys, changed case order, changed mapping or policy, semantic outcome
 mismatches, unsafe retained data, and changed benchmark evidence. Explicit
 exceptions preserve the same checks under `python3 -O`.
 
-The validator code-pins the canonical cases digest, a canonical semantic digest
-over mapping, policy, evidence contract, raw requests, and independently
-computed outcomes, plus the baseline digest. The baseline repeats the semantic
-digest and binds the normalized README, cases, validator, and tests. Coordinated
-fixture, expected-result, semantic, and baseline mutations fail unless an
-independent reviewed root is also updated. Aggregate registration supplies that
-independent five-file raw digest and size root after the aggregate owner releases
-exclusive ownership.
+The validator accepts only the canonical `cases.json` path and code-pins its
+raw digest. It also binds every row to its observation index, exact request
+object, and the reviewed `docs/deployment/proof-matrix.md` Git object
+(`fbaebbcf445d89e0b3968c884d0ae4ccb40744cb`). A canonical semantic digest covers
+the mapping, policy, evidence contract, raw requests, source-row evidence, and
+independently computed outcomes, plus the baseline digest. The baseline repeats
+the semantic digest and binds the normalized README, cases, validator, and
+tests. Artifact bytes are captured once through bounded regular-file reads and
+that immutable capture feeds parsing, hashing, baseline, and redaction checks.
+Coordinated fixture, expected-result, semantic, and baseline mutations fail
+unless an independent reviewed root is also updated. Aggregate registration
+supplies that independent five-file raw digest and size root after the aggregate
+owner releases exclusive ownership.
 
 Run from the repository root:
 

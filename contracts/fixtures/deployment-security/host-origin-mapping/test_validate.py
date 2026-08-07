@@ -63,24 +63,32 @@ class HostOriginMappingProofTests(unittest.TestCase):
         for optimized in (False, True):
             result = self.run_cli(optimized=optimized)
             self.assertEqual(result.returncode, 0, result); self.assertEqual(result.stderr, "")
-            self.assertEqual(json.loads(result.stdout), {"status": "ok", "fixture_id": "host-origin-mapping-dep-03-f5be9236", "cases": 32, "accepted": 1, "rejected": 31, "synthetic_only": True, "live_claim": False})
+            self.assertEqual(json.loads(result.stdout), {"status": "ok", "fixture_id": "host-origin-mapping-dep-03-f5be9236", "cases": 33, "accepted": 1, "rejected": 32, "synthetic_only": True, "live_claim": False})
 
     def test_case_inventory_and_raw_results_are_frozen(self) -> None:
         retained = validate.validate_document(copy.deepcopy(self.document))
         self.assertEqual(tuple(case["id"] for case in self.document["cases"]), validate.EXPECTED_CASE_IDS)
-        self.assertEqual(len(retained), 32); self.assertTrue(retained[0]["upstream_called"])
+        self.assertEqual(len(retained), 33); self.assertTrue(retained[0]["upstream_called"])
         raw_values = set()
         for case in self.document["cases"]:
             request = case["request"]
             raw_values.update(value for value in request["host_values"] if value)
             raw_values.update(value for value in request["origin_values"] if value)
             raw_values.update(value for value in (request["upstream_host_override"], request["upstream_origin_override"]) if value)
+            for values in request["inbound_forwarded"].values():
+                if isinstance(values, list):
+                    raw_values.update(value for value in values if value and value != "https")
+                elif values:
+                    raw_values.add(values)
         retained_text = json.dumps(retained, sort_keys=True)
         for raw in raw_values:
             if raw not in {"null", "*"}:
                 self.assertNotIn(raw, retained_text)
         for evidence in retained[1:]:
-            self.assertFalse(evidence["upstream_called"]); self.assertIsNone(evidence["mapped_host_marker"]); self.assertIsNone(evidence["mapped_origin_marker"])
+            self.assertFalse(evidence["upstream_called"])
+            for field in ("mapped_host_marker", "mapped_origin_marker", "forwarded_host_marker", "forwarded_proto_marker", "forwarded_prefix_marker", "forwarded_for_marker"):
+                self.assertIsNone(evidence[field])
+        self.assertEqual(retained[0]["forwarded_result"], "stripped_and_rebuilt")
 
     def test_exact_scheme_serialization(self) -> None:
         accepted = ("https",)
@@ -103,6 +111,34 @@ class HostOriginMappingProofTests(unittest.TestCase):
         for value in mutations:
             with self.subTest(value=value):
                 self.assertNotEqual(validate.classify_header_values(value, validate.classify_origin), "accepted_exact")
+
+    def test_inbound_forwarded_headers_are_stripped_and_rebuilt(self) -> None:
+        case = copy.deepcopy(self.document["cases"][0])
+        case["request"]["inbound_forwarded"] = {
+            "x_forwarded_host": ["spoofed-forwarded"],
+            "x_forwarded_proto": ["http"],
+            "x_forwarded_prefix": ["/attacker"],
+            "x_forwarded_for": ["client-chain"],
+        }
+        result = validate.evaluate_case(case)
+        self.assertEqual(result["decision"], "forward_with_configured_mapping")
+        self.assertEqual(result["forwarded_result"], "stripped_and_rebuilt")
+        self.assertEqual(result["forwarded_host_marker"], "public_host_from_edge_validation")
+        self.assertEqual(result["forwarded_proto_marker"], "https_from_edge_transport")
+
+    def test_malformed_forwarded_headers_reject_before_overrides(self) -> None:
+        case = copy.deepcopy(self.document["cases"][0])
+        case["request"]["inbound_forwarded"] = {
+            "x_forwarded_host": "spoofed-forwarded",
+            "x_forwarded_proto": ["https"],
+            "x_forwarded_prefix": ["/hermes"],
+            "x_forwarded_for": [],
+        }
+        case["request"]["upstream_host_override"] = "attacker.private.invalid"
+        result = validate.evaluate_case(case)
+        self.assertEqual(result["decision"], "reject_forwarded_headers")
+        self.assertEqual(result["status"], 421)
+        self.assertFalse(result["upstream_called"])
 
     def test_non_null_overrides_always_reject(self) -> None:
         values = ("", "chat.public.invalid", "fixed_private_non_loopback_9119", [], {}, False, 0)
@@ -135,6 +171,23 @@ class HostOriginMappingProofTests(unittest.TestCase):
                 document = copy.deepcopy(self.document); document[section][field] = "mutated"
                 self.assert_mutation_fails_both_modes(document)
         document = copy.deepcopy(self.document); document["cases"].reverse(); self.assert_mutation_fails_both_modes(document)
+
+    def test_source_row_binding_rejects_copied_allow_row_evidence(self) -> None:
+        document = copy.deepcopy(self.document)
+        document["cases"][1]["source_evidence"] = copy.deepcopy(document["cases"][0]["source_evidence"])
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_document(document)
+        document = copy.deepcopy(self.document)
+        document["cases"][1]["request"] = copy.deepcopy(document["cases"][0]["request"])
+        document["cases"][1]["expected"] = copy.deepcopy(document["cases"][0]["expected"])
+        document["cases"][1]["source_evidence"] = copy.deepcopy(document["cases"][0]["source_evidence"])
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_document(document)
+
+    def test_alternate_cases_path_is_rejected_in_both_modes(self) -> None:
+        path = self.write_json(self.document)
+        for optimized in (False, True):
+            self.assert_bounded_failure(self.run_cli(["--cases", str(path), "--skip-baseline"], optimized=optimized))
 
     def test_each_retained_artifact_rejects_every_forbidden_class(self) -> None:
         canaries = {
