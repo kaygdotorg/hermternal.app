@@ -35,13 +35,12 @@ OPERATION = "C-04"
 CONTRACT = "dashboard-v0.0.1"
 HERMES_REPOSITORY = "NousResearch/hermes-agent"
 HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
-# Immutable fixture data is reviewed against an exact prior PR head. The
+# Immutable fixture data is reviewed against the exact prior descendant that
+# contains the refreshed attestation and final proof-matrix bytes. The
 # executing validator is checked separately against the current HEAD blob so
-# this correction can evolve without a self-referential commit hash. The final
-# descendant updates these constants to the commit containing the refreshed
-# attestation snapshot.
-REVIEWED_COMMIT = "23f6241cc85dc232f8a56ec99c68fe22b989e03e"
-REVIEWED_TREE = "4669a03260fa7f594af677fc24262543fc5a8e13"
+# the snapshot can remain immutable without a self-referential commit hash.
+REVIEWED_COMMIT = "ff31faf186b0a072c4d18297e84fb9bb6b07e977"
+REVIEWED_TREE = "6a909d73208b2559f493e361d01197366aa51a53"
 VALIDATOR_PATH = "contracts/fixtures/compatibility-attestation/validate.py"
 VALIDATOR_COMMAND = "python3 contracts/fixtures/compatibility-attestation/validate.py"
 ATTESTATION_RELATIVE = "contracts/fixtures/compatibility-attestation/revision_attestation.json"
