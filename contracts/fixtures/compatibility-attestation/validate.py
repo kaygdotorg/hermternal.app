@@ -39,8 +39,8 @@ HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
 # contains the refreshed attestation and final proof-matrix bytes. The
 # executing validator is checked separately against the current HEAD blob so
 # the snapshot can remain immutable without a self-referential commit hash.
-REVIEWED_COMMIT = "ff31faf186b0a072c4d18297e84fb9bb6b07e977"
-REVIEWED_TREE = "6a909d73208b2559f493e361d01197366aa51a53"
+REVIEWED_COMMIT = "4c2c2bc5a91e0432f68ec841b6386ebe6b912f29"
+REVIEWED_TREE = "b3d4ce3b3144c36f9972eb5a23ca354ac0fbf696"
 VALIDATOR_PATH = "contracts/fixtures/compatibility-attestation/validate.py"
 VALIDATOR_COMMAND = "python3 contracts/fixtures/compatibility-attestation/validate.py"
 ATTESTATION_RELATIVE = "contracts/fixtures/compatibility-attestation/revision_attestation.json"
