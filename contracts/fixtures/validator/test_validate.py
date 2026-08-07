@@ -355,8 +355,8 @@ class CliTests(unittest.TestCase):
             completed = self._run(optimized=optimized, repo_root=repo_root)
             self.assertEqual(completed.returncode, 0)
             payload = json.loads(completed.stdout)
-            self.assertEqual(payload["fixture_count"], 24)
-            self.assertEqual(payload["coverage_count"], 24)
+            self.assertEqual(payload["fixture_count"], 28)
+            self.assertEqual(payload["coverage_count"], 28)
             self.assertEqual(payload["evidence_status"], "partial")
             self.assertEqual(completed.stderr, "")
 
