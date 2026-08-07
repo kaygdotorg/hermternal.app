@@ -56,18 +56,26 @@ The verifier's object repository must be a canonical absolute plain checkout,
 not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
 `commondir`, object, ref, or config boundaries. Before any path-based Git
 command, it opens `/` and every caller ancestor through a descriptor-relative
-chain with no-follow flags, allowing only the explicit host aliases `/tmp`, `/var`, `/var/folders`, and
-`/var/tmp`; it then opens the caller root and `.git` directory from those held
-descriptors. It copies the complete Git metadata tree into a private mode-700
-temporary snapshot. The copy is chunked and bounded to
-`MAX_SNAPSHOT_FILE_BYTES` per regular file and `MAX_SNAPSHOT_TOTAL_BYTES` in
-aggregate, with a `SNAPSHOT_TIMEOUT_SECONDS` wall-clock deadline. It rejects
-symlinks/non-regular entries and checks source metadata before and after each
-copy. Git then runs only against that snapshot, so concurrent rename or
-symlink replacement of nested fanout/pack/ref paths, config, or metadata cannot
-redirect reads. The snapshot also descriptor-walks the full `objects` and
-`refs` trees with no-follow descriptors as a second structural check. It fails
-closed on local grafts, shallow metadata, alternates and HTTP alternates,
+chain with no-follow flags, allowing only the explicit host aliases `/tmp`,
+`/var`, `/var/folders`, and `/var/tmp`; it then opens the caller root and `.git`
+directory from those held descriptors. It copies the complete Git metadata tree
+into a private mode-700 temporary snapshot. The copy is chunked and
+category-bounded: ordinary metadata and loose objects use
+`MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) for legitimate pack,
+index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
+`MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), with a `SNAPSHOT_TIMEOUT_SECONDS` (30
+second) wall-clock deadline. The 8 MiB pack cap derives from the supported
+repository's fresh single-branch remote-clone observation of a roughly 2.1 MiB
+pack; it leaves measured growth headroom while keeping individual files
+bounded. The 1 MiB non-pack cap remains above the checked-in evidence and
+metadata sizes. It rejects symlinks/non-regular entries and checks source
+metadata before and after each copy. Git then runs only against that snapshot,
+so concurrent rename or symlink replacement of nested fanout/pack/ref paths,
+config, or metadata cannot redirect reads. The snapshot also descriptor-walks
+the full `objects` and `refs` trees with no-follow descriptors as a second
+structural check. It fails closed on local grafts, shallow metadata, alternates
+and HTTP alternates,
 replacement refs, partial-clone/promisor settings, and local include or
 URL-redirection config. Git is invoked only through validated `/usr/bin/git`
 with fixed helper `PATH` `/usr/bin:/bin`; inherited Git redirects and

@@ -70,7 +70,11 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_GIT_OUTPUT = 512 * 1024
 GIT_TIMEOUT_SECONDS = 10.0
+# Ordinary metadata and loose objects stay at the conservative one-MiB cap.
+# Packed branch-only clones need a separate bound because one legitimate pack
+# in the supported repository is approximately 2.1 MiB.
 MAX_SNAPSHOT_FILE_BYTES = 1 * 1024 * 1024
+MAX_SNAPSHOT_PACK_FILE_BYTES = 8 * 1024 * 1024
 MAX_SNAPSHOT_TOTAL_BYTES = 32 * 1024 * 1024
 SNAPSHOT_TIMEOUT_SECONDS = 30.0
 MAX_ERROR_LENGTH = 220
@@ -80,8 +84,9 @@ TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
 # helper search path fixed; the host owning these system directories is part of
 # this fixture-only trust boundary, not an untrusted checkout input.
 TRUSTED_HELPER_PATH = "/usr/bin:/bin"
-# macOS exposes the host temporary directory through /tmp; permit that
-# system alias while rejecting caller-created symlinked ancestors.
+# macOS exposes the host temporary directory through /tmp, /var,
+# /var/folders, and /var/tmp; permit only those system aliases while rejecting
+# caller-created symlinked ancestors.
 TRUSTED_PATH_ALIASES = frozenset(
     {Path("/tmp"), Path("/var"), Path("/var/folders"), Path("/var/tmp")}
 )
@@ -188,9 +193,10 @@ def _open_directory_chain(
             try:
                 next_fd = os.open(component, flags, dir_fd=current_fd)
             except OSError:
-                # macOS exposes the host temporary tree through /tmp and /var.
-                # Only those exact system aliases may be followed; all other
-                # ancestors must be opened with O_NOFOLLOW from their parent fd.
+                # macOS exposes the host temporary tree through the four
+                # explicitly trusted aliases above. Only those exact system
+                # aliases may be followed; all other ancestors must be opened
+                # with O_NOFOLLOW from their parent fd.
                 _require(candidate in TRUSTED_PATH_ALIASES)
                 next_fd = os.open(component, flags & ~no_follow, dir_fd=current_fd)
             old_fd = current_fd
@@ -399,23 +405,45 @@ class _SnapshotBudget:
     def check(self) -> None:
         _require(time.monotonic() <= self.deadline)
 
-    def reserve(self, amount: int, copied_in_file: int) -> int:
+    def check_file_size(self, size: int, file_limit: int) -> None:
+        self.check()
+        _require(0 <= size <= file_limit)
+        # Reject an aggregate overrun before opening and reading the file. The
+        # per-chunk reservation below still protects against a file growing
+        # after this initial descriptor stat.
+        _require(self.total_bytes + size <= MAX_SNAPSHOT_TOTAL_BYTES)
+
+    def reserve(self, amount: int, copied_in_file: int, file_limit: int) -> int:
         self.check()
         _require(amount >= 0)
-        _require(copied_in_file + amount <= MAX_SNAPSHOT_FILE_BYTES)
+        _require(copied_in_file + amount <= file_limit)
         _require(self.total_bytes + amount <= MAX_SNAPSHOT_TOTAL_BYTES)
         self.total_bytes += amount
         self.check()
         return copied_in_file + amount
 
 
-def _copy_regular_from_fd(source_fd: int, destination: Path, budget: _SnapshotBudget) -> None:
-    """Copy one already-open regular file under file, aggregate, and time caps."""
+def _snapshot_file_limit(relative_path: PurePosixPath) -> int:
+    """Use pack-directory headroom without widening loose-file limits."""
+
+    if relative_path.parts[:2] == ("objects", "pack"):
+        return MAX_SNAPSHOT_PACK_FILE_BYTES
+    return MAX_SNAPSHOT_FILE_BYTES
+
+
+def _copy_regular_from_fd(
+    source_fd: int,
+    destination: Path,
+    budget: _SnapshotBudget,
+    relative_path: PurePosixPath,
+) -> None:
+    """Copy one regular file under category, aggregate, and time caps."""
 
     budget.check()
     before = os.fstat(source_fd)
     _require(stat.S_ISREG(before.st_mode))
-    _require(0 <= before.st_size <= MAX_SNAPSHOT_FILE_BYTES)
+    file_limit = _snapshot_file_limit(relative_path)
+    budget.check_file_size(before.st_size, file_limit)
     destination_fd: int | None = None
     copied = 0
     try:
@@ -433,7 +461,7 @@ def _copy_regular_from_fd(source_fd: int, destination: Path, budget: _SnapshotBu
             chunk = os.read(source_fd, 64 * 1024)
             if not chunk:
                 break
-            copied = budget.reserve(len(chunk), copied)
+            copied = budget.reserve(len(chunk), copied, file_limit)
             remaining = memoryview(chunk)
             while remaining:
                 budget.check()
@@ -457,7 +485,10 @@ def _copy_regular_from_fd(source_fd: int, destination: Path, budget: _SnapshotBu
 
 
 def _copy_git_tree(
-    source_fd: int, destination: Path, budget: _SnapshotBudget
+    source_fd: int,
+    destination: Path,
+    budget: _SnapshotBudget,
+    relative_path: PurePosixPath,
 ) -> None:
     """Create a bounded private regular-file snapshot from an open Git fd."""
 
@@ -477,14 +508,20 @@ def _copy_git_tree(
             _require(name not in ("", ".", ".."))
             child_fd: int | None = None
             child_destination = destination / name
+            child_relative_path = relative_path / name
             try:
                 child_fd = os.open(name, flags, dir_fd=source_fd)
                 mode = os.fstat(child_fd).st_mode
                 if stat.S_ISDIR(mode):
-                    _copy_git_tree(child_fd, child_destination, budget)
+                    _copy_git_tree(child_fd, child_destination, budget, child_relative_path)
                 else:
                     _require(stat.S_ISREG(mode))
-                    _copy_regular_from_fd(child_fd, child_destination, budget)
+                    _copy_regular_from_fd(
+                        child_fd,
+                        child_destination,
+                        budget,
+                        child_relative_path,
+                    )
             finally:
                 if child_fd is not None:
                     os.close(child_fd)
@@ -520,7 +557,7 @@ def _snapshot_object_repository(object_repo: Path) -> tuple[tempfile.TemporaryDi
         snapshot_root = Path(temporary.name) / "repo"
         os.mkdir(snapshot_root, 0o700)
         budget.check()
-        _copy_git_tree(git_fd, snapshot_root / ".git", budget)
+        _copy_git_tree(git_fd, snapshot_root / ".git", budget, PurePosixPath())
         return temporary, snapshot_root
     except AuthorityError:
         if temporary is not None:

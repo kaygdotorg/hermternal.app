@@ -66,13 +66,21 @@ record.
 The object-repository input is a canonical absolute plain checkout. Before
 running any path-based Git command, the verifier opens `/` and every caller
 ancestor through a descriptor-relative chain, using `O_NOFOLLOW` except for the
-explicit host aliases `/tmp`, `/var`, `/var/folders`, and `/var/tmp`. It then opens the caller root and
-`.git` directory from the held descriptors and copies the complete Git metadata
-tree into a private mode-700 temporary snapshot. The copy is chunked and
-bounded to `MAX_SNAPSHOT_FILE_BYTES` per regular file and
-`MAX_SNAPSHOT_TOTAL_BYTES` in aggregate, with a `SNAPSHOT_TIMEOUT_SECONDS`
-wall-clock deadline. It rejects symlinks/non-regular entries and checks source
-metadata before and after each copy. Git is invoked only against that snapshot,
+explicit host aliases `/tmp`, `/var`, `/var/folders`, and `/var/tmp`. It then
+opens the caller root and `.git` directory from the held descriptors and copies
+the complete Git metadata tree into a private mode-700 temporary snapshot. The
+copy is chunked and category-bounded: ordinary metadata and loose objects use
+`MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) for legitimate pack,
+index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
+`MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), and the copy has a
+`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The 8 MiB pack cap
+comes from the supported repository's fresh single-branch remote-clone
+observation of a roughly 2.1 MiB pack, leaving measured growth headroom without
+making one unbounded file acceptable; the 1 MiB non-pack cap remains above the
+checked-in evidence and metadata sizes. It rejects symlinks/non-regular entries
+and checks source metadata before and after each copy. Git is invoked only
+against that snapshot,
 so a concurrent rename or symlink replacement of the caller's `.git`, nested
 fanout/pack/ref path, config, or metadata cannot redirect a later read. The
 snapshot also uses a descriptor walk of the complete `objects` and `refs`
@@ -153,9 +161,11 @@ configuration, annotated-tag source objects, FIFO artifact paths, hostile Git
 `PATH`/global config, checkout/object-root resolution failures, source-path
 replacement races after descriptor validation, deterministic ancestor
 replacement during descriptor opening, corrupted loose objects under existing
-OIDs, and oversized pack, loose-object, reflog, and metadata snapshot files.
-It also rejects an aggregate snapshot over the total byte budget and a
-snapshot deadline overrun. It bounds oversized blob, stderr, and history output
+OIDs, oversized loose-object, reflog, and metadata snapshot files, and an
+oversized pack-directory file over the category-specific pack cap. A real
+roughly 2.1 MiB pack in a fresh branch-only remote clone passes. It also rejects
+an aggregate snapshot over the total byte budget before copying the next file
+and a snapshot deadline overrun. It bounds oversized blob, stderr, and history output
 in both interpreter modes, terminates no-output timeouts, cleans up selector
 setup failures, and kills descendants that retain stdout or stderr pipes. The
 FIFO and output-cap cases assert prompt bounded exit rather than relying on a

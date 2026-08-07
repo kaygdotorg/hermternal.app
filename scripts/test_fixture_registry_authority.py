@@ -131,6 +131,60 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             shutil.copyfile(source, destination)
         return temporary
 
+    def make_packed_remote_object_repo(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+        """Create a synthetic branch-only remote clone with a real pack over 1 MiB."""
+
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-packed-remote-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        bare = root / "origin.git"
+        client = root / "client"
+        branch = "fixture-authority-test"
+        head = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        completed = subprocess.run(
+            ["git", "clone", "--bare", "--no-hardlinks", "--quiet", str(ROOT), str(bare)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            self.fail(completed.stderr or completed.stdout)
+        subprocess.run(
+            ["git", "--git-dir", str(bare), "update-ref", f"refs/heads/{branch}", head],
+            check=True,
+            capture_output=True,
+        )
+        completed = subprocess.run(
+            [
+                "git",
+                "clone",
+                "--single-branch",
+                "--branch",
+                branch,
+                "--no-local",
+                "--quiet",
+                str(bare),
+                str(client),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            self.fail(completed.stderr or completed.stdout)
+        pack_files = tuple((client / ".git/objects/pack").glob("*.pack"))
+        self.assertTrue(pack_files)
+        self.assertGreater(
+            max(path.stat().st_size for path in pack_files),
+            verifier.MAX_SNAPSHOT_FILE_BYTES,
+        )
+        return temporary, client
+
     def assert_pair_failure(
         self,
         checkout: Path,
@@ -369,6 +423,17 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         self.assertEqual(normal_payload["artifact_count"], 4)
         self.assertNotEqual(normal_payload["authority_commit"], normal_payload["source_commit"])
         self.assertEqual(normal_payload["source_commit"], self.authority["source_commit"])
+
+        # A fresh single-branch clone exercises the ordinary remote-packed
+        # layout rather than the local object layout used by most regressions.
+        _packed_temporary, packed_repo = self.make_packed_remote_object_repo()
+        with self.copy_checkout() as checkout_temporary:
+            checkout = Path(checkout_temporary)
+            packed_normal = self.run_cli(checkout, optimized=False, object_repo=packed_repo)
+            packed_optimized = self.run_cli(checkout, optimized=True, object_repo=packed_repo)
+        self.assertEqual(packed_normal.stdout, packed_optimized.stdout)
+        self.assert_success(packed_normal)
+        self.assert_success(packed_optimized)
 
     def test_legacy_v1_path_and_fields_remain_readable(self) -> None:
         legacy = verifier.load_legacy_authority(ROOT)
@@ -678,9 +743,16 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 else:
                     target = git_dir / "description"
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(b"x" * (verifier.MAX_SNAPSHOT_FILE_BYTES + 1))
+                limit = (
+                    verifier.MAX_SNAPSHOT_PACK_FILE_BYTES
+                    if variant == "pack"
+                    else verifier.MAX_SNAPSHOT_FILE_BYTES
+                )
+                target.write_bytes(b"x" * (limit + 1))
                 with self.copy_checkout() as checkout_temporary:
+                    started = time.monotonic()
                     self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+                    self.assertLess(time.monotonic() - started, 5)
 
     def test_aggregate_snapshot_budget_fails_closed_in_both_modes(self) -> None:
         object_temporary, object_repo = self.copy_object_repo()
@@ -691,7 +763,9 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 b"x" * verifier.MAX_SNAPSHOT_FILE_BYTES
             )
         with self.copy_checkout() as checkout_temporary:
+            started = time.monotonic()
             self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+            self.assertLess(time.monotonic() - started, 5)
 
     def test_snapshot_deadline_fails_closed(self) -> None:
         object_temporary, object_repo = self.copy_object_repo()
@@ -1042,7 +1116,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                     # success case; the dedicated oversized-pack regression
                     # below covers this trust boundary.
                     if any(
-                        child.is_file() and child.stat().st_size > verifier.MAX_SNAPSHOT_FILE_BYTES
+                        child.is_file() and child.stat().st_size > verifier.MAX_SNAPSHOT_PACK_FILE_BYTES
                         for child in target.iterdir()
                     ):
                         with self.copy_checkout() as checkout_temporary:
@@ -1052,12 +1126,19 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                     outside.mkdir()
                     mutate = lambda: (target.rename(backup), target.symlink_to(outside, target_is_directory=True))
                 elif variant == "ref":
-                    ref_name = subprocess.check_output(
-                        ["git", "-C", str(object_repo), "symbolic-ref", "HEAD"],
-                        text=True,
-                    ).strip()
+                    # Create a deterministic loose ref instead of assuming
+                    # the caller checkout has a symbolic HEAD. This keeps the
+                    # race regression valid for detached exact-SHA checkouts.
+                    ref_name = "refs/heads/authority-race"
                     target = git_dir / ref_name
-                    self.assertTrue(target.is_file())
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(
+                        subprocess.check_output(
+                            ["git", "-C", str(object_repo), "rev-parse", "HEAD"],
+                            text=True,
+                        ),
+                        encoding="ascii",
+                    )
                     backup = target.with_name(target.name + ".saved")
                     outside.write_text("0" * 40 + "\n", encoding="ascii")
                     mutate = lambda: (target.rename(backup), target.symlink_to(outside))
