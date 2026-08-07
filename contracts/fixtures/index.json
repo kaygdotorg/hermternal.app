@@ -82,22 +82,22 @@
       "files": [
         {
           "path": "behavioral-probe/README.md",
-          "sha256": "7a3f350bef2d83d832103ab57f283f6ff8f072a34a42c9cdaea38ad17376d065",
+          "sha256": "875b83f523c7ec4ff8e6c28e542f80ae734a73f79118bd27b1294f444b7e8dc9",
           "size_bytes": 9387
         },
         {
           "path": "behavioral-probe/baseline-canonical-sha256.txt",
-          "sha256": "142431718d63b7f886c9057339b18fcd42b1962cb95d2a05ae7dc04e62d5f06c",
+          "sha256": "3d94e162c619d18772ce3c3b08bf6ffb1e3b41c50a4494f409a17c468acb70b3",
           "size_bytes": 65
         },
         {
           "path": "behavioral-probe/probe-baseline.json",
-          "sha256": "2336209230cffe3d04515b54bbd9c17f3c514da1c86e064384b773a63b3d42bd",
+          "sha256": "4c9c88f807babe7c010d9127fa13ded7ca3be5abef56009d07ed5092de837be6",
           "size_bytes": 4059
         },
         {
           "path": "behavioral-probe/probe-fixtures.json",
-          "sha256": "9e9ba4463c1203b9963b14a6d33a04674f967530fb210f1dd77ba881a073ad87",
+          "sha256": "9958c4c3f32946e7301fdffa5a861b36f7921ada8b394ea72e07405b7c1d3fef",
           "size_bytes": 71389
         },
         {
@@ -107,7 +107,7 @@
         },
         {
           "path": "behavioral-probe/validate.py",
-          "sha256": "3dbb2a18ce9e8b16482a0c75aaec857607a7dc4a4126a6f156094947e569df60",
+          "sha256": "aa426279c5844475af765b45990e55c519c1814ee98c1f445ac65f981550f75d",
           "size_bytes": 54195
         }
       ]
@@ -196,7 +196,7 @@
       "files": [
         {
           "path": "compatibility-attestation/README.md",
-          "sha256": "d473be26713ee91383cb0ae4b70dc47430d5aa9fe96445e84a2cec788ebc18f3",
+          "sha256": "6d02a502dfc22bd1c50f6adbd5f6dde65f5824bc5be8f53dc7f5144d785ac950",
           "size_bytes": 7537
         },
         {
@@ -206,7 +206,7 @@
         },
         {
           "path": "compatibility-attestation/revision_attestation.json",
-          "sha256": "3969cf7fb5bb4845b8f2b77e85f367e3040dc1d6157494f34edeeba02109b9bc",
+          "sha256": "bf8288a9b3da55197568de51d839040887094a6be1bda2424d36f68c1aabd40f",
           "size_bytes": 1679
         },
         {
@@ -216,12 +216,12 @@
         },
         {
           "path": "compatibility-attestation/validate.py",
-          "sha256": "da997795d5fa478ca0eeaab2e9a236e5a990355a97ce20f5d800df7805ea8781",
-          "size_bytes": 45544
+          "sha256": "5fbf6535f9b06c8140c957ef11dadef9c176a451f0894c051d7586e4d319ba5d",
+          "size_bytes": 45624
         },
         {
           "path": "compatibility-attestation/validation-baseline.json",
-          "sha256": "a74730b86d03c96e70720402a6280f1545a02665056583fde00ea7c62733d861",
+          "sha256": "f6d506b2752b6751d45bc8439eb4625d2b18d9e58422013bb97193639378a964",
           "size_bytes": 1558
         }
       ]
@@ -711,7 +711,7 @@
         },
         {
           "path": "deployment-security/ws-ticket/probe-baseline.json",
-          "sha256": "6a69abbc7b42bee6e2fdf300ddeb1b1152699895fc871d749fe355be188d510c",
+          "sha256": "64e77fee867b31ad0ceafc887a5257212c2c166ed8b0e33b7c8ce157a3f2680b",
           "size_bytes": 3158
         },
         {
@@ -721,12 +721,12 @@
         },
         {
           "path": "deployment-security/ws-ticket/ticket-fixtures.json",
-          "sha256": "90a29f60aa84b662cb647cb11672394d13e97f61f7875ff5b176745996b2558b",
+          "sha256": "63492a77b3fa4766a77bdd88ae722ca19bf2c13dbf80e86f4264cfbfb3c94e86",
           "size_bytes": 37600
         },
         {
           "path": "deployment-security/ws-ticket/validate.py",
-          "sha256": "0e0d074ae7b9939482acd3e85e3fb52e12c56230a1a9db824318e24bf4367b8d",
+          "sha256": "9953166f05a26d7a98ca099a4562c33ad26f785c5a2e3e7148440d445f03664f",
           "size_bytes": 55327
         }
       ]

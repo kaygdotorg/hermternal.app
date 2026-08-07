@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Verify the v2 aggregate fixture authority from immutable Git objects.
+"""Verify the final v2 aggregate fixture authority from immutable Git objects.
 
-This verifier is intentionally separate from the aggregate scanner. The legacy v1 authority (its schema plus six legacy fields) remains readable
-at its historical path, while the new multi-artifact bootstrap uses the distinct
-v2 path and schema. Stage two pins
-the checked-in predecessor bytes only; the later scanner correction must rebase
-onto the merged predecessor and create its next authority independently. The
-checkout is compared with authority bytes read from the local Git object
-database, so replacing the visible authority file or refreshing local hashes
-cannot silently authorize different scanner inputs.
+This verifier is intentionally separate from the aggregate scanner. The legacy
+v1 authority and the historical bootstrap v2 authority remain readable in Git
+history, while this lane consumes a distinct final v2 path. The final authority
+is introduced only after its direct predecessor commit has finalized the
+scanner, index, tests, and baseline. The checkout is compared with authority
+bytes read from the local Git object database, so replacing the visible
+authority file or refreshing local hashes cannot silently authorize different
+scanner inputs.
 """
 
 from __future__ import annotations
@@ -43,13 +43,9 @@ LEGACY_AUTHORITY_KEYS = (
 )
 LEGACY_VALIDATOR_PATH = "contracts/fixtures/validator/validate.py"
 LEGACY_BASELINE_PATH = "contracts/fixtures/validator/validation-baseline.json"
-AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.json"
+AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.final.json"
 AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
-AUTHORITY_ROLE = "bootstrap_predecessor"
-# The bootstrap is approved only for this reviewed external predecessor. An
-# ancestry check alone would let a self-consistent but unreviewed commit become
-# the authority source.
-APPROVED_SOURCE_COMMIT = "abb6754bddd1cf18927b0172ed9fa3456235b035"
+AUTHORITY_ROLE = "aggregate_predecessor"
 EXPECTED_ARTIFACT_PATHS = (
     "contracts/fixtures/index.json",
     "contracts/fixtures/validator/test_validate.py",
@@ -928,7 +924,6 @@ def _validate_manifest(authority: dict[str, Any]) -> tuple[str, list[dict[str, A
     _require(authority["role"] == AUTHORITY_ROLE)
     source_commit = authority["source_commit"]
     _require(type(source_commit) is str and HEX40.fullmatch(source_commit) is not None)
-    _require(source_commit == APPROVED_SOURCE_COMMIT)
     _require(authority["canonicalization"] == "exact_bytes")
     _require(authority["synthetic_only"] is True and authority["live_claim"] is False)
     manifest = authority["artifact_manifest"]
@@ -991,6 +986,11 @@ def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
             source_commit, records = _validate_manifest(authority)
             _require(source_commit != introduction)
             _require(_git(isolated_repo, "cat-file", "-t", source_commit) == b"commit\n")
+            try:
+                first_parent = _git(isolated_repo, "rev-parse", f"{introduction}^1").decode("ascii").strip()
+            except UnicodeError as exc:
+                raise AuthorityError() from exc
+            _require(first_parent == source_commit)
             _require(_git(isolated_repo, "merge-base", "--is-ancestor", source_commit, introduction) == b"")
             for record in records:
                 blob_oid, data = _git_blob(isolated_repo, source_commit, record["path"])
@@ -1076,7 +1076,7 @@ def verify_checkout(checkout_root: Path, object_repo: Path) -> dict[str, Any]:
             _require(hashlib.sha256(data).hexdigest() == record["sha256"])
         return {
             "ok": True,
-            "stage": "bootstrap_predecessor_v2",
+            "stage": "aggregate_predecessor_v2",
             "authority_path": authority["authority_path"],
             "schema": authority["schema"],
             "authority_commit": authority["authority_commit"],
