@@ -39,7 +39,11 @@
     if (action.type === 'stop') void session.stop();
     if (action.type === 'retry' || action.type === 'check-connection') void session.retryConnection();
     if (action.type === 'cancel-reconnect') session.cancelReconnect();
-    if (action.type === 'approve-tool') void session.approve(action.itemId, true);
+    if (action.type === 'approve-tool') {
+      // The preview carries once/session/always metadata; this live adapter is
+      // intentionally limited to the existing boolean approval transport.
+      void session.approve(action.itemId, true);
+    }
     if (action.type === 'reject-tool') void session.approve(action.itemId, false);
     if (action.type === 'answer-clarification') {
       void session.answerClarification(action.itemId, action.answer);

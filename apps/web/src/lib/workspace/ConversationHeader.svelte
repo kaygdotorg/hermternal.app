@@ -83,6 +83,7 @@
       icon="conversation"
       iconOnly
       label="Chat"
+      revealLabel
       selected
       title="Chat mode is current in this preview"
       toggleable
@@ -93,6 +94,7 @@
       icon="terminal"
       iconOnly
       label="Terminal"
+      revealLabel
       title="Terminal mode is deferred in this preview"
       variant="ghost"
     />
@@ -163,13 +165,14 @@
     display: flex;
     width: 92px;
     height: 44px;
-    flex: 0 0 92px;
+    flex: 0 0 auto;
     align-items: center;
     gap: 2px;
     padding: 0;
     border: 1px solid var(--line-soft);
     border-radius: var(--radius-pill);
     background: color-mix(in srgb, var(--muted) 8%, transparent);
+    transition: width 150ms cubic-bezier(0.22, 1, 0.36, 1), gap 150ms ease;
   }
 
   .mode-controls :global(.pill) {
@@ -178,6 +181,30 @@
     height: 44px;
     min-height: 44px;
     padding-inline: 8px;
+    transition:
+      width 150ms cubic-bezier(0.22, 1, 0.36, 1),
+      min-width 150ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease,
+      box-shadow 150ms ease,
+      transform 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .mode-controls:has(:global(.pill:hover)),
+  .mode-controls:has(:global(.pill:focus-visible)) {
+    width: 220px;
+    gap: 8px;
+  }
+
+  .mode-controls :global(.pill:first-child:is(:hover, :focus-visible)) {
+    width: 96px;
+    min-width: 96px;
+  }
+
+  .mode-controls :global(.pill:last-child:is(:hover, :focus-visible)) {
+    width: 116px;
+    min-width: 116px;
   }
 
   .mode-controls :global(.pill.ghost) {

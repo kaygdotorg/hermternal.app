@@ -42,6 +42,12 @@
   let mobileTitleDraft = title;
   let mobileTitleInput: HTMLInputElement | undefined;
   let mobileTitleTrigger: HTMLButtonElement | undefined;
+  let mobileSidebarTrigger: HTMLButtonElement | undefined;
+  let mobileWorkspaceTrigger: HTMLButtonElement | undefined;
+  let mobileSidebarDrawer: HTMLElement | undefined;
+  let mobileWorkspaceDrawer: HTMLElement | undefined;
+  let mobileTitleLayer: HTMLElement | undefined;
+  let modalTrigger: HTMLElement | undefined;
   let localTitle = title;
   let localModel = model;
 
@@ -77,6 +83,82 @@
       if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
       else setTimeout(resolve, 0);
     });
+  }
+
+  function activeModalRoot(): HTMLElement | undefined {
+    if (mobileTitleEditing) return mobileTitleLayer;
+    if (mobileSidebarOpen) return mobileSidebarDrawer;
+    if (mobileWorkspaceOpen) return mobileWorkspaceDrawer;
+    return undefined;
+  }
+
+  function focusables(root: HTMLElement): HTMLElement[] {
+    return Array.from(
+      root.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((element) => element.getAttribute('aria-hidden') !== 'true');
+  }
+
+  async function focusModalStart(): Promise<void> {
+    await afterActivationFrame();
+    const root = activeModalRoot();
+    const first = root ? focusables(root)[0] : undefined;
+    first?.focus();
+  }
+
+  async function closeMobileDrawers(restoreFocus = true): Promise<void> {
+    const trigger = modalTrigger;
+    mobileSidebarOpen = false;
+    mobileWorkspaceOpen = false;
+    modalTrigger = undefined;
+    if (!restoreFocus) return;
+    await afterActivationFrame();
+    trigger?.focus();
+  }
+
+  function openMobileDrawer(kind: 'sidebar' | 'workspace'): void {
+    if (compatibilityBlocked) return;
+    // Pointer-down runs before the browser moves focus to the button. Use the
+    // bound trigger identity so Escape and scrim close always restore focus.
+    modalTrigger = kind === 'sidebar' ? mobileSidebarTrigger : mobileWorkspaceTrigger;
+    mobileSidebarOpen = kind === 'sidebar';
+    mobileWorkspaceOpen = kind === 'workspace';
+    void focusModalStart();
+  }
+
+  function handleGlobalKeydown(event: KeyboardEvent): void {
+    const root = activeModalRoot();
+    if (!root || compatibilityBlocked) return;
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (mobileTitleEditing) void closeMobileTitleEditing(false);
+      else void closeMobileDrawers();
+      return;
+    }
+
+    if (event.key !== 'Tab') return;
+    const controls = focusables(root);
+    if (controls.length === 0) {
+      event.preventDefault();
+      return;
+    }
+
+    const currentIndex = controls.indexOf(document.activeElement as HTMLElement);
+    if (currentIndex === -1) {
+      event.preventDefault();
+      controls[0].focus();
+      return;
+    }
+
+    const nextIndex = event.shiftKey
+      ? (currentIndex - 1 + controls.length) % controls.length
+      : (currentIndex + 1) % controls.length;
+    if ((event.shiftKey && currentIndex === 0) || (!event.shiftKey && currentIndex === controls.length - 1)) {
+      event.preventDefault();
+      controls[nextIndex].focus();
+    }
   }
 
   async function startMobileTitleEditing(): Promise<void> {
@@ -115,25 +197,30 @@
     // Forced events can bypass native `inert`; guard local presentation state
     // before any drawer mutation, matching the action-emission boundary below.
     if (compatibilityBlocked) return;
-    mobileSidebarOpen = !mobileSidebarOpen;
-    mobileWorkspaceOpen = false;
+    if (mobileSidebarOpen) void closeMobileDrawers();
+    else openMobileDrawer('sidebar');
   }
 
   function toggleMobileWorkspace(): void {
     if (compatibilityBlocked) return;
-    mobileWorkspaceOpen = !mobileWorkspaceOpen;
-    mobileSidebarOpen = false;
-    handleAction({ type: 'open-workspace' });
+    if (mobileWorkspaceOpen) void closeMobileDrawers();
+    else {
+      openMobileDrawer('workspace');
+      handleAction({ type: 'open-workspace' });
+    }
   }
 
   function handleAction(action: WorkspaceAction): void {
     // `inert` is the browser and accessibility boundary; this handler guard is
     // the matching programmatic boundary for synthetic or forced DOM events.
     if (compatibilityBlocked && !recoveryActionAllowed(action)) return;
-    if (action.type === 'toggle-inspector' && artifactInspectorEnabled) inspectorVisible = !inspectorVisible;
+    if (action.type === 'toggle-inspector' && artifactInspectorEnabled) {
+      if (mobileWorkspaceOpen) void closeMobileDrawers();
+      else inspectorVisible = !inspectorVisible;
+    }
     if (action.type === 'select-session') {
       activeSessionId = action.sessionId;
-      mobileSidebarOpen = false;
+      if (mobileSidebarOpen) void closeMobileDrawers();
     }
     if (action.type === 'edit-title') localTitle = action.title;
     if (action.type === 'set-model') localModel = action.model;
@@ -141,18 +228,21 @@
   }
 </script>
 
-<section
-  aria-label="Hermternal runtime workspace preview"
-  class="workspace-preview"
-  data-appearance={appearance}
-  data-state={state}
-  data-testid="runtime-preview"
->
+<svelte:window onkeydown={handleGlobalKeydown} />
+
+<div class="workspace-preview-container">
+  <section
+    aria-label="Hermternal runtime workspace preview"
+    class="workspace-preview"
+    data-appearance={appearance}
+    data-state={state}
+    data-testid="runtime-preview"
+  >
   <div
-    aria-hidden={compatibilityBlocked ? 'true' : undefined}
+    aria-hidden={compatibilityBlocked || mobileTitleEditing || mobileSidebarOpen || mobileWorkspaceOpen ? 'true' : undefined}
     class="workspace-underlay"
     data-testid="workspace-underlay"
-    inert={compatibilityBlocked || mobileTitleEditing}
+    inert={compatibilityBlocked || mobileTitleEditing || mobileSidebarOpen || mobileWorkspaceOpen}
   >
     <div aria-hidden="true" class="workspace-mobile-status-bar">
       <span class="status-time">9:41</span>
@@ -163,6 +253,7 @@
       <div class="mobile-title-island" aria-label="Navigation and conversation">
       <Pill
         ariaLabel="Open conversations"
+        bind:element={mobileSidebarTrigger}
         icon="menu"
         iconOnly
         label="Conversations"
@@ -179,6 +270,7 @@
     </div>
     <Pill
       ariaLabel="Open workspace"
+      bind:element={mobileWorkspaceTrigger}
       expandable
       expanded={mobileWorkspaceOpen}
       icon="workspace"
@@ -190,46 +282,78 @@
   </div>
 
     <div class:inspector-hidden={!artifactInspectorEnabled || !inspectorVisible} class="workspace-grid">
-    <aside class:open={mobileSidebarOpen} class="sidebar">
-      <SessionList {activeSessionId} {sessions} onAction={handleAction} />
-    </aside>
-
-    <div class="conversation-panel">
-      <ConversationHeader model={localModel} title={localTitle} onAction={handleAction} />
-
-      <div class="conversation-body">
-        <Timeline {dataSource} emptyLabel={timelineEmptyLabel} items={timeline} runtimeState={state} onAction={handleAction} />
-
-        <div
-          class:empty-layer={state === 'empty'}
-          class:visible={state !== 'ready' && !compatibilityBlocked}
-          class="state-layer"
-        >
-          {#if !compatibilityBlocked}
-            <StateBanner {dataMode} {dataSource} {permanentFailure} {state} onAction={handleAction} />
-          {/if}
-        </div>
-
-        <Composer
-          disabled={composerDisabled}
-          isStreaming={state === 'streaming'}
-          model={localModel}
-          onAction={handleAction}
-        />
-      </div>
-    </div>
-
-    {#if artifactInspectorEnabled && inspectorVisible}
-      <ArtifactInspector onAction={handleAction} />
-    {/if}
-  </div>
-
-    {#if mobileWorkspaceOpen}
-      <aside aria-label="Workspace" class="mobile-workspace-drawer">
-        <ArtifactInspector onAction={handleAction} />
+      <aside class="sidebar">
+        <SessionList {activeSessionId} {sessions} onAction={handleAction} />
       </aside>
-    {/if}
+
+      <div class="conversation-panel">
+        <ConversationHeader model={localModel} title={localTitle} onAction={handleAction} />
+
+        <div class="conversation-body">
+          <Timeline {dataSource} emptyLabel={timelineEmptyLabel} items={timeline} runtimeState={state} onAction={handleAction} />
+
+          <div
+            class:empty-layer={state === 'empty'}
+            class:visible={state !== 'ready' && !compatibilityBlocked}
+            class="state-layer"
+          >
+            {#if !compatibilityBlocked}
+              <StateBanner {dataMode} {dataSource} {permanentFailure} {state} onAction={handleAction} />
+            {/if}
+          </div>
+
+          <Composer
+            disabled={composerDisabled}
+            isStreaming={state === 'streaming'}
+            model={localModel}
+            onAction={handleAction}
+          />
+        </div>
+      </div>
+
+      {#if artifactInspectorEnabled && inspectorVisible}
+        <div class="desktop-inspector">
+          <ArtifactInspector onAction={handleAction} />
+        </div>
+      {/if}
+    </div>
   </div>
+
+  {#if mobileSidebarOpen || mobileWorkspaceOpen}
+    <button
+      aria-label="Close drawer"
+      class="mobile-drawer-scrim"
+      data-testid="mobile-drawer-scrim"
+      type="button"
+      onclick={() => void closeMobileDrawers()}
+    ></button>
+  {/if}
+
+  {#if mobileSidebarOpen}
+    <div
+      aria-label="Conversations"
+      aria-modal="true"
+      bind:this={mobileSidebarDrawer}
+      class="mobile-session-drawer"
+      data-testid="mobile-session-drawer"
+      role="dialog"
+    >
+      <SessionList {activeSessionId} {sessions} onAction={handleAction} />
+    </div>
+  {/if}
+
+  {#if mobileWorkspaceOpen}
+    <div
+      aria-label="Workspace"
+      aria-modal="true"
+      bind:this={mobileWorkspaceDrawer}
+      class="mobile-workspace-drawer"
+      data-testid="mobile-workspace-drawer"
+      role="dialog"
+    >
+      <ArtifactInspector onAction={handleAction} />
+    </div>
+  {/if}
 
   {#if compatibilityBlocked}
     <div class="state-layer compatibility-layer visible" data-testid="compatibility-gate-layer">
@@ -241,6 +365,7 @@
     <div
       aria-label="Edit conversation title"
       aria-modal="true"
+      bind:this={mobileTitleLayer}
       class="mobile-title-edit-layer"
       data-testid="mobile-title-editor"
       role="dialog"
@@ -273,9 +398,17 @@
       </div>
     </div>
   {/if}
-</section>
+  </section>
+</div>
 
 <style>
+  .workspace-preview-container {
+    width: 100%;
+    min-width: 0;
+    container-name: workspace-preview;
+    container-type: inline-size;
+  }
+
   .workspace-preview {
     --canvas: var(--color-canvas);
     --surface: var(--color-paper);
@@ -313,6 +446,7 @@
     container-name: workspace-preview;
     container-type: inline-size;
     width: 100%;
+    height: 960px;
     min-width: 0;
     min-height: 960px;
     overflow: hidden;
@@ -382,7 +516,8 @@
   }
 
   .workspace-underlay {
-    display: contents;
+    display: block;
+    height: 100%;
   }
 
   /* Keep the approved desktop family intact: the sidebar and inspector stay
@@ -393,7 +528,9 @@
     box-sizing: border-box;
     display: grid;
     grid-template-columns: minmax(220px, 276px) minmax(0, 720px) minmax(260px, 380px);
+    grid-template-rows: 928px;
     gap: 16px;
+    height: 928px;
     min-height: 928px;
     padding: 16px;
   }
@@ -407,9 +544,15 @@
   }
 
   .sidebar,
-  .conversation-panel {
+  .conversation-panel,
+  .desktop-inspector {
     min-width: 0;
     min-height: 0;
+    height: 928px;
+  }
+
+  .desktop-inspector {
+    display: flex;
   }
 
   .conversation-panel {
@@ -424,13 +567,16 @@
   .conversation-body {
     position: relative;
     display: flex;
+    height: 856px;
     min-height: 0;
-    flex: 1 1 auto;
+    flex: 0 0 856px;
     flex-direction: column;
   }
 
   .conversation-body :global(.timeline) {
     flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   .state-layer {
@@ -468,6 +614,8 @@
 
   .workspace-mobile-status-bar,
   .mobile-toolbar,
+  .mobile-drawer-scrim,
+  .mobile-session-drawer,
   .mobile-workspace-drawer,
   .mobile-title-edit-layer {
     display: none;
@@ -498,7 +646,8 @@
 
   @container workspace-preview (max-width: 760px) {
     .workspace-preview {
-      min-height: 0;
+      height: 844px;
+      min-height: 844px;
       overflow: visible;
     }
 
@@ -623,44 +772,69 @@
 
     .workspace-grid {
       display: block;
-      min-height: calc(100dvh - 126px);
+      grid-template-rows: 718px;
+      height: 718px;
+      min-height: 718px;
       padding: 0;
     }
 
-    .sidebar {
-      position: absolute;
-      top: 126px;
-      left: 16px;
-      z-index: 8;
+    .workspace-grid > .sidebar,
+    .workspace-grid > .desktop-inspector {
       display: none;
+    }
+
+    .mobile-drawer-scrim {
+      position: absolute;
+      top: 62px;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      z-index: 10;
+      display: block;
+      width: 100%;
+      height: auto;
+      padding: 0;
+      border: 0;
+      background: #343b4780;
+      backdrop-filter: blur(2px);
+    }
+
+    .mobile-session-drawer,
+    .mobile-workspace-drawer {
+      position: absolute;
+      top: 74px;
+      left: 12px;
+      z-index: 11;
+      display: block;
       box-sizing: border-box;
-      width: min(358px, calc(100% - 32px));
-      max-width: calc(100% - 32px);
-      height: min(720px, calc(100dvh - 142px));
-      max-height: calc(100dvh - 142px);
-      overflow: auto;
+      height: 756px;
+      max-height: calc(100% - 88px);
+      overflow: hidden;
+      border: 1px solid var(--chrome-line);
+      border-radius: 28px;
+      background: var(--chrome-surface);
+      box-shadow: var(--chrome-shadow);
       contain: layout paint;
     }
 
-    .sidebar.open {
-      display: block;
+    .mobile-session-drawer {
+      width: min(342px, calc(100% - 24px));
     }
 
     .mobile-workspace-drawer {
-      position: absolute;
-      top: 126px;
-      right: 16px;
-      z-index: 8;
-      display: block;
-      width: min(358px, calc(100% - 32px));
-      max-height: calc(100dvh - 142px);
-      overflow: auto;
-      contain: layout paint;
+      width: min(366px, calc(100% - 24px));
     }
 
+    .mobile-session-drawer :global(.session-list),
     .mobile-workspace-drawer :global(.inspector) {
+      box-sizing: border-box;
       display: flex;
-      min-height: 560px;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      border: 0;
+      border-radius: 27px;
+      box-shadow: none;
     }
 
     .mobile-title-edit-layer {
@@ -673,9 +847,12 @@
 
     .title-edit-dimmer {
       position: absolute;
-      inset: 0;
+      top: 62px;
+      right: 0;
+      bottom: 0;
+      left: 0;
       width: 100%;
-      height: 100%;
+      height: auto;
       padding: 0;
       border: 0;
       background: #0d11175c;
@@ -795,8 +972,15 @@
     }
 
     .conversation-panel {
-      min-height: calc(100dvh - 126px);
+      height: 718px;
+      min-height: 718px;
       border-radius: var(--radius-nested-glass);
+    }
+
+    .conversation-body {
+      height: 718px;
+      min-height: 0;
+      flex: 0 0 718px;
     }
 
     .state-layer {
@@ -876,6 +1060,8 @@
     .workspace-preview :global(.inspector),
     .workspace-preview :global(.composer),
     .conversation-panel,
+    .mobile-session-drawer,
+    .mobile-workspace-drawer,
     .mobile-title-island,
     .mobile-toolbar > :global(.pill),
     .mobile-workspace-drawer,

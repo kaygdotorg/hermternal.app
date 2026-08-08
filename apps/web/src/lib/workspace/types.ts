@@ -119,6 +119,13 @@ export type TimelineItem =
   | LoadingItem
   | ErrorItem;
 
+/**
+ * Synthetic approval scopes are presentation metadata for the preview. The
+ * live session adapter still maps every allow scope to its reviewed boolean
+ * approval boundary until the transport exposes scope-aware permissions.
+ */
+export type ApprovalScope = 'once' | 'session' | 'always';
+
 export type WorkspaceAction =
   | { type: 'new-session' }
   | { type: 'select-session'; sessionId: string }
@@ -137,8 +144,8 @@ export type WorkspaceAction =
   | { type: 'return-to-sign-in' }
   | { type: 'open-workspace' }
   | { type: 'dismiss' }
-  | { type: 'approve-tool'; itemId: string }
-  | { type: 'reject-tool'; itemId: string }
+  | { type: 'approve-tool'; itemId: string; scope: ApprovalScope }
+  | { type: 'reject-tool'; itemId: string; scope: 'deny' }
   | { type: 'answer-clarification'; itemId: string; answer: string };
 
 export type WorkspaceActionHandler = (action: WorkspaceAction) => void;

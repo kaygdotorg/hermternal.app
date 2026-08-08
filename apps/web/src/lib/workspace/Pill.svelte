@@ -15,6 +15,8 @@
   export let variant: PillVariant = 'neutral';
   export let fullWidth = false;
   export let iconOnly = false;
+  /** Reveal the label on fine-pointer hover or keyboard focus without moving the icon slot. */
+  export let revealLabel = false;
   export let selected = false;
   export let toggleable = false;
   export let expanded = false;
@@ -107,6 +109,7 @@
   aria-pressed={toggleable ? selected : undefined}
   class:full-width={fullWidth}
   class:icon-only={iconOnly}
+  class:reveal-label={revealLabel}
   class:pulsing={pressPulse === 1}
   class:pressed
   class:selected
@@ -130,7 +133,7 @@
     <span aria-hidden="true" class="icon-slot"></span>
   {/if}
 
-  <span class="pill-copy" class:hidden-copy={iconOnly}>
+  <span class="pill-copy" class:hidden-copy={iconOnly && !revealLabel}>
     <span class="pill-label">{label}</span>
     {#if description}
       <span class="pill-description">{description}</span>
@@ -247,6 +250,35 @@
     padding-inline: 8px;
   }
 
+  /* Paper keeps compact action islands icon-only at rest, then reveals the
+     label on hover or keyboard focus. The icon slot remains fixed so the
+     revealed copy never shifts the control's visual anchor. */
+  .pill.reveal-label {
+    justify-content: flex-start;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .pill.reveal-label .pill-copy {
+    max-width: 0;
+    flex: 0 1 auto;
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
+    transition:
+      max-width 150ms cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 100ms ease;
+  }
+
+  .pill.reveal-label:is(:hover, :focus-visible) .pill-copy {
+    max-width: 180px;
+    opacity: 1;
+  }
+
+  .pill.reveal-label:is(:hover, :focus-visible) {
+    gap: 8px;
+  }
+
   .icon-slot,
   .trailing-slot {
     display: inline-flex;
@@ -338,6 +370,10 @@
         color 0ms,
         box-shadow 0ms;
       transform: none;
+    }
+
+    .pill.reveal-label .pill-copy {
+      transition: none;
     }
 
     .pill.pulsing:not(:disabled) {

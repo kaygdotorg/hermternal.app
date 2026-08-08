@@ -9,7 +9,7 @@ const approval: TimelineItem = {
   title: 'Allow fixture action?',
   description: 'Synthetic approval only.',
   confirmLabel: 'Allow once',
-  rejectLabel: 'Not now',
+  rejectLabel: 'Deny',
   status: 'pending'
 };
 
@@ -21,7 +21,7 @@ describe('Timeline', () => {
       render(Timeline, { items: [approval], runtimeState, onAction });
 
       const allow = screen.getByRole('button', { name: 'Allow once, unavailable' });
-      const reject = screen.getByRole('button', { name: 'Not now, unavailable' });
+      const reject = screen.getByRole('button', { name: 'Deny, unavailable' });
       expect(allow).toBeDisabled();
       expect(reject).toBeDisabled();
       fireEvent.click(allow);
@@ -30,6 +30,21 @@ describe('Timeline', () => {
       expect(screen.getByRole('status')).toHaveTextContent(/unavailable/i);
     }
   );
+
+  it('emits distinct synthetic approval scopes and a separate deny decision', () => {
+    const onAction = vi.fn();
+    render(Timeline, { items: [approval], runtimeState: 'ready', onAction });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Allow for session' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Always allow' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+
+    expect(onAction).toHaveBeenNthCalledWith(1, { type: 'approve-tool', itemId: 'approval-test', scope: 'once' });
+    expect(onAction).toHaveBeenNthCalledWith(2, { type: 'approve-tool', itemId: 'approval-test', scope: 'session' });
+    expect(onAction).toHaveBeenNthCalledWith(3, { type: 'approve-tool', itemId: 'approval-test', scope: 'always' });
+    expect(onAction).toHaveBeenNthCalledWith(4, { type: 'reject-tool', itemId: 'approval-test', scope: 'deny' });
+  });
 
   it('labels fixture streaming visibly and accessibly as synthetic by default', () => {
     const item: TimelineItem = {

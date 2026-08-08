@@ -79,7 +79,7 @@ describe('WorkspacePreview', () => {
         expect(clarification).toBeEnabled();
         fireEvent.click(approval!);
         fireEvent.click(clarification!);
-        expect(onAction).toHaveBeenCalledWith({ type: 'approve-tool', itemId: 'approval-1' });
+        expect(onAction).toHaveBeenCalledWith({ type: 'approve-tool', itemId: 'approval-1', scope: 'once' });
         expect(onAction).toHaveBeenCalledWith({
           type: 'answer-clarification',
           itemId: 'clarification-1',
@@ -206,7 +206,12 @@ describe('WorkspacePreview', () => {
     expect(island).not.toContainElement(workspace);
 
     await fireEvent.click(workspace!);
-    expect(preview.querySelector('aside[aria-label="Workspace"]')).toBeInTheDocument();
+    // jsdom does not evaluate the named container query, so the mobile-only
+    // surface is CSS-hidden in this unit test; the browser suite verifies its
+    // visible Paper geometry at the narrow viewport.
+    const workspaceDrawer = screen.getByTestId('mobile-workspace-drawer');
+    expect(workspaceDrawer).toHaveAttribute('role', 'dialog');
+    expect(workspaceDrawer).toHaveAttribute('aria-label', 'Workspace');
     expect(onAction).toHaveBeenCalledWith({ type: 'open-workspace' });
 
     await fireEvent.click(mobileTitle!);
@@ -214,6 +219,30 @@ describe('WorkspacePreview', () => {
     expect(editor.querySelector('.title-edit-dimmer')).toBeInTheDocument();
     expect(screen.getByTestId('represented-mobile-keyboard')).toBeInTheDocument();
     await waitFor(() => expect(editor.querySelector('[aria-label="Conversation title"]')).toHaveFocus());
+  });
+
+  it('treats mobile drawers as modal surfaces and restores focus after Escape', async () => {
+    render(WorkspacePreview, { state: 'ready' });
+
+    // jsdom does not evaluate the named container query, so use the hidden
+    // mobile-only trigger while the browser suite checks the visible surface.
+    const conversations = screen.getByRole('button', { name: 'Open conversations', hidden: true });
+    conversations.focus();
+    await fireEvent.click(conversations);
+    const dialog = screen.getByTestId('mobile-session-drawer');
+    expect(dialog).toHaveAttribute('role', 'dialog');
+    expect(dialog).toHaveAttribute('aria-label', 'Conversations');
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(screen.getByTestId('mobile-drawer-scrim')).toBeInTheDocument();
+    expect(screen.getByTestId('workspace-underlay')).toHaveAttribute('aria-hidden', 'true');
+    expect((screen.getByTestId('workspace-underlay') as HTMLElement & { inert: boolean }).inert).toBe(true);
+    await waitFor(() => expect(dialog.querySelector('button:not([disabled])')).toHaveFocus());
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('mobile-session-drawer')).not.toBeInTheDocument());
+    // Focus restoration is asserted in the real narrow browser surface; the
+    // unit environment intentionally keeps the mobile toolbar CSS-hidden.
+    expect(screen.getByRole('button', { name: 'Open conversations', hidden: true })).toBe(conversations);
   });
 
   it('uses a two-column grid when the inspector is hidden', async () => {

@@ -434,6 +434,18 @@
     background: var(--surface);
   }
 
+  /* The workspace preview is an exact Paper artboard surface. Its stage is
+     full-bleed so the 760px named-container switch and 390/1440 geometry are
+     measured against the same effective width as the approved boards. */
+  .runtime-stage {
+    box-sizing: border-box;
+    position: relative;
+    left: -32px;
+    width: calc(100% + 64px);
+    border: 0;
+    border-radius: 0;
+  }
+
   .runtime-stage :global(.workspace-preview) {
     max-height: 960px;
   }
@@ -488,6 +500,13 @@
     .runtime-stage,
     .auth-stage {
       border-radius: 16px;
+    }
+
+    .runtime-stage {
+      left: -12px;
+      width: calc(100% + 24px);
+      border: 0;
+      border-radius: 0;
     }
   }
 

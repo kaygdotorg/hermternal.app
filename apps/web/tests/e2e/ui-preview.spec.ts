@@ -131,7 +131,56 @@ test('UI preview exposes local state controls and dark appearance', async ({ pag
   await expect(page.getByRole('heading', { name: 'Sign-in did not complete' })).toBeVisible();
 });
 
-test('narrow absolute surfaces stay contained and Send activates the local action', async ({ page }) => {
+test('Paper desktop geometry keeps the fixed three-column workspace and composer baseline', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+  const workspace = page.locator('.workspace-preview');
+  const workspaceBox = await workspace.boundingBox();
+  const gridBox = await workspace.locator('.workspace-grid').boundingBox();
+  const sidebarBox = await workspace.locator('.sidebar').boundingBox();
+  const conversationBox = await workspace.locator('.conversation-panel').boundingBox();
+  const inspectorBox = await workspace.locator('.desktop-inspector').boundingBox();
+  const composerBox = await workspace.getByRole('form', { name: 'Message composer' }).boundingBox();
+  expect(workspaceBox).not.toBeNull();
+  expect(gridBox).not.toBeNull();
+  expect(sidebarBox).not.toBeNull();
+  expect(conversationBox).not.toBeNull();
+  expect(inspectorBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+
+  expect(workspaceBox?.width).toBe(1440);
+  expect(workspaceBox?.height).toBe(960);
+  expect(gridBox?.x).toBe(workspaceBox?.x);
+  expect(gridBox?.y).toBe(workspaceBox?.y);
+  expect(gridBox?.width).toBe(1440);
+  expect(gridBox?.height).toBe(928);
+  expect(sidebarBox?.x).toBe((workspaceBox?.x ?? 0) + 16);
+  expect(conversationBox?.x).toBe((workspaceBox?.x ?? 0) + 16 + 276 + 16);
+  expect(inspectorBox?.x).toBe((workspaceBox?.x ?? 0) + 16 + 276 + 16 + 720 + 16);
+  expect(sidebarBox?.y).toBe((workspaceBox?.y ?? 0) + 16);
+  expect(conversationBox?.y).toBe((workspaceBox?.y ?? 0) + 16);
+  expect(inspectorBox?.y).toBe((workspaceBox?.y ?? 0) + 16);
+  expect(sidebarBox?.width).toBe(276);
+  expect(conversationBox?.width).toBe(720);
+  expect(inspectorBox?.width).toBe(380);
+  expect(sidebarBox?.height).toBe(928);
+  expect(conversationBox?.height).toBe(928);
+  expect(inspectorBox?.height).toBe(928);
+  expect(composerBox?.height).toBe(112);
+  expect(Math.abs((composerBox?.y ?? 0) - ((workspaceBox?.y ?? 0) + 800))).toBeLessThanOrEqual(1);
+
+  const computedGrid = await workspace.locator('.workspace-grid').evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { columns: style.gridTemplateColumns, rows: style.gridTemplateRows };
+  });
+  expect(computedGrid.columns).toBe('276px 720px 380px');
+  expect(computedGrid.rows).toBe('928px');
+  await expect(workspace.locator('.conversation-body .timeline')).toHaveCSS('overflow-y', 'auto');
+});
+
+test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send action', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(previewUrl('/ui-preview'));
 
@@ -144,34 +193,179 @@ test('narrow absolute surfaces stay contained and Send activates the local actio
   expect(Math.abs((authStatusBox?.y ?? 0) - (authBox?.y ?? 0))).toBeLessThanOrEqual(1);
 
   await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
-  await page.getByRole('button', { name: 'Open conversations' }).click();
   const workspace = page.locator('.workspace-preview');
+  const workspaceBox = await workspace.boundingBox();
   const statusBar = workspace.locator('.workspace-mobile-status-bar');
   const toolbar = workspace.locator('.mobile-toolbar');
-  const composerBox = await page.getByRole('form', { name: 'Message composer' }).boundingBox();
-  const workspaceBox = await workspace.boundingBox();
+  const conversation = workspace.locator('.conversation-panel');
+  const composer = page.getByRole('form', { name: 'Message composer' });
   const workspaceStatusBox = await statusBar.boundingBox();
   const toolbarBox = await toolbar.boundingBox();
-  const sidebar = page.locator('.workspace-preview .sidebar');
-  const sidebarBox = await sidebar.boundingBox();
+  const conversationBox = await conversation.boundingBox();
+  const composerBox = await composer.boundingBox();
   expect(workspaceBox).not.toBeNull();
   expect(workspaceStatusBox).not.toBeNull();
   expect(toolbarBox).not.toBeNull();
+  expect(conversationBox).not.toBeNull();
   expect(composerBox).not.toBeNull();
-  expect(sidebarBox).not.toBeNull();
+  expect(workspaceBox?.width).toBe(390);
+  expect(workspaceBox?.height).toBe(844);
+  expect(workspaceStatusBox?.x).toBe(workspaceBox?.x);
+  expect(workspaceStatusBox?.y).toBe(workspaceBox?.y);
+  expect(workspaceStatusBox?.width).toBe(390);
   expect(workspaceStatusBox?.height).toBe(62);
+  expect(toolbarBox?.x).toBe(workspaceBox?.x);
+  expect(toolbarBox?.y).toBe((workspaceBox?.y ?? 0) + 62);
+  expect(toolbarBox?.width).toBe(390);
   expect(toolbarBox?.height).toBe(64);
+  expect(conversationBox?.x).toBe(workspaceBox?.x);
+  expect(conversationBox?.y).toBe((workspaceBox?.y ?? 0) + 126);
+  expect(conversationBox?.width).toBe(390);
+  expect(conversationBox?.height).toBe(718);
+  expect(composerBox?.y).toBe((workspaceBox?.y ?? 0) + 728);
   expect(composerBox?.height).toBe(100);
-  // The approved mobile shell reserves a 62px status bar above the 64px header.
-  expect(Math.abs((sidebarBox?.y ?? 0) - ((workspaceBox?.y ?? 0) + 126))).toBeLessThanOrEqual(1);
-  expect((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0)).toBeLessThanOrEqual(
-    (workspaceBox?.x ?? 0) + (workspaceBox?.width ?? 0) + 1
-  );
+  await expect(workspace.locator('.workspace-grid .desktop-inspector')).toBeHidden();
 
-  const composer = page.getByRole('textbox', { name: 'Message Hermes' });
-  await composer.fill('Pointer fixture');
+  const conversations = page.getByRole('button', { name: 'Open conversations' });
+  await conversations.click();
+  const scrim = page.getByTestId('mobile-drawer-scrim');
+  const sessionDrawer = page.getByTestId('mobile-session-drawer');
+  const scrimBox = await scrim.boundingBox();
+  const sessionDrawerBox = await sessionDrawer.boundingBox();
+  expect(scrimBox).not.toBeNull();
+  expect(sessionDrawerBox).not.toBeNull();
+  expect(scrimBox?.x).toBe(workspaceBox?.x);
+  expect(scrimBox?.y).toBe((workspaceBox?.y ?? 0) + 62);
+  expect(scrimBox?.width).toBe(390);
+  expect(scrimBox?.height).toBe(782);
+  expect(sessionDrawerBox?.x).toBe((workspaceBox?.x ?? 0) + 12);
+  expect(sessionDrawerBox?.y).toBe((workspaceBox?.y ?? 0) + 74);
+  expect(sessionDrawerBox?.width).toBe(342);
+  expect(sessionDrawerBox?.height).toBe(756);
+  await expect(sessionDrawer).toHaveAttribute('role', 'dialog');
+  await expect(sessionDrawer).toHaveAttribute('aria-modal', 'true');
+  await expect(workspace.locator('.workspace-underlay')).toHaveAttribute('inert', '');
+  await expect(workspace.locator('.workspace-underlay')).toHaveAttribute('aria-hidden', 'true');
+  await expect(sessionDrawer.locator('button:not([disabled])').first()).toBeFocused();
+
+  const sessionFocusables = sessionDrawer.locator(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  );
+  await sessionFocusables.last().focus();
+  await page.keyboard.press('Tab');
+  await expect(sessionFocusables.first()).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(sessionFocusables.last()).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(sessionDrawer).toBeHidden();
+  await expect(conversations).toBeFocused();
+
+  const workspaceTrigger = page.getByRole('button', { name: 'Open workspace' });
+  await workspaceTrigger.click();
+  const workspaceDrawer = page.getByTestId('mobile-workspace-drawer');
+  const workspaceAfterSessionBox = await workspace.boundingBox();
+  const workspaceDrawerBox = await workspaceDrawer.boundingBox();
+  expect(workspaceAfterSessionBox).not.toBeNull();
+  expect(workspaceDrawerBox).not.toBeNull();
+  expect(workspaceDrawerBox?.x).toBe((workspaceAfterSessionBox?.x ?? 0) + 12);
+  expect(workspaceDrawerBox?.y).toBe((workspaceAfterSessionBox?.y ?? 0) + 74);
+  expect(workspaceDrawerBox?.width).toBe(366);
+  expect(workspaceDrawerBox?.height).toBe(756);
+  await expect(workspace.locator('.workspace-grid .desktop-inspector')).toBeHidden();
+  await expect(workspaceDrawer.locator('.inspector')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(workspaceDrawer).toBeHidden();
+  await expect(workspaceTrigger).toBeFocused();
+
+  await composer.getByRole('textbox', { name: 'Message Hermes' }).fill('Pointer fixture');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('.section-note').first()).toHaveText('send');
+});
+
+test('Paper effective width switches exactly at 760px without a tabbed desktop replacement', async ({ page }) => {
+  for (const width of [760, 761]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+    const workspace = page.locator('.workspace-preview');
+    expect((await workspace.boundingBox())?.width).toBe(width);
+
+    if (width === 760) {
+      await expect(workspace.locator('.mobile-toolbar')).toBeVisible();
+      await expect(workspace.locator('.conversation-header')).toBeHidden();
+    } else {
+      await expect(workspace.locator('.mobile-toolbar')).toBeHidden();
+      await expect(workspace.locator('.conversation-header')).toBeVisible();
+      await expect(workspace.locator('.sidebar')).toBeVisible();
+    }
+  }
+});
+
+test('Paper action labels reveal on hover and focus with a stable icon slot', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+  const workspace = page.locator('.workspace-preview');
+  const actionLabels = [
+    'Chat mode selected',
+    'Open terminal mode',
+    'Allow once',
+    'Allow for session',
+    'Always allow',
+    'Deny',
+    'Open artifact preview',
+    'Download artifact preview'
+  ];
+
+  for (const ariaLabel of actionLabels) {
+    // Label expansion changes sibling geometry. Reset pointer and focus first so
+    // the next pill is measured from its stable Paper resting state rather than
+    // while the previous pill is still transitioning out of its reveal.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(180);
+
+    const pill = workspace.getByRole('button', { name: ariaLabel });
+    const copy = pill.locator('.pill-copy');
+    const icon = pill.locator('.icon-slot');
+    await expect(pill).toBeVisible();
+    const resting = await pill.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const copy = element.querySelector<HTMLElement>('.pill-copy');
+      const rect = element.getBoundingClientRect();
+      const iconRect = element.querySelector<HTMLElement>('.icon-slot')?.getBoundingClientRect();
+      return {
+        width: rect.width,
+        opacity: copy ? getComputedStyle(copy).opacity : '',
+        maxWidth: copy ? getComputedStyle(copy).maxWidth : '',
+        iconOffset: iconRect ? iconRect.x - rect.x : null,
+        transition: style.transition
+      };
+    });
+    expect(resting.opacity).toBe('0');
+    expect(resting.maxWidth).toBe('0px');
+
+    await pill.hover({ force: true });
+    await expect
+      .poll(() => copy.evaluate((element) => getComputedStyle(element).opacity), { message: ariaLabel })
+      .toBe('1');
+    await expect
+      .poll(() => copy.evaluate((element) => Number.parseFloat(getComputedStyle(element).maxWidth)), { message: ariaLabel })
+      .toBeGreaterThan(0);
+    const hovered = await pill.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const iconRect = element.querySelector<HTMLElement>('.icon-slot')?.getBoundingClientRect();
+      return { width: rect.width, iconOffset: iconRect ? iconRect.x - rect.x : null };
+    });
+    expect(hovered.width).toBeGreaterThan(resting.width);
+    expect(hovered.iconOffset).toBe(resting.iconOffset);
+
+    if (!(await pill.isDisabled())) {
+      await pill.focus();
+      await expect.poll(() => copy.evaluate((element) => getComputedStyle(element).opacity)).toBe('1');
+    }
+  }
 });
 
 test('provider choices route to deterministic local password and callback states', async ({ page }) => {
@@ -275,13 +469,27 @@ test('narrow title editing uses the compound island, separate workspace action, 
   await expect(island.getByRole('button', { name: 'Open workspace' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Open workspace' })).toBeVisible();
 
+  const workspace = page.locator('.workspace-preview');
+  const workspaceBox = await workspace.boundingBox();
   await island.getByRole('button', { name: 'Edit conversation title' }).click();
-  await expect(page.getByTestId('mobile-title-editor')).toBeVisible();
+  const titleLayer = page.getByTestId('mobile-title-editor');
+  const dimmer = page.locator('.title-edit-dimmer');
+  const dimmerBox = await dimmer.boundingBox();
+  await expect(titleLayer).toBeVisible();
+  await expect(titleLayer).toHaveAttribute('role', 'dialog');
+  await expect(titleLayer).toHaveAttribute('aria-modal', 'true');
   await expect(page.getByTestId('represented-mobile-keyboard')).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Conversation title' })).toBeFocused();
-  expect(await page.locator('.title-edit-dimmer').evaluate((node) => getComputedStyle(node).backdropFilter)).toContain(
-    'blur'
-  );
+  expect(dimmerBox).not.toBeNull();
+  expect(dimmerBox?.x).toBe(workspaceBox?.x);
+  expect(dimmerBox?.y).toBe((workspaceBox?.y ?? 0) + 62);
+  expect(dimmerBox?.width).toBe(390);
+  expect(dimmerBox?.height).toBe(782);
+  expect(await dimmer.evaluate((node) => getComputedStyle(node).backdropFilter)).toContain('blur');
+
+  await page.keyboard.press('Escape');
+  await expect(titleLayer).toBeHidden();
+  await expect(island.getByRole('button', { name: 'Edit conversation title' })).toBeFocused();
 });
 
 test('password preview submits only a credential-free local fixture action', async ({ page }) => {
@@ -391,7 +599,10 @@ test('Pill consumes one pointer gesture across leave, re-entry, and compatibilit
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(previewUrl('/ui-preview'));
   await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
-  const workspace = page.getByRole('button', { name: 'Open workspace' });
+  // The trigger remains in the inert, aria-hidden underlay while its modal
+  // drawer is open, so inspect the stable DOM control rather than the exposed
+  // accessibility tree for the state assertion.
+  const workspace = page.locator('button[aria-label="Open workspace"]');
 
   await workspace.dispatchEvent('pointerdown', { button: 0, pointerType: 'mouse' });
   await expect(workspace).toHaveAttribute('aria-expanded', 'true');
@@ -401,9 +612,13 @@ test('Pill consumes one pointer gesture across leave, re-entry, and compatibilit
   await workspace.dispatchEvent('click', { detail: 1 });
   await expect(workspace).toHaveAttribute('aria-expanded', 'true');
 
-  await workspace.focus();
-  await page.keyboard.press('Enter');
+  // The open drawer makes the underlay inert, so Escape is the modal close
+  // path. Keyboard activation is then verified from the restored trigger.
+  await page.keyboard.press('Escape');
   await expect(workspace).toHaveAttribute('aria-expanded', 'false');
+  await expect(workspace).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(workspace).toHaveAttribute('aria-expanded', 'true');
 });
 
 test('opt-in live provider discovery uses the same-origin GET boundary and transitions from pending to success', async ({
