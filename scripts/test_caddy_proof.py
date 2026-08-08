@@ -601,6 +601,139 @@ class CaddyProofEvidenceTests(unittest.TestCase):
         self.assertTrue(all(value == "redacted" for value in retention.values()))
 
 
+class CaddyProofEvidenceCliTests(unittest.TestCase):
+    """Exercise the standalone-derived and committed-retained CLI workflows."""
+
+    def _static_root(self, root: Path) -> Path:
+        for relative_path in caddy_proof.STATIC_BUILD_REQUIRED_FILES:
+            path = root / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{relative_path}\\n", encoding="utf-8")
+        return root
+
+    def _browser_evidence(self, static_root: Path) -> dict[str, object]:
+        provenance = caddy_proof._derive_git_static_build_provenance(static_root)
+        return {
+            "schema": caddy_proof.BROWSER_EVIDENCE_SCHEMA,
+            "status": "passed",
+            "provenance": {
+                **provenance,
+                "caddyfile_digest": EXPECTED_CADDYFILE_DIGEST,
+                "runtime_inputs_sha256": caddy_proof.runtime_input_digest(
+                    caddy_proof.reconstruction_inputs()
+                ),
+            },
+            "observations": {"events": dict(caddy_proof.BROWSER_COMPLETION_EVIDENCE)},
+        }
+
+    def _run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts/caddy_proof.py"), "evidence", *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_cli_derives_standalone_git_and_static_build_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            static_root = self._static_root(Path(directory) / "build")
+            provenance = caddy_proof._derive_git_static_build_provenance(static_root)
+            evidence_path = Path(directory) / "browser.json"
+            evidence_path.write_text(json.dumps(self._browser_evidence(static_root)), encoding="utf-8")
+            result = self._run_cli(
+                "--static-build-root",
+                str(static_root),
+                "--build-sha",
+                provenance["build_sha"],
+                "--build-digest",
+                provenance["build_digest"],
+                "--caddyfile-digest",
+                EXPECTED_CADDYFILE_DIGEST,
+                "--browser-evidence",
+                str(evidence_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["browser_journey"], "passed")
+
+    def test_cli_rejects_exact_zero_and_one_forged_build_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            static_root = self._static_root(Path(directory) / "build")
+            evidence = self._browser_evidence(static_root)
+            evidence_path = Path(directory) / "browser.json"
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+            derived = caddy_proof._derive_git_static_build_provenance(static_root)
+            forged_values = (
+                ("0" * 40, derived["build_digest"]),
+                ("1" * 40, derived["build_digest"]),
+                (derived["build_sha"], "0" * 64),
+                (derived["build_sha"], "1" * 64),
+            )
+            for forged_sha, forged_digest in forged_values:
+                with self.subTest(build_sha=forged_sha[0], build_digest=forged_digest[0]):
+                    result = self._run_cli(
+                        "--static-build-root",
+                        str(static_root),
+                        "--build-sha",
+                        forged_sha,
+                        "--build-digest",
+                        forged_digest,
+                        "--caddyfile-digest",
+                        EXPECTED_CADDYFILE_DIGEST,
+                        "--browser-evidence",
+                        str(evidence_path),
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("does not match", result.stderr)
+
+    def test_cli_rejects_duplicate_browser_json_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            static_root = self._static_root(Path(directory) / "build")
+            evidence_path = Path(directory) / "browser.json"
+            duplicate_payloads = (
+                '{"schema":"%s","schema":"%s"}'
+                % (caddy_proof.BROWSER_EVIDENCE_SCHEMA, caddy_proof.BROWSER_EVIDENCE_SCHEMA),
+                '{"provenance":{"build_sha":"%s","build_sha":"%s"}}'
+                % ("0" * 40, "1" * 40),
+            )
+            for payload in duplicate_payloads:
+                with self.subTest(payload=payload):
+                    evidence_path.write_text(payload, encoding="utf-8")
+                    result = self._run_cli(
+                        "--static-build-root",
+                        str(static_root),
+                        "--caddyfile-digest",
+                        EXPECTED_CADDYFILE_DIGEST,
+                        "--browser-evidence",
+                        str(evidence_path),
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("duplicate JSON object key", result.stderr)
+
+    def test_cli_rejects_oversize_browser_json_before_full_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            static_root = self._static_root(Path(directory) / "build")
+            evidence_path = Path(directory) / "browser.json"
+            evidence_path.write_bytes(b"{}" + b" " * caddy_proof.BROWSER_EVIDENCE_MAX_BYTES)
+            result = self._run_cli(
+                "--static-build-root",
+                str(static_root),
+                "--caddyfile-digest",
+                EXPECTED_CADDYFILE_DIGEST,
+                "--browser-evidence",
+                str(evidence_path),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bounded input size", result.stderr)
+
+    def test_cli_accepts_committed_retained_input_without_local_static_files(self) -> None:
+        result = self._run_cli("--retained-input", str(EVIDENCE_PATH))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        retained = json.loads(result.stdout)
+        self.assertEqual(retained["browser_journey"], "blocked_provider")
+        self.assertEqual(retained["product"]["build_commit"], EXPECTED_BUILD_SHA)
+        self.assertEqual(retained["deployment"]["runtime_inputs"], caddy_proof.reconstruction_inputs())
+
+
 def _free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))

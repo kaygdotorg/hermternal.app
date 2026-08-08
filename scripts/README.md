@@ -346,25 +346,45 @@ python3 -m py_compile \
   scripts/test_caddy_proof.py
 ```
 
-The CLI supports `render`, `digest`, `build-digest`, and `evidence`. The checked-
-in redacted evidence is
-`tests/integration/hermes-caddy/caddy-proof-evidence.json`. It binds
-build commit `521ede32b904a42e22eebb279fd7d404074cd318`, static build digest
-`77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21`, and
-runtime Caddyfile digest
-`342952687f19e425bd47126a47b5d17767c27aed99942252d6a6711b2b94f15c`.
-The runtime input manifest digest is
-`94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4`; its
-paths are deterministic proof placeholders, not retained user or VM paths.
-The retained browser state is derived from the bounded `browser_evidence` map
-in `caddy-proof-evidence.json`. Its fixed
-`hermternal.caddy-proof.browser-evidence.v1` schema binds the status to the
-exact build, static manifest, rendered Caddyfile, and runtime-input digests.
-The current map is `blocked_provider` with only the semantic marker
-`provider_unavailable`; it contains no browser event payload. `render_manifest`
-rejects missing, malformed, stale, mismatched, or extra-key maps. `passed`
-requires the closed event set with `message.complete` set to `complete`, while
-`blocked_empty_session` and `failed` require their matching fixed marker. The
-fixture contains no credential, cookie, ticket, ticket fragment, provider
-payload, or transcript. A Caddy binary version or image digest is not retained
-or validated by this local fixture.
+The CLI supports `render`, `digest`, `build-digest`, and `evidence`. The
+`evidence` command has two explicit workflows; do not treat a standalone
+browser map as a complete retained manifest.
+
+For a new standalone browser run, keep the browser map outside the static
+output directory because the static digest covers every file in that tree:
+
+```sh
+python3 scripts/caddy_proof.py evidence \
+  --static-build-root apps/web/build \
+  --caddyfile-digest <rendered-caddyfile-sha256> \
+  --browser-evidence /tmp/browser-evidence.json
+```
+
+`--static-build-root` must contain the reviewed `index.html`, `200.html`,
+`manifest.webmanifest`, and `service-worker.js` entry points. The command
+derives the checked-out Git `HEAD` and the digest of the actual static bytes;
+optional `--build-sha` and `--build-digest` values are compatibility
+assertions only and fail when they differ from those derived values. The
+browser map must use the fixed
+`hermternal.caddy-proof.browser-evidence.v1` schema and bind its status to the
+verified build pair, Caddyfile digest, and runtime-input digest. Reads are
+bounded to 4096 bytes, require UTF-8 JSON, and reject duplicate object keys at
+every nesting level before validation. A `passed` map requires the closed
+event set with `message.complete` set to `complete`.
+
+For the reviewed historical fixture, use the retained workflow explicitly:
+
+```sh
+python3 scripts/caddy_proof.py evidence \
+  --retained-input tests/integration/hermes-caddy/caddy-proof-evidence.json
+```
+
+Retained mode reads the complete committed manifest, verifies its
+`caddy-proof-evidence-sha256.txt` anchor, checks the historical build pair
+against that anchored file, and uses its deterministic runtime-input map. It
+does not require a local static-build directory. Standalone assertion flags
+cannot be combined with retained input. The committed browser state is
+`blocked_provider` with only the semantic marker `provider_unavailable`; it
+contains no browser event payload, credential, cookie, ticket, ticket fragment,
+provider payload, or transcript. A Caddy binary version or image digest is not retained or
+validated by this local fixture.
