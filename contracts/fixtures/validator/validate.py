@@ -136,7 +136,7 @@ BASELINE_REPETITIONS = 30
 # canonicalizer omits only this validator's own manifest digest and derived byte
 # total, which would otherwise create a self-referential hash cycle.
 BASELINE_SELF_MANIFEST_PATH = "contracts/fixtures/validator/validate.py"
-BASELINE_CANONICAL_SHA256 = "3b9078ce4d311b53d0493613b308402e4e2c2434d0582aa00f591803d003be02"
+BASELINE_CANONICAL_SHA256 = "9a3c8c0b211a3ccc0a3255c73ce39fb056ded8e27679bbb0dcf3d3844863c6a7"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -500,45 +500,43 @@ def _validate_text_value(
     if not allow_nul:
         require("\x00" not in value, "text contains an embedded NUL")
     exact_full_allowance = value in allowed_synthetic_full_values
-    private_key = PRIVATE_KEY_PATTERN.search(value)
-    require(
-        private_key is None
-        or exact_full_allowance
-        or (allow_synthetic_markers and _is_explicit_synthetic_marker(value)),
-        "private key material is not allowed",
-    )
-    provider_key = AWS_KEY_PATTERN.search(value)
-    require(
-        provider_key is None
-        or exact_full_allowance
-        or (allow_synthetic_markers and _is_placeholder(provider_key.group(0), allow_synthetic_markers=True)),
-        "provider key material is not allowed",
-    )
-    provider_token = PROVIDER_TOKEN_PATTERN.search(value)
-    require(
-        provider_token is None
-        or exact_full_allowance
-        or (allow_synthetic_markers and _is_placeholder(provider_token.group(0), allow_synthetic_markers=True)),
-        "provider token material is not allowed",
-    )
+    private_key_matches = tuple(PRIVATE_KEY_PATTERN.finditer(value))
+    for match in private_key_matches:
+        require(
+            exact_full_allowance
+            or (
+                allow_synthetic_markers
+                and len(private_key_matches) == 1
+                and _is_explicit_synthetic_marker(value)
+            ),
+            "private key material is not allowed",
+        )
+    for pattern, message in (
+        (AWS_KEY_PATTERN, "provider key material is not allowed"),
+        (PROVIDER_TOKEN_PATTERN, "provider token material is not allowed"),
+    ):
+        for match in pattern.finditer(value):
+            require(
+                exact_full_allowance
+                or (allow_synthetic_markers and _is_placeholder(match.group(0), allow_synthetic_markers=True)),
+                message,
+            )
     patterns = (BEARER_VALUE_PATTERN, BASIC_VALUE_PATTERN, JWT_PATTERN)
     if check_assignments:
         patterns += (ASSIGNMENT_SECRET_PATTERN,)
     for pattern in patterns:
-        match = pattern.search(value)
-        if match is None:
-            continue
-        candidate = match.group(1) if match.lastindex else match.group(0)
-        exact_basic_allowance = (
-            pattern is BASIC_VALUE_PATTERN
-            and candidate in allowed_basic_auth_candidates
-        )
-        require(
-            exact_basic_allowance
-            or exact_full_allowance
-            or _is_placeholder(candidate, allow_synthetic_markers=allow_synthetic_markers),
-            "credential-shaped value is not allowed",
-        )
+        for match in pattern.finditer(value):
+            candidate = match.group(1) if match.lastindex else match.group(0)
+            exact_basic_allowance = (
+                pattern is BASIC_VALUE_PATTERN
+                and candidate in allowed_basic_auth_candidates
+            )
+            require(
+                exact_basic_allowance
+                or exact_full_allowance
+                or _is_placeholder(candidate, allow_synthetic_markers=allow_synthetic_markers),
+                "credential-shaped value is not allowed",
+            )
     _validate_url_hosts(value, allow_synthetic_markers=allow_synthetic_markers)
 
 
@@ -772,6 +770,202 @@ def _validate_regex_literal(value: str) -> None:
     _regex_literal_authorities(value)
 
 
+def _ast_target_names(node: ast.AST) -> tuple[str, ...]:
+    if isinstance(node, ast.Name):
+        return (node.id,)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for element in node.elts:
+            names.extend(_ast_target_names(element))
+        return tuple(names)
+    return ()
+
+
+def _regex_reference_kind(
+    node: ast.AST,
+    *,
+    module_aliases: set[str],
+    compiler_aliases: set[str],
+) -> str | None:
+    if isinstance(node, ast.Name):
+        if node.id in module_aliases:
+            return "module"
+        if node.id in compiler_aliases:
+            return "compiler"
+        return None
+    if isinstance(node, ast.Attribute) and node.attr == "compile":
+        if isinstance(node.value, ast.Name) and node.value.id in module_aliases:
+            return "compiler"
+        return None
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) == 2
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id in module_aliases
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "compile"
+    ):
+        return "compiler"
+    return None
+
+
+def _regex_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """Resolve only static stdlib/third-party regex compiler aliases.
+
+    The aggregate scanner never executes fixture code. It therefore tracks the
+    small set of import and assignment forms that can name ``re.compile`` or
+    ``regex.compile``; unknown callables remain ordinary source text instead of
+    receiving an unsafe runtime interpretation.
+    """
+
+    # Keep the historical bare ``re.compile`` and ``regex.compile`` forms
+    # recognized even when a compact adversarial source omits its import line.
+    module_aliases = {"re", "regex"}
+    compiler_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name in {"re", "regex"}:
+                    module_aliases.add(imported.asname or imported.name)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in {"re", "regex"}:
+            for imported in node.names:
+                if imported.name == "compile":
+                    compiler_aliases.add(imported.asname or imported.name)
+
+    # Resolve simple chains such as ``rx = re`` and ``compile_alias = rx.compile``
+    # without following arbitrary expressions or invoking user code. The AST size
+    # bounds the fixed point even when a hostile source contains a long alias chain.
+    alias_passes = sum(1 for _ in ast.walk(tree)) + 1
+    for _ in range(alias_passes):
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+                value = node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets = [node.target]
+                value = node.value
+            else:
+                continue
+            kind = _regex_reference_kind(
+                value,
+                module_aliases=module_aliases,
+                compiler_aliases=compiler_aliases,
+            )
+            if kind is None:
+                continue
+            for target in targets:
+                for name in _ast_target_names(target):
+                    target_set = module_aliases if kind == "module" else compiler_aliases
+                    if name not in target_set:
+                        target_set.add(name)
+                        changed = True
+        if not changed:
+            break
+    return module_aliases, compiler_aliases
+
+
+def _is_regex_compile_call(
+    node: ast.Call,
+    *,
+    module_aliases: set[str],
+    compiler_aliases: set[str],
+) -> bool:
+    return _regex_reference_kind(
+        node.func,
+        module_aliases=module_aliases,
+        compiler_aliases=compiler_aliases,
+    ) == "compiler"
+
+
+_REGEX_STATIC_UNKNOWN = object()
+
+
+def _regex_static_value(
+    node: ast.AST,
+    bindings: dict[str, str | bytes | object],
+) -> str | bytes | object:
+    if isinstance(node, ast.Constant) and type(node.value) in {str, bytes}:
+        return node.value
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id, _REGEX_STATIC_UNKNOWN)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _regex_static_value(node.left, bindings)
+        right = _regex_static_value(node.right, bindings)
+        if type(left) is not type(right) or type(left) not in {str, bytes}:
+            return _REGEX_STATIC_UNKNOWN
+        if len(left) + len(right) > MAX_ARTIFACT_BYTES:
+            return _REGEX_STATIC_UNKNOWN
+        return left + right
+    return _REGEX_STATIC_UNKNOWN
+
+
+def _regex_static_bindings(tree: ast.AST) -> tuple[dict[str, str | bytes | object], dict[str, ast.AST | None]]:
+    """Resolve bounded string/bytes assignments used as regex patterns."""
+
+    bindings: dict[str, str | bytes | object] = {}
+    sources: dict[str, ast.AST | None] = {}
+    assignment_passes = sum(1 for _ in ast.walk(tree)) + 1
+    for _ in range(assignment_passes):
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+                value_node = node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets = [node.target]
+                value_node = node.value
+            else:
+                continue
+            value = _regex_static_value(value_node, bindings)
+            if value is _REGEX_STATIC_UNKNOWN:
+                continue
+            for target in targets:
+                for name in _ast_target_names(target):
+                    previous = bindings.get(name, _REGEX_STATIC_UNKNOWN)
+                    if previous is _REGEX_STATIC_UNKNOWN and name not in bindings:
+                        bindings[name] = value
+                        sources[name] = value_node
+                        changed = True
+                    elif previous != value:
+                        if bindings.get(name) is not _REGEX_STATIC_UNKNOWN or sources.get(name) is not None:
+                            bindings[name] = _REGEX_STATIC_UNKNOWN
+                            sources[name] = None
+                            changed = True
+        if not changed:
+            break
+    return bindings, sources
+
+
+def _regex_compile_pattern_node(node: ast.Call) -> ast.AST | None:
+    if node.args:
+        return node.args[0]
+    for keyword in node.keywords:
+        if keyword.arg == "pattern":
+            return keyword.value
+    return None
+
+
+def _regex_pattern_constant_nodes(
+    node: ast.AST,
+    sources: dict[str, ast.AST | None],
+    seen_names: set[str] | None = None,
+) -> set[int]:
+    if seen_names is None:
+        seen_names = set()
+    if isinstance(node, ast.Constant) and type(node.value) in {str, bytes}:
+        return {id(node)}
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _regex_pattern_constant_nodes(node.left, sources, seen_names) | _regex_pattern_constant_nodes(node.right, sources, seen_names)
+    if isinstance(node, ast.Name) and node.id not in seen_names:
+        source = sources.get(node.id)
+        if source is not None:
+            return _regex_pattern_constant_nodes(source, sources, seen_names | {node.id})
+    return set()
+
+
 def _validate_python_file(
     path: Path,
     *,
@@ -800,23 +994,37 @@ def _validate_python_file(
         raise ValidationError() from exc
     require(len(text) <= MAX_ARTIFACT_BYTES, "text artifact is too large")
 
+    module_aliases, compiler_aliases = _regex_aliases(tree)
+    static_bindings, static_sources = _regex_static_bindings(tree)
     regex_literals: set[int] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        if not isinstance(node, ast.Call) or not _is_regex_compile_call(
+            node,
+            module_aliases=module_aliases,
+            compiler_aliases=compiler_aliases,
+        ):
             continue
-        if node.func.attr != "compile" or not isinstance(node.func.value, ast.Name) or node.func.value.id not in {"re", "regex"}:
+        pattern_node = _regex_compile_pattern_node(node)
+        if pattern_node is None:
             continue
-        pattern = node.args[0] if node.args else None
-        if isinstance(pattern, ast.Constant) and type(pattern.value) is str:
-            regex_literals.add(id(pattern))
+        pattern = _regex_static_value(pattern_node, static_bindings)
+        if pattern is _REGEX_STATIC_UNKNOWN:
+            continue
+        regex_literals.update(_regex_pattern_constant_nodes(pattern_node, static_sources))
+        if type(pattern) is bytes:
+            try:
+                pattern = pattern.decode("utf-8")
+            except UnicodeError:
+                # An opaque binary regex cannot reveal a textual authority to
+                # this scanner; ordinary binary fixture inputs remain bounded.
+                continue
+        _validate_regex_literal(pattern)
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Constant) or type(node.value) not in {str, bytes}:
             continue
         value = node.value
         if id(node) in regex_literals:
-            if type(value) is str:
-                _validate_regex_literal(value)
             continue
         if type(value) is bytes:
             try:

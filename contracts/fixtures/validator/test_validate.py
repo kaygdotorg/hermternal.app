@@ -374,6 +374,67 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate._validate_index_document(index, repo_root)
 
+    def test_credential_scanner_checks_every_match_in_both_modes(self) -> None:
+        """A reviewed first negative sample cannot hide a later credential."""
+
+        cases = (
+            (
+                "deployment-security/external-allowlist/test_validate.py",
+                (
+                    'VALUE = "Authorization: Basic '
+                    + validate.TEST_NEGATIVE_BASIC_AUTH_CANDIDATE
+                    + '; Authorization: Basic AAAAAAAAAAAAAAAA"\n'
+                ),
+            ),
+            (
+                "connection-restoration/validate.py",
+                'VALUE = "synthetic -----BEGIN PRIVATE KEY----- -----BEGIN RSA PRIVATE KEY-----"\n',
+            ),
+            (
+                "connection-restoration/validate.py",
+                'VALUE = "ghp_example12345678 ghp_liveprovider12345678"\n',
+            ),
+            (
+                "connection-restoration/validate.py",
+                'VALUE = "AKIAxxxxxxxxxxxxxxxx AKIAABCDEFGHIJKLMNOP"\n',
+            ),
+            (
+                "connection-restoration/validate.py",
+                'VALUE = "Bearer request.payload.token Bearer AAAAAAAAAAAAAAAA"\n',
+            ),
+            (
+                "connection-restoration/validate.py",
+                'VALUE = "eyJexample123.eyJexample456.eyJexample789 eyJaaaaaaaa.eyJbbbbbbbb.eyJcccccccc"\n',
+            ),
+            (
+                "connection-restoration/validate.py",
+                'VALUE = "token=source.token token=unredacted-secret-value"\n',
+            ),
+        )
+        for relative_path, source in cases:
+            with self.subTest(relative_path=relative_path, source=source):
+                self._assert_scanner_rejects_in_both_modes(relative_path, source.encode("utf-8"))
+
+    def test_regex_compiler_aliases_are_scanned_in_both_modes(self) -> None:
+        """Static aliases must receive the same bounded regex policy."""
+
+        sources = (
+            'import re as regex_module\nregex_module.compile(r"h(?:x)://live.example.net/x")\n',
+            'from re import compile as regex_compile\nregex_compile(r"h(?:x)://live.example.net/x")\n',
+            'import re\nregex_module = re\nregex_compile = regex_module.compile\nregex_compile(r"h(?:x)://live.example.net/x")\n',
+            'import re\nregex_compile = getattr(re, "compile")\nregex_compile(r"h(?:x)://live.example.net/x")\n',
+            'import re\ngetattr(re, "compile")(r"h(?:x)://live.example.net/x")\n',
+            'import re\npattern = r"h(?:x)://"\nhost = "live.example.net/x"\nre.compile(pattern + host)\n',
+            'import re\nre.compile(pattern=r"h(?:x)://live.example.net/x")\n',
+            'import re\nre.compile(rb"h(?:x)://live.example.net/x")\n',
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source.encode("utf-8"),
+                )
+
     def test_malformed_named_group_headers_fail_closed_in_both_modes(self) -> None:
         """Do not let malformed group metadata hide schemes or authorities."""
 
