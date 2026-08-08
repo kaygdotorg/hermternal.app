@@ -780,9 +780,11 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     // A coordinator lease invalidation calls detach() to start the exact-identity
     // retention window; only an explicit close() is a user-closed terminal that
     // must hide reconnect. Keep these intents distinct in public retry state.
+    const hadActiveContext = activeContext !== undefined;
+    const hadActiveAttempt = activeAttempt !== undefined;
     userClosed = closing;
     explicitlyClosed = closing;
-    reattachBlocked = undefined;
+    if (closing || hadActiveContext || hadActiveAttempt) reattachBlocked = undefined;
     const generation = ++currentGeneration;
     const input = currentInput;
     const attempt = activeAttempt;
