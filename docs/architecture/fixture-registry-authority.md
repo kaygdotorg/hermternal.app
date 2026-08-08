@@ -84,6 +84,20 @@ object database, and each authority must satisfy all of the following:
 - the checkout copies of the authority, index, validator tests, validator, and
   validation baseline exactly match those immutable predecessor records.
 
+This is not a self-authenticating bootstrap root. The aggregate validator
+captures `scripts/verify_fixture_registry_authority.py` and compares its SHA-256
+and Git blob identity with bindings stored in mutable
+`contracts/fixtures/validator/validate.py`, then uses the helper's active OID
+constants against runtime pins. Those values are consistency checks, not
+independent custody. A trusted launcher or immutable external pin record must
+protect the verifier digest, active authority/source OIDs, artifact and
+manifest generation or digest, and rollback policy before launch; ordinary
+environment variables alone do not establish that root. A checkout that can
+rewrite the validator, helper, bindings, and pins together is outside this
+fixture's claim. The external enforcement and deterministic rotation procedure
+remain unresolved in this fixture lane; the external fixture-authority root
+and deterministic authority-rotation tooling dependencies are separate work.
+
 The legacy v1 path and bootstrap v2 path remain readable historical records.
 The final v2 path is the standalone verifier's historical trust input, while
 the hardened v2 path is the aggregate validator's active trust input. Explicit
@@ -242,8 +256,15 @@ FIFO and output-cap cases assert prompt bounded exit rather than relying on a
 post-timeout kill.
 
 The real Git object database remains the source of truth throughout these
-mutations. A local replacement authority therefore cannot authorize a matching
-local scanner or baseline rewrite.
+mutations, but only after the external verifier and pin root are trusted. The
+current coordinated helper/binding probe rejected in both interpreter modes
+because f4 changed validator sources while the checked-in baseline and manifest
+remained stale. That is defense in depth, not bootstrap authentication, and it
+does not predict behavior after a coordinated baseline/manifest regeneration.
+A local replacement authority therefore cannot authorize a matching scanner or
+baseline rewrite within the tested boundary; the external fixture-authority
+root and deterministic authority-rotation tooling dependencies remain required
+for an enforced external root.
 
 ## Current aggregate sequencing
 
