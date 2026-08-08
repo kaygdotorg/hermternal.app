@@ -1,8 +1,10 @@
 <script context="module" lang="ts">
   type AccountMenuOwner = {
     token: symbol;
+    lease: number;
   };
 
+  let accountMenuOwnershipLease = 0;
   let activeAccountMenuOwner: AccountMenuOwner | undefined;
 </script>
 
@@ -106,7 +108,7 @@
   }
 
   function claimAccountMenuOwner(): void {
-    activeAccountMenuOwner = { token: accountMenuOwnerToken };
+    activeAccountMenuOwner = { token: accountMenuOwnerToken, lease: ++accountMenuOwnershipLease };
   }
 
   function invalidateHiddenAccountMenu(): void {
@@ -130,14 +132,13 @@
     return activeAccountMenuOwner?.token === accountMenuOwnerToken;
   }
 
-  function canRestoreClosedMenuFocus(): boolean {
+  function canRestoreClosedMenuFocus(leaseAtClose: number | undefined): boolean {
+    // A lease is captured before release. The active owner may be null after
+    // this instance closes, but any later claim advances the module lease and
+    // permanently fences this delayed restoration.
+    if (leaseAtClose === undefined || accountMenuOwnershipLease !== leaseAtClose) return false;
     if (!sessionList?.isConnected || !accountMenuTrigger?.isConnected) return false;
-    if (!refreshAccountMenuVisibility()) return false;
-
-    // Closing releases ownership before awaiting the frame, so no owner is the
-    // legitimate handoff state. A different token means a responsive instance
-    // claimed the menu and this continuation must not focus the old trigger.
-    return !activeAccountMenuOwner || activeAccountMenuOwner.token === accountMenuOwnerToken;
+    return refreshAccountMenuVisibility();
   }
 
   $: pinned = sessions.filter((session) => session.group === 'pinned');
@@ -262,6 +263,8 @@
     const closingMenu = accountMenu;
     const focusAtClose = document.activeElement;
     const ownsFocusAtClose = focusBelongsToMenuTransition(focusAtClose, closingMenu);
+    const leaseAtClose =
+      activeAccountMenuOwner?.token === accountMenuOwnerToken ? activeAccountMenuOwner.lease : undefined;
     accountMenuOpen = false;
     releaseAccountMenuOwner();
     if (!restoreFocus || !ownsFocusAtClose) return;
@@ -270,7 +273,7 @@
       generation !== accountMenuFocusGeneration ||
       visibilityEpochAtClose !== accountMenuVisibilityEpoch ||
       accountMenuOpen ||
-      !canRestoreClosedMenuFocus() ||
+      !canRestoreClosedMenuFocus(leaseAtClose) ||
       hasUnrelatedFocusTransfer(focusEpochAtClose, closingMenu)
     )
       return;

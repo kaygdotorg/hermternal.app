@@ -669,6 +669,8 @@ test('account-menu geometry follows the named container inside a wide viewport',
   expect((await mobileMenu.boundingBox())?.width).toBe(308);
   expect((await mobileMenu.boundingBox())?.height).toBe(143);
   await page.keyboard.press('Escape');
+  await expect(mobileMenu).toBeHidden();
+  await expect(mobileTrigger).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(drawer).toBeHidden();
 
@@ -685,6 +687,9 @@ test('account-menu geometry follows the named container inside a wide viewport',
   await expect(desktopMenu).toBeVisible();
   expect((await desktopMenu.boundingBox())?.width).toBe(242);
   expect((await desktopMenu.boundingBox())?.height).toBe(159);
+  await page.keyboard.press('Escape');
+  await expect(desktopMenu).toBeHidden();
+  await expect(desktopTrigger).toBeFocused();
 });
 
 test('Paper action labels stay under a stationary pointer through repeated hover transitions', async ({ page }) => {

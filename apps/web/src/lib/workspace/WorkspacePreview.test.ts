@@ -221,7 +221,7 @@ describe('WorkspacePreview', () => {
     expect(nextControl).toHaveFocus();
   });
 
-  it('fences a released hidden owner after another instance claims before close rAF', async () => {
+  it('fences the FIFO stale close after a touch replacement claims and releases', async () => {
     const frames: FrameRequestCallback[] = [];
     const oldView = render(SessionList, { accountMenuId: 'old-account-menu' });
     const oldTrigger = within(oldView.container).getByRole('button', { name: 'Open account menu' });
@@ -241,8 +241,7 @@ describe('WorkspacePreview', () => {
       fireEvent.keyDown(window, { key: 'Escape' });
       await waitFor(() => expect(oldMenu).not.toBeInTheDocument());
       await waitFor(() => expect(frames).toHaveLength(1));
-      const staleClose = frames.shift();
-      expect(staleClose).toBeDefined();
+      expect(document.activeElement).toBe(document.body);
 
       const oldSessionList = oldTrigger.closest('.session-list') as HTMLElement;
       expect(oldSessionList).toBeInTheDocument();
@@ -250,26 +249,28 @@ describe('WorkspacePreview', () => {
 
       newView = render(SessionList, { accountMenuId: 'new-account-menu' });
       const newTrigger = within(newView.container).getByRole('button', { name: 'Open account menu' });
-      fireEvent.pointerDown(newTrigger, { button: 0, pointerType: 'mouse' });
+      fireEvent.pointerDown(newTrigger, { button: 0, pointerType: 'touch' });
       const newMenu = await within(newView.container).findByRole('menu', { name: 'Account menu' });
-      const newSignOut = within(newMenu).getByRole('menuitem', { name: 'Sign out' });
+      expect(document.activeElement).toBe(document.body);
 
-      // The old close callback runs after the new instance owns the menu but
-      // before its own focus frame. It must not move focus into the hidden row.
+      // The replacement claims while focus remains neutral, then closes before
+      // any queued frame runs. Its release leaves no active owner, so only the
+      // module lease can distinguish the old close from the new close.
+      fireEvent.keyDown(window, { key: 'Escape' });
+      await waitFor(() => expect(newMenu).not.toBeInTheDocument());
+      await waitFor(() => expect(frames).toHaveLength(4));
+
+      // FIFO is intentional: old close, replacement press pulse, replacement
+      // open continuation, then replacement close restoration.
+      const staleClose = frames.shift();
+      expect(staleClose).toBeDefined();
       staleClose?.(0);
       await Promise.resolve();
       expect(oldTrigger).not.toHaveFocus();
-      expect(newMenu).toBeInTheDocument();
+      expect(newTrigger).not.toHaveFocus();
 
-      await waitFor(() => expect(frames).toHaveLength(2));
       for (const callback of frames.splice(0)) callback(0);
-      await waitFor(() => expect(newSignOut).toHaveFocus());
-
-      // The replacement owner still handles Escape and restores its own trigger.
-      fireEvent.keyDown(window, { key: 'Escape' });
-      await waitFor(() => expect(within(newView!.container).queryByRole('menu')).not.toBeInTheDocument());
-      await waitFor(() => expect(frames.length).toBeGreaterThan(0));
-      for (const callback of frames.splice(0)) callback(0);
+      // The replacement close is legitimate and must restore its own trigger.
       await waitFor(() => expect(newTrigger).toHaveFocus());
     } finally {
       newView?.unmount();
