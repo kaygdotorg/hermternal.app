@@ -101,21 +101,36 @@ interface CanonicalAliasRecord {
   readonly canonicalSessionId: string;
 }
 
+type PendingCanonicalAliasMap = WeakMap<object, CanonicalAliasRecord>;
+
 interface LiveRestAliasAuthority {
   readonly fetchSession: (sessionId: string, signal?: AbortSignal) => Promise<LiveSession>;
-  readonly pendingByWorkspace: WeakMap<object, WeakMap<object, CanonicalAliasRecord>>;
+  readonly pendingByWorkspace: WeakMap<object, PendingCanonicalAliasMap>;
+  readonly scopeEpochByWorkspace: WeakMap<object, number>;
   readonly consumedDetails: WeakSet<object>;
+}
+
+interface CapturedCanonicalAliasScope {
+  readonly epoch: number;
+  readonly pending: PendingCanonicalAliasMap;
 }
 
 // Trust never travels on a returned detail object. Only the exact transport
 // object created below can issue authority, and only the exact workspace that
-// requested an alias can consume its exact returned detail once.
+// requested an alias can consume its exact returned detail once. Each workspace
+// scope also has an epoch and map identity so a reset can revoke an in-flight
+// fetch before its completion attempts to mint authority.
 const liveRestAliasAuthorities = new WeakMap<object, LiveRestAliasAuthority>();
 
 /**
  * Fetches a session for one exact workspace. Real transports use their private
  * validated request closure; structural/custom adapters can only return an
  * exact-ID detail and cannot authorize an alias response.
+ *
+ * The workspace scope epoch and exact pending map are captured before the
+ * request awaits. A lifecycle reset replaces that map and advances its epoch,
+ * so a late canonical response is still returned as data but cannot repopulate
+ * the fresh scope with consumable authority.
  *
  * The returned value is one frozen, detached projection. Detail validation reads
  * only own enumerable data descriptors, so an accessor, inherited field, proxy,
@@ -133,6 +148,9 @@ export async function getLiveRestSessionForWorkspace(
   }
   const requested = validateSessionId(requestedSessionId);
   const authority = liveRestAliasAuthorities.get(rest);
+  const capturedScope = authority
+    ? captureCanonicalAliasScope(authority, workspace)
+    : undefined;
   const session = authority
     ? await authority.fetchSession(requested, signal)
     : await rest.getSession(requested, signal);
@@ -141,23 +159,40 @@ export async function getLiveRestSessionForWorkspace(
     throw new LiveRestError('invalid-response');
   }
   if (captured.id === requested) return captured;
-  if (!authority) {
+  if (!authority || !capturedScope) {
     throw new LiveRestError('invalid-response');
   }
 
   // Alias authority binds the exact detached projection, not the adapter's raw
   // object. Clones and wrappers therefore cannot consume a canonical identity,
   // while the frozen projection remains safe across every later workspace read.
+  // Do not move this check after a reset: only the map and epoch captured before
+  // the await may receive authority from this completion.
+  if (
+    authority.scopeEpochByWorkspace.get(workspace) !== capturedScope.epoch ||
+    authority.pendingByWorkspace.get(workspace) !== capturedScope.pending
+  ) {
+    return captured;
+  }
+  capturedScope.pending.set(captured, {
+    requestedSessionId: requested,
+    canonicalSessionId: captured.id
+  });
+  return captured;
+}
+
+function captureCanonicalAliasScope(
+  authority: LiveRestAliasAuthority,
+  workspace: object
+): CapturedCanonicalAliasScope {
   let pending = authority.pendingByWorkspace.get(workspace);
   if (!pending) {
     pending = new WeakMap<object, CanonicalAliasRecord>();
     authority.pendingByWorkspace.set(workspace, pending);
   }
-  pending.set(captured, {
-    requestedSessionId: requested,
-    canonicalSessionId: captured.id
-  });
-  return captured;
+  const epoch = authority.scopeEpochByWorkspace.get(workspace) ?? 0;
+  authority.scopeEpochByWorkspace.set(workspace, epoch);
+  return { epoch, pending };
 }
 
 /**
@@ -194,11 +229,18 @@ export function consumeLiveRestCanonicalAlias(
   return record.canonicalSessionId;
 }
 
-/** Clear unconsumed alias authority for one workspace without reviving details. */
+/**
+ * Clear unconsumed alias authority for one workspace without reviving details.
+ * Replacing the map and advancing its epoch also fences completions that were
+ * already awaiting the real REST response under the previous lifecycle scope.
+ */
 export function resetLiveRestCanonicalAliasScope(rest: LiveRestTransport, workspace: object): void {
   if (!isWeakKey(rest) || !isWeakKey(workspace)) return;
   const authority = liveRestAliasAuthorities.get(rest);
-  authority?.pendingByWorkspace.set(workspace, new WeakMap<object, CanonicalAliasRecord>());
+  if (!authority) return;
+  const epoch = authority.scopeEpochByWorkspace.get(workspace) ?? 0;
+  authority.scopeEpochByWorkspace.set(workspace, epoch + 1);
+  authority.pendingByWorkspace.set(workspace, new WeakMap<object, CanonicalAliasRecord>());
 }
 
 /**
@@ -371,7 +413,8 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
 
   liveRestAliasAuthorities.set(transport, {
     fetchSession,
-    pendingByWorkspace: new WeakMap<object, WeakMap<object, CanonicalAliasRecord>>(),
+    pendingByWorkspace: new WeakMap<object, PendingCanonicalAliasMap>(),
+    scopeEpochByWorkspace: new WeakMap<object, number>(),
     consumedDetails: new WeakSet<object>()
   });
   return transport;

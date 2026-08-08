@@ -130,10 +130,13 @@ budgets:
   the adapter's raw object again. The exact transport instance created here is
   registered in a module-private `WeakMap`; when that instance resolves an
   alias, the exact workspace instance, requested alias, canonical ID, and exact
-  frozen projection are recorded in workspace-scoped private state. The
-  workspace consumes that record once. Clones, reflected properties, descriptor
-  copies, wrappers, custom adapters, wrong aliases, replay, and cross-workspace
-  or cross-transport transfer fail closed. History remains a strict commit key,
+  frozen projection are recorded in workspace-scoped private state. The helper
+  captures that scope's epoch and exact pending map before awaiting the detail
+  read; a lifecycle reset replaces the map and advances the epoch, so a stale
+  completion cannot repopulate the fresh scope. The workspace consumes each
+  record once. Clones, reflected properties, descriptor copies, wrappers,
+  custom adapters, wrong aliases, replay, and cross-workspace or
+  cross-transport transfer fail closed. History remains a strict commit key,
   so a foreign message response cannot replace the selected timeline or
   identity.
 - Source-defined strings stay bounded but may be empty when the pinned
