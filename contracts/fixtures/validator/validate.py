@@ -1099,6 +1099,11 @@ def _decode_regex_host(text: str) -> tuple[str, bool]:
 
 REGEX_SCHEME_CANDIDATES = ("https://", "http://", "wss://", "ws://")
 MAX_REGEX_SCHEME_SOURCE_LENGTH = 64
+# Scheme inference stays tightly bounded, but structural group discovery needs
+# enough room to inspect reviewed long regexes whose literal prefix has already
+# diverged from every supported URL scheme. Keep this ceiling independent so a
+# longer group cannot make a possible scheme escape nested scanning.
+MAX_REGEX_GROUP_SOURCE_LENGTH = 128
 
 
 def _regex_scheme_token(text: str, index: int, expected: str) -> int | None:
@@ -1386,7 +1391,7 @@ def _regex_class_prefix_result(text: str, index: int) -> _RegexSchemePrefixResul
 def _regex_bounded_group_span(text: str, index: int) -> tuple[int, bool]:
     """Return a bounded group end and whether the closing delimiter was seen."""
 
-    limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
+    limit = min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH)
     depth = 0
     in_class = False
     cursor = index
@@ -1433,12 +1438,12 @@ def _regex_group_body_start(text: str, index: int) -> tuple[int | None, int, boo
     if text.startswith("(?<!", index):
         return index + 4, -1, True
     if text.startswith("(?P<", index) or text.startswith("(?<", index):
-        closing = text.find(">", index + 3, min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH))
+        closing = text.find(">", index + 3, min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH))
         if closing >= 0:
             return closing + 1, 0, True
         return None, 0, False
     if text.startswith("(?", index):
-        limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
+        limit = min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH)
         colon = text.find(":", index + 2, limit)
         if colon >= 0:
             flags = text[index + 2:colon]
@@ -1524,7 +1529,7 @@ def _regex_assertion_group_start(text: str, index: int) -> int | None:
 
     if text.startswith("(?<=", index) or text.startswith("(?<!", index):
         return index
-    search_start = max(0, index - MAX_REGEX_SCHEME_SOURCE_LENGTH)
+    search_start = max(0, index - MAX_REGEX_GROUP_SOURCE_LENGTH)
     for marker in ("(?<=", "(?<!"):
         candidate = text.rfind(marker, search_start, index)
         if candidate >= 0 and _regex_group_end(text, candidate) == index:
@@ -2018,7 +2023,7 @@ def _regex_nested_scheme_matches(
         budget = [MAX_REGEX_NESTED_SCAN_NODES]
     if depth > MAX_REGEX_NESTED_SCAN_DEPTH or end < start:
         raise ValidationError()
-    if end - start > MAX_REGEX_SCHEME_SOURCE_LENGTH:
+    if end - start > MAX_REGEX_GROUP_SOURCE_LENGTH:
         raise ValidationError()
     matches: list[tuple[int, int]] = []
     index = start

@@ -1338,6 +1338,47 @@ class CliTests(unittest.TestCase):
                     ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
                 )
 
+    def test_long_safe_regex_groups_keep_structural_scanning_bounded(self) -> None:
+        """Accept reviewed long groups without skipping late scheme-bearing bodies."""
+
+        behavioral_probe_source = (
+            're.compile(r"synthetic-(?:api-key|secret|ticket-value|ticket-fragment|'
+            'bearer-value|cookie-value|password-value|pty-(?:input|output|handle))", '
+            're.IGNORECASE)\n'
+        )
+        route_allowlist_source = (
+            're.compile(r"synthetic-(?:api-key|secret|ticket-value|bearer-value|'
+            'cookie-value|password-value|pty-(?:input|output|handle))", re.IGNORECASE)\n'
+        )
+        self._assert_scanner_accepts_in_both_modes(
+            "behavioral-probe/validate.py",
+            behavioral_probe_source.encode("utf-8"),
+        )
+        self._assert_scanner_accepts_in_both_modes(
+            "route-allowlist/test_route_allowlist.py",
+            route_allowlist_source.encode("utf-8"),
+        )
+
+        filler = "x" * (validate.MAX_REGEX_SCHEME_SOURCE_LENGTH + 8)
+        slash = chr(92)
+        late_live_patterns = (
+            "(?:" + filler + "https://api.live.invalid/x)",
+            "(?:" + filler + "h(?:t|T)tps://api.live.invalid/x)",
+            "(?:" + filler + "h" + slash + "Qttps://api.live.invalid/x)",
+        )
+        for pattern in late_live_patterns:
+            with self.subTest(pattern=pattern):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
+        oversized_group = "(?:" + ("x" * validate.MAX_REGEX_GROUP_SOURCE_LENGTH) + "https://api.live.invalid/x)"
+        self._assert_scanner_rejects_in_both_modes(
+            "connection-restoration/validate.py",
+            ("re.compile(r'" + oversized_group + "')\n").encode("utf-8"),
+        )
+
     def test_regex_assertions_use_preceding_context_and_scan_nested_live_urls(self) -> None:
         """Inspect positive assertions without treating absent context as proof."""
 
