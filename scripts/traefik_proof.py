@@ -472,6 +472,9 @@ PARSER_IMPLEMENTATION_PATH = "scripts/traefik_proof.py"
 PARSER_TEST_PATH = "scripts/test_traefik_proof.py"
 PARSER_SOURCE_MAX_BYTES = 1 << 20
 PARSER_SOURCE_MAX_COMMITS = 4096
+PARSER_SOURCE_MAX_SUBPROCESSES = 2048
+PARSER_SOURCE_MAX_SECONDS = 12.0
+PARSER_GIT_COMMAND_TIMEOUT_SECONDS = 5.0
 PARSER_PROVENANCE_KEYS = frozenset(
     {
         "implementation_path",
@@ -485,7 +488,35 @@ PARSER_PROVENANCE_KEYS = frozenset(
 PARSER_SOURCE_PATHS = (PARSER_IMPLEMENTATION_PATH, PARSER_TEST_PATH)
 
 
-def _git_output(project_root: Path, *arguments: str) -> bytes:
+class _ParserBudgetExceeded(ValueError):
+    """Signal an aggregate provenance budget rejection without wrapping it."""
+
+
+class _ParserGitBudget:
+    """Bound every Git subprocess in one provenance calculation."""
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.calls = 0
+
+    def timeout(self) -> float:
+        if self.calls >= PARSER_SOURCE_MAX_SUBPROCESSES:
+            raise _ParserBudgetExceeded("parser provenance subprocess budget exhausted")
+        elapsed = time.monotonic() - self.started
+        if elapsed < 0:
+            raise _ParserBudgetExceeded("parser provenance monotonic clock moved backwards")
+        remaining = PARSER_SOURCE_MAX_SECONDS - elapsed
+        if remaining <= 0:
+            raise _ParserBudgetExceeded("parser provenance overall time budget exhausted")
+        self.calls += 1
+        return min(PARSER_GIT_COMMAND_TIMEOUT_SECONDS, remaining)
+
+
+def _git_output(
+    project_root: Path,
+    *arguments: str,
+    budget: _ParserGitBudget | None = None,
+) -> bytes:
     """Read one bounded Git result used to bind evidence to committed sources."""
 
     try:
@@ -493,7 +524,7 @@ def _git_output(project_root: Path, *arguments: str) -> bytes:
             ["git", "-C", str(project_root), *arguments],
             check=True,
             capture_output=True,
-            timeout=5,
+            timeout=PARSER_GIT_COMMAND_TIMEOUT_SECONDS if budget is None else budget.timeout(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError("parser provenance requires a readable local Git repository") from exc
@@ -510,14 +541,27 @@ def _git_blob_oid(source: bytes) -> str:
     return hashlib.sha1(header + source).hexdigest()
 
 
-def _parser_tree_pair(project_root: Path, revision: str) -> tuple[str | None, str | None]:
+def _parser_tree_pair(
+    project_root: Path,
+    revision: str,
+    *,
+    budget: _ParserGitBudget | None = None,
+) -> tuple[str | None, str | None]:
     """Return the two source blob OIDs while deliberately ignoring file modes.
 
     A mode-only commit must not become a new parser identity. The blob pair is
     therefore the source-change unit; mode metadata remains outside evidence.
     """
 
-    raw = _git_output(project_root, "ls-tree", "-z", revision, "--", *PARSER_SOURCE_PATHS)
+    raw = _git_output(
+        project_root,
+        "ls-tree",
+        "-z",
+        revision,
+        "--",
+        *PARSER_SOURCE_PATHS,
+        budget=budget,
+    )
     entries: dict[str, tuple[str, str]] = {}
     for record in raw.split(b"\0"):
         if not record:
@@ -542,6 +586,8 @@ def _parser_source_predecessor(
     implementation: bytes,
     test_source: bytes,
     head: str,
+    *,
+    budget: _ParserGitBudget | None = None,
 ) -> tuple[str, bytes, bytes]:
     """Find one unambiguous source-changing predecessor of the current bytes.
 
@@ -562,8 +608,11 @@ def _parser_source_predecessor(
             "--full-history",
             "--parents",
             head,
+            budget=budget,
         ).decode("ascii").splitlines()
     except (UnicodeDecodeError, ValueError) as exc:
+        if isinstance(exc, _ParserBudgetExceeded):
+            raise
         raise ValueError("parser provenance source history cannot be read") from exc
     if not history_lines or len(history_lines) > PARSER_SOURCE_MAX_COMMITS:
         raise ValueError("parser provenance source history exceeds its bounded limit")
@@ -582,7 +631,7 @@ def _parser_source_predecessor(
 
     def pair(revision: str) -> tuple[str | None, str | None]:
         if revision not in pair_cache:
-            pair_cache[revision] = _parser_tree_pair(project_root, revision)
+            pair_cache[revision] = _parser_tree_pair(project_root, revision, budget=budget)
         return pair_cache[revision]
 
     current_pair = pair(head)
@@ -633,11 +682,13 @@ def _parser_source_predecessor(
         project_root,
         "show",
         f"{candidate}:{PARSER_IMPLEMENTATION_PATH}",
+        budget=budget,
     )
     committed_tests = _git_output(
         project_root,
         "show",
         f"{candidate}:{PARSER_TEST_PATH}",
+        budget=budget,
     )
     if committed_implementation != implementation or committed_tests != test_source:
         raise ValueError("parser provenance source predecessor does not match committed parser sources")
@@ -645,11 +696,13 @@ def _parser_source_predecessor(
         project_root,
         "rev-parse",
         f"{candidate}:{PARSER_IMPLEMENTATION_PATH}",
+        budget=budget,
     ).decode("ascii").strip()
     test_blob = _git_output(
         project_root,
         "rev-parse",
         f"{candidate}:{PARSER_TEST_PATH}",
+        budget=budget,
     ).decode("ascii").strip()
     if (
         not re.fullmatch(r"[0-9a-f]{40}", implementation_blob)
@@ -675,7 +728,14 @@ def _current_parser_provenance(project_root: Path | None = None) -> dict[str, st
         PARSER_SOURCE_MAX_BYTES,
         "parser test source",
     )
-    implementation_commit = _git_output(project_root, "rev-parse", "--verify", "HEAD").decode("ascii").strip()
+    budget = _ParserGitBudget()
+    implementation_commit = _git_output(
+        project_root,
+        "rev-parse",
+        "--verify",
+        "HEAD",
+        budget=budget,
+    ).decode("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", implementation_commit):
         raise ValueError("current parser source commit is not a lowercase Git SHA")
     implementation_commit, committed_implementation, committed_tests = _parser_source_predecessor(
@@ -683,6 +743,7 @@ def _current_parser_provenance(project_root: Path | None = None) -> dict[str, st
         implementation,
         test_source,
         implementation_commit,
+        budget=budget,
     )
     if committed_implementation != implementation or committed_tests != test_source:
         raise ValueError("parser provenance requires clean committed implementation and test sources")

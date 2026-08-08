@@ -219,7 +219,11 @@ of inheriting Git log order. The selected commit is then checked against the
 exact working-tree bytes and both Git blobs before evidence is emitted;
 evidence-only or documentation-only descendants therefore retain the same
 implementation commit, while uncommitted source drift and forged CLI provenance
-fail closed.
+fail closed. One provenance calculation also shares a fixed monotonic
+12-second deadline and a 2,048-subprocess ceiling across traversal, tree reads,
+and final blob checks. Each individual Git command remains limited to five
+seconds, but exhausting either aggregate budget rejects provenance instead of
+continuing through an arbitrarily large history.
 
 The browser state is `blocked_provider` with only the fixed
 `provider_unavailable` blocker. No `gateway.ready`, `session.resume`,
