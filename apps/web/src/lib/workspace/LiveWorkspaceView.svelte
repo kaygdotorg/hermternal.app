@@ -7,6 +7,8 @@
   export let session: LiveWorkspaceSession;
   export let appearance: Appearance = 'light';
   export let onReturnToSignIn: () => void = () => {};
+  /** Root auth owns the shared session; standalone previews retain local cleanup. */
+  export let disposeSessionOnDestroy = true;
 
   let snapshot: Readonly<LiveWorkspaceSnapshot> = session.current;
   let unsubscribe: (() => void) | undefined;
@@ -28,6 +30,7 @@
     // The route root owns final disposal. This authenticated projection only
     // releases its subscription so expiry can remount the same workspace.
     unsubscribe?.();
+    if (disposeSessionOnDestroy) session.dispose();
   });
 
   function handleAction(action: WorkspaceAction): void {
