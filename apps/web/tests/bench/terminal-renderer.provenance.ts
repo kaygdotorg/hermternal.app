@@ -64,9 +64,12 @@ export type BenchmarkCheckout = Readonly<{
   execution_inputs: readonly BenchmarkExecutionInput[];
   /** Artifact bytes and hashes collected from the exact produced build output. */
   build: BenchmarkBuild;
-  /** Optional checked-in evidence head used to enforce evidence-only ancestry. */
+  /**
+   * Checked-in evidence must be a distinct successor of the measured source.
+   * This makes provenance non-circular: a commit cannot self-attest its trace.
+   */
   evidence_head?: string;
-  /** Git paths changed between source and evidence heads. */
+  /** The source-to-evidence range must contain this artifact and nothing else. */
   evidence_changed_paths?: readonly string[];
 }>;
 
@@ -383,12 +386,17 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
     throw new Error('checked-in benchmark evidence source commit did not match the reviewed checkout HEAD');
   }
   if (checkout.evidence_head !== undefined || checkout.evidence_changed_paths !== undefined) {
+    const evidencePath = 'apps/web/tests/bench/terminal-renderer.evidence.json';
     if (
       typeof checkout.evidence_head !== 'string' ||
       !FULL_COMMIT_SHA.test(checkout.evidence_head) ||
+      checkout.evidence_head.toLowerCase() === checkout.head.toLowerCase() ||
       !Array.isArray(checkout.evidence_changed_paths) ||
-      checkout.evidence_changed_paths.some((path) => path !== 'apps/web/tests/bench/terminal-renderer.evidence.json')
+      checkout.evidence_changed_paths.length !== 1 ||
+      checkout.evidence_changed_paths[0] !== evidencePath
     ) {
+      // An empty range would let one commit attest itself; any other path would
+      // make an old source appear authorized by unrelated later changes.
       throw new Error('checked-in benchmark evidence source relationship was not evidence-only');
     }
   }

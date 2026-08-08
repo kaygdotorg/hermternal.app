@@ -1861,6 +1861,15 @@ describe('TerminalRenderer', () => {
       evidence_changed_paths: ['apps/web/src/lib/terminal/renderer.ts']
     };
     expect(() => assertBenchmarkTrace(evidence, nonEvidenceDescendant)).toThrow(/evidence-only/);
+
+    // An evidence artifact cannot authorize itself: an empty source-to-evidence
+    // range is circular even though it contains no unrelated paths.
+    const selfAttestingCheckout = {
+      ...checkout,
+      evidence_head: checkout.head,
+      evidence_changed_paths: ['apps/web/tests/bench/terminal-renderer.evidence.json']
+    };
+    expect(() => assertBenchmarkTrace(evidence, selfAttestingCheckout)).toThrow(/evidence-only/);
   });
 
   it('fails closed for outbound benchmark requests', () => {
