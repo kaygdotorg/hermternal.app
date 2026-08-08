@@ -358,6 +358,9 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   let lastError: SessionCoordinatorErrorCode | undefined;
   let lastFocusIntent: FocusIntent | undefined;
   let nextFocusSequence = 0;
+  // Nested observer transitions synchronously publish a newer state. This
+  // monotonic fence prevents an outer publish from delivering its stale snapshot.
+  let publicationRevision = 0;
   let nextModeActivationSequence = 0;
   const latestModeActivationSequence: Record<WorkspaceMode, number> = { chat: 0, terminal: 0 };
   let disposed = false;
@@ -414,9 +417,16 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   };
 
   const publish = (): void => {
+    const revision = ++publicationRevision;
     const snapshot = state();
     safeCall(options.onStateChange, snapshot);
-    for (const listener of [...listeners]) safeCall(listener, snapshot);
+    // `onStateChange` and subscribers are synchronous extension points. If one
+    // reenters the lifecycle it publishes a newer revision, whose state must win.
+    if (revision !== publicationRevision) return;
+    for (const listener of [...listeners]) {
+      if (revision !== publicationRevision) return;
+      safeCall(listener, snapshot);
+    }
   };
 
   const current = (generation: number, sessionId: string): boolean =>

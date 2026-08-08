@@ -529,6 +529,7 @@ describe('createSessionCoordinator', () => {
     const pending = terminal.deferNext('session-old');
     let coordinator!: ReturnType<typeof createSessionCoordinator>;
     let settlementAccepted: boolean | undefined;
+    const subscriberStates: Array<ReturnType<typeof createSessionCoordinator>['state']> = [];
 
     coordinator = createSessionCoordinator({
       chat: chat.chat,
@@ -544,6 +545,7 @@ describe('createSessionCoordinator', () => {
         });
       }
     });
+    coordinator.subscribe((nextState) => subscriberStates.push(nextState));
 
     const activation = coordinator.activate('terminal');
     await flush();
@@ -565,6 +567,15 @@ describe('createSessionCoordinator', () => {
     expectInvalidatedThenReleased(terminal, pending.binding);
     expect(coordinator.state).toMatchObject({ terminalStatus: 'detached' });
     expect(coordinator.state).not.toHaveProperty('terminalSessionId');
+    // The nested idle publication reaches subscribers; the outer attaching
+    // snapshot must not resume after onStateChange revokes its lease.
+    expect(subscriberStates.at(-1)).toEqual(coordinator.state);
+    expect(subscriberStates).not.toContainEqual(
+      expect.objectContaining({
+        terminalStatus: 'attaching',
+        terminalLeaseSequence: expect.any(Number)
+      })
+    );
   });
 
   it.each(['invalidate', 'release'] as const)(

@@ -41,8 +41,10 @@ Hermes session, or mirror transcript content.
   cannot cancel a newly pending or attached same-session recovery lease. During
   invalidation, cleanup callbacks may reenter the coordinator; the outer
   settlement rechecks its identity, generation, token, lifecycle, and ownership
-  before it clears focus or publishes, so the nested transition wins. The token
-  is optional only for source compatibility: a legacy two-field settlement is
+  before it clears focus or publishes, so the nested transition wins. Publication
+  is also revision-fenced: if `onStateChange` or a subscriber synchronously
+  causes a newer publication, remaining recipients never receive the obsolete
+  snapshot. The token is optional only for source compatibility: a legacy two-field settlement is
   accepted for the first attach in a session generation and is rejected
   conservatively after a retry. `reconnectTerminal()` uses the existing Terminal
   activation and focus contract to acquire a new lease; it does not call Chat
