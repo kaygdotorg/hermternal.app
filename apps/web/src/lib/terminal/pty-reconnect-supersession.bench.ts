@@ -164,6 +164,8 @@ async function runStage(stage: Stage): Promise<RunProof> {
   }
   await flush();
   const sampleMs = roundSample(performance.now() - started);
+  const ticketRequestsBeforeRecovery = ticketRequests;
+  const socketFactoryCallsBeforeRecovery = socketFactoryCalls;
 
   // Recovery is outside the measured quarantine-settlement interval. It proves
   // that late cleanup released exactly one owner and that the replacement's
@@ -187,8 +189,8 @@ async function runStage(stage: Stage): Promise<RunProof> {
   const staleOpenCalls = staleSocket?.opened ? 1 : 0;
   const duplicateOwnerViolations = activeOwnerCountBeforeCleanup > 1 ? 1 : 0;
   const assertions = {
-    quarantineTicketFence: ticketRequests === (stage === "validator" ? 0 : 1),
-    quarantineFactoryFence: socketFactoryCalls === (stage === "factory" ? 1 : 0),
+    quarantineTicketFence: ticketRequestsBeforeRecovery === (stage === "validator" ? 0 : 1),
+    quarantineFactoryFence: socketFactoryCallsBeforeRecovery === (stage === "factory" ? 1 : 0),
     staleSocketClosedOnce: stage !== "factory" || staleCleanupCalls === 1,
     staleSocketNeverOpened: staleOpenCalls === 0,
     replacementOpenedExactlyOnce: replacement.opened && openedSockets === 1,
