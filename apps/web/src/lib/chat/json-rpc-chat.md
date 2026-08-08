@@ -174,7 +174,17 @@ they are never promoted to approval or clarification.
 Server replies and events share the channel. A reply is correlated only by the
 JSON-RPC request `id`. The event `request_id` field is optional source data; it
 is checked when present and otherwise correlated to the one active selected
-session operation. An event is never interpreted as a request result.
+session operation. Each active operation retains its originating session and
+socket generation. An explicit event session must match that owner. Session
+creation or restoration reserves the transition before sending its asynchronous
+control request; prompts and competing session transitions remain blocked until
+it settles, while replacement is rejected when an operation is already active.
+After the sole-operation check succeeds, the public event carries the operation's stable
+local request ID so workspace listeners use the same ownership decision. Zero or
+multiple matches remain protocol violations; the transport never guesses.
+Interactive payload `request_id` values remain distinct approval or clarification
+owner IDs and never become prompt correlation. An event is never interpreted as
+a request result.
 
 Acknowledgement receipt is tracked separately from operation lifecycle. If a
 stream, approval, clarification, or completion event arrives before the reply,

@@ -423,6 +423,8 @@ interface ParsedEventEnvelope {
 
 interface OperationRecord {
   readonly id: string;
+  readonly sessionId: string;
+  readonly generation: number;
   status: JsonRpcDeliveryStatus;
   acknowledgementReceived: boolean;
   sequenceMode: "unknown" | "present" | "absent";
@@ -509,6 +511,7 @@ export function createJsonRpcChatTransport(
   let activeAttempt: ConnectionAttempt | undefined;
   let reconnectTransitionToken = 0;
   let notifyingReconnectTransition: number | undefined;
+  let sessionTransitionPending = false;
   let userClosed = false;
 
   if (selectedSessionId !== undefined) {
@@ -767,25 +770,25 @@ export function createJsonRpcChatTransport(
     return sanitized;
   };
 
-  const eventSessionId = (event: ParsedEventEnvelope): string | undefined =>
-    event.sessionId ?? selectedSessionId;
-
   const findOperationForEvent = (
     event: ParsedEventEnvelope,
+    context: SocketContext,
   ): OperationRecord | undefined => {
     if (event.requestId) {
       const operation = activeRequests.get(event.requestId);
-      if (operation) {
+      if (
+        operation &&
+        operation.generation === context.generation &&
+        (event.sessionId === undefined || event.sessionId === operation.sessionId)
+      ) {
         return operation;
       }
       return undefined;
     }
-    const sessionId = eventSessionId(event);
     const matches = [...activeRequests.values()].filter(
       (record) =>
-        sessionId === undefined ||
-        selectedSessionId === undefined ||
-        sessionId === selectedSessionId,
+        record.generation === context.generation &&
+        (event.sessionId === undefined || event.sessionId === record.sessionId),
     );
     return matches.length === 1 ? matches[0] : undefined;
   };
@@ -961,11 +964,15 @@ export function createJsonRpcChatTransport(
     failContext(context, "protocol-violation", "protocol-error");
   };
 
-  const createPublicEvent = (event: ParsedEventEnvelope): JsonRpcChatEvent => {
+  const createPublicEvent = (
+    event: ParsedEventEnvelope,
+    correlatedRequestId?: string,
+  ): JsonRpcChatEvent => {
+    const requestId = event.requestId ?? correlatedRequestId;
     const base = {
       type: event.type as JsonRpcKnownEventName,
       ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-      ...(event.requestId ? { requestId: event.requestId } : {}),
+      ...(requestId ? { requestId } : {}),
       ...(event.sequence !== undefined ? { sequence: event.sequence } : {}),
       payload: event.payload,
     };
@@ -1057,16 +1064,12 @@ export function createJsonRpcChatTransport(
       return;
     }
 
-    const operation = findOperationForEvent(envelope);
+    const operation = findOperationForEvent(envelope, context);
     if (!operation) {
       failContext(context, "protocol-violation", "protocol-error");
       return;
     }
-    if (
-      envelope.sessionId &&
-      selectedSessionId &&
-      envelope.sessionId !== selectedSessionId
-    ) {
+    if (envelope.sessionId && envelope.sessionId !== operation.sessionId) {
       failContext(context, "protocol-violation", "protocol-error");
       return;
     }
@@ -1080,8 +1083,10 @@ export function createJsonRpcChatTransport(
     let event: JsonRpcChatEvent;
     try {
       // Interaction owner fields are untrusted protocol data. Validate them
-      // inside the fail-closed boundary before mutating operation state.
-      event = createPublicEvent(envelope);
+      // inside the fail-closed boundary before mutating operation state. Once
+      // sole-operation correlation succeeds, expose that stable local owner to
+      // listeners even when official Hermes omits wire request_id.
+      event = createPublicEvent(envelope, operation.id);
     } catch {
       failContext(context, "protocol-violation", "protocol-error");
       return;
@@ -1612,45 +1617,57 @@ export function createJsonRpcChatTransport(
     if (!context?.gatewayReady || currentState.status !== "ready") {
       throw new JsonRpcChatError("not-connected", currentGeneration);
     }
-
-    let created: JsonRpcCreatedSession | undefined;
-    await sendRequest(
-      context,
-      JSON_RPC_SESSION_CREATE_METHOD,
-      {},
-      "create",
-      signal,
-      (result) => {
-        created = parseCreatedSession(result);
-      },
-    );
-    if (!created) {
-      throw new JsonRpcChatError("protocol-violation", currentGeneration);
+    if (activeRequests.size > 0 || sessionTransitionPending) {
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
-    // The first prompt addresses the ephemeral live ID. REST reconciliation uses
-    // the separately returned stored ID after Hermes persists the first turn.
-    selectedSessionId = created.sessionId;
-    return created;
+
+    sessionTransitionPending = true;
+    try {
+      let created: JsonRpcCreatedSession | undefined;
+      await sendRequest(
+        context,
+        JSON_RPC_SESSION_CREATE_METHOD,
+        {},
+        "create",
+        signal,
+        (result) => {
+          created = parseCreatedSession(result);
+        },
+      );
+      if (!created) {
+        throw new JsonRpcChatError("protocol-violation", currentGeneration);
+      }
+      // The first prompt addresses the ephemeral live ID. REST reconciliation uses
+      // the separately returned stored ID after Hermes persists the first turn.
+      selectedSessionId = created.sessionId;
+      return created;
+    } finally {
+      sessionTransitionPending = false;
+    }
   };
 
-  const restore = (
+  const restore = async (
     sessionId = selectedSessionId,
     signal?: AbortSignal,
   ): Promise<void> => {
     if (sessionId === undefined) {
-      return Promise.reject(
-        new JsonRpcChatError("invalid-input", currentGeneration),
-      );
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
     validateSessionId(sessionId);
     const context = activeContext;
     if (!context?.gatewayReady || currentState.status !== "ready") {
-      return Promise.reject(
-        new JsonRpcChatError("not-connected", currentGeneration),
-      );
+      throw new JsonRpcChatError("not-connected", currentGeneration);
     }
+    if (activeRequests.size > 0 || sessionTransitionPending) {
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
+    }
+    sessionTransitionPending = true;
     selectedSessionId = sessionId;
-    return restoreInternal(context, sessionId, signal);
+    try {
+      await restoreInternal(context, sessionId, signal);
+    } finally {
+      sessionTransitionPending = false;
+    }
   };
 
   const close = (): void => {
@@ -1702,7 +1719,7 @@ export function createJsonRpcChatTransport(
       throw new JsonRpcChatError("not-connected", currentGeneration);
     }
     validatePrompt(prompt);
-    if (selectedSessionId === undefined) {
+    if (selectedSessionId === undefined || sessionTransitionPending) {
       throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
     if (requestOptions.signal?.aborted) {
@@ -1730,6 +1747,8 @@ export function createJsonRpcChatTransport(
     );
     const record: OperationRecord = {
       id,
+      sessionId: selectedSessionId,
+      generation: context.generation,
       status: "submitting",
       acknowledgementReceived: false,
       sequenceMode: "unknown",
@@ -2035,11 +2054,10 @@ function parseEventEnvelope(value: BoundedJsonValue): ParsedEventEnvelope {
       payloadObject?.session_id ??
       payloadObject?.sessionId,
   );
+  // Only envelope fields correlate an event to a prompt operation. Interactive
+  // payloads may use request_id for a distinct approval or clarification owner.
   const requestId = optionalSafeId(
-    object.request_id ??
-      object.requestId ??
-      payloadObject?.request_id ??
-      payloadObject?.requestId,
+    object.request_id ?? object.requestId,
     MAX_JSON_RPC_ID_LENGTH,
   );
   const sequenceValue = object.sequence ?? payloadObject?.sequence;
@@ -2209,8 +2227,8 @@ function findInteractionOwner(
       : ["clarification_id", "clarificationId", "request_id", "id"];
   for (const alias of aliases) {
     const value =
-      (alias === "request_id" ? event.requestId : undefined) ??
       payload?.[alias] ??
+      (alias === "request_id" ? event.requestId : undefined) ??
       payload?.[key];
     if (value !== undefined) {
       return requireOpaqueString(

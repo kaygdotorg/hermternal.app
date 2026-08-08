@@ -74,12 +74,16 @@ class BrowserChatSocket implements JsonRpcWebSocket {
     this.onmessage?.({ data: JSON.stringify({ jsonrpc: '2.0', id, result: { restored: true } }) });
   }
 
-  emitEvent(type: string, requestId: string, payload: Record<string, unknown> = {}): void {
+  emitEvent(type: string, requestId: string | undefined, payload: Record<string, unknown> = {}): void {
     this.onmessage?.({
       data: JSON.stringify({
         jsonrpc: '2.0',
         method: 'event',
-        params: { type, request_id: requestId, payload }
+        params: {
+          type,
+          ...(requestId ? { request_id: requestId } : {}),
+          payload
+        }
       })
     });
   }
@@ -626,6 +630,58 @@ describe('LiveWorkspaceSession', () => {
         status: 'complete'
       }
     ]);
+  });
+
+  it('renders request-ID-free Hermes events and reconciles completion from REST', async () => {
+    const rest = createRest([]);
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce(
+      sessionMessages([
+        { role: 'user', content: 'Hello without an event request ID' },
+        { role: 'assistant', content: 'Complete server history' }
+      ])
+    );
+
+    session.sendPrompt('Hello without an event request ID');
+    const requestId = latestPromptId(socket);
+    socket.emitEvent('message.delta', undefined, { text: 'Partial live answer' });
+
+    expect(session.current).toMatchObject({ state: 'streaming' });
+    expect(session.current.timeline).toContainEqual({
+      kind: 'streaming',
+      id: `${requestId}:stream`,
+      text: 'Partial live answer',
+      model: 'Hermes 4'
+    });
+
+    socket.emitEvent('message.complete', undefined, {
+      text: 'Complete live answer',
+      status: 'ok'
+    });
+    await flush();
+    await flush();
+
+    expect(rest.getSessionMessages).toHaveBeenLastCalledWith(
+      'session-1',
+      { limit: 500, offset: 0 },
+      expect.any(AbortSignal)
+    );
+    expect(session.current).toMatchObject({ state: 'ready' });
+    expect(session.current.timeline).toEqual([
+      {
+        kind: 'user-message',
+        id: 'session-1:message:0',
+        text: 'Hello without an event request ID'
+      },
+      {
+        kind: 'assistant-message',
+        id: 'session-1:message:1',
+        text: 'Complete server history',
+        model: 'Hermes 4',
+        status: 'complete'
+      }
+    ]);
+    expect(socket.sent.filter((frame) => JSON.parse(frame).method === 'prompt.submit')).toHaveLength(1);
   });
 
   it('does not let an earlier completion refresh erase a newer prompt', async () => {
