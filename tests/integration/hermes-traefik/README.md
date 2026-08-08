@@ -205,10 +205,16 @@ before making that runtime claim.
   the disposable Caddy proof;
 - the semantic digest of the canonical compact Traefik static/dynamic bundle and runtime inputs (not independently retained emitted-file bytes);
 - the deterministic runtime-input digest;
-- the exact parser implementation path, Git commit, blob OID, source SHA-256,
-  and focused test-source SHA-256; and
+- the exact parser implementation path, stable source-predecessor Git commit,
+  implementation blob OID, source SHA-256, and focused test-source SHA-256; and
 - the synthetic cookie, ticket, PTY, no-retry, and no-upstream model outputs; and
 - the fixed synthetic proof-run boundary (`live_run=false`, `compatible=false`).
+
+The generator walks the current `HEAD` history for the parser and focused test
+paths, selects the newest commit containing the exact current source bytes, and
+verifies both Git blobs before emitting evidence. Evidence-only or documentation
+-only descendants therefore retain the same implementation commit; uncommitted
+source drift and forged CLI provenance fail closed.
 
 The browser state is `blocked_provider` with only the fixed
 `provider_unavailable` blocker. No `gateway.ready`, `session.resume`,

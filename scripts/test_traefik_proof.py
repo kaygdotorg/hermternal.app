@@ -1572,6 +1572,53 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         ).strip()
         self.assertEqual(blob, provenance["implementation_blob"])
 
+    def test_source_predecessor_ignores_evidence_descendant_and_rejects_drift(self) -> None:
+        """Evidence-only descendants keep the source commit; source drift fails closed."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project_root = Path(temporary)
+            scripts_root = project_root / "scripts"
+            scripts_root.mkdir()
+            implementation = (ROOT / traefik_proof.PARSER_IMPLEMENTATION_PATH).read_bytes()
+            test_source = (ROOT / traefik_proof.PARSER_TEST_PATH).read_bytes()
+            (scripts_root / "traefik_proof.py").write_bytes(implementation)
+            (scripts_root / "test_traefik_proof.py").write_bytes(test_source)
+
+            def git(*arguments: str) -> str:
+                completed = subprocess.run(
+                    ["git", "-C", str(project_root), *arguments],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            git("init", "--quiet")
+            git("config", "user.name", "Hermternal test")
+            git("config", "user.email", "hermternal-test@example.invalid")
+            git("add", "scripts")
+            git("commit", "--quiet", "-m", "parser source")
+            source_commit = git("rev-parse", "HEAD")
+            (project_root / "retained-evidence.json").write_text("{}\n", encoding="utf-8")
+            git("add", "retained-evidence.json")
+            git("commit", "--quiet", "-m", "evidence only")
+            evidence_commit = git("rev-parse", "HEAD")
+
+            provenance = traefik_proof._current_parser_provenance(project_root)
+            self.assertEqual(provenance["implementation_commit"], source_commit)
+            self.assertNotEqual(provenance["implementation_commit"], evidence_commit)
+            self.assertEqual(provenance["implementation_sha256"], hashlib.sha256(implementation).hexdigest())
+            self.assertEqual(provenance["test_source_sha256"], hashlib.sha256(test_source).hexdigest())
+
+            (scripts_root / "traefik_proof.py").write_bytes(implementation + b"\n")
+            with self.assertRaisesRegex(ValueError, "source predecessor"):
+                traefik_proof._current_parser_provenance(project_root)
+
+        forged = self._parser_provenance()
+        forged["implementation_commit"] = "0" * 40
+        with self.assertRaisesRegex(ValueError, "does not match committed parser sources"):
+            traefik_proof._normalize_parser_provenance(forged)
+
     def test_evidence_is_exact_canonical_cli_output(self) -> None:
         manifest = traefik_proof.render_manifest(
             build_sha=EXPECTED_BUILD_SHA,
