@@ -1,0 +1,28 @@
+{
+  "schema": "hermternal.pty-retry-authorization-benchmark.v1",
+  "operation": "same-identity retry decision blocked after 4409",
+  "metric": {
+    "name": "blocked_retry_decision_wall_time",
+    "unit": "ms",
+    "clock": "performance.now"
+  },
+  "method": "R-7 inclusive linear interpolation",
+  "repetitions": 1000,
+  "warmups": 100,
+  "exclusions": [
+    "ticket minting",
+    "socket creation",
+    "rendering",
+    "network"
+  ],
+  "authorizationProof": {
+    "ticketCalls": 1,
+    "socketCreations": 1
+  },
+  "distribution": {
+    "p50": 0.000708,
+    "p95": 0.002461,
+    "p99": 0.004835
+  },
+  "threshold": null
+}

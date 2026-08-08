@@ -768,7 +768,9 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
 
   const stop = (closing: boolean): void => {
     userClosed = true;
-    explicitlyClosed = closing;
+    // Close is an authorization latch. Later cleanup calls cannot weaken it;
+    // only an explicit connect records replacement user intent.
+    if (closing) explicitlyClosed = true;
     reattachBlocked = undefined;
     const generation = ++currentGeneration;
     const input = currentInput;
