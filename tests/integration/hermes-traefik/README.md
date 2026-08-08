@@ -45,8 +45,10 @@ canonical authority is `traefik-92.test:19444`), `X-Forwarded-For`,
 and `X-Forwarded-Uri`. A present, syntactically valid but noncanonical
 `X-Forwarded-Host` is passed to the policy model and returns the retained edge
 `421`. Empty, whitespace/control, missing-port, malformed host/port/bracket, or
-userinfo authorities are rejected at the adapter boundary with `400`; duplicate
-ForwardAuth metadata is also `400`. DNS authorities use the shared grammar:
+userinfo authorities are rejected at the adapter boundary with `400`; a valid
+bracketed IPv6 authority is syntactically valid but remains a noncanonical edge
+`421`, while duplicate ForwardAuth metadata is `400`. DNS authorities use the
+shared grammar:
 each label is nonempty, at most 63 bytes, bounded by ASCII alphanumerics, and
 contains only interior hyphens; the host is at most 253 bytes and trailing dots
 are rejected. Ports use canonical decimal syntax with no leading zero and must
@@ -55,10 +57,16 @@ consistently across the generated fields and copied `Origin`; trailing or
 internal SP/HTAB is rejected with `400`. Obsolete folded continuation lines are
 also rejected before `BaseHTTPRequestHandler` can normalize them. The same DNS grammar validates the
 configured runtime host, so malformed renderer inputs fail as configuration
-errors. This keeps the real wrong-host ForwardAuth request aligned with the
-synthetic vector instead of replacing it with a canonical header. Only copied
-`Origin` is permitted beside that generated set. The adapter's ordinary `Host`
-is an ignored ForwardAuth-service transport header, not the public authority.
+errors. `X-Forwarded-Method` is a nonempty HTTP token. `X-Forwarded-For` is one
+or more canonical IPv4/IPv6 addresses separated only by commas with optional
+SP/HTAB around each delimiter; garbage, empty entries, and embedded whitespace
+are rejected. A present `Origin` is a nonempty `http`/`https` serialized origin
+or `null`; present OWS-only Origin is an adapter `400`, while an absent Origin
+remains allowed for non-WebSocket routes. This keeps the real wrong-host
+ForwardAuth request aligned with the synthetic vector instead of replacing it
+with a canonical header. Only copied `Origin` is permitted beside that generated
+set. The adapter's ordinary `Host` is an ignored ForwardAuth-service transport
+header, not the public authority.
 `Content-Length`, `User-Agent`, `Accept-Encoding`, and `Connection: close` are
 explicit bounded transport exceptions; they are never policy input or upstream
 forwarding. Malformed or oversized `Content-Length` is a separate `413` framing
