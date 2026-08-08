@@ -277,27 +277,23 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   ): Promise<TerminalBinding> {
     if (this.disposed) throw new PtyTransportError("closed");
     if (signal.aborted) throw new PtyTransportError("aborted");
+    const pendingAttach = this.pendingAttach;
+    if (pendingAttach !== undefined) {
+      // Attachment issuance is also an ownership attempt. Serialize every caller
+      // behind it, so a same-session caller cannot receive a provisional lease.
+      await pendingAttach.completion;
+      return this.attach(sessionId, signal);
+    }
     if (
       this.activeBinding?.valid &&
       this.activeBinding.sessionId === sessionId
     ) {
-      const pendingAttach = this.pendingAttach;
-      if (pendingAttach?.token === this.activeBinding.token) {
-        // A lease exists before its adapter call settles, but it is not usable.
-        // Same-session callers join its actual outcome instead of resolving early.
-        await pendingAttach.completion;
-        if (
-          this.activeBinding?.valid &&
-          this.activeBinding.sessionId === sessionId
-        )
-          return this.activeBinding;
-        return this.attach(sessionId, signal);
-      }
       return this.activeBinding;
     }
+
     // An arbitrary adapter can ignore cancellation and claim raw PTY ownership
     // after its caller leaves. Invalidate A, then wait for its one cleanup before
-    // recursively rechecking ownership and allowing B to touch the shared adapter.
+    // allowing this attachment to touch the shared adapter.
     if (
       this.pendingTransportOperation !== undefined ||
       this.quarantinedTransportOperations.size > 0
@@ -306,38 +302,40 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       await this.waitForQuarantinedTransportOperations(signal);
       return this.attach(sessionId, signal);
     }
-    this.invalidateActiveBinding();
-    await this.waitForRendererReady(signal);
-    if (this.disposed) throw new PtyTransportError("closed");
-    if (signal.aborted) throw new PtyTransportError("aborted");
 
-    this.explicitlyClosed = false;
     const token = {};
-    const binding: ActiveBinding = {
-      token,
-      sessionId,
-      valid: true,
-      invalidate: () => {
-        if (!binding.valid) return;
-        binding.valid = false;
-        if (this.activeBinding?.token !== token) return;
-        this.activeBinding = undefined;
-        this.reconnectingSessionId =
-          this.reconnectingSessionId === sessionId
-            ? undefined
-            : this.reconnectingSessionId;
-        this.invalidatedSessionId = sessionId;
-        if (!this.invalidatePendingTransportOperation(token, "detach")) {
-          this.cleanupTransport("detach");
-        }
-      },
-      isValid: () => binding.valid,
-    };
-    this.reconnectingSessionId = undefined;
-    this.activeBinding = binding;
     const attachAttempt = this.beginAttachAttempt(token, sessionId);
-
+    let binding: ActiveBinding | undefined;
     try {
+      this.invalidateActiveBinding();
+      await this.waitForRendererReady(signal);
+      if (this.disposed) throw new PtyTransportError("closed");
+      if (signal.aborted) throw new PtyTransportError("aborted");
+
+      this.explicitlyClosed = false;
+      binding = {
+        token,
+        sessionId,
+        valid: true,
+        invalidate: () => {
+          if (!binding?.valid) return;
+          binding.valid = false;
+          if (this.activeBinding?.token !== token) return;
+          this.activeBinding = undefined;
+          this.reconnectingSessionId =
+            this.reconnectingSessionId === sessionId
+              ? undefined
+              : this.reconnectingSessionId;
+          this.invalidatedSessionId = sessionId;
+          if (!this.invalidatePendingTransportOperation(token, "detach")) {
+            this.cleanupTransport("detach");
+          }
+        },
+        isValid: () => binding?.valid ?? false,
+      };
+      this.reconnectingSessionId = undefined;
+      this.activeBinding = binding;
+
       let attachment: CurrentSessionTerminalAttachment | undefined;
       try {
         attachment = this.createAttachment
@@ -387,7 +385,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         this.completeTransportOperation(operation);
       }
     } catch (error) {
-      binding.valid = false;
+      if (binding) binding.valid = false;
       if (this.activeBinding?.token === token) {
         this.activeBinding = undefined;
         this.reconnectingSessionId =
@@ -493,7 +491,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     const binding = this.activeBinding;
     const token = binding?.token ?? {};
     this.reconnectingSessionId = reconnectingSessionId;
-    const operation = this.beginTransportOperation(token, reconnectingSessionId);
+    const operation = this.beginTransportOperation(
+      token,
+      reconnectingSessionId,
+    );
     try {
       operation.transportStarted = true;
       await this.transport.reconnect(signal);
@@ -993,7 +994,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     if (
       event.state.status === "detached" ||
       event.state.status === "failed" ||
-      event.state.status === "exited"
+      event.state.status === "exited" ||
+      // A native close is terminal even without an explicit user Close action.
+      // Keep no coordinator lease that a later same-session activation could reuse.
+      event.state.status === "closed"
     ) {
       if (
         pending !== undefined &&
@@ -1081,7 +1085,10 @@ function normalizeBridgeError(
   // Adapter errors are an untrusted boundary, including objects branded as a
   // PtyTransportError. Reconstruct only reviewed code and bounded generation;
   // this drops foreign messages, causes, stack decorations, and own properties.
-  if (error instanceof PtyTransportError && BRIDGE_ERROR_CODES.has(error.code)) {
+  if (
+    error instanceof PtyTransportError &&
+    BRIDGE_ERROR_CODES.has(error.code)
+  ) {
     const generation =
       typeof error.generation === "number" &&
       Number.isSafeInteger(error.generation) &&
