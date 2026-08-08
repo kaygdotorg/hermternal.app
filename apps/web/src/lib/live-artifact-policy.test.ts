@@ -62,15 +62,22 @@ describe('live Playwright artifact policy', () => {
       errorContext: '- textbox "synthetic-user": synthetic-password'
     };
     const errors = [rootError, serializedTestInfoError];
+    const sanitized = redactTestErrors(errors, [
+      'synthetic-user',
+      'synthetic-password'
+    ]) as Array<Record<string, unknown>>;
+    const sanitizedRoot = sanitized[0];
+    const sanitizedCause = sanitizedRoot.cause as Record<string, unknown>;
+    const sanitizedMatcherResult = sanitizedRoot.matcherResult as Record<string, unknown>;
 
-    redactTestErrors(errors, ['synthetic-user', 'synthetic-password']);
-
-    expect(rootError.message).toBe(`expect(locator).toHaveText: ${LIVE_ARTIFACT_REDACTION}`);
-    expect(rootError.stack).toContain(LIVE_ARTIFACT_REDACTION);
-    expect(rootError.errorContext).toBe(
+    expect(sanitizedRoot.message).toBe(
+      `expect(locator).toHaveText: ${LIVE_ARTIFACT_REDACTION}`
+    );
+    expect(sanitizedRoot.stack).toContain(LIVE_ARTIFACT_REDACTION);
+    expect(sanitizedRoot.errorContext).toBe(
       `- textbox "${LIVE_ARTIFACT_REDACTION}": ${LIVE_ARTIFACT_REDACTION}`
     );
-    expect(rootError.matcherResult).toEqual({
+    expect(sanitizedMatcherResult).toEqual({
       message: `expect(locator).toHaveValue: ${LIVE_ARTIFACT_REDACTION}`,
       actual: `<input id="auth-password" value="${LIVE_ARTIFACT_REDACTION}">`,
       expected: LIVE_ARTIFACT_REDACTION,
@@ -80,17 +87,31 @@ describe('live Playwright artifact policy', () => {
       ],
       ariaSnapshot: `- textbox "${LIVE_ARTIFACT_REDACTION}": ${LIVE_ARTIFACT_REDACTION}`
     });
-    expect(nestedCause.message).toBe(`nested ${LIVE_ARTIFACT_REDACTION}`);
-    expect(nestedCause.stack).toContain(LIVE_ARTIFACT_REDACTION);
-    expect(serializedTestInfoError).toEqual({
-      location: sourceLocation,
+    expect(sanitizedCause.message).toBe(`nested ${LIVE_ARTIFACT_REDACTION}`);
+    expect(sanitizedCause.stack).toContain(LIVE_ARTIFACT_REDACTION);
+    expect(sanitized[1]).toEqual({
       message: `expect(locator).toHaveText: ${LIVE_ARTIFACT_REDACTION}`,
       stack: `<textarea>${LIVE_ARTIFACT_REDACTION}</textarea>`,
       value: LIVE_ARTIFACT_REDACTION,
       errorContext: `- textbox "${LIVE_ARTIFACT_REDACTION}": ${LIVE_ARTIFACT_REDACTION}`
     });
+    // The source graph is intentionally untouched; only the returned snapshot
+    // is suitable for a reporter or retained TestInfo error.
+    expect(rootError.message).toContain('synthetic-password');
+    expect(serializedTestInfoError.value).toBe('synthetic-password');
 
-    expect(redactLiveText('<input value="unlisted-value">', [])).toContain(LIVE_ARTIFACT_REDACTION);
+    const unlistedQuotedValue = redactLiveText('<input value="unlisted-value">', []) as string;
+    const unlistedUnquotedValue = redactLiveText('<input value=unlisted-value>', []) as string;
+    const unknownValueAttribute = redactLiveText(
+      '<div data-note="value=unlisted-value" value=unlisted-value>label</div>',
+      []
+    ) as string;
+    expect(unlistedQuotedValue).toContain(LIVE_ARTIFACT_REDACTION);
+    expect(unlistedUnquotedValue).toContain(LIVE_ARTIFACT_REDACTION);
+    expect(unknownValueAttribute).toContain(LIVE_ARTIFACT_REDACTION);
+    expect(unlistedUnquotedValue).not.toContain('unlisted-value');
+    expect(unknownValueAttribute).toContain('data-note="value=unlisted-value"');
+    expect(unknownValueAttribute).toContain(`value=${LIVE_ARTIFACT_REDACTION}`);
     const unlistedFormMarkup = redactLiveText(
       '<select><option>unlisted-option</option></select><div contenteditable>unlisted-editable</div>',
       []
@@ -159,6 +180,22 @@ describe('live Playwright artifact policy', () => {
     ) as string;
     expect(unknownMode).toContain(LIVE_ARTIFACT_REDACTION);
     expect(unknownMode).not.toContain('unknown-credential');
+
+    const dataNoteProbe = redactLiveText(
+      '<div data-note="contenteditable=false" contenteditable="true">synthetic-password</div>',
+      []
+    ) as string;
+    expect(dataNoteProbe).toContain(
+      `<div data-note="contenteditable=false" contenteditable="true">${LIVE_ARTIFACT_REDACTION}</div>`
+    );
+    expect(dataNoteProbe).not.toContain('synthetic-password');
+
+    const duplicateAttributeProbe = redactLiveText(
+      '<div contenteditable="false" contenteditable="true">synthetic-password</div>',
+      []
+    ) as string;
+    expect(duplicateAttributeProbe).toContain(LIVE_ARTIFACT_REDACTION);
+    expect(duplicateAttributeProbe).not.toContain('synthetic-password');
   });
 
   it('fails closed for unterminated comments before or inside editable markup', () => {
@@ -178,15 +215,19 @@ describe('live Playwright artifact policy', () => {
     }
   });
 
-  it('fails closed when diagnostic writes are rejected, silent, or unreadable', () => {
-    const falseSetter = new Proxy(
-      { message: 'synthetic-password' },
-      { set: () => false }
-    );
+  it('fails closed for unreadable diagnostics and never relies on source writes', () => {
+    const falseSetterTarget = { message: 'synthetic-password' };
+    const falseSetter = new Proxy(falseSetterTarget, { set: () => false });
     const silentSetterTarget = { message: 'synthetic-password' };
-    const silentSetter = new Proxy(silentSetterTarget, {
-      set: () => true
-    });
+    const silentSetter = new Proxy(silentSetterTarget, { set: () => true });
+    const falseSnapshot = redactTestErrors([falseSetter], ['synthetic-password']);
+    const silentSnapshot = redactTestErrors([silentSetter], ['synthetic-password']);
+
+    expect(JSON.stringify(falseSnapshot)).not.toContain('synthetic-password');
+    expect(JSON.stringify(silentSnapshot)).not.toContain('synthetic-password');
+    expect(falseSetterTarget.message).toBe('synthetic-password');
+    expect(silentSetterTarget.message).toBe('synthetic-password');
+
     const throwingGetter = {};
     Object.defineProperty(throwingGetter, 'message', {
       configurable: true,
@@ -205,13 +246,6 @@ describe('live Playwright artifact policy', () => {
       }
     );
 
-    expect(() => redactTestErrors([falseSetter], ['synthetic-password'])).toThrow(
-      'redaction failed'
-    );
-    expect(() => redactTestErrors([silentSetter], ['synthetic-password'])).toThrow(
-      'redaction failed'
-    );
-    expect(silentSetterTarget.message).toBe('synthetic-password');
     expect(() => redactTestErrors([throwingGetter], ['synthetic-password'])).toThrow(
       'redaction failed'
     );
@@ -220,7 +254,7 @@ describe('live Playwright artifact policy', () => {
     );
   });
 
-  it('verifies unchanged data and accessor reads and rejects spoofed or incomplete descriptors', () => {
+  it('checks descriptor read-back and fails closed for spoofed or incomplete descriptors', () => {
     const spoofedDataTarget = { message: LIVE_ARTIFACT_REDACTION };
     const spoofedData = new Proxy(spoofedDataTarget, {
       get: (target, key, receiver) =>
@@ -232,9 +266,11 @@ describe('live Playwright artifact policy', () => {
         configurable: true
       })
     });
-    expect(() => redactTestErrors([spoofedData], ['synthetic-password'])).toThrow(
-      'redaction failed'
-    );
+    const spoofedDataSnapshot = redactTestErrors([spoofedData], [
+      'synthetic-password'
+    ]) as Array<Record<string, unknown>>;
+    expect(spoofedDataSnapshot[0].message).toBe(LIVE_ARTIFACT_REDACTION);
+    expect(JSON.stringify(spoofedDataSnapshot)).not.toContain('synthetic-password');
 
     const incompleteDataTarget = { message: LIVE_ARTIFACT_REDACTION };
     const incompleteData = new Proxy(incompleteDataTarget, {
@@ -266,9 +302,11 @@ describe('live Playwright artifact policy', () => {
         set: accessorSetter
       })
     });
-    expect(() => redactTestErrors([spoofedAccessor], ['synthetic-password'])).toThrow(
-      'redaction failed'
-    );
+    const spoofedAccessorSnapshot = redactTestErrors([spoofedAccessor], [
+      'synthetic-password'
+    ]) as Array<Record<string, unknown>>;
+    expect(spoofedAccessorSnapshot[0].message).toBe(LIVE_ARTIFACT_REDACTION);
+    expect(accessorValue).toBe('synthetic-password');
 
     let ordinaryAccessorValue = 'synthetic-password';
     const ordinaryAccessor = {};
@@ -280,8 +318,11 @@ describe('live Playwright artifact policy', () => {
         ordinaryAccessorValue = value;
       }
     });
-    redactTestErrors([ordinaryAccessor], ['synthetic-password']);
-    expect(ordinaryAccessorValue).toBe(LIVE_ARTIFACT_REDACTION);
+    const ordinarySnapshot = redactTestErrors([ordinaryAccessor], [
+      'synthetic-password'
+    ]) as Array<Record<string, unknown>>;
+    expect(ordinarySnapshot[0].message).toBe(LIVE_ARTIFACT_REDACTION);
+    expect(ordinaryAccessorValue).toBe('synthetic-password');
 
     const incompleteAccessorTarget = {};
     Object.defineProperty(incompleteAccessorTarget, 'message', {
@@ -296,6 +337,41 @@ describe('live Playwright artifact policy', () => {
     expect(() => redactTestErrors([incompleteAccessor], ['synthetic-password'])).toThrow(
       'redaction failed'
     );
+  });
+
+  it('detaches stateful Proxy diagnostics and suppresses unsafe toJSON hooks', () => {
+    let reads = 0;
+    const alternating = new Proxy(
+      { message: 'synthetic-password' },
+      {
+        get: (target, key, receiver) => {
+          if (key === 'message') {
+            reads += 1;
+            return reads % 2 === 0
+              ? 'synthetic-password'
+              : LIVE_ARTIFACT_REDACTION;
+          }
+          return Reflect.get(target, key, receiver);
+        }
+      }
+    );
+
+    const sanitized = redactTestErrors([alternating], [
+      'synthetic-password'
+    ]);
+    const serialized = JSON.stringify(sanitized);
+    expect(serialized).not.toContain('synthetic-password');
+    expect(serialized).toContain(LIVE_ARTIFACT_REDACTION);
+
+    const diagnostic = { message: 'safe' };
+    Object.defineProperty(diagnostic, 'toJSON', {
+      enumerable: true,
+      value: () => ({ leaked: 'synthetic-password' })
+    });
+    const sanitizedWithToJson = redactTestErrors([diagnostic], [
+      'synthetic-password'
+    ]);
+    expect(JSON.stringify(sanitizedWithToJson)).not.toContain('synthetic-password');
   });
 
   it('scrubs every valid editable content mode before page teardown', async () => {
@@ -382,8 +458,13 @@ describe('live Playwright artifact policy', () => {
   it('handles cycles and rejects bounded traversal overflow', () => {
     const cyclic: Record<string, unknown> = { message: 'synthetic-password' };
     cyclic.self = cyclic;
-    redactTestErrors([cyclic], ['synthetic-password']);
-    expect(cyclic.message).toBe(LIVE_ARTIFACT_REDACTION);
+    const sanitized = redactTestErrors([cyclic], [
+      'synthetic-password'
+    ]) as Array<Record<string, unknown>>;
+    expect(sanitized[0].message).toBe(LIVE_ARTIFACT_REDACTION);
+    expect(sanitized[0].self).toBe(LIVE_ARTIFACT_REDACTION);
+    expect(JSON.stringify(sanitized)).not.toContain('synthetic-password');
+    expect(cyclic.message).toBe('synthetic-password');
     expect(cyclic.self).toBe(cyclic);
 
     let deep: Record<string, unknown> = { value: 'synthetic-password' };
@@ -395,21 +476,63 @@ describe('live Playwright artifact policy', () => {
     expect(() => redactLiveText('x'.repeat(256 * 1024 + 1), [])).toThrow('budget');
   });
 
+  it('replaces retained errors with trusted snapshots before cleanup', async () => {
+    const outputRoot = liveArtifactOutputDirectory();
+    await mkdir(outputRoot, { recursive: true });
+    await writeFile(join(outputRoot, 'error-context.md'), 'synthetic-password', 'utf8');
+
+    const sourceDiagnostic = { message: 'synthetic-password' };
+    const testInfo = {
+      attachments: [{ name: 'live-error', path: join(outputRoot, 'error-context.md') }],
+      errors: [sourceDiagnostic],
+      outputDir: outputRoot
+    };
+
+    const sourceScrubError = new Error('scrub failed synthetic-password');
+    let thrown: unknown;
+    try {
+      await finalizeLiveTest({
+        testInfo,
+        scrubError: sourceScrubError,
+        secrets: ['synthetic-password']
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(thrown).not.toBe(sourceScrubError);
+    expect((thrown as Record<string, unknown>).message).toBe(
+      `scrub failed ${LIVE_ARTIFACT_REDACTION}`
+    );
+    expect(JSON.stringify(thrown)).not.toContain('synthetic-password');
+    expect(testInfo.attachments).toHaveLength(0);
+    expect(testInfo.errors).toHaveLength(1);
+    expect((testInfo.errors[0] as { message: string }).message).toBe(
+      LIVE_ARTIFACT_REDACTION
+    );
+    expect(JSON.stringify(testInfo.errors)).not.toContain('synthetic-password');
+    expect(sourceDiagnostic.message).toBe('synthetic-password');
+    expect(await exists(outputRoot)).toBe(false);
+  });
+
   it('runs attachment and output cleanup before propagating a redaction failure', async () => {
     const outputRoot = liveArtifactOutputDirectory();
     await mkdir(outputRoot, { recursive: true });
     await writeFile(join(outputRoot, 'error-context.md'), 'synthetic-password', 'utf8');
 
-    const immutableDiagnostic = {} as { message: string };
-    Object.defineProperty(immutableDiagnostic, 'message', {
-      configurable: false,
+    const throwingDiagnostic = {};
+    Object.defineProperty(throwingDiagnostic, 'message', {
+      configurable: true,
       enumerable: true,
-      value: 'synthetic-password',
-      writable: false
+      get: () => {
+        throw new Error('diagnostic getter failed');
+      },
+      set: () => undefined
     });
     const testInfo = {
       attachments: [{ name: 'live-error', path: join(outputRoot, 'error-context.md') }],
-      errors: [immutableDiagnostic],
+      errors: [throwingDiagnostic],
       outputDir: outputRoot
     };
 
@@ -417,6 +540,8 @@ describe('live Playwright artifact policy', () => {
       finalizeLiveTest({ testInfo, secrets: ['synthetic-password'] })
     ).rejects.toThrow('redaction failed');
     expect(testInfo.attachments).toHaveLength(0);
+    expect(testInfo.errors).toEqual([LIVE_ARTIFACT_REDACTION]);
+    expect(JSON.stringify(testInfo.errors)).not.toContain('synthetic-password');
     expect(await exists(outputRoot)).toBe(false);
   });
 
@@ -431,6 +556,15 @@ describe('live Playwright artifact policy', () => {
 
     expect(await exists(outputRoot)).toBe(false);
     expect(outputRoot).not.toContain(`${join('apps', 'web', 'test-results')}`);
+
+    // Recreating the exact path without the run-owned marker must not inherit
+    // the deleted root's ownership token or become cleanup-eligible.
+    await mkdir(outputRoot, { recursive: true });
+    const recreatedArtifact = join(outputRoot, 'recreated.txt');
+    await writeFile(recreatedArtifact, 'synthetic-password', 'utf8');
+    await removeLiveArtifacts(outputRoot);
+    expect(await exists(recreatedArtifact)).toBe(true);
+    await rm(outputRoot, { recursive: true, force: true });
 
     const descendantRoot = liveArtifactOutputDirectory();
     const descendant = join(descendantRoot, 'nested');

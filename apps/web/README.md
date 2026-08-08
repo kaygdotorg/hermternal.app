@@ -123,9 +123,12 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   field transitions, and submits from the password control. The opt-in live lane uses a run-owned temporary
   root with exact-root cleanup, disabled media artifacts, a status-only reporter, bounded descriptor-aware
   structured-error redaction (including native Error causes, Playwright `errorContext`, matcher results,
-  logs, and ARIA snapshots), verified descriptor/read-back writes for data and accessor properties, and
-  balanced serialized contenteditable comments. Malformed or unknown markup and encoded credentials fail
-  closed rather than allowing a later editable element to be skipped. Scrub failures fail
+  logs, and ARIA snapshots) into detached trusted snapshots, with descriptor/read-back checks for data and
+  accessor properties and no retained source graph. Own `toJSON` hooks, stateful or inconsistent properties,
+  incomplete descriptors, malformed values, and over-budget graphs fail closed. Balanced serialized
+  contenteditable comments and actual `value` attributes are scanned, including unquoted values. Malformed
+  or unknown markup, duplicate or ambiguous attributes, and encoded credentials fail closed rather than
+  allowing a later editable element to be skipped. Scrub failures fail
   the proof unless `page.isClosed()` returns `true`; generic error text
   such as `page crashed` is never accepted as termination proof. Attachments and output cleanup run in
   `finally` even when redaction fails, so a failed proof cannot retain synthetic credentials in traces,
