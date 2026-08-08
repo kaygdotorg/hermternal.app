@@ -16,7 +16,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
 import validate
+from fixture_authority_test_source import PROTECTED_OBJECTS, seed_protected_objects
 
 
 AUTHORITY_PIN_PATH = validate.REPO_ROOT / "scripts/fixture_registry_authority.v2.hardened.pin.json"
@@ -60,49 +65,22 @@ def _protected_authority_objects() -> tuple[tuple[str, str], ...]:
     """Return every external authority/source object required by aggregate trust."""
 
     active = _active_authority_environment()
-    return (
+    pinned = (
         ("historical-authority", validate.EXPECTED_HISTORICAL_AUTHORITY_COMMIT),
         ("historical-source", validate.EXPECTED_HISTORICAL_SOURCE_COMMIT),
         ("active-authority", active[validate.ACTIVE_AUTHORITY_COMMIT_ENV]),
         ("active-source", active[validate.ACTIVE_SOURCE_COMMIT_ENV]),
     )
+    if pinned != PROTECTED_OBJECTS:
+        raise AssertionError("aggregate runtime pins differ from the trusted bundle")
+    return pinned
 
 
-def _seed_protected_objects(repository: Path, *, source: Path = validate.REPO_ROOT) -> None:
-    """Seed all pinned authority/source commits into a fresh plain clone.
+def _seed_protected_objects(repository: Path) -> None:
+    """Seed the exact four pins from the repository-versioned trusted bundle."""
 
-    A local-path clone can copy unreachable objects and make a missing trust input
-    look present. Fetch each externally pinned object into a local fixture ref so
-    these aggregate tests exercise the same fail-closed object-repository contract.
-    """
-
-    protected = _protected_authority_objects()
-    completed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            "fetch",
-            "--no-tags",
-            "--quiet",
-            str(source),
-            *(f"{commit}:refs/fixture-authority/{name}" for name, commit in protected),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise AssertionError(completed.stderr or completed.stdout)
-    for name, commit in protected:
-        verified = subprocess.run(
-            ["git", "-C", str(repository), "cat-file", "-t", commit],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if verified.returncode != 0 or verified.stdout.strip() != "commit":
-            raise AssertionError(f"protected {name} object missing: {commit}")
+    _protected_authority_objects()
+    seed_protected_objects(repository)
 
 
 def _assert_protected_objects_missing(repository: Path) -> None:
