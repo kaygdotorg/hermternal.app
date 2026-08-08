@@ -540,6 +540,9 @@ def _validate_text_file(path: Path) -> None:
 # bounded so a malformed group cannot hide a URL from the fixture scanner.
 REGEX_SCHEME_CANDIDATES = ("https://", "http://", "wss://", "ws://")
 MAX_REGEX_SCHEME_SOURCE_LENGTH = 64
+# Use the explicit ASCII intersection of Python and ECMAScript group names;
+# accepting arbitrary header text could hide a URL or unknown regex escape.
+REGEX_GROUP_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 MAX_REGEX_GROUP_SOURCE_LENGTH = 128
 _REGEX_GROUP_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -559,11 +562,19 @@ def _regex_group_body_start(text: str, index: int) -> tuple[int | None, int, boo
         return index + 4, 1, True
     if text.startswith("(?<!", index):
         return index + 4, -1, True
-    if text.startswith("(?P<", index) or text.startswith("(?<", index):
-        closing = text.find(">", index + 3, min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH))
-        if closing >= 0:
-            return closing + 1, 0, True
-        return None, 0, False
+    if text.startswith("(?P<", index):
+        header_start = index + 4
+    elif text.startswith("(?<", index):
+        header_start = index + 3
+    else:
+        header_start = None
+    if header_start is not None:
+        limit = min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH)
+        closing = text.find(">", header_start, limit)
+        require(closing >= 0, "named regex group header is incomplete")
+        name = text[header_start:closing]
+        require(REGEX_GROUP_NAME_PATTERN.fullmatch(name) is not None, "named regex group header is malformed")
+        return closing + 1, 0, True
     if text.startswith("(?", index):
         limit = min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH)
         colon = text.find(":", index + 2, limit)

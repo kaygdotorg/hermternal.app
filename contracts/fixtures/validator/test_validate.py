@@ -269,6 +269,72 @@ class CliTests(unittest.TestCase):
             completed = self._run_scanner(artifact, optimized=optimized)
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_malformed_named_group_headers_fail_closed_in_both_modes(self) -> None:
+        """Do not let malformed group metadata hide schemes or authorities."""
+
+        slash = chr(92)
+        host = ".".join(("api", "live", "invalid"))
+        schemes = ("http", "https", "ws", "wss")
+        port_variants = ("abc", "0", "65536")
+        for opener in ("(?P<", "(?<"):
+            for width in (64, 65, 127, 128, 129):
+                for scheme in schemes:
+                    pattern = opener + ("x" * width) + scheme + "://" + host + "/x>safe)"
+                    with self.subTest(opener=opener, width=width, scheme=scheme):
+                        self._assert_scanner_rejects_in_both_modes(
+                            "connection-restoration/validate.py",
+                            ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                        )
+                for port in port_variants:
+                    pattern = opener + ("x" * width) + "https://" + host + ":" + port + "/x>safe)"
+                    with self.subTest(opener=opener, width=width, port=port):
+                        self._assert_scanner_rejects_in_both_modes(
+                            "connection-restoration/validate.py",
+                            ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                        )
+                dynamic = opener + ("x" * width) + "h(?:t|T)tps://" + host + "/x>safe)"
+                with self.subTest(opener=opener, width=width, dynamic=True):
+                    self._assert_scanner_rejects_in_both_modes(
+                        "connection-restoration/validate.py",
+                        ("re.compile(r'" + dynamic + "')\n").encode("utf-8"),
+                    )
+                unknown = opener + ("x" * width) + slash + "Q>safe)"
+                with self.subTest(opener=opener, width=width, unknown_escape=True):
+                    self._assert_scanner_rejects_in_both_modes(
+                        "connection-restoration/validate.py",
+                        ("re.compile(r'" + unknown + "')\n").encode("utf-8"),
+                    )
+
+    def test_valid_named_groups_and_structural_boundaries_remain_bounded(self) -> None:
+        """Keep valid names and exact 64/65/127/128/129 group boundaries."""
+
+        host = ".".join(("synthetic", "invalid"))
+        for opener in ("(?P<", "(?<"):
+            pattern = opener + "url>" + host + ")"
+            with self.subTest(named_opener=opener):
+                self._assert_scanner_accepts_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
+        for opener in ("(?:", "(?P<n>", "(?<n>"):
+            for total_length in (64, 65, 127, 128):
+                body_length = total_length - len(opener) - 1
+                pattern = opener + ("x" * body_length) + ")"
+                with self.subTest(opener=opener, total_length=total_length):
+                    self._assert_scanner_accepts_in_both_modes(
+                        "connection-restoration/validate.py",
+                        ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                    )
+            total_length = 129
+            body_length = total_length - len(opener) - 1
+            pattern = opener + ("x" * body_length) + ")"
+            with self.subTest(opener=opener, total_length=total_length):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
     @staticmethod
     def _distribution(samples: list[float]) -> dict[str, float]:
         ordered = sorted(samples)
