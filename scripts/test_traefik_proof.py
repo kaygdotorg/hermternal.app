@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -77,6 +80,66 @@ class TraefikRendererTests(unittest.TestCase):
             headers=self._headers() if headers is None else headers,
         )
 
+    def test_all_retained_route_cases_execute_private_vectors(self) -> None:
+        cases = [*traefik_proof.POSITIVE_CASES, *traefik_proof.NEGATIVE_CASES]
+        case_ids = [case["id"] for case in cases]
+        self.assertEqual(case_ids, list(traefik_proof.ROUTE_CASE_VECTORS))
+        self.assertEqual([case["vector_id"] for case in cases], case_ids)
+        self.assertEqual(len(case_ids), 34)
+
+        executed: dict[str, dict[str, object]] = {}
+        for case in cases:
+            case_id = str(case["id"])
+            vector = traefik_proof.ROUTE_CASE_VECTORS[case_id]
+            with self.subTest(case=case_id):
+                if vector["kind"] != "network":
+                    policy_observed = traefik_proof.policy_decision_for_case(case, self.inputs)
+                    expected_policy = vector.get(
+                        "policy_expected",
+                        {
+                            "status": case["status"],
+                            "layer": case["layer"],
+                            "upstream_request": case["upstream_request"],
+                        },
+                    )
+                    self.assertEqual(
+                        {key: policy_observed[key] for key in ("status", "layer", "upstream_request")},
+                        expected_policy,
+                    )
+                observed = traefik_proof.route_case_observation(case, self.inputs)
+                self.assertEqual(
+                    {key: observed[key] for key in ("status", "layer", "upstream_request")},
+                    {key: case[key] for key in ("status", "layer", "upstream_request")},
+                )
+                executed[case_id] = observed
+
+        for case_id in ("deep_link_session", "deep_link_message"):
+            vector = traefik_proof.ROUTE_CASE_VECTORS[case_id]
+            self.assertEqual(traefik_proof.spa_fallback_path(str(vector["path"])), "/200.html")
+        self.assertEqual(
+            self.middlewares["dashboard-hermes-headers"]["headers"]["customRequestHeaders"],
+            traefik_proof._request_headers("traefik-92.test:19444", 19444, 19257, "/hermes"),
+        )
+
+        ticket_ledger = traefik_proof.SyntheticTicketLedger()
+        self.assertEqual(ticket_ledger.consume("unknown", now=0), "invalid")
+        ticket_ledger.issue("expired", now=0)
+        self.assertEqual(ticket_ledger.consume("expired", now=traefik_proof.TICKET_TTL_SECONDS), "expired")
+        ticket_ledger.issue("reuse", now=0)
+        self.assertEqual(ticket_ledger.consume("reuse", now=1), "accepted")
+        self.assertEqual(ticket_ledger.consume("reuse", now=2), "reused")
+
+        blocked_ids = [
+            case_id
+            for case_id, result in executed.items()
+            if result["upstream_request"] is False
+        ]
+        no_upstream = traefik_proof.edge_no_upstream_observation()
+        self.assertEqual(no_upstream["blocked_case_ids"], blocked_ids)
+        self.assertEqual(no_upstream["blocked_case_count"], 20)
+        self.assertEqual(no_upstream["blocked_layers"], ["edge", "network"])
+        self.assertFalse(no_upstream["upstream_request"])
+
     def test_renderer_inputs_reject_ambiguous_hosts_ports_and_paths(self) -> None:
         self.assertEqual(traefik_proof._validate_host("traefik-92.test"), "traefik-92.test")
         with self.assertRaises(ValueError):
@@ -117,9 +180,22 @@ class TraefikRendererTests(unittest.TestCase):
             dynamic_path = output_dir / "traefik-dynamic.json"
             self.assertEqual(inputs["dynamic_filename"], str(dynamic_path.resolve()))
             self.assertEqual(bundle["static"]["providers"]["file"]["filename"], str(dynamic_path.resolve()))
+            expected_static = (json.dumps(bundle["static"], sort_keys=True, indent=2) + "\n").encode("utf-8")
+            expected_dynamic = (json.dumps(bundle["dynamic"], sort_keys=True, indent=2) + "\n").encode("utf-8")
+            self.assertEqual(static_path.read_bytes(), expected_static)
+            self.assertEqual(dynamic_path.read_bytes(), expected_dynamic)
             self.assertEqual(json.loads(static_path.read_text()), bundle["static"])
             self.assertEqual(json.loads(dynamic_path.read_text()), bundle["dynamic"])
             self.assertEqual(bundle["dynamic"]["tls"]["certificates"][0]["certFile"], inputs["cert_path"])
+
+    def test_render_cli_compact_stdout_is_canonical(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(traefik_proof.main(["render"]), 0)
+        expected = (
+            json.dumps(traefik_proof.render_bundle(), sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        self.assertEqual(output.getvalue().encode("utf-8"), expected)
 
     def test_routes_are_finite_tls_enabled_and_prefix_is_explicit(self) -> None:
         for method, path in traefik_proof.EXACT_REST_ROUTES:
@@ -655,6 +731,90 @@ class TraefikRendererTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "precedes stored"):
             lifecycle.reap(now=9)
 
+    def test_pty_lifecycle_advances_active_reattach_clock_and_preserves_same_time_idempotence(self) -> None:
+        lifecycle = traefik_proof.SyntheticPtyLifecycle()
+        self.assertEqual(lifecycle.attach("fixtureActive", now=10), "attached")
+        self.assertEqual(lifecycle.reattach("fixtureActive", now=20), "already_attached")
+        self.assertEqual(lifecycle.reattach("fixtureActive", now=20), "already_attached")
+        with self.assertRaisesRegex(ValueError, "precedes stored"):
+            lifecycle.detach("fixtureActive", now=15)
+        self.assertEqual(lifecycle.detach("fixtureActive", now=20), "detached")
+
+    def test_pty_lifecycle_reap_preflights_all_clocks_and_is_atomic(self) -> None:
+        active = traefik_proof.SyntheticPtyLifecycle()
+        active.attach("fixtureActive", now=10)
+        states_before = dict(active._states)
+        clocks_before = dict(active._last_event_at)
+        with self.assertRaisesRegex(ValueError, "precedes stored"):
+            active.reap(now=9)
+        self.assertEqual(active._states, states_before)
+        self.assertEqual(active._last_event_at, clocks_before)
+
+        mixed = traefik_proof.SyntheticPtyLifecycle()
+        mixed.attach("fixtureFuture", now=2000)
+        mixed.attach("fixtureDetached", now=0)
+        mixed.detach("fixtureDetached", now=0)
+        states_before = dict(mixed._states)
+        clocks_before = dict(mixed._last_event_at)
+        with self.assertRaisesRegex(ValueError, "precedes stored"):
+            mixed.reap(now=1801)
+        self.assertEqual(mixed._states, states_before)
+        self.assertEqual(mixed._last_event_at, clocks_before)
+
+        survivors = traefik_proof.SyntheticPtyLifecycle()
+        survivors.attach("fixtureDetached", now=0)
+        survivors.detach("fixtureDetached", now=0)
+        self.assertEqual(survivors.reap(now=traefik_proof.PTY_DETACHED_TTL_SECONDS), 0)
+        with self.assertRaisesRegex(ValueError, "precedes stored"):
+            survivors.reattach("fixtureDetached", now=traefik_proof.PTY_DETACHED_TTL_SECONDS - 1)
+        self.assertEqual(
+            survivors.reattach("fixtureDetached", now=traefik_proof.PTY_DETACHED_TTL_SECONDS),
+            "reattached",
+        )
+
+    def test_pty_lifecycle_rejects_duplicate_attach_without_reviving_retained_state(self) -> None:
+        lifecycle = traefik_proof.SyntheticPtyLifecycle()
+        lifecycle.attach("fixtureDuplicate", now=0)
+        lifecycle.detach("fixtureDuplicate", now=0)
+        states_before = dict(lifecycle._states)
+        clocks_before = dict(lifecycle._last_event_at)
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            lifecycle.attach("fixtureDuplicate", now=traefik_proof.PTY_DETACHED_TTL_SECONDS + 1)
+        self.assertEqual(lifecycle._states, states_before)
+        self.assertEqual(lifecycle._last_event_at, clocks_before)
+        with self.assertRaisesRegex(ValueError, "exceeded retention TTL"):
+            lifecycle.reattach("fixtureDuplicate", now=traefik_proof.PTY_DETACHED_TTL_SECONDS + 1)
+        self.assertEqual(lifecycle.reap(now=traefik_proof.PTY_DETACHED_TTL_SECONDS + 1), 1)
+        with self.assertRaisesRegex(ValueError, "has been reaped"):
+            lifecycle.reattach("fixtureDuplicate", now=traefik_proof.PTY_DETACHED_TTL_SECONDS + 1)
+        # A fully reaped ID is a new identity; only retained IDs are unique.
+        self.assertEqual(
+            lifecycle.attach("fixtureDuplicate", now=traefik_proof.PTY_DETACHED_TTL_SECONDS + 1),
+            "attached",
+        )
+        with self.assertRaisesRegex(ValueError, "has been reaped"):
+            lifecycle.reattach("fixtureUnknown", now=0)
+
+    def test_pty_lifecycle_accepts_zero_maximum_subsecond_and_near_ttl_timestamps(self) -> None:
+        lifecycle = traefik_proof.SyntheticPtyLifecycle()
+        self.assertEqual(lifecycle.attach("fixtureZero", now=0), "attached")
+        self.assertEqual(lifecycle.detach("fixtureZero", now=0), "detached")
+        self.assertEqual(lifecycle.reattach("fixtureZero", now=0), "reattached")
+        self.assertEqual(
+            lifecycle.attach("fixtureMaximum", now=traefik_proof.MAX_PTY_TIMESTAMP_SECONDS),
+            "attached",
+        )
+
+        fractional = traefik_proof.SyntheticPtyLifecycle()
+        fractional.attach("fixtureFractional", now=0.25)
+        fractional.detach("fixtureFractional", now=0.5)
+        self.assertEqual(fractional.reattach("fixtureFractional", now=1799.75), "reattached")
+
+        near_ttl = traefik_proof.SyntheticPtyLifecycle()
+        near_ttl.attach("fixtureNearTtl", now=0)
+        near_ttl.detach("fixtureNearTtl", now=0)
+        self.assertEqual(near_ttl.reattach("fixtureNearTtl", now=1799.999), "reattached")
+
     def test_private_boundary_no_retry_and_no_upstream_observation_are_explicit(self) -> None:
         boundary = traefik_proof.private_hermes_boundary_observation()
         self.assertEqual(boundary["port"], 9119)
@@ -1146,7 +1306,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         self.assertEqual(deployment["required_hermes_bind_class"], traefik_proof.REQUIRED_HERMES_BIND_CLASS)
         self.assertFalse(deployment["public_hermes_exposure"])
         self.assertEqual(deployment["production_topology"], traefik_proof.PROOF_RUN_REQUIRED_TOPOLOGY)
-        self.assertEqual(self.evidence["offline_harness"]["status"], "regression_tested")
+        self.assertEqual(self.evidence["offline_harness"]["status"], "declared")
         self.assertEqual(
             self.evidence["offline_harness"]["traefik_runtime"],
             "not_run; configuration and rule compatibility are not claimed",
@@ -1156,16 +1316,70 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         self.assertEqual(self.evidence["cookie_proof"]["synthetic_model"]["value"], "redacted")
         self.assertEqual(self.evidence["ticket_lifecycle"]["retry"], "disabled")
         self.assertEqual(self.evidence["pty_lifecycle"]["expired_reattach_before_reap"], "rejected")
+        self.assertEqual(self.evidence["pty_lifecycle"]["duplicate_attach"], "rejected")
         self.assertEqual(self.evidence["pty_lifecycle"]["ttl_reap"], 1)
         self.assertEqual(self.evidence["upgrade_retry_policy"], {"chat": "disabled", "pty": "disabled"})
         self.assertEqual(self.evidence["hermes_boundary"], traefik_proof.private_hermes_boundary_observation())
         self.assertEqual(self.evidence["edge_no_upstream"]["blocked_case_count"], 20)
         self.assertEqual(len(self.evidence["positive_cases"]), 11)
         self.assertEqual(len(self.evidence["negative_cases"]), 23)
-        for case in [*self.evidence["positive_cases"], *self.evidence["negative_cases"]]:
+        retained_cases = [*self.evidence["positive_cases"], *self.evidence["negative_cases"]]
+        self.assertEqual(
+            [case["id"] for case in retained_cases],
+            [case["id"] for case in [*traefik_proof.POSITIVE_CASES, *traefik_proof.NEGATIVE_CASES]],
+        )
+        self.assertEqual([case["vector_id"] for case in retained_cases], list(traefik_proof.ROUTE_CASE_VECTORS))
+        for case in retained_cases:
             with self.subTest(case=case["id"]):
                 self.assertIn(case["proof_level"], {"model", "model_plus_router_rule", "model_boundary_only"})
                 self.assertIn("observed_by", case)
+                self.assertNotIn("method", case)
+                self.assertNotIn("path", case)
+                self.assertNotIn("query", case)
+                self.assertNotIn("headers", case)
+
+    def test_evidence_is_exact_canonical_cli_output(self) -> None:
+        manifest = traefik_proof.render_manifest(
+            build_sha=EXPECTED_BUILD_SHA,
+            build_digest=EXPECTED_BUILD_DIGEST,
+            traefik_config_digest=EXPECTED_CONFIG_DIGEST,
+            browser_journey="blocked_provider",
+            browser_evidence=self._browser_evidence("blocked_provider"),
+        )
+        expected_pretty = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        self.assertEqual(EVIDENCE_PATH.read_bytes(), expected_pretty)
+        self.assertEqual(
+            EVIDENCE_ANCHOR_PATH.read_bytes(),
+            (hashlib.sha256(expected_pretty).hexdigest() + "\n").encode("ascii"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            browser_path = Path(temporary) / "browser-evidence.json"
+            browser_path.write_text(
+                json.dumps(self._browser_evidence("blocked_provider"), sort_keys=True),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/traefik_proof.py"),
+                    "evidence",
+                    "--build-sha",
+                    EXPECTED_BUILD_SHA,
+                    "--build-digest",
+                    EXPECTED_BUILD_DIGEST,
+                    "--traefik-config-digest",
+                    EXPECTED_CONFIG_DIGEST,
+                    "--browser-evidence",
+                    str(browser_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        self.assertEqual(json.loads(completed.stdout.decode("utf-8")), manifest)
+        self.assertEqual(
+            completed.stdout,
+            (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
+        )
 
     def test_proof_run_is_reconstructed_and_not_caller_mutable(self) -> None:
         first = traefik_proof._synthetic_proof_run()
