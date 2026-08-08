@@ -405,6 +405,100 @@ test('Paper action labels stay under a stationary pointer through repeated hover
   }
 });
 
+test('Paper mode overlays clear adjacent controls and preserve long localized focus labels', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+  const workspace = page.locator('.workspace-preview');
+  const terminal = workspace.getByRole('button', { name: 'Open terminal mode' });
+  const terminalCopy = terminal.locator('.pill-copy');
+  const approval = workspace.getByRole('button', { name: 'Allow once' });
+  const approvalCopy = approval.locator('.pill-copy');
+  await terminal.hover();
+  await expect(terminalCopy).toHaveCSS('opacity', '1');
+
+  const stacking = await page.evaluate(() => {
+    const modeControls = document.querySelector<HTMLElement>('.mode-controls');
+    const terminal = document.querySelector<HTMLElement>('button[aria-label="Open terminal mode"]');
+    const terminalCopy = terminal?.querySelector<HTMLElement>('.pill-copy');
+    const workspaceOptions = document.querySelector<HTMLElement>('button[aria-label="Workspace options"]');
+    if (!modeControls || !terminal || !terminalCopy || !workspaceOptions) return null;
+
+    const modeRect = modeControls.getBoundingClientRect();
+    const terminalRect = terminal.getBoundingClientRect();
+    const copyRect = terminalCopy.getBoundingClientRect();
+    const optionsRect = workspaceOptions.getBoundingClientRect();
+    const optionsCenterX = optionsRect.left + optionsRect.width / 2;
+    const optionsCenterY = optionsRect.top + optionsRect.height / 2;
+    const hit = document.elementFromPoint(optionsCenterX, optionsCenterY);
+    const modeZIndex = Number.parseInt(getComputedStyle(modeControls).zIndex, 10);
+    const optionsZIndex = Number.parseInt(getComputedStyle(workspaceOptions).zIndex, 10);
+
+    return {
+      modeWidth: modeRect.width,
+      terminalWidth: terminalRect.width,
+      copyWidth: copyRect.width,
+      copyRight: copyRect.right,
+      optionsLeft: optionsRect.left,
+      overlapX: Math.min(copyRect.right, optionsRect.right) - Math.max(copyRect.left, optionsRect.left),
+      overlapY: Math.min(copyRect.bottom, optionsRect.bottom) - Math.max(copyRect.top, optionsRect.top),
+      modeZIndex: Number.isNaN(modeZIndex) ? 0 : modeZIndex,
+      optionsZIndex: Number.isNaN(optionsZIndex) ? 0 : optionsZIndex,
+      hitLabel: hit?.closest('button')?.getAttribute('aria-label') ?? null,
+      copyOpacity: getComputedStyle(terminalCopy).opacity
+    };
+  });
+
+  expect(stacking).not.toBeNull();
+  expect(stacking?.modeWidth).toBe(92);
+  expect(stacking?.terminalWidth).toBe(44);
+  expect(stacking?.copyWidth).toBeGreaterThan(44);
+  expect(stacking?.copyRight).toBeGreaterThan(stacking?.optionsLeft ?? 0);
+  expect(stacking?.overlapX).toBeGreaterThan(0);
+  expect(stacking?.overlapY).toBeGreaterThan(0);
+  expect(stacking?.modeZIndex).toBeGreaterThan(stacking?.optionsZIndex ?? 0);
+  expect(stacking?.copyOpacity).toBe('1');
+  // The label is pointer-transparent, so the adjacent control remains the
+  // hit target even while the label paints above it.
+  expect(stacking?.hitLabel).toBe('Workspace options');
+
+  await page.mouse.move(0, 0);
+  await expect(terminalCopy).toHaveCSS('opacity', '0');
+  await approval.evaluate((element) => {
+    const label = element.querySelector<HTMLElement>('.pill-label');
+    if (label) label.textContent = 'Einmal zulassen · lokalisierte Arbeitsbereichssteuerung';
+  });
+  // Use an enabled approval action for the keyboard branch. Mode switching is
+  // intentionally disabled in this preview, while approval focus is real.
+  await approval.focus();
+  await expect(approval).toBeFocused();
+  await expect(approvalCopy).toHaveCSS('opacity', '1');
+
+  const localized = await approval.evaluate((element) => {
+    const copy = element.querySelector<HTMLElement>('.pill-copy');
+    const label = element.querySelector<HTMLElement>('.pill-label');
+    const buttonRect = element.getBoundingClientRect();
+    const copyRect = copy?.getBoundingClientRect();
+    return {
+      buttonWidth: buttonRect.width,
+      copyWidth: copyRect?.width ?? 0,
+      copyMaxWidth: Number.parseFloat(copy ? getComputedStyle(copy).maxWidth : '0'),
+      labelText: label?.textContent ?? '',
+      copyClientWidth: copy?.clientWidth ?? 0,
+      copyScrollWidth: copy?.scrollWidth ?? 0
+    };
+  });
+
+  expect(localized.buttonWidth).toBe(44);
+  expect(localized.copyWidth).toBeGreaterThan(44);
+  expect(localized.copyMaxWidth).toBeGreaterThan(120);
+  expect(localized.copyMaxWidth).toBeLessThanOrEqual(180);
+  expect(localized.labelText).toContain('lokalisierte');
+  expect(localized.copyScrollWidth).toBeGreaterThan(localized.copyClientWidth);
+  await expect(approval).toBeFocused();
+});
+
 test('provider choices route to deterministic local password and callback states', async ({ page }) => {
   await page.goto(previewUrl('/ui-preview'));
 

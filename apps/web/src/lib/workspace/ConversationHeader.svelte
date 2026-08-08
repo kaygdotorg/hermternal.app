@@ -170,7 +170,6 @@
     align-items: center;
     gap: 2px;
     padding: 0;
-    isolation: isolate;
     overflow: visible;
   }
 
@@ -191,6 +190,14 @@
     content: '';
     pointer-events: none;
     transition: width 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .mode-controls:has(:global(.pill:hover)),
+  .mode-controls:has(:global(.pill:focus-visible)) {
+    /* Raise the whole visual overlay above following header controls. The
+       overlay itself remains pointer-transparent, so adjacent buttons keep
+       their hit testing while the mode label is visibly unobscured. */
+    z-index: 2;
   }
 
   .mode-controls:has(:global(.pill:hover))::before,
