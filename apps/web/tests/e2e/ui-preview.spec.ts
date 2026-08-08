@@ -284,11 +284,50 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
 
 test('account menu exposes the approved Sign out state on desktop and in the mobile drawer', async ({ page }) => {
   for (const viewport of [
-    { width: 1440, height: 960, scope: '.sidebar', menuId: 'desktop-account-menu' },
-    { width: 390, height: 844, scope: '[data-testid="mobile-session-drawer"]', menuId: 'mobile-account-menu' }
+    {
+      appearance: 'light',
+      width: 1440,
+      height: 960,
+      scope: '.sidebar',
+      menuId: 'desktop-account-menu',
+      menuWidth: 242,
+      menuHeight: 159,
+      hintHeight: 32
+    },
+    {
+      appearance: 'dark',
+      width: 1440,
+      height: 960,
+      scope: '.sidebar',
+      menuId: 'desktop-account-menu',
+      menuWidth: 242,
+      menuHeight: 159,
+      hintHeight: 32
+    },
+    {
+      appearance: 'light',
+      width: 390,
+      height: 844,
+      scope: '[data-testid="mobile-session-drawer"]',
+      menuId: 'mobile-account-menu',
+      menuWidth: 308,
+      menuHeight: 143,
+      hintHeight: 16
+    },
+    {
+      appearance: 'dark',
+      width: 390,
+      height: 844,
+      scope: '[data-testid="mobile-session-drawer"]',
+      menuId: 'mobile-account-menu',
+      menuWidth: 308,
+      menuHeight: 143,
+      hintHeight: 16
+    }
   ]) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Appearance' }).selectOption(viewport.appearance);
     await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
 
     if (viewport.width < 760) {
@@ -305,7 +344,14 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
     const menu = page.locator(`#${viewport.menuId}`);
     await expect(menu).toHaveRole('menu');
     const menuBox = await menu.boundingBox();
-    expect(menuBox?.width).toBe(242);
+    expect(menuBox?.width).toBe(viewport.menuWidth);
+    expect(menuBox?.height).toBe(viewport.menuHeight);
+    await expect(menu.getByText('Account', { exact: true })).toBeVisible();
+    await expect(menu.getByText('⌘K', { exact: true })).toBeVisible();
+    await expect(menu.getByRole('separator')).toBeVisible();
+    await expect(menu.getByText('Enter or Space activates · Escape closes', { exact: true })).toBeVisible();
+    const hintBox = await menu.getByText('Enter or Space activates · Escape closes', { exact: true }).boundingBox();
+    expect(hintBox?.height).toBe(viewport.hintHeight);
     const menuA11y = await new AxeBuilder({ page }).include(`#${viewport.menuId}`).analyze();
     expect(menuA11y.violations).toEqual([]);
     await expect(menu.getByRole('menuitem', { name: 'Sign out' })).toBeFocused();

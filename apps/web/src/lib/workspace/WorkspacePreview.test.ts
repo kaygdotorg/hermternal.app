@@ -50,6 +50,10 @@ describe('WorkspacePreview', () => {
 
     const menu = await screen.findByRole('menu', { name: 'Account menu' });
     expect(menu).toHaveAttribute('id', 'desktop-account-menu');
+    expect(within(menu).getByText('Account')).toBeInTheDocument();
+    expect(within(menu).getByText('⌘K')).toBeInTheDocument();
+    expect(within(menu).getByRole('separator')).toBeInTheDocument();
+    expect(within(menu).getByText('Enter or Space activates · Escape closes')).toBeInTheDocument();
     const signOut = within(menu).getByRole('menuitem', { name: 'Sign out' });
     expect(signOut).toBeEnabled();
     await waitFor(() => expect(signOut).toHaveFocus());

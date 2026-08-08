@@ -195,8 +195,13 @@
     >
       <div class="account-menu-header">
         <span aria-hidden="true" class="menu-avatar">H</span>
-        <span class="menu-account-name">Hermes</span>
+        <span class="menu-account-copy">
+          <span class="menu-account-name">Hermes</span>
+          <span class="menu-account-subtitle">Account</span>
+        </span>
+        <span aria-hidden="true" class="menu-account-shortcut">⌘K</span>
       </div>
+      <div class="account-menu-divider" role="separator"></div>
       <Pill
         ariaLabel={signOutPending ? 'Signing out' : 'Sign out'}
         disabled={signOutPending}
@@ -207,6 +212,7 @@
         variant="ghost"
         onActivate={requestSignOut}
       />
+      <div class="account-menu-hint">Enter or Space activates · Escape closes</div>
     </div>
   {/if}
 </nav>
@@ -374,8 +380,8 @@
 
   .account-menu {
     position: absolute;
-    bottom: 72px;
-    left: 28px;
+    bottom: 147px;
+    left: 12px;
     z-index: 8;
     box-sizing: border-box;
     display: flex;
@@ -396,15 +402,16 @@
     display: flex;
     min-height: 40px;
     align-items: center;
+    justify-content: space-between;
     gap: 8px;
     padding-inline: 8px;
   }
 
   .menu-avatar {
     display: inline-flex;
-    width: 32px;
-    height: 32px;
-    flex: 0 0 32px;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
     align-items: center;
     justify-content: center;
     border: 1px solid var(--line, #d8dde5);
@@ -416,12 +423,42 @@
     line-height: 20px;
   }
 
+  .menu-account-copy {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+    flex-direction: column;
+  }
+
   .menu-account-name {
     min-width: 0;
     color: var(--ink, #16181d);
     font-size: 14px;
     font-weight: 600;
     line-height: 18px;
+  }
+
+  .menu-account-subtitle,
+  .menu-account-shortcut,
+  .account-menu-hint {
+    color: var(--muted, #667080);
+    font-size: 12px;
+    line-height: 16px;
+  }
+
+  .menu-account-subtitle {
+    min-width: 0;
+  }
+
+  .menu-account-shortcut {
+    flex: 0 0 auto;
+  }
+
+  .account-menu-divider {
+    width: 100%;
+    height: 1px;
+    flex-shrink: 0;
+    background: var(--line, #d8dde5);
   }
 
   .account-menu :global(.pill) {
@@ -448,5 +485,19 @@
 
   .account-menu :global(.pill:disabled) {
     background: color-mix(in srgb, var(--line, #d8dde5) 48%, var(--surface, #fff));
+  }
+
+  .account-menu-hint {
+    min-height: 16px;
+    padding-inline: 12px;
+  }
+
+  @media (max-width: 760px) {
+    .account-menu {
+      bottom: 159px;
+      left: 16px;
+      width: min(308px, calc(100% - 32px));
+      max-width: calc(100% - 32px);
+    }
   }
 </style>
