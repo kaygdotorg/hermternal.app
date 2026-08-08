@@ -122,7 +122,12 @@ budgets:
   closed.
 - A returned session ID is validated independently. It may differ from the
   requested path because Hermes resolves aliases and continuation sessions to a
-  canonical ID before returning session details or messages.
+  canonical ID before returning session details or messages. Only a detail
+  response produced by this constructed transport receives its private,
+  request-bound canonical-alias marker; the workspace may use that marker to
+  adopt the validated canonical detail ID. History remains a strict commit key,
+  so a custom adapter or foreign message response cannot replace the selected
+  timeline or identity.
 - Source-defined strings stay bounded but may be empty when the pinned
   TypeScript type says only `string`. This includes the identity's optional
   profile metadata (`email`, `display_name`, and `org_id`), nullable session

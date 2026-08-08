@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createLiveRestTransport,
+  isLiveRestCanonicalAlias,
   LiveRestError,
   normalizeApiBaseUrl,
   validateSessionId
@@ -924,9 +925,12 @@ describe('createLiveRestTransport', () => {
     const resolvedDetailId = fetchSequence(
       response(rawSession({ ...LIVE_SESSION_FIXTURE, id: 'synthetic-session-0002' }))
     );
-    await expect(
-      createLiveRestTransport({ fetch: resolvedDetailId.fetch }).getSession(LIVE_SESSION_FIXTURE.id)
-    ).resolves.toMatchObject({ id: 'synthetic-session-0002' });
+    const resolvedDetail = await createLiveRestTransport({ fetch: resolvedDetailId.fetch }).getSession(
+      LIVE_SESSION_FIXTURE.id
+    );
+    expect(resolvedDetail).toMatchObject({ id: 'synthetic-session-0002' });
+    expect(isLiveRestCanonicalAlias(resolvedDetail, LIVE_SESSION_FIXTURE.id)).toBe(true);
+    expect(isLiveRestCanonicalAlias({ ...resolvedDetail }, LIVE_SESSION_FIXTURE.id)).toBe(false);
 
     const resolvedMessagesId = fetchSequence(response(rawSessionMessages('synthetic-session-0002')));
     await expect(
