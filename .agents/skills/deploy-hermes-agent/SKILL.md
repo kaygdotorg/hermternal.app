@@ -35,20 +35,25 @@ Never:
 
 ## Start one instance
 
-From the repository root on the VM:
+From the repository root on the VM, provide the exact instance name and the
+free loopback port owned by that instance. Do not copy a port from an old proof:
 
 ```sh
-python3 scripts/hermes_agent.py start \
-  --instance playwright-auth \
-  --port 19119
+INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
+PORT="${HERMES_PORT:?set a free loopback port for this instance}"
+launcher_output="$(
+  python3 scripts/hermes_agent.py start \
+    --instance "$INSTANCE" \
+    --port "$PORT"
+)"
+endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
 
-The command prints one JSON object. Keep these fields:
-
-- `endpoint` — the private loopback Dashboard URL;
-- `credential_file` — the local password-file path;
-- `container` — the exact launcher-owned container;
-- `image` — the immutable official image reference.
+The launcher emits public metadata under `.result`. `read_launcher_result.py`
+parses `.result.endpoint` and `.result.credential_file`; it never prints the
+password or infers a port. `endpoint` is the authoritative private loopback
+Dashboard URL for this launcher-owned instance.
 
 Do not print the credential file. A local test process may read it through the
 repository helper. `with_live_credential.py` removes only terminal CR/LF bytes,
@@ -57,7 +62,8 @@ the proof command. The password is never printed or written by the helper; it is
 present only in the child process environment:
 
 ```sh
-python3 scripts/with_live_credential.py /path/from/credential_file -- \
+HERMES_LIVE_TARGET="$endpoint" \
+  python3 scripts/with_live_credential.py "$credential_file" -- \
   node /path/to/browser-smoke.mjs
 ```
 
@@ -72,37 +78,37 @@ file, and loopback port:
 
 ```sh
 python3 scripts/hermes_agent.py start-many \
-  --prefix playwright \
-  --count 4 \
-  --base-port 19120
+  --prefix "${HERMES_INSTANCE_PREFIX:?set the fleet prefix}" \
+  --count "${HERMES_INSTANCE_COUNT:?set the fleet count}" \
+  --base-port "${HERMES_BASE_PORT:?set the first free loopback port}"
 ```
 
-This creates `playwright-1` through `playwright-4` on ports `19120` through
-`19123`. The launcher has no custom fleet resource budget. The VM may use its
-available resources. Separate agents may run `start` in parallel when each agent
-owns a distinct instance name and port.
+The launcher reports each instance's endpoint and credential-file path in its
+JSON results. Keep those results together; do not reconstruct a port from a
+prefix, count, or remembered deployment.
 
 ## Inspect an instance
 
 ```sh
-python3 scripts/hermes_agent.py endpoint --instance playwright-auth
-python3 scripts/hermes_agent.py credential-file --instance playwright-auth
-python3 scripts/hermes_agent.py status --instance playwright-auth
+INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
+launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
+endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 ```
 
-If a browser runs outside the VM, use an SSH tunnel to the reported loopback
-port. Do not change the container publication address:
-
-```sh
-ssh -N -L 19119:127.0.0.1:19119 hermternal-test@hermternal-dev
-```
+The endpoint command is the source of truth: use its parsed `.result.endpoint`
+and `.result.credential_file` values for this instance. If a browser runs outside
+the VM, use the approved tunnel with the endpoint selected from that output; do
+not replace it with a sample port or an unrelated listener.
 
 ## Stop and clean up
 
 Stop only the exact instance you own:
 
 ```sh
-python3 scripts/hermes_agent.py stop --instance playwright-auth
+python3 scripts/hermes_agent.py stop \
+  --instance "${HERMES_INSTANCE:?set the exact launcher instance name}"
 ```
 
 Keep data and the synthetic credential when a retry needs the same instance.
@@ -110,7 +116,7 @@ Remove both only when the disposable lane is finished:
 
 ```sh
 python3 scripts/hermes_agent.py stop \
-  --instance playwright-auth \
+  --instance "${HERMES_INSTANCE:?set the exact launcher instance name}" \
   --purge-data
 ```
 
@@ -118,9 +124,9 @@ Stop an exact batch:
 
 ```sh
 python3 scripts/hermes_agent.py stop-many \
-  --prefix playwright \
-  --count 4 \
-  --base-port 19120 \
+  --prefix "${HERMES_INSTANCE_PREFIX:?set the fleet prefix}" \
+  --count "${HERMES_INSTANCE_COUNT:?set the fleet count}" \
+  --base-port "${HERMES_BASE_PORT:?set the first free loopback port}" \
   --purge-data
 ```
 
