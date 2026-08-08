@@ -76,13 +76,12 @@ directory from those held descriptors. It copies the complete Git metadata tree
 into a private mode-700 temporary snapshot. The copy is chunked and
 category-bounded: ordinary metadata and loose objects use
 `MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
-`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) for legitimate pack,
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (16 MiB) for legitimate pack,
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), with a `SNAPSHOT_TIMEOUT_SECONDS` (30
-second) wall-clock deadline. The 8 MiB pack cap derives from the supported
-repository's fresh single-branch remote-clone observation of a roughly 2.1 MiB
-pack; it leaves measured growth headroom while keeping individual files
-bounded. The 1 MiB non-pack cap remains above the checked-in evidence and
+second) wall-clock deadline. The 16 MiB pack cap covers the checked-in authority
+bundle's measured roughly 11 MiB macOS clone pack while keeping each individual
+file bounded. The 1 MiB non-pack cap remains above the checked-in evidence and
 metadata sizes. Snapshot entry count, directory count, file count, traversal
 depth, retained path storage, aggregate bytes, and deadline are bounded
 independently, so arbitrarily many zero-byte metadata entries cannot consume

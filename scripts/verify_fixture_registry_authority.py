@@ -75,10 +75,10 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_GIT_OUTPUT = 512 * 1024
 GIT_TIMEOUT_SECONDS = 10.0
 # Ordinary metadata and loose objects stay at the conservative one-MiB cap.
-# Packed branch-only clones need a separate bound because one legitimate pack
-# in the supported repository is approximately 2.1 MiB.
+# Packed clones need a separate bound because the checked-in authority bundle
+# and its reachable history produce an approximately 11 MiB pack on macOS.
 MAX_SNAPSHOT_FILE_BYTES = 1 * 1024 * 1024
-MAX_SNAPSHOT_PACK_FILE_BYTES = 8 * 1024 * 1024
+MAX_SNAPSHOT_PACK_FILE_BYTES = 16 * 1024 * 1024
 MAX_SNAPSHOT_TOTAL_BYTES = 32 * 1024 * 1024
 # Snapshot metadata is bounded separately from copied bytes. A repository with
 # unlimited empty entries could otherwise exhaust directory listings, retained

@@ -98,17 +98,16 @@ opens the caller root and `.git` directory from the held descriptors and copies
 the complete Git metadata tree into a private mode-700 temporary snapshot. The
 copy is chunked and category-bounded: ordinary metadata and loose objects use
 `MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
-`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) for legitimate pack,
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (16 MiB) for legitimate pack,
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), and the copy has a
 `SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. Snapshot entry,
 directory, file, depth, and retained path-storage budgets are independent of
 those byte limits, so arbitrarily many zero-byte metadata entries cannot exhaust
-CI before content accounting. The 8 MiB pack cap
-comes from the supported repository's fresh single-branch remote-clone
-observation of a roughly 2.1 MiB pack, leaving measured growth headroom without
-making one unbounded file acceptable; the 1 MiB non-pack cap remains above the
-checked-in evidence and metadata sizes. It rejects symlinks/non-regular entries
+CI before content accounting. The 16 MiB pack cap covers the checked-in authority
+bundle's measured roughly 11 MiB macOS clone pack while keeping each individual
+file bounded; the 1 MiB non-pack cap remains above the checked-in evidence and
+metadata sizes. It rejects symlinks/non-regular entries
 and checks source metadata before and after each copy. Git is invoked only
 against that snapshot,
 so a concurrent rename or symlink replacement of the caller's `.git`, nested
