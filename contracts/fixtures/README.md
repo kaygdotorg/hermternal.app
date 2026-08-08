@@ -59,6 +59,13 @@ and active hardened bindings are independently pinned, so a restack may leave
 their introduction objects on separate reviewed ancestry lines; the direct
 first-parent rule still applies within each binding.
 
+The active hardened pins are authenticated external CI inputs supplied through
+`HERMTERNAL_FIXTURE_AUTHORITY_COMMIT` and
+`HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT`. The checked-in
+`scripts/fixture_registry_authority.v2.hardened.pin.json` file is test
+provisioning data for the versioned offline bundle only; it is never a runtime
+authority fallback. Missing or malformed protected environment pins fail closed.
+
 The verifier's object repository must be a canonical absolute plain checkout,
 not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
 `commondir`, object, ref, or config boundaries. Before any path-based Git
@@ -76,8 +83,12 @@ second) wall-clock deadline. The 8 MiB pack cap derives from the supported
 repository's fresh single-branch remote-clone observation of a roughly 2.1 MiB
 pack; it leaves measured growth headroom while keeping individual files
 bounded. The 1 MiB non-pack cap remains above the checked-in evidence and
-metadata sizes. It rejects symlinks/non-regular entries and checks source
-metadata before and after each copy. Git then runs only against that snapshot,
+metadata sizes. Snapshot entry count, directory count, file count, traversal
+depth, retained path storage, aggregate bytes, and deadline are bounded
+independently, so arbitrarily many zero-byte metadata entries cannot consume
+CI before the byte limits run. It rejects symlinks/non-regular entries and
+checks source metadata before and after each copy. Git then runs only against
+ that snapshot,
 so concurrent rename or symlink replacement of nested fanout/pack/ref paths,
 config, or metadata cannot redirect reads. The snapshot also descriptor-walks
 the full `objects` and `refs` trees with no-follow descriptors as a second
@@ -245,7 +256,12 @@ checkout as authority.
 The repository does not yet have a checked-in GitHub Actions workflow that
 runs this aggregate validator, its test suite, and the `python -O` equivalents.
 The local normal/optimized commands above are the required gates for this
-fixture-only lane; no CI workflow is implied by passing them.
+fixture-only lane; no CI workflow is implied by passing them. The aggregate
+registry does not own the Caddy binary proof gate: `scripts/test_caddy_proof.py`
+is the separate PR #300 black-box lane and may skip when local Caddy or OpenSSL
+dependencies are unavailable. The registry records only reviewed redacted
+Caddy fixture bytes and approved source identities; a dependency skip cannot
+be promoted to live proof here.
 
 The validator is offline. It does not start Hermes, contact a proxy or
 identity provider, open a socket, follow a referenced URL, or claim deployment

@@ -231,6 +231,25 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(self.index["evidence_status"], "partial")
         self.assertFalse(self.index["live_claim"])
 
+    def test_validate_all_rejects_mutated_in_memory_index(self) -> None:
+        for mutation in ("notes", "status"):
+            with self.subTest(mutation=mutation):
+                mutated = copy.deepcopy(self.index)
+                if mutation == "notes":
+                    mutated["coverage"][0]["notes"] += " caller mutation"
+                else:
+                    pending = next(item for item in mutated["coverage"] if item["status"] == "pending")
+                    pending["status"] = "ready"
+                with self.assertRaises(validate.ValidationError):
+                    validate.validate_all(
+                        mutated,
+                        self.schema,
+                        self.baseline,
+                        repo_root=validate.REPO_ROOT,
+                        baseline_path=validate.BASELINE_PATH,
+                        object_repo=self.object_repo,
+                    )
+
     def test_target_roots_are_complete_and_connected(self) -> None:
         expected = {
             "chat-stream-completion": {
@@ -843,6 +862,17 @@ class CliTests(unittest.TestCase):
             "\ntoken=unredacted-secret-value-123456\n",
         )
 
+    def test_quoted_assignment_values_are_rejected_in_both_modes(self) -> None:
+        for assignment in (
+            'password="unredacted-secret-value-123456"\n',
+            "password='unredacted-secret-value-123456'\n",
+        ):
+            with self.subTest(assignment=assignment):
+                self._assert_scanner_rejects(
+                    "connection-restoration/README.md",
+                    assignment.encode("utf-8"),
+                )
+
     def test_sensitive_key_aliases_are_rejected_in_both_modes(self) -> None:
         aliases = (
             "apiKey",
@@ -890,6 +920,20 @@ class CliTests(unittest.TestCase):
         )
         self._assert_scanner_rejects("connection-restoration/validate.py", source.encode("utf-8"))
 
+    def test_python_destructured_and_loop_credential_targets_fail_closed(self) -> None:
+        snippets = (
+            'api_key, other = ("unredacted-secret-value-123456", "x")\n',
+            'api_key, other = ["unredacted-secret-value-123456", "x"]\n',
+            'for api_key in ["unredacted-secret-value-123456"]:\n    pass\n',
+            'for api_key in ("unredacted-secret-value-123456",):\n    pass\n',
+        )
+        for source in snippets:
+            with self.subTest(source=source):
+                self._assert_scanner_rejects(
+                    "connection-restoration/validate.py",
+                    source.encode("utf-8"),
+                )
+
     def test_sensitive_json_keys_reject_format_and_control_aliases(self) -> None:
         for key in ("api​_key", "x-api⁠-key", "refresh_token"):
             with self.subTest(key=key):
@@ -904,6 +948,18 @@ class CliTests(unittest.TestCase):
             "connection-restoration/README.md",
             b"https://fixture:password@synthetic.invalid/v1\n",
         )
+
+    def test_encoded_url_query_and_userinfo_credentials_are_rejected(self) -> None:
+        for value in (
+            "https://synthetic.invalid/?t%6fken=unredacted-secret-value-123456\n",
+            "https://user%3Aunredacted-secret-value-123456@synthetic.invalid\n",
+            "https://evil.com\\@synthetic.invalid\n",
+        ):
+            with self.subTest(value=value):
+                self._assert_scanner_rejects(
+                    "connection-restoration/README.md",
+                    value.encode("utf-8"),
+                )
 
     def test_structural_url_allowances_are_exact_and_path_scoped(self) -> None:
         relative_path = "deployment-security/host-origin-mapping/test_validate.py"
@@ -1249,6 +1305,38 @@ class CliTests(unittest.TestCase):
                     validate._actual_fixture_files("synthetic", fixtures_root)
             finally:
                 fifo.unlink()
+
+    def test_zero_byte_fixture_file_cardinality_is_bounded_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        fixture_root = repo_root / "contracts/fixtures/connection-restoration"
+        for index in range(validate.MAX_FIXTURE_TRAVERSAL_FILES + 1):
+            (fixture_root / f"empty-unindexed-{index}").touch()
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_zero_byte_fixture_directory_cardinality_is_bounded_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        fixture_root = repo_root / "contracts/fixtures/connection-restoration"
+        for index in range(validate.MAX_FIXTURE_TRAVERSAL_DIRECTORIES + 1):
+            (fixture_root / f"empty-directory-{index}").mkdir()
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_fixture_traversal_depth_is_bounded_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        current = repo_root / "contracts/fixtures/connection-restoration"
+        for index in range(validate.MAX_FIXTURE_TRAVERSAL_DEPTH + 1):
+            current = current / f"d{index}"
+            current.mkdir()
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_fixture_path_storage_is_bounded_before_artifact_bytes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        current = repo_root / "contracts/fixtures/connection-restoration"
+        for index in range(8):
+            current = current / ("long-unindexed-directory-" + ("x" * 44) + str(index))
+            current.mkdir()
+        for index in range(1_000):
+            (current / (f"long-unindexed-file-{index:04d}" + ("y" * 70))).touch()
+        self._assert_blocked_in_both_modes(repo_root)
 
     def test_unknown_flag_is_one_bounded_redacted_line(self) -> None:
         normal = self._run("--unknown-flag=synthetic-secret-value")

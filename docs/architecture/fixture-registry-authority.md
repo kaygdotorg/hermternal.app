@@ -57,7 +57,13 @@ a self-referential source hash inside `validate.py`. The historical final and
 active hardened bindings are independently exact-pinned reviewed objects; the
 active binding does not assume that a later restack preserves the historical
 binding as an ancestor. Active binding and source commits are supplied through
-protected runtime pins, not inferred from a branch or tag.
+protected runtime pins, not inferred from a branch or tag. Those pins are
+authenticated external CI inputs supplied through
+`HERMTERNAL_FIXTURE_AUTHORITY_COMMIT` and
+`HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT`; missing or malformed values fail
+closed. The checked-in `scripts/fixture_registry_authority.v2.hardened.pin.json`
+is test provisioning data for the versioned offline bundle only and is never a
+runtime fallback.
 
 ## Active v2 loading rule
 
@@ -95,7 +101,10 @@ copy is chunked and category-bounded: ordinary metadata and loose objects use
 `objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) for legitimate pack,
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), and the copy has a
-`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The 8 MiB pack cap
+`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. Snapshot entry,
+directory, file, depth, and retained path-storage budgets are independent of
+those byte limits, so arbitrarily many zero-byte metadata entries cannot exhaust
+CI before content accounting. The 8 MiB pack cap
 comes from the supported repository's fresh single-branch remote-clone
 observation of a roughly 2.1 MiB pack, leaving measured growth headroom without
 making one unbounded file acceptable; the 1 MiB non-pack cap remains above the
@@ -260,7 +269,12 @@ clone succeeds. The standalone suite consumes that same bundle and checks the
 same four commit objects and refs. Normal and optimized aggregate CLI and
 discovery gates must remain equivalent; a passing result is still partial
 synthetic registry evidence, not live Hermes, authentication, deployment,
-streaming, or Terminal proof.
+streaming, or Terminal proof. This aggregate lane does not own the Caddy
+binary proof gate: `scripts/test_caddy_proof.py` remains the separate PR #300
+black-box lane and may skip when local Caddy or OpenSSL dependencies are
+unavailable. The aggregate records bind only reviewed redacted Caddy fixture
+bytes and approved source identities; a dependency skip cannot become live
+proof through this registry.
 
 DEP-03 Host/Origin remains web-only with `success` and `failure` states. Its
 local pins are reproducibility checks, not a separate trust root, and the
