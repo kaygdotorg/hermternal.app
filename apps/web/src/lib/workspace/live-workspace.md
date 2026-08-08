@@ -19,9 +19,13 @@ The normal route keeps one `LiveWorkspaceSession` mounted while the user switche
 between Chat and Terminal. The session's coordinator receives a façade over the
 existing Chat transport and a single current-session PTY bridge. Mode actions
 reuse the selected opaque session; they do not call `createSession()`, create a
-second Chat transport, or dispose Chat. A session replacement clears the old
-terminal presentation state after synchronous PTY invalidation, so a late old
-terminal publication cannot appear on the replacement session.
+second Chat transport, or dispose Chat. Terminal state, notices, and byte
+publications are owned by the current workspace generation, selected session,
+and coordinator identity. A stale event is rejected before it can update the
+workspace snapshot, and the matching bridge binding is invalidated/detached
+rather than merely hidden. A session replacement clears the old terminal
+presentation state after synchronous PTY invalidation, so a late old terminal
+publication cannot appear on the replacement session.
 
 `TerminalSurface` remains mounted while Chat is selected and hides only its
 presentation layer. It owns the host, lazy W-Term/Ghostty import, renderer mount
