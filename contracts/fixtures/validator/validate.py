@@ -536,6 +536,196 @@ def _validate_text_file(path: Path) -> None:
     _validate_text_value(text, check_assignments=False)
 
 
+# Regex metadata is source input, not executable code. Keep structural parsing
+# bounded so a malformed group cannot hide a URL from the fixture scanner.
+REGEX_SCHEME_CANDIDATES = ("https://", "http://", "wss://", "ws://")
+MAX_REGEX_SCHEME_SOURCE_LENGTH = 64
+MAX_REGEX_GROUP_SOURCE_LENGTH = 128
+_REGEX_GROUP_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _regex_group_body_start(text: str, index: int) -> tuple[int | None, int, bool]:
+    """Return the bounded group body, assertion mode, and recognition status."""
+
+    if not text.startswith("(", index):
+        return None, 0, False
+    if text.startswith("(?:", index) or text.startswith("(?>", index):
+        return index + 3, 0, True
+    if text.startswith("(?=", index):
+        return index + 3, 1, True
+    if text.startswith("(?!", index):
+        return index + 3, -1, True
+    if text.startswith("(?<=", index):
+        return index + 4, 1, True
+    if text.startswith("(?<!", index):
+        return index + 4, -1, True
+    if text.startswith("(?P<", index) or text.startswith("(?<", index):
+        closing = text.find(">", index + 3, min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH))
+        if closing >= 0:
+            return closing + 1, 0, True
+        return None, 0, False
+    if text.startswith("(?", index):
+        limit = min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH)
+        colon = text.find(":", index + 2, limit)
+        if colon >= 0:
+            flags = text[index + 2:colon]
+            if flags and all(character.isalpha() or character == "-" for character in flags):
+                return colon + 1, 0, True
+        return None, 0, False
+    return index + 1, 0, True
+
+
+def _regex_bounded_group_span(text: str, index: int) -> tuple[int, bool]:
+    """Return a group span without searching beyond the structural budget."""
+
+    limit = min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH)
+    depth = 0
+    in_class = False
+    cursor = index
+    while cursor < limit:
+        character = text[cursor]
+        if character == "\\":
+            cursor = min(limit, cursor + 2)
+            continue
+        if in_class:
+            if character == "]":
+                in_class = False
+            cursor += 1
+            continue
+        if character == "[":
+            in_class = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth <= 0:
+                return cursor + 1, True
+        cursor += 1
+    return limit, False
+
+
+def _regex_group_end(text: str, index: int) -> int:
+    return _regex_bounded_group_span(text, index)[0]
+
+
+def _regex_decoded_host(source: str) -> str:
+    """Decode only deterministic host escapes needed for policy checks."""
+
+    decoded: list[str] = []
+    index = 0
+    while index < len(source):
+        if source[index] != "\\":
+            decoded.append(source[index])
+            index += 1
+            continue
+        if index + 1 >= len(source):
+            raise ValidationError()
+        marker = source[index + 1]
+        if marker == "x" and index + 3 < len(source):
+            digits = source[index + 2:index + 4]
+            require(re.fullmatch(r"[0-9A-Fa-f]{2}", digits) is not None, "regex escape is invalid")
+            decoded.append(chr(int(digits, 16)))
+            index += 4
+            continue
+        require(marker in {".", "-", "/", ":", "?", "#", "@", "%"}, "regex host is uncertain")
+        decoded.append(marker)
+        index += 2
+    return "".join(decoded)
+
+
+def _regex_literal_host_is_allowed(host: str) -> bool:
+    lowered = host.casefold().rstrip(".")
+    return (
+        lowered.endswith((".test", ".example", ".example.com"))
+        or lowered in ALLOWED_URL_HOSTS
+        or lowered in {"synthetic.invalid", "hermternal.invalid"}
+    )
+
+
+def _regex_literal_authorities(text: str) -> None:
+    """Reject concrete or dynamic authorities that regex syntax can hide."""
+
+    scheme = re.compile(r"(?i)(?:https?|wss?)://")
+    for match in scheme.finditer(text):
+        remainder = text[match.end():]
+        authority = re.split(r"[/#?\s<>'\"]", remainder, maxsplit=1)[0]
+        if not authority:
+            continue
+        if any(marker in authority for marker in "[](){}?+*|"):
+            literal_suffix = authority.replace(r"\.", ".")
+            if any(suffix in literal_suffix.casefold() for suffix in (".test", ".example", ".example.com")):
+                continue
+            raise ValidationError()
+        decoded = _regex_decoded_host(authority)
+        if "@" in decoded:
+            userinfo, decoded = decoded.rsplit("@", 1)
+            if ":" in userinfo:
+                raise ValidationError()
+        if ":" in decoded:
+            host, port = decoded.rsplit(":", 1)
+            require(port.isdigit() and 1 <= int(port) <= 65535, "regex URL port is invalid")
+        else:
+            host = decoded
+        require(_regex_literal_host_is_allowed(host), "regex URL host is not allowed")
+
+    # Any regex construct in a scheme prefix is ambiguous when it reaches a
+    # concrete authority. Keep scheme inference bounded at 64 source bytes.
+    dynamic = re.compile(r"(?i)(?<![A-Za-z])(?:h|w)[^\\s<>'\"]{0,63}://")
+    for match in dynamic.finditer(text):
+        prefix = match.group(0)
+        if not any(candidate.casefold() in prefix.casefold() for candidate in REGEX_SCHEME_CANDIDATES):
+            remainder = text[match.end():]
+            authority = re.split(r"[/#?\s<>'\"]", remainder, maxsplit=1)[0]
+            if authority:
+                raise ValidationError()
+
+
+def _validate_regex_literal(value: str) -> None:
+    """Validate bounded group metadata before scanning regex authorities."""
+
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character == "\\":
+            index += 2
+            continue
+        if character == "[":
+            closing = value.find("]", index + 1, min(len(value), index + MAX_REGEX_SCHEME_SOURCE_LENGTH + 1))
+            require(closing >= 0, "regex character class is incomplete")
+            index = closing + 1
+            continue
+        if character != "(":
+            index += 1
+            continue
+        body_start, _assertion_mode, recognized = _regex_group_body_start(value, index)
+        end, complete = _regex_bounded_group_span(value, index)
+        if not complete and recognized and body_start is not None:
+            body_prefix = value[body_start:min(len(value), index + MAX_REGEX_GROUP_SOURCE_LENGTH)]
+            require(
+                any(marker in body_prefix for marker in "([\\\\|*+?{"),
+                "regex group exceeds structural bound",
+            )
+        if complete:
+            group = value[index:end]
+            if len(group) > MAX_REGEX_GROUP_SOURCE_LENGTH and re.fullmatch(
+                r"(?:\(\?:|\(\?P<[A-Za-z_][A-Za-z0-9_]*>|\(\?<[^>]+>)[A-Za-z0-9_.-]+\)",
+                group,
+            ):
+                raise ValidationError()
+        if value.startswith("(?P<", index) or (
+            value.startswith("(?<", index)
+            and not value.startswith("(?<=", index)
+            and not value.startswith("(?<!", index)
+        ):
+            require(recognized and body_start is not None, "named regex group header is incomplete")
+            header_start = index + (4 if value.startswith("(?P<", index) else 3)
+            closing = value.find(">", header_start, min(len(value), index + MAX_REGEX_GROUP_SOURCE_LENGTH))
+            require(closing >= 0, "named regex group header is incomplete")
+            require(_REGEX_GROUP_NAME_PATTERN.fullmatch(value[header_start:closing]) is not None, "named regex group header is malformed")
+        index += 1
+    _regex_literal_authorities(value)
+
+
 def _validate_python_file(path: Path) -> None:
     """Scan Python source while allowing explicit negative-test markers.
 
@@ -558,14 +748,18 @@ def _validate_python_file(path: Path) -> None:
             continue
         if node.func.attr != "compile" or not isinstance(node.func.value, ast.Name) or node.func.value.id not in {"re", "regex"}:
             continue
-        for child in ast.walk(node):
-            if isinstance(child, ast.Constant) and type(child.value) is str:
-                regex_literals.add(id(child))
+        pattern = node.args[0] if node.args else None
+        if isinstance(pattern, ast.Constant) and type(pattern.value) is str:
+            regex_literals.add(id(pattern))
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Constant) or type(node.value) not in {str, bytes} or id(node) in regex_literals:
+        if not isinstance(node, ast.Constant) or type(node.value) not in {str, bytes}:
             continue
         value = node.value
+        if id(node) in regex_literals:
+            if type(value) is str:
+                _validate_regex_literal(value)
+            continue
         if type(value) is bytes:
             try:
                 value = value.decode("utf-8")

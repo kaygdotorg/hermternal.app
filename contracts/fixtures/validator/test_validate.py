@@ -226,6 +226,23 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["live_claim"])
             self.assertEqual(payload["evidence_status"], "blocked")
 
+    def _assert_scanner_rejects_in_both_modes(self, relative_path: str, source: bytes) -> None:
+        repo_root = self._copy_fixture_repo()
+        artifact = repo_root / "contracts/fixtures" / relative_path
+        artifact.write_bytes(source)
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def _assert_scanner_accepts_in_both_modes(self, relative_path: str, source: bytes) -> None:
+        repo_root = self._copy_fixture_repo()
+        artifact = repo_root / "contracts/fixtures" / relative_path
+        artifact.write_bytes(source)
+        self._rebind_copy(repo_root, refresh_anchor=True)
+        for optimized in (False, True):
+            completed = self._run(optimized=optimized, repo_root=repo_root)
+            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(completed.stderr, "")
+
     @staticmethod
     def _distribution(samples: list[float]) -> dict[str, float]:
         ordered = sorted(samples)
