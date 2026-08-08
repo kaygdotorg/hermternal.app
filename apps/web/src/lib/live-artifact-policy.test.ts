@@ -925,6 +925,43 @@ test('non-configurable hostile serializers', async () => {
     expect(result.stdout).toContain(LIVE_ARTIFACT_REDACTION);
   }, 30_000);
 
+  it('protects IPC when Object.create is replaced before a failed step', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { finalizeLiveTest } from '__POLICY_URL__';
+const secret = 'synthetic-password';
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test('mutated Object.create', async () => {
+  test.fail();
+  const originalCreate = Object.create;
+  // Delegate ordinary allocations so Playwright's worker lifecycle remains
+  // intact; poison only the null-prototype snapshot allocation used by the
+  // vulnerable redaction path.
+  Object.create = (prototype, properties) => {
+    const created = originalCreate(prototype, properties);
+    if (prototype === null && new Error().stack?.includes('createSnapshotContainer')) {
+      Object.defineProperty(created, 'toJSON', {
+        configurable: true,
+        enumerable: false,
+        value: () => ({ leaked: secret }),
+        writable: true
+      });
+    }
+    return created;
+  };
+  await test.step('credential-bearing step', async () => {
+    throw new Error(secret);
+  });
+});
+`);
+    const output = result.stdout + result.stderr;
+    expect(result.code).toBe(0);
+    expect(output).not.toContain('synthetic-password');
+    expect(result.stdout).toContain(LIVE_ARTIFACT_REDACTION);
+  }, 30_000);
+
   it('protects step-end IPC emitted before afterEach runs', async () => {
     const result = await runSyntheticPlaywright(`
 import { test } from ${JSON.stringify(playwrightEntryUrl)};

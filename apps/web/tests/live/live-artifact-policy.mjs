@@ -5,6 +5,206 @@ import { promises as fsPromises } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
+// Capture every ECMAScript intrinsic used by the redaction boundary while this
+// worker-only module is preloaded. Test code is allowed to replace globals and
+// prototype methods, but the transport guard must continue using these exact
+// native functions. Calls below use the captured Reflect.apply rather than a
+// mutable Function.prototype.call property.
+const SAFE_ARRAY = Array;
+const SAFE_ARRAY_IS_ARRAY = Array.isArray;
+const SAFE_ARRAY_AT = Array.prototype.at;
+const SAFE_ARRAY_FILTER = Array.prototype.filter;
+const SAFE_ARRAY_JOIN = Array.prototype.join;
+const SAFE_ARRAY_POP = Array.prototype.pop;
+const SAFE_ARRAY_PUSH = Array.prototype.push;
+const SAFE_ARRAY_REVERSE = Array.prototype.reverse;
+const SAFE_ARRAY_SORT = Array.prototype.sort;
+const SAFE_BUFFER_FROM = Buffer.from;
+const SAFE_BUFFER_INDEX_OF = Buffer.prototype.indexOf;
+const SAFE_BUFFER_TO_STRING = Buffer.prototype.toString;
+const SAFE_ERROR = Error;
+const SAFE_MAP = Map;
+const SAFE_MAP_GET = Map.prototype.get;
+const SAFE_MAP_HAS = Map.prototype.has;
+const SAFE_MAP_SET = Map.prototype.set;
+const SAFE_MATH_FLOOR = Math.floor;
+const SAFE_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
+const SAFE_OBJECT_CREATE = Object.create;
+const SAFE_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
+const SAFE_OBJECT_FREEZE = Object.freeze;
+const SAFE_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
+const SAFE_OBJECT_IS = Object.is;
+const SAFE_OBJECT_HAS_OWN_PROPERTY = Object.prototype.hasOwnProperty;
+const SAFE_REFLECT_APPLY = Reflect.apply;
+const SAFE_REFLECT_GET = Reflect.get;
+const SAFE_REFLECT_GET_OWN_PROPERTY_DESCRIPTOR = Reflect.getOwnPropertyDescriptor;
+const SAFE_REFLECT_OWN_KEYS = Reflect.ownKeys;
+const SAFE_REGEXP_TEST = RegExp.prototype.test;
+const SAFE_SET = Set;
+const SAFE_SET_ADD = Set.prototype.add;
+const SAFE_SET_DELETE = Set.prototype.delete;
+const SAFE_SET_HAS = Set.prototype.has;
+const SAFE_STRING = String;
+const SAFE_STRING_INDEX_OF = String.prototype.indexOf;
+const SAFE_STRING_SLICE = String.prototype.slice;
+const SAFE_STRING_SPLIT = String.prototype.split;
+const SAFE_STRING_STARTS_WITH = String.prototype.startsWith;
+const SAFE_STRING_TO_LOWER_CASE = String.prototype.toLowerCase;
+const SAFE_STRING_TRIM = String.prototype.trim;
+const SAFE_SYMBOL_SPECIES = Symbol.species;
+
+/**
+ * Invoke a captured intrinsic without consulting mutable function prototypes.
+ *
+ * @param {Function} method
+ * @param {unknown} receiver
+ * @param {unknown[]} [argumentsList]
+ * @returns {unknown}
+ */
+function trustedApply(method, receiver, argumentsList = []) {
+  return SAFE_REFLECT_APPLY(method, receiver, argumentsList);
+}
+
+/**
+ * @param {object} target
+ * @param {PropertyKey} key
+ * @returns {boolean}
+ */
+function trustedHasOwn(target, key) {
+  return /** @type {boolean} */ (trustedApply(SAFE_OBJECT_HAS_OWN_PROPERTY, target, [key]));
+}
+
+/**
+ * Copy a finite array without consulting its iterator or mutable Set methods.
+ * The preload guard passes arrays, and rejecting other shapes keeps a hostile
+ * iterable from executing code inside the redaction boundary.
+ *
+ * @param {unknown} values
+ * @returns {unknown[]}
+ */
+function trustedArrayCopy(values) {
+  if (!SAFE_ARRAY_IS_ARRAY(values)) throw new SAFE_ERROR(REDACTION_FAILURE_MESSAGE);
+  const copy = new SAFE_ARRAY();
+  for (let index = 0; index < values.length; index += 1) {
+    trustedApply(SAFE_ARRAY_PUSH, copy, [values[index]]);
+  }
+  return copy;
+}
+
+/**
+ * @param {unknown[]} values
+ * @returns {unknown[]}
+ */
+function trustedUniqueArray(values) {
+  const seen = new SAFE_SET();
+  const unique = new SAFE_ARRAY();
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index];
+    if (trustedApply(SAFE_SET_HAS, seen, [value])) continue;
+    trustedApply(SAFE_SET_ADD, seen, [value]);
+    trustedApply(SAFE_ARRAY_PUSH, unique, [value]);
+  }
+  return unique;
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @param {number} [end]
+ * @returns {string}
+ */
+function trustedStringSlice(value, start, end) {
+  return /** @type {string} */ (trustedApply(SAFE_STRING_SLICE, value, [start, end]));
+}
+
+/**
+ * @param {string} value
+ * @param {string} search
+ * @param {number} [position]
+ * @returns {number}
+ */
+function trustedStringIndexOf(value, search, position) {
+  return /** @type {number} */ (trustedApply(SAFE_STRING_INDEX_OF, value, [search, position]));
+}
+
+/**
+ * @param {string} value
+ * @param {string} search
+ * @param {number} [position]
+ * @returns {boolean}
+ */
+function trustedStringStartsWith(value, search, position) {
+  return /** @type {boolean} */ (trustedApply(SAFE_STRING_STARTS_WITH, value, [search, position]));
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function trustedStringLowerCase(value) {
+  return /** @type {string} */ (trustedApply(SAFE_STRING_TO_LOWER_CASE, value));
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function trustedStringTrim(value) {
+  return /** @type {string} */ (trustedApply(SAFE_STRING_TRIM, value));
+}
+
+/**
+ * @param {string} value
+ * @param {string} separator
+ * @returns {string[]}
+ */
+function trustedStringSplit(value, separator) {
+  return /** @type {string[]} */ (trustedApply(SAFE_STRING_SPLIT, value, [separator]));
+}
+
+/**
+ * @param {unknown[]} value
+ * @param {string} separator
+ * @returns {string}
+ */
+function trustedArrayJoin(value, separator) {
+  return /** @type {string} */ (trustedApply(SAFE_ARRAY_JOIN, value, [separator]));
+}
+
+/**
+ * @param {unknown} secrets
+ * @returns {string[]}
+ */
+function trustedSortedSecrets(secrets) {
+  const copied = trustedArrayCopy(secrets);
+  /** @type {string[]} */
+  const filtered = new SAFE_ARRAY();
+  for (let index = 0; index < copied.length; index += 1) {
+    const secret = copied[index];
+    if (typeof secret === 'string' && secret.length > 0) {
+      trustedApply(SAFE_ARRAY_PUSH, filtered, [secret]);
+    }
+  }
+  trustedApply(SAFE_ARRAY_SORT, filtered, [
+    /**
+     * @param {string} a
+     * @param {string} b
+     * @returns {number}
+     */
+    (a, b) => b.length - a.length
+  ]);
+  return /** @type {string[]} */ (filtered);
+}
+
+/**
+ * @param {RegExp} expression
+ * @param {string} value
+ * @returns {boolean}
+ */
+function trustedRegExpTest(expression, value) {
+  return /** @type {boolean} */ (trustedApply(SAFE_REGEXP_TEST, expression, [value]));
+}
+
 export const LIVE_ARTIFACT_REDACTION = '[redacted-live-credential]';
 const LIVE_OUTPUT_PREFIX = 'hermternal-playwright-live-';
 const LIVE_OUTPUT_OWNER_FILE = '.hermternal-live-artifact-owner';
@@ -17,10 +217,14 @@ const REDACTION_MAX_STRING_LENGTH = 256 * 1024;
 const REDACTION_MAX_TOTAL_STRING_LENGTH = 4 * 1024 * 1024;
 const REDACTION_MAX_ARRAY_ITEMS = 512;
 const REDACTION_MAX_PROPERTIES = 1024;
-const REDACTION_MAX_BINARY_BYTES = Math.floor(REDACTION_MAX_STRING_LENGTH * 3 / 4);
+const REDACTION_MAX_BINARY_BYTES = /** @type {number} */ (
+  trustedApply(SAFE_MATH_FLOOR, undefined, [REDACTION_MAX_STRING_LENGTH * 3 / 4])
+);
 const REDACTION_BUDGET_MESSAGE = 'live artifact redaction budget exceeded';
 const REDACTION_FAILURE_MESSAGE = 'live artifact redaction failed';
-const LIVE_BINARY_REDACTION = Buffer.from(LIVE_ARTIFACT_REDACTION, 'utf8').toString('base64');
+const LIVE_BINARY_REDACTION = /** @type {string} */ (
+  trustedApply(SAFE_BUFFER_TO_STRING, trustedApply(SAFE_BUFFER_FROM, Buffer, [LIVE_ARTIFACT_REDACTION, 'utf8']), ['base64'])
+);
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const HTML_UNTERMINATED_COMMENT = -2;
 const HTML_MALFORMED_TAG = -3;
@@ -37,7 +241,7 @@ function createLiveArtifactRoot() {
 
 /** @type {{ root: string, ownerToken: string } | undefined} */
 let liveArtifactRun;
-const HTML_VOID_ELEMENTS = new Set([
+const HTML_VOID_ELEMENTS = new SAFE_SET([
   'area',
   'base',
   'br',
@@ -65,11 +269,14 @@ const HTML_VOID_ELEMENTS = new Set([
  */
 export function liveCredentialValues(environment = process.env) {
   const values = [LIVE_DEFAULT_USERNAME];
-  for (const name of LIVE_SECRET_ENV_NAMES) {
+  for (let index = 0; index < LIVE_SECRET_ENV_NAMES.length; index += 1) {
+    const name = LIVE_SECRET_ENV_NAMES[index];
     const value = environment[name];
-    if (typeof value === 'string' && value.length > 0) values.push(value);
+    if (typeof value === 'string' && value.length > 0) {
+      trustedApply(SAFE_ARRAY_PUSH, values, [value]);
+    }
   }
-  return [...new Set(values)];
+  return /** @type {string[]} */ (trustedUniqueArray(values));
 }
 
 /**
@@ -81,7 +288,7 @@ export function liveCredentialValues(environment = process.env) {
  */
 export function assertLiveRunnerDebugDisabled(environment = process.env) {
   if (environment.PW_RUNNER_DEBUG) {
-    throw new Error('PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane');
+    throw new SAFE_ERROR('PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane');
   }
 }
 
@@ -130,7 +337,7 @@ export function liveArtifactOutputDirectory() {
         return configuredRun.root;
       }
     }
-    throw new Error('live artifact output root ownership could not be validated');
+    throw new SAFE_ERROR('live artifact output root ownership could not be validated');
   }
 
   liveArtifactRun = createLiveArtifactRoot();
@@ -142,7 +349,7 @@ export function liveArtifactOutputDirectory() {
  */
 export function liveArtifactOutputOwnershipToken() {
   liveArtifactOutputDirectory();
-  if (!liveArtifactRun) throw new Error('live artifact output root unavailable');
+  if (!liveArtifactRun) throw new SAFE_ERROR('live artifact output root unavailable');
   return liveArtifactRun.ownerToken;
 }
 
@@ -191,12 +398,12 @@ function ownerTokenFor(candidate) {
 export function isLiveArtifactDirectory(directory) {
   const candidate = resolve(directory);
   const pathFromTemporaryRoot = relative(resolve(tmpdir()), candidate);
-  const [rootName, ...remainder] = pathFromTemporaryRoot.split(sep);
+  const [rootName, ...remainder] = trustedStringSplit(pathFromTemporaryRoot, sep);
   if (
     !rootName ||
     remainder.length > 0 ||
     rootName !== basename(candidate) ||
-    !rootName.startsWith(LIVE_OUTPUT_PREFIX)
+    !trustedStringStartsWith(rootName, LIVE_OUTPUT_PREFIX)
   ) {
     return false;
   }
@@ -293,12 +500,12 @@ function isVerifiedQuarantine(quarantinePath, evidence) {
  * @returns {number}
  */
 function findHtmlTagEnd(value, start) {
-  if (value.startsWith('<!--', start)) {
-    const commentEnd = value.indexOf('-->', start + 4);
+  if (trustedStringStartsWith(value, '<!--', start)) {
+    const commentEnd = trustedStringIndexOf(value,'-->', start + 4);
     return commentEnd < 0 ? HTML_UNTERMINATED_COMMENT : commentEnd + 2;
   }
   const firstCharacter = value[start + 1];
-  if (firstCharacter !== '/' && !/[A-Za-z]/u.test(firstCharacter ?? '')) return HTML_MALFORMED_TAG;
+  if (firstCharacter !== '/' && !trustedRegExpTest(/[A-Za-z]/u, firstCharacter ?? '')) return HTML_MALFORMED_TAG;
   let quote = '';
   for (let index = start + 1; index < value.length; index += 1) {
     const character = value[index];
@@ -332,7 +539,7 @@ function findHtmlTagEnd(value, start) {
  * @returns {HtmlTag | undefined}
  */
 function parseHtmlTag(value, start, end) {
-  if (value.startsWith('<!--', start)) return undefined;
+  if (trustedStringStartsWith(value, '<!--', start)) return undefined;
   let cursor = start + 1;
   let closing = false;
   if (value[cursor] === '/') {
@@ -340,13 +547,13 @@ function parseHtmlTag(value, start, end) {
     cursor += 1;
   }
   if (value[cursor] === '!' || value[cursor] === '?') return undefined;
-  while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+  while (cursor < end && trustedRegExpTest(/\s/u, value[cursor])) cursor += 1;
   const nameStart = cursor;
-  if (!/[A-Za-z]/u.test(value[cursor] ?? '')) return undefined;
+  if (!trustedRegExpTest(/[A-Za-z]/u, value[cursor] ?? '')) return undefined;
   cursor += 1;
-  while (cursor < end && /[A-Za-z0-9:_-]/u.test(value[cursor])) cursor += 1;
-  const name = value.slice(nameStart, cursor).toLowerCase();
-  while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+  while (cursor < end && trustedRegExpTest(/[A-Za-z0-9:_-]/u, value[cursor])) cursor += 1;
+  const name = trustedStringLowerCase(trustedStringSlice(value, nameStart, cursor));
+  while (cursor < end && trustedRegExpTest(/\s/u, value[cursor])) cursor += 1;
 
   if (closing) {
     return cursor === end
@@ -354,26 +561,27 @@ function parseHtmlTag(value, start, end) {
       : undefined;
   }
 
+  /** @type {HtmlAttribute[]} */
   const attributes = [];
-  const seenNames = new Set();
+  const seenNames = new SAFE_SET();
   let ambiguous = false;
   let selfClosing = false;
   while (cursor < end) {
     if (value[cursor] === '/') {
       cursor += 1;
-      while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+      while (cursor < end && trustedRegExpTest(/\s/u, value[cursor])) cursor += 1;
       if (cursor !== end) return undefined;
       selfClosing = true;
       break;
     }
-    if (!/[A-Za-z_:]/u.test(value[cursor] ?? '')) return undefined;
+    if (!trustedRegExpTest(/[A-Za-z_:]/u, value[cursor] ?? '')) return undefined;
     const attributeStart = cursor;
     cursor += 1;
-    while (cursor < end && /[A-Za-z0-9:._-]/u.test(value[cursor])) cursor += 1;
-    const attributeName = value.slice(attributeStart, cursor).toLowerCase();
-    if (seenNames.has(attributeName)) ambiguous = true;
-    seenNames.add(attributeName);
-    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+    while (cursor < end && trustedRegExpTest(/[A-Za-z0-9:._-]/u, value[cursor])) cursor += 1;
+    const attributeName = trustedStringLowerCase(trustedStringSlice(value, attributeStart, cursor));
+    if (trustedApply(SAFE_SET_HAS, seenNames, [attributeName])) ambiguous = true;
+    trustedApply(SAFE_SET_ADD, seenNames, [attributeName]);
+    while (cursor < end && trustedRegExpTest(/\s/u, value[cursor])) cursor += 1;
 
     let attributeValue;
     let valueStart;
@@ -381,7 +589,7 @@ function parseHtmlTag(value, start, end) {
     let quote;
     if (value[cursor] === '=') {
       cursor += 1;
-      while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+      while (cursor < end && trustedRegExpTest(/\s/u, value[cursor])) cursor += 1;
       if (cursor >= end) return undefined;
       quote = value[cursor] === '"' || value[cursor] === "'" ? value[cursor] : undefined;
       if (quote) {
@@ -393,27 +601,27 @@ function parseHtmlTag(value, start, end) {
         }
         if (value[cursor] !== quote) return undefined;
         valueEnd = cursor;
-        attributeValue = value.slice(valueStart, valueEnd);
+        attributeValue = trustedStringSlice(value,valueStart, valueEnd);
         cursor += 1;
       } else {
         valueStart = cursor;
-        while (cursor < end && !/\s/u.test(value[cursor])) {
-          if (/[<"'=]/u.test(value[cursor])) return undefined;
+        while (cursor < end && !trustedRegExpTest(/\s/u, value[cursor])) {
+          if (trustedRegExpTest(/[<"'=]/u, value[cursor])) return undefined;
           cursor += 1;
         }
         if (cursor === valueStart) return undefined;
         valueEnd = cursor;
-        attributeValue = value.slice(valueStart, valueEnd);
+        attributeValue = trustedStringSlice(value,valueStart, valueEnd);
       }
     }
-    attributes.push({
+    trustedApply(SAFE_ARRAY_PUSH, attributes, [{
       name: attributeName,
       value: attributeValue,
       valueStart,
       valueEnd,
       quote
-    });
-    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+    }]);
+    while (cursor < end && trustedRegExpTest(/\s/u, value[cursor])) cursor += 1;
   }
 
   return { closing, name, selfClosing, ambiguous, attributes };
@@ -424,9 +632,14 @@ function parseHtmlTag(value, start, end) {
  * @returns {boolean}
  */
 function hasEditableContentAttribute(tag) {
-  const matches = tag.attributes.filter(({ name }) => name === 'contenteditable');
+  const matches = /** @type {HtmlAttribute[]} */ (
+    trustedApply(SAFE_ARRAY_FILTER, tag.attributes, [
+      /** @param {HtmlAttribute} attribute */
+      (attribute) => attribute.name === 'contenteditable'
+    ])
+  );
   if (matches.length !== 1) return matches.length > 0;
-  const mode = (matches[0].value ?? '').trim().toLowerCase();
+  const mode = trustedStringLowerCase(trustedStringTrim(matches[0].value ?? ''));
   // Unknown values are treated as potentially editable. Preserving their
   // contents would let a future browser mode or malformed serialization bypass
   // this last-resort artifact boundary; only explicit false is safe.
@@ -441,7 +654,7 @@ function hasEditableContentAttribute(tag) {
 function findNextEditableOpening(value, start) {
   let cursor = start;
   while (cursor < value.length) {
-    const opening = value.indexOf('<', cursor);
+    const opening = trustedStringIndexOf(value,'<', cursor);
     if (opening < 0) return undefined;
     const end = findHtmlTagEnd(value, opening);
     if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG) {
@@ -452,7 +665,7 @@ function findNextEditableOpening(value, start) {
     if (!tag) {
       // A terminated non-comment construct is still unknown markup. Do not
       // jump to its closing `>` because that can skip an editable element.
-      if (value.startsWith('<!--', opening)) {
+      if (trustedStringStartsWith(value, '<!--', opening)) {
         cursor = end + 1;
         continue;
       }
@@ -476,13 +689,13 @@ function findMatchingClosingTag(value, opening) {
   const stack = [opening.tag.name];
   let cursor = opening.end + 1;
   while (cursor < value.length) {
-    const next = value.indexOf('<', cursor);
+    const next = trustedStringIndexOf(value,'<', cursor);
     if (next < 0) return undefined;
     const end = findHtmlTagEnd(value, next);
     if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG || end < 0) return undefined;
     const tag = parseHtmlTag(value, next, end);
     if (!tag) {
-      if (value.startsWith('<!--', next)) {
+      if (trustedStringStartsWith(value, '<!--', next)) {
         cursor = end + 1;
         continue;
       }
@@ -490,11 +703,11 @@ function findMatchingClosingTag(value, opening) {
     }
     if (tag.ambiguous) return undefined;
     if (tag.closing) {
-      if (stack.at(-1) !== tag.name) return undefined;
-      stack.pop();
+      if (trustedApply(SAFE_ARRAY_AT, stack, [-1]) !== tag.name) return undefined;
+      trustedApply(SAFE_ARRAY_POP, stack);
       if (stack.length === 0) return { start: next, end };
-    } else if (!tag.selfClosing && !HTML_VOID_ELEMENTS.has(tag.name)) {
-      stack.push(tag.name);
+    } else if (!tag.selfClosing && !trustedApply(SAFE_SET_HAS, HTML_VOID_ELEMENTS, [tag.name])) {
+      trustedApply(SAFE_ARRAY_PUSH, stack, [tag.name]);
     }
     cursor = end + 1;
   }
@@ -516,23 +729,23 @@ function redactContentEditableMarkup(value) {
   while (cursor < value.length) {
     const opening = findNextEditableOpening(value, cursor);
     if (!opening) {
-      redacted += value.slice(cursor);
+      redacted += trustedStringSlice(value,cursor);
       break;
     }
     if ('malformedStart' in opening) {
-      redacted += value.slice(cursor, opening.malformedStart);
+      redacted += trustedStringSlice(value,cursor, opening.malformedStart);
       redacted += LIVE_ARTIFACT_REDACTION;
       break;
     }
-    redacted += value.slice(cursor, opening.start);
+    redacted += trustedStringSlice(value,cursor, opening.start);
     const closing = findMatchingClosingTag(value, opening);
-    redacted += value.slice(opening.start, opening.end + 1);
+    redacted += trustedStringSlice(value,opening.start, opening.end + 1);
     if (!closing) {
       redacted += LIVE_ARTIFACT_REDACTION;
       break;
     }
     redacted += LIVE_ARTIFACT_REDACTION;
-    redacted += value.slice(closing.start, closing.end + 1);
+    redacted += trustedStringSlice(value,closing.start, closing.end + 1);
     cursor = closing.end + 1;
   }
   return redacted;
@@ -546,7 +759,7 @@ function redactContentEditableMarkup(value) {
 function findNextStructuredFormOpening(value, start) {
   let cursor = start;
   while (cursor < value.length) {
-    const opening = value.indexOf('<', cursor);
+    const opening = trustedStringIndexOf(value,'<', cursor);
     if (opening < 0) return undefined;
     const end = findHtmlTagEnd(value, opening);
     if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG || end < 0) {
@@ -577,7 +790,7 @@ function findNextStructuredFormOpening(value, start) {
 function findTextareaClosingTag(value, opening) {
   let cursor = opening.end + 1;
   while (cursor < value.length) {
-    const next = value.indexOf('<', cursor);
+    const next = trustedStringIndexOf(value,'<', cursor);
     if (next < 0) return undefined;
     const end = findHtmlTagEnd(value, next);
     if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG || end < 0) {
@@ -605,7 +818,7 @@ function findSelectClosingTag(value, opening) {
   const stack = ['select'];
   let cursor = opening.end + 1;
   while (cursor < value.length) {
-    const next = value.indexOf('<', cursor);
+    const next = trustedStringIndexOf(value,'<', cursor);
     if (next < 0) return undefined;
     const end = findHtmlTagEnd(value, next);
     if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG || end < 0) {
@@ -613,17 +826,17 @@ function findSelectClosingTag(value, opening) {
     }
     const tag = parseHtmlTag(value, next, end);
     if (!tag || tag.ambiguous || tag.selfClosing) return undefined;
-    const parent = stack.at(-1);
+    const parent = trustedApply(SAFE_ARRAY_AT, stack, [-1]);
     if (tag.closing) {
       if (tag.attributes.length > 0 || parent !== tag.name) return undefined;
-      stack.pop();
+      trustedApply(SAFE_ARRAY_POP, stack);
       if (stack.length === 0) return { start: next, end };
     } else {
       const allowed =
         (parent === 'select' && (tag.name === 'option' || tag.name === 'optgroup')) ||
         (parent === 'optgroup' && tag.name === 'option');
       if (!allowed) return undefined;
-      stack.push(tag.name);
+      trustedApply(SAFE_ARRAY_PUSH, stack, [tag.name]);
     }
     cursor = end + 1;
   }
@@ -645,26 +858,26 @@ function redactStructuredFormMarkup(value) {
   while (cursor < value.length) {
     const opening = findNextStructuredFormOpening(value, cursor);
     if (!opening) {
-      redacted += value.slice(cursor);
+      redacted += trustedStringSlice(value,cursor);
       break;
     }
     if ('malformedStart' in opening) {
-      redacted += value.slice(cursor, opening.malformedStart);
+      redacted += trustedStringSlice(value,cursor, opening.malformedStart);
       redacted += LIVE_ARTIFACT_REDACTION;
       break;
     }
-    redacted += value.slice(cursor, opening.start);
+    redacted += trustedStringSlice(value,cursor, opening.start);
     const closing =
       opening.tag.name === 'textarea'
         ? findTextareaClosingTag(value, opening)
         : findSelectClosingTag(value, opening);
-    redacted += value.slice(opening.start, opening.end + 1);
+    redacted += trustedStringSlice(value,opening.start, opening.end + 1);
     if (!closing) {
       redacted += LIVE_ARTIFACT_REDACTION;
       break;
     }
     redacted += LIVE_ARTIFACT_REDACTION;
-    redacted += value.slice(closing.start, closing.end + 1);
+    redacted += trustedStringSlice(value,closing.start, closing.end + 1);
     cursor = closing.end + 1;
   }
   return redacted;
@@ -684,48 +897,58 @@ function redactSerializedValueAttributes(value) {
   let cursor = 0;
   let redacted = '';
   while (cursor < value.length) {
-    const opening = value.indexOf('<', cursor);
+    const opening = trustedStringIndexOf(value,'<', cursor);
     if (opening < 0) {
-      redacted += value.slice(cursor);
+      redacted += trustedStringSlice(value,cursor);
       break;
     }
     const end = findHtmlTagEnd(value, opening);
     if (end === HTML_UNTERMINATED_COMMENT) {
-      redacted += value.slice(cursor, opening);
+      redacted += trustedStringSlice(value,cursor, opening);
       redacted += LIVE_ARTIFACT_REDACTION;
       break;
     }
     if (end === HTML_MALFORMED_TAG || end < 0) {
-      redacted += value.slice(cursor, opening);
+      redacted += trustedStringSlice(value,cursor, opening);
       redacted += LIVE_ARTIFACT_REDACTION;
       break;
     }
     const tag = parseHtmlTag(value, opening, end);
     if (!tag) {
-      if (value.startsWith('<!--', opening)) {
-        redacted += value.slice(cursor, end + 1);
+      if (trustedStringStartsWith(value, '<!--', opening)) {
+        redacted += trustedStringSlice(value,cursor, end + 1);
         cursor = end + 1;
         continue;
       }
-      redacted += value.slice(cursor, opening);
+      redacted += trustedStringSlice(value,cursor, opening);
       redacted += LIVE_ARTIFACT_REDACTION;
       break;
     }
     if (tag.ambiguous) {
-      redacted += value.slice(cursor, opening);
+      redacted += trustedStringSlice(value,cursor, opening);
       redacted += LIVE_ARTIFACT_REDACTION;
       break;
     }
-    let redactedTag = value.slice(opening, end + 1);
-    const valueAttributes = tag.attributes.filter(
-      ({ name, valueStart, valueEnd }) => name === 'value' && valueStart !== undefined && valueEnd !== undefined
+    let redactedTag = trustedStringSlice(value,opening, end + 1);
+    const valueAttributes = /** @type {HtmlAttribute[]} */ (
+      trustedApply(SAFE_ARRAY_FILTER, tag.attributes, [
+        /** @param {HtmlAttribute} attribute */
+        (attribute) =>
+          attribute.name === 'value' &&
+          attribute.valueStart !== undefined &&
+          attribute.valueEnd !== undefined
+      ])
     );
-    for (const attribute of valueAttributes.reverse()) {
+    const reversedValueAttributes = /** @type {HtmlAttribute[]} */ (
+      trustedApply(SAFE_ARRAY_REVERSE, valueAttributes)
+    );
+    for (let index = 0; index < reversedValueAttributes.length; index += 1) {
+      const attribute = reversedValueAttributes[index];
       const localStart = /** @type {number} */ (attribute.valueStart) - opening;
       const localEnd = /** @type {number} */ (attribute.valueEnd) - opening;
-      redactedTag = `${redactedTag.slice(0, localStart)}${LIVE_ARTIFACT_REDACTION}${redactedTag.slice(localEnd)}`;
+      redactedTag = `${trustedStringSlice(redactedTag, 0, localStart)}${LIVE_ARTIFACT_REDACTION}${trustedStringSlice(redactedTag, localEnd)}`;
     }
-    redacted += value.slice(cursor, opening);
+    redacted += trustedStringSlice(value,cursor, opening);
     redacted += redactedTag;
     cursor = end + 1;
   }
@@ -743,10 +966,15 @@ function redactSerializedValueAttributes(value) {
  */
 export function redactLiveText(value, secrets = liveCredentialValues()) {
   if (typeof value !== 'string') return value;
-  if (value.length > REDACTION_MAX_STRING_LENGTH) throw new Error(REDACTION_BUDGET_MESSAGE);
+  if (value.length > REDACTION_MAX_STRING_LENGTH) throw new SAFE_ERROR(REDACTION_BUDGET_MESSAGE);
   let redacted = value;
-  for (const secret of [...new Set(secrets)].filter((item) => item.length > 0).sort((a, b) => b.length - a.length)) {
-    redacted = redacted.split(secret).join(LIVE_ARTIFACT_REDACTION);
+  const sortedSecrets = trustedSortedSecrets(secrets);
+  for (let index = 0; index < sortedSecrets.length; index += 1) {
+    const secret = sortedSecrets[index];
+    redacted = trustedArrayJoin(
+      trustedStringSplit(redacted, secret),
+      LIVE_ARTIFACT_REDACTION
+    );
   }
 
   redacted = redactSerializedValueAttributes(redacted);
@@ -780,8 +1008,8 @@ export function isDefinitivelyClosed(page) {
  */
 function createRedactionState() {
   return {
-    active: new Set(),
-    snapshots: new Map(),
+    active: new SAFE_SET(),
+    snapshots: new SAFE_MAP(),
     nodes: 0,
     strings: 0,
     totalStringLength: 0,
@@ -794,14 +1022,14 @@ function createRedactionState() {
  * @returns {never}
  */
 function throwRedactionBudget() {
-  throw new Error(REDACTION_BUDGET_MESSAGE);
+  throw new SAFE_ERROR(REDACTION_BUDGET_MESSAGE);
 }
 
 /**
  * @returns {never}
  */
 function throwRedactionFailure() {
-  throw new Error(REDACTION_FAILURE_MESSAGE);
+  throw new SAFE_ERROR(REDACTION_FAILURE_MESSAGE);
 }
 
 /**
@@ -838,12 +1066,12 @@ function redactBoundedString(value, secrets, state) {
 function validateDataDescriptor(descriptor) {
   if (
     !descriptor ||
-    !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
-    !Object.prototype.hasOwnProperty.call(descriptor, 'writable') ||
-    !Object.prototype.hasOwnProperty.call(descriptor, 'enumerable') ||
-    !Object.prototype.hasOwnProperty.call(descriptor, 'configurable') ||
-    Object.prototype.hasOwnProperty.call(descriptor, 'get') ||
-    Object.prototype.hasOwnProperty.call(descriptor, 'set') ||
+    !trustedHasOwn(descriptor, 'value') ||
+    !trustedHasOwn(descriptor, 'writable') ||
+    !trustedHasOwn(descriptor, 'enumerable') ||
+    !trustedHasOwn(descriptor, 'configurable') ||
+    trustedHasOwn(descriptor, 'get') ||
+    trustedHasOwn(descriptor, 'set') ||
     typeof descriptor.writable !== 'boolean' ||
     typeof descriptor.enumerable !== 'boolean' ||
     typeof descriptor.configurable !== 'boolean'
@@ -858,12 +1086,12 @@ function validateDataDescriptor(descriptor) {
 function validateAccessorDescriptor(descriptor) {
   if (
     !descriptor ||
-    Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
-    Object.prototype.hasOwnProperty.call(descriptor, 'writable') ||
-    !Object.prototype.hasOwnProperty.call(descriptor, 'get') ||
-    !Object.prototype.hasOwnProperty.call(descriptor, 'set') ||
-    !Object.prototype.hasOwnProperty.call(descriptor, 'enumerable') ||
-    !Object.prototype.hasOwnProperty.call(descriptor, 'configurable') ||
+    trustedHasOwn(descriptor, 'value') ||
+    trustedHasOwn(descriptor, 'writable') ||
+    !trustedHasOwn(descriptor, 'get') ||
+    !trustedHasOwn(descriptor, 'set') ||
+    !trustedHasOwn(descriptor, 'enumerable') ||
+    !trustedHasOwn(descriptor, 'configurable') ||
     (descriptor.get !== undefined && typeof descriptor.get !== 'function') ||
     (descriptor.set !== undefined && typeof descriptor.set !== 'function') ||
     typeof descriptor.enumerable !== 'boolean' ||
@@ -884,7 +1112,7 @@ function validateAccessorDescriptor(descriptor) {
  */
 function defineSnapshotProperty(target, key, value) {
   try {
-    Object.defineProperty(target, key, {
+    SAFE_OBJECT_DEFINE_PROPERTY(target, key, {
       configurable: true,
       enumerable: true,
       value,
@@ -906,9 +1134,9 @@ function defineSnapshotProperty(target, key, value) {
  */
 function createSerializationSafeArray(length) {
   /** @type {unknown[]} */
-  const snapshot = new Array(length);
+  const snapshot = new SAFE_ARRAY(length);
   try {
-    Object.defineProperty(snapshot, 'toJSON', {
+    SAFE_OBJECT_DEFINE_PROPERTY(snapshot, 'toJSON', {
       configurable: false,
       enumerable: false,
       value() {
@@ -916,7 +1144,7 @@ function createSerializationSafeArray(length) {
       },
       writable: false
     });
-    Object.defineProperty(snapshot, 'constructor', {
+    SAFE_OBJECT_DEFINE_PROPERTY(snapshot, 'constructor', {
       configurable: false,
       enumerable: false,
       value: createSerializationSafeArray,
@@ -929,7 +1157,7 @@ function createSerializationSafeArray(length) {
 }
 
 try {
-  Object.defineProperty(createSerializationSafeArray, Symbol.species, {
+  SAFE_OBJECT_DEFINE_PROPERTY(createSerializationSafeArray, SAFE_SYMBOL_SPECIES, {
     configurable: false,
     enumerable: false,
     value: createSerializationSafeArray,
@@ -950,7 +1178,7 @@ try {
  * @returns {Record<string, unknown> | unknown[]}
  */
 function createSnapshotContainer(array) {
-  if (!array) return Object.create(null);
+  if (!array) return SAFE_OBJECT_CREATE(null);
   return createSerializationSafeArray(0);
 }
 
@@ -972,35 +1200,35 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
   if (typeof value === 'string') return redactBoundedString(value, secrets, state);
   if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
   if (typeof value === 'undefined') return undefined;
-  if (typeof value === 'bigint') return redactBoundedString(String(value), secrets, state);
+  if (typeof value === 'bigint') return redactBoundedString(SAFE_STRING(value), secrets, state);
   if (typeof value === 'function' || typeof value === 'symbol') return LIVE_ARTIFACT_REDACTION;
   if (typeof value !== 'object') return LIVE_ARTIFACT_REDACTION;
-  if (state.active.has(value)) return LIVE_ARTIFACT_REDACTION;
-  if (state.snapshots.has(value)) return state.snapshots.get(value);
+  if (trustedApply(SAFE_SET_HAS, state.active, [value])) return LIVE_ARTIFACT_REDACTION;
+  if (trustedApply(SAFE_MAP_HAS, state.snapshots, [value])) return trustedApply(SAFE_MAP_GET, state.snapshots, [value]);
 
   consumeRedactionNode(state, depth);
-  const snapshot = createSnapshotContainer(Array.isArray(value));
-  state.snapshots.set(value, snapshot);
-  state.active.add(value);
+  const snapshot = createSnapshotContainer(SAFE_ARRAY_IS_ARRAY(value));
+  trustedApply(SAFE_MAP_SET, state.snapshots, [value, snapshot]);
+  trustedApply(SAFE_SET_ADD, state.active, [value]);
   try {
     /** @type {(string | symbol)[]} */
     let keys;
     try {
-      keys = Reflect.ownKeys(value);
+      keys = SAFE_REFLECT_OWN_KEYS(value);
     } catch {
       throwRedactionFailure();
     }
     if (keys.length > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
-    if (Array.isArray(value)) {
+    if (SAFE_ARRAY_IS_ARRAY(value)) {
       let length;
       try {
-        length = Reflect.get(value, 'length');
+        length = SAFE_REFLECT_GET(value, 'length');
       } catch {
         throwRedactionFailure();
       }
       if (
         typeof length !== 'number' ||
-        !Number.isSafeInteger(length) ||
+        !SAFE_NUMBER_IS_SAFE_INTEGER(length) ||
         length < 0 ||
         length > REDACTION_MAX_ARRAY_ITEMS ||
         state.arrayItems + length > REDACTION_MAX_ARRAY_ITEMS
@@ -1010,7 +1238,8 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
       state.arrayItems += length;
     }
 
-    for (const key of keys) {
+    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+      const key = keys[keyIndex];
       if (typeof key !== 'string') continue;
       // Safe snapshot arrays own non-configurable `toJSON` and `constructor`
       // properties. They are transport mechanics, not diagnostic fields; copying
@@ -1019,14 +1248,14 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
       if (
         key === 'location' ||
         key === 'toJSON' ||
-        (Array.isArray(value) && (key === 'length' || key === 'constructor'))
+        (SAFE_ARRAY_IS_ARRAY(value) && (key === 'length' || key === 'constructor'))
       ) continue;
       state.properties += 1;
       if (state.properties > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
       /** @type {PropertyDescriptor | undefined} */
       let descriptor;
       try {
-        descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+        descriptor = SAFE_REFLECT_GET_OWN_PROPERTY_DESCRIPTOR(value, key);
       } catch {
         throwRedactionFailure();
       }
@@ -1041,7 +1270,7 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
       try {
         // Read once. Any stateful source behavior is consumed here and cannot
         // affect the already-created plain snapshot later.
-        observed = Reflect.get(value, key);
+        observed = SAFE_REFLECT_GET(value, key);
       } catch {
         throwRedactionFailure();
       }
@@ -1052,15 +1281,15 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
       // between a marker and a credential.
       let descriptorMatchesReadBack;
       if ('value' in descriptor) {
-        descriptorMatchesReadBack = Object.is(descriptor.value, observed);
+        descriptorMatchesReadBack = SAFE_OBJECT_IS(descriptor.value, observed);
       } else if (typeof descriptor.get === 'function') {
         let getterReadBack;
         try {
-          getterReadBack = Reflect.apply(descriptor.get, value, []);
+          getterReadBack = trustedApply(descriptor.get, value, []);
         } catch {
           throwRedactionFailure();
         }
-        descriptorMatchesReadBack = Object.is(getterReadBack, observed);
+        descriptorMatchesReadBack = SAFE_OBJECT_IS(getterReadBack, observed);
       } else {
         descriptorMatchesReadBack = observed === undefined;
       }
@@ -1074,7 +1303,7 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
     }
     return snapshot;
   } finally {
-    state.active.delete(value);
+    trustedApply(SAFE_SET_DELETE, state.active, [value]);
   }
 }
 
@@ -1088,10 +1317,10 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
  * @returns {unknown[]}
  */
 export function redactTestErrors(errors, secrets = liveCredentialValues()) {
-  if (!Array.isArray(errors)) throwRedactionFailure();
+  if (!SAFE_ARRAY_IS_ARRAY(errors)) throwRedactionFailure();
   const state = createRedactionState();
   const snapshot = redactTestDiagnosticValue(errors, secrets, state, 0);
-  if (!Array.isArray(snapshot)) throwRedactionFailure();
+  if (!SAFE_ARRAY_IS_ARRAY(snapshot)) throwRedactionFailure();
   return snapshot;
 }
 
@@ -1102,11 +1331,19 @@ export function redactTestErrors(errors, secrets = liveCredentialValues()) {
 function credentialBytePatterns(secrets) {
   /** @type {Buffer[]} */
   const patterns = [];
-  for (const secret of secrets) {
+  const copiedSecrets = trustedArrayCopy(secrets);
+  const encodings = ['utf8', 'utf16le'];
+  for (let secretIndex = 0; secretIndex < copiedSecrets.length; secretIndex += 1) {
+    const secret = copiedSecrets[secretIndex];
     if (typeof secret !== 'string' || secret.length === 0) continue;
-    for (const encoding of /** @type {const} */ (['utf8', 'utf16le'])) {
-      const bytes = Buffer.from(secret, encoding);
-      if (bytes.length > 0 && bytes.length <= REDACTION_MAX_BINARY_BYTES) patterns.push(bytes);
+    for (let encodingIndex = 0; encodingIndex < encodings.length; encodingIndex += 1) {
+      const encoding = encodings[encodingIndex];
+      const bytes = /** @type {Buffer} */ (
+        trustedApply(SAFE_BUFFER_FROM, Buffer, [secret, encoding])
+      );
+      if (bytes.length > 0 && bytes.length <= REDACTION_MAX_BINARY_BYTES) {
+        trustedApply(SAFE_ARRAY_PUSH, patterns, [bytes]);
+      }
     }
   }
   return patterns;
@@ -1123,20 +1360,29 @@ function credentialBytePatterns(secrets) {
  */
 function redactProtocolBase64(encoded, patterns) {
   if (typeof encoded !== 'string') throwRedactionFailure();
-  if (encoded.length > REDACTION_MAX_STRING_LENGTH || !BASE64_PATTERN.test(encoded)) {
+  if (encoded.length > REDACTION_MAX_STRING_LENGTH || !trustedRegExpTest(BASE64_PATTERN, encoded)) {
     throwRedactionBudget();
   }
   let bytes;
   try {
-    bytes = Buffer.from(encoded, 'base64');
+    bytes = /** @type {Buffer} */ (
+      trustedApply(SAFE_BUFFER_FROM, Buffer, [encoded, 'base64'])
+    );
   } catch {
     throwRedactionFailure();
   }
-  if (bytes.length > REDACTION_MAX_BINARY_BYTES || bytes.toString('base64') !== encoded) {
+  const canonical = /** @type {string} */ (
+    trustedApply(SAFE_BUFFER_TO_STRING, bytes, ['base64'])
+  );
+  if (bytes.length > REDACTION_MAX_BINARY_BYTES || canonical !== encoded) {
     throwRedactionBudget();
   }
-  for (const pattern of patterns) {
-    if (bytes.indexOf(pattern) >= 0) return LIVE_BINARY_REDACTION;
+  for (let index = 0; index < patterns.length; index += 1) {
+    const pattern = /** @type {Buffer} */ (patterns[index]);
+    const matchIndex = /** @type {number} */ (
+      trustedApply(SAFE_BUFFER_INDEX_OF, bytes, [pattern])
+    );
+    if (matchIndex >= 0) return LIVE_BINARY_REDACTION;
   }
   return encoded;
 }
@@ -1150,12 +1396,12 @@ function snapshotProperty(value, key) {
   if (value === null || typeof value !== 'object') throwRedactionFailure();
   let descriptor;
   try {
-    descriptor = Object.getOwnPropertyDescriptor(value, key);
+    descriptor = SAFE_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, key);
   } catch {
     throwRedactionFailure();
   }
   if (!descriptor) return { present: false };
-  if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) throwRedactionFailure();
+  if (!trustedHasOwn(descriptor, 'value')) throwRedactionFailure();
   return { present: true, value: descriptor.value };
 }
 
@@ -1177,7 +1423,12 @@ function redactPlaywrightBinaryFields(snapshot, patterns) {
     throwRedactionFailure();
   }
   const eventMethod = snapshotProperty(outerParams.value, 'method');
-  if (!eventMethod.present || !['stdOut', 'stdErr', 'attach'].includes(String(eventMethod.value))) return;
+  if (
+    !eventMethod.present ||
+    (eventMethod.value !== 'stdOut' &&
+      eventMethod.value !== 'stdErr' &&
+      eventMethod.value !== 'attach')
+  ) return;
   const eventParams = snapshotProperty(outerParams.value, 'params');
   if (!eventParams.present || eventParams.value === null || typeof eventParams.value !== 'object') {
     throwRedactionFailure();
@@ -1204,7 +1455,9 @@ function redactPlaywrightBinaryFields(snapshot, patterns) {
  * @returns {unknown}
  */
 export function redactLiveTransportMessage(message, secrets = liveCredentialValues()) {
-  const capturedSecrets = Object.freeze([...secrets]);
+  const capturedSecrets = /** @type {string[]} */ (
+    SAFE_OBJECT_FREEZE(trustedArrayCopy(secrets))
+  );
   const state = createRedactionState();
   const snapshot = redactTestDiagnosticValue(message, capturedSecrets, state, 0);
   redactPlaywrightBinaryFields(snapshot, credentialBytePatterns(capturedSecrets));
@@ -1222,6 +1475,8 @@ export function redactLiveTransportMessage(message, secrets = liveCredentialValu
 export async function scrubLivePage(page) {
   try {
     await page.evaluate(() => {
+      // This callback runs in the browser realm, so use that realm's native Set
+      // rather than a Node preload capture that would not be defined remotely.
       const editableModes = new Set(['', 'true', 'plaintext-only']);
       for (const element of document.querySelectorAll('input, textarea, select, [contenteditable]')) {
         if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
@@ -1301,7 +1556,7 @@ function uniqueSiblingPath(parent, name, purpose) {
  */
 function isStrictOwnedDescendant(root, candidate) {
   const remainder = relative(resolve(root), resolve(candidate));
-  return remainder.length > 0 && remainder !== '..' && !remainder.startsWith(`..${sep}`);
+  return remainder.length > 0 && remainder !== '..' && !trustedStringStartsWith(remainder, `..${sep}`);
 }
 
 /**
@@ -1502,15 +1757,15 @@ function replaceDiagnosticArray(testInfo, snapshot) {
   }
 
   const target = testInfo.errors;
-  if (!Array.isArray(target)) throwRedactionFailure();
+  if (!SAFE_ARRAY_IS_ARRAY(target)) throwRedactionFailure();
   try {
     target.length = 0;
     for (let index = 0; index < snapshot.length; index += 1) {
-      target.push(snapshot[index]);
+      trustedApply(SAFE_ARRAY_PUSH, target, [snapshot[index]]);
     }
     if (target.length !== snapshot.length) throwRedactionFailure();
     for (let index = 0; index < snapshot.length; index += 1) {
-      if (!Object.is(target[index], snapshot[index])) throwRedactionFailure();
+      if (!SAFE_OBJECT_IS(target[index], snapshot[index])) throwRedactionFailure();
     }
   } catch {
     throwRedactionFailure();
