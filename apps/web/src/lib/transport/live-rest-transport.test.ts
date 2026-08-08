@@ -126,6 +126,16 @@ function fetchSequence(...responses: Response[]): { fetch: typeof fetch; calls: 
   };
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function rawProviderDiscovery(): string {
   return JSON.stringify({
     providers: [
@@ -1006,6 +1016,34 @@ describe('createLiveRestTransport', () => {
     expect(
       consumeLiveRestCanonicalAlias(transport, workspace, detail, LIVE_SESSION_FIXTURE.id)
     ).toBeUndefined();
+  });
+
+  it('does not let a deferred real REST alias repopulate a reset workspace scope', async () => {
+    const alias = LIVE_SESSION_FIXTURE.id;
+    const canonical = 'synthetic-session-0002';
+    const deferredResponse = createDeferred<Response>();
+    let fetchCalls = 0;
+    const transport = createLiveRestTransport({
+      fetch: async () => {
+        fetchCalls += 1;
+        return fetchCalls === 1
+          ? deferredResponse.promise
+          : response(rawSession({ ...LIVE_SESSION_FIXTURE, id: canonical }));
+      }
+    });
+    const workspace = {};
+
+    const staleFetch = getLiveRestSessionForWorkspace(transport, workspace, alias);
+    resetLiveRestCanonicalAliasScope(transport, workspace);
+    deferredResponse.resolve(response(rawSession({ ...LIVE_SESSION_FIXTURE, id: canonical })));
+
+    const staleDetail = await staleFetch;
+    expect(staleDetail.id).toBe(canonical);
+    expect(consumeLiveRestCanonicalAlias(transport, workspace, staleDetail, alias)).toBeUndefined();
+
+    const freshDetail = await getLiveRestSessionForWorkspace(transport, workspace, alias);
+    expect(consumeLiveRestCanonicalAlias(transport, workspace, freshDetail, alias)).toBe(canonical);
+    expect(fetchCalls).toBe(2);
   });
 
   it('rejects a wrapper that relays a real transport alias detail', async () => {

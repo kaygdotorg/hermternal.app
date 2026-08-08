@@ -714,6 +714,54 @@ describe('LiveWorkspaceSession', () => {
     expect(chat.createChat).toHaveBeenCalledTimes(1);
   });
 
+  it('fences a deferred REST alias completion when a newer workspace selection resets scope', async () => {
+    const requestedSessionId = 'alias-session';
+    const replacement = { ...SESSION, id: 'session-2', title: 'Replacement', isActive: false };
+    const deferredDetail = createDeferred<Response>();
+    const rawHistory = JSON.stringify({
+      session_id: replacement.id,
+      messages: [],
+      pagination: { limit: 500, offset: 0, returned: 0 }
+    });
+    const rest = createLiveRestTransport({
+      fetch: async (input) => {
+        const path = String(input);
+        if (path.endsWith(`/sessions/${requestedSessionId}`)) return deferredDetail.promise;
+        if (path.endsWith(`/sessions/${replacement.id}`)) {
+          return new Response(rawSessionDetail(replacement), {
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+        if (path.includes(`/sessions/${replacement.id}/messages?`)) {
+          return new Response(rawHistory, { headers: { 'content-type': 'application/json' } });
+        }
+        throw new Error(`unexpected REST path: ${path}`);
+      }
+    });
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    const stale = session.selectSession(requestedSessionId);
+    const current = session.selectSession(replacement.id);
+    await current;
+    deferredDetail.resolve(
+      new Response(rawSessionDetail({ ...replacement, id: 'canonical-session' }), {
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    await stale;
+
+    expect(session.current).toMatchObject({
+      state: 'empty',
+      activeSessionId: replacement.id,
+      title: replacement.title
+    });
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(chat.createChat.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ selectedSessionId: replacement.id })
+    );
+  });
+
   it('rejects foreign history during session replacement without publishing or committing it', async () => {
     const rest = createRest([{ role: 'assistant', content: 'Owned session answer' }]);
     const replacement = { ...SESSION, id: 'session-2', title: 'Replacement', isActive: false };
