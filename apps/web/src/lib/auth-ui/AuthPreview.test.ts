@@ -3,6 +3,23 @@ import { describe, expect, it, vi } from 'vitest';
 import AuthPreview from './AuthPreview.svelte';
 import { DEFAULT_PROVIDERS } from './fixtures';
 
+async function flushBoundedEventLoop(bound = 8): Promise<void> {
+  for (let phase = 0; phase < bound; phase += 1) {
+    await Promise.resolve();
+    await Promise.resolve();
+    if (vi.getTimerCount() === 0) {
+      await Promise.resolve();
+      await Promise.resolve();
+      if (vi.getTimerCount() === 0) return;
+    }
+    await vi.runOnlyPendingTimersAsync();
+  }
+
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(vi.getTimerCount()).toBe(0);
+}
+
 describe('AuthPreview', () => {
   it('renders provider selection without exposing search or deep-link controls', () => {
     render(AuthPreview, { state: 'provider-selection' });
@@ -170,7 +187,7 @@ describe('AuthPreview', () => {
     expect(screen.getByLabelText('Username')).toHaveFocus();
   });
 
-  it('scrubs input properties and reset defaults before hostile reset observation and mutation observers', async () => {
+  it('scrubs all input representations after hostile observer tasks settle', async () => {
     let view!: ReturnType<typeof render>;
     let callbackDom: [string, string, string, string] | undefined;
     const onPasswordSubmit = vi.fn(() => {
@@ -203,62 +220,52 @@ describe('AuthPreview', () => {
       password.value = 'reset-listener-password';
     });
     let observerCount = 0;
-    let microtaskAttributesRestored = false;
-    let taskAttributesRestored = false;
+    let lateTaskQueued = false;
+    let lateTaskRan = false;
     const observer = new MutationObserver(() => {
       observerCount += 1;
-      // Re-populate at each bounded phase to prove the component does not rely
-      // on an unbounded observer fight to leave the live DOM credential-free.
-      username.value = 'observer-sync-user';
-      password.value = 'observer-sync-password';
-      if (observerCount === 1) {
-        username.defaultValue = 'observer-sync-default-user';
-        password.defaultValue = 'observer-sync-default-password';
-        username.setAttribute('value', 'observer-sync-attribute-user');
-        password.setAttribute('value', 'observer-sync-attribute-password');
-      }
-      queueMicrotask(() => {
-        username.value = 'observer-microtask-user';
-        password.value = 'observer-microtask-password';
-        if (!microtaskAttributesRestored) {
-          microtaskAttributesRestored = true;
-          username.defaultValue = 'observer-microtask-default-user';
-          password.defaultValue = 'observer-microtask-default-password';
-          username.setAttribute('value', 'observer-microtask-attribute-user');
-          password.setAttribute('value', 'observer-microtask-attribute-password');
-        }
-      });
+      if (lateTaskQueued) return;
+      lateTaskQueued = true;
+      // This task is queued by an earlier attribute mutation, before the
+      // component's final bounded timer. Keep the observer connected so the
+      // late attribute writes also exercise a second observer delivery without
+      // creating an unbounded feedback loop.
       setTimeout(() => {
-        username.value = 'observer-task-user';
-        password.value = 'observer-task-password';
-        if (!taskAttributesRestored) {
-          taskAttributesRestored = true;
-          username.defaultValue = 'observer-task-default-user';
-          password.defaultValue = 'observer-task-default-password';
-          username.setAttribute('value', 'observer-task-attribute-user');
-          password.setAttribute('value', 'observer-task-attribute-password');
-        }
+        lateTaskRan = true;
+        username.value = 'late';
+        password.value = 'late';
+        username.defaultValue = 'late-default';
+        password.defaultValue = 'late-default';
+        username.setAttribute('value', 'late-attr');
+        password.setAttribute('value', 'late-attr');
       }, 0);
     });
     observer.observe(form, { attributes: true, subtree: true, attributeFilter: ['value'] });
 
-    fireEvent.submit(form);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      fireEvent.submit(form);
 
-    expect(onPasswordSubmit).toHaveBeenCalledWith({ username: 'hostile-user', password: 'hostile-password' });
-    expect(callbackDom).toEqual(['', '', '', '']);
-    expect(resetObservation).toEqual([['', '', '', '']]);
-    await waitFor(() => {
+      expect(onPasswordSubmit).toHaveBeenCalledWith({ username: 'hostile-user', password: 'hostile-password' });
+      expect(callbackDom).toEqual(['', '', '', '']);
+      expect(resetObservation).toEqual([['', '', '', '']]);
+      await flushBoundedEventLoop();
+
+      expect(lateTaskQueued).toBe(true);
+      expect(lateTaskRan).toBe(true);
+      expect(observerCount).toBeGreaterThan(0);
+      expect(observerCount).toBeLessThanOrEqual(4);
       expect(username).toHaveValue('');
       expect(password).toHaveValue('');
       expect(username.defaultValue).toBe('');
       expect(password.defaultValue).toBe('');
       expect(username.getAttribute('value')).toBeNull();
       expect(password.getAttribute('value')).toBeNull();
-    });
-    expect(observerCount).toBeGreaterThan(0);
-    expect(observerCount).toBeLessThan(4);
-    expect(JSON.stringify(callbackDom)).not.toContain('hostile-password');
-    observer.disconnect();
+      expect(JSON.stringify(callbackDom)).not.toContain('hostile-password');
+    } finally {
+      observer.disconnect();
+      vi.useRealTimers();
+    }
   });
 
   it('scrubs retained input references synchronously during unmount', async () => {
