@@ -1463,5 +1463,9 @@ test('sequential test sees the same root', async ({}, testInfo) => {
     expect(config).toContain("trace: 'off'");
     expect(config).toContain("video: 'off'");
     expect(config).toContain("screenshot: 'off'");
+    expect(config).toContain("viewport: { width: 1440, height: 960 }");
+    expect(config).toContain('deviceScaleFactor: 1');
+    expect(config).toContain("locale: 'en-US'");
+    expect(config).toContain("reducedMotion: 'reduce'");
   });
 });
