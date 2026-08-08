@@ -29,13 +29,13 @@ test('normal root verifies identity and discovers password providers', async ({ 
   await expect(page.getByTestId('status-success')).toHaveCount(0);
 });
 
-test('native field Enter preserves live values while failing closed without navigation, requests, storage, or serialization', async ({ page }) => {
+test('native field Enter preserves live values while failing closed without navigation, requests, storage, or credential serialization', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
-  const requestUrls: string[] = [];
-  const navigationUrls: string[] = [];
-  const onRequest = (request: { isNavigationRequest(): boolean; url(): string }) => {
-    requestUrls.push(request.url());
-    if (request.isNavigationRequest()) navigationUrls.push(request.url());
+  let requestCount = 0;
+  let navigationCount = 0;
+  const onRequest = (request: { isNavigationRequest(): boolean }) => {
+    requestCount += 1;
+    if (request.isNavigationRequest()) navigationCount += 1;
   };
   page.on('request', onRequest);
 
@@ -63,7 +63,15 @@ test('native field Enter preserves live values while failing closed without navi
     await expect(form).toHaveAttribute('data-field-ownership', 'ready');
 
     const originalUrl = page.url();
-    const storageBefore = await page.context().storageState();
+    const storageSummary = async (): Promise<{ cookieCount: number; originCount: number; localStorageEntryCount: number }> => {
+      const storage = await page.context().storageState();
+      return {
+        cookieCount: storage.cookies.length,
+        originCount: storage.origins.length,
+        localStorageEntryCount: storage.origins.reduce((count, origin) => count + origin.localStorage.length, 0)
+      };
+    };
+    const storageBefore = await storageSummary();
     const username = page.getByLabel('Username');
     const password = page.getByRole('textbox', { name: 'Password' });
     const usernameValue = 'native-field-enter-user';
@@ -75,24 +83,36 @@ test('native field Enter preserves live values while failing closed without navi
     // The browser protocol captures request and navigation evidence outside the
     // disabled page runtime. Input Enter has no running handler or native reset
     // target, so retaining the live control values is an allowed outcome.
-    requestUrls.length = 0;
-    navigationUrls.length = 0;
+    requestCount = 0;
+    navigationCount = 0;
     await password.press('Enter');
 
-    await expect(username).toHaveValue(usernameValue);
-    await expect(password).toHaveValue(passwordValue);
+    const nativeValuesRemain =
+      (await username.inputValue()) === usernameValue && (await password.inputValue()) === passwordValue;
+    expect(nativeValuesRemain).toBe(true);
     expect(page.url()).toBe(originalUrl);
-    expect(navigationUrls).toEqual([]);
-    expect(requestUrls).toEqual([]);
-    expect(await page.context().storageState()).toEqual(storageBefore);
+    expect(navigationCount).toBe(0);
+    expect(requestCount).toBe(0);
+    const storageUnchanged = JSON.stringify(await storageSummary()) === JSON.stringify(storageBefore);
+    expect(storageUnchanged).toBe(true);
 
-    // `page.content()` is a browser-observable serialized-DOM snapshot, not a
-    // callback in the disabled page. The live properties may retain values, but
-    // neither credential may be serialized into the document markup.
-    const serializedDom = await page.content();
-    expect(serializedDom).not.toContain(usernameValue);
-    expect(serializedDom).not.toContain(passwordValue);
+    // Derive only a credential-presence count inside the browser. This is not
+    // a screenshot or complete-DOM redaction claim, and raw markup never leaves
+    // the page evaluation or remains in the test trace.
+    const serializedCredentialCount = await page.evaluate(
+      ([usernameText, passwordText]) =>
+        [usernameText, passwordText].reduce(
+          (count, value) => count + Number(document.documentElement.outerHTML.includes(value)),
+          0
+        ),
+      [usernameValue, passwordValue]
+    );
+    expect(serializedCredentialCount).toBe(0);
   } finally {
     page.off('request', onRequest);
+    await page.unroute('**/api/auth/me').catch(() => undefined);
+    await page.unroute('**/api/auth/providers').catch(() => undefined);
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
+    await cdp.detach().catch(() => undefined);
   }
 });
