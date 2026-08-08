@@ -354,6 +354,10 @@ describe('LiveWorkspaceSession', () => {
 
     await session.initialize();
     await session.createSession();
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce({
+      ...sessionMessages([]),
+      sessionId: 'stored-draft'
+    });
     session.sendPrompt('first persisted turn');
     chat.emit({ type: 'message.complete', requestId: 'request-1', payload: { status: 'ok' } });
     chat.complete({ type: 'message.complete', requestId: 'request-1', payload: { status: 'ok' } });
@@ -747,6 +751,55 @@ describe('LiveWorkspaceSession', () => {
     expect(session.current.state).toBe('ready');
     expect(socket.sent.filter((frame) => JSON.parse(frame).method === 'prompt.submit')).toHaveLength(1);
     expect(JSON.stringify(session.current)).not.toContain('redacted');
+  });
+
+  it('rejects foreign REST history after a correlated completion without replacing the owned timeline', async () => {
+    const rest = createRest([]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce({
+      sessionId: 'foreign-session',
+      messages: [
+        { role: 'user', content: 'Foreign prompt' },
+        { role: 'assistant', content: 'Foreign answer' }
+      ],
+      pagination: { limit: 500, offset: 0, returned: 2 }
+    });
+
+    session.sendPrompt('Owned prompt');
+    const completion: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      sessionId: SESSION.id,
+      payload: { text: 'Owned answer', status: 'ok' }
+    };
+    chat.emit(completion);
+    chat.complete(completion);
+    await flush();
+    await flush();
+
+    expect(rest.getSessionMessages).toHaveBeenLastCalledWith(
+      SESSION.id,
+      { limit: 500, offset: 0 },
+      expect.any(AbortSignal)
+    );
+    expect(session.current).toMatchObject({
+      state: 'retryable-error',
+      activeSessionId: SESSION.id
+    });
+    expect(session.current.timeline).toEqual([
+      { kind: 'user-message', id: 'request-1:user', text: 'Owned prompt' },
+      {
+        kind: 'assistant-message',
+        id: 'request-1:stream',
+        text: 'Owned answer',
+        model: 'Hermes 4',
+        status: 'complete'
+      }
+    ]);
+    expect(JSON.stringify(session.current.timeline)).not.toContain('Foreign prompt');
+    expect(JSON.stringify(session.current.timeline)).not.toContain('Foreign answer');
   });
 
   it('does not let an earlier completion refresh erase a newer prompt', async () => {
