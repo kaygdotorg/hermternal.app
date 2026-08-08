@@ -1104,6 +1104,7 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         value: bytes,
         *,
         forwarded_for: bytes = b"127.0.0.1",
+        forwarded_method: bytes = b"GET",
         forwarded_port: bytes = b"19444",
         forwarded_proto: bytes = b"https",
         origin: bytes | None = None,
@@ -1120,7 +1121,7 @@ class ForwardAuthAdapterTests(unittest.TestCase):
                 b"X-Forwarded-For: " + forwarded_for + b"\r\n",
                 b"X-Forwarded-Host: " + value + b"\r\n",
                 folded_suffix,
-                b"X-Forwarded-Method: GET\r\n",
+                b"X-Forwarded-Method: " + forwarded_method + b"\r\n",
                 b"X-Forwarded-Port: " + forwarded_port + b"\r\n",
                 b"X-Forwarded-Proto: " + forwarded_proto + b"\r\n",
                 b"X-Forwarded-Uri: /\r\n",
@@ -1315,6 +1316,7 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         valid_authorities = (
             ("canonical", b"traefik-92.test:19444", 200, "allow"),
             ("valid_wrong", b"wrong.test:19444", 421, "deny"),
+            ("valid_bracketed_ipv6", b"[::1]:19444", 421, "deny"),
             ("valid_max_label", b"a" * 63 + b".test:19444", 421, "deny"),
             ("valid_max_host", max_host + b":19444", 421, "deny"),
             ("max_port", b"wrong.test:65535", 421, "deny"),
@@ -1340,11 +1342,39 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         for label, kwargs in (
             ("host_trailing_ows", {"value": b"traefik-92.test:19444 "}),
             ("host_internal_ows", {"value": b"traefik-92.test: 19444"}),
-            ("xff_trailing_ows", {"value": b"traefik-92.test:19444", "forwarded_for": b"127.0.0.1 "}),
+            ("xff_internal_ows", {"value": b"traefik-92.test:19444", "forwarded_for": b"127.0.0.1 10.0.0.1"}),
             ("xff_only_ows", {"value": b"traefik-92.test:19444", "forwarded_for": b" \t"}),
             ("port_trailing_ows", {"value": b"traefik-92.test:19444", "forwarded_port": b"19444 "}),
             ("proto_internal_ows", {"value": b"traefik-92.test:19444", "forwarded_proto": b"ht tps"}),
             ("origin_trailing_ows", {"value": b"traefik-92.test:19444", "origin": b"https://traefik-92.test:19444 "}),
+        ):
+            with self.subTest(authority=label):
+                status, response_headers = self._send_raw_x_forwarded_host(**kwargs)
+                self.assertEqual(status, 400)
+                self.assertEqual(response_headers["x-hermternal-policy"], "deny")
+
+        for label, forwarded_for in (
+            ("xff_trailing_ows", b"127.0.0.1 "),
+            ("xff_comma_ows_chain", b"127.0.0.1, \t10.0.0.1"),
+            ("xff_ipv6", b"::1"),
+        ):
+            with self.subTest(authority=label):
+                status, response_headers = self._send_raw_x_forwarded_host(
+                    b"traefik-92.test:19444",
+                    forwarded_for=forwarded_for,
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(response_headers["x-hermternal-policy"], "allow")
+
+        for label, kwargs in (
+            ("empty_method", {"value": b"traefik-92.test:19444", "forwarded_method": b""}),
+            ("ows_only_method", {"value": b"traefik-92.test:19444", "forwarded_method": b" \t"}),
+            ("malformed_method", {"value": b"traefik-92.test:19444", "forwarded_method": b"GET /"}),
+            ("garbage_xff", {"value": b"traefik-92.test:19444", "forwarded_for": b"not-an-ip"}),
+            ("comma_garbage_xff", {"value": b"traefik-92.test:19444", "forwarded_for": b"127.0.0.1,garbage"}),
+            ("trailing_comma_xff", {"value": b"traefik-92.test:19444", "forwarded_for": b"127.0.0.1,"}),
+            ("ows_only_origin", {"value": b"traefik-92.test:19444", "origin": b" \t"}),
+            ("malformed_origin", {"value": b"traefik-92.test:19444", "origin": b"not-an-origin"}),
         ):
             with self.subTest(authority=label):
                 status, response_headers = self._send_raw_x_forwarded_host(**kwargs)
@@ -1574,14 +1604,6 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                     EXPECTED_BUILD_DIGEST,
                     "--traefik-config-digest",
                     EXPECTED_CONFIG_DIGEST,
-                    "--parser-implementation-commit",
-                    self._parser_provenance()["implementation_commit"],
-                    "--parser-implementation-blob",
-                    self._parser_provenance()["implementation_blob"],
-                    "--parser-implementation-sha256",
-                    self._parser_provenance()["implementation_sha256"],
-                    "--parser-test-sha256",
-                    self._parser_provenance()["test_source_sha256"],
                     "--browser-evidence",
                     str(browser_path),
                 ],
@@ -1593,6 +1615,33 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             completed.stdout,
             (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
         )
+        forged = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/traefik_proof.py"),
+                "evidence",
+                "--build-sha",
+                EXPECTED_BUILD_SHA,
+                "--build-digest",
+                EXPECTED_BUILD_DIGEST,
+                "--traefik-config-digest",
+                EXPECTED_CONFIG_DIGEST,
+                "--parser-implementation-commit",
+                "0" * 40,
+                "--parser-implementation-blob",
+                "1" * 40,
+                "--parser-implementation-sha256",
+                "2" * 64,
+                "--parser-test-sha256",
+                "3" * 64,
+                "--browser-evidence",
+                str(browser_path),
+            ],
+            check=False,
+            capture_output=True,
+        )
+        self.assertNotEqual(forged.returncode, 0)
+        self.assertIn(b"parser provenance", forged.stderr.lower())
 
     def test_proof_run_is_reconstructed_and_not_caller_mutable(self) -> None:
         first = traefik_proof._synthetic_proof_run()
