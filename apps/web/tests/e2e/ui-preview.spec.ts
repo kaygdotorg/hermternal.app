@@ -760,77 +760,100 @@ test('password cancellation preserves one Pill gesture across pointerup, pointer
 
 test('first-load no-script product route exposes only the inert loading boundary', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
-  const requestUrls: string[] = [];
-  page.on('request', (request) => requestUrls.push(request.url()));
-  await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
-  await page.goto(previewUrl('/'));
+  let authRequestCount = 0;
+  const onRequest = (request: { url(): string }) => {
+    if (/\/api\/auth\//u.test(request.url())) authRequestCount += 1;
+  };
+  page.on('request', onRequest);
 
-  await expect(page.getByLabel('Starting Hermternal')).toHaveAttribute('aria-busy', 'true');
-  await expect(page.getByTestId('auth-preview')).toHaveCount(0);
-  await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveCount(0);
-  await expect(page.locator('input[type="password"]')).toHaveCount(0);
-  expect(await page.locator('html').textContent()).not.toContain('password');
-  expect(requestUrls.some((url) => /\/api\/auth\//u.test(url))).toBe(false);
+  try {
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+    await page.goto(previewUrl('/'));
+
+    await expect(page.getByLabel('Starting Hermternal')).toHaveAttribute('aria-busy', 'true');
+    await expect(page.getByTestId('auth-preview')).toHaveCount(0);
+    await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveCount(0);
+    await expect(page.locator('input[type="password"]')).toHaveCount(0);
+    const passwordTextVisible = (await page.locator('html').textContent())?.includes('password') ?? false;
+    expect(passwordTextVisible).toBe(false);
+    expect(authRequestCount).toBe(0);
+  } finally {
+    page.off('request', onRequest);
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
+  }
 });
 
 test('native password activation clears live values without navigation when script execution stops', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
 
   for (const activation of ['click', 'enter'] as const) {
-    await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
-    await page.goto(previewUrl('/ui-preview'));
-    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
-    await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready');
-    const originalUrl = page.url();
-    const originalHistoryLength = await page.evaluate(() => history.length);
     const usernameValue = `visible-username-${activation}`;
     const passwordValue = `raw-password-${activation}`;
-    const navigationRequests: string[] = [];
-    const requestUrls: string[] = [];
-    const consoleMessages: string[] = [];
-    const onRequest = (request: { isNavigationRequest(): boolean; url(): string }) => {
-      requestUrls.push(request.url());
-      if (request.isNavigationRequest()) navigationRequests.push(request.url());
+    let requestCount = 0;
+    let navigationCount = 0;
+    let credentialSeenInConsole = false;
+    const onRequest = (request: { isNavigationRequest(): boolean }) => {
+      requestCount += 1;
+      if (request.isNavigationRequest()) navigationCount += 1;
     };
-    const onConsole = (message: { text(): string }) => consoleMessages.push(message.text());
-    page.on('request', onRequest);
-    page.on('console', onConsole);
+    const onConsole = (message: { text(): string }) => {
+      const text = message.text();
+      credentialSeenInConsole ||= text.includes(usernameValue) || text.includes(passwordValue);
+    };
+    try {
+      await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
+      await page.goto(previewUrl('/ui-preview'));
+      await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+      await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready');
+      const originalUrl = page.url();
+      const originalHistoryLength = await page.evaluate(() => history.length);
 
-    await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
-    const username = page.getByLabel('Username');
-    const password = page.getByRole('textbox', { name: 'Password' });
-    await username.fill(usernameValue);
-    await password.fill(passwordValue);
+      await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+      const username = page.getByLabel('Username');
+      const password = page.getByRole('textbox', { name: 'Password' });
+      await username.fill(usernameValue);
+      await password.fill(passwordValue);
 
-    const signIn = page.getByRole('button', { name: 'Sign in' });
-    if (activation === 'click') await signIn.click();
-    else {
-      await signIn.focus();
-      await signIn.press('Enter');
+      // Start protocol and console evidence only after setup navigation and
+      // hydration have completed, so the assertion covers the disabled-script
+      // activation rather than the test fixture's own page load.
+      requestCount = 0;
+      navigationCount = 0;
+      page.on('request', onRequest);
+      page.on('console', onConsole);
+
+      const signIn = page.getByRole('button', { name: 'Sign in' });
+      if (activation === 'click') await signIn.click();
+      else {
+        await signIn.focus();
+        await signIn.press('Enter');
+      }
+
+      const liveValuesCleared = (await username.inputValue()) === '' && (await password.inputValue()) === '';
+      expect(liveValuesCleared).toBe(true);
+      await expect(page).toHaveURL(originalUrl);
+      expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
+      expect(navigationCount).toBe(0);
+      expect(requestCount).toBe(0);
+      expect(credentialSeenInConsole).toBe(false);
+
+      // Compute only a credential-presence count inside the browser. This is
+      // not screenshot or full-DOM redaction evidence, and raw markup is not
+      // returned to the test trace.
+      const serializedCredentialCount = await page.evaluate(
+        ([usernameText, passwordText]) =>
+          [usernameText, passwordText].reduce(
+            (count, value) => count + Number(document.documentElement.outerHTML.includes(value)),
+            0
+          ),
+        [usernameValue, passwordValue]
+      );
+      expect(serializedCredentialCount).toBe(0);
+    } finally {
+      page.off('request', onRequest);
+      page.off('console', onConsole);
+      await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
     }
-
-    await expect(username).toHaveValue('');
-    await expect(password).toHaveValue('');
-    await expect(page).toHaveURL(originalUrl);
-    expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
-    const liveDom = await page.locator('html').evaluate((root) => ({
-      html: root.outerHTML,
-      values: Array.from(root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea')).map(
-        (field) => field.value
-      )
-    }));
-    expect(JSON.stringify(liveDom)).not.toContain(usernameValue);
-    expect(JSON.stringify(liveDom)).not.toContain(passwordValue);
-    expect(JSON.stringify(consoleMessages)).not.toContain(passwordValue);
-    expect(JSON.stringify(requestUrls)).not.toContain(passwordValue);
-    expect(JSON.stringify(requestUrls)).not.toContain(usernameValue);
-    expect(navigationRequests).toEqual([]);
-    // An empty live username control is the screenshot boundary: the captured
-    // pixels cannot render the previously entered fixture value.
-    expect((await page.screenshot()).byteLength).toBeGreaterThan(0);
-
-    page.off('request', onRequest);
-    page.off('console', onConsole);
   }
 });
 
@@ -907,7 +930,7 @@ test('password ownership fences delayed hydration, rapid focus transfer, and key
   }
 });
 
-test('native field Enter preserves live values while failing closed without navigation, requests, storage, or serialization', async ({ page }) => {
+test('native field Enter preserves live values while failing closed without navigation, requests, storage, or credential serialization', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
   await page.goto(previewUrl('/ui-preview'));
   await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
@@ -916,45 +939,53 @@ test('native field Enter preserves live values while failing closed without navi
 
   const originalUrl = page.url();
   const originalHistoryLength = await page.evaluate(() => history.length);
+  const storageBefore = await page.context().storageState();
   const usernameValue = 'native-field-enter-user';
   const passwordValue = 'native-field-enter-password';
-  const requestUrls: string[] = [];
-  const navigationRequests: string[] = [];
-  const onRequest = (request: { isNavigationRequest(): boolean; url(): string }) => {
-    requestUrls.push(request.url());
-    if (request.isNavigationRequest()) navigationRequests.push(request.url());
+  let requestCount = 0;
+  let navigationCount = 0;
+  const onRequest = (request: { isNavigationRequest(): boolean }) => {
+    requestCount += 1;
+    if (request.isNavigationRequest()) navigationCount += 1;
   };
   page.on('request', onRequest);
 
-  await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
-  const username = page.getByLabel('Username');
-  await username.fill(usernameValue);
-  const password = page.getByRole('textbox', { name: 'Password' });
-  await password.fill(passwordValue);
-  await password.press('Enter');
+  try {
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+    const username = page.getByLabel('Username');
+    await username.fill(usernameValue);
+    const password = page.getByRole('textbox', { name: 'Password' });
+    await password.fill(passwordValue);
+    await password.press('Enter');
 
-  // With handlers disabled, input Enter has no native reset target. The live
-  // values remain in their controls even though submission fails closed.
-  await expect(username).toHaveValue(usernameValue);
-  await expect(password).toHaveValue(passwordValue);
+    // With handlers disabled, input Enter has no native reset target. The live
+    // values may remain in their controls even though submission fails closed.
+    const nativeValuesRemain =
+      (await username.inputValue()) === usernameValue && (await password.inputValue()) === passwordValue;
+    expect(nativeValuesRemain).toBe(true);
 
-  await expect(page).toHaveURL(originalUrl);
-  expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
-  expect(navigationRequests).toEqual([]);
-  expect(requestUrls).toEqual([]);
-  expect(
-    await page.evaluate(([username, password]) => ({
-      localStorage: Object.values(localStorage).some((value) => value.includes(username) || value.includes(password)),
-      sessionStorage: Object.values(sessionStorage).some((value) => value.includes(username) || value.includes(password)),
-      html: document.documentElement.outerHTML
-    }), [usernameValue, passwordValue])
-  ).toEqual({
-    localStorage: false,
-    sessionStorage: false,
-    html: expect.not.stringContaining(passwordValue)
-  });
+    await expect(page).toHaveURL(originalUrl);
+    expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
+    expect(navigationCount).toBe(0);
+    expect(requestCount).toBe(0);
+    const storageUnchanged = JSON.stringify(await page.context().storageState()) === JSON.stringify(storageBefore);
+    expect(storageUnchanged).toBe(true);
 
-  page.off('request', onRequest);
+    // Compute only a credential-presence count inside the browser; do not
+    // return raw HTML or make a screenshot/full-DOM redaction claim.
+    const serializedCredentialCount = await page.evaluate(
+      ([usernameText, passwordText]) =>
+        [usernameText, passwordText].reduce(
+          (count, value) => count + Number(document.documentElement.outerHTML.includes(value)),
+          0
+        ),
+      [usernameValue, passwordValue]
+    );
+    expect(serializedCredentialCount).toBe(0);
+  } finally {
+    page.off('request', onRequest);
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
+  }
 });
 
 test('Pill consumes one pointer gesture across leave, re-entry, and compatibility click', async ({ page }) => {
