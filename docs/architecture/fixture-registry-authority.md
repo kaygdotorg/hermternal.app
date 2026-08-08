@@ -50,26 +50,28 @@ The active corrected aggregate binding is introduced at the distinct path:
 `scripts/fixture_registry_authority.v2.hardened.json`
 
 Both use the same v2 schema with role `aggregate_predecessor`. Each
-`source_commit` is the exact aggregate predecessor for its introduction commit
+`source_commit` is the exact aggregate predecessor for its pinned binding commit
 and must equal that commit's first parent. This direct-parent rule keeps an
 authority path out of the scanner/index/baseline commit it authorizes and avoids
-a self-referential source hash inside `validate.py`. The active hardened
-introduction and source commits are supplied through protected runtime pins,
-not inferred from a branch or tag.
+a self-referential source hash inside `validate.py`. The historical final and
+active hardened bindings are independently exact-pinned reviewed objects; the
+active binding does not assume that a later restack preserves the historical
+binding as an ancestor. Active binding and source commits are supplied through
+protected runtime pins, not inferred from a branch or tag.
 
 ## Active v2 loading rule
 
 The standalone verifier reads the historical
-`scripts/fixture_registry_authority.v2.final.json` from the sole first-parent
-Git commit that introduced that path. It does not use the visible checkout copy
-as its authority source. The aggregate validator authenticates the standalone
-verifier bytes, verifies that historical chain, then reads the active
-`scripts/fixture_registry_authority.v2.hardened.json` from the exact protected
-introduction and source pins. Both paths are read from the local Git object
-database, and each authority must satisfy all of the following:
+`scripts/fixture_registry_authority.v2.final.json` from its exact protected
+binding commit. It does not use the visible checkout copy as its authority
+source or infer a replacement from `HEAD`. The aggregate validator authenticates
+the standalone verifier bytes, verifies that historical binding, then reads the
+active `scripts/fixture_registry_authority.v2.hardened.json` from its exact
+protected binding and source pins. Both paths are read from the local Git
+object database, and each authority must satisfy all of the following:
 
 - the declared `source_commit` is a commit object and exactly equals that
-  authority introduction commit's first parent;
+  authority binding commit's first parent;
 - the four declared paths resolve at that predecessor to the recorded Git blob
   object IDs;
 - each predecessor object has the recorded byte length and SHA-256 digest; and
