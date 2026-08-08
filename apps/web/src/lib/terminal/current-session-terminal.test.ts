@@ -11,6 +11,17 @@ import {
   type CurrentSessionTerminalEvent
 } from './current-session-terminal';
 
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 function createFakePty() {
   const listeners = new Set<(event: PtyTransportEvent) => void>();
   const initial: PtyConnectionState = {
@@ -220,6 +231,35 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(otherBinding.isValid?.()).toBe(true);
   });
 
+  it('finishes cleanup after an adapter ignores binding invalidation until late connect completion', async () => {
+    const fake = createFakePty();
+    const connectGate = deferred<void>();
+    const originalConnect = fake.connect.getMockImplementation();
+    if (!originalConnect) throw new Error('PTY connect implementation is missing');
+    fake.connect.mockImplementation(async (input, signal) => {
+      await connectGate.promise;
+      return originalConnect(input, signal);
+    });
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const events: CurrentSessionTerminalEvent[] = [];
+    bridge.subscribe((event) => events.push(event));
+
+    const pending = bridge.attach('session-one', new AbortController().signal);
+    await Promise.resolve();
+    await Promise.resolve();
+    bridge.invalidateBindingForSession('session-one');
+    connectGate.resolve(undefined);
+
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' });
+    expect(fake.detach).toHaveBeenCalledTimes(2);
+    expect(fake.pty.state.status).toBe('detached');
+    expect(bridge.state.sessionId).toBeUndefined();
+    expect(events.filter((event) => event.type === 'state' && event.state.status === 'attached')).toEqual([]);
+
+    bridge.invalidateBindingForSession('session-one');
+    expect(fake.detach).toHaveBeenCalledTimes(2);
+  });
+
   it('stops later listeners after the first stale-state listener invalidates the binding', async () => {
     const fake = createFakePty();
     const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
@@ -244,7 +284,8 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(secondListener).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'state', state: expect.objectContaining({ status: 'attached' }) })
     );
-    expect(fake.detach).toHaveBeenCalledTimes(1);
+    expect(fake.detach).toHaveBeenCalledTimes(2);
+    expect(fake.pty.state.status).toBe('detached');
   });
 
   it('suppresses stale bytes, notices, and immediate state replay after invalidation', async () => {
