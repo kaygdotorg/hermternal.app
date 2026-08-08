@@ -482,6 +482,7 @@ PARSER_PROVENANCE_KEYS = frozenset(
         "test_source_sha256",
     }
 )
+PARSER_SOURCE_PATHS = (PARSER_IMPLEMENTATION_PATH, PARSER_TEST_PATH)
 
 
 def _git_output(project_root: Path, *arguments: str) -> bytes:
@@ -509,69 +510,155 @@ def _git_blob_oid(source: bytes) -> str:
     return hashlib.sha1(header + source).hexdigest()
 
 
+def _parser_tree_pair(project_root: Path, revision: str) -> tuple[str | None, str | None]:
+    """Return the two source blob OIDs while deliberately ignoring file modes.
+
+    A mode-only commit must not become a new parser identity. The blob pair is
+    therefore the source-change unit; mode metadata remains outside evidence.
+    """
+
+    raw = _git_output(project_root, "ls-tree", "-z", revision, "--", *PARSER_SOURCE_PATHS)
+    entries: dict[str, tuple[str, str]] = {}
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, kind, raw_oid = metadata.split(b" ", 2)
+            path = raw_path.decode("utf-8")
+            oid = raw_oid.decode("ascii")
+            mode.decode("ascii")
+            kind_text = kind.decode("ascii")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError("parser provenance source tree is malformed") from exc
+        if kind_text != "blob" or path not in PARSER_SOURCE_PATHS:
+            raise ValueError("parser provenance source tree contains an unexpected entry")
+        entries[path] = (oid, mode.decode("ascii"))
+    return tuple(entries.get(path, (None, ""))[0] for path in PARSER_SOURCE_PATHS)  # type: ignore[return-value]
+
+
 def _parser_source_predecessor(
     project_root: Path,
     implementation: bytes,
     test_source: bytes,
     head: str,
 ) -> tuple[str, bytes, bytes]:
-    """Find the newest commit that contains the exact current parser source pair.
+    """Find one unambiguous source-changing predecessor of the current bytes.
 
-    Evidence-only descendants must not move the source identity. Searching the
-    path history instead of binding to HEAD keeps a retained manifest stable
-    until either parser source changes, while the byte comparison still fails
-    closed for an uncommitted source drift.
+    Evidence-only descendants remain in the topology but have an unchanged
+    blob pair, so they do not move the identity. A merge can expose several
+    incomparable commits that
+    independently introduced the same parser/test bytes; selecting one from Git
+    log order would make retained evidence topology-dependent, so ambiguous
+    maximal candidates fail closed. Commits that only change file mode are
+    ignored because their blob pair is unchanged from a parent.
     """
 
     try:
-        history = _git_output(
+        history_lines = _git_output(
             project_root,
-            "log",
-            "--format=%H",
+            "rev-list",
+            "--topo-order",
+            "--full-history",
+            "--parents",
             head,
-            "--",
-            PARSER_IMPLEMENTATION_PATH,
-            PARSER_TEST_PATH,
         ).decode("ascii").splitlines()
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("parser provenance source history cannot be read") from exc
-    if not history or len(history) > PARSER_SOURCE_MAX_COMMITS:
+    if not history_lines or len(history_lines) > PARSER_SOURCE_MAX_COMMITS:
         raise ValueError("parser provenance source history exceeds its bounded limit")
-    if any(not re.fullmatch(r"[0-9a-f]{40}", commit) for commit in history):
-        raise ValueError("parser provenance source history contains an invalid Git SHA")
 
-    for candidate in history:
-        committed_implementation = _git_output(
-            project_root,
-            "show",
-            f"{candidate}:{PARSER_IMPLEMENTATION_PATH}",
-        )
-        committed_tests = _git_output(
-            project_root,
-            "show",
-            f"{candidate}:{PARSER_TEST_PATH}",
-        )
-        if committed_implementation != implementation or committed_tests != test_source:
+    parents_by_commit: dict[str, tuple[str, ...]] = {}
+    for line in history_lines:
+        fields = line.split()
+        if not fields or any(not re.fullmatch(r"[0-9a-f]{40}", field) for field in fields):
+            raise ValueError("parser provenance source history contains an invalid Git SHA")
+        commit, *parents = fields
+        if commit in parents_by_commit:
+            raise ValueError("parser provenance source history contains a duplicate commit")
+        parents_by_commit[commit] = tuple(parents)
+
+    pair_cache: dict[str, tuple[str | None, str | None]] = {}
+
+    def pair(revision: str) -> tuple[str | None, str | None]:
+        if revision not in pair_cache:
+            pair_cache[revision] = _parser_tree_pair(project_root, revision)
+        return pair_cache[revision]
+
+    current_pair = pair(head)
+    candidates: list[str] = []
+    for commit, parents in parents_by_commit.items():
+        if pair(commit) != current_pair:
             continue
-        implementation_blob = _git_output(
-            project_root,
-            "rev-parse",
-            f"{candidate}:{PARSER_IMPLEMENTATION_PATH}",
-        ).decode("ascii").strip()
-        test_blob = _git_output(
-            project_root,
-            "rev-parse",
-            f"{candidate}:{PARSER_TEST_PATH}",
-        ).decode("ascii").strip()
-        if (
-            not re.fullmatch(r"[0-9a-f]{40}", implementation_blob)
-            or not re.fullmatch(r"[0-9a-f]{40}", test_blob)
-            or implementation_blob != _git_blob_oid(committed_implementation)
-            or test_blob != _git_blob_oid(committed_tests)
-        ):
-            raise ValueError("parser provenance Git blob identity does not match source bytes")
-        return candidate, committed_implementation, committed_tests
-    raise ValueError("parser provenance requires a committed source predecessor")
+        parent_pairs = [pair(parent) for parent in parents]
+        # If any parent already has this exact pair, this commit did not
+        # introduce the source identity. This covers evidence descendants,
+        # mode-only changes, and merges that preserve one source side.
+        if parent_pairs and any(parent_pair == current_pair for parent_pair in parent_pairs):
+            continue
+        candidates.append(commit)
+
+    if not candidates:
+        raise ValueError("parser provenance requires a committed source predecessor")
+
+    def is_ancestor(ancestor: str, descendant: str) -> bool:
+        pending = [descendant]
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            for parent in parents_by_commit.get(current, ()):
+                if parent == ancestor:
+                    return True
+                if parent not in parents_by_commit:
+                    raise ValueError("parser provenance source history has incomplete ancestry")
+                pending.append(parent)
+        return False
+
+    maximal = [
+        candidate
+        for candidate in candidates
+        if not any(
+            candidate != other and is_ancestor(candidate, other)
+            for other in candidates
+        )
+    ]
+    if len(maximal) != 1:
+        raise ValueError("parser provenance source predecessor is ambiguous")
+
+    candidate = maximal[0]
+    committed_implementation = _git_output(
+        project_root,
+        "show",
+        f"{candidate}:{PARSER_IMPLEMENTATION_PATH}",
+    )
+    committed_tests = _git_output(
+        project_root,
+        "show",
+        f"{candidate}:{PARSER_TEST_PATH}",
+    )
+    if committed_implementation != implementation or committed_tests != test_source:
+        raise ValueError("parser provenance source predecessor does not match committed parser sources")
+    implementation_blob = _git_output(
+        project_root,
+        "rev-parse",
+        f"{candidate}:{PARSER_IMPLEMENTATION_PATH}",
+    ).decode("ascii").strip()
+    test_blob = _git_output(
+        project_root,
+        "rev-parse",
+        f"{candidate}:{PARSER_TEST_PATH}",
+    ).decode("ascii").strip()
+    if (
+        not re.fullmatch(r"[0-9a-f]{40}", implementation_blob)
+        or not re.fullmatch(r"[0-9a-f]{40}", test_blob)
+        or implementation_blob != _git_blob_oid(committed_implementation)
+        or test_blob != _git_blob_oid(committed_tests)
+    ):
+        raise ValueError("parser provenance Git blob identity does not match source bytes")
+    return candidate, committed_implementation, committed_tests
 
 
 def _current_parser_provenance(project_root: Path | None = None) -> dict[str, str]:
