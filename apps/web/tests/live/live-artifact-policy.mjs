@@ -1,9 +1,12 @@
+import { randomBytes } from 'node:crypto';
+import { lstatSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { relative, resolve, sep } from 'node:path';
+import { basename, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 export const LIVE_ARTIFACT_REDACTION = '[redacted-live-credential]';
 const LIVE_OUTPUT_PREFIX = 'hermternal-playwright-live-';
+const LIVE_OUTPUT_OWNER_FILE = '.hermternal-live-artifact-owner';
 const LIVE_DEFAULT_USERNAME = 'hermternal-test';
 const LIVE_SECRET_ENV_NAMES = ['HERMES_TEST_USERNAME', 'HERMES_TEST_PASSWORD'];
 const REDACTION_MAX_DEPTH = 16;
@@ -16,7 +19,20 @@ const REDACTION_MAX_PROPERTIES = 1024;
 const REDACTION_BUDGET_MESSAGE = 'live artifact redaction budget exceeded';
 const REDACTION_FAILURE_MESSAGE = 'live artifact redaction failed';
 const HTML_UNTERMINATED_COMMENT = -2;
-const EDITABLE_CONTENT_MODES = new Set(['', 'true', 'plaintext-only']);
+const HTML_MALFORMED_TAG = -3;
+function createLiveArtifactRoot() {
+  const root = mkdtempSync(join(resolve(tmpdir()), LIVE_OUTPUT_PREFIX));
+  const ownerToken = randomBytes(32).toString('hex');
+  writeFileSync(join(root, LIVE_OUTPUT_OWNER_FILE), `${ownerToken}\n`, {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600
+  });
+  return { root, ownerToken };
+}
+
+/** @type {{ root: string, ownerToken: string } | undefined} */
+let liveArtifactRun;
 const HTML_VOID_ELEMENTS = new Set([
   'area',
   'base',
@@ -53,30 +69,129 @@ export function liveCredentialValues(environment = process.env) {
 }
 
 /**
- * Keep live Playwright output in a unique OS-temporary directory instead of
- * the repository's retained `test-results` path.
- *
- * @param {number} [processId]
- * @returns {string}
+ * @param {{ root: string, ownerToken: string }} run
+ * @returns {boolean}
  */
-export function liveArtifactOutputDirectory(processId = process.pid) {
-  return resolve(tmpdir(), `${LIVE_OUTPUT_PREFIX}${processId}`);
+function hasOwnedRootMarker(run) {
+  try {
+    const rootStats = lstatSync(run.root);
+    const ownerPath = join(run.root, LIVE_OUTPUT_OWNER_FILE);
+    const ownerStats = lstatSync(ownerPath);
+    return (
+      rootStats.isDirectory() &&
+      !rootStats.isSymbolicLink() &&
+      ownerStats.isFile() &&
+      !ownerStats.isSymbolicLink() &&
+      readFileSync(ownerPath, 'utf8') === `${run.ownerToken}\n`
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
+ * Keep live Playwright output in a unique OS-temporary directory instead of
+ * the repository's retained `test-results` path. The directory is created on
+ * first use and recreated only after its exact run root has been removed.
+ *
+ * @returns {string}
+ */
+export function liveArtifactOutputDirectory() {
+  if (!liveArtifactRun || !hasOwnedRootMarker(liveArtifactRun)) liveArtifactRun = createLiveArtifactRoot();
+  return liveArtifactRun.root;
+}
+
+/**
+ * @returns {string}
+ */
+export function liveArtifactOutputOwnershipToken() {
+  liveArtifactOutputDirectory();
+  if (!liveArtifactRun) throw new Error('live artifact output root unavailable');
+  return liveArtifactRun.ownerToken;
+}
+
+/**
+ * @returns {string}
+ */
+function liveArtifactCleanupRoot() {
+  const configuredRoot = process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+  return typeof configuredRoot === 'string' && configuredRoot.length > 0
+    ? resolve(configuredRoot)
+    : liveArtifactOutputDirectory();
+}
+
+/**
+ * Read the configured owner token only for the exact configured root. The
+ * module-local root is used by unit tests; Playwright's global teardown uses
+ * the explicit path and token exported through its process environment.
+ *
+ * @param {string} candidate
+ * @returns {string | undefined}
+ */
+function ownerTokenFor(candidate) {
+  if (liveArtifactRun && candidate === liveArtifactRun.root && hasOwnedRootMarker(liveArtifactRun)) {
+    return liveArtifactRun.ownerToken;
+  }
+  const configuredRoot = process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+  const configuredToken = process.env.PLAYWRIGHT_LIVE_OUTPUT_TOKEN;
+  if (
+    typeof configuredRoot !== 'string' ||
+    typeof configuredToken !== 'string' ||
+    candidate !== resolve(configuredRoot)
+  ) {
+    return undefined;
+  }
+  return configuredToken;
+}
+
+/**
+ * Validate the exact run root before deletion. Prefix matches, descendants,
+ * symlink roots, and roots without the run-owned marker or run-bound token are
+ * never accepted.
+ *
  * @param {string} directory
  * @returns {boolean}
  */
 export function isLiveArtifactDirectory(directory) {
   const candidate = resolve(directory);
   const pathFromTemporaryRoot = relative(resolve(tmpdir()), candidate);
-  const [rootName] = pathFromTemporaryRoot.split(sep);
-  return rootName.startsWith(LIVE_OUTPUT_PREFIX) && rootName.length > LIVE_OUTPUT_PREFIX.length;
+  const [rootName, ...remainder] = pathFromTemporaryRoot.split(sep);
+  if (
+    !rootName ||
+    remainder.length > 0 ||
+    rootName !== basename(candidate) ||
+    !rootName.startsWith(LIVE_OUTPUT_PREFIX)
+  ) {
+    return false;
+  }
+  const ownerToken = ownerTokenFor(candidate);
+  if (!ownerToken) return false;
+  try {
+    const rootStats = lstatSync(candidate);
+    if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) return false;
+    const ownerPath = join(candidate, LIVE_OUTPUT_OWNER_FILE);
+    try {
+      const ownerStats = lstatSync(ownerPath);
+      if (!ownerStats.isFile() || ownerStats.isSymbolicLink()) return false;
+      return readFileSync(ownerPath, 'utf8') === `${ownerToken}\n`;
+    } catch {
+      // A per-test cleanup can remove the root before Playwright recreates the
+      // exact configured directory for its next test. The in-memory or
+      // environment-passed owner token still binds this exact path to the run.
+      return (
+        (liveArtifactRun !== undefined && candidate === liveArtifactRun.root) ||
+        candidate === resolve(process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR ?? '')
+      );
+    }
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Find the end of one HTML tag while respecting quoted attribute values.
- * Returning no boundary is intentionally fail-closed for editable markup.
+ * A non-tag `<` is malformed rather than text that may be skipped, because
+ * continuing from a later `>` could hide a subsequent editable credential.
  *
  * @param {string} value
  * @param {number} start
@@ -87,9 +202,12 @@ function findHtmlTagEnd(value, start) {
     const commentEnd = value.indexOf('-->', start + 4);
     return commentEnd < 0 ? HTML_UNTERMINATED_COMMENT : commentEnd + 2;
   }
+  const firstCharacter = value[start + 1];
+  if (firstCharacter !== '/' && !/[A-Za-z]/u.test(firstCharacter ?? '')) return HTML_MALFORMED_TAG;
   let quote = '';
   for (let index = start + 1; index < value.length; index += 1) {
     const character = value[index];
+    if (character === '<') return HTML_MALFORMED_TAG;
     if (quote) {
       if (character === quote) quote = '';
       continue;
@@ -117,18 +235,59 @@ function parseHtmlTag(value, start, end) {
     closing = true;
     cursor += 1;
   }
-  if (value[cursor] === '!' || value[cursor] === '?') return undefined;
   while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
   const nameStart = cursor;
   if (!/[A-Za-z]/u.test(value[cursor] ?? '')) return undefined;
   cursor += 1;
   while (cursor < end && /[A-Za-z0-9:_-]/u.test(value[cursor])) cursor += 1;
   const name = value.slice(nameStart, cursor).toLowerCase();
-  return {
-    closing,
-    name,
-    selfClosing: !closing && /\/\s*>$/u.test(value.slice(start, end + 1))
-  };
+  while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+
+  if (closing) {
+    return cursor === end ? { closing, name, selfClosing: false } : undefined;
+  }
+
+  const selfClosing = value[cursor] === '/';
+  if (selfClosing) cursor += 1;
+  while (cursor < end) {
+    if (!/[A-Za-z_:]/u.test(value[cursor] ?? '')) {
+      if (value[cursor] === '/' && cursor + 1 === end) {
+        cursor += 1;
+        break;
+      }
+      return undefined;
+    }
+    cursor += 1;
+    while (cursor < end && /[A-Za-z0-9:._-]/u.test(value[cursor])) cursor += 1;
+    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+    if (value[cursor] !== '=') continue;
+    cursor += 1;
+    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+    const quote = value[cursor];
+    if (quote === '"' || quote === "'") {
+      cursor += 1;
+      while (cursor < end && value[cursor] !== quote) {
+        if (value[cursor] === '<') return undefined;
+        cursor += 1;
+      }
+      if (value[cursor] !== quote) return undefined;
+      cursor += 1;
+    } else {
+      const valueStart = cursor;
+      while (cursor < end && !/\s/u.test(value[cursor])) {
+        if (/[<"'=]/u.test(value[cursor])) return undefined;
+        cursor += 1;
+      }
+      if (cursor === valueStart) return undefined;
+    }
+    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+    if (cursor === end) break;
+    if (value[cursor] === '/' && cursor + 1 === end) {
+      cursor += 1;
+      break;
+    }
+  }
+  return cursor === end ? { closing, name, selfClosing } : undefined;
 }
 
 /**
@@ -139,7 +298,10 @@ function hasEditableContentAttribute(tag) {
   const match = /(?:^|[\s<])contenteditable(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/iu.exec(tag);
   if (!match) return false;
   const mode = (match[1] ?? match[2] ?? match[3] ?? '').trim().toLowerCase();
-  return EDITABLE_CONTENT_MODES.has(mode);
+  // Unknown values are treated as potentially editable. Preserving their
+  // contents would let a future browser mode or malformed serialization bypass
+  // this last-resort artifact boundary; only explicit false is safe.
+  return mode !== 'false';
 }
 
 /**
@@ -153,12 +315,21 @@ function findNextEditableOpening(value, start) {
     const opening = value.indexOf('<', cursor);
     if (opening < 0) return undefined;
     const end = findHtmlTagEnd(value, opening);
-    if (end === HTML_UNTERMINATED_COMMENT) return { malformedStart: opening };
-    if (end < 0) {
-      return hasEditableContentAttribute(value.slice(opening)) ? { malformedStart: opening } : undefined;
+    if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG) {
+      return { malformedStart: opening };
     }
+    if (end < 0) return { malformedStart: opening };
     const tag = parseHtmlTag(value, opening, end);
-    if (tag && !tag.closing && !tag.selfClosing && hasEditableContentAttribute(value.slice(opening, end + 1))) {
+    if (!tag) {
+      // A terminated non-comment construct is still unknown markup. Do not
+      // jump to its closing `>` because that can skip an editable element.
+      if (value.startsWith('<!--', opening)) {
+        cursor = end + 1;
+        continue;
+      }
+      return { malformedStart: opening };
+    }
+    if (!tag.closing && !tag.selfClosing && hasEditableContentAttribute(value.slice(opening, end + 1))) {
       return { start: opening, end, tag };
     }
     cursor = end + 1;
@@ -178,16 +349,21 @@ function findMatchingClosingTag(value, opening) {
     const next = value.indexOf('<', cursor);
     if (next < 0) return undefined;
     const end = findHtmlTagEnd(value, next);
-    if (end === HTML_UNTERMINATED_COMMENT || end < 0) return undefined;
+    if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG || end < 0) return undefined;
     const tag = parseHtmlTag(value, next, end);
-    if (tag) {
-      if (tag.closing) {
-        if (stack.at(-1) !== tag.name) return undefined;
-        stack.pop();
-        if (stack.length === 0) return { start: next, end };
-      } else if (!tag.selfClosing && !HTML_VOID_ELEMENTS.has(tag.name)) {
-        stack.push(tag.name);
+    if (!tag) {
+      if (value.startsWith('<!--', next)) {
+        cursor = end + 1;
+        continue;
       }
+      return undefined;
+    }
+    if (tag.closing) {
+      if (stack.at(-1) !== tag.name) return undefined;
+      stack.pop();
+      if (stack.length === 0) return { start: next, end };
+    } else if (!tag.selfClosing && !HTML_VOID_ELEMENTS.has(tag.name)) {
+      stack.push(tag.name);
     }
     cursor = end + 1;
   }
@@ -335,33 +511,143 @@ function redactBoundedString(value, secrets, state) {
 }
 
 /**
+ * @param {PropertyDescriptor | undefined} descriptor
+ */
+function validateDataDescriptor(descriptor) {
+  if (
+    !descriptor ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'writable') ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'enumerable') ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'configurable') ||
+    Object.prototype.hasOwnProperty.call(descriptor, 'get') ||
+    Object.prototype.hasOwnProperty.call(descriptor, 'set') ||
+    typeof descriptor.writable !== 'boolean' ||
+    typeof descriptor.enumerable !== 'boolean' ||
+    typeof descriptor.configurable !== 'boolean'
+  ) {
+    throwRedactionFailure();
+  }
+}
+
+/**
+ * @param {PropertyDescriptor | undefined} descriptor
+ */
+function validateAccessorDescriptor(descriptor) {
+  if (
+    !descriptor ||
+    Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+    Object.prototype.hasOwnProperty.call(descriptor, 'writable') ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'get') ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'set') ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'enumerable') ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'configurable') ||
+    (descriptor.get !== undefined && typeof descriptor.get !== 'function') ||
+    (descriptor.set !== undefined && typeof descriptor.set !== 'function') ||
+    typeof descriptor.enumerable !== 'boolean' ||
+    typeof descriptor.configurable !== 'boolean'
+  ) {
+    throwRedactionFailure();
+  }
+}
+
+/**
+ * @param {PropertyDescriptor | undefined} actual
+ * @param {PropertyDescriptor} expected
+ * @returns {boolean}
+ */
+function sameDataDescriptor(actual, expected) {
+  if (!actual) return false;
+  return (
+    Object.prototype.hasOwnProperty.call(actual, 'value') &&
+    Object.prototype.hasOwnProperty.call(actual, 'writable') &&
+    Object.prototype.hasOwnProperty.call(actual, 'enumerable') &&
+    Object.prototype.hasOwnProperty.call(actual, 'configurable') &&
+    Object.is(actual.value, expected.value) &&
+    actual.writable === expected.writable &&
+    actual.enumerable === expected.enumerable &&
+    actual.configurable === expected.configurable
+  );
+}
+
+/**
+ * @param {PropertyDescriptor | undefined} actual
+ * @param {PropertyDescriptor} expected
+ * @returns {boolean}
+ */
+function sameAccessorDescriptor(actual, expected) {
+  if (!actual) return false;
+  return (
+    !Object.prototype.hasOwnProperty.call(actual, 'value') &&
+    !Object.prototype.hasOwnProperty.call(actual, 'writable') &&
+    Object.prototype.hasOwnProperty.call(actual, 'get') &&
+    Object.prototype.hasOwnProperty.call(actual, 'set') &&
+    Object.prototype.hasOwnProperty.call(actual, 'enumerable') &&
+    Object.prototype.hasOwnProperty.call(actual, 'configurable') &&
+    actual.get === expected.get &&
+    actual.set === expected.set &&
+    actual.enumerable === expected.enumerable &&
+    actual.configurable === expected.configurable
+  );
+}
+
+/**
  * @param {object} target
  * @param {string | symbol} key
  * @param {PropertyDescriptor} descriptor
  * @param {unknown} value
  */
 function writeDiagnosticValue(target, key, descriptor, value) {
-  if (Object.is(value, descriptor.value)) return;
-  if (descriptor.writable !== true) throwRedactionFailure();
-  let didSet;
-  let updatedDescriptor;
+  try {
+    validateDataDescriptor(descriptor);
+  } catch {
+    throwRedactionFailure();
+  }
+
+  let observedDescriptor;
   let readBack;
   try {
+    observedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
+    readBack = Reflect.get(target, key);
+  } catch {
+    throwRedactionFailure();
+  }
+  if (
+    !observedDescriptor ||
+    (() => {
+      try {
+        validateDataDescriptor(observedDescriptor);
+        return !sameDataDescriptor(observedDescriptor, descriptor) || !Object.is(readBack, descriptor.value);
+      } catch {
+        return true;
+      }
+    })()
+  ) {
+    throwRedactionFailure();
+  }
+  if (Object.is(value, descriptor.value)) return;
+  if (descriptor.writable !== true) throwRedactionFailure();
+
+  let didSet;
+  try {
     didSet = Reflect.set(target, key, value);
-    updatedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
+    observedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
     readBack = Reflect.get(target, key);
   } catch {
     throwRedactionFailure();
   }
   if (
     didSet !== true ||
-    !updatedDescriptor ||
-    !('value' in updatedDescriptor) ||
-    !Object.is(updatedDescriptor.value, value) ||
-    !Object.is(readBack, value) ||
-    updatedDescriptor.writable !== descriptor.writable ||
-    updatedDescriptor.enumerable !== descriptor.enumerable ||
-    updatedDescriptor.configurable !== descriptor.configurable
+    !observedDescriptor ||
+    (() => {
+      try {
+        validateDataDescriptor(observedDescriptor);
+        return !sameDataDescriptor(observedDescriptor, { ...descriptor, value });
+      } catch {
+        return true;
+      }
+    })() ||
+    !Object.is(readBack, value)
   ) {
     throwRedactionFailure();
   }
@@ -373,23 +659,31 @@ function writeDiagnosticValue(target, key, descriptor, value) {
  * @param {PropertyDescriptor} descriptor
  * @param {unknown} value
  */
-function verifyAccessorWrite(target, key, descriptor, value) {
-  let updatedDescriptor;
-  let readBack;
+function verifyAccessorObservation(target, key, descriptor, value) {
   try {
-    updatedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
+    validateAccessorDescriptor(descriptor);
+  } catch {
+    throwRedactionFailure();
+  }
+  let observedDescriptor;
+  let readBack;
+  let getterReadBack;
+  try {
+    observedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
     readBack = Reflect.get(target, key);
+    if (typeof descriptor.get === 'function') getterReadBack = Reflect.apply(descriptor.get, target, []);
+  } catch {
+    throwRedactionFailure();
+  }
+  try {
+    validateAccessorDescriptor(observedDescriptor);
   } catch {
     throwRedactionFailure();
   }
   if (
-    !updatedDescriptor ||
-    'value' in updatedDescriptor ||
-    updatedDescriptor.get !== descriptor.get ||
-    updatedDescriptor.set !== descriptor.set ||
-    updatedDescriptor.enumerable !== descriptor.enumerable ||
-    updatedDescriptor.configurable !== descriptor.configurable ||
-    !Object.is(readBack, value)
+    !sameAccessorDescriptor(observedDescriptor, descriptor) ||
+    !Object.is(readBack, value) ||
+    (typeof descriptor.get === 'function' && !Object.is(getterReadBack, value))
   ) {
     throwRedactionFailure();
   }
@@ -404,7 +698,11 @@ function verifyAccessorWrite(target, key, descriptor, value) {
  * @param {number} depth
  */
 function redactAccessorValue(target, key, descriptor, secrets, state, depth) {
-  if (typeof descriptor.get !== 'function') return;
+  try {
+    validateAccessorDescriptor(descriptor);
+  } catch {
+    throwRedactionFailure();
+  }
   let current;
   try {
     current = Reflect.get(target, key);
@@ -412,7 +710,10 @@ function redactAccessorValue(target, key, descriptor, secrets, state, depth) {
     throwRedactionFailure();
   }
   const redacted = redactTestDiagnosticValue(current, secrets, state, depth + 1);
-  if (Object.is(redacted, current)) return;
+  if (Object.is(redacted, current)) {
+    verifyAccessorObservation(target, key, descriptor, current);
+    return;
+  }
   if (typeof descriptor.set !== 'function') throwRedactionFailure();
   let didSet;
   try {
@@ -421,7 +722,7 @@ function redactAccessorValue(target, key, descriptor, secrets, state, depth) {
     throwRedactionFailure();
   }
   if (didSet !== true) throwRedactionFailure();
-  verifyAccessorWrite(target, key, descriptor, redacted);
+  verifyAccessorObservation(target, key, descriptor, redacted);
 }
 
 /**
@@ -579,7 +880,7 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
       cleanupError = error;
     }
     try {
-      await removeLiveArtifacts(testInfo.outputDir);
+      await removeLiveArtifacts(liveArtifactCleanupRoot());
     } catch (error) {
       cleanupError ??= error;
     }
