@@ -45,6 +45,7 @@
 <section
   aria-label="Conversation timeline"
   class="timeline"
+  data-live-content="conversation-timeline"
   data-testid="conversation-timeline"
   role="log"
   tabindex="0"

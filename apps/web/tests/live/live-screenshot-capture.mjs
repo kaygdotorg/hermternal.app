@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync, realpathSync, promises as fsPromises } from 'node:fs';
 import { join, parse, relative, resolve, sep } from 'node:path';
@@ -55,6 +55,55 @@ const SAFE_FILE_STEM_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const FORBIDDEN_PUBLIC_TEXT_PATTERN =
   /(?:password|credential|cookie|ticket|prompt|transcript|provider|websocket|web-socket|pty|stdout|stderr|trace|dom|html|request[._ -]?id|session[._ -]?id|hostname|secret)/iu;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const ATOMIC_RENAME_SCRIPT = String.raw`
+import ctypes
+import errno
+import os
+import platform
+import sys
+
+source_fd = int(sys.argv[1])
+destination_fd = int(sys.argv[2])
+source_name = sys.argv[3].encode('utf-8')
+destination_name = sys.argv[4].encode('utf-8')
+
+libc = ctypes.CDLL(None, use_errno=True)
+if sys.platform == 'darwin':
+    rename = libc.renameatx_np
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    result = rename(source_fd, source_name, destination_fd, destination_name, 0x00000004)
+elif sys.platform.startswith('linux'):
+    rename = getattr(libc, 'renameat2', None)
+    if rename is not None:
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_fd, source_name, destination_fd, destination_name, 0x00000001)
+    else:
+        syscall_number = {
+            'x86_64': 316,
+            'aarch64': 276,
+            'arm64': 276,
+        }.get(platform.machine())
+        if syscall_number is None:
+            raise OSError(errno.ENOTSUP, 'renameat2 is unavailable')
+        syscall = libc.syscall
+        syscall.restype = ctypes.c_long
+        result = syscall(
+            syscall_number,
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+            0x00000001,
+        )
+else:
+    raise OSError(errno.ENOTSUP, 'exclusive directory rename is unavailable')
+
+if result != 0:
+    error_number = ctypes.get_errno()
+    sys.exit(error_number or 1)
+`;
 
 const MANIFEST_KEYS = [
   'schema',
@@ -311,6 +360,156 @@ export function isLiveScreenshotCaptureEnabled(environment = process.env) {
 }
 
 /**
+ * Replace every live-derived conversation surface with bounded, semantic
+ * placeholders before the PNG is rendered. This function is intentionally
+ * self-contained because Playwright serializes it into the page realm. The
+ * component markers identify the only DOM regions that may contain live
+ * session, transcript, or composer data; the post-transform assertions fail
+ * closed if a marker or a known live value remains.
+ */
+export function sanitizeLiveChatCapturePresentation() {
+  const preview = document.querySelector('[data-testid="runtime-preview"]');
+  if (!(preview instanceof HTMLElement)) {
+    throw new Error('live screenshot capture workspace is unavailable');
+  }
+
+  /** @type {string[]} */
+  const oldLiveValues = [];
+  /** @param {unknown} value */
+  const remember = (value) => {
+    if (typeof value === 'string' && value.trim().length > 0) oldLiveValues.push(value.trim());
+  };
+  /** @param {Element} element */
+  const rememberDynamicAttributes = (element) => {
+    remember(element.getAttribute('aria-label'));
+    remember(element.getAttribute('title'));
+    const candidate = /** @type {Element & { value?: unknown }} */ (element);
+    if ('value' in candidate) remember(candidate.value);
+  };
+
+  const timeline = preview.querySelector('[data-live-content="conversation-timeline"]');
+  if (!(timeline instanceof HTMLElement)) {
+    throw new Error('live screenshot capture transcript surface is unavailable');
+  }
+  timeline.querySelectorAll(
+    '.user-message, .assistant-copy, .tool-row, .approval-card, .clarification-card, .image-card, .streaming-card, .stopped-card, .loading-card'
+  ).forEach((element) => {
+    remember(element.textContent);
+    element.querySelectorAll('[aria-label], [title]').forEach(rememberDynamicAttributes);
+  });
+
+  preview.querySelectorAll('[data-live-content="session-list"] .session-row').forEach((row) => {
+    remember(row.querySelector('.pill-label')?.textContent);
+    remember(row.querySelector('.pill-description')?.textContent);
+    const button = row.querySelector('button');
+    if (button) rememberDynamicAttributes(button);
+  });
+
+  preview.querySelectorAll('[data-live-content="conversation-title"]').forEach((region) => {
+    region.querySelectorAll('[aria-label="Edit conversation title"] .pill-label').forEach((label) => {
+      remember(label.textContent);
+    });
+    region.querySelectorAll('input').forEach(rememberDynamicAttributes);
+  });
+  preview.querySelectorAll('[data-live-content="composer"] textarea, [data-live-content="composer"] input').forEach(
+    rememberDynamicAttributes
+  );
+
+  timeline.replaceChildren();
+  const conversationPlaceholder = document.createElement('div');
+  conversationPlaceholder.setAttribute('aria-label', 'Conversation preview');
+  conversationPlaceholder.setAttribute('data-capture-placeholder', 'conversation');
+  conversationPlaceholder.textContent = 'Conversation preview';
+  timeline.append(conversationPlaceholder);
+  timeline.setAttribute('data-capture-sanitized', '1');
+  timeline.removeAttribute('data-live-content');
+
+  preview.querySelectorAll('[data-live-content="session-list"]').forEach((list) => {
+    list.querySelectorAll('.session-row').forEach((row) => {
+      const button = row.querySelector('button');
+      if (!button) return;
+      button.setAttribute('aria-label', 'Open conversation');
+      button.setAttribute('title', 'Open conversation');
+      const label = button.querySelector('.pill-label');
+      if (label) label.textContent = 'Conversation';
+      button.querySelector('.pill-description')?.remove();
+    });
+    list.setAttribute('data-capture-sanitized', '1');
+    list.removeAttribute('data-live-content');
+  });
+
+  preview.querySelectorAll('[data-live-content="conversation-title"]').forEach((region) => {
+    region.querySelectorAll('[aria-label="Edit conversation title"] .pill-label').forEach((label) => {
+      label.textContent = 'Chat session';
+    });
+    region.querySelectorAll('[aria-label="Edit conversation title"]').forEach((button) => {
+      button.setAttribute('aria-label', 'Edit conversation title');
+      button.setAttribute('title', 'Edit conversation title');
+    });
+    region.querySelectorAll('input').forEach((input) => {
+      input.value = '';
+      input.removeAttribute('value');
+      input.setAttribute('placeholder', 'Chat session');
+    });
+    region.setAttribute('data-capture-sanitized', '1');
+    region.removeAttribute('data-live-content');
+  });
+
+  preview.querySelectorAll('[data-live-content="composer"]').forEach((composer) => {
+    composer.querySelectorAll('textarea, input').forEach((input) => {
+      const field = /** @type {HTMLInputElement | HTMLTextAreaElement} */ (input);
+      field.value = '';
+      field.removeAttribute('value');
+    });
+    composer.querySelectorAll('[contenteditable="true"]').forEach((element) => {
+      element.textContent = '';
+    });
+    composer.setAttribute('data-capture-sanitized', '1');
+    composer.removeAttribute('data-live-content');
+  });
+
+  const prohibitedSelectors =
+    '.user-message, .assistant-copy, .tool-row, .approval-card, .clarification-card, .image-card, .streaming-card, .stopped-card, .loading-card';
+  if (preview.querySelector(prohibitedSelectors)) {
+    throw new Error('live screenshot capture retained prohibited conversation content');
+  }
+  if (preview.querySelector('[data-live-content]')) {
+    throw new Error('live screenshot capture retained an unsanitized live DOM marker');
+  }
+
+  let storageText = '';
+  try {
+    storageText = `${Object.values(localStorage).join('\n')}\n${Object.values(sessionStorage).join('\n')}`;
+  } catch {
+    // Some jsdom and opaque browser documents do not expose storage. The DOM
+    // marker and value checks above remain mandatory in those realms.
+  }
+  const serializedPage = `${document.documentElement.outerHTML}\n${storageText}`;
+  const fixedPresentationText = new Set([
+    'Hermes',
+    'Conversation',
+    'Open conversation',
+    'Chat session',
+    'Edit conversation title',
+    'Conversation preview',
+    'Message Hermes',
+    'Conversation title'
+  ]);
+  const residual = [...new Set(oldLiveValues)].filter(
+    (value) => value.length >= 3 && !fixedPresentationText.has(value) && serializedPage.includes(value)
+  );
+  if (residual.length > 0) {
+    throw new Error('live screenshot capture found prohibited live text or data');
+  }
+
+  return Object.freeze({
+    sanitized: true,
+    removedValueCount: oldLiveValues.length,
+    prohibitedNodeCount: 0
+  });
+}
+
+/**
  * Read the explicit opt-in gate. A missing or malformed input is never
  * interpreted as permission to capture or retain a live screenshot.
  *
@@ -449,6 +648,15 @@ export async function captureLiveChatScreenshot({
     observed.zoom !== LIVE_SCREENSHOT_BROWSER_ZOOM
   ) {
     throw new Error('live screenshot capture browser inputs are not pinned');
+  }
+
+  // Complete all live proof assertions before this call. The page is then
+  // transformed in-place into a capture-only presentation that contains no
+  // user, assistant, tool, title, or composer values. The sanitizer validates
+  // the DOM and storage boundary immediately before the screenshot operation.
+  const presentation = await page.evaluate(sanitizeLiveChatCapturePresentation);
+  if (!presentation || presentation.sanitized !== true || presentation.prohibitedNodeCount !== 0) {
+    throw new Error('live screenshot capture presentation was not sanitized');
   }
 
   const bytes = assertImageBytes(
@@ -605,6 +813,42 @@ function assertSameDestination(evidence) {
   }
 }
 
+/**
+ * Open the destination only after lexical and canonical identity checks, then
+ * compare the open handle's inode. Once held, the directory descriptor anchors
+ * the final publication even if an attacker replaces the visible pathname.
+ *
+ * @param {DirectoryEvidence} evidence
+ */
+async function openVerifiedDestination(evidence) {
+  let handle;
+  try {
+    handle = await fsPromises.open(evidence.candidate, 'r');
+    const stats = await handle.stat();
+    if (
+      !stats.isDirectory() ||
+      stats.dev !== evidence.dev ||
+      stats.ino !== evidence.ino
+    ) {
+      throw new Error('live screenshot retention destination changed');
+    }
+    return handle;
+  } catch (error) {
+    if (handle) await handle.close().catch(() => undefined);
+    if (error instanceof Error && error.message.includes('destination changed')) throw error;
+    throw new Error('live screenshot retention destination disappeared');
+  }
+}
+
+/** @param {any} handle @param {DirectoryEvidence} evidence */
+async function assertDestinationHandle(handle, evidence) {
+  const stats = await handle.stat();
+  if (!stats.isDirectory() || stats.dev !== evidence.dev || stats.ino !== evidence.ino) {
+    throw new Error('live screenshot retention destination changed');
+  }
+}
+
+/** @param {string} directory */
 /** @param {string} path */
 function pathExists(path) {
   try {
@@ -615,23 +859,119 @@ function pathExists(path) {
   }
 }
 
+/** @param {string} directory */
+async function verifyPrivateStagingDirectory(directory) {
+  const stats = lstatSync(directory);
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  if (
+    !stats.isDirectory() ||
+    stats.isSymbolicLink() ||
+    (stats.mode & 0o077) !== 0 ||
+    (currentUid !== undefined && stats.uid !== currentUid)
+  ) {
+    throw new Error('live screenshot staging directory is not private');
+  }
+  const entries = (await fsPromises.readdir(directory)).sort();
+  if (entries.length !== 2 || entries[0] !== 'manifest.json' || entries[1] !== 'screenshot.png') {
+    throw new Error('live screenshot staging bundle is incomplete');
+  }
+  for (const entry of entries) {
+    const entryPath = join(directory, entry);
+    const entryStats = lstatSync(entryPath);
+    if (!entryStats.isFile() || entryStats.isSymbolicLink()) {
+      throw new Error('live screenshot staging bundle contains an unsafe entry');
+    }
+  }
+}
+
+/**
+ * @param {string[]} args
+ * @param {number[]} fileDescriptors
+ * @returns {Promise<void>}
+ */
+function runAtomicRename(args, fileDescriptors) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn('python3', args, {
+      stdio: ['ignore', 'ignore', 'ignore', ...fileDescriptors],
+      windowsHide: true
+    });
+    child.once('error', rejectPromise);
+    child.once('exit', (code) => {
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+      const error = /** @type {Error & { code?: number }} */ (
+        new Error('exclusive directory rename failed')
+      );
+      error.code = code ?? 1;
+      rejectPromise(error);
+    });
+  });
+}
+
+/**
+ * Publish a complete staging directory with one exclusive atomic directory
+ * rename. The Python shim calls the platform's no-replace rename primitive
+ * (`renameatx_np` on macOS and `renameat2` on Linux) using open directory file
+ * descriptors, so a replaced visible destination receives no bundle bytes.
+ *
+ * @param {{ stagingDirectory: string, destination: DirectoryEvidence, beforeAtomicPublish?: () => Promise<void> }} options
+ */
+async function publishStagedBundle({ stagingDirectory, destination, beforeAtomicPublish }) {
+  const stagingParentPath = parse(stagingDirectory).dir;
+  const stagingName = parse(stagingDirectory).base;
+  const stagingParent = await fsPromises.open(stagingParentPath, 'r');
+  const destinationHandle = await openVerifiedDestination(destination);
+  try {
+    // Test-only adversarial hook. The real lane never supplies it; the open
+    // descriptor remains the publication anchor if the pathname is replaced.
+    if (beforeAtomicPublish) await beforeAtomicPublish();
+    assertSameDestination(destination);
+    await assertDestinationHandle(destinationHandle, destination);
+    await runAtomicRename(
+      [
+        '-c',
+        ATOMIC_RENAME_SCRIPT,
+        '3',
+        '4',
+        stagingName,
+        `${LIVE_SCREENSHOT_FILE_STEM}.bundle`
+      ],
+      [stagingParent.fd, destinationHandle.fd]
+    );
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 17) {
+      throw new Error('live screenshot retention refuses to overwrite existing bundle');
+    }
+    if (error instanceof Error && error.message.includes('destination changed')) throw error;
+    throw new Error('live screenshot retention bundle publication failed');
+  } finally {
+    await destinationHandle.close().catch(() => undefined);
+    await stagingParent.close().catch(() => undefined);
+  }
+}
+
 /**
  * Persist only the exact PNG bytes and allowlisted manifest after a manual
- * independent review. Existing files are never overwritten. The temporary
- * staging directory is private to this call and is removed on every exit.
+ * independent review. The complete bundle is built privately, then published
+ * as `destination/<stem>.bundle/` in one exclusive atomic directory operation;
+ * no PNG or manifest is opened through a final public pathname.
  *
  * @param {{
  *   capture: { bytes: Uint8Array, manifest: Record<string, unknown> },
  *   destinationDirectory: string,
  *   fileStem?: string,
- *   review: 'independent-approved'
+ *   review: 'independent-approved',
+ *   beforeAtomicPublish?: () => Promise<void>
  * }} options
  */
 export async function persistApprovedLiveScreenshot({
   capture,
   destinationDirectory,
   fileStem = LIVE_SCREENSHOT_FILE_STEM,
-  review
+  review,
+  beforeAtomicPublish
 }) {
   if (review !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
     throw new Error('live screenshot retention requires independent approval');
@@ -641,6 +981,9 @@ export async function persistApprovedLiveScreenshot({
   }
   if (!SAFE_FILE_STEM_PATTERN.test(fileStem) || fileStem.length > MAX_RETAINED_FILE_STEM_LENGTH) {
     throw new Error('live screenshot retention file name is not bounded');
+  }
+  if (fileStem !== LIVE_SCREENSHOT_FILE_STEM) {
+    throw new Error('live screenshot retention file name is not pinned');
   }
   const bytes = assertImageBytes(capture.bytes);
   const sourceManifest = /** @type {any} */ (
@@ -667,57 +1010,58 @@ export async function persistApprovedLiveScreenshot({
   });
   const manifestText = serializeLiveScreenshotManifest(manifest);
   const evidence = safeDestinationEvidence(destinationDirectory);
-  const imagePath = join(evidence.candidate, `${fileStem}.png`);
-  const manifestPath = join(evidence.candidate, `${fileStem}.manifest.json`);
-  if (pathExists(imagePath) || pathExists(manifestPath)) {
-    throw new Error('live screenshot retention refuses to overwrite existing files');
+  const bundlePath = join(evidence.candidate, `${fileStem}.bundle`);
+  if (pathExists(bundlePath)) {
+    throw new Error('live screenshot retention refuses to overwrite existing bundle');
   }
 
-  const stagingPrefix = join(evidence.candidate, `.${fileStem}-capture-`);
   let stagingDirectory;
-  let linkedImage = false;
-  let linkedManifest = false;
+  let published = false;
   try {
-    assertSameDestination(evidence);
-    stagingDirectory = await fsPromises.mkdtemp(stagingPrefix);
+    // Stage outside the destination pathname. Require the same filesystem so
+    // the final publication remains a single atomic rename, never a copy.
+    stagingDirectory = await fsPromises.mkdtemp(join(resolve(process.env.TMPDIR ?? '/tmp'), `.${fileStem}-capture-`));
+    await fsPromises.chmod(stagingDirectory, 0o700);
+    await fsPromises.writeFile(join(stagingDirectory, 'screenshot.png'), bytes, {
+      encoding: null,
+      flag: 'wx',
+      mode: 0o600
+    });
+    await fsPromises.writeFile(join(stagingDirectory, 'manifest.json'), manifestText, {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600
+    });
+    await verifyPrivateStagingDirectory(stagingDirectory);
     const stagingStats = lstatSync(stagingDirectory);
-    if (!stagingStats.isDirectory() || stagingStats.isSymbolicLink()) {
-      throw new Error('live screenshot staging directory is not safe');
+    const destinationStats = lstatSync(evidence.candidate);
+    if (stagingStats.dev !== destinationStats.dev) {
+      throw new Error('live screenshot staging filesystem is not atomic');
     }
-    const stagingImage = join(stagingDirectory, 'capture.png');
-    const stagingManifest = join(stagingDirectory, 'capture.manifest.json');
-    await fsPromises.writeFile(stagingImage, bytes, { encoding: null, flag: 'wx', mode: 0o600 });
-    await fsPromises.writeFile(stagingManifest, manifestText, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+
     assertSameDestination(evidence);
-    // Hard links publish fully written files without replacing an existing
-    // target. The temporary inode is unlinked only after the target link exists.
-    await fsPromises.link(stagingImage, imagePath);
-    linkedImage = true;
-    await fsPromises.unlink(stagingImage);
-    await fsPromises.link(stagingManifest, manifestPath);
-    linkedManifest = true;
-    await fsPromises.unlink(stagingManifest);
+    await publishStagedBundle({
+      stagingDirectory,
+      destination: evidence,
+      beforeAtomicPublish
+    });
+    published = true;
     assertSameDestination(evidence);
-    return { imagePath, manifestPath, manifest };
-  } catch (error) {
-    // Never clean a target after its parent identity changes; that path may now
-    // resolve to an unrelated replacement. The reviewer can inspect any
-    // intentionally preserved remnant instead of a cleanup race deleting it.
-    try {
-      assertSameDestination(evidence);
-      if (linkedImage && pathExists(imagePath)) await fsPromises.unlink(imagePath);
-      if (linkedManifest && pathExists(manifestPath)) await fsPromises.unlink(manifestPath);
-    } catch {
-      // Preserve changed-path remnants fail-closed.
-    }
-    throw error;
+    return {
+      bundlePath,
+      imagePath: join(bundlePath, 'screenshot.png'),
+      manifestPath: join(bundlePath, 'manifest.json'),
+      manifest
+    };
   } finally {
-    if (stagingDirectory) {
+    if (stagingDirectory && !published) {
       try {
-        assertSameDestination(evidence);
-        await fsPromises.rm(stagingDirectory, { recursive: true, force: true });
+        const stats = lstatSync(stagingDirectory);
+        if (stats.isDirectory() && !stats.isSymbolicLink()) {
+          await fsPromises.rm(stagingDirectory, { recursive: true, force: true });
+        }
       } catch {
-        // A replaced destination must not be recursively removed.
+        // Never follow or recursively remove a replaced staging path.
       }
     }
   }

@@ -39,7 +39,7 @@
       <h2 id="pinned-heading">Pinned</h2>
       <span class="group-count">{pinned.length}</span>
     </div>
-    <div class="session-items">
+    <div class="session-items" data-live-content="session-list">
       {#each pinned as session (session.id)}
         <div class="session-row">
           <Pill
@@ -66,7 +66,7 @@
       <h2 id="recent-heading">Recents</h2>
       <span class="group-count">{recent.length}</span>
     </div>
-    <div class="session-items">
+    <div class="session-items" data-live-content="session-list">
       {#each recent as session (session.id)}
         <div class="session-row">
           <Pill
