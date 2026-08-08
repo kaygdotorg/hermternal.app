@@ -814,50 +814,99 @@ describe("PTY transport", () => {
     await fresh;
   });
 
-  it("closes a synchronous socket returned after connecting cancellation", async () => {
+  it("does not construct a socket when connecting state closes the attempt", async () => {
     let harness!: Harness;
-    let created!: FakeSocket;
+    const createWebSocket = vi.fn(() => new FakeSocket());
     harness = makeHarness({
-      createWebSocket: () => {
-        created = new FakeSocket();
-        return created;
-      },
+      createWebSocket,
       onStateChange: (state) => {
         if (state.status === "connecting") harness.transport.close();
       },
     });
 
-    const pending = harness.transport.connect(ATTACH_INPUT);
-    await expect(pending).rejects.toMatchObject({ code: "aborted" });
-    await flush();
-    expect(created.closes).toEqual([{ code: 1000, reason: "client-detach" }]);
-    created.open();
-    await flush();
+    await expect(harness.transport.connect(ATTACH_INPUT)).rejects.toMatchObject({
+      code: "aborted",
+    });
+    expect(createWebSocket).not.toHaveBeenCalled();
+    expect(harness.sockets).toHaveLength(0);
     expect(harness.transport.state.status).toBe("detached");
   });
 
-  it("closes a delayed socket resolved after connecting cancellation", async () => {
+  it("does not construct a socket when connecting state detaches the attempt", async () => {
     let harness!: Harness;
-    let resolveSocket!: (socket: FakeSocket) => void;
-    const created = new FakeSocket();
+    const createWebSocket = vi.fn(() => new FakeSocket());
     harness = makeHarness({
-      createWebSocket: () =>
-        new Promise<PtyWebSocket>((resolve) => {
-          resolveSocket = resolve as (socket: FakeSocket) => void;
-        }),
+      createWebSocket,
       onStateChange: (state) => {
-        if (state.status === "connecting") harness.transport.close();
+        if (state.status === "connecting") harness.transport.detach();
       },
     });
 
-    const pending = harness.transport.connect(ATTACH_INPUT);
-    await expect(pending).rejects.toMatchObject({ code: "aborted" });
-    resolveSocket(created);
-    await flush();
-    expect(created.closes).toEqual([{ code: 1000, reason: "client-detach" }]);
-    created.open();
-    await flush();
+    await expect(harness.transport.connect(ATTACH_INPUT)).rejects.toMatchObject({
+      code: "aborted",
+    });
+    expect(createWebSocket).not.toHaveBeenCalled();
+    expect(harness.sockets).toHaveLength(0);
     expect(harness.transport.state.status).toBe("detached");
+  });
+
+  it("does not construct a socket when a connecting event aborts its caller", async () => {
+    const controller = new AbortController();
+    const createWebSocket = vi.fn(() => new FakeSocket());
+    const harness = makeHarness({
+      createWebSocket,
+      onEvent: (event) => {
+        if (event.type === "state" && event.state.status === "connecting") {
+          controller.abort();
+        }
+      },
+    });
+
+    await expect(harness.transport.connect(ATTACH_INPUT, controller.signal)).rejects.toMatchObject({
+      code: "aborted",
+    });
+    expect(createWebSocket).not.toHaveBeenCalled();
+    expect(harness.sockets).toHaveLength(0);
+    expect(harness.transport.state.status).toBe("detached");
+  });
+
+  it("lets a connecting observer replace its owner without constructing a stale socket", async () => {
+    const replacementInput: PtyConnectionInput = {
+      sessionId: "session-current-002",
+      attach: "attach-current-002",
+      processIdentity: "process-current-002",
+    };
+    let harness!: Harness;
+    let replacement!: Promise<void>;
+    let replaced = false;
+    harness = makeHarness({
+      validateAttachment: async () => true,
+      onEvent: (event) => {
+        if (
+          !replaced &&
+          event.type === "state" &&
+          event.state.status === "connecting"
+        ) {
+          replaced = true;
+          replacement = harness.transport.connect(replacementInput);
+        }
+      },
+    });
+
+    const stale = harness.transport.connect(ATTACH_INPUT);
+    await expect(stale).rejects.toMatchObject({ code: "aborted" });
+    await flush();
+    // The one factory call and socket belong only to the replacement generation.
+    expect(harness.sockets).toHaveLength(1);
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(2);
+    const socket = harness.sockets[0]!;
+    socket.open();
+    await replacement;
+    expect(harness.transport.state).toMatchObject({
+      status: "attached",
+      generation: 2,
+      sessionId: replacementInput.sessionId,
+    });
   });
 
   it("replaces sessions without allowing stale callbacks to affect the active socket", async () => {

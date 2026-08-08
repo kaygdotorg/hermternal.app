@@ -744,10 +744,11 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
         throwIfNotCurrent();
         validateTicket(ticket, generation);
         setState("connecting", generation, normalized);
-        // The factory is intentionally invoked after the connecting observer,
-        // even if that observer cancelled the attempt. Its returned socket is
-        // captured by the ownership slot and closed by awaitWithAbort's late
-        // value path instead of being left as an untracked adapter resource.
+        // `connecting` is observable. It may synchronously cancel, Close, or
+        // replace this operation, so the current owner must be rechecked before
+        // constructing the opaque upgrade or asking the factory to allocate a
+        // socket. A stale attempt must not consume the new intent's resources.
+        throwIfNotCurrent();
         const upgrade = createUpgrade(ticket, normalized);
         const socketPromise = Promise.resolve(
           options.createWebSocket(upgrade, controller.signal),
