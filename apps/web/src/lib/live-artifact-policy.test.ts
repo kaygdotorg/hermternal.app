@@ -1,3 +1,4 @@
+import { promises as fsPromises } from 'node:fs';
 import { access, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -120,6 +121,32 @@ describe('live Playwright artifact policy', () => {
     expect(unlistedFormMarkup).not.toContain('unlisted-option');
     expect(unlistedFormMarkup).not.toContain('unlisted-editable');
     expect(liveCredentialValues({})).toContain('hermternal-test');
+  });
+
+  it('structurally redacts textarea and select bodies and fails closed on malformed forms', () => {
+    const cases = [
+      '<textarea><!-- </textarea> -->unlisted-secret</textarea><div contenteditable="true">second-secret</div>',
+      '<textarea>unlisted-secret<div contenteditable="true">second-secret</div>',
+      '<select><!-- </select> --><option>unlisted-option</option></select><div contenteditable="true">second-secret</div>',
+      '<select><option>unlisted-option<div contenteditable="true">second-secret</div>',
+      '<select><option>unlisted-option</select><div contenteditable="true">second-secret</div>'
+    ];
+
+    for (const markup of cases) {
+      const redacted = redactLiveText(markup, []) as string;
+      expect(redacted).toContain(LIVE_ARTIFACT_REDACTION);
+      expect(redacted).not.toContain('unlisted-secret');
+      expect(redacted).not.toContain('unlisted-option');
+      expect(redacted).not.toContain('second-secret');
+    }
+
+    const validTextarea = redactLiveText('<textarea>unlisted-secret</textarea>', []) as string;
+    const validSelect = redactLiveText(
+      '<select><option value=unlisted-option>unlisted-option</option></select>',
+      []
+    ) as string;
+    expect(validTextarea).toBe(`<textarea>${LIVE_ARTIFACT_REDACTION}</textarea>`);
+    expect(validSelect).toBe(`<select>${LIVE_ARTIFACT_REDACTION}</select>`);
   });
 
   it('redacts nested serialized contenteditable markup with matching closing tags', () => {
@@ -372,6 +399,42 @@ describe('live Playwright artifact policy', () => {
       'synthetic-password'
     ]);
     expect(JSON.stringify(sanitizedWithToJson)).not.toContain('synthetic-password');
+
+    const arrayToJson = Object.getOwnPropertyDescriptor(Array.prototype, 'toJSON');
+    const objectToJson = Object.getOwnPropertyDescriptor(Object.prototype, 'toJSON');
+    try {
+      Object.defineProperty(Array.prototype, 'toJSON', {
+        configurable: true,
+        enumerable: false,
+        value: () => ({ leaked: 'synthetic-password' }),
+        writable: true
+      });
+      Object.defineProperty(Object.prototype, 'toJSON', {
+        configurable: true,
+        enumerable: false,
+        value: () => ({ leaked: 'synthetic-password' }),
+        writable: true
+      });
+
+      const poisonedSnapshot = redactTestErrors(
+        [{ nested: ['synthetic-password'] }],
+        ['synthetic-password']
+      );
+      expect(JSON.stringify(poisonedSnapshot)).not.toContain('synthetic-password');
+      const safeEntry = redactTestErrors([{ message: 'safe' }], [
+        'synthetic-password'
+      ])[0];
+      poisonedSnapshot.push(safeEntry);
+      const mappedSnapshot = poisonedSnapshot.map((entry) => entry);
+      expect(mappedSnapshot).toHaveLength(2);
+      expect(JSON.stringify(mappedSnapshot)).not.toContain('synthetic-password');
+      expect(JSON.stringify(poisonedSnapshot)).not.toContain('synthetic-password');
+    } finally {
+      if (arrayToJson) Object.defineProperty(Array.prototype, 'toJSON', arrayToJson);
+      else delete (Array.prototype as { toJSON?: unknown }).toJSON;
+      if (objectToJson) Object.defineProperty(Object.prototype, 'toJSON', objectToJson);
+      else delete (Object.prototype as { toJSON?: unknown }).toJSON;
+    }
   });
 
   it('scrubs every valid editable content mode before page teardown', async () => {
@@ -512,6 +575,12 @@ describe('live Playwright artifact policy', () => {
       LIVE_ARTIFACT_REDACTION
     );
     expect(JSON.stringify(testInfo.errors)).not.toContain('synthetic-password');
+    const safeExtra = redactTestErrors([{ message: 'safe' }], [
+      'synthetic-password'
+    ])[0] as { message: string };
+    testInfo.errors.push(safeExtra);
+    expect(testInfo.errors.map((entry) => entry)).toHaveLength(2);
+    expect(JSON.stringify(testInfo.errors)).not.toContain('synthetic-password');
     expect(sourceDiagnostic.message).toBe('synthetic-password');
     expect(await exists(outputRoot)).toBe(false);
   });
@@ -543,6 +612,46 @@ describe('live Playwright artifact policy', () => {
     expect(testInfo.errors).toEqual([LIVE_ARTIFACT_REDACTION]);
     expect(JSON.stringify(testInfo.errors)).not.toContain('synthetic-password');
     expect(await exists(outputRoot)).toBe(false);
+  });
+
+  it('binds cleanup to the owned inode across a replacement race', async () => {
+    const outputRoot = liveArtifactOutputDirectory();
+    const ownedArtifact = join(outputRoot, 'owned-only.txt');
+    const backupRoot = `${outputRoot}-race-backup`;
+    const replacementArtifact = join(outputRoot, 'replacement.txt');
+    await rm(backupRoot, { recursive: true, force: true });
+    await mkdir(outputRoot, { recursive: true });
+    await writeFile(ownedArtifact, 'synthetic-password', 'utf8');
+
+    const originalRm = fsPromises.rm;
+    let swapped = false;
+    fsPromises.rm = async (target, options) => {
+      if (!swapped) {
+        swapped = true;
+        try {
+          await fsPromises.rename(outputRoot, backupRoot);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        await mkdir(outputRoot, { recursive: true });
+        await writeFile(replacementArtifact, 'replacement-survives', 'utf8');
+      }
+      return originalRm(target, options);
+    };
+
+    try {
+      await removeLiveArtifacts(outputRoot);
+    } finally {
+      fsPromises.rm = originalRm;
+    }
+
+    expect(swapped).toBe(true);
+    expect(await exists(replacementArtifact)).toBe(true);
+    if (await exists(backupRoot)) {
+      expect(await exists(join(backupRoot, 'owned-only.txt'))).toBe(true);
+    }
+    await rm(outputRoot, { recursive: true, force: true });
+    await rm(backupRoot, { recursive: true, force: true });
   });
 
   it('keeps live output outside retained test-results and removes the complete run root', async () => {

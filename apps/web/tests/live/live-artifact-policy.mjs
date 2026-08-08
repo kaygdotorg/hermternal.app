@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { lstatSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { promises as fsPromises } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -180,6 +180,68 @@ export function isLiveArtifactDirectory(directory) {
       // refused even when the path still matches this run's configured root.
       return false;
     }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Capture the ownership proof and inode identity used for an atomic cleanup
+ * handoff. The evidence is intentionally read again after the public path
+ * check, so a later rename can be compared with the exact directory observed.
+ *
+ * @typedef {{ candidate: string, ownerToken: string, dev: number, ino: number }} LiveArtifactEvidence
+ *
+ * @param {string} directory
+ * @returns {LiveArtifactEvidence | undefined}
+ */
+function liveArtifactEvidence(directory) {
+  const candidate = resolve(directory);
+  if (!isLiveArtifactDirectory(candidate)) return undefined;
+  const ownerToken = ownerTokenFor(candidate);
+  if (!ownerToken) return undefined;
+  try {
+    const rootStats = lstatSync(candidate);
+    const ownerPath = join(candidate, LIVE_OUTPUT_OWNER_FILE);
+    const ownerStats = lstatSync(ownerPath);
+    if (
+      !rootStats.isDirectory() ||
+      rootStats.isSymbolicLink() ||
+      !ownerStats.isFile() ||
+      ownerStats.isSymbolicLink() ||
+      readFileSync(ownerPath, 'utf8') !== `${ownerToken}\n`
+    ) {
+      return undefined;
+    }
+    return { candidate, ownerToken, dev: rootStats.dev, ino: rootStats.ino };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Verify a quarantined directory without trusting its new path. Both the
+ * original directory identity and its run-owned marker must still match before
+ * recursive deletion is permitted.
+ *
+ * @param {string} quarantinePath
+ * @param {LiveArtifactEvidence} evidence
+ * @returns {boolean}
+ */
+function isVerifiedQuarantine(quarantinePath, evidence) {
+  try {
+    const rootStats = lstatSync(quarantinePath);
+    const ownerPath = join(quarantinePath, LIVE_OUTPUT_OWNER_FILE);
+    const ownerStats = lstatSync(ownerPath);
+    return (
+      rootStats.isDirectory() &&
+      !rootStats.isSymbolicLink() &&
+      rootStats.dev === evidence.dev &&
+      rootStats.ino === evidence.ino &&
+      ownerStats.isFile() &&
+      !ownerStats.isSymbolicLink() &&
+      readFileSync(ownerPath, 'utf8') === `${evidence.ownerToken}\n`
+    );
   } catch {
     return false;
   }
@@ -441,6 +503,138 @@ function redactContentEditableMarkup(value) {
 }
 
 /**
+ * @param {string} value
+ * @param {number} start
+ * @returns {{ start: number, end: number, tag: HtmlTag } | { malformedStart: number } | undefined}
+ */
+function findNextStructuredFormOpening(value, start) {
+  let cursor = start;
+  while (cursor < value.length) {
+    const opening = value.indexOf('<', cursor);
+    if (opening < 0) return undefined;
+    const end = findHtmlTagEnd(value, opening);
+    if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG || end < 0) {
+      return { malformedStart: opening };
+    }
+    const tag = parseHtmlTag(value, opening, end);
+    if (!tag) return { malformedStart: opening };
+    if (tag.ambiguous) return { malformedStart: opening };
+    if (!tag.closing && (tag.name === 'textarea' || tag.name === 'select')) {
+      if (tag.selfClosing) return { malformedStart: opening };
+      return { start: opening, end, tag };
+    }
+    cursor = end + 1;
+  }
+  return undefined;
+}
+
+/**
+ * Raw-text textarea content has no nested markup boundary that can be trusted
+ * in a serialized diagnostic. Any markup-like token, comment, malformed tag,
+ * mismatched close, or missing close fails closed instead of allowing a later
+ * credential to remain observable.
+ *
+ * @param {string} value
+ * @param {{ end: number, tag: HtmlTag }} opening
+ * @returns {{ start: number, end: number } | undefined}
+ */
+function findTextareaClosingTag(value, opening) {
+  let cursor = opening.end + 1;
+  while (cursor < value.length) {
+    const next = value.indexOf('<', cursor);
+    if (next < 0) return undefined;
+    const end = findHtmlTagEnd(value, next);
+    if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG || end < 0) {
+      return undefined;
+    }
+    const tag = parseHtmlTag(value, next, end);
+    if (!tag || tag.ambiguous || !tag.closing || tag.name !== opening.tag.name || tag.attributes.length > 0) {
+      return undefined;
+    }
+    return { start: next, end };
+  }
+  return undefined;
+}
+
+/**
+ * Select content is validated as a small tag grammar before it is replaced.
+ * Only option/optgroup nesting is accepted; comments, unknown nested tags,
+ * mismatched closes, raw-text `<` tokens, and unclosed elements fail closed.
+ *
+ * @param {string} value
+ * @param {{ end: number, tag: HtmlTag }} opening
+ * @returns {{ start: number, end: number } | undefined}
+ */
+function findSelectClosingTag(value, opening) {
+  const stack = ['select'];
+  let cursor = opening.end + 1;
+  while (cursor < value.length) {
+    const next = value.indexOf('<', cursor);
+    if (next < 0) return undefined;
+    const end = findHtmlTagEnd(value, next);
+    if (end === HTML_UNTERMINATED_COMMENT || end === HTML_MALFORMED_TAG || end < 0) {
+      return undefined;
+    }
+    const tag = parseHtmlTag(value, next, end);
+    if (!tag || tag.ambiguous || tag.selfClosing) return undefined;
+    const parent = stack.at(-1);
+    if (tag.closing) {
+      if (tag.attributes.length > 0 || parent !== tag.name) return undefined;
+      stack.pop();
+      if (stack.length === 0) return { start: next, end };
+    } else {
+      const allowed =
+        (parent === 'select' && (tag.name === 'option' || tag.name === 'optgroup')) ||
+        (parent === 'optgroup' && tag.name === 'option');
+      if (!allowed) return undefined;
+      stack.push(tag.name);
+    }
+    cursor = end + 1;
+  }
+  return undefined;
+}
+
+/**
+ * Redact textarea and select contents only after validating their serialized
+ * boundaries. Replacing the entire user-controlled body also removes unknown
+ * option text and values, while structural validation prevents comments or a
+ * premature closing tag from hiding a later credential.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function redactStructuredFormMarkup(value) {
+  let cursor = 0;
+  let redacted = '';
+  while (cursor < value.length) {
+    const opening = findNextStructuredFormOpening(value, cursor);
+    if (!opening) {
+      redacted += value.slice(cursor);
+      break;
+    }
+    if ('malformedStart' in opening) {
+      redacted += value.slice(cursor, opening.malformedStart);
+      redacted += LIVE_ARTIFACT_REDACTION;
+      break;
+    }
+    redacted += value.slice(cursor, opening.start);
+    const closing =
+      opening.tag.name === 'textarea'
+        ? findTextareaClosingTag(value, opening)
+        : findSelectClosingTag(value, opening);
+    redacted += value.slice(opening.start, opening.end + 1);
+    if (!closing) {
+      redacted += LIVE_ARTIFACT_REDACTION;
+      break;
+    }
+    redacted += LIVE_ARTIFACT_REDACTION;
+    redacted += value.slice(closing.start, closing.end + 1);
+    cursor = closing.end + 1;
+  }
+  return redacted;
+}
+
+/**
  * Redact every actual `value` attribute, including unquoted values and values
  * not present in the known secret list. Attribute positions come from the
  * structured tag parser, so text such as `data-note="value=secret"` cannot be
@@ -520,8 +714,7 @@ export function redactLiveText(value, secrets = liveCredentialValues()) {
   }
 
   redacted = redactSerializedValueAttributes(redacted);
-  redacted = redacted.replace(/(<textarea\b[^>]*>)[\s\S]*?(<\/textarea>)/giu, `$1${LIVE_ARTIFACT_REDACTION}$2`);
-  redacted = redacted.replace(/(<select\b[^>]*>)[\s\S]*?(<\/select>)/giu, `$1${LIVE_ARTIFACT_REDACTION}$2`);
+  redacted = redactStructuredFormMarkup(redacted);
   return redactContentEditableMarkup(redacted);
 }
 
@@ -667,6 +860,65 @@ function defineSnapshotProperty(target, key, value) {
 }
 
 /**
+ * Construct a real Array with normal push/map/iterator behavior while
+ * ensuring arrays created by map/filter/slice keep the same safe serializer.
+ * The own species constructor avoids falling back to a poisoned ambient
+ * Array.prototype.toJSON on representative reporter transformations.
+ *
+ * @param {number} length
+ * @returns {unknown[]}
+ */
+function createSerializationSafeArray(length) {
+  /** @type {unknown[]} */
+  const snapshot = new Array(length);
+  try {
+    Object.defineProperty(snapshot, 'toJSON', {
+      configurable: false,
+      enumerable: false,
+      value() {
+        return this;
+      },
+      writable: false
+    });
+    Object.defineProperty(snapshot, 'constructor', {
+      configurable: false,
+      enumerable: false,
+      value: createSerializationSafeArray,
+      writable: false
+    });
+  } catch {
+    throwRedactionFailure();
+  }
+  return snapshot;
+}
+
+try {
+  Object.defineProperty(createSerializationSafeArray, Symbol.species, {
+    configurable: false,
+    enumerable: false,
+    value: createSerializationSafeArray,
+    writable: false
+  });
+} catch {
+  throwRedactionFailure();
+}
+
+/**
+ * Create a snapshot container with no ambient serialization hooks. Arrays keep
+ * their normal Array behavior and receive a safe own serializer, while object
+ * snapshots use a null prototype. This prevents a reporter's later
+ * JSON.stringify from invoking poisoned Array.prototype.toJSON or
+ * Object.prototype.toJSON hooks.
+ *
+ * @param {boolean} array
+ * @returns {Record<string, unknown> | unknown[]}
+ */
+function createSnapshotContainer(array) {
+  if (!array) return Object.create(null);
+  return createSerializationSafeArray(0);
+}
+
+/**
  * Traverse diagnostics into a trusted JSON-safe plain snapshot. The source
  * graph is never mutated or retained in the returned value. This is deliberate:
  * a stateful Proxy can change after a successful read-back, and own `toJSON`
@@ -691,7 +943,7 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
   if (state.snapshots.has(value)) return state.snapshots.get(value);
 
   consumeRedactionNode(state, depth);
-  const snapshot = Array.isArray(value) ? [] : Object.create(null);
+  const snapshot = createSnapshotContainer(Array.isArray(value));
   state.snapshots.set(value, snapshot);
   state.active.add(value);
   try {
@@ -839,16 +1091,36 @@ export async function scrubLivePage(page) {
 }
 
 /**
- * Remove a live output directory only when it is inside this run's unique
- * temporary root. Refusing other paths prevents cleanup from deleting an
- * unrelated developer or CI artifact directory.
+ * Remove a live output directory only after an identity-bound atomic handoff.
+ * The owned root is first renamed into a private temporary quarantine. Its
+ * device/inode identity and run marker are reverified at that new path before
+ * recursive deletion, so a replacement at the original path cannot become the
+ * deletion target during the validation-to-remove window.
  *
  * @param {string} directory
  * @returns {Promise<void>}
  */
 export async function removeLiveArtifacts(directory) {
-  if (!isLiveArtifactDirectory(directory)) return;
-  await rm(resolve(directory), { recursive: true, force: true });
+  const evidence = liveArtifactEvidence(directory);
+  if (!evidence) return;
+
+  let quarantineParent;
+  let quarantinePath;
+  try {
+    quarantineParent = mkdtempSync(join(resolve(tmpdir()), 'hermternal-live-quarantine-'));
+    quarantinePath = join(quarantineParent, basename(evidence.candidate));
+    await fsPromises.rename(evidence.candidate, quarantinePath);
+  } catch {
+    if (quarantineParent) {
+      await fsPromises.rm(quarantineParent, { recursive: true, force: true }).catch(() => undefined);
+    }
+    return;
+  }
+
+  if (!isVerifiedQuarantine(quarantinePath, evidence)) return;
+
+  await fsPromises.rm(quarantinePath, { recursive: true, force: true });
+  await fsPromises.rm(quarantineParent, { recursive: false, force: true }).catch(() => undefined);
 }
 
 /**
@@ -873,12 +1145,12 @@ function replaceDiagnosticArray(testInfo, snapshot) {
   if (!Array.isArray(target)) throwRedactionFailure();
   try {
     target.length = 0;
-    for (const value of snapshot) target.push(value);
-    if (
-      target.length !== snapshot.length ||
-      snapshot.some((value, index) => !Object.is(target[index], value))
-    ) {
-      throwRedactionFailure();
+    for (let index = 0; index < snapshot.length; index += 1) {
+      target.push(snapshot[index]);
+    }
+    if (target.length !== snapshot.length) throwRedactionFailure();
+    for (let index = 0; index < snapshot.length; index += 1) {
+      if (!Object.is(target[index], snapshot[index])) throwRedactionFailure();
     }
   } catch {
     throwRedactionFailure();
