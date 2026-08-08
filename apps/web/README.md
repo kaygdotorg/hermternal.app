@@ -123,7 +123,8 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   field transitions, and submits from the password control. The opt-in live lane uses temporary output,
   disabled media artifacts, a status-only reporter, bounded descriptor-aware structured-error redaction
   (including native Error causes, Playwright `errorContext`, matcher results, logs, and ARIA snapshots),
-  and DOM cleanup. Scrub failures fail the proof unless `page.isClosed()` returns `true`; generic error text
+  verified descriptor/read-back writes, and balanced serialized contenteditable comments. Scrub failures fail
+  the proof unless `page.isClosed()` returns `true`; generic error text
   such as `page crashed` is never accepted as termination proof. Attachments and output cleanup run in
   `finally` even when redaction fails, so a failed proof cannot retain synthetic credentials in traces,
   screenshots, reports, error contexts, or `test-results`.
