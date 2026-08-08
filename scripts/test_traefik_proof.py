@@ -298,6 +298,20 @@ class TraefikRendererTests(unittest.TestCase):
             ],
         )
 
+    def test_wrong_host_vector_preserves_noncanonical_forwarded_authority(self) -> None:
+        vector = traefik_proof.ROUTE_CASE_VECTORS["wrong_host"]
+        headers = traefik_proof._route_case_headers(self.inputs, vector)
+        self.assertEqual(
+            dict(headers)["X-Forwarded-Host"],
+            "wrong.test:19444",
+        )
+        self.assertEqual(
+            traefik_proof.policy_decision_for_case(
+                {"id": "wrong_host"}, self.inputs
+            ),
+            {"status": 421, "layer": "edge", "upstream_request": False},
+        )
+
     def test_upstream_services_are_private_and_static_is_separate_from_hermes(self) -> None:
         hermes = self.services["hermes"]["loadBalancer"]
         static = self.services["static"]["loadBalancer"]
@@ -1096,6 +1110,13 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         denied_status, denied_headers = self._send(denied)
         self.assertEqual(denied_status, 404)
         self.assertEqual(denied_headers["x-hermternal-policy"], "deny")
+        wrong_host = [
+            (name, "wrong.test:19444") if name == "X-Forwarded-Host" else (name, value)
+            for name, value in self._forwarded()
+        ]
+        wrong_status, wrong_headers = self._send(wrong_host)
+        self.assertEqual(wrong_status, 421)
+        self.assertEqual(wrong_headers["x-hermternal-policy"], "deny")
 
     def test_adapter_allows_only_explicit_transport_headers_beside_forwardauth(self) -> None:
         transport_headers = self._forwarded() + [
@@ -1190,7 +1211,7 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         )
         self.assertEqual(status, 414)
 
-    def test_adapter_rejects_missing_forwarded_uri_and_malformed_authority(self) -> None:
+    def test_adapter_rejects_missing_uri_and_denies_noncanonical_authority(self) -> None:
         headers = [(name, value) for name, value in self._forwarded() if name != "X-Forwarded-Uri"]
         status, _ = self._send(headers)
         self.assertEqual(status, 400)
@@ -1199,8 +1220,9 @@ class ForwardAuthAdapterTests(unittest.TestCase):
             (name, "traefik-92.test") if name == "X-Forwarded-Host" else (name, value)
             for name, value in headers
         ]
-        status, _ = self._send(headers)
-        self.assertEqual(status, 400)
+        status, response_headers = self._send(headers)
+        self.assertEqual(status, 421)
+        self.assertEqual(response_headers["x-hermternal-policy"], "deny")
 
 
 class TraefikEvidenceContractTests(unittest.TestCase):
