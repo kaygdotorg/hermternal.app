@@ -127,6 +127,18 @@ received. `sendPrompt()` requires `ready` after this response; `restoring` is a
 strict barrier that permits waiting or cancellation only. The server owns the
 durable history; the transport does not mirror it.
 
+Selected and reconnect identity form one committed transaction. During an
+explicit `restore(target)`, the target remains private while the previously
+committed identity stays visible and sendable only through its existing socket
+rules. A successful `session.resume` on the current socket commits the selected
+and reconnect IDs, plus draft-promotion fields, together before `ready` is
+published. A rejection, abort, close, stale generation, or stale completion
+leaves the previous identity unchanged. `connect()` and `reconnect()` are
+rejected while that transition is pending, so neither can resume the previous
+ID behind the requested target. Prompts and session-routed controls also reject
+if the committed selected and reconnect IDs diverge; no mismatched frame is
+sent.
+
 An authenticated empty workspace can explicitly call `session.create` after
 readiness. Hermes returns a short-lived live session ID and a distinct stored
 session ID. The first prompt uses only the live ID on the socket that created

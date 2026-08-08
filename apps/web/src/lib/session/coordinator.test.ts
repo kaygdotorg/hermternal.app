@@ -36,6 +36,7 @@ interface FakeChatHarness {
   reconnect: ReturnType<typeof vi.fn>;
   restore: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
+  deferRestore(sessionId: string): Deferred<void>;
   get status(): JsonRpcConnectionStatus;
   set status(value: JsonRpcConnectionStatus);
   get selectedSessionId(): string | undefined;
@@ -48,6 +49,7 @@ function createFakeChat(
   let status = initialStatus;
   let selectedSessionId: string | undefined = initialSessionId;
   let generation = 1;
+  const restorePlans = new Map<string, Deferred<void>[]>();
   const connect = vi.fn(async (signal: AbortSignal) => {
     if (signal.aborted) throw new SessionCoordinatorError('aborted');
     status = 'ready';
@@ -60,6 +62,13 @@ function createFakeChat(
   });
   const restore = vi.fn(async (sessionId: string, signal: AbortSignal) => {
     if (signal.aborted) throw new SessionCoordinatorError('aborted');
+    const [plan, ...remaining] = restorePlans.get(sessionId) ?? [];
+    if (remaining.length > 0) restorePlans.set(sessionId, remaining);
+    else restorePlans.delete(sessionId);
+    if (plan) await plan.promise;
+    if (signal.aborted) throw new SessionCoordinatorError('aborted');
+    // Model the transport's atomic restore contract: a rejected or aborted
+    // resume never publishes the requested identity to the coordinator.
     selectedSessionId = sessionId;
     status = 'ready';
   });
@@ -83,6 +92,13 @@ function createFakeChat(
     reconnect,
     restore,
     close,
+    deferRestore(sessionId) {
+      const pending = deferred<void>();
+      const queue = restorePlans.get(sessionId) ?? [];
+      queue.push(pending);
+      restorePlans.set(sessionId, queue);
+      return pending;
+    },
     get status() {
       return status;
     },
@@ -319,6 +335,54 @@ describe('createSessionCoordinator', () => {
     expect(harness.terminal.attach).not.toHaveBeenCalled();
     expect('transcript' in harness.coordinator.state).toBe(false);
     expect('messages' in harness.coordinator.state).toBe(false);
+  });
+
+  it('rechecks the committed Chat identity after a failed replacement before reconnecting', async () => {
+    const harness = createCoordinator();
+    await harness.coordinator.activate('chat');
+    const failedRestore = harness.chat.deferRestore('session-new');
+    const replacement = harness.coordinator.setSession('session-new');
+    await flush();
+
+    expect(harness.coordinator.activeSessionId).toBe('session-new');
+    expect(harness.chat.selectedSessionId).toBe('session-old');
+    failedRestore.reject(new Error('synthetic restore rejection'));
+    await expect(replacement).rejects.toMatchObject({ code: 'chat-operation-failed' });
+    expect(harness.chat.selectedSessionId).toBe('session-old');
+
+    const retryFailure = harness.chat.deferRestore('session-new');
+    const reconnect = harness.coordinator.reconnect();
+    await flush();
+    expect(harness.chat.reconnect).toHaveBeenCalledTimes(1);
+    expect(harness.chat.restore).toHaveBeenCalledTimes(2);
+    retryFailure.reject(new Error('synthetic repeated restore rejection'));
+    await expect(reconnect).rejects.toMatchObject({ code: 'chat-operation-failed' });
+    expect(harness.chat.selectedSessionId).toBe('session-old');
+
+    await harness.coordinator.reconnect();
+    expect(harness.chat.restore).toHaveBeenCalledTimes(3);
+    expect(harness.chat.selectedSessionId).toBe('session-new');
+    expect(harness.coordinator.activeSessionId).toBe('session-new');
+  });
+
+  it('ignores a stale Chat restore completion when a replacement session supersedes it', async () => {
+    const harness = createCoordinator();
+    const firstRestore = harness.chat.deferRestore('session-new');
+    const first = harness.coordinator.setSession('session-new');
+    await flush();
+
+    const secondRestore = harness.chat.deferRestore('session-third');
+    const second = harness.coordinator.setSession('session-third');
+    await flush();
+    firstRestore.resolve();
+    await flush();
+    expect(harness.chat.selectedSessionId).toBe('session-old');
+
+    secondRestore.resolve();
+    await Promise.all([first, second]);
+    expect(harness.chat.selectedSessionId).toBe('session-third');
+    expect(harness.coordinator.activeSessionId).toBe('session-third');
+    expect(harness.coordinator.state.sessionGeneration).toBe(3);
   });
 
   it('replaces the session while Terminal is active and invalidates the old binding', async () => {

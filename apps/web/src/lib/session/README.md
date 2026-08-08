@@ -33,10 +33,16 @@ Hermes session, or mirror transcript content.
   transport remains open and usable. Switching back to Chat focuses the composer
   without retrying or replaying a prompt.
 - `reconnect()` coalesces concurrent calls to the existing Chat transport. It
-  does not reattach an already valid Terminal binding.
+  does not reattach an already valid Terminal binding. If Chat is completing an
+  explicit identity restore, reconnect remains behind that transaction instead
+  of resuming the prior identity on a replacement socket.
 - `restore(sessionId)` uses the server-backed Chat restore boundary after a
   browser refresh. No messages, prompt text, or local transcript mirror are
-  retained by this module.
+  retained by this module. Chat keeps its last committed identity visible until
+  `session.resume` succeeds, then commits the selected and reconnect identity
+  together; rejection, abort, and stale completion cannot publish a split
+  session. The coordinator therefore rechecks Chat's committed identity after
+  reconnect and restores the requested session when needed.
 - Deployment evidence must be explicitly compatible with the pinned
   `dashboard-v0.0.1` contract and Hermes revision
   `f5be9236e00ddf2f2a412697f267078fc4ee068e2`. Omitted, unknown, mismatched, or
