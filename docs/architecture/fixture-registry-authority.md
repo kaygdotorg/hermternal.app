@@ -125,14 +125,14 @@ seed all four exact protected commit OIDs into local `refs/fixture-authority/*`
 refs before verification; the verifier never infers a replacement from `HEAD`.
 The aggregate and standalone regression suites consume the same explicit,
 offline, repository-versioned source at
-`scripts/fixture_registry_authority.objects.bundle`. Its 8,290,438 bytes are
+`scripts/fixture_registry_authority.objects.bundle`. Its 11,092,429 bytes are
 pinned by SHA-256
-`cc6882a125ddd70af7b1c9b297a4be90d5f5ae222f168cde95e72eeb1bc43341`, and its
+`0554da22401f197d1f8df9118de88342e895398d0b5b0df48df38fbb71023fa4`, and its
 `git bundle list-heads` output is bounded to the four exact refs and OIDs:
 
 ```text
-refs/fixture-authority/active-authority 324c78fe179a933d069e4ffde35e6b6c89ce25d2
-refs/fixture-authority/active-source 0230c585d6ec230300f451df87bad20dfda7ad43
+refs/fixture-authority/active-authority e8f09813bb87eb38dd03d4a3b4d59b0dbe0091e2
+refs/fixture-authority/active-source f82d74224af050fc669273ac57dfff13f588f093
 refs/fixture-authority/historical-authority 285acdcf9c11c049180a7844e689eee0f1490de4
 refs/fixture-authority/historical-source 263cb75adcf153d6fe252636b064e5fbc3e3f877
 ```
@@ -147,8 +147,8 @@ git -C "$OBJECT_REPO" fetch --no-tags --quiet \
   "$PWD/scripts/fixture_registry_authority.objects.bundle" \
   285acdcf9c11c049180a7844e689eee0f1490de4:refs/fixture-authority/historical-authority \
   263cb75adcf153d6fe252636b064e5fbc3e3f877:refs/fixture-authority/historical-source \
-  324c78fe179a933d069e4ffde35e6b6c89ce25d2:refs/fixture-authority/active-authority \
-  0230c585d6ec230300f451df87bad20dfda7ad43:refs/fixture-authority/active-source
+  e8f09813bb87eb38dd03d4a3b4d59b0dbe0091e2:refs/fixture-authority/active-authority \
+  f82d74224af050fc669273ac57dfff13f588f093:refs/fixture-authority/active-source
 ```
 
 The host's `/usr/bin/git` is checked as an absolute, regular executable; Git
