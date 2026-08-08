@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { randomBytes } from 'node:crypto';
 import { lstatSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
@@ -16,8 +17,11 @@ const REDACTION_MAX_STRING_LENGTH = 256 * 1024;
 const REDACTION_MAX_TOTAL_STRING_LENGTH = 4 * 1024 * 1024;
 const REDACTION_MAX_ARRAY_ITEMS = 512;
 const REDACTION_MAX_PROPERTIES = 1024;
+const REDACTION_MAX_BINARY_BYTES = Math.floor(REDACTION_MAX_STRING_LENGTH * 3 / 4);
 const REDACTION_BUDGET_MESSAGE = 'live artifact redaction budget exceeded';
 const REDACTION_FAILURE_MESSAGE = 'live artifact redaction failed';
+const LIVE_BINARY_REDACTION = Buffer.from(LIVE_ARTIFACT_REDACTION, 'utf8').toString('base64');
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const HTML_UNTERMINATED_COMMENT = -2;
 const HTML_MALFORMED_TAG = -3;
 function createLiveArtifactRoot() {
@@ -69,6 +73,19 @@ export function liveCredentialValues(environment = process.env) {
 }
 
 /**
+ * Reject Playwright's debug mode before it can replace worker IPC with direct
+ * stderr inheritance. The live lane promises that every worker diagnostic is
+ * detached and redacted; a truthy `PW_RUNNER_DEBUG` violates that boundary.
+ *
+ * @param {Record<string, string | undefined>} [environment]
+ */
+export function assertLiveRunnerDebugDisabled(environment = process.env) {
+  if (environment.PW_RUNNER_DEBUG) {
+    throw new Error('PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane');
+  }
+}
+
+/**
  * @param {{ root: string, ownerToken: string }} run
  * @returns {boolean}
  */
@@ -97,7 +114,26 @@ function hasOwnedRootMarker(run) {
  * @returns {string}
  */
 export function liveArtifactOutputDirectory() {
-  if (!liveArtifactRun || !hasOwnedRootMarker(liveArtifactRun)) liveArtifactRun = createLiveArtifactRoot();
+  if (liveArtifactRun && hasOwnedRootMarker(liveArtifactRun)) return liveArtifactRun.root;
+
+  // Playwright deserializes the config in each worker process. Adopt the exact
+  // parent-created root only when its inherited token and marker still match;
+  // never create a fresh root in a worker and silently split one run across
+  // retries or sequential workers.
+  const configuredRoot = process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+  const configuredToken = process.env.PLAYWRIGHT_LIVE_OUTPUT_TOKEN;
+  if (configuredRoot !== undefined || configuredToken !== undefined) {
+    if (typeof configuredRoot === 'string' && typeof configuredToken === 'string') {
+      const configuredRun = { root: resolve(configuredRoot), ownerToken: configuredToken };
+      if (hasOwnedRootMarker(configuredRun)) {
+        liveArtifactRun = configuredRun;
+        return configuredRun.root;
+      }
+    }
+    throw new Error('live artifact output root ownership could not be validated');
+  }
+
+  liveArtifactRun = createLiveArtifactRoot();
   return liveArtifactRun.root;
 }
 
@@ -1060,6 +1096,103 @@ export function redactTestErrors(errors, secrets = liveCredentialValues()) {
 }
 
 /**
+ * @param {Iterable<string>} secrets
+ * @returns {Buffer[]}
+ */
+function credentialBytePatterns(secrets) {
+  /** @type {Buffer[]} */
+  const patterns = [];
+  for (const secret of secrets) {
+    if (typeof secret !== 'string' || secret.length === 0) continue;
+    for (const encoding of /** @type {const} */ (['utf8', 'utf16le'])) {
+      const bytes = Buffer.from(secret, encoding);
+      if (bytes.length > 0 && bytes.length <= REDACTION_MAX_BINARY_BYTES) patterns.push(bytes);
+    }
+  }
+  return patterns;
+}
+
+/**
+ * Decode one Playwright protocol base64 field strictly. Buffer.from's base64
+ * parser accepts malformed input and silently discards invalid bytes, so both
+ * the alphabet and canonical round-trip are checked before any byte search.
+ *
+ * @param {unknown} encoded
+ * @param {Buffer[]} patterns
+ * @returns {string}
+ */
+function redactProtocolBase64(encoded, patterns) {
+  if (typeof encoded !== 'string') throwRedactionFailure();
+  if (encoded.length > REDACTION_MAX_STRING_LENGTH || !BASE64_PATTERN.test(encoded)) {
+    throwRedactionBudget();
+  }
+  let bytes;
+  try {
+    bytes = Buffer.from(encoded, 'base64');
+  } catch {
+    throwRedactionFailure();
+  }
+  if (bytes.length > REDACTION_MAX_BINARY_BYTES || bytes.toString('base64') !== encoded) {
+    throwRedactionBudget();
+  }
+  for (const pattern of patterns) {
+    if (bytes.indexOf(pattern) >= 0) return LIVE_BINARY_REDACTION;
+  }
+  return encoded;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} key
+ * @returns {{ present: boolean, value?: unknown }}
+ */
+function snapshotProperty(value, key) {
+  if (value === null || typeof value !== 'object') throwRedactionFailure();
+  let descriptor;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(value, key);
+  } catch {
+    throwRedactionFailure();
+  }
+  if (!descriptor) return { present: false };
+  if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) throwRedactionFailure();
+  return { present: true, value: descriptor.value };
+}
+
+/**
+ * Rewrite only the binary fields used by Playwright's worker protocol. The
+ * generic detached snapshot protects ordinary strings, while this protocol
+ * layer decodes stdOut/stdErr buffers and attach bodies so base64 transport
+ * cannot carry a credential past the parent boundary.
+ *
+ * @param {unknown} snapshot
+ * @param {Buffer[]} patterns
+ */
+function redactPlaywrightBinaryFields(snapshot, patterns) {
+  if (snapshot === null || typeof snapshot !== 'object') return;
+  const outerMethod = snapshotProperty(snapshot, 'method');
+  if (!outerMethod.present || outerMethod.value !== '__dispatch__') return;
+  const outerParams = snapshotProperty(snapshot, 'params');
+  if (!outerParams.present || outerParams.value === null || typeof outerParams.value !== 'object') {
+    throwRedactionFailure();
+  }
+  const eventMethod = snapshotProperty(outerParams.value, 'method');
+  if (!eventMethod.present || !['stdOut', 'stdErr', 'attach'].includes(String(eventMethod.value))) return;
+  const eventParams = snapshotProperty(outerParams.value, 'params');
+  if (!eventParams.present || eventParams.value === null || typeof eventParams.value !== 'object') {
+    throwRedactionFailure();
+  }
+  const field = eventMethod.value === 'attach' ? 'body' : 'buffer';
+  const encoded = snapshotProperty(eventParams.value, field);
+  if (!encoded.present || encoded.value === undefined) return;
+  defineSnapshotProperty(
+    /** @type {Record<string, unknown>} */ (eventParams.value),
+    field,
+    redactProtocolBase64(encoded.value, patterns)
+  );
+}
+
+/**
  * Detach and redact one complete Playwright worker IPC message. This boundary
  * runs on `process.send`, not in afterEach: step-end and test-end payloads can
  * be emitted before a fixture cleanup hook, and Playwright's mapped error
@@ -1071,8 +1204,11 @@ export function redactTestErrors(errors, secrets = liveCredentialValues()) {
  * @returns {unknown}
  */
 export function redactLiveTransportMessage(message, secrets = liveCredentialValues()) {
+  const capturedSecrets = Object.freeze([...secrets]);
   const state = createRedactionState();
-  return redactTestDiagnosticValue(message, secrets, state, 0);
+  const snapshot = redactTestDiagnosticValue(message, capturedSecrets, state, 0);
+  redactPlaywrightBinaryFields(snapshot, credentialBytePatterns(capturedSecrets));
+  return snapshot;
 }
 
 /**

@@ -121,16 +121,24 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
 - Axe runs against success, empty, and failure states in both light and dark color schemes.
 - The password preview regression delays the hydration focus frame, sends rapid keyboard input, repeats
   field transitions, and submits from the password control. The opt-in live lane uses one run-owned 0700
-  temporary root with an owner marker, disabled media artifacts, and a status-only reporter. Every
-  Playwright worker preloads `tests/live/live-ipc-guard.cjs` through `NODE_OPTIONS --require` before the
-  test body. The guard captures and pins `process.send`, never mutates `Object.prototype`,
+  temporary root with an owner marker, disabled media artifacts, and a status-only reporter. The
+  Playwright project output directory is a disposable child of that root because Playwright clears its
+  project output before a run; workers adopt the inherited root only after validating its marker and
+  token, so retries and sequential workers share one run owner. Every Playwright worker preloads
+  `tests/live/live-ipc-guard.cjs` through `NODE_OPTIONS --require` before the
+  test body. `PW_RUNNER_DEBUG` is incompatible with this lane: the config rejects any truthy value before
+  worker spawn because Playwright otherwise inherits worker stderr directly. The guard captures the
+  credential variants once at preload, then pins `process.send`, never mutates `Object.prototype`,
   `Array.prototype`, or `testInfo.errors`, and detaches/redacts every worker-to-parent payload, including
-  step, test-end, fatal, attachment, stdio, environment, and response messages. Unknown, trapped, or
-  over-budget values are replaced or not forwarded, so Playwright cannot fall back to serializing the
-  unsafe source graph. Per-test finalization only quarantines strict child output directories; it preserves
-  the shared marker, root, and root-level artifacts. Global teardown alone removes the complete root by
-  atomic quarantine plus bounded known-entry non-recursive `unlink`/`rmdir`, retaining any unknown,
-  replaced, or raced remnant. Detached descriptor-aware snapshots cover native Error causes, Playwright
+  step, test-end, fatal, attachment, stdio, environment, and response messages. Playwright stdio buffers
+  and attachment bodies are bounded-decoded from base64 and replaced when their bytes contain a captured
+  credential encoding; malformed or oversized binary fields fail closed. Unknown, trapped, or over-budget
+  values are replaced or not forwarded, so Playwright cannot fall back to serializing the unsafe source
+  graph. Per-test finalization only quarantines strict child output directories; it preserves
+  the shared marker, root, and root-level artifacts. The config routes Playwright's post-teardown
+  `LastRunReporter` to `/dev/null`, so it cannot recreate a markerless `.last-run.json` directory after
+  global teardown. Global teardown alone removes the complete root by atomic quarantine plus bounded
+  known-entry non-recursive `unlink`/`rmdir`, retaining any unknown, replaced, or raced remnant. Detached descriptor-aware snapshots cover native Error causes, Playwright
   `errorContext`, matcher results, logs, ARIA snapshots, and structured form values without retaining the
   source graph. Snapshot arrays remain real Playwright-compatible arrays with normal push/map/iterator
   behavior and safe own serialization/species behavior. Own `toJSON` hooks, stateful or inconsistent
