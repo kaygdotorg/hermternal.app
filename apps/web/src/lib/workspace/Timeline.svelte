@@ -94,21 +94,45 @@
         </div>
         <p>{item.description}</p>
         {#if item.status === 'pending'}
-          <div class="approval-actions">
+          <div class="approval-actions" aria-label="Approval choices">
             <Pill
               ariaLabel={timelineActionsDisabled ? `${item.confirmLabel}, unavailable` : item.confirmLabel}
               disabled={timelineActionsDisabled}
+              icon="check"
+              iconOnly
               label={item.confirmLabel}
-              title={timelineActionsDisabled ? approvalDisabledReason : undefined}
+              title={timelineActionsDisabled ? approvalDisabledReason : item.confirmLabel}
               variant="action"
+              onActivate={() => onAction({ type: 'approve-tool', itemId: item.id })}
+            />
+            <Pill
+              ariaLabel={timelineActionsDisabled ? 'Allow for session, unavailable' : 'Allow for session'}
+              disabled={timelineActionsDisabled}
+              icon="clock"
+              iconOnly
+              label="Allow for session"
+              title={timelineActionsDisabled ? approvalDisabledReason : 'Allow for session'}
+              variant="ghost"
+              onActivate={() => onAction({ type: 'approve-tool', itemId: item.id })}
+            />
+            <Pill
+              ariaLabel={timelineActionsDisabled ? 'Always allow, unavailable' : 'Always allow'}
+              disabled={timelineActionsDisabled}
+              icon="shield"
+              iconOnly
+              label="Always allow"
+              title={timelineActionsDisabled ? approvalDisabledReason : 'Always allow'}
+              variant="ghost"
               onActivate={() => onAction({ type: 'approve-tool', itemId: item.id })}
             />
             <Pill
               ariaLabel={timelineActionsDisabled ? `${item.rejectLabel}, unavailable` : item.rejectLabel}
               disabled={timelineActionsDisabled}
+              icon="close"
+              iconOnly
               label={item.rejectLabel}
-              title={timelineActionsDisabled ? approvalDisabledReason : undefined}
-              variant="ghost"
+              title={timelineActionsDisabled ? approvalDisabledReason : item.rejectLabel}
+              variant="danger"
               onActivate={() => onAction({ type: 'reject-tool', itemId: item.id })}
             />
           </div>
@@ -252,7 +276,7 @@
     gap: 5px;
     padding: 4px 8px;
     border-radius: var(--radius-pill);
-    background: color-mix(in srgb, var(--action-ink) 16%, transparent);
+    background: #ffffff33;
     font-size: 12px;
     line-height: 16px;
   }
@@ -507,7 +531,7 @@
     border-radius: var(--radius-input);
     object-fit: cover;
     background: color-mix(in srgb, var(--signal) 8%, var(--surface));
-    color: var(--signal);
+    color: var(--ink);
   }
 
   .image-placeholder {
@@ -626,10 +650,10 @@
     }
   }
 
-  @media (max-width: 620px) {
+  @container workspace-preview (max-width: 760px) {
     .timeline {
-      gap: 14px;
-      padding: 20px 16px 156px;
+      gap: 20px;
+      padding: 12px 16px 148px;
     }
 
     .approval-card,

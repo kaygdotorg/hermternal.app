@@ -23,43 +23,44 @@ export const DEFAULT_SESSIONS: SessionSummary[] = [
 export const DEFAULT_IMAGE: ImageAttachment = {
   id: 'synthetic-logistics-chart',
   alt: 'Synthetic container load by hub chart',
-  caption: 'Container load by hub · synthetic fixture'
+  caption: 'Warehouse logistics logs · synthetic fixture'
 };
 
 export const DEFAULT_TIMELINE: TimelineItem[] = [
   {
     kind: 'user-message',
     id: 'user-1',
-    text: 'Analyze the shipping surge in EMEA hubs for Q3. Focus specifically on Rotterdam and Hamburg.'
+    text: 'Analyze the shipping surge in EMEA hubs for Q3. Focus specifically on the attached warehouse logistics logs.',
+    attachments: [DEFAULT_IMAGE]
   },
   {
     kind: 'assistant-message',
     id: 'assistant-1',
     model: 'Atlas · balanced',
-    status: 'draft',
-    text: 'I’ll trace the strongest signal through the synthetic logistics fixture before summarizing the bottleneck.'
+    status: 'complete',
+    text: 'Processed logistics data across four EMEA hubs.'
   },
   {
     kind: 'tool',
     id: 'tool-1',
-    label: 'Read logistics fixture',
-    detail: 'Synthetic source · 12 rows · read-only',
+    label: 'Permission required',
+    detail: 'Read-only access to restricted warehouse timestamps',
     status: 'completed'
   },
   {
     kind: 'approval',
     id: 'approval-1',
-    title: 'Allow a mock route check?',
-    description: 'This presentation-only tool would compare two synthetic hub snapshots. No network request is made.',
+    title: 'Allow read-only timestamp access?',
+    description: 'Hermes needs restricted warehouse timestamps to verify the Rotterdam delay. This is a local fixture; no network request is made.',
     confirmLabel: 'Allow once',
-    rejectLabel: 'Not now',
+    rejectLabel: 'Deny',
     status: 'pending'
   },
   {
     kind: 'tool',
     id: 'tool-2',
-    label: 'Compare Rotterdam and Hamburg',
-    detail: 'Waiting for approval',
+    label: 'Verify Rotterdam delay',
+    detail: 'Waiting for approval · synthetic fixture',
     status: 'pending'
   },
   {
@@ -77,7 +78,8 @@ export const DEFAULT_TIMELINE: TimelineItem[] = [
     kind: 'assistant-message',
     id: 'assistant-2',
     model: 'Atlas · balanced',
-    text: 'The strongest signal is a processing bottleneck at Rotterdam. Hamburg remains steadier when inland transfers are excluded.'
+    status: 'draft',
+    text: 'The strongest signal is a processing bottleneck at Rotterdam rather than a region-wide capacity issue. I’ll verify the restricted timestamps before attributing the full 12% increase.'
   }
 ];
 

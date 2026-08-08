@@ -148,19 +148,24 @@
   }
 
   .session-group {
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 4px;
+    padding: 8px 6px 10px;
+    border: 1px solid var(--chrome-line);
+    border-radius: var(--radius-nested-glass);
+    background: color-mix(in srgb, var(--surface) 58%, transparent);
   }
 
   .recent-group {
-    padding-top: 4px;
+    padding-top: 8px;
   }
 
   .group-heading {
     min-height: 30px;
     justify-content: space-between;
-    padding-inline: 12px;
+    padding-inline: 6px;
     color: var(--muted);
   }
 
@@ -254,11 +259,5 @@
     min-width: 44px;
     min-height: 44px;
     padding-inline: 6px;
-  }
-
-  @media (max-width: 1180px) {
-    .session-list {
-      padding: 12px;
-    }
   }
 </style>
