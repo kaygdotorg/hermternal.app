@@ -482,57 +482,6 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(JSON.stringify(bridge.state)).not.toContain('process-session-one');
   });
 
-  it('returns a fresh binding for coordinator-owned attach-mode reconnect', async () => {
-    const fake = createFakePty();
-    const bridge = new CurrentSessionTerminalBridge({
-      createTransport: () => fake.pty,
-      createAttachment: () => ({ attach: 'attach-one', processIdentity: 'process-one' })
-    });
-
-    const first = await bridge.attach('session-one', new AbortController().signal);
-    first.invalidate();
-    const second = await bridge.reconnectBinding('session-one', new AbortController().signal);
-
-    expect(second).not.toBe(first);
-    expect(isValid(second)).toBe(true);
-    expect(fake.reconnect).toHaveBeenCalledTimes(1);
-    second.invalidate();
-    expect(fake.detach).toHaveBeenCalledTimes(2);
-  });
-
-  it('invokes lease adoption before a synchronous recovered attached event', async () => {
-    const fake = createFakePty();
-    const bridge = new CurrentSessionTerminalBridge({
-      createTransport: () => fake.pty,
-      createAttachment: () => ({ attach: 'attach-one', processIdentity: 'process-one' })
-    });
-    const first = await bridge.attach('session-one', new AbortController().signal);
-    first.invalidate();
-    const order: string[] = [];
-    fake.reconnect.mockImplementationOnce(async () => {
-      order.push('transport-reconnect');
-      fake.emit({
-        type: 'state',
-        state: {
-          status: 'attached',
-          generation: 2,
-          mode: 'attach',
-          sessionId: 'session-one',
-          outputMayBeTruncated: true
-        }
-      });
-    });
-
-    const second = await bridge.reconnectBinding(
-      'session-one',
-      new AbortController().signal,
-      () => order.push('lease-adopted')
-    );
-
-    expect(order).toEqual(['lease-adopted', 'transport-reconnect']);
-    expect(isValid(second)).toBe(true);
-  });
-
   it('cancels renderer-gated attach and reconnect on explicit detach', async () => {
     const fake = createFakePty();
     const bridge = new CurrentSessionTerminalBridge({
@@ -635,6 +584,67 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(fake.close).toHaveBeenCalledTimes(1);
   });
 
+  it('fails closed before ticket minting when browser origin is absent', () => {
+    vi.stubGlobal('location', undefined);
+    const fetcher = vi.fn();
+    const createSocket = vi.fn();
+
+    expect(() => createBrowserPtyTransport({ fetch: fetcher, createSocket })).toThrowError(
+      expect.objectContaining({ code: 'invalid-options' })
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(createSocket).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps browser attach mode closed without an issuance validator', async () => {
+    vi.stubGlobal('location', { origin: 'https://reviewed.example' });
+    const fetcher = vi.fn();
+    const createSocket = vi.fn();
+    const transport = createBrowserPtyTransport({ fetch: fetcher, createSocket });
+
+    await expect(transport.connect({
+      sessionId: 'session-one', attach: 'attach-one', processIdentity: 'process-one'
+    })).rejects.toMatchObject({ code: 'invalid-attachment' });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(createSocket).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('passes attach mode only through the injected issuance validator', async () => {
+    vi.stubGlobal('location', { origin: 'https://reviewed.example' });
+    let readyState = 0;
+    const socket: PtyWebSocket = {
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      onclose: null,
+      get readyState() { return readyState; },
+      send: vi.fn(),
+      close: vi.fn()
+    };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ ticket: 'pty-ticket', ttl_seconds: 30 }), {
+      headers: { 'content-type': 'application/json' }
+    }));
+    const validateAttachment = vi.fn(() => true);
+    const transport = createBrowserPtyTransport({
+      fetch: fetcher,
+      createSocket: () => socket,
+      validateAttachment
+    });
+    const pending = transport.connect({ sessionId: 'session-one', attach: 'attach-one', processIdentity: 'process-one' });
+    await flush();
+    expect(validateAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({ attach: 'attach-one', processIdentity: 'process-one' }),
+      expect.any(AbortSignal)
+    );
+    readyState = 1;
+    socket.onopen?.();
+    await pending;
+    expect(transport.state.status).toBe('attached');
+    vi.unstubAllGlobals();
+  });
+
   it.each([
     ['http://localhost', 'ws:'],
     ['https://reviewed.example', 'wss:']
@@ -680,6 +690,38 @@ describe('CurrentSessionTerminalBridge', () => {
     socket.onopen?.();
     await pending;
     expect(transport.state.status).toBe('attached');
+    vi.unstubAllGlobals();
+  });
+
+  it('closes a default browser socket once when abort and PTY cleanup overlap', async () => {
+    vi.stubGlobal('location', { origin: 'https://reviewed.example' });
+    const close = vi.fn();
+    class NativeSocket {
+      static latest: NativeSocket | undefined;
+      binaryType = '';
+      readyState = 0;
+      onopen: ((event?: unknown) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event?: unknown) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      constructor(_url: string) { NativeSocket.latest = this; }
+      send(_data: unknown): void {}
+      close = close;
+    }
+    vi.stubGlobal('WebSocket', NativeSocket);
+    const transport = createBrowserPtyTransport({
+      fetch: vi.fn(async () => new Response(JSON.stringify({ ticket: 'pty-ticket', ttl_seconds: 30 }), {
+        headers: { 'content-type': 'application/json' }
+      }))
+    });
+    const controller = new AbortController();
+    const pending = transport.connect({ sessionId: 'session-one' }, controller.signal);
+    await flush();
+    expect(NativeSocket.latest).toBeDefined();
+    controller.abort();
+    transport.close();
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' });
+    expect(close).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
   });
 
@@ -749,6 +791,45 @@ describe('CurrentSessionTerminalBridge', () => {
     firstGate.resolve(undefined);
     await expect(first).rejects.toMatchObject({ code: 'aborted' });
     expect(bridge.state.sessionId).toBe('session-two');
+  });
+
+  it('does not let a late same-session terminal result invalidate a replacement lease', async () => {
+    const fake = createFakePty();
+    const firstGate = deferred<void>();
+    const secondGate = deferred<void>();
+    const originalConnect = fake.connect.getMockImplementation();
+    if (!originalConnect) throw new Error('PTY connect implementation is missing');
+    fake.connect
+      .mockImplementationOnce(async (input, signal) => {
+        fake.emit({ type: 'state', state: {
+          status: 'starting', generation: 1, mode: 'legacy', sessionId: input.sessionId, outputMayBeTruncated: false
+        } });
+        await firstGate.promise;
+        return originalConnect(input, signal);
+      })
+      .mockImplementationOnce(async (input, signal) => {
+        await secondGate.promise;
+        return originalConnect(input, signal);
+      });
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const first = bridge.attach('session-one', new AbortController().signal);
+    await flush();
+    bridge.invalidateBindingForSession('session-one');
+    const replacement = bridge.attach('session-one', new AbortController().signal);
+    await flush();
+
+    fake.emit({ type: 'state', state: {
+      status: 'failed', generation: 1, mode: 'legacy', sessionId: 'session-one',
+      closeCode: 4401, closeClassification: 'authentication-rejected', outputMayBeTruncated: false
+    } });
+
+    secondGate.resolve(undefined);
+    const binding = await replacement;
+    expect(isValid(binding)).toBe(true);
+    expect(bridge.lifecycleIdentity.binding).toBe(binding);
+    firstGate.resolve(undefined);
+    await expect(first).rejects.toMatchObject({ code: 'aborted' });
+    expect(isValid(binding)).toBe(true);
   });
 
   it('keeps direct reconnect binding ownership for later detach and close', async () => {
