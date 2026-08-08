@@ -175,13 +175,10 @@ export function isLiveArtifactDirectory(directory) {
       if (!ownerStats.isFile() || ownerStats.isSymbolicLink()) return false;
       return readFileSync(ownerPath, 'utf8') === `${ownerToken}\n`;
     } catch {
-      // A per-test cleanup can remove the root before Playwright recreates the
-      // exact configured directory for its next test. The in-memory or
-      // environment-passed owner token still binds this exact path to the run.
-      return (
-        (liveArtifactRun !== undefined && candidate === liveArtifactRun.root) ||
-        candidate === resolve(process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR ?? '')
-      );
+      // A missing marker is never ownership evidence. The exact path may have
+      // been removed and recreated by another process, so markerless roots are
+      // refused even when the path still matches this run's configured root.
+      return false;
     }
   } catch {
     return false;
@@ -222,10 +219,19 @@ function findHtmlTagEnd(value, start) {
 }
 
 /**
+ * @typedef {{ name: string, value: string | undefined, valueStart: number | undefined, valueEnd: number | undefined, quote: string | undefined }} HtmlAttribute
+ * @typedef {{ closing: boolean, name: string, selfClosing: boolean, ambiguous: boolean, attributes: HtmlAttribute[] }} HtmlTag
+ */
+
+/**
+ * Parse a tag's actual attributes. Attribute text inside quoted values is never
+ * interpreted as markup, duplicate attributes are marked ambiguous, and any
+ * malformed boundary fails closed before it can be used for redaction.
+ *
  * @param {string} value
  * @param {number} start
  * @param {number} end
- * @returns {{ closing: boolean, name: string, selfClosing: boolean } | undefined}
+ * @returns {HtmlTag | undefined}
  */
 function parseHtmlTag(value, start, end) {
   if (value.startsWith('<!--', start)) return undefined;
@@ -235,6 +241,7 @@ function parseHtmlTag(value, start, end) {
     closing = true;
     cursor += 1;
   }
+  if (value[cursor] === '!' || value[cursor] === '?') return undefined;
   while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
   const nameStart = cursor;
   if (!/[A-Za-z]/u.test(value[cursor] ?? '')) return undefined;
@@ -244,60 +251,84 @@ function parseHtmlTag(value, start, end) {
   while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
 
   if (closing) {
-    return cursor === end ? { closing, name, selfClosing: false } : undefined;
+    return cursor === end
+      ? { closing, name, selfClosing: false, ambiguous: false, attributes: [] }
+      : undefined;
   }
 
-  const selfClosing = value[cursor] === '/';
-  if (selfClosing) cursor += 1;
+  const attributes = [];
+  const seenNames = new Set();
+  let ambiguous = false;
+  let selfClosing = false;
   while (cursor < end) {
-    if (!/[A-Za-z_:]/u.test(value[cursor] ?? '')) {
-      if (value[cursor] === '/' && cursor + 1 === end) {
-        cursor += 1;
-        break;
-      }
-      return undefined;
-    }
-    cursor += 1;
-    while (cursor < end && /[A-Za-z0-9:._-]/u.test(value[cursor])) cursor += 1;
-    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
-    if (value[cursor] !== '=') continue;
-    cursor += 1;
-    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
-    const quote = value[cursor];
-    if (quote === '"' || quote === "'") {
+    if (value[cursor] === '/') {
       cursor += 1;
-      while (cursor < end && value[cursor] !== quote) {
-        if (value[cursor] === '<') return undefined;
-        cursor += 1;
-      }
-      if (value[cursor] !== quote) return undefined;
-      cursor += 1;
-    } else {
-      const valueStart = cursor;
-      while (cursor < end && !/\s/u.test(value[cursor])) {
-        if (/[<"'=]/u.test(value[cursor])) return undefined;
-        cursor += 1;
-      }
-      if (cursor === valueStart) return undefined;
-    }
-    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
-    if (cursor === end) break;
-    if (value[cursor] === '/' && cursor + 1 === end) {
-      cursor += 1;
+      while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+      if (cursor !== end) return undefined;
+      selfClosing = true;
       break;
     }
+    if (!/[A-Za-z_:]/u.test(value[cursor] ?? '')) return undefined;
+    const attributeStart = cursor;
+    cursor += 1;
+    while (cursor < end && /[A-Za-z0-9:._-]/u.test(value[cursor])) cursor += 1;
+    const attributeName = value.slice(attributeStart, cursor).toLowerCase();
+    if (seenNames.has(attributeName)) ambiguous = true;
+    seenNames.add(attributeName);
+    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+
+    let attributeValue;
+    let valueStart;
+    let valueEnd;
+    let quote;
+    if (value[cursor] === '=') {
+      cursor += 1;
+      while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+      if (cursor >= end) return undefined;
+      quote = value[cursor] === '"' || value[cursor] === "'" ? value[cursor] : undefined;
+      if (quote) {
+        valueStart = cursor + 1;
+        cursor += 1;
+        while (cursor < end && value[cursor] !== quote) {
+          if (value[cursor] === '<') return undefined;
+          cursor += 1;
+        }
+        if (value[cursor] !== quote) return undefined;
+        valueEnd = cursor;
+        attributeValue = value.slice(valueStart, valueEnd);
+        cursor += 1;
+      } else {
+        valueStart = cursor;
+        while (cursor < end && !/\s/u.test(value[cursor])) {
+          if (/[<"'=]/u.test(value[cursor])) return undefined;
+          cursor += 1;
+        }
+        if (cursor === valueStart) return undefined;
+        valueEnd = cursor;
+        attributeValue = value.slice(valueStart, valueEnd);
+      }
+    }
+    attributes.push({
+      name: attributeName,
+      value: attributeValue,
+      valueStart,
+      valueEnd,
+      quote
+    });
+    while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
   }
-  return cursor === end ? { closing, name, selfClosing } : undefined;
+
+  return { closing, name, selfClosing, ambiguous, attributes };
 }
 
 /**
- * @param {string} tag
+ * @param {HtmlTag} tag
  * @returns {boolean}
  */
 function hasEditableContentAttribute(tag) {
-  const match = /(?:^|[\s<])contenteditable(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/iu.exec(tag);
-  if (!match) return false;
-  const mode = (match[1] ?? match[2] ?? match[3] ?? '').trim().toLowerCase();
+  const matches = tag.attributes.filter(({ name }) => name === 'contenteditable');
+  if (matches.length !== 1) return matches.length > 0;
+  const mode = (matches[0].value ?? '').trim().toLowerCase();
   // Unknown values are treated as potentially editable. Preserving their
   // contents would let a future browser mode or malformed serialization bypass
   // this last-resort artifact boundary; only explicit false is safe.
@@ -329,7 +360,8 @@ function findNextEditableOpening(value, start) {
       }
       return { malformedStart: opening };
     }
-    if (!tag.closing && !tag.selfClosing && hasEditableContentAttribute(value.slice(opening, end + 1))) {
+    if (tag.ambiguous) return { malformedStart: opening };
+    if (!tag.closing && !tag.selfClosing && hasEditableContentAttribute(tag)) {
       return { start: opening, end, tag };
     }
     cursor = end + 1;
@@ -358,6 +390,7 @@ function findMatchingClosingTag(value, opening) {
       }
       return undefined;
     }
+    if (tag.ambiguous) return undefined;
     if (tag.closing) {
       if (stack.at(-1) !== tag.name) return undefined;
       stack.pop();
@@ -408,6 +441,68 @@ function redactContentEditableMarkup(value) {
 }
 
 /**
+ * Redact every actual `value` attribute, including unquoted values and values
+ * not present in the known secret list. Attribute positions come from the
+ * structured tag parser, so text such as `data-note="value=secret"` cannot be
+ * mistaken for an input attribute. Any ambiguous or malformed tag redacts the
+ * remainder instead of preserving a possibly serialized credential.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function redactSerializedValueAttributes(value) {
+  let cursor = 0;
+  let redacted = '';
+  while (cursor < value.length) {
+    const opening = value.indexOf('<', cursor);
+    if (opening < 0) {
+      redacted += value.slice(cursor);
+      break;
+    }
+    const end = findHtmlTagEnd(value, opening);
+    if (end === HTML_UNTERMINATED_COMMENT) {
+      redacted += value.slice(cursor, opening);
+      redacted += LIVE_ARTIFACT_REDACTION;
+      break;
+    }
+    if (end === HTML_MALFORMED_TAG || end < 0) {
+      redacted += value.slice(cursor, opening);
+      redacted += LIVE_ARTIFACT_REDACTION;
+      break;
+    }
+    const tag = parseHtmlTag(value, opening, end);
+    if (!tag) {
+      if (value.startsWith('<!--', opening)) {
+        redacted += value.slice(cursor, end + 1);
+        cursor = end + 1;
+        continue;
+      }
+      redacted += value.slice(cursor, opening);
+      redacted += LIVE_ARTIFACT_REDACTION;
+      break;
+    }
+    if (tag.ambiguous) {
+      redacted += value.slice(cursor, opening);
+      redacted += LIVE_ARTIFACT_REDACTION;
+      break;
+    }
+    let redactedTag = value.slice(opening, end + 1);
+    const valueAttributes = tag.attributes.filter(
+      ({ name, valueStart, valueEnd }) => name === 'value' && valueStart !== undefined && valueEnd !== undefined
+    );
+    for (const attribute of valueAttributes.reverse()) {
+      const localStart = /** @type {number} */ (attribute.valueStart) - opening;
+      const localEnd = /** @type {number} */ (attribute.valueEnd) - opening;
+      redactedTag = `${redactedTag.slice(0, localStart)}${LIVE_ARTIFACT_REDACTION}${redactedTag.slice(localEnd)}`;
+    }
+    redacted += value.slice(cursor, opening);
+    redacted += redactedTag;
+    cursor = end + 1;
+  }
+  return redacted;
+}
+
+/**
  * Replace known synthetic credentials first, then redact credential-shaped
  * input values from HTML snippets. The second pass protects failure contexts
  * that serialize a DOM value after a locator assertion has already failed.
@@ -424,10 +519,7 @@ export function redactLiveText(value, secrets = liveCredentialValues()) {
     redacted = redacted.split(secret).join(LIVE_ARTIFACT_REDACTION);
   }
 
-  redacted = redacted.replace(
-    /(<(?:input|textarea)\b[^>]*\bvalue=)(["'])(.*?)\2/giu,
-    (_match, prefix, quote) => `${prefix}${quote}${LIVE_ARTIFACT_REDACTION}${quote}`
-  );
+  redacted = redactSerializedValueAttributes(redacted);
   redacted = redacted.replace(/(<textarea\b[^>]*>)[\s\S]*?(<\/textarea>)/giu, `$1${LIVE_ARTIFACT_REDACTION}$2`);
   redacted = redacted.replace(/(<select\b[^>]*>)[\s\S]*?(<\/select>)/giu, `$1${LIVE_ARTIFACT_REDACTION}$2`);
   return redactContentEditableMarkup(redacted);
@@ -451,7 +543,7 @@ export function isDefinitivelyClosed(page) {
 }
 
 /**
- * @typedef {{ visited: Set<object>, nodes: number, strings: number, totalStringLength: number, arrayItems: number, properties: number }} RedactionState
+ * @typedef {{ active: Set<object>, snapshots: Map<object, unknown>, nodes: number, strings: number, totalStringLength: number, arrayItems: number, properties: number }} RedactionState
  */
 
 /**
@@ -459,7 +551,8 @@ export function isDefinitivelyClosed(page) {
  */
 function createRedactionState() {
   return {
-    visited: new Set(),
+    active: new Set(),
+    snapshots: new Map(),
     nodes: 0,
     strings: 0,
     totalStringLength: 0,
@@ -552,248 +645,158 @@ function validateAccessorDescriptor(descriptor) {
 }
 
 /**
- * @param {PropertyDescriptor | undefined} actual
- * @param {PropertyDescriptor} expected
- * @returns {boolean}
- */
-function sameDataDescriptor(actual, expected) {
-  if (!actual) return false;
-  return (
-    Object.prototype.hasOwnProperty.call(actual, 'value') &&
-    Object.prototype.hasOwnProperty.call(actual, 'writable') &&
-    Object.prototype.hasOwnProperty.call(actual, 'enumerable') &&
-    Object.prototype.hasOwnProperty.call(actual, 'configurable') &&
-    Object.is(actual.value, expected.value) &&
-    actual.writable === expected.writable &&
-    actual.enumerable === expected.enumerable &&
-    actual.configurable === expected.configurable
-  );
-}
-
-/**
- * @param {PropertyDescriptor | undefined} actual
- * @param {PropertyDescriptor} expected
- * @returns {boolean}
- */
-function sameAccessorDescriptor(actual, expected) {
-  if (!actual) return false;
-  return (
-    !Object.prototype.hasOwnProperty.call(actual, 'value') &&
-    !Object.prototype.hasOwnProperty.call(actual, 'writable') &&
-    Object.prototype.hasOwnProperty.call(actual, 'get') &&
-    Object.prototype.hasOwnProperty.call(actual, 'set') &&
-    Object.prototype.hasOwnProperty.call(actual, 'enumerable') &&
-    Object.prototype.hasOwnProperty.call(actual, 'configurable') &&
-    actual.get === expected.get &&
-    actual.set === expected.set &&
-    actual.enumerable === expected.enumerable &&
-    actual.configurable === expected.configurable
-  );
-}
-
-/**
- * @param {object} target
- * @param {string | symbol} key
- * @param {PropertyDescriptor} descriptor
- * @param {unknown} value
- */
-function writeDiagnosticValue(target, key, descriptor, value) {
-  try {
-    validateDataDescriptor(descriptor);
-  } catch {
-    throwRedactionFailure();
-  }
-
-  let observedDescriptor;
-  let readBack;
-  try {
-    observedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
-    readBack = Reflect.get(target, key);
-  } catch {
-    throwRedactionFailure();
-  }
-  if (
-    !observedDescriptor ||
-    (() => {
-      try {
-        validateDataDescriptor(observedDescriptor);
-        return !sameDataDescriptor(observedDescriptor, descriptor) || !Object.is(readBack, descriptor.value);
-      } catch {
-        return true;
-      }
-    })()
-  ) {
-    throwRedactionFailure();
-  }
-  if (Object.is(value, descriptor.value)) return;
-  if (descriptor.writable !== true) throwRedactionFailure();
-
-  let didSet;
-  try {
-    didSet = Reflect.set(target, key, value);
-    observedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
-    readBack = Reflect.get(target, key);
-  } catch {
-    throwRedactionFailure();
-  }
-  if (
-    didSet !== true ||
-    !observedDescriptor ||
-    (() => {
-      try {
-        validateDataDescriptor(observedDescriptor);
-        return !sameDataDescriptor(observedDescriptor, { ...descriptor, value });
-      } catch {
-        return true;
-      }
-    })() ||
-    !Object.is(readBack, value)
-  ) {
-    throwRedactionFailure();
-  }
-}
-
-/**
- * @param {object} target
- * @param {string | symbol} key
- * @param {PropertyDescriptor} descriptor
- * @param {unknown} value
- */
-function verifyAccessorObservation(target, key, descriptor, value) {
-  try {
-    validateAccessorDescriptor(descriptor);
-  } catch {
-    throwRedactionFailure();
-  }
-  let observedDescriptor;
-  let readBack;
-  let getterReadBack;
-  try {
-    observedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
-    readBack = Reflect.get(target, key);
-    if (typeof descriptor.get === 'function') getterReadBack = Reflect.apply(descriptor.get, target, []);
-  } catch {
-    throwRedactionFailure();
-  }
-  try {
-    validateAccessorDescriptor(observedDescriptor);
-  } catch {
-    throwRedactionFailure();
-  }
-  if (
-    !sameAccessorDescriptor(observedDescriptor, descriptor) ||
-    !Object.is(readBack, value) ||
-    (typeof descriptor.get === 'function' && !Object.is(getterReadBack, value))
-  ) {
-    throwRedactionFailure();
-  }
-}
-
-/**
- * @param {object} target
- * @param {string | symbol} key
- * @param {PropertyDescriptor} descriptor
- * @param {Iterable<string>} secrets
- * @param {RedactionState} state
- * @param {number} depth
- */
-function redactAccessorValue(target, key, descriptor, secrets, state, depth) {
-  try {
-    validateAccessorDescriptor(descriptor);
-  } catch {
-    throwRedactionFailure();
-  }
-  let current;
-  try {
-    current = Reflect.get(target, key);
-  } catch {
-    throwRedactionFailure();
-  }
-  const redacted = redactTestDiagnosticValue(current, secrets, state, depth + 1);
-  if (Object.is(redacted, current)) {
-    verifyAccessorObservation(target, key, descriptor, current);
-    return;
-  }
-  if (typeof descriptor.set !== 'function') throwRedactionFailure();
-  let didSet;
-  try {
-    didSet = Reflect.set(target, key, redacted);
-  } catch {
-    throwRedactionFailure();
-  }
-  if (didSet !== true) throwRedactionFailure();
-  verifyAccessorObservation(target, key, descriptor, redacted);
-}
-
-/**
- * Traverse own string and symbol properties, including non-enumerable native
- * Error fields. Cycles are skipped by identity; every other limit fails closed
- * so a reporter cannot serialize a partially redacted diagnostic graph.
+ * Define an own data property on a null-prototype snapshot without invoking
+ * the legacy `__proto__` setter. Snapshot properties are plain data, so later
+ * reporter serialization cannot invoke source getters, proxies, or `toJSON`.
  *
- * @param {any} value
+ * @param {Record<string, unknown> | unknown[]} target
+ * @param {string} key
+ * @param {unknown} value
+ */
+function defineSnapshotProperty(target, key, value) {
+  try {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true
+    });
+  } catch {
+    throwRedactionFailure();
+  }
+}
+
+/**
+ * Traverse diagnostics into a trusted JSON-safe plain snapshot. The source
+ * graph is never mutated or retained in the returned value. This is deliberate:
+ * a stateful Proxy can change after a successful read-back, and own `toJSON`
+ * hooks can reveal a secret during later reporter serialization. Skipping those
+ * hooks and replacing the reporter's error array with this snapshot closes both
+ * boundaries.
+ *
+ * @param {unknown} value
  * @param {Iterable<string>} secrets
  * @param {RedactionState} state
  * @param {number} depth
- * @returns {any}
+ * @returns {unknown}
  */
 function redactTestDiagnosticValue(value, secrets, state, depth) {
   if (typeof value === 'string') return redactBoundedString(value, secrets, state);
-  if (value === null || typeof value !== 'object') return value;
-  if (state.visited.has(value)) return value;
+  if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
+  if (typeof value === 'undefined') return undefined;
+  if (typeof value === 'bigint') return redactBoundedString(String(value), secrets, state);
+  if (typeof value === 'function' || typeof value === 'symbol') return LIVE_ARTIFACT_REDACTION;
+  if (typeof value !== 'object') return LIVE_ARTIFACT_REDACTION;
+  if (state.active.has(value)) return LIVE_ARTIFACT_REDACTION;
+  if (state.snapshots.has(value)) return state.snapshots.get(value);
+
   consumeRedactionNode(state, depth);
-  state.visited.add(value);
-
-  /** @type {(string | symbol)[]} */
-  let keys;
+  const snapshot = Array.isArray(value) ? [] : Object.create(null);
+  state.snapshots.set(value, snapshot);
+  state.active.add(value);
   try {
-    keys = Reflect.ownKeys(value);
-  } catch {
-    throwRedactionFailure();
-  }
-  if (keys.length > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
-  if (Array.isArray(value)) {
-    if (value.length > REDACTION_MAX_ARRAY_ITEMS || state.arrayItems + value.length > REDACTION_MAX_ARRAY_ITEMS) {
-      throwRedactionBudget();
-    }
-    state.arrayItems += value.length;
-  }
-
-  for (const key of keys) {
-    if (Array.isArray(value) && key === 'length') continue;
-    if (key === 'location') continue;
-    state.properties += 1;
-    if (state.properties > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
-    /** @type {PropertyDescriptor | undefined} */
-    let descriptor;
+    /** @type {(string | symbol)[]} */
+    let keys;
     try {
-      descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+      keys = Reflect.ownKeys(value);
     } catch {
       throwRedactionFailure();
     }
-    if (!descriptor) throwRedactionFailure();
-    if ('value' in descriptor) {
-      const redacted = redactTestDiagnosticValue(descriptor.value, secrets, state, depth + 1);
-      writeDiagnosticValue(value, key, descriptor, redacted);
-    } else {
-      redactAccessorValue(value, key, descriptor, secrets, state, depth);
+    if (keys.length > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
+    if (Array.isArray(value)) {
+      let length;
+      try {
+        length = Reflect.get(value, 'length');
+      } catch {
+        throwRedactionFailure();
+      }
+      if (
+        typeof length !== 'number' ||
+        !Number.isSafeInteger(length) ||
+        length < 0 ||
+        length > REDACTION_MAX_ARRAY_ITEMS ||
+        state.arrayItems + length > REDACTION_MAX_ARRAY_ITEMS
+      ) {
+        throwRedactionBudget();
+      }
+      state.arrayItems += length;
     }
+
+    for (const key of keys) {
+      if (typeof key !== 'string') continue;
+      if (key === 'location' || key === 'toJSON' || (Array.isArray(value) && key === 'length')) continue;
+      state.properties += 1;
+      if (state.properties > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
+      /** @type {PropertyDescriptor | undefined} */
+      let descriptor;
+      try {
+        descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+      } catch {
+        throwRedactionFailure();
+      }
+      if (!descriptor) throwRedactionFailure();
+      try {
+        if ('value' in descriptor) validateDataDescriptor(descriptor);
+        else validateAccessorDescriptor(descriptor);
+      } catch {
+        throwRedactionFailure();
+      }
+      let observed;
+      try {
+        // Read once. Any stateful source behavior is consumed here and cannot
+        // affect the already-created plain snapshot later.
+        observed = Reflect.get(value, key);
+      } catch {
+        throwRedactionFailure();
+      }
+
+      // A descriptor that disagrees with the observable value is not trusted.
+      // Keep the detached snapshot safe without retaining either side of the
+      // disagreement; this also handles stateful Proxy reads that alternate
+      // between a marker and a credential.
+      let descriptorMatchesReadBack;
+      if ('value' in descriptor) {
+        descriptorMatchesReadBack = Object.is(descriptor.value, observed);
+      } else if (typeof descriptor.get === 'function') {
+        let getterReadBack;
+        try {
+          getterReadBack = Reflect.apply(descriptor.get, value, []);
+        } catch {
+          throwRedactionFailure();
+        }
+        descriptorMatchesReadBack = Object.is(getterReadBack, observed);
+      } else {
+        descriptorMatchesReadBack = observed === undefined;
+      }
+      if (!descriptorMatchesReadBack) {
+        defineSnapshotProperty(snapshot, key, LIVE_ARTIFACT_REDACTION);
+        continue;
+      }
+
+      const sanitized = redactTestDiagnosticValue(observed, secrets, state, depth + 1);
+      defineSnapshotProperty(snapshot, key, sanitized);
+    }
+    return snapshot;
+  } finally {
+    state.active.delete(value);
   }
-  return value;
 }
 
 /**
- * Mutate Playwright's structured error objects before a reporter can serialize
- * them. Own non-enumerable Error fields, nested causes, TestInfoError strings,
- * matcher results, and ARIA snapshots are all included in the bounded walk.
+ * Build a trusted plain snapshot for Playwright diagnostics. Callers must use
+ * the returned value for retained or reporter-visible errors; the untrusted
+ * source graph is intentionally left untouched.
  *
  * @param {unknown} errors
  * @param {Iterable<string>} [secrets]
- * @returns {void}
+ * @returns {unknown[]}
  */
 export function redactTestErrors(errors, secrets = liveCredentialValues()) {
-  if (!Array.isArray(errors)) return;
+  if (!Array.isArray(errors)) throwRedactionFailure();
   const state = createRedactionState();
-  redactTestDiagnosticValue(errors, secrets, state, 0);
+  const snapshot = redactTestDiagnosticValue(errors, secrets, state, 0);
+  if (!Array.isArray(snapshot)) throwRedactionFailure();
+  return snapshot;
 }
 
 /**
@@ -849,27 +852,71 @@ export async function removeLiveArtifacts(directory) {
 }
 
 /**
+ * Replace the reporter-visible TestInfo array with trusted snapshot values. The
+ * property assignment is preferred because it detaches the original array; the
+ * mutation fallback supports a host that exposes a stable array reference. A
+ * silent or rejected replacement fails closed instead of retaining the source
+ * graph for Playwright to serialize later.
+ *
+ * @param {{ errors: unknown[] }} testInfo
+ * @param {unknown[]} snapshot
+ */
+function replaceDiagnosticArray(testInfo, snapshot) {
+  try {
+    testInfo.errors = snapshot;
+    if (testInfo.errors === snapshot) return;
+  } catch {
+    // Fall through to the stable-array path below.
+  }
+
+  const target = testInfo.errors;
+  if (!Array.isArray(target)) throwRedactionFailure();
+  try {
+    target.length = 0;
+    for (const value of snapshot) target.push(value);
+    if (
+      target.length !== snapshot.length ||
+      snapshot.some((value, index) => !Object.is(target[index], value))
+    ) {
+      throwRedactionFailure();
+    }
+  } catch {
+    throwRedactionFailure();
+  }
+}
+
+/**
  * Redact teardown diagnostics and always remove attachments/output. A redaction
  * failure wins over the original scrub failure so an unredacted error is never
  * rethrown; cleanup still runs from the `finally` block before propagation.
+ * Reporter-visible errors are replaced with trusted plain snapshots before the
+ * function returns or throws.
  *
  * @param {{ testInfo: { errors: unknown[], attachments: unknown[], outputDir: string }, scrubError?: unknown, secrets?: Iterable<string> }} options
  * @returns {Promise<void>}
  */
 export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCredentialValues() }) {
   const scrubDiagnostics = scrubError === undefined ? undefined : [scrubError];
+  let safeScrubDiagnostic;
   let redactionError;
   let cleanupError;
   try {
     if (scrubDiagnostics) {
       try {
-        redactTestErrors(scrubDiagnostics, secrets);
+        const snapshot = redactTestErrors(scrubDiagnostics, secrets);
+        safeScrubDiagnostic = snapshot[0];
       } catch (error) {
         redactionError = error;
       }
     }
+    let safeErrors;
     try {
-      redactTestErrors(testInfo.errors, secrets);
+      safeErrors = redactTestErrors(testInfo.errors, secrets);
+    } catch (error) {
+      redactionError ??= error;
+    }
+    try {
+      replaceDiagnosticArray(testInfo, safeErrors ?? [LIVE_ARTIFACT_REDACTION]);
     } catch (error) {
       redactionError ??= error;
     }
@@ -886,6 +933,6 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
     }
   }
   if (redactionError !== undefined) throw redactionError;
-  if (scrubDiagnostics) throw scrubDiagnostics[0];
+  if (scrubDiagnostics) throw safeScrubDiagnostic ?? new Error('live page scrub failed');
   if (cleanupError !== undefined) throw cleanupError;
 }
