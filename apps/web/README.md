@@ -132,10 +132,10 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   `Array.prototype`, or `testInfo.errors`, and detaches/redacts every worker-to-parent payload, including
   step, test-end, fatal, attachment, stdio, environment, and response messages. Playwright stdio buffers
   and attachment bodies are bounded-decoded from base64 and replaced when their bytes contain a captured
-  credential encoding; malformed or oversized binary fields fail closed. Unknown, trapped, or over-budget
+  credential encoding or end in any non-empty prefix of one; this closes split-write reconstruction across parent IPC messages while preserving buffers proven safe. Malformed or oversized binary fields fail closed. Unknown, trapped, or over-budget
   values are replaced or not forwarded, so Playwright cannot fall back to serializing the unsafe source
-  graph. Per-test finalization only quarantines strict child output directories; it preserves
-  the shared marker, root, and root-level artifacts. The config routes Playwright's post-teardown
+  graph. Per-test finalization validates every path ancestor and only quarantines strict child output directories;
+  symlink ancestors fail closed. It preserves the shared marker, root, and root-level artifacts. The config routes Playwright's post-teardown
   `LastRunReporter` to `/dev/null`, so it cannot recreate a markerless `.last-run.json` directory after
   global teardown. Global teardown alone removes the complete root by atomic quarantine plus bounded
   known-entry non-recursive `unlink`/`rmdir`, retaining any unknown, replaced, or raced remnant. Detached descriptor-aware snapshots cover native Error causes, Playwright

@@ -850,6 +850,21 @@ describe('live Playwright artifact policy', () => {
     expect(redactedAttachment.params.params.body).toBe(
       Buffer.from(LIVE_ARTIFACT_REDACTION, 'utf8').toString('base64')
     );
+
+    // Exercise KMP fallback after a partial prefix mismatch before a later match.
+    const repeatedPrefixSecret = 'abab';
+    const repeatedPrefixBytes = Buffer.from('abacabab', 'utf8').toString('base64');
+    const redactedRepeatedPrefix = redactLiveTransportMessage(
+      {
+        method: '__dispatch__',
+        params: { method: 'stdOut', params: { buffer: repeatedPrefixBytes } }
+      },
+      [repeatedPrefixSecret]
+    ) as { params: { params: { buffer: string } } };
+    expect(redactedRepeatedPrefix.params.params.buffer).toBe(
+      Buffer.from(LIVE_ARTIFACT_REDACTION, 'utf8').toString('base64')
+    );
+
     expect(() =>
       redactLiveTransportMessage(
         { method: '__dispatch__', params: { method: 'stdOut', params: { buffer: 'not-base64!' } } },
@@ -1033,6 +1048,39 @@ test('binary transport diagnostics', async ({}, testInfo) => {
     expect(output).toContain('safe-stdout');
     expect(output).toContain('safe-stderr');
     expect(output).toContain('safe-attachment');
+    expect(result.stdout).toContain('END:passed');
+  }, 30_000);
+
+  it('redacts every stdout and stderr credential split boundary in the real worker', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { finalizeLiveTest } from '__POLICY_URL__';
+const secret = 'synthetic-password';
+const bytes = Buffer.from(secret, 'utf8');
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test('binary split boundaries', async () => {
+  for (let boundary = 1; boundary < bytes.length; boundary += 1) {
+    process.stdout.write(bytes.subarray(0, boundary));
+    await new Promise((resolve) => setImmediate(resolve));
+    process.stdout.write(bytes.subarray(boundary));
+    await new Promise((resolve) => setImmediate(resolve));
+    process.stderr.write(bytes.subarray(0, boundary));
+    await new Promise((resolve) => setImmediate(resolve));
+    process.stderr.write(bytes.subarray(boundary));
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  process.stdout.write(Buffer.from('safe-split-stdout', 'utf8'));
+  process.stderr.write(Buffer.from('safe-split-stderr', 'utf8'));
+});
+`);
+    const output = result.stdout + result.stderr;
+    expect(result.code).toBe(0);
+    expect(output).not.toContain('synthetic-password');
+    expect(output).toContain(LIVE_ARTIFACT_REDACTION);
+    expect(output).toContain('safe-split-stdout');
+    expect(output).toContain('safe-split-stderr');
     expect(result.stdout).toContain('END:passed');
   }, 30_000);
 
@@ -1285,6 +1333,48 @@ test('second owned test sees the same root', async ({}, testInfo) => {
 `);
     if (result.code !== 0) throw new Error(`synthetic lifecycle failed\\n${result.stdout}\\n${result.stderr}`);
     expect(result.stdout + result.stderr).not.toContain('synthetic-password');
+    expect(result.stdout).toContain('END:passed');
+  }, 30_000);
+
+  it('refuses per-test cleanup through a replaceable symlink ancestor', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
+import { finalizeLiveTest } from '__POLICY_URL__';
+const root = process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+if (!root) throw new Error('missing synthetic output root');
+const secret = 'synthetic-password';
+let victim;
+let victimFile;
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test.afterAll(async () => {
+  if (!victimFile) throw new Error('missing symlink victim');
+  const contents = await readFile(victimFile, 'utf8').catch(() => 'missing');
+  process.stdout.write('VICTIM:' + contents + '\\n');
+  await rm(victim, { recursive: true, force: true });
+});
+test('symlink ancestor stays outside cleanup', async ({}, testInfo) => {
+  const ancestor = join(root, '.playwright-output');
+  const relativeOutput = relative(ancestor, testInfo.outputDir);
+  if (!relativeOutput || relativeOutput.startsWith('..'))
+    throw new Error('missing nested project output ancestor');
+  victim = await mkdtemp(join(tmpdir(), 'hermternal-live-symlink-victim-'));
+  const victimOutput = join(victim, relativeOutput);
+  await mkdir(victimOutput, { recursive: true });
+  victimFile = join(victimOutput, 'must-survive.txt');
+  await writeFile(victimFile, 'victim-survives', 'utf8');
+  await rm(ancestor, { recursive: true, force: true });
+  await symlink(victim, ancestor);
+});
+`);
+    const output = result.stdout + result.stderr;
+    expect(result.code).toBe(0);
+    expect(output).not.toContain('synthetic-password');
+    expect(output).toContain('VICTIM:victim-survives');
     expect(result.stdout).toContain('END:passed');
   }, 30_000);
 

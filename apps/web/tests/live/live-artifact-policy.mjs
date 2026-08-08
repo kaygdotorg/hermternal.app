@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { randomBytes } from 'node:crypto';
-import { lstatSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -20,7 +20,6 @@ const SAFE_ARRAY_PUSH = Array.prototype.push;
 const SAFE_ARRAY_REVERSE = Array.prototype.reverse;
 const SAFE_ARRAY_SORT = Array.prototype.sort;
 const SAFE_BUFFER_FROM = Buffer.from;
-const SAFE_BUFFER_INDEX_OF = Buffer.prototype.indexOf;
 const SAFE_BUFFER_TO_STRING = Buffer.prototype.toString;
 const SAFE_ERROR = Error;
 const SAFE_MAP = Map;
@@ -220,6 +219,7 @@ const REDACTION_MAX_PROPERTIES = 1024;
 const REDACTION_MAX_BINARY_BYTES = /** @type {number} */ (
   trustedApply(SAFE_MATH_FLOOR, undefined, [REDACTION_MAX_STRING_LENGTH * 3 / 4])
 );
+const REDACTION_MAX_BINARY_PATTERNS = 256;
 const REDACTION_BUDGET_MESSAGE = 'live artifact redaction budget exceeded';
 const REDACTION_FAILURE_MESSAGE = 'live artifact redaction failed';
 const LIVE_BINARY_REDACTION = /** @type {string} */ (
@@ -1325,13 +1325,43 @@ export function redactTestErrors(errors, secrets = liveCredentialValues()) {
 }
 
 /**
+ * @typedef {{ bytes: Buffer, prefixTable: number[] }} BinaryCredentialPattern
+ */
+
+/**
+ * Build a KMP prefix table for one captured credential encoding. The table lets
+ * the transport boundary detect both a complete credential and a decoded buffer
+ * suffix that is a non-empty credential prefix in linear time. Redacting that
+ * whole buffer is intentionally conservative: it prevents a parent reporter
+ * from reconstructing a credential by concatenating adjacent stdio messages.
+ *
+ * @param {Buffer} bytes
+ * @returns {number[]}
+ */
+function binaryPrefixTable(bytes) {
+  /** @type {number[]} */
+  const table = new SAFE_ARRAY(bytes.length);
+  table[0] = 0;
+  let prefixLength = 0;
+  for (let index = 1; index < bytes.length; index += 1) {
+    while (prefixLength > 0 && bytes[index] !== bytes[prefixLength]) {
+      prefixLength = table[prefixLength - 1];
+    }
+    if (bytes[index] === bytes[prefixLength]) prefixLength += 1;
+    table[index] = prefixLength;
+  }
+  return table;
+}
+
+/**
  * @param {Iterable<string>} secrets
- * @returns {Buffer[]}
+ * @returns {BinaryCredentialPattern[]}
  */
 function credentialBytePatterns(secrets) {
-  /** @type {Buffer[]} */
+  /** @type {BinaryCredentialPattern[]} */
   const patterns = [];
   const copiedSecrets = trustedArrayCopy(secrets);
+  if (copiedSecrets.length > REDACTION_MAX_BINARY_PATTERNS) throwRedactionBudget();
   const encodings = ['utf8', 'utf16le'];
   for (let secretIndex = 0; secretIndex < copiedSecrets.length; secretIndex += 1) {
     const secret = copiedSecrets[secretIndex];
@@ -1342,7 +1372,7 @@ function credentialBytePatterns(secrets) {
         trustedApply(SAFE_BUFFER_FROM, Buffer, [secret, encoding])
       );
       if (bytes.length > 0 && bytes.length <= REDACTION_MAX_BINARY_BYTES) {
-        trustedApply(SAFE_ARRAY_PUSH, patterns, [bytes]);
+        trustedApply(SAFE_ARRAY_PUSH, patterns, [{ bytes, prefixTable: binaryPrefixTable(bytes) }]);
       }
     }
   }
@@ -1350,12 +1380,36 @@ function credentialBytePatterns(secrets) {
 }
 
 /**
+ * Detect a complete credential match or a non-empty suffix prefix. KMP keeps
+ * this bounded by the decoded message and captured-pattern sizes instead of
+ * allocating every possible suffix. A positive final match is sufficient for
+ * split-write protection; the entire current field is replaced before IPC.
+ *
+ * @param {Buffer} bytes
+ * @param {BinaryCredentialPattern} pattern
+ * @returns {boolean}
+ */
+function hasCredentialMatchOrPrefixSuffix(bytes, pattern) {
+  let prefixLength = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    while (prefixLength > 0 && bytes[index] !== pattern.bytes[prefixLength]) {
+      prefixLength = pattern.prefixTable[prefixLength - 1];
+    }
+    if (bytes[index] === pattern.bytes[prefixLength]) prefixLength += 1;
+    if (prefixLength === pattern.bytes.length) return true;
+  }
+  return prefixLength > 0;
+}
+
+/**
  * Decode one Playwright protocol base64 field strictly. Buffer.from's base64
  * parser accepts malformed input and silently discards invalid bytes, so both
  * the alphabet and canonical round-trip are checked before any byte search.
+ * A suffix that is a non-empty credential prefix is also replaced so separate
+ * parent IPC messages cannot be concatenated into the original credential.
  *
  * @param {unknown} encoded
- * @param {Buffer[]} patterns
+ * @param {BinaryCredentialPattern[]} patterns
  * @returns {string}
  */
 function redactProtocolBase64(encoded, patterns) {
@@ -1378,11 +1432,8 @@ function redactProtocolBase64(encoded, patterns) {
     throwRedactionBudget();
   }
   for (let index = 0; index < patterns.length; index += 1) {
-    const pattern = /** @type {Buffer} */ (patterns[index]);
-    const matchIndex = /** @type {number} */ (
-      trustedApply(SAFE_BUFFER_INDEX_OF, bytes, [pattern])
-    );
-    if (matchIndex >= 0) return LIVE_BINARY_REDACTION;
+    const pattern = /** @type {BinaryCredentialPattern} */ (patterns[index]);
+    if (hasCredentialMatchOrPrefixSuffix(bytes, pattern)) return LIVE_BINARY_REDACTION;
   }
   return encoded;
 }
@@ -1412,7 +1463,7 @@ function snapshotProperty(value, key) {
  * cannot carry a credential past the parent boundary.
  *
  * @param {unknown} snapshot
- * @param {Buffer[]} patterns
+ * @param {BinaryCredentialPattern[]} patterns
  */
 function redactPlaywrightBinaryFields(snapshot, patterns) {
   if (snapshot === null || typeof snapshot !== 'object') return;
@@ -1560,6 +1611,39 @@ function isStrictOwnedDescendant(root, candidate) {
 }
 
 /**
+ * Verify every path component between the owned root and a per-test output
+ * directory. A candidate lstat alone follows replaceable ancestor symlinks;
+ * realpath/lstat checks reject that shape before the first rename. This is a
+ * fail-closed lexical boundary for the path-based Node filesystem API.
+ *
+ * @param {string} root
+ * @param {string} candidate
+ * @returns {boolean}
+ */
+function hasOwnedPathAncestors(root, candidate) {
+  const resolvedRoot = resolve(root);
+  const resolvedCandidate = resolve(candidate);
+  if (!isStrictOwnedDescendant(resolvedRoot, resolvedCandidate)) return false;
+  try {
+    const canonicalRoot = realpathSync(resolvedRoot);
+    const remainder = relative(resolvedRoot, resolvedCandidate);
+    const components = trustedStringSplit(remainder, sep);
+    let current = resolvedRoot;
+    for (let index = 0; index < components.length; index += 1) {
+      current = join(current, components[index]);
+      const stats = lstatSync(current);
+      if (!stats.isDirectory() || stats.isSymbolicLink()) return false;
+      const canonicalCurrent = realpathSync(current);
+      const expectedCanonical = join(canonicalRoot, relative(resolvedRoot, current));
+      if (canonicalCurrent !== expectedCanonical) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Delete one owned directory tree without recursively trusting a pathname. The
  * directory is first renamed to a fresh sibling tombstone, so a replacement at
  * the caller's path is never inspected or deleted. Every child is detached and
@@ -1634,9 +1718,9 @@ async function removeOwnedTree(directory, expected) {
 
 /**
  * Remove one Playwright test output directory while preserving the run root,
- * owner marker, and root-level artifacts for later tests. The child is moved to
- * a private quarantine before recursive traversal, so replacement at the
- * original output path is never trusted.
+ * owner marker, and root-level artifacts for later tests. Every ancestor is
+ * lstat/realpath checked before the child is moved to a private quarantine;
+ * replacement symlink ancestors fail closed before recursive traversal.
  *
  * @param {string} directory
  * @returns {Promise<void>}
@@ -1646,7 +1730,7 @@ async function removeLiveTestArtifacts(directory) {
   const rootEvidence = liveArtifactEvidence(root);
   if (!rootEvidence) return;
   const candidate = resolve(directory);
-  if (!isStrictOwnedDescendant(root, candidate)) return;
+  if (!hasOwnedPathAncestors(root, candidate)) return;
 
   let candidateStats;
   try {
