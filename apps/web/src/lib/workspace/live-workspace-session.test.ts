@@ -681,7 +681,15 @@ describe('LiveWorkspaceSession', () => {
         status: 'complete'
       }
     ]);
+
+    // The completion was correlated without a wire request ID. A later generic
+    // transport failure is stale after the successful REST commit and must not
+    // regress the ready workspace or replay the prompt.
+    socket.emitClose(1011, 'redacted');
+
+    expect(session.current.state).toBe('ready');
     expect(socket.sent.filter((frame) => JSON.parse(frame).method === 'prompt.submit')).toHaveLength(1);
+    expect(JSON.stringify(session.current)).not.toContain('redacted');
   });
 
   it('does not let an earlier completion refresh erase a newer prompt', async () => {
@@ -1053,7 +1061,7 @@ describe('LiveWorkspaceSession', () => {
     expect(JSON.stringify(session.current.timeline)).not.toContain('late history');
   });
 
-  it('keeps committed completion history visible but non-sendable after a late generic terminal callback', async () => {
+  it('keeps committed completion history ready after a late generic terminal callback', async () => {
     const rest = createRest([]);
     const { session, socket } = await createConnectedSocketWorkspace(rest);
     vi.mocked(rest.getSessionMessages).mockResolvedValueOnce(
@@ -1078,14 +1086,14 @@ describe('LiveWorkspaceSession', () => {
     // committed. It must not downgrade or duplicate the committed history.
     socket.emitClose(1011, 'redacted');
 
-    expect(session.current.state).toBe('retryable-error');
+    expect(session.current.state).toBe('ready');
     expect(session.current.timeline.filter((item) => item.kind === 'assistant-message')).toEqual([
       expect.objectContaining({ text: 'Completed answer' })
     ]);
     expect(JSON.stringify(session.current)).not.toContain('redacted');
 
-    // The committed view remains readable, but a dead transport cannot accept
-    // another prompt. The next user action must surface recovery, not replay.
+    // No prompt is replayed by the late callback. An explicit send against the
+    // closed transport fails locally and then exposes normal recovery.
     const sentBeforeBlockedPrompt = socket.sent.length;
     session.sendPrompt('must reconnect');
     expect(socket.sent).toHaveLength(sentBeforeBlockedPrompt);
@@ -1132,7 +1140,7 @@ describe('LiveWorkspaceSession', () => {
     expect(countAssistantMarkers()).toBe(1);
   });
 
-  it('keeps committed persisted history visible but non-sendable after a late generic terminal callback', async () => {
+  it('keeps committed persisted history ready after a late generic terminal callback', async () => {
     const rest = createRest([
       { role: 'user', content: 'Persisted prompt' },
       { role: 'assistant', content: 'Persisted answer' }
@@ -1154,7 +1162,7 @@ describe('LiveWorkspaceSession', () => {
 
     socket.emitClose(1011, 'redacted');
 
-    expect(session.current.state).toBe('retryable-error');
+    expect(session.current.state).toBe('ready');
     expect(session.current.timeline).toEqual([
       { kind: 'user-message', id: 'session-1:message:0', text: 'Persisted prompt' },
       {

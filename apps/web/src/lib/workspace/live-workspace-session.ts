@@ -651,11 +651,15 @@ export class LiveWorkspaceSession {
     // ordered as one client transaction. Preserve the committed view only for
     // the exact generation/session/chat; pending history must still lose to a
     // failure, and auth/origin classifications always remain authoritative.
-    const preserveCommittedHistory =
-      (state.status === 'failed' || state.status === 'delivery_uncertain') &&
-      this.ownsCommittedHistory();
+    const committedHistory = this.ownsCommittedHistory();
+    const preserveLateGenericFailure = state.status === 'failed' && committedHistory;
+    const preserveLateUncertainty = state.status === 'delivery_uncertain' && committedHistory;
 
-    if (isTerminalConnectionStatus(state.status) && !preserveCommittedHistory) {
+    if (
+      isTerminalConnectionStatus(state.status) &&
+      !preserveLateGenericFailure &&
+      !preserveLateUncertainty
+    ) {
       this.advanceRefreshEpoch();
       this.supersedeRetry();
     }
@@ -670,11 +674,16 @@ export class LiveWorkspaceSession {
           : {})
       });
     }
-    if (preserveCommittedHistory) {
-      // Keep the server-owned timeline visible, but do not claim that a dead
-      // transport can accept another prompt. The recovery state disables the
-      // composer, so its draft remains local instead of being cleared by a
-      // send attempt against the closed socket.
+    if (preserveLateGenericFailure) {
+      // A generic terminal callback after successful completion and REST
+      // reconciliation is stale lifecycle information. Keep the confirmed
+      // server history and ready state; a real uncertain or classified close
+      // still takes the recovery/permanent path below.
+      return;
+    }
+    if (preserveLateUncertainty) {
+      // Uncertain delivery remains actionable recovery even when the last
+      // completed history read succeeded. Never treat uncertainty as success.
       this.supersedeRetry();
       this.publish({ ...this.snapshot, state: 'retryable-error' });
       return;
