@@ -199,7 +199,7 @@ AUTHORITY_ARTIFACT_PATHS = (
     "contracts/fixtures/validator/validate.py",
     "contracts/fixtures/validator/validation-baseline.json",
 )
-BASELINE_CANONICAL_SHA256 = "716253020eb63665a8dce8ea0f4a1e6170596634367f09038f6ad66874141e75"
+BASELINE_CANONICAL_SHA256 = "586f8cc96fab9473a0a81ad9842b539c1b82b1a5053f0bd9a5cb236747ca9770"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")

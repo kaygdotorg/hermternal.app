@@ -211,7 +211,9 @@ historical and active authority/source objects, must not be a linked worktree,
 and must not use alternates, shallow or promisor metadata, replacement refs,
 grafts, or redirecting Git configuration. A fresh single-head clone does not
 necessarily retain those unreachable objects; seed all four protected OIDs into
-local `refs/fixture-authority/*` refs before running either validator mode.
+local `refs/fixture-authority/*` refs before running either validator mode. The
+aggregate test classes apply the same rule and assert that an unseeded clone is
+blocked before a seeded clone is accepted.
 
 The repository does not yet have a checked-in GitHub Actions workflow that
 runs this aggregate validator, its test suite, and the `python -O` equivalents.
