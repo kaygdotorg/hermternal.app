@@ -301,7 +301,7 @@ test('Paper effective width switches exactly at 760px without a tabbed desktop r
   }
 });
 
-test('Paper action labels reveal on hover and focus with a stable icon slot', async ({ page }) => {
+test('Paper action labels stay under a stationary pointer through repeated hover transitions', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 960 });
   await page.goto(previewUrl('/ui-preview'));
   await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
@@ -319,51 +319,88 @@ test('Paper action labels reveal on hover and focus with a stable icon slot', as
   ];
 
   for (const ariaLabel of actionLabels) {
-    // Label expansion changes sibling geometry. Reset pointer and focus first so
-    // the next pill is measured from its stable Paper resting state rather than
-    // while the previous pill is still transitioning out of its reveal.
-    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-    await page.mouse.move(0, 0);
-    await page.waitForTimeout(180);
-
     const pill = workspace.getByRole('button', { name: ariaLabel });
     const copy = pill.locator('.pill-copy');
-    const icon = pill.locator('.icon-slot');
     await expect(pill).toBeVisible();
-    const resting = await pill.evaluate((element) => {
-      const style = getComputedStyle(element);
-      const copy = element.querySelector<HTMLElement>('.pill-copy');
-      const rect = element.getBoundingClientRect();
-      const iconRect = element.querySelector<HTMLElement>('.icon-slot')?.getBoundingClientRect();
-      return {
-        width: rect.width,
-        opacity: copy ? getComputedStyle(copy).opacity : '',
-        maxWidth: copy ? getComputedStyle(copy).maxWidth : '',
-        iconOffset: iconRect ? iconRect.x - rect.x : null,
-        transition: style.transition
-      };
-    });
-    expect(resting.opacity).toBe('0');
-    expect(resting.maxWidth).toBe('0px');
 
-    await pill.hover({ force: true });
-    await expect
-      .poll(() => copy.evaluate((element) => getComputedStyle(element).opacity), { message: ariaLabel })
-      .toBe('1');
-    await expect
-      .poll(() => copy.evaluate((element) => Number.parseFloat(getComputedStyle(element).maxWidth)), { message: ariaLabel })
-      .toBeGreaterThan(0);
-    const hovered = await pill.evaluate((element) => {
-      const rect = element.getBoundingClientRect();
-      const iconRect = element.querySelector<HTMLElement>('.icon-slot')?.getBoundingClientRect();
-      return { width: rect.width, iconOffset: iconRect ? iconRect.x - rect.x : null };
-    });
-    expect(hovered.width).toBeGreaterThan(resting.width);
-    expect(hovered.iconOffset).toBe(resting.iconOffset);
+    for (let run = 0; run < 3; run += 1) {
+      // Reset the previous reveal before putting the pointer over the next
+      // control. The pointer then stays at one fixed screen coordinate for the
+      // entire transition, exposing layout-induced hover loops.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.mouse.move(0, 0);
+      await expect
+        .poll(
+          () =>
+            pill.evaluate((element) => {
+              const copy = element.querySelector<HTMLElement>('.pill-copy');
+              return {
+                opacity: copy ? getComputedStyle(copy).opacity : '',
+                maxWidth: copy ? getComputedStyle(copy).maxWidth : ''
+              };
+            }),
+          { message: `${ariaLabel} resting state` }
+        )
+        .toEqual({ opacity: '0', maxWidth: '0px' });
+
+      const resting = await pill.evaluate((element) => {
+        const copy = element.querySelector<HTMLElement>('.pill-copy');
+        const rect = element.getBoundingClientRect();
+        const iconRect = element.querySelector<HTMLElement>('.icon-slot')?.getBoundingClientRect();
+        return {
+          width: rect.width,
+          opacity: copy ? getComputedStyle(copy).opacity : '',
+          maxWidth: copy ? getComputedStyle(copy).maxWidth : '',
+          iconOffset: iconRect ? iconRect.x - rect.x : null
+        };
+      });
+      expect(resting.opacity, ariaLabel).toBe('0');
+      expect(resting.maxWidth, ariaLabel).toBe('0px');
+      expect(resting.width, ariaLabel).toBe(44);
+
+      const box = await pill.boundingBox();
+      expect(box, ariaLabel).not.toBeNull();
+      await page.mouse.move((box?.x ?? 0) + (box?.width ?? 0) / 2, (box?.y ?? 0) + (box?.height ?? 0) / 2);
+
+      const samples: Array<{ hovered: boolean; opacity: string; maxWidth: number; copyWidth: number }> = [];
+      for (let sample = 0; sample < 10; sample += 1) {
+        await page.waitForTimeout(30);
+        samples.push(
+          await pill.evaluate((element) => {
+            const copy = element.querySelector<HTMLElement>('.pill-copy');
+            const style = copy ? getComputedStyle(copy) : undefined;
+            return {
+              hovered: element.matches(':hover'),
+              opacity: style?.opacity ?? '',
+              maxWidth: Number.parseFloat(style?.maxWidth ?? '0'),
+              copyWidth: copy?.getBoundingClientRect().width ?? 0
+            };
+          })
+        );
+      }
+
+      expect(samples.every((sample) => sample.hovered), ariaLabel).toBe(true);
+      const revealed = samples.at(-1);
+      expect(revealed?.opacity, ariaLabel).toBe('1');
+      expect(revealed?.maxWidth, ariaLabel).toBeGreaterThan(0);
+      expect(revealed?.copyWidth, ariaLabel).toBeGreaterThan(0);
+
+      const hovered = await pill.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const iconRect = element.querySelector<HTMLElement>('.icon-slot')?.getBoundingClientRect();
+        return { width: rect.width, iconOffset: iconRect ? iconRect.x - rect.x : null };
+      });
+      // The label is a visual overlay. The real 44px hit target and fixed icon
+      // slot stay put while the surrounding layout remains unchanged.
+      expect(hovered.width, ariaLabel).toBe(resting.width);
+      expect(hovered.iconOffset, ariaLabel).toBeCloseTo(resting.iconOffset ?? 0, 4);
+    }
 
     if (!(await pill.isDisabled())) {
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(220);
       await pill.focus();
-      await expect.poll(() => copy.evaluate((element) => getComputedStyle(element).opacity)).toBe('1');
+      await expect.poll(() => copy.evaluate((element) => getComputedStyle(element).opacity), { message: ariaLabel }).toBe('1');
     }
   }
 });

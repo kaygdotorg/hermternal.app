@@ -161,6 +161,7 @@
   }
 
   .mode-controls {
+    position: relative;
     box-sizing: border-box;
     display: flex;
     width: 92px;
@@ -169,55 +170,46 @@
     align-items: center;
     gap: 2px;
     padding: 0;
+    isolation: isolate;
+    overflow: visible;
+  }
+
+  /* The mode island may grow visually, but its layout slot stays 92px wide.
+     Keeping the shell in a non-layout layer prevents a stationary pointer from
+     losing the hovered Chat or Terminal button while the reveal settles. */
+  .mode-controls::before {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 0;
+    box-sizing: border-box;
+    width: 92px;
+    height: 44px;
     border: 1px solid var(--line-soft);
     border-radius: var(--radius-pill);
     background: color-mix(in srgb, var(--muted) 8%, transparent);
-    transition: width 150ms cubic-bezier(0.22, 1, 0.36, 1), gap 150ms ease;
+    content: '';
+    pointer-events: none;
+    transition: width 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .mode-controls:has(:global(.pill:hover))::before,
+  .mode-controls:has(:global(.pill:focus-visible))::before {
+    width: 220px;
   }
 
   .mode-controls :global(.pill) {
+    position: relative;
+    z-index: 1;
     width: 44px;
     min-width: 44px;
     height: 44px;
     min-height: 44px;
     padding-inline: 8px;
-    transition:
-      width 150ms cubic-bezier(0.22, 1, 0.36, 1),
-      min-width 150ms cubic-bezier(0.22, 1, 0.36, 1),
-      background-color 150ms ease,
-      border-color 150ms ease,
-      color 150ms ease,
-      box-shadow 150ms ease,
-      transform 150ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-
-  .mode-controls:has(:global(.pill:hover)),
-  .mode-controls:has(:global(.pill:focus-visible)) {
-    width: 220px;
-    gap: 8px;
-  }
-
-  .mode-controls :global(.pill:first-child:is(:hover, :focus-visible)) {
-    width: 96px;
-    min-width: 96px;
-  }
-
-  .mode-controls :global(.pill:last-child:is(:hover, :focus-visible)) {
-    width: 116px;
-    min-width: 116px;
   }
 
   .mode-controls :global(.pill.ghost) {
     color: var(--ink);
-  }
-
-  .mode-controls :global(.pill-label) {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
   }
 
   .header-model {
@@ -227,15 +219,6 @@
   @container workspace-preview (max-width: 760px) {
     .conversation-header {
       gap: 6px;
-    }
-
-    .mode-controls :global(.pill-label) {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip: rect(0 0 0 0);
-      white-space: nowrap;
     }
 
     .mode-controls :global(.pill) {
