@@ -77,6 +77,8 @@ describe('AuthPreview', () => {
     const form = screen.getByRole('form', { name: 'Hermes password sign in' });
     const username = screen.getByLabelText('Username');
     const password = screen.getByLabelText('Password');
+    expect(form).toHaveAttribute('method', 'dialog');
+    expect(screen.getByRole('button', { name: 'Sign in' })).toHaveAttribute('type', 'reset');
     expect(form).toHaveAttribute('data-field-ownership', 'pending');
     expect(form).not.toHaveAttribute('autocomplete');
     expect(form).not.toHaveAttribute('data-form-type');
@@ -121,6 +123,275 @@ describe('AuthPreview', () => {
     fireEvent.pointerUp(signIn, { button: 0, pointerType: 'mouse' });
     fireEvent.click(signIn, { detail: 1 });
     expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('emits cancel-sign-in separately and restores password focus and ownership on a synchronous return', async () => {
+    let view!: ReturnType<typeof render>;
+    const onAction = vi.fn((action: { type: string }) => {
+      if (action.type === 'cancel-sign-in') void view.rerender({ state: 'password' });
+    });
+    view = render(AuthPreview, { state: 'password', onAction });
+
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+    await view.rerender({ state: 'password-submitting' });
+    const cancel = await screen.findByRole('button', { name: 'Cancel sign-in' });
+
+    await fireEvent.click(cancel);
+
+    expect(onAction).toHaveBeenCalledWith({ type: 'cancel-sign-in' });
+    expect(onAction).not.toHaveBeenCalledWith({ type: 'back-to-providers' });
+    await waitFor(() => {
+      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
+      expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready');
+      expect(screen.getByLabelText('Username')).toHaveFocus();
+    });
+  });
+
+  it.each(['pointerup', 'pointercancel'] as const)('suppresses the compatibility click after cancel-sign-in %s without clearing the returned provider selection', async (completion) => {
+    let view!: ReturnType<typeof render>;
+    const onAction = vi.fn((action: { type: string }) => {
+      if (action.type === 'cancel-sign-in') void view.rerender({ state: 'password' });
+    });
+    view = render(AuthPreview, { state: 'password', onAction });
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+    await view.rerender({ state: 'password-submitting' });
+
+    const cancel = screen.getByRole('button', { name: 'Cancel sign-in' });
+    fireEvent.pointerDown(cancel, { button: 0, pointerType: 'mouse' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Back to providers' })).toBeInTheDocument());
+
+    if (completion === 'pointerup') fireEvent.pointerUp(cancel, { button: 0, pointerType: 'mouse' });
+    else fireEvent.pointerCancel(cancel, { pointerType: 'mouse' });
+    fireEvent.click(screen.getByRole('button', { name: 'Back to providers' }), { detail: 1 });
+
+    expect(onAction).toHaveBeenCalledTimes(1);
+    expect(onAction).toHaveBeenCalledWith({ type: 'cancel-sign-in' });
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+    expect(screen.getByLabelText('Username')).toHaveFocus();
+  });
+
+  it('scrubs input properties and reset defaults before hostile reset observation and mutation observers', async () => {
+    let view!: ReturnType<typeof render>;
+    let callbackDom: [string, string, string, string] | undefined;
+    const onPasswordSubmit = vi.fn(() => {
+      const callbackUsername = screen.getByLabelText('Username') as HTMLInputElement;
+      const callbackPassword = screen.getByLabelText('Password') as HTMLInputElement;
+      callbackDom = [
+        callbackUsername.value,
+        callbackPassword.value,
+        callbackUsername.defaultValue,
+        callbackPassword.defaultValue
+      ];
+      void view.rerender({ state: 'password-submitting' });
+    });
+    view = render(AuthPreview, { discoveryMode: 'live', state: 'password', onPasswordSubmit });
+
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+    const form = screen.getByRole('form', { name: 'Hermes password sign in' });
+    const username = screen.getByLabelText('Username') as HTMLInputElement;
+    const password = screen.getByLabelText('Password') as HTMLInputElement;
+    fireEvent.input(username, { target: { value: 'hostile-user' } });
+    fireEvent.input(password, { target: { value: 'hostile-password' } });
+    username.defaultValue = 'retained-default-user';
+    password.defaultValue = 'retained-default-password';
+
+    const resetObservation: Array<[string, string, string, string]> = [];
+    form.addEventListener('reset', (event) => {
+      resetObservation.push([username.value, password.value, username.defaultValue, password.defaultValue]);
+      event.preventDefault();
+      username.value = 'reset-listener-user';
+      password.value = 'reset-listener-password';
+    });
+    let observerCount = 0;
+    let microtaskAttributesRestored = false;
+    let taskAttributesRestored = false;
+    const observer = new MutationObserver(() => {
+      observerCount += 1;
+      // Re-populate at each bounded phase to prove the component does not rely
+      // on an unbounded observer fight to leave the live DOM credential-free.
+      username.value = 'observer-sync-user';
+      password.value = 'observer-sync-password';
+      if (observerCount === 1) {
+        username.defaultValue = 'observer-sync-default-user';
+        password.defaultValue = 'observer-sync-default-password';
+        username.setAttribute('value', 'observer-sync-attribute-user');
+        password.setAttribute('value', 'observer-sync-attribute-password');
+      }
+      queueMicrotask(() => {
+        username.value = 'observer-microtask-user';
+        password.value = 'observer-microtask-password';
+        if (!microtaskAttributesRestored) {
+          microtaskAttributesRestored = true;
+          username.defaultValue = 'observer-microtask-default-user';
+          password.defaultValue = 'observer-microtask-default-password';
+          username.setAttribute('value', 'observer-microtask-attribute-user');
+          password.setAttribute('value', 'observer-microtask-attribute-password');
+        }
+      });
+      setTimeout(() => {
+        username.value = 'observer-task-user';
+        password.value = 'observer-task-password';
+        if (!taskAttributesRestored) {
+          taskAttributesRestored = true;
+          username.defaultValue = 'observer-task-default-user';
+          password.defaultValue = 'observer-task-default-password';
+          username.setAttribute('value', 'observer-task-attribute-user');
+          password.setAttribute('value', 'observer-task-attribute-password');
+        }
+      }, 0);
+    });
+    observer.observe(form, { attributes: true, subtree: true, attributeFilter: ['value'] });
+
+    fireEvent.submit(form);
+
+    expect(onPasswordSubmit).toHaveBeenCalledWith({ username: 'hostile-user', password: 'hostile-password' });
+    expect(callbackDom).toEqual(['', '', '', '']);
+    expect(resetObservation).toEqual([['', '', '', '']]);
+    await waitFor(() => {
+      expect(username).toHaveValue('');
+      expect(password).toHaveValue('');
+      expect(username.defaultValue).toBe('');
+      expect(password.defaultValue).toBe('');
+      expect(username.getAttribute('value')).toBeNull();
+      expect(password.getAttribute('value')).toBeNull();
+    });
+    expect(observerCount).toBeGreaterThan(0);
+    expect(observerCount).toBeLessThan(4);
+    expect(JSON.stringify(callbackDom)).not.toContain('hostile-password');
+    observer.disconnect();
+  });
+
+  it('scrubs retained input references synchronously during unmount', async () => {
+    const view = render(AuthPreview, { discoveryMode: 'live', state: 'password' });
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+    const username = screen.getByLabelText('Username') as HTMLInputElement;
+    const password = screen.getByLabelText('Password') as HTMLInputElement;
+    username.value = 'unmount-user';
+    password.value = 'unmount-password';
+    username.defaultValue = 'unmount-default-user';
+    password.defaultValue = 'unmount-default-password';
+
+    view.unmount();
+
+    expect(username.value).toBe('');
+    expect(password.value).toBe('');
+    expect(username.defaultValue).toBe('');
+    expect(password.defaultValue).toBe('');
+    expect(username.getAttribute('value')).toBeNull();
+    expect(password.getAttribute('value')).toBeNull();
+  });
+
+  it('does not let a delayed scrub from a replaced attempt clear a new password entry', async () => {
+    const view = render(AuthPreview, { discoveryMode: 'live', state: 'password', onPasswordSubmit: vi.fn() });
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+
+    const delayedTimers: Array<() => void> = [];
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler) => {
+      if (typeof handler === 'function') delayedTimers.push(handler as () => void);
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout);
+    try {
+      const form = screen.getByRole('form', { name: 'Hermes password sign in' });
+      fireEvent.input(screen.getByLabelText('Username'), { target: { value: 'old-user' } });
+      fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'old-password' } });
+      fireEvent.submit(form);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(delayedTimers.length).toBeGreaterThan(0);
+
+      await view.rerender({ state: 'provider-selection' });
+      await view.rerender({ state: 'password' });
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+    const username = screen.getByLabelText('Username');
+    const password = screen.getByLabelText('Password');
+    fireEvent.input(username, { target: { value: 'new-user' } });
+    fireEvent.input(password, { target: { value: 'new-password' } });
+    for (const timer of delayedTimers) timer();
+    expect(username).toHaveValue('new-user');
+    expect(password).toHaveValue('new-password');
+  });
+
+  it('does not let a delayed cancel scrub clear a new password owner', async () => {
+    let view!: ReturnType<typeof render>;
+    const onAction = vi.fn((action: { type: string }) => {
+      if (action.type === 'cancel-sign-in') void view.rerender({ state: 'password' });
+    });
+    view = render(AuthPreview, { state: 'password-submitting', onAction });
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Signing in to Hermes' })).toHaveFocus());
+
+    const delayedTimers: Array<() => void> = [];
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler) => {
+      if (typeof handler === 'function') delayedTimers.push(handler as () => void);
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout);
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel sign-in' }));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(delayedTimers.length).toBeGreaterThanOrEqual(1);
+      await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+
+      const username = screen.getByLabelText('Username');
+      const password = screen.getByLabelText('Password');
+      fireEvent.input(username, { target: { value: 'new-owner' } });
+      fireEvent.input(password, { target: { value: 'new-owner-password' } });
+
+      for (const timer of delayedTimers) timer();
+      expect(username).toHaveValue('new-owner');
+      expect(password).toHaveValue('new-owner-password');
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('uses fail-closed native semantics while hydrated Enter submits through the local handler', async () => {
+    const onAction = vi.fn();
+    render(AuthPreview, { state: 'password', onAction });
+
+    const form = screen.getByRole('form', { name: 'Hermes password sign in' });
+    const username = screen.getByLabelText('Username');
+    const password = screen.getByLabelText('Password');
+    const signIn = screen.getByRole('button', { name: 'Sign in' });
+    expect(form).toHaveAttribute('method', 'dialog');
+    expect(signIn).toHaveAttribute('type', 'reset');
+
+    await waitFor(() => expect(form).toHaveAttribute('data-field-ownership', 'ready'));
+    fireEvent.input(username, { target: { value: 'keyboard-user' } });
+    fireEvent.input(password, { target: { value: 'keyboard-password' } });
+    fireEvent.keyDown(password, { key: 'Enter' });
+
+    expect(onAction).toHaveBeenCalledWith({ type: 'submit-password-fixture' });
+    expect(username).toHaveValue('');
+    expect(password).toHaveValue('');
+  });
+
+  it('intercepts Enter on a live named field and clears both values after the transient callback', async () => {
+    const onPasswordSubmit = vi.fn();
+    render(AuthPreview, {
+      discoveryMode: 'live',
+      state: 'password',
+      onPasswordSubmit
+    });
+
+    const form = screen.getByRole('form', { name: 'Hermes password sign in' });
+    const username = screen.getByLabelText('Username');
+    const password = screen.getByLabelText('Password');
+    await waitFor(() => expect(form).toHaveAttribute('data-field-ownership', 'ready'));
+    expect(username).toHaveAttribute('name', 'username');
+    expect(password).toHaveAttribute('name', 'password');
+
+    fireEvent.input(username, { target: { value: 'live-user' } });
+    fireEvent.input(password, { target: { value: 'live-password' } });
+    fireEvent.keyDown(password, { key: 'Enter' });
+
+    expect(onPasswordSubmit).toHaveBeenCalledTimes(1);
+    expect(onPasswordSubmit).toHaveBeenCalledWith({ username: 'live-user', password: 'live-password' });
+    expect(username).toHaveValue('');
+    expect(password).toHaveValue('');
   });
 
   it('passes live credentials only to the transient password callback and clears the form', async () => {

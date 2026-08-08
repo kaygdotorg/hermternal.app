@@ -37,6 +37,7 @@ export interface AuthProvider {
 export type AuthAction =
   | { type: 'choose-provider'; providerId: string; providerKind: AuthProviderKind }
   | { type: 'back-to-providers' }
+  | { type: 'cancel-sign-in' }
   | { type: 'submit-password-fixture' }
   | { type: 'toggle-password-visibility' }
   | { type: 'cancel-callback' }

@@ -17,6 +17,24 @@ describe('Pill', () => {
     expect(button).toHaveAccessibleName('Workspace options');
   });
 
+  it('tracks a dynamic visible label while preserving explicit accessible-name overrides', async () => {
+    const view = render(Pill, { label: 'Back to providers', onActivate: vi.fn() });
+    const button = screen.getByRole('button', { name: 'Back to providers' });
+
+    expect(button).toHaveAccessibleName('Back to providers');
+    expect(button).toHaveAttribute('title', 'Back to providers');
+
+    await view.rerender({ label: 'Cancel sign-in' });
+
+    expect(button).toHaveAccessibleName('Cancel sign-in');
+    expect(button).toHaveAttribute('title', 'Cancel sign-in');
+
+    await view.rerender({ label: 'Submitting', ariaLabel: 'Sign-in in progress' });
+
+    expect(button).toHaveAccessibleName('Sign-in in progress');
+    expect(button).toHaveAttribute('title', 'Sign-in in progress');
+  });
+
   it('activates on pointer down once, suppresses the follow-up click, and can repeat after cancel', () => {
     const onActivate = vi.fn();
     render(Pill, { label: 'Send', icon: 'send', onActivate });

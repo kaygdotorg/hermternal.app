@@ -224,9 +224,26 @@ export class BrowserAuthSession {
     // A logout is a protected boundary: the caller may not abort it or replace
     // its pending or recovery state with discovery or signed-out UI before verification.
     if (this.isLogoutState()) return;
-    this.generation += 1;
-    this.controller?.abort();
+
+    const cancelledSnapshot = this.snapshot;
+    const wasPasswordSubmission = cancelledSnapshot.status === 'password_submitting';
+    const cancellationGeneration = this.generation + 1;
+    this.generation = cancellationGeneration;
+    const controller = this.controller;
     this.controller = undefined;
+    controller?.abort();
+    // Abort listeners can synchronously start a newer operation. Do not let this
+    // cancellation publish over that newer owner, but retain the reviewed
+    // provider state when the password request was the operation being cancelled.
+    if (!this.isCurrent(cancellationGeneration)) return;
+    if (wasPasswordSubmission) {
+      this.publish({
+        status: 'signed_out',
+        providers: cancelledSnapshot.providers,
+        selectedProviderId: cancelledSnapshot.selectedProviderId
+      });
+      return;
+    }
     if (this.snapshot.status !== 'authenticated') {
       this.publish({ status: 'signed_out', providers: [] });
     }

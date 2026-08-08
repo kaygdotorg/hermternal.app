@@ -114,6 +114,77 @@ describe('BrowserAuthSession', () => {
     expect(session.current.status).toBe('authenticated');
   });
 
+  it('aborts password submission synchronously and retains the reviewed provider state', async () => {
+    const pending = deferred<{ identity: AuthIdentity; next: '/' }>();
+    let requestSignal: AbortSignal | undefined;
+    const loginWithPassword = vi.fn<BrowserAuthClient['loginWithPassword']>((_input, signal) => {
+      requestSignal = signal;
+      return pending.promise;
+    });
+    const session = new BrowserAuthSession({
+      client: client({ loginWithPassword }),
+      discoverProviders: async () => ({ providers: [passwordProvider] }),
+      invalidateLocalSession: vi.fn()
+    });
+    await session.retryDiscovery();
+    session.chooseProvider(passwordProvider.id);
+
+    const login = session.loginWithPassword({ username: 'synthetic-user', password: 'transient-secret' });
+    expect(session.current).toMatchObject({
+      status: 'password_submitting',
+      providers: [passwordProvider],
+      selectedProviderId: passwordProvider.id
+    });
+
+    session.cancel();
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(session.current).toMatchObject({
+      status: 'signed_out',
+      providers: [passwordProvider],
+      selectedProviderId: passwordProvider.id
+    });
+
+    pending.resolve({ identity, next: '/' });
+    await login;
+
+    expect(session.current).toMatchObject({
+      status: 'signed_out',
+      providers: [passwordProvider],
+      selectedProviderId: passwordProvider.id
+    });
+  });
+
+  it('ignores stale password errors after cancellation', async () => {
+    const pending = deferred<{ identity: AuthIdentity; next: '/' }>();
+    let requestSignal: AbortSignal | undefined;
+    const loginWithPassword = vi.fn<BrowserAuthClient['loginWithPassword']>((_input, signal) => {
+      requestSignal = signal;
+      return pending.promise;
+    });
+    const session = new BrowserAuthSession({
+      client: client({ loginWithPassword }),
+      discoverProviders: async () => ({ providers: [passwordProvider] }),
+      invalidateLocalSession: vi.fn()
+    });
+    await session.retryDiscovery();
+    session.chooseProvider(passwordProvider.id);
+
+    const login = session.loginWithPassword({ username: 'synthetic-user', password: 'transient-secret' });
+    session.cancel();
+
+    expect(requestSignal?.aborted).toBe(true);
+    pending.reject(new BrowserAuthError('invalid-credentials'));
+    await login;
+
+    expect(session.current).toMatchObject({
+      status: 'signed_out',
+      providers: [passwordProvider],
+      selectedProviderId: passwordProvider.id
+    });
+    expect(session.current.errorCode).toBeUndefined();
+  });
+
   it('invalidates local chat before logout and accepts only verified server logout', async () => {
     const events: string[] = [];
     const authClient = client({
@@ -605,7 +676,11 @@ describe('BrowserAuthSession', () => {
     await session.loginWithPassword({ username: 'synthetic-user', password: 'transient-secret' });
 
     expect(loginWithPassword).not.toHaveBeenCalled();
-    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+    expect(session.current).toMatchObject({
+      status: 'signed_out',
+      providers: [passwordProvider],
+      selectedProviderId: passwordProvider.id
+    });
   });
 
   it('does not publish an outer expiry after local invalidation starts newer auth work', async () => {

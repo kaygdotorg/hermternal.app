@@ -9,7 +9,8 @@
   export let trailingIcon: IconName | undefined = undefined;
   export let monogram: string | undefined = undefined;
   export let shortcut: string | undefined = undefined;
-  export let ariaLabel = label;
+  /** An explicit accessible name wins; otherwise the visible label remains the source of truth. */
+  export let ariaLabel: string | undefined = undefined;
   export let title: string | undefined = undefined;
   export let disabledReason = 'Deferred in this preview';
   export let variant: PillVariant = 'neutral';
@@ -33,6 +34,7 @@
   let pressed = false;
   let pressPulse = 0;
   let pointerActivationHandled = false;
+  $: effectiveAriaLabel = ariaLabel ?? label;
 
   function reducedMotion(): boolean {
     return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -105,7 +107,7 @@
   aria-controls={expandable ? ariaControls : undefined}
   aria-current={ariaCurrent}
   aria-expanded={expandable ? expanded : undefined}
-  aria-label={ariaLabel}
+  aria-label={effectiveAriaLabel}
   aria-pressed={toggleable ? selected : undefined}
   class:full-width={fullWidth}
   class:icon-only={iconOnly}
@@ -115,7 +117,7 @@
   class:selected
   class="pill {variant}"
   disabled={disabled || (buttonType === 'button' && !onActivate)}
-  title={title ?? (buttonType === 'button' && !onActivate ? disabledReason : ariaLabel)}
+  title={title ?? (buttonType === 'button' && !onActivate ? disabledReason : effectiveAriaLabel)}
   type={buttonType}
   style={`--drift-x: ${driftX}px; --drift-y: ${driftY}px;`}
   onpointercancel={handlePointerCancel}

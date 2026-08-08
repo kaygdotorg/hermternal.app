@@ -138,6 +138,13 @@
       return;
     }
 
+    if (action.type === 'cancel-sign-in') {
+      // The preview has no live request, but it still models the safe return
+      // that BrowserAuthSession.cancel() provides after aborting one.
+      authState = 'password';
+      return;
+    }
+
     if (
       action.type === 'back-to-providers' ||
       action.type === 'cancel-callback' ||

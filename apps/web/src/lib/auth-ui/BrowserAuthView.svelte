@@ -27,6 +27,14 @@
       return;
     }
     if (snapshot.status === 'logging_out' || snapshot.status === 'logout_failed') return;
+    if (action.type === 'cancel-sign-in') {
+      // Cancellation owns a different boundary from returning to provider
+      // selection: only the active password operation may abort the session.
+      // A duplicate compatibility event after the synchronous return must not
+      // clear the retained provider selection.
+      if (snapshot.status === 'password_submitting') session.cancel();
+      return;
+    }
     if (action.type === 'choose-provider') {
       session.chooseProvider(action.providerId);
       return;
