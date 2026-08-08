@@ -8,8 +8,8 @@
   },
   "method": "R-7 inclusive linear interpolation",
   "provenance": {
-    "commitSha": "1f37aea7fb8b70d9cd87c5bee62e8ab9660363b0",
-    "command": "GIT_COMMIT=<source-sha> bun src/lib/terminal/pty-reconnect-supersession.bench.ts",
+    "sourceRevision": "7ef5cb595d44ae3d78aa2d45101eba60cc78925c",
+    "command": "GIT_SOURCE_REVISION=<source-sha> bun src/lib/terminal/pty-reconnect-supersession.bench.ts",
     "exitStatus": 0,
     "runtime": "Bun 1.3.14",
     "platform": "darwin",
@@ -29,9 +29,9 @@
     {
       "stage": "validator",
       "distribution": {
-        "min": 0.066458,
-        "median": 0.103417,
-        "p95": 0.299864
+        "min": 0.13275,
+        "median": 0.25123,
+        "p95": 2.640667
       },
       "totals": {
         "ticketRequests": 0,
@@ -45,9 +45,9 @@
     {
       "stage": "ticket",
       "distribution": {
-        "min": 0.070541,
-        "median": 0.099792,
-        "p95": 0.238085
+        "min": 0.124166,
+        "median": 0.262771,
+        "p95": 2.111594
       },
       "totals": {
         "ticketRequests": 30,
@@ -61,9 +61,9 @@
     {
       "stage": "factory",
       "distribution": {
-        "min": 0.037208,
-        "median": 0.125875,
-        "p95": 0.38046
+        "min": 0.052417,
+        "median": 0.261604,
+        "p95": 2.858008
       },
       "totals": {
         "ticketRequests": 30,
