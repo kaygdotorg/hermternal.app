@@ -62,20 +62,37 @@ chat/PTY query grammars. The proof binds those parity vectors to the committed
 static-route grammar and deep-link fixture digests above; it does not contact
 Hermes or the VM during correction runs.
 
-The retained browser state is derived from the bounded `browser_evidence` map
-in the JSON artifact. Its fixed `hermternal.caddy-proof.browser-evidence.v1`
-schema binds the status to the exact build, static manifest, rendered Caddyfile,
-and runtime-input digests. The retained status is `blocked_provider` with only
-the semantic blocker `provider_unavailable`. No browser event payload is
-retained or claimed; no gateway, session, or prompt event artifact is retained
-or claimed: `gateway.ready`, `session.resume`, `prompt.submit`, `message.delta`,
-and `message.complete` are all unproven. A `passed` map must contain every
-required event, including `message.complete: complete`; `blocked_empty_session`
-and `failed` require their matching fixed blocker or failure marker. Missing,
-stale, mismatched, malformed, or extra-key maps fail closed. The official
-launcher did not provide an inference credential. The browser journey therefore
-remains an incomplete provider/API-key proof before `message.delta` or
-`message.complete`; this is not a successful real-product journey and no
+Browser evidence has two separate workflows. For a standalone run, pass a
+temporary browser map and the static-build output directory to the renderer;
+keep the map outside the static directory because the verifier hashes every
+file in that tree. The static output must contain `index.html`, `200.html`,
+`manifest.webmanifest`, and `service-worker.js`. Git `HEAD` and the static-tree
+digest are derived locally before the map is accepted. Optional CLI build SHA
+and digest flags are checked assertions only; fabricated values, including
+all-zero or all-one values, are rejected.
+
+For the historical proof retained here, pass the complete committed evidence
+file with `--retained-input`. Retained mode verifies
+`caddy-proof-evidence-sha256.txt`, checks the anchored historical build pair,
+and uses deterministic runtime-input placeholders, so it remains usable
+without a local copy of the old static build. Do not combine retained input
+with standalone assertion flags. Both workflows use the fixed
+`hermternal.caddy-proof.browser-evidence.v1` schema, bind status to the exact
+build, static manifest, rendered Caddyfile, and runtime-input digests, cap
+browser JSON at 4096 bytes, and reject invalid UTF-8 or duplicate object keys
+at any nesting level.
+
+The retained status is `blocked_provider` with only the semantic blocker
+`provider_unavailable`. No browser event payload is retained or claimed; no
+gateway, session, or prompt event artifact is retained or claimed:
+`gateway.ready`, `session.resume`, `prompt.submit`, `message.delta`, and
+`message.complete` are all unproven. A `passed` map must contain every required
+event, including `message.complete: complete`; `blocked_empty_session` and
+`failed` require their matching fixed blocker or failure marker. Missing, stale,
+mismatched, malformed, oversized, or extra-key maps fail closed. The official
+launcher did not provide an inference credential. The browser journey
+therefore remains an incomplete provider/API-key proof before `message.delta`
+or `message.complete`; this is not a successful real-product journey and no
 preview URL may be published.
 
 The local mock emitted no `Set-Cookie`. The renderer test proves only that the
