@@ -37,6 +37,14 @@ part of this disposable proof harness, not a production authentication
 service. The retained evidence names this dependency instead of implying that
 Traefik's native matchers alone prove exact query denial.
 
+Traefik router rules use the normalized host name (`traefik-92.test`) because
+that is the router matcher contract. The executable policy adapter separately
+requires exactly one case-sensitive `Host` and `X-Forwarded-Host` authority,
+including `:19444`; missing, malformed, wrong-port, or duplicate
+case-insensitive values fail closed. The raw target is required and must agree
+exactly with method, path, query, and forwarded URI, so a bare `?` cannot be
+silently normalized away.
+
 ## Reviewed routing cases
 
 The policy model and renderer cover:
@@ -58,13 +66,42 @@ The policy model and renderer cover:
   after the edge accepted the request.
 
 Inbound forwarding fields are not trusted. The static entry point disables
-insecure forwarded-header trust, the policy receives the original request
-metadata, and the Hermes middleware overrides the retained forwarding fields
-with the synthetic public authority, HTTPS scheme, one optional `/hermes`
-prefix, and the private Hermes service authority. The proof does not claim
-that a cookie has `Secure`, `HttpOnly`, `SameSite`, or `Path`: no real
+insecure forwarded-header trust, and the executable adapter accepts only the
+closed `X-Forwarded-*` contract, rejects unknown forwarding metadata, rejects
+direct hop-by-hop spoofing, and requires exact authority and raw-target
+agreement. The generated Hermes middleware emits a finite known-field override map:
+private upstream `Host` and `Origin`, synthetic public
+`Forwarded`/`X-Forwarded-*` metadata, one optional `/hermes` prefix, and only
+the canonical WebSocket upgrade pair. Empty values express the intended
+finite removal map, but this offline fixture does not prove Traefik's runtime
+removal of RFC hop-by-hop headers or `Connection`-listed tokens. Traefik's
+`customRequestHeaders` has no wildcard delete for arbitrary inbound
+`X-Forwarded-*` names, so this fixture does not claim arbitrary forwarding
+alias deletion either. Those runtime guarantees remain a future real Traefik
+plus recording-upstream capture requirement or a dedicated sanitizer boundary,
+outside this offline harness. Root and dashboard WebSocket routes use separate
+header middleware so
+prefix stripping does not erase the `/hermes` contract. The proof does not
+claim that a cookie has `Secure`, `HttpOnly`, `SameSite`, or `Path`: no real
 `Set-Cookie` response is captured, so `cookie_proof.status` remains
 `not_proven`.
+
+## Offline harness and generated files
+
+The regression suite starts `make_forward_auth_server()` on an ephemeral
+loopback port and sends real standard-library `http.client` requests through
+the adapter. The server bounds the request line, header count and bytes,
+content length, and forwarded metadata. It rejects symlinks, FIFOs, special
+files, replacement races, and digest traversal or byte/time budget overruns.
+This is an executable local policy harness only: it does not start Traefik,
+Hermes, a provider, or any deployment listener.
+
+`render_to_directory()` writes `traefik-static.json` and
+`traefik-dynamic.json` under the requested output directory and binds the file
+provider to that exact absolute dynamic filename. A Traefik `check-config`
+probe runs only when a local `traefik` binary is available. The retained
+recording was made without that binary, so `offline_harness.traefik_check_config`
+is explicitly `skipped_unavailable`; no binary validation is claimed.
 
 ## Evidence bindings
 
@@ -100,9 +137,11 @@ python3 -O -m unittest discover -s scripts -p 'test_traefik_proof.py'
 python3 -m py_compile scripts/traefik_proof.py scripts/test_traefik_proof.py
 ```
 
-These checks are offline and use only standard-library policy and renderer
-models. They do not claim a live Traefik binary, a Hermes process, provider
-availability, cookie attributes, firewall behavior, or issue #90 completion.
-The fixture keeps `proof_run.live_run=false` and `proof_run.compatible=false`;
-only an authorized live exercise of the exact reviewed and merged build against
-real Hermes in the required private topology can clear that deployment gate.
+These checks are offline and use only standard-library policy, renderer, and
+loopback adapter code. The optional Traefik check is skipped explicitly when no
+local binary is installed; a skipped check is not a pass. The suite does not
+claim a live Traefik deployment, a Hermes process, provider availability,
+cookie attributes, firewall behavior, or issue #90 completion. The fixture
+keeps `proof_run.live_run=false` and `proof_run.compatible=false`; only an
+authorized live exercise of the exact reviewed and merged build against real
+Hermes in the required private topology can clear that deployment gate.
