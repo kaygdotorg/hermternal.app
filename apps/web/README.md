@@ -15,6 +15,8 @@ The `/ui-preview` route renders the approved D-15W Runtime and Authentication st
 
 The Paper-approved Chat workspace uses exactly two responsive families. The desktop family preserves the sidebar and Workspace inspector at the 1440 × 960 reference geometry: 276px sidebar, 720px conversation cap, 380px inspector, and 16px outer insets and gaps. The mobile family uses the 390 × 844 shell with a 62px status bar, 64px header, 100px composer, conversation drawer, Workspace drawer, and title-edit state. The breakpoint follows effective preview width; desktop never substitutes top tabs for the sidebar. All workspace content on `/ui-preview` is local fixture data. It does not contact Hermes, load remote artifacts, retain credentials, or mirror a transcript.
 
+The normal `/` route does include a browser same-origin authentication boundary for the reviewed Hermes endpoints. It uses relative requests and browser-managed cookies, and its browser proof runs use route fixtures or disposable proof infrastructure. This boundary is not a production or deployed Hermes/provider integration: the repository has no deployed gateway, provider SDK or account, live credentials, or production authentication configuration.
+
 The canonical artboard-to-implementation manifest is `../../contracts/design-tokens/web/artboards.json`. The preview consumes the matching semantic presentation tokens and implements the approved desktop and narrow state inventory, including fail-closed compatibility gates. Runtime behavior that Paper cannot prove remains covered by local component and browser tests.
 
 The planned chat surface has one profile, provider-neutral discovery, session restore, streaming, approvals, clarification, interruption, images only for attachments, and no transcript mirror.
@@ -164,8 +166,9 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   deleted or read and reserved/API/auth/WS/PTy/unknown requests are not intercepted.
 
 These checks are scaffold evidence, not proof that a future Runtime or Authentication screen is
-ready to ship. No real provider, Hermes gateway, authentication provider, deployment, credential,
-or user-data integration is present.
+ready to ship. The normal `/` route includes only the browser same-origin authentication boundary
+described above; no production or deployed Hermes gateway/provider integration, live provider
+account, production credential, or user-data integration is present.
 
 ## Existing product boundary
 

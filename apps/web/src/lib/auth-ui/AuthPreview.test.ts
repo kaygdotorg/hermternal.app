@@ -187,57 +187,68 @@ describe('AuthPreview', () => {
     expect(screen.getByLabelText('Username')).toHaveFocus();
   });
 
-  it('scrubs all input representations after hostile observer tasks settle', async () => {
+  it('scrubs all input representations after a finite hostile observer task chain', async () => {
+    type PasswordDomState = [string, string, string, string, string | null, string | null];
     let view!: ReturnType<typeof render>;
-    let callbackDom: [string, string, string, string] | undefined;
-    const onPasswordSubmit = vi.fn(() => {
-      const callbackUsername = screen.getByLabelText('Username') as HTMLInputElement;
-      const callbackPassword = screen.getByLabelText('Password') as HTMLInputElement;
-      callbackDom = [
-        callbackUsername.value,
-        callbackPassword.value,
-        callbackUsername.defaultValue,
-        callbackPassword.defaultValue
+    let username!: HTMLInputElement;
+    let password!: HTMLInputElement;
+    const phaseSnapshots: Array<{ phase: string; state: PasswordDomState }> = [];
+    const capturePhase = (phase: string): PasswordDomState => {
+      const state: PasswordDomState = [
+        username.value,
+        password.value,
+        username.defaultValue,
+        password.defaultValue,
+        username.getAttribute('value'),
+        password.getAttribute('value')
       ];
+      phaseSnapshots.push({ phase, state });
+      return state;
+    };
+    const cleanDomState: PasswordDomState = ['', '', '', '', null, null];
+    let callbackDom: PasswordDomState | undefined;
+    const onPasswordSubmit = vi.fn(() => {
+      callbackDom = capturePhase('callback');
       void view.rerender({ state: 'password-submitting' });
     });
     view = render(AuthPreview, { discoveryMode: 'live', state: 'password', onPasswordSubmit });
 
     await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
     const form = screen.getByRole('form', { name: 'Hermes password sign in' });
-    const username = screen.getByLabelText('Username') as HTMLInputElement;
-    const password = screen.getByLabelText('Password') as HTMLInputElement;
+    username = screen.getByLabelText('Username') as HTMLInputElement;
+    password = screen.getByLabelText('Password') as HTMLInputElement;
     fireEvent.input(username, { target: { value: 'hostile-user' } });
     fireEvent.input(password, { target: { value: 'hostile-password' } });
     username.defaultValue = 'retained-default-user';
     password.defaultValue = 'retained-default-password';
 
-    const resetObservation: Array<[string, string, string, string]> = [];
+    const resetObservation: PasswordDomState[] = [];
     form.addEventListener('reset', (event) => {
-      resetObservation.push([username.value, password.value, username.defaultValue, password.defaultValue]);
+      resetObservation.push(capturePhase('reset'));
       event.preventDefault();
       username.value = 'reset-listener-user';
       password.value = 'reset-listener-password';
     });
     let observerCount = 0;
-    let lateTaskQueued = false;
-    let lateTaskRan = false;
+    let observerTasksQueued = 0;
+    let observerTasksRan = 0;
     const observer = new MutationObserver(() => {
       observerCount += 1;
-      if (lateTaskQueued) return;
-      lateTaskQueued = true;
-      // This task is queued by an earlier attribute mutation, before the
-      // component's final bounded timer. Keep the observer connected so the
-      // late attribute writes also exercise a second observer delivery without
-      // creating an unbounded feedback loop.
+      capturePhase(`observer-delivery-${observerCount}`);
+      if (observerTasksQueued >= 2) return;
+      const taskNumber = ++observerTasksQueued;
+      // Each delivery queues at most one bounded task. The second task is the
+      // later observer work that must still run before the component's final
+      // scrub; the delivery after it proves the chain remains finite.
       setTimeout(() => {
-        lateTaskRan = true;
-        username.value = 'late';
-        password.value = 'late';
-        username.defaultValue = 'late-default';
-        password.defaultValue = 'late-default';
-        username.setAttribute('value', 'late-attr');
-        password.setAttribute('value', 'late-attr');
+        observerTasksRan += 1;
+        username.value = `observer-task-${taskNumber}-user`;
+        password.value = `observer-task-${taskNumber}-password`;
+        username.defaultValue = `observer-task-${taskNumber}-default-user`;
+        password.defaultValue = `observer-task-${taskNumber}-default-password`;
+        username.setAttribute('value', `observer-task-${taskNumber}-attribute-user`);
+        password.setAttribute('value', `observer-task-${taskNumber}-attribute-password`);
+        capturePhase(`observer-task-${taskNumber}`);
       }, 0);
     });
     observer.observe(form, { attributes: true, subtree: true, attributeFilter: ['value'] });
@@ -247,20 +258,48 @@ describe('AuthPreview', () => {
       fireEvent.submit(form);
 
       expect(onPasswordSubmit).toHaveBeenCalledWith({ username: 'hostile-user', password: 'hostile-password' });
-      expect(callbackDom).toEqual(['', '', '', '']);
-      expect(resetObservation).toEqual([['', '', '', '']]);
+      expect(callbackDom).toEqual(cleanDomState);
+      expect(resetObservation).toEqual([cleanDomState]);
       await flushBoundedEventLoop();
 
-      expect(lateTaskQueued).toBe(true);
-      expect(lateTaskRan).toBe(true);
-      expect(observerCount).toBeGreaterThan(0);
-      expect(observerCount).toBeLessThanOrEqual(4);
-      expect(username).toHaveValue('');
-      expect(password).toHaveValue('');
-      expect(username.defaultValue).toBe('');
-      expect(password.defaultValue).toBe('');
-      expect(username.getAttribute('value')).toBeNull();
-      expect(password.getAttribute('value')).toBeNull();
+      const taskStates: PasswordDomState[] = [
+        [
+          'observer-task-1-user',
+          'observer-task-1-password',
+          'observer-task-1-attribute-user',
+          'observer-task-1-attribute-password',
+          'observer-task-1-attribute-user',
+          'observer-task-1-attribute-password'
+        ],
+        [
+          'observer-task-2-user',
+          'observer-task-2-password',
+          'observer-task-2-attribute-user',
+          'observer-task-2-attribute-password',
+          'observer-task-2-attribute-user',
+          'observer-task-2-attribute-password'
+        ]
+      ];
+      const finalState = capturePhase('after-final-task');
+      const observerStates = phaseSnapshots
+        .filter(({ phase }) => phase.startsWith('observer-delivery-'))
+        .map(({ state }) => state);
+
+      expect(observerTasksQueued).toBe(2);
+      expect(observerTasksRan).toBe(2);
+      expect(observerCount).toBeGreaterThanOrEqual(3);
+      expect(observerCount).toBeLessThanOrEqual(6);
+      expect(observerStates).toEqual(expect.arrayContaining([cleanDomState, ...taskStates]));
+      expect(phaseSnapshots).toEqual(
+        expect.arrayContaining([
+          { phase: 'reset', state: cleanDomState },
+          { phase: 'callback', state: cleanDomState },
+          { phase: 'observer-task-1', state: taskStates[0] },
+          { phase: 'observer-task-2', state: taskStates[1] },
+          { phase: 'after-final-task', state: cleanDomState }
+        ])
+      );
+      expect(finalState).toEqual(cleanDomState);
       expect(JSON.stringify(callbackDom)).not.toContain('hostile-password');
     } finally {
       observer.disconnect();
