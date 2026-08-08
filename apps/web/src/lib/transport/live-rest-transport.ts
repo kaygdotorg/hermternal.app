@@ -40,6 +40,14 @@ const PROVIDER_NAME_MAX_LENGTH = 96;
 const PROVIDER_NAME_FORBIDDEN_PATTERN = /[\s/\\\p{C}]/u;
 const PROVIDER_CONTROL_PATTERN = /\p{C}/u;
 
+// Only the constructed browser REST transport can authorize a detail response
+// whose validated ID differs from the requested path. Keep the marker private
+// so a structural/custom adapter remains strict at the workspace boundary.
+const LIVE_REST_CANONICAL_ALIAS: unique symbol = Symbol('live-rest-canonical-alias');
+type LiveRestCanonicalAlias = {
+  readonly [LIVE_REST_CANONICAL_ALIAS]: string;
+};
+
 export type LiveRestErrorCode =
   | 'aborted'
   | 'timeout'
@@ -92,6 +100,21 @@ export interface LiveRestTransport {
     options?: MessageListOptions,
     signal?: AbortSignal
   ): Promise<SessionMessages>;
+}
+
+/**
+ * Returns true only for a detail response branded by this module after its
+ * validated ID resolved from the supplied request-path alias. The marker is
+ * intentionally not part of LiveSession, so custom adapters cannot opt in by
+ * satisfying a public structural type.
+ */
+export function isLiveRestCanonicalAlias(
+  value: unknown,
+  requestedSessionId: string
+): value is LiveSession {
+  if (value === null || typeof value !== 'object') return false;
+  const marker = (value as Partial<LiveRestCanonicalAlias>)[LIVE_REST_CANONICAL_ALIAS];
+  return marker === requestedSessionId;
 }
 
 /**
@@ -236,13 +259,16 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
       return request(`/sessions${query}`, validateSessionList, signal);
     },
 
-    getSession(sessionId: string, signal?: AbortSignal): Promise<LiveSession> {
+    async getSession(sessionId: string, signal?: AbortSignal): Promise<LiveSession> {
       const requestedSessionId = validateSessionId(sessionId);
-      return request(
+      const session = await request(
         `/sessions/${encodeURIComponent(requestedSessionId)}`,
         validateSession,
         signal
       );
+      return session.id === requestedSessionId
+        ? session
+        : markCanonicalAlias(session, requestedSessionId);
     },
 
     getSessionMessages(
@@ -658,6 +684,19 @@ function validateSessionList(value: StrictJsonValue): SessionList {
   const offset = requireBoundedInteger(object.offset, 0, 1_000_000);
 
   return { sessions, total, limit, offset };
+}
+
+function markCanonicalAlias<T extends object>(
+  value: T,
+  requestedSessionId: string
+): T & LiveRestCanonicalAlias {
+  Object.defineProperty(value, LIVE_REST_CANONICAL_ALIAS, {
+    configurable: false,
+    enumerable: false,
+    value: requestedSessionId,
+    writable: false
+  });
+  return value as T & LiveRestCanonicalAlias;
 }
 
 function validateSession(value: StrictJsonValue): LiveSession {
