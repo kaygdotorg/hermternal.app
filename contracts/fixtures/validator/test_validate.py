@@ -1299,6 +1299,102 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(completed.stdout, "")
                 self.assertEqual(completed.stderr, "")
 
+    def test_malformed_regex_class_ranges_and_oversized_constructs_fail_closed_in_both_modes(self) -> None:
+        """Reject malformed regex atoms before they can hide a live URL."""
+
+        slash = chr(92)
+        api_host = ".".join(("api", "live", "invalid"))
+        synthetic_host = ".".join(("hermternal", "test"))
+        api_url = "://" + api_host + "/x"
+        malformed_patterns = (
+            "h[" + slash + "D-t]ps" + api_url,
+            "h[" + slash + "Q-t]ps" + api_url,
+            "h[" + slash + "D-" + slash + "w]ps" + api_url,
+            "h[" + slash + "x-t]ps" + api_url,
+            "h[" + slash + "u-t]ps" + api_url,
+            "h[" + slash + "U-t]ps" + api_url,
+            "h[" + slash + "N{BAD}-t]ps" + api_url,
+            "https://[" + slash + "Q-z]." + synthetic_host + "/x",
+        )
+        for pattern in malformed_patterns:
+            with self.subTest(pattern=pattern):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
+        oversized_class = "h[" + ("x" * (validate.MAX_REGEX_SCHEME_SOURCE_LENGTH + 1)) + "]ttps://api.live.invalid/x"
+        oversized_range = "h[a-" + ("x" * (validate.MAX_REGEX_SCHEME_SOURCE_LENGTH + 1)) + "]ps" + api_url
+        oversized_group = "(?:" + ("x" * (validate.MAX_REGEX_SCHEME_SOURCE_LENGTH + 1)) + "https://api.live.invalid/x"
+        for pattern in (
+            "(?:https://api.live.invalid/x",
+            oversized_class,
+            oversized_range,
+            oversized_group,
+        ):
+            with self.subTest(pattern=pattern):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
+    def test_regex_assertions_use_preceding_context_and_scan_nested_live_urls(self) -> None:
+        """Inspect positive assertions without treating absent context as proof."""
+
+        text = "x(?<=x)y"
+        outputs = frozenset({("x",)})
+        self.assertFalse(validate._regex_assertion_is_contradictory(text, 7, outputs, 1, 0))
+        self.assertTrue(validate._regex_assertion_is_contradictory(text, 7, outputs, -1, 0))
+
+        live_patterns = (
+            "(https://live.example.net/x)",
+            "(?:https://live.example.net/x)",
+            "(?P<url>https://live.example.net/x)",
+            "(?i:https://live.example.net/x)",
+            "(?:(?:https://live.example.net/x))",
+            "(?=https://live.example.net/x)",
+            "(?<=https://live.example.net)foo",
+            "x(?<=https://live.example.net)foo",
+        )
+        for pattern in live_patterns:
+            with self.subTest(pattern=pattern):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
+        negative_controls = (
+            "(?!https://live.example.net/x)foo",
+            "(?<!https://live.example.net)foo",
+            "(?=x)https://api.live.invalid/x",
+            "(?!h)https://api.live.invalid/x",
+        )
+        for pattern in negative_controls:
+            with self.subTest(pattern=pattern):
+                self._assert_scanner_accepts_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
+    def test_dynamic_ws_regex_schemes_share_live_authority_policy_in_both_modes(self) -> None:
+        """Probe every bounded ws/wss spelling with the ordinary URL policy."""
+
+        patterns = (
+            "w[sS]://live.example.net/x",
+            "ws?://live.example.net/x",
+            "wss?://live.example.net/x",
+            "w(?:s)://live.example.net/x",
+            "w(?:s|S)://live.example.net/x",
+            "w(?:ss?)://live.example.net/x",
+            "w{1}s://live.example.net/x",
+        )
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
     def test_dynamic_regex_scheme_prefixes_fail_closed_without_scanning_unknown_constructs(self) -> None:
         """Reject every bounded HTTP(S) regex construct before authority parsing."""
 

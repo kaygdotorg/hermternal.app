@@ -1214,6 +1214,11 @@ def _regex_scheme_match_at(text: str, index: int) -> int | None:
 
 MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH = 5
 MAX_REGEX_SCHEME_PREFIX_OUTPUTS = 128
+# Nested regex constructs are inspected structurally, but only within these
+# bounded budgets. A malformed or over-budget construct must never become a
+# reason to skip a possible URL hidden in its body.
+MAX_REGEX_NESTED_SCAN_DEPTH = 16
+MAX_REGEX_NESTED_SCAN_NODES = 2_048
 _REGEX_SCHEME_TARGETS = ("http", "https", "ws", "wss")
 
 
@@ -1271,6 +1276,13 @@ def _regex_prefix_concat(
             pattern = left_pattern + right_pattern
             if len(pattern) <= MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH:
                 merged.add(pattern)
+            else:
+                # Retain a bounded prefix one byte longer than every supported
+                # scheme. It proves that this branch cannot equal a scheme,
+                # while keeping shorter alternatives available for a real URL.
+                # Replacing the branch with unknown outputs would make a
+                # proven non-match look like a possible live scheme.
+                merged.add(pattern[: MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH + 1])
             if len(merged) > MAX_REGEX_SCHEME_PREFIX_OUTPUTS:
                 return _regex_unknown_prefix_outputs(variable_length=True)
     return frozenset(merged)
@@ -1341,7 +1353,7 @@ def _regex_class_prefix_result(text: str, index: int) -> _RegexSchemePrefixResul
         cursor = first_end
         if cursor < len(body) - 1 and body[cursor] == "-":
             second, second_end, second_uncertain = _regex_class_atom_values(body, cursor + 1)
-            if second is not None and len(first) == 1 and len(second) == 1:
+            if first is not None and second is not None and len(first) == 1 and len(second) == 1:
                 start = ord(next(iter(first)))
                 finish = ord(next(iter(second)))
                 if start <= finish and finish - start <= MAX_REGEX_SCHEME_PREFIX_OUTPUTS:
@@ -1371,7 +1383,9 @@ def _regex_class_prefix_result(text: str, index: int) -> _RegexSchemePrefixResul
     return _regex_prefix_result(outputs, end, uncertain=uncertain, construct=True)
 
 
-def _regex_group_end(text: str, index: int) -> int:
+def _regex_bounded_group_span(text: str, index: int) -> tuple[int, bool]:
+    """Return a bounded group end and whether the closing delimiter was seen."""
+
     limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
     depth = 0
     in_class = False
@@ -1394,9 +1408,13 @@ def _regex_group_end(text: str, index: int) -> int:
         elif character == ")":
             depth -= 1
             if depth <= 0:
-                return cursor + 1
+                return cursor + 1, True
         cursor += 1
-    return limit
+    return limit, False
+
+
+def _regex_group_end(text: str, index: int) -> int:
+    return _regex_bounded_group_span(text, index)[0]
 
 
 def _regex_group_body_start(text: str, index: int) -> tuple[int | None, int, bool]:
@@ -1436,7 +1454,7 @@ def _regex_parse_source_prefix(
     depth: int,
     required_length: int,
 ) -> frozenset[tuple[str | None, ...]]:
-    """Parse only a bounded upcoming prefix for lookaround assertions."""
+    """Parse only a bounded upcoming prefix for lookahead assertions."""
 
     values: frozenset[tuple[str | None, ...]] = frozenset({()})
     cursor = index
@@ -1450,13 +1468,86 @@ def _regex_parse_source_prefix(
     return values
 
 
+def _regex_suffix_concat(
+    left: frozenset[tuple[str | None, ...]],
+    right: frozenset[tuple[str | None, ...]],
+    required_length: int,
+) -> frozenset[tuple[str | None, ...]]:
+    """Keep only bounded suffixes needed to reason about lookbehind input."""
+
+    merged: set[tuple[str | None, ...]] = set()
+    for left_pattern in left:
+        for right_pattern in right:
+            combined = left_pattern + right_pattern
+            if len(combined) > required_length:
+                combined = combined[-required_length:] if required_length else ()
+            merged.add(combined)
+            if len(merged) > MAX_REGEX_SCHEME_PREFIX_OUTPUTS:
+                return _regex_unknown_prefix_outputs(variable_length=True)
+    return frozenset(merged)
+
+
+def _regex_parse_source_suffix(
+    text: str,
+    end: int,
+    depth: int,
+    required_length: int,
+) -> frozenset[tuple[str | None, ...]]:
+    """Parse a bounded suffix of source immediately preceding a lookbehind."""
+
+    if end <= 0:
+        # No preceding source is insufficient evidence for a contradiction;
+        # callers must still inspect a positive lookbehind body for hidden URLs.
+        return frozenset()
+    if required_length <= 0:
+        return frozenset({()})
+    values: frozenset[tuple[str | None, ...]] = frozenset({()})
+    cursor = 0
+    limit = min(end, MAX_REGEX_SCHEME_SOURCE_LENGTH)
+    while cursor < limit:
+        if text[cursor] == "|":
+            # Branch joins require a full regex grammar; keep the suffix
+            # uncertain rather than pretending one branch is authoritative.
+            return _regex_unknown_prefix_outputs(variable_length=True)
+        atom = _regex_apply_quantifier(text, _regex_parse_atom(text, cursor, depth))
+        if atom.end <= cursor or atom.end > end:
+            return _regex_unknown_prefix_outputs(variable_length=True)
+        values = _regex_suffix_concat(values, atom.outputs, required_length)
+        cursor = atom.end
+    if cursor != end:
+        return _regex_unknown_prefix_outputs(variable_length=True)
+    return values
+
+
+def _regex_assertion_group_start(text: str, index: int) -> int | None:
+    """Find a nearby lookbehind group when callers provide its closing index."""
+
+    if text.startswith("(?<=", index) or text.startswith("(?<!", index):
+        return index
+    search_start = max(0, index - MAX_REGEX_SCHEME_SOURCE_LENGTH)
+    for marker in ("(?<=", "(?<!"):
+        candidate = text.rfind(marker, search_start, index)
+        if candidate >= 0 and _regex_group_end(text, candidate) == index:
+            return candidate
+    return None
+
+
 def _regex_assertion_is_contradictory(
     text: str,
     index: int,
     assertion_outputs: frozenset[tuple[str | None, ...]],
     mode: int,
     depth: int,
+    *,
+    lookbehind: bool | None = None,
 ) -> bool:
+    """Check assertion satisfiability against the correct side of input.
+
+    Lookaheads compare against source after the assertion. Lookbehinds compare
+    against the bounded source suffix before the assertion; using following
+    source for a lookbehind can incorrectly discard a satisfiable live URL.
+    """
+
     exact_outputs = tuple(
         output for output in assertion_outputs
         if output and all(character is not None for character in output)
@@ -1464,9 +1555,47 @@ def _regex_assertion_is_contradictory(
     if not exact_outputs:
         return False
     required_length = max(len(output) for output in exact_outputs)
+    assertion_start = _regex_assertion_group_start(text, index)
+    if lookbehind is None:
+        lookbehind = assertion_start is not None
+    if lookbehind:
+        if assertion_start is None:
+            return False
+        context = _regex_parse_source_suffix(text, assertion_start, depth, required_length)
+        if not context or any(len(pattern) < required_length for pattern in context):
+            # A short or missing prefix cannot prove either assertion mode;
+            # external input may complete the positive lookbehind body.
+            return False
+        if mode == 1:
+            return not any(
+                any(
+                    len(pattern) >= len(output)
+                    and all(
+                        pattern[-len(output) + position] is None
+                        or pattern[-len(output) + position] == output[position]
+                        for position in range(len(output))
+                    )
+                    for output in exact_outputs
+                )
+                for pattern in context
+            )
+        return all(
+            any(
+                len(pattern) == len(output)
+                and all(
+                    pattern[position] is not None and pattern[position] == output[position]
+                    for position in range(len(output))
+                )
+                for output in exact_outputs
+            )
+            for pattern in context
+        )
+
     upcoming = _regex_parse_source_prefix(text, index, depth, required_length)
-    if not upcoming:
-        return mode == 1
+    if not upcoming or any(len(pattern) < required_length for pattern in upcoming):
+        # A short or missing suffix cannot prove either assertion mode;
+        # external input may complete the positive lookahead body.
+        return False
     if mode == 1:
         return not any(
             any(
@@ -1505,6 +1634,7 @@ def _regex_parse_atom(text: str, index: int, depth: int) -> _RegexSchemePrefixRe
         return _regex_class_prefix_result(text, index)
     if character == "(":
         body_start, assertion_mode, recognized = _regex_group_body_start(text, index)
+        lookbehind = text.startswith("(?<=", index) or text.startswith("(?<!", index)
         group_end = _regex_group_end(text, index)
         if body_start is None:
             # Unknown group syntax is itself a potential dynamic construct. Do
@@ -1519,10 +1649,11 @@ def _regex_parse_atom(text: str, index: int, depth: int) -> _RegexSchemePrefixRe
         if assertion_mode:
             contradictory = _regex_assertion_is_contradictory(
                 text,
-                result.end,
+                index if lookbehind else result.end,
                 result.outputs,
                 assertion_mode,
                 depth + 1,
+                lookbehind=lookbehind,
             )
             return _regex_prefix_result(
                 frozenset() if contradictory else frozenset({()}),
@@ -1646,15 +1777,21 @@ def _regex_apply_quantifier(text: str, result: _RegexSchemePrefixResult) -> _Reg
             construct=True,
         )
     outputs: set[tuple[str | None, ...]] = set()
+    overflow = False
     for count in counts:
         for pattern in result.outputs:
             repeated = pattern * count
             if len(repeated) <= MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH:
                 outputs.add(repeated)
+            else:
+                # Keep a sentinel-length prefix so exact targets remain
+                # distinguishable from branches that are already too long.
+                outputs.add(repeated[: MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH + 1])
+                overflow = True
     return _regex_prefix_result(
         frozenset(outputs),
         end,
-        uncertain=result.uncertain,
+        uncertain=result.uncertain or overflow,
         construct=True,
     )
 
@@ -1698,17 +1835,28 @@ def _regex_parse_alternation(text: str, index: int, depth: int) -> _RegexSchemeP
         uncertain = True
         break
     if not values:
+        if not uncertain:
+            # A contradictory assertion can consume a whole branch. Preserve
+            # that empty language instead of turning it into unknown output,
+            # which would make the following literal URL look reachable.
+            return _regex_prefix_result(
+                frozenset(),
+                max(index + 1, cursor),
+                uncertain=False,
+                construct=construct,
+            )
         values = _regex_unknown_prefix_outputs(variable_length=True)
-    return _regex_prefix_result(values, max(index + 1, cursor), uncertain=True, construct=construct)
+    return _regex_prefix_result(values, max(index + 1, cursor), uncertain=uncertain, construct=construct)
 
 
 def _regex_dynamic_scheme_probe_at(text: str, index: int) -> _RegexSchemeProbe | None:
-    if index >= len(text) or text[index] not in "hH[(\\":
+    if index >= len(text) or text[index] not in "hHwW[(\\":
         return None
     values: frozenset[tuple[str | None, ...]] = frozenset({()})
     cursor = index
     uncertain = False
     construct = False
+    uncertain_class = False
     limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
     while cursor < limit:
         if text[cursor].isspace() or text[cursor] in "\"'<>":
@@ -1718,6 +1866,8 @@ def _regex_dynamic_scheme_probe_at(text: str, index: int) -> _RegexSchemeProbe |
         atom = _regex_apply_quantifier(text, _regex_parse_atom(text, cursor, 0))
         if atom.end <= cursor:
             break
+        if text[cursor] == "[" and atom.uncertain:
+            uncertain_class = True
         values = _regex_prefix_concat(values, atom.outputs)
         uncertain = uncertain or atom.uncertain
         construct = construct or atom.construct
@@ -1729,6 +1879,16 @@ def _regex_dynamic_scheme_probe_at(text: str, index: int) -> _RegexSchemeProbe |
                     return _RegexSchemeProbe(delimiter_end, cursor)
         if not uncertain and not any(_regex_prefix_can_start_target(pattern) for pattern in values):
             break
+    possible_target = any(_regex_prefix_can_start_target(pattern) for pattern in values)
+    if construct and text[index].casefold() in {"h", "w"} and (
+        uncertain_class or (uncertain and possible_target)
+    ):
+        # An unknown class, escape, assertion, or quantifier that can still
+        # form a target scheme cannot prove that the pattern is harmless. An
+        # uncertain class is rejected even when the surrounding spelling is
+        # shorter than a complete scheme because malformed ranges must fail
+        # closed rather than becoming an apparent non-match.
+        raise ValidationError()
     if construct:
         skip_end = max(index + 1, cursor)
         proven_nonmatch = not uncertain and not any(
@@ -1838,14 +1998,118 @@ def _regex_dynamic_authority_is_live(text: str, scheme_end: int) -> bool:
     return False
 
 
+def _regex_nested_scheme_matches(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    depth: int = 0,
+    budget: list[int] | None = None,
+) -> tuple[tuple[int, int], ...]:
+    """Find URL schemes nested in one bounded regex construct.
+
+    Prefix inference is useful for scheme construction, but it cannot retain a
+    complete URL body. Walk recognized groups recursively before the caller
+    skips them, while treating negative assertions as non-consuming constraints
+    and rejecting malformed or over-budget structure rather than guessing.
+    """
+
+    if budget is None:
+        budget = [MAX_REGEX_NESTED_SCAN_NODES]
+    if depth > MAX_REGEX_NESTED_SCAN_DEPTH or end < start:
+        raise ValidationError()
+    if end - start > MAX_REGEX_SCHEME_SOURCE_LENGTH:
+        raise ValidationError()
+    matches: list[tuple[int, int]] = []
+    index = start
+    while index < end:
+        budget[0] -= 1
+        if budget[0] < 0:
+            raise ValidationError()
+        character = text[index]
+        if character == "(":
+            group_end, complete = _regex_bounded_group_span(text, index)
+            if not complete or group_end > end:
+                raise ValidationError()
+            body_start, assertion_mode, _recognized = _regex_group_body_start(text, index)
+            if body_start is None:
+                body_start = index + 1
+            body_end = group_end - 1
+            scan_body = assertion_mode != -1
+            lookbehind = text.startswith("(?<=", index) or text.startswith("(?<!", index)
+            if scan_body and assertion_mode == 1 and body_start < body_end:
+                result = _regex_parse_alternation(text, body_start, depth + 1)
+                if _regex_assertion_is_contradictory(
+                    text,
+                    index if lookbehind else result.end,
+                    result.outputs,
+                    assertion_mode,
+                    depth + 1,
+                    lookbehind=lookbehind,
+                ):
+                    scan_body = False
+            if scan_body and body_start < body_end:
+                matches.extend(
+                    _regex_nested_scheme_matches(
+                        text,
+                        body_start,
+                        body_end,
+                        depth=depth + 1,
+                        budget=budget,
+                    )
+                )
+            index = group_end
+            continue
+        if character == "[":
+            span = _regex_class_span(text, index)
+            if span is None or span[0] > end:
+                raise ValidationError()
+            index = span[0]
+            continue
+        if character == "\\":
+            _decoded, consumed, _uncertain = _decode_regex_escape(text, index)
+            if consumed > end:
+                raise ValidationError()
+            index = max(index + 1, consumed)
+            continue
+        match_end = _regex_scheme_match_at(text, index)
+        if match_end is not None and match_end <= end:
+            matches.append((index, match_end))
+            index = match_end
+            continue
+        probe = _regex_dynamic_scheme_probe_at(text, index)
+        if probe is not None:
+            if probe.scheme_end is not None and probe.scheme_end <= end:
+                if _regex_dynamic_authority_is_live(text, probe.scheme_end):
+                    raise ValidationError()
+                index = probe.scheme_end
+            else:
+                index = min(end, max(index + 1, probe.skip_end))
+            continue
+        index += 1
+    return tuple(matches)
+
+
 def _regex_scheme_matches(text: str) -> Iterator[tuple[int, int]]:
     """Yield deterministic scheme spans and reject dynamic scheme syntax."""
 
     index = 0
     in_class = False
+    nested_budget = [MAX_REGEX_NESTED_SCAN_NODES]
     while index < len(text):
         character = text[index]
         if not in_class:
+            if character == "(":
+                group_end, complete = _regex_bounded_group_span(text, index)
+                if not complete:
+                    raise ValidationError()
+                for nested_start, nested_end in _regex_nested_scheme_matches(
+                    text,
+                    index,
+                    group_end,
+                    budget=nested_budget,
+                ):
+                    yield nested_start, nested_end
             # Singleton classes and deterministic escapes remain ordinary URL
             # matches. Dynamic parsing follows only after this proof attempt so
             # a safe ``[h]ttps`` cannot be reclassified as an ambiguous scheme.
