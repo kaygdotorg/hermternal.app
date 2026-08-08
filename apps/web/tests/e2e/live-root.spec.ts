@@ -29,7 +29,7 @@ test('normal root verifies identity and discovers password providers', async ({ 
   await expect(page.getByTestId('status-success')).toHaveCount(0);
 });
 
-test('native field Enter cannot construct credential-bearing FormData after script execution stops', async ({ page }) => {
+test('native field Enter dispatches no formdata event after script execution stops', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
   await page.route('**/api/auth/me', async (route) => {
     await route.fulfill({
@@ -54,13 +54,20 @@ test('native field Enter cannot construct credential-bearing FormData after scri
   await expect(form).toHaveAttribute('data-field-ownership', 'ready');
 
   await form.evaluate((element) => {
-    const entries: Array<[string, string]> = [];
+    const evidence: { eventCount: number; entries: Array<[string, string]> | null } = {
+      eventCount: 0,
+      entries: null
+    };
     (element as HTMLFormElement).addEventListener('formdata', (event) => {
-      for (const [name, value] of event.formData.entries()) {
-        entries.push([name, typeof value === 'string' ? value : value.name]);
-      }
+      evidence.eventCount += 1;
+      evidence.entries = [...event.formData.entries()].map(([name, value]) => [
+        name,
+        typeof value === 'string' ? value : value.name
+      ]);
     });
-    (window as Window & { __authFormDataEntries?: Array<[string, string]> }).__authFormDataEntries = entries;
+    (window as Window & {
+      __authFormDataEvidence?: { eventCount: number; entries: Array<[string, string]> | null };
+    }).__authFormDataEvidence = evidence;
   });
 
   const username = page.getByLabel('Username');
@@ -72,10 +79,16 @@ test('native field Enter cannot construct credential-bearing FormData after scri
   await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
   await password.press('Enter');
 
-  const entries = await page.evaluate(
-    () => (window as Window & { __authFormDataEntries?: Array<[string, string]> }).__authFormDataEntries ?? []
+  const evidence = await page.evaluate(
+    () =>
+      (window as Window & {
+        __authFormDataEvidence?: { eventCount: number; entries: Array<[string, string]> | null };
+      }).__authFormDataEvidence ?? { eventCount: 0, entries: null }
   );
-  expect(entries).toEqual([]);
+  // `entries: []` would prove an empty constructed FormData. `entries: null`
+  // paired with zero events records the actual Chromium result: no FormData
+  // construction occurred for field Enter with script execution disabled.
+  expect(evidence).toEqual({ eventCount: 0, entries: null });
   await expect(username).toHaveValue(usernameValue);
   await expect(password).toHaveValue(passwordValue);
 });
