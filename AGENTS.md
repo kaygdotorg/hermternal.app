@@ -60,6 +60,16 @@ native features belong in the product design from the beginning. do not postpone
 
 ## engineering workflow
 
+### orchestrate through subagents
+
+The main agent is the orchestrator. It owns planning, prioritization, task decomposition, scheduling, coordination, review of returned work, handling completed or blocked agents, and user communication.
+
+Delegate execution work to subagents whenever an agent slot is available. Execution work includes implementation, design editing, documentation editing, tests, benchmarks, repository inspection for a delegated task, and other artifact-producing operations. Give each subagent a focused task, explicit file or surface ownership, applicable issue context, required checks, and a clear handoff format.
+
+Do not let completed subagents wait while the main agent performs execution work. Review their results promptly, resolve blockers, and assign the next independent work item. Keep independent lanes active in parallel without violating one-agent-per-file ownership.
+
+The main agent may perform execution work directly only when delegation is unavailable, rejected by the harness, or would materially block urgent progress. State the reason, keep the direct change narrow, and return to orchestration as soon as capacity is available. Independent review requirements still apply; direct work must not be self-approved or self-merged.
+
 ### read and index efficiently
 
 always use `rtk` for repository navigation, file reading, search, git inspection, diffs, dependency inspection, builds, linting, and tests when an rtk command exists.
