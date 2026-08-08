@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Pill from './Pill.svelte';
   import type { SessionSummary, WorkspaceActionHandler } from './types';
 
@@ -62,9 +62,36 @@
     }
   }
 
-  async function focusAccountMenuStart(generation: number): Promise<void> {
+  function focusBelongsToMenuTransition(focused: Element | null, closingMenu: HTMLElement | undefined): boolean {
+    return (
+      focused === accountMenuTrigger ||
+      focused === document.body ||
+      focused === document.documentElement ||
+      focused === closingMenu ||
+      Boolean(focused && closingMenu?.contains(focused))
+    );
+  }
+
+  function focusBelongsToMenuOpenTransition(focused: Element | null, focusAtOpen: Element | null): boolean {
+    return (
+      focused === focusAtOpen ||
+      focused === accountMenuTrigger ||
+      focused === document.body ||
+      focused === document.documentElement ||
+      Boolean(focused && accountMenu?.contains(focused))
+    );
+  }
+
+  async function focusAccountMenuStart(generation: number, focusAtOpen: Element | null): Promise<void> {
     await afterActivationFrame();
     if (generation !== accountMenuFocusGeneration || !accountMenuOpen) return;
+
+    const focused = document.activeElement;
+    // Do not steal focus from a control the user reached while the menu was
+    // opening. The trigger and neutral document focus are expected browser
+    // transitions; an already-focused menu descendant owns focus itself.
+    if (!focusBelongsToMenuOpenTransition(focused, focusAtOpen) || accountMenu?.contains(focused)) return;
+
     // The mobile drawer is a scroll container. Preserve its current position while
     // moving focus into the newly-rendered menu. Capture at focus time so a real
     // user's later scroll is never replaced by a stale mount-time snapshot.
@@ -74,16 +101,26 @@
   function openAccountMenu(): void {
     if (signOutPending) return;
     const generation = ++accountMenuFocusGeneration;
+    const focusAtOpen = document.activeElement;
     accountMenuOpen = true;
-    void focusAccountMenuStart(generation);
+    void focusAccountMenuStart(generation, focusAtOpen);
   }
 
   async function closeAccountMenu(restoreFocus = true): Promise<void> {
     const generation = ++accountMenuFocusGeneration;
+    const closingMenu = accountMenu;
+    const focusAtClose = document.activeElement;
+    const ownsFocusAtClose = focusBelongsToMenuTransition(focusAtClose, closingMenu);
     accountMenuOpen = false;
-    if (!restoreFocus) return;
+    if (!restoreFocus || !ownsFocusAtClose) return;
     await afterActivationFrame();
     if (generation !== accountMenuFocusGeneration || accountMenuOpen) return;
+
+    // Do not steal focus from a control the user reached while the menu was
+    // closing. Body focus is the browser's expected handoff after removing the
+    // menu; the trigger/menu transition still owns that neutral state.
+    const focusAfterClose = document.activeElement;
+    if (!focusBelongsToMenuTransition(focusAfterClose, closingMenu)) return;
     focusWithoutScroll(accountMenuTrigger);
   }
 
@@ -113,10 +150,18 @@
 
   function handleWindowKeydown(event: KeyboardEvent): void {
     if (!accountMenuOpen || event.key !== 'Escape') return;
+    // Touch pointerdown can open the menu while focus remains on another drawer
+    // control. Capture Escape before WorkspacePreview's window bubble handler so
+    // the nested account menu closes without dismissing the whole drawer.
     event.preventDefault();
     event.stopImmediatePropagation();
     void closeAccountMenu();
   }
+
+  onMount(() => {
+    window.addEventListener('keydown', handleWindowKeydown, true);
+    return () => window.removeEventListener('keydown', handleWindowKeydown, true);
+  });
 
   function handleAccountMenuFocusOut(event: FocusEvent): void {
     if (!accountMenuOpen) return;
@@ -124,8 +169,6 @@
     if (!next || !accountMenu?.contains(next)) void closeAccountMenu(false);
   }
 </script>
-
-<svelte:window onkeydown={handleWindowKeydown} />
 
 <nav aria-label="Conversations" class="session-list">
   <div class="sidebar-heading">

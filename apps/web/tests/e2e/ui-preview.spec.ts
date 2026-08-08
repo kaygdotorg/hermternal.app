@@ -489,6 +489,58 @@ test('genuine mobile account activation preserves current scroll through immedia
   await expect(drawer).toBeHidden();
 });
 
+test.describe('touch account-menu regressions', () => {
+  test.use({ hasTouch: true });
+
+  test('touch open fences immediate Escape before the drawer listener', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 1600 });
+    await page.goto(previewUrl('/ui-preview'));
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+
+    const drawer = page.getByTestId('mobile-session-drawer');
+    const priorControl = drawer.locator('button:not([disabled])').first();
+    await expect(priorControl).toBeFocused();
+    await page.evaluate(() => window.scrollTo(0, 100));
+    await priorControl.focus();
+    await expect(priorControl).toBeFocused();
+    const trigger = drawer.getByRole('button', { name: 'Open account menu' });
+    const menu = page.locator('#mobile-account-menu');
+
+    await page.evaluate(() => {
+      (window as Window & { __accountMenuBubbleEscapes?: number }).__accountMenuBubbleEscapes = 0;
+      window.addEventListener('keydown', () => {
+        const debugWindow = window as Window & { __accountMenuBubbleEscapes?: number };
+        debugWindow.__accountMenuBubbleEscapes = (debugWindow.__accountMenuBubbleEscapes ?? 0) + 1;
+      });
+    });
+    await expect(trigger).toBeInViewport();
+    // Dispatch touch pointerdown and Escape in one browser task. The queued
+    // microtask lets Svelte render the menu but stays ahead of its tick+rAF
+    // focus transfer, preserving the native pre-focus ordering under test.
+    const immediateState = await page.evaluate(async () => {
+      const trigger = document.querySelector<HTMLButtonElement>('[aria-controls="mobile-account-menu"]');
+      if (!trigger) throw new Error('The mobile account trigger was not rendered.');
+      trigger.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'touch' })
+      );
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      const activeBeforeEscape = document.activeElement?.getAttribute('aria-label');
+      const menuOpenBeforeEscape = document.querySelector('#mobile-account-menu') !== null;
+      const activeElement = document.activeElement;
+      const escape = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' });
+      activeElement?.dispatchEvent(escape);
+      return { activeBeforeEscape, menuOpenBeforeEscape, defaultPrevented: escape.defaultPrevented };
+    });
+    expect(immediateState).toEqual({ activeBeforeEscape: 'Start a new chat', menuOpenBeforeEscape: true, defaultPrevented: true });
+    await expect(menu).toBeHidden();
+    await expect(drawer).toBeVisible();
+    await expect(priorControl).toBeFocused();
+    expect(await page.evaluate(() => (window as Window & { __accountMenuBubbleEscapes?: number }).__accountMenuBubbleEscapes)).toBe(0);
+  });
+});
+
 test('Paper effective width switches exactly at 760px without a tabbed desktop replacement', async ({ page }) => {
   for (const width of [760, 761]) {
     await page.setViewportSize({ width, height: 844 });

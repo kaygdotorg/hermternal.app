@@ -98,8 +98,8 @@
       return;
     }
     // Keyboard and assistive activation use an untrusted/detail-zero click and
-    // remain available even after a pointer leaves or is cancelled.
-    pointerActivationHandled = false;
+    // remain available even after a pointer leaves or is cancelled. Keep the
+    // pointer suppression armed so a later compatibility click is still consumed.
     onActivate();
   }
 </script>

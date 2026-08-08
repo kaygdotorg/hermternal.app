@@ -64,6 +64,20 @@ describe('Pill', () => {
     expect(onActivate).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps a cancelled pointer compatibility click suppressed after keyboard activation', () => {
+    const onActivate = vi.fn();
+    render(Pill, { label: 'Account', onActivate });
+
+    const button = screen.getByRole('button', { name: 'Account' });
+    fireEvent.pointerDown(button, { button: 0, pointerType: 'touch' });
+    fireEvent.pointerCancel(button, { pointerType: 'touch' });
+    fireEvent.click(button, { detail: 0 });
+    expect(onActivate).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(button, { detail: 1 });
+    expect(onActivate).toHaveBeenCalledTimes(2);
+  });
+
   it('only exposes pressed and expanded semantics for opted-in controls', () => {
     render(Pill, {
       ariaControls: 'provider-panel',

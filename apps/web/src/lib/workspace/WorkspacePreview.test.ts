@@ -64,6 +64,27 @@ describe('WorkspacePreview', () => {
     expect(onSignOut).not.toHaveBeenCalled();
   });
 
+  it('does not steal focus after the user moves elsewhere while the menu opens', async () => {
+    render(WorkspacePreview, { state: 'ready' });
+
+    const trigger = screen.getByRole('button', { name: 'Open account menu' });
+    const nextControl = screen.getByRole('button', { name: 'Start a new chat' });
+    trigger.focus();
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' });
+    nextControl.focus();
+
+    const menu = await screen.findByRole('menu', { name: 'Account menu' });
+    expect(menu).toBeInTheDocument();
+    const waitForFrame = (): Promise<void> =>
+      new Promise((resolve) => {
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+        else setTimeout(resolve, 0);
+      });
+    await waitForFrame();
+    await waitForFrame();
+    expect(nextControl).toHaveFocus();
+  });
+
   it('intercepts immediate mobile Escape before menu focus settles', async () => {
     render(WorkspacePreview, { state: 'ready' });
 
@@ -71,6 +92,7 @@ describe('WorkspacePreview', () => {
     await fireEvent.click(conversations);
     const drawer = screen.getByTestId('mobile-session-drawer');
     const trigger = within(drawer).getByRole('button', { name: 'Open account menu', hidden: true });
+    trigger.focus();
 
     fireEvent.click(trigger, { detail: 0 });
     const menu = await within(drawer).findByRole('menu', { name: 'Account menu', hidden: true });
@@ -82,13 +104,61 @@ describe('WorkspacePreview', () => {
     await waitFor(() => expect(trigger).toHaveFocus());
   });
 
+  it('fences touch-style Escape before the drawer handler when focus stays on the prior control', async () => {
+    render(WorkspacePreview, { state: 'ready' });
+
+    const conversations = screen.getByRole('button', { name: 'Open conversations', hidden: true });
+    await fireEvent.click(conversations);
+    const drawer = screen.getByTestId('mobile-session-drawer');
+    const priorControl = within(drawer).getByRole('button', { name: 'Start a new chat', hidden: true });
+    const trigger = within(drawer).getByRole('button', { name: 'Open account menu', hidden: true });
+    priorControl.focus();
+
+    const parentEscape = vi.fn();
+    window.addEventListener('keydown', parentEscape);
+    try {
+      fireEvent.pointerDown(trigger, { button: 0, pointerType: 'touch' });
+      const menu = await within(drawer).findByRole('menu', { name: 'Account menu', hidden: true });
+      expect(menu).toBeInTheDocument();
+      expect(priorControl).toHaveFocus();
+
+      fireEvent.keyDown(priorControl, { key: 'Escape', bubbles: true });
+      await waitFor(() => expect(within(drawer).queryByRole('menu', { name: 'Account menu', hidden: true })).not.toBeInTheDocument());
+      expect(parentEscape).not.toHaveBeenCalled();
+      expect(screen.getByTestId('mobile-session-drawer')).toBe(drawer);
+      expect(priorControl).toHaveFocus();
+    } finally {
+      window.removeEventListener('keydown', parentEscape);
+    }
+  });
+
+  it('does not steal focus after the user moves elsewhere while the menu closes', async () => {
+    render(WorkspacePreview, { state: 'ready' });
+
+    const trigger = screen.getByRole('button', { name: 'Open account menu' });
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' });
+    const menu = await screen.findByRole('menu', { name: 'Account menu' });
+    const signOut = within(menu).getByRole('menuitem', { name: 'Sign out' });
+    await waitFor(() => expect(signOut).toHaveFocus());
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    const nextControl = screen.getByRole('button', { name: 'Start a new chat' });
+    nextControl.focus();
+
+    await waitFor(() => expect(screen.queryByRole('menu', { name: 'Account menu' })).not.toBeInTheDocument());
+    expect(nextControl).toHaveFocus();
+  });
+
   it('invalidates stale focus continuations across rapid mobile close and reopen', async () => {
     render(WorkspacePreview, { state: 'ready' });
 
     const conversations = screen.getByRole('button', { name: 'Open conversations', hidden: true });
     await fireEvent.click(conversations);
     const drawer = screen.getByTestId('mobile-session-drawer');
+    const firstControl = within(drawer).getByRole('button', { name: 'Start a new chat', hidden: true });
+    await waitFor(() => expect(firstControl).toHaveFocus());
     const trigger = within(drawer).getByRole('button', { name: 'Open account menu', hidden: true });
+    trigger.focus();
 
     fireEvent.click(trigger, { detail: 0 });
     fireEvent.keyDown(trigger, { key: 'Escape' });
