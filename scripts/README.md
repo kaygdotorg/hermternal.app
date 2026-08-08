@@ -194,6 +194,21 @@ default. Data defaults to `~/.local/share/hermternal-tests/hermes-agent/` and
 non-secret launcher state defaults to
 `~/.local/state/hermternal/hermes-agent/`. Tests may override all three roots.
 
+The local live-proof handoff must use `with_live_credential.py` instead of a
+shell filter that could remove interior bytes:
+
+```sh
+python3 scripts/with_live_credential.py /path/from/credential_file -- \
+  bun --cwd apps/web run test:e2e:live
+```
+
+The helper reads the launcher line as bytes, removes only trailing CR/LF, and
+requires exactly 48 lowercase hexadecimal characters. It then replaces itself
+with the child command and supplies `HERMES_TEST_PASSWORD` only in that child
+process environment. It never prints or writes the password; invalid input
+fails locally before the child starts. The launcher-generated `password\n` file
+format is unchanged.
+
 `start` first requires local rootless Podman and verifies the requested official
 repository digest. It then polls bounded `GET /api/auth/providers` responses.
 Readiness requires HTTP 200 and a `basic` provider with
@@ -226,14 +241,18 @@ Offline verification:
 
 ```sh
 python3 -m py_compile scripts/hermes_agent.py scripts/test_hermes_agent.py
+python3 -m py_compile scripts/with_live_credential.py scripts/test_with_live_credential.py
 python3 scripts/test_hermes_agent.py
+python3 scripts/test_with_live_credential.py
 python3 -O scripts/test_hermes_agent.py
-python3 -m unittest scripts.test_hermes_agent
-python3 -O -m unittest scripts.test_hermes_agent
+python3 -m unittest scripts.test_hermes_agent scripts.test_with_live_credential
+python3 -O -m unittest scripts.test_hermes_agent scripts.test_with_live_credential
 ```
 
-The 28-test suite uses a fake Podman boundary and local synthetic HTTP server.
-It never starts Hermes or reads a real credential. It covers immutable image
+The 29-test launcher suite uses a fake Podman boundary and local synthetic HTTP
+server. The focused live-proof handoff suite uses only synthetic credential-file
+bytes and a mocked child-process boundary. Neither suite starts Hermes or reads
+a real credential. The launcher suite covers immutable image
 binding, rootless checks, environment cleanup, deterministic scaling, upstream
 command preservation, absence of custom policy flags, credential redaction,
 provider readiness, existing stopped-container recovery and exact-once rollback,

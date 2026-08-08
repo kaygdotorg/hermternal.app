@@ -50,14 +50,20 @@ The command prints one JSON object. Keep these fields:
 - `container` — the exact launcher-owned container;
 - `image` — the immutable official image reference.
 
-Do not print the credential file. A local test process may read it directly. For
-example, set a process environment variable without sending the value to chat or
-a retained log:
+Do not print the credential file. A local test process may read it through the
+repository helper. `with_live_credential.py` removes only terminal CR/LF bytes,
+requires exactly 48 lowercase hexadecimal characters, and replaces itself with
+the proof command. The password is never printed or written by the helper; it is
+present only in the child process environment:
 
 ```sh
-HERMES_TEST_PASSWORD="$(tr -d '\r\n' < /path/from/credential_file)" \
+python3 scripts/with_live_credential.py /path/from/credential_file -- \
   node /path/to/browser-smoke.mjs
 ```
+
+Invalid, empty, overlong, uppercase, or whitespace-padded files fail locally
+before the browser command starts. Do not put the password in a command argument,
+repository file, fixture, report, terminal output, or retained log.
 
 ## Start N independent instances
 

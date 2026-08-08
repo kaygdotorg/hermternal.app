@@ -316,6 +316,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         second = launcher.read_or_create_password(spec)
         self.assertEqual(first, second)
         self.assertRegex(first, r"^[0-9a-f]{48}$")
+        self.assertEqual(spec.credential_file.read_bytes(), (first + "\n").encode("ascii"))
         self.assertEqual(stat.S_IMODE(spec.credential_file.stat().st_mode), 0o600)
 
         result, created = self.start(spec)
@@ -328,6 +329,33 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertNotIn(first, command)
         self.assertEqual(environment["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"], first)
         self.assertIn("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", command)
+
+    def test_existing_credential_file_normalizes_only_trailing_crlf(self) -> None:
+        spec = self.make_spec()
+        value = b"a" * 48
+        spec.credential_file.parent.mkdir(parents=True)
+
+        for suffix in (b"", b"\n", b"\r", b"\r\n", b"\n\r"):
+            with self.subTest(suffix=suffix):
+                spec.credential_file.write_bytes(value + suffix)
+                self.assertEqual(launcher.read_or_create_password(spec), value.decode("ascii"))
+
+        rejected = (
+            value + b" ",
+            value + b"\t\n",
+            value + b"\ntrailing",
+            value[:24] + b"\n" + value[24:],
+            value.upper(),
+            value[:-1],
+            value + b"0",
+            b"",
+        )
+        for raw in rejected:
+            with self.subTest(raw=raw):
+                spec.credential_file.write_bytes(raw)
+                with self.assertRaises(launcher.LauncherError) as raised:
+                    launcher.read_or_create_password(spec)
+                self.assertEqual(raised.exception.code, "credential_file_invalid")
 
     def test_start_verifies_image_and_writes_nonsecret_state(self) -> None:
         spec = self.make_spec()
