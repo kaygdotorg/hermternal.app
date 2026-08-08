@@ -34,13 +34,19 @@ Hermes session, or mirror transcript content.
   terminalLeaseSequence })` reconciles an unsolicited Terminal detach/failure
   without selecting Chat. The coordinator publishes a fresh opaque
   `terminalLeaseSequence` for every attach, including an in-generation
-  `reconnectTerminal()` recovery; settlement must return that token so a stale
-  lease cannot cancel a newly pending or attached same-session recovery lease.
-  The token is optional only for source compatibility: a legacy two-field
-  settlement is accepted for the first attach in a session generation and is
-  rejected conservatively after a retry. `reconnectTerminal()` uses the existing
-  Terminal activation and focus contract to acquire a new lease; it does not
-  call Chat connect, restore, or reconnect.
+  `reconnectTerminal()` recovery; the pending lease ownership is installed
+  before its `attaching` snapshot is observable, so a synchronous observer can
+  settle the published token and a late adapter completion is cleaned instead
+  of becoming attached. Settlement must return that token so a stale lease
+  cannot cancel a newly pending or attached same-session recovery lease. During
+  invalidation, cleanup callbacks may reenter the coordinator; the outer
+  settlement rechecks its identity, generation, token, lifecycle, and ownership
+  before it clears focus or publishes, so the nested transition wins. The token
+  is optional only for source compatibility: a legacy two-field settlement is
+  accepted for the first attach in a session generation and is rejected
+  conservatively after a retry. `reconnectTerminal()` uses the existing Terminal
+  activation and focus contract to acquire a new lease; it does not call Chat
+  connect, restore, or reconnect.
 - `logout()` and `dispose()` claim lifecycle state before adapter cleanup. They
   close Chat and clean the active Terminal lease at most once, increment the
   session generation once, and treat `disposed` as higher precedence than

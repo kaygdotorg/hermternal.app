@@ -523,6 +523,87 @@ describe('createSessionCoordinator', () => {
     expect(harness.terminal.release.mock.calls.filter(([binding]) => binding === recovering.binding)).toHaveLength(1);
   });
 
+  it('accepts a synchronous observer settlement for the published attaching lease', async () => {
+    const chat = createFakeChat();
+    const terminal = createFakeTerminal();
+    const pending = terminal.deferNext('session-old');
+    let coordinator!: ReturnType<typeof createSessionCoordinator>;
+    let settlementAccepted: boolean | undefined;
+
+    coordinator = createSessionCoordinator({
+      chat: chat.chat,
+      terminal: terminal.terminal,
+      deployment: compatibleDeployment(),
+      initialSessionId: 'session-old',
+      onStateChange: (nextState) => {
+        if (settlementAccepted !== undefined || nextState.terminalStatus !== 'attaching') return;
+        settlementAccepted = coordinator.invalidateTerminalBinding({
+          sessionId: nextState.activeSessionId!,
+          sessionGeneration: nextState.sessionGeneration,
+          terminalLeaseSequence: nextState.terminalLeaseSequence!
+        });
+      }
+    });
+
+    const activation = coordinator.activate('terminal');
+    await flush();
+
+    expect(settlementAccepted).toBe(true);
+    expect(terminal.attach).toHaveBeenCalledTimes(1);
+    expect(coordinator.state).toMatchObject({
+      activeSessionId: 'session-old',
+      terminalStatus: 'detached'
+    });
+    expect(coordinator.state).not.toHaveProperty('terminalSessionId');
+    expect(coordinator.state).not.toHaveProperty('terminalLeaseSequence');
+
+    // The adapter had already begun attaching; its late completion must clean up
+    // rather than restoring the lease the synchronous observer revoked.
+    pending.deferred.resolve(pending.binding);
+    await activation;
+
+    expectInvalidatedThenReleased(terminal, pending.binding);
+    expect(coordinator.state).toMatchObject({ terminalStatus: 'detached' });
+    expect(coordinator.state).not.toHaveProperty('terminalSessionId');
+  });
+
+  it.each(['invalidate', 'release'] as const)(
+    'preserves nested session invalidation when Terminal %s cleanup reenters',
+    async (cleanupPoint) => {
+      const harness = createCoordinator();
+      await harness.coordinator.activate('terminal');
+      const binding = await harness.terminal.attach.mock.results[0]!.value;
+      const settlement = {
+        sessionId: 'session-old',
+        sessionGeneration: harness.coordinator.state.sessionGeneration,
+        terminalLeaseSequence: harness.coordinator.state.terminalLeaseSequence
+      };
+      const generation = harness.coordinator.state.sessionGeneration;
+
+      if (cleanupPoint === 'invalidate') {
+        vi.spyOn(binding, 'invalidate').mockImplementation(() => harness.coordinator.invalidateSession());
+      } else {
+        harness.terminal.release.mockImplementationOnce(() => harness.coordinator.invalidateSession());
+      }
+
+      expect(harness.coordinator.invalidateTerminalBinding(settlement)).toBe(false);
+
+      expect(binding.invalidate).toHaveBeenCalledTimes(1);
+      expect(harness.terminal.release).toHaveBeenCalledTimes(1);
+      expect(harness.coordinator.state).toMatchObject({
+        status: 'empty',
+        mode: 'terminal',
+        terminalStatus: 'detached',
+        sessionGeneration: generation + 1
+      });
+      expect(harness.coordinator.activeSessionId).toBeUndefined();
+      expect(harness.coordinator.state).not.toHaveProperty('activeSessionId');
+      expect(harness.coordinator.state).not.toHaveProperty('terminalSessionId');
+      expect(harness.coordinator.state).not.toHaveProperty('terminalLeaseSequence');
+      expect(harness.coordinator.state).not.toHaveProperty('focusIntent');
+    }
+  );
+
   it('contains Terminal attach failure without closing or poisoning Chat', async () => {
     const chat = createFakeChat();
     const terminal = createFakeTerminal();

@@ -518,9 +518,10 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     const lease = terminalBinding;
     terminalBinding = undefined;
     terminalBindingFocusOwnerSequence = undefined;
-    if (lease && terminalLeaseSequence === lease.terminalLeaseSequence) {
-      terminalLeaseSequence = undefined;
-    }
+    // Every caller has already cancelled any pending attach, so this is the
+    // terminal lifecycle's destructive boundary even when cleanup reentered
+    // after the binding reference was cleared.
+    terminalLeaseSequence = undefined;
     terminalStatus = 'detached';
     if (lease) cleanupBinding(lease);
   };
@@ -544,6 +545,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     lastFocusIntent = undefined;
     lifecycle = 'empty';
     invalidateBinding();
+    terminalLeaseSequence = undefined;
 
     // Binding cleanup may reenter logout or disposal; its final lifecycle wins.
     if (!disposed && !loggedOut) publish();
@@ -567,8 +569,33 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
       return false;
     }
 
-    cancelTerminal();
-    invalidateBinding();
+    // Retain this token through adapter cleanup. Either callback may synchronously
+    // start another lifecycle transition, so the original settlement may finish
+    // only if it still owns this exact, otherwise-unobservable lease transition.
+    const lifecycleBeforeCleanup = lifecycle;
+    const pending = pendingTerminal;
+    if (pending?.terminalLeaseSequence === activeLeaseSequence) {
+      pending.cancelled = true;
+      safeAbort(pending.controller);
+      pendingTerminal = undefined;
+      void pending.promise.catch(() => undefined);
+    }
+    const lease = terminalBinding;
+    terminalBinding = undefined;
+    terminalBindingFocusOwnerSequence = undefined;
+    terminalStatus = 'detached';
+    if (lease) cleanupBinding(lease);
+
+    if (
+      !current(settlement.sessionGeneration, settlement.sessionId) ||
+      terminalLeaseSequence !== activeLeaseSequence ||
+      lifecycle !== lifecycleBeforeCleanup ||
+      terminalBinding !== undefined ||
+      pendingTerminal !== undefined
+    ) {
+      return false;
+    }
+    terminalLeaseSequence = undefined;
     clearTerminalFocus();
     if (mode === 'terminal') lifecycle = 'idle';
     publish();
@@ -736,73 +763,78 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     }
     if (existing) cancelTerminal();
 
-    // Issue ownership before publishing `attaching` so adapter callbacks can
-    // capture the token even if the attach has not resolved yet.
+    // Install an owned operation, not merely its token, before starting the
+    // adapter or publishing `attaching`. A synchronous observer may settle the
+    // published token while the adapter is still pending.
     const leaseSequence = ++nextTerminalLeaseSequence;
-    terminalLeaseSequence = leaseSequence;
-    terminalLeaseCountForSession += 1;
-    terminalStatus = 'attaching';
-    lastError = undefined;
-    publish();
-    if (!current(generation, sessionId)) {
-      if (terminalLeaseSequence === leaseSequence) terminalLeaseSequence = undefined;
-      return Promise.reject(new SessionCoordinatorError('stale-operation'));
-    }
     const controller = new AbortController();
-    const pending = {
+    let startAttach!: () => void;
+    let pending!: PendingTerminalAttach;
+    const operation = new Promise<TerminalBinding>((resolve, reject) => {
+      startAttach = () => {
+        void (async (): Promise<TerminalBinding> => {
+          try {
+            const value = await terminal.attach(sessionId, controller.signal);
+            if (!current(generation, sessionId) || pending.cancelled) {
+              cleanupUnknownBinding(value);
+              throw new SessionCoordinatorError('stale-operation');
+            }
+            const binding = normalizeBinding(value, sessionId);
+            const lease: TerminalBindingLease = {
+              binding,
+              terminalLeaseSequence: pending.terminalLeaseSequence,
+              cleaned: false
+            };
+            if (!current(generation, sessionId) || pending.cancelled) {
+              cleanupBinding(lease);
+              throw new SessionCoordinatorError('stale-operation');
+            }
+            terminalBinding = lease;
+            terminalBindingFocusOwnerSequence = pending.focusOwnerSequence;
+            terminalStatus = 'attached';
+            lastError = undefined;
+            lifecycle = 'active';
+            publish();
+            return binding;
+          } catch (error) {
+            if (isStale(error) || pending.cancelled) throw new SessionCoordinatorError('stale-operation');
+            const normalized = normalizeTerminalError();
+            if (current(generation, sessionId)) {
+              if (terminalLeaseSequence === pending.terminalLeaseSequence) {
+                terminalLeaseSequence = undefined;
+              }
+              terminalStatus = 'failed';
+              lastError = normalized.code;
+              lifecycle = mode === 'terminal' ? 'terminal-attach-failed' : 'active';
+              publish();
+            }
+            throw normalized;
+          }
+        })().then(resolve, reject);
+      };
+    });
+    const promise = operation.finally(() => {
+      if (pendingTerminal === pending) pendingTerminal = undefined;
+    });
+    pending = {
       generation,
       sessionId,
       terminalLeaseSequence: leaseSequence,
       controller,
       focusOwnerSequence,
       cancelled: false,
-      promise: undefined as unknown as Promise<TerminalBinding>
-    } satisfies Omit<PendingTerminalAttach, 'promise'> & { promise: Promise<TerminalBinding> };
-
-    const promise = (async (): Promise<TerminalBinding> => {
-      try {
-        const value = await terminal.attach(sessionId, controller.signal);
-        if (!current(generation, sessionId) || pending.cancelled) {
-          cleanupUnknownBinding(value);
-          throw new SessionCoordinatorError('stale-operation');
-        }
-        const binding = normalizeBinding(value, sessionId);
-        const lease: TerminalBindingLease = {
-          binding,
-          terminalLeaseSequence: pending.terminalLeaseSequence,
-          cleaned: false
-        };
-        if (!current(generation, sessionId) || pending.cancelled) {
-          cleanupBinding(lease);
-          throw new SessionCoordinatorError('stale-operation');
-        }
-        terminalBinding = lease;
-        terminalBindingFocusOwnerSequence = pending.focusOwnerSequence;
-        terminalStatus = 'attached';
-        lastError = undefined;
-        lifecycle = 'active';
-        publish();
-        return binding;
-      } catch (error) {
-        if (isStale(error) || pending.cancelled) throw new SessionCoordinatorError('stale-operation');
-        const normalized = normalizeTerminalError();
-        if (current(generation, sessionId)) {
-          if (terminalLeaseSequence === pending.terminalLeaseSequence) {
-            terminalLeaseSequence = undefined;
-          }
-          terminalStatus = 'failed';
-          lastError = normalized.code;
-          lifecycle = mode === 'terminal' ? 'terminal-attach-failed' : 'active';
-          publish();
-        }
-        throw normalized;
-      }
-    })().finally(() => {
-      if (pendingTerminal === pending) pendingTerminal = undefined;
-    });
-    pending.promise = promise;
+      promise
+    };
+    terminalLeaseSequence = leaseSequence;
+    terminalLeaseCountForSession += 1;
+    terminalStatus = 'attaching';
+    lastError = undefined;
     pendingTerminal = pending;
     void promise.catch(() => undefined);
+    // Start the adapter only after its cancellation ownership is installed; the
+    // following publish may synchronously settle this still-pending lease.
+    startAttach();
+    publish();
     return awaitWithAbort(promise, signal);
   };
 
