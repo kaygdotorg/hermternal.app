@@ -58,9 +58,12 @@ operations:
   quarantined until its validator, ticket provider, or socket factory settles.
   A duplicate reconnect receives the deterministic aborted result instead of
   minting parallel low-level work; its late ticket or validator cannot publish
-  state, and its late factory socket is closed without handlers. A different
-  identity may replace the current generation, but stale settlement can never
-  reclaim it. If an established reattach is cancelled after `onopen`, its exact
+  state, and its late factory socket is closed without handlers. Explicit
+  same-identity `connect()` after Close is different replacement intent: it may
+  safely claim a new generation before the quarantined raw work settles, while
+  `reconnect()` remains denied by the Close latch. A different identity may
+  replace the current generation, but stale settlement can never reclaim it. If
+  an established reattach is cancelled after `onopen`, its exact
   identity's detach-retention evidence is restored. `outputMayBeTruncated` is
   true only for the current successful reattach and resets on detach, Close,
   cancellation, failure, replacement, and unrelated generations.
@@ -108,7 +111,9 @@ truncation resets across failure and replacement transitions. New deterministic
 deferred-adapter regressions prove that ignored validator, ticket, and factory
 cancellation fences the current identity until settlement: no duplicate ticket
 or factory work starts, and a late factory socket is closed without state,
-bytes, notice, or retry publication. Tests also verify that terminal bytes and
+bytes, notice, or retry publication. Companion Close regressions prove that
+explicit same-identity `connect()` safely supersedes each quarantined stage,
+while reconnect stays closed-latched. Tests also verify that terminal bytes and
 ticket material are not logged or retained in public state.
 
 Accessibility is N/A for this transport-only change. It adds no UI nodes and

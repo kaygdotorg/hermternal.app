@@ -592,7 +592,15 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   ): Promise<void> => {
     const normalized = validateInput(input);
     const staleAttempt = activeAttempt;
-    if (staleAttempt && currentInput && sameConnectionInput(currentInput, normalized)) {
+    if (
+      staleAttempt &&
+      currentInput &&
+      sameConnectionInput(currentInput, normalized) &&
+      // Reconnect cannot overtake quarantined work, but explicit connect is new
+      // user intent after Close. It safely claims a generation while the old
+      // adapter remains fenced and retains its late-value cleanup.
+      (reattaching || !staleAttempt.quarantined)
+    ) {
       return waitForAttempt(staleAttempt, signal);
     }
     if (signal?.aborted) {
