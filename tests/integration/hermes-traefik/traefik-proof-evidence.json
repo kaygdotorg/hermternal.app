@@ -1,0 +1,119 @@
+{
+  "black_box": {
+    "assertions": [
+      "valid session and message deep links reach the static upstream",
+      "root-only scenario query is accepted by the policy gate",
+      "static, client, and non-callback REST query mutations are edge 404",
+      "OAuth callback accepts only the reviewed code/state or provider-error query forms",
+      "mock Hermes receives exact path, query, body, and one /hermes prefix",
+      "spoofed forwarding fields do not survive the trusted header middleware",
+      "chat and PTY upgrades use separate exact query grammars"
+    ],
+    "request_material": "redacted",
+    "route_vectors": "shared static-route grammar and deep-link fixture identities",
+    "scope": "local Traefik plus recording static, policy, and Hermes mocks only"
+  },
+  "browser_evidence": {
+    "observations": {
+      "blocker": "provider_unavailable"
+    },
+    "provenance": {
+      "build_digest": "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21",
+      "build_sha": "521ede32b904a42e22eebb279fd7d404074cd318",
+      "runtime_inputs_sha256": "f31e23a00efb78045017a5ed9761a6672fdd4155e29cdd9bfaba4ee7231a81ae",
+      "traefik_config_digest": "9e84bb9fe37996341dfdb675e98b928e5203a9adc793c69edb52e1f28f927e3b"
+    },
+    "schema": "hermternal.traefik-proof.browser-evidence.v1",
+    "status": "blocked_provider"
+  },
+  "browser_journey": "blocked_provider",
+  "contract": "dashboard-v0.0.1",
+  "cookie_proof": {
+    "reason": "Traefik renderer output does not prove HttpOnly, SameSite, Path, or Secure on a real Set-Cookie response",
+    "status": "not_proven"
+  },
+  "deployment": {
+    "edge_policy": "local-forward-auth-closed-query-gate",
+    "hermes_listener": "loopback-only",
+    "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "parity_fixtures": {
+      "deep_link_cases": {
+        "path": "contracts/fixtures/deep-link-grammar/cases.json",
+        "sha256": "91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96"
+      },
+      "static_route_grammar": {
+        "path": "apps/web/src/lib/static-route-grammar.mjs",
+        "sha256": "f0542d97b363b8e2a921e93001d72dd0f56d5f30001f15e95bbca5b2f4165165"
+      }
+    },
+    "proxy": "traefik",
+    "public_listener": "loopback-only-disposable",
+    "runtime_config_sha256": "9e84bb9fe37996341dfdb675e98b928e5203a9adc793c69edb52e1f28f927e3b",
+    "runtime_inputs": {
+      "cert_path": "/opt/hermternal/traefik-proof/tls.crt",
+      "hermes_port": 19257,
+      "host": "traefik-92.test",
+      "https_port": 19444,
+      "key_path": "/opt/hermternal/traefik-proof/tls.key",
+      "policy_port": 19259,
+      "site_root": "/opt/hermternal/traefik-proof/site",
+      "static_port": 19258,
+      "storage_root": "/opt/hermternal/traefik-proof"
+    },
+    "runtime_inputs_schema": "hermternal.traefik-proof.runtime-inputs.v1",
+    "runtime_inputs_sha256": "f31e23a00efb78045017a5ed9761a6672fdd4155e29cdd9bfaba4ee7231a81ae"
+  },
+  "issue": "92",
+  "negative_cases": [
+    {"id": "wrong_host", "layer": "edge", "status": 421, "upstream_request": false},
+    {"id": "wrong_websocket_origin", "layer": "edge", "status": 403, "upstream_request": false},
+    {"id": "unknown_route", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "unknown_method", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "duplicate_prefix", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "traversal", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "encoded_separator", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "encoded_dot", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "malformed_upgrade", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "missing_ticket", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "root_query_mutation", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "static_asset_query_mutation", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "client_route_query_mutation", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "rest_query_mutation", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "pty_missing_resume", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "pty_extra_parameter", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "pty_duplicate_parameter", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "pty_empty_value", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "pty_fresh_parameter", "layer": "edge", "status": 404, "upstream_request": false},
+    {"id": "invalid_ticket", "layer": "hermes", "status": 400, "upstream_request": true},
+    {"id": "ticket_expired", "layer": "hermes", "status": 403, "upstream_request": true},
+    {"id": "ticket_reuse", "layer": "hermes", "status": 403, "upstream_request": true},
+    {"id": "direct_private_port", "layer": "network", "status": "connection_denied", "upstream_request": false}
+  ],
+  "positive_cases": [
+    {"id": "root_static", "layer": "static", "status": 200, "upstream_request": true},
+    {"id": "root_scenario_static", "layer": "static", "query_policy": "reviewed scenario selector only", "status": 200, "upstream_request": true},
+    {"fallback": "/200.html", "id": "deep_link_session", "layer": "static", "status": 200, "upstream_request": true},
+    {"fallback": "/200.html", "id": "deep_link_message", "layer": "static", "status": 200, "upstream_request": true},
+    {"id": "dashboard_provider_discovery", "layer": "hermes", "status": 200, "upstream_request": true},
+    {"id": "password_login", "layer": "hermes", "status": 200, "upstream_request": true},
+    {"id": "oauth_callback", "layer": "hermes", "query_policy": "reviewed code/state or provider-error forms; order-independent", "status": 200, "upstream_request": true},
+    {"id": "ws_ticket", "layer": "hermes", "status": 200, "upstream_request": true},
+    {"id": "ws_upgrade", "layer": "hermes", "query_policy": "chat ticket-only", "status": 101, "upstream_request": true},
+    {"id": "pty_upgrade", "layer": "hermes", "query_policy": "ticket plus resume with optional attach; order-independent", "status": 101, "upstream_request": true},
+    {"forwarding_policy": "forward-auth gate plus trusted header middleware", "id": "mock_upstream_header_rebuild", "layer": "hermes", "prefix_policy": "single /hermes prefix", "status": 200, "upstream_request": true}
+  ],
+  "product": {
+    "build_commit": "521ede32b904a42e22eebb279fd7d404074cd318",
+    "static_manifest_sha256": "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
+  },
+  "retention": {
+    "cookies": "redacted",
+    "credentials": "redacted",
+    "provider_state": "redacted",
+    "queries": "redacted",
+    "ticket_fragments": "redacted",
+    "tickets": "redacted",
+    "transcripts": "redacted"
+  },
+  "schema": "hermternal.traefik-proof.v1"
+}
