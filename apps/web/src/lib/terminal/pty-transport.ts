@@ -1,3 +1,8 @@
+import {
+  MAX_WS_TICKET_LENGTH,
+  WsTicketError,
+} from "../chat/ws-ticket";
+
 export const PTY_WS_TICKET_PATH = "/api/auth/ws-ticket" as const;
 export const PTY_WEBSOCKET_PATH = "/api/pty" as const;
 export const PTY_WEBSOCKET_ORIGIN = "same-origin" as const;
@@ -8,7 +13,6 @@ export const PTY_MAX_COLS = 2000;
 export const PTY_MIN_ROWS = 1;
 export const PTY_MAX_ROWS = 1000;
 
-const MAX_TICKET_LENGTH = 512;
 const MAX_SESSION_ID_LENGTH = 128;
 const MAX_ATTACH_HANDLE_LENGTH = 512;
 const MAX_PROCESS_IDENTITY_LENGTH = 128;
@@ -262,6 +266,18 @@ export function createFreshPtyTicketProvider(
         throw new PtyTransportError("aborted");
       }
       if (error instanceof PtyTransportError) throw error;
+      if (error instanceof WsTicketError) {
+        if (error.code === "cancelled") {
+          throw new PtyTransportError("aborted");
+        }
+        if (error.code === "authentication-failed" && error.status === 401) {
+          throw new PtyTransportError("authentication-required");
+        }
+        if (error.code === "response-invalid") {
+          throw new PtyTransportError("invalid-ticket");
+        }
+        throw new PtyTransportError("connection-failed");
+      }
       throw new PtyTransportError("connection-failed");
     }
     return parseTicketResponse(response);
@@ -341,6 +357,19 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     truncated = false,
   ): void => {
     const mode = modeFor(input);
+    const retainedAttachment =
+      mode === "attach" &&
+      input !== undefined &&
+      detachedAttachment !== undefined &&
+      sameConnectionInput(detachedAttachment.input, input);
+    // A failed handshake is not evidence that a detached PTY exists. Only an
+    // established attachment or exact retained identity may advertise explicit
+    // reconnect; this keeps 4401/4403 pre-open failures out of the retry UI.
+    const reconnectSupported =
+      mode === "attach" &&
+      reattachBlocked === undefined &&
+      !userClosed &&
+      (status !== "failed" && status !== "exited" && status !== "closed" || retainedAttachment);
     const nextState = Object.freeze({
       status,
       generation,
@@ -352,7 +381,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       ...(observation?.code !== undefined ? { closeCode: observation.code } : {}),
       ...(observation ? { closeClassification: observation.classification } : {}),
       outputMayBeTruncated: truncated,
-      reconnectSupported: mode === "attach" && reattachBlocked === undefined && !userClosed,
+      reconnectSupported,
     });
     currentState = nextState;
     // Publish the immutable transition before observers can synchronously
@@ -492,7 +521,14 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       clearAttempt(context.generation);
       context.rejectReady(new PtyTransportError("connection-failed", generation));
       const status = statusForClose(context.mode, observation, opened);
-      if (status === "detached") markDetached(input, now());
+      const retainAfterEstablishedFailure =
+        opened &&
+        context.mode === "attach" &&
+        (observation.classification === "authentication-rejected" ||
+          observation.classification === "backend-failure");
+      if (status === "detached" || retainAfterEstablishedFailure) {
+        markDetached(input, now());
+      }
       reattachBlocked = retryBlockForClose(observation.classification);
       setState(status, generation, input, observation);
     };
@@ -1009,6 +1045,11 @@ function detachedStatus(input: PtyConnectionInput | undefined): PtyStatus {
   return modeFor(input) === "attach" ? "detached" : "exited";
 }
 
+/**
+ * The shared HTTP boundary validates `{ ticket, ttl_seconds: 30 }` and returns
+ * only `{ ticket }`. Keep this adapter parser limited to that already-reviewed
+ * normalized value; it must not become a second raw-response parser.
+ */
 function parseTicketResponse(response: unknown): string {
   try {
     if (
@@ -1036,8 +1077,8 @@ function validateTicket(ticket: unknown, generation: number): asserts ticket is 
   if (
     typeof ticket !== "string" ||
     ticket.length === 0 ||
-    ticket.length > MAX_TICKET_LENGTH ||
-    !SAFE_OPAQUE_PATTERN.test(ticket)
+    ticket.length > MAX_WS_TICKET_LENGTH ||
+    !/^[A-Za-z0-9_-]+$/u.test(ticket)
   ) {
     throw new PtyTransportError("invalid-ticket", generation);
   }

@@ -50,7 +50,7 @@ const OFFICIAL_COMPATIBILITY_EVIDENCE: JsonRpcChatOptions["compatibilityEvidence
     },
   };
 
-export type BrowserWebSocketFactory = (url: string) => JsonRpcWebSocket;
+export type BrowserWebSocketFactory = (url: string, signal?: AbortSignal) => JsonRpcWebSocket;
 
 export interface BrowserChatOptions extends Omit<
   JsonRpcChatOptions,
@@ -128,7 +128,7 @@ export function createBrowserChatTransport(
       // Both the ticket boundary's late-result hook and this adapter's abort
       // ownership can observe one cancellation. The wrapper makes that shared
       // boundary idempotent before either path reaches the real socket.
-      const socket = createIdempotentSocket(createSocket(upgradeUrl.toString()));
+      const socket = createIdempotentSocket(createSocket(upgradeUrl.toString(), signal));
       const closeOnAbort = (): void => {
         releaseSocketAbort(socket);
         socket.close(1000, "cancelled");

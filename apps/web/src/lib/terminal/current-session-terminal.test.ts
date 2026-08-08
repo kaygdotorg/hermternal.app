@@ -4,11 +4,14 @@ import {
   type PtyConnectionInput,
   type PtyConnectionState,
   type PtyTransport,
-  type PtyTransportEvent
+  type PtyTransportEvent,
+  type PtyWebSocket
 } from './pty-transport';
 import {
   CurrentSessionTerminalBridge,
-  type CurrentSessionTerminalEvent
+  createBrowserPtyTransport,
+  type CurrentSessionTerminalEvent,
+  type BrowserPtyWebSocketFactory
 } from './current-session-terminal';
 
 function deferred<T>(): {
@@ -20,6 +23,10 @@ function deferred<T>(): {
     resolve = nextResolve;
   });
   return { promise, resolve };
+}
+
+async function flush(): Promise<void> {
+  for (let index = 0; index < 32; index += 1) await Promise.resolve();
 }
 
 function createFakePty() {
@@ -592,5 +599,161 @@ describe('CurrentSessionTerminalBridge', () => {
     );
     expect(() => bridge.resize(80, 24)).toThrowError(expect.objectContaining({ code: 'closed' }));
     expect(fake.close).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['http://localhost', 'ws:'],
+    ['https://reviewed.example', 'wss:']
+  ] as const)('maps the browser origin %s to a %s PTY upgrade', async (origin, protocol) => {
+    vi.stubGlobal('location', { origin });
+    let readyState = 0;
+    const socket: PtyWebSocket = {
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      onclose: null,
+      get readyState() {
+        return readyState;
+      },
+      send: vi.fn(),
+      close: vi.fn()
+    };
+    const urls: string[] = [];
+    const signals: AbortSignal[] = [];
+    const createSocket: BrowserPtyWebSocketFactory = vi.fn((url, signal) => {
+      urls.push(url);
+      signals.push(signal);
+      return socket;
+    });
+    const transport = createBrowserPtyTransport({
+      fetch: vi.fn(async () =>
+        new Response(JSON.stringify({ ticket: 'pty-ticket', ttl_seconds: 30 }), {
+          headers: { 'content-type': 'application/json' }
+        })
+      ),
+      createSocket
+    });
+
+    const pending = transport.connect({ sessionId: 'session-one' });
+    await flush();
+    expect(createSocket).toHaveBeenCalledTimes(1);
+    expect(signals[0]).toEqual(expect.any(AbortSignal));
+    const upgrade = new URL(urls[0] ?? 'http://invalid');
+    expect(upgrade.protocol).toBe(protocol);
+    expect(upgrade.pathname).toBe('/api/pty');
+
+    readyState = 1;
+    socket.onopen?.();
+    await pending;
+    expect(transport.state.status).toBe('attached');
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    [4401, 'authentication-rejected', 'authentication-required'],
+    [4403, 'host-or-origin-rejected', 'incompatible-origin']
+  ] as const)('preserves an initial PTY close classification through bridge attach (%s)', async (closeCode, closeClassification, failure) => {
+    const fake = createFakePty();
+    fake.connect.mockImplementationOnce(async (input) => {
+      const state: PtyConnectionState = {
+        status: 'failed',
+        generation: 1,
+        mode: 'attach',
+        sessionId: input.sessionId,
+        closeCode,
+        closeClassification,
+        outputMayBeTruncated: false,
+        reconnectSupported: false
+      };
+      fake.emit({ type: 'state', state });
+      throw new PtyTransportError('connection-failed');
+    });
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const events: CurrentSessionTerminalEvent[] = [];
+    bridge.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    await expect(bridge.attach('session-one', new AbortController().signal)).rejects.toMatchObject({
+      code: 'connection-failed'
+    });
+
+    const failureEvent = events.find(
+      (event): event is Extract<CurrentSessionTerminalEvent, { type: 'state' }> =>
+        event.type === 'state' && event.state.status === 'failed'
+    );
+    expect(failureEvent?.state).toMatchObject({
+      closeCode,
+      closeClassification,
+      failure,
+      reconnectSupported: false
+    });
+    expect(events.filter((event) => event.type === 'state').map((event) => event.state.status)).toEqual([
+      'failed'
+    ]);
+  });
+
+  it('starts a replacement attach while a cancelled adapter ignores AbortSignal', async () => {
+    const fake = createFakePty();
+    const firstGate = deferred<void>();
+    const originalConnect = fake.connect.getMockImplementation();
+    if (!originalConnect) throw new Error('PTY connect implementation is missing');
+    fake.connect.mockImplementationOnce(async (input, signal) => {
+      await firstGate.promise;
+      return originalConnect(input, signal);
+    });
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const first = bridge.attach('session-one', new AbortController().signal);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    bridge.invalidateBindingForSession('session-one');
+    const replacement = bridge.attach('session-two', new AbortController().signal);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fake.connect).toHaveBeenCalledTimes(2);
+    await replacement;
+    firstGate.resolve(undefined);
+    await expect(first).rejects.toMatchObject({ code: 'aborted' });
+    expect(bridge.state.sessionId).toBe('session-two');
+  });
+
+  it('keeps direct reconnect binding ownership for later detach and close', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({
+      createTransport: () => fake.pty,
+      createAttachment: () => ({ attach: 'attach-one', processIdentity: 'process-one' })
+    });
+
+    const first = await bridge.attach('session-one', new AbortController().signal);
+    first.invalidate();
+    await bridge.reconnect();
+    bridge.detach();
+    expect(fake.detach).toHaveBeenCalledTimes(2);
+
+    await bridge.reconnect();
+    bridge.close();
+    expect(fake.close).toHaveBeenCalledTimes(1);
+    expect(bridge.state.status).toBe('closed');
+    expect(bridge.state.reconnectSupported).toBe(false);
+  });
+
+  it.each(['detach', 'close'] as const)('publishes truthful user %s state when the adapter keeps an attached snapshot', async (action) => {
+    const fake = createFakePty();
+    fake.detach.mockImplementation(() => undefined);
+    fake.close.mockImplementation(() => undefined);
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const events: CurrentSessionTerminalEvent[] = [];
+    bridge.subscribe((event) => events.push(event));
+    await bridge.attach('session-one', new AbortController().signal);
+    events.length = 0;
+
+    bridge[action]();
+
+    const stateEvent = events.find(
+      (event): event is Extract<CurrentSessionTerminalEvent, { type: 'state' }> => event.type === 'state'
+    );
+    expect(stateEvent?.state.status).toBe(action === 'detach' ? 'exited' : 'closed');
+    expect(bridge.state.status).toBe(action === 'detach' ? 'exited' : 'closed');
   });
 });
