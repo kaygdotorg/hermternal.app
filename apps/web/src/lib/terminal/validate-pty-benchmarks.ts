@@ -985,11 +985,6 @@ function validateOwnershipProof(
     expectedSocketClosures,
     `${label}.socketClosures`,
   );
-  if (run.allCallbacksNullAfterClose !== true) {
-    throw new Error(
-      `${label}.allCallbacksNullAfterClose did not prove callback disownership`,
-    );
-  }
 
   if (!reconnect) {
     // Abort, close, and detach allocate no socket; only replacement can prove
@@ -1000,6 +995,11 @@ function validateOwnershipProof(
     if (run.callbackProofApplicable !== replacement) {
       throw new Error(
         `${label}.callbackProofApplicable did not match the action`,
+      );
+    }
+    if (run.allCallbacksNullAfterClose !== replacement) {
+      throw new Error(
+        `${label}.allCallbacksNullAfterClose did not match callback-proof applicability`,
       );
     }
     const expectedCallbackDispatches = replacement ? 1 : 0;
@@ -1018,6 +1018,10 @@ function validateOwnershipProof(
         );
       }
     }
+  } else if (run.allCallbacksNullAfterClose !== true) {
+    throw new Error(
+      `${label}.allCallbacksNullAfterClose did not prove callback disownership`,
+    );
   }
 }
 

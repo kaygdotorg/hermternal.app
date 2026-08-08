@@ -320,13 +320,18 @@ async function runAction(action: Action): Promise<RunProof> {
   // each callback captured from the live socket after Close to prove stale
   // open, message, error, and close events cannot publish anything.
   transport.close();
-  const allCallbacksNullAfterClose = sockets.every(
-    (socket) =>
-      socket.onopen === null &&
-      socket.onmessage === null &&
-      socket.onerror === null &&
-      socket.onclose === null,
-  );
+  // A pre-factory cancellation has no socket callbacks to inspect. Keep that
+  // proof explicitly inapplicable instead of recording a vacuous every([])
+  // success; replacement runs must prove callback nulling on the real socket.
+  const allCallbacksNullAfterClose =
+    callbackProofApplicable &&
+    sockets.every(
+      (socket) =>
+        socket.onopen === null &&
+        socket.onmessage === null &&
+        socket.onerror === null &&
+        socket.onclose === null,
+    );
   let staleOnopenDispatches = 0;
   let staleOnmessageDispatches = 0;
   let staleOnerrorDispatches = 0;
@@ -385,7 +390,8 @@ async function runAction(action: Action): Promise<RunProof> {
       action !== "replace" ||
       (socketClosures.length === 1 &&
         socketClosures.every((socket) => socket.closeCalls === 1 && socket.opened)),
-    allCallbacksNullAfterClose,
+    allCallbacksNullAfterClose:
+      !callbackProofApplicable || allCallbacksNullAfterClose,
     replacementCallbacksBound:
       !callbackProofApplicable ||
       (callbackSnapshots.length === 1 &&
