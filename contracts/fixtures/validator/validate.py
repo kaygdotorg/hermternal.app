@@ -178,16 +178,20 @@ VALIDATOR_AUTHORITY_ROLE = "aggregate_predecessor"
 # rotation to the reviewed chain without attempting a self-referential intro hash.
 EXPECTED_HISTORICAL_AUTHORITY_COMMIT = "285acdcf9c11c049180a7844e689eee0f1490de4"
 EXPECTED_HISTORICAL_SOURCE_COMMIT = "263cb75adcf153d6fe252636b064e5fbc3e3f877"
-# The active rotation is pinned by the protected runtime environment rather
-# than by source bytes that would need to contain their own future commit OID.
-# Missing or malformed pins fail closed; they are never inferred from HEAD.
+# The active rotation is pinned by reviewed source constants and by a protected
+# runtime environment. The environment is the external root: a checked-in pin
+# document, including this source file, cannot authenticate itself. Missing,
+# malformed, or non-matching pins fail closed; they are never inferred from HEAD.
+ACTIVE_AUTHORITY_COMMIT = "e8f09813bb87eb38dd03d4a3b4d59b0dbe0091e2"
+ACTIVE_SOURCE_COMMIT = "f82d74224af050fc669273ac57dfff13f588f093"
 ACTIVE_AUTHORITY_COMMIT_ENV = "HERMTERNAL_FIXTURE_AUTHORITY_COMMIT"
 ACTIVE_SOURCE_COMMIT_ENV = "HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT"
 # The standalone verifier is executed only after its exact bytes are captured
-# through a stable descriptor and match this source-level pin. It is not imported
-# by path, so a checkout edit cannot execute before authentication.
+# through a stable descriptor and match both source-level identities. It is not
+# imported by path, so a checkout edit cannot execute before authentication.
 HARDENED_AUTHORITY_VERIFIER_PATH = "scripts/verify_fixture_registry_authority.py"
-HARDENED_AUTHORITY_VERIFIER_SHA256 = "01a0b3db1a832ba07bd8f932df4abd892b738463f5d3246fd3880ef71dadd61d"
+HARDENED_AUTHORITY_VERIFIER_SHA256 = "f27b168c6207e9a5e5d19d91ab7c0bdefdb96a3d1a52d8060493078bfaa81887"
+HARDENED_AUTHORITY_VERIFIER_BLOB_OID = "e0f088c8e31cedaf475ef3b3ed595827b6d18d65"
 HARDENED_AUTHORITY_VERIFIER_MAX_BYTES = 256 * 1024
 # Temporary-directory roots on macOS may expose /tmp through one of these
 # system aliases. All other ancestors stay no-follow descriptor anchored.
@@ -2327,13 +2331,22 @@ def _stable_file_bytes(root: Path, relative_path: str, limit: int) -> bytes:
                 pass
 
 
+def _git_blob_oid(data: bytes) -> str:
+    """Compute Git's SHA-1 blob identity without invoking a mutable Git binary."""
+
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+
 def _authenticated_authority_verifier(repo_root: Path) -> types.ModuleType:
-    """Execute only the standalone verifier bytes authenticated before compile."""
+    """Execute only verifier bytes authenticated before compile and exec."""
 
     source = _stable_file_bytes(repo_root, HARDENED_AUTHORITY_VERIFIER_PATH, HARDENED_AUTHORITY_VERIFIER_MAX_BYTES)
     require(
         HARDENED_AUTHORITY_VERIFIER_SHA256 != "__pending__"
-        and hashlib.sha256(source).hexdigest() == HARDENED_AUTHORITY_VERIFIER_SHA256,
+        and hashlib.sha256(source).hexdigest() == HARDENED_AUTHORITY_VERIFIER_SHA256
+        and HARDENED_AUTHORITY_VERIFIER_BLOB_OID != "__pending__"
+        and _git_blob_oid(source) == HARDENED_AUTHORITY_VERIFIER_BLOB_OID,
         "authority verifier source changed",
     )
     module_name = "_hermternal_authenticated_fixture_authority"
@@ -2411,7 +2424,7 @@ def _validate_authority_manifest(authority: dict[str, Any]) -> tuple[str, list[d
 
 
 def _active_authority_pins() -> tuple[str, str]:
-    """Read exact active authority pins from the protected runtime boundary."""
+    """Read active pins and require the external boundary to match reviewed OIDs."""
 
     authority_commit = os.environ.get(ACTIVE_AUTHORITY_COMMIT_ENV)
     source_commit = os.environ.get(ACTIVE_SOURCE_COMMIT_ENV)
@@ -2423,6 +2436,8 @@ def _active_authority_pins() -> tuple[str, str]:
         type(source_commit) is str and HEX40.fullmatch(source_commit) is not None,
         "active authority source pin is missing",
     )
+    require(authority_commit == ACTIVE_AUTHORITY_COMMIT, "active authority introduction pin changed")
+    require(source_commit == ACTIVE_SOURCE_COMMIT, "active authority source pin changed")
     return authority_commit, source_commit
 
 
