@@ -84,9 +84,10 @@ function createContext(
     discoverProviders: vi.fn(async () => ({ providers: [] })),
     invalidateLocalSession: () => workspace.invalidate()
   });
-  const context = { auth, workspace } as unknown as LiveRootContext;
+  const dispose = vi.fn();
+  const context = { auth, workspace, dispose } as unknown as LiveRootContext;
   mockRoot.context = context;
-  return { auth, workspace };
+  return { auth, workspace, dispose };
 }
 
 describe('live root route composition', () => {
@@ -104,9 +105,26 @@ describe('live root route composition', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
 
     expect(expire).toHaveBeenCalledTimes(1);
+    expect(expire).toHaveBeenCalledWith();
     expect(workspace.invalidate).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'session-expired'));
+    expect(workspace.dispose).not.toHaveBeenCalled();
     expect(screen.getByRole('heading', { name: 'Session expired' })).toBeInTheDocument();
+  });
+
+  it('remounts the same workspace after rendered authentication expiry', async () => {
+    const { auth, workspace } = createContext({ reason: 'authentication-required' });
+
+    render(Page);
+    await screen.findByRole('button', { name: 'Back to sessions' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'session-expired'));
+
+    await auth.initialize();
+
+    await waitFor(() => expect(workspace.subscribe).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(workspace.initialize).toHaveBeenCalledTimes(2));
+    expect(auth.current.status).toBe('authenticated');
   });
 
   it('routes semantic ticket 401 authentication-required state through the same sign-in bridge', async () => {
@@ -134,6 +152,16 @@ describe('live root route composition', () => {
     expect(workspace.invalidate).not.toHaveBeenCalled();
     expect(auth.current.status).toBe('authenticated');
     expect(screen.getByText('Connection lost')).toBeInTheDocument();
+  });
+
+  it('calls the root final disposer once when the rendered page tears down', async () => {
+    const { dispose } = createContext(undefined, 'loading');
+    const page = render(Page);
+
+    await waitFor(() => expect(screen.queryByLabelText('Starting Hermternal')).not.toBeInTheDocument());
+    page.unmount();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a rendered 4403 workspace failure on the authenticated incompatible boundary', async () => {

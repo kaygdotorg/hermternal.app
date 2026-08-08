@@ -4,11 +4,12 @@ import type { LiveWorkspaceSession, LiveWorkspaceSnapshot } from './live-workspa
 import LiveWorkspaceView from './LiveWorkspaceView.svelte';
 
 function createSession(snapshot: LiveWorkspaceSnapshot) {
+  const unsubscribe = vi.fn();
   const session = {
     current: snapshot,
     subscribe: vi.fn((subscriber: (next: Readonly<LiveWorkspaceSnapshot>) => void) => {
       subscriber(snapshot);
-      return vi.fn();
+      return unsubscribe;
     }),
     initialize: vi.fn().mockResolvedValue(undefined),
     selectSession: vi.fn().mockResolvedValue(undefined),
@@ -18,13 +19,14 @@ function createSession(snapshot: LiveWorkspaceSnapshot) {
     cancelReconnect: vi.fn(),
     approve: vi.fn().mockResolvedValue(undefined),
     answerClarification: vi.fn().mockResolvedValue(undefined),
-    dispose: vi.fn()
+    dispose: vi.fn(),
+    unsubscribe
   };
   return session as unknown as LiveWorkspaceSession & typeof session;
 }
 
 describe('LiveWorkspaceView', () => {
-  it('initializes the controller, sends user input, and disposes local state', async () => {
+  it('initializes the controller, sends user input, and releases only its subscription', async () => {
     const session = createSession({
       state: 'ready',
       sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
@@ -42,7 +44,8 @@ describe('LiveWorkspaceView', () => {
     await waitFor(() => expect(session.sendPrompt).toHaveBeenCalledWith('Send once'));
 
     view.unmount();
-    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(session.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(session.dispose).not.toHaveBeenCalled();
   });
 
   it('renders truthful live empty state and disables input without a server session', async () => {

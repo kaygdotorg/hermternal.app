@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { LiveRestFetch } from '$lib/transport';
+import { LiveWorkspaceSession } from '$lib/workspace/live-workspace-session';
 import { createLiveRootContext, resolveRootRoute } from './root-route';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -107,5 +108,46 @@ describe('root route composition', () => {
     expect(invalidate).toHaveBeenCalledTimes(1);
     expect(context.auth.current.status).toBe('expired');
     expect(context.workspace.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
+  });
+
+  it('reuses the root workspace when the authenticated view remounts after expiry', async () => {
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
+      throw new Error('unexpected request');
+    });
+    const context = createLiveRootContext({ fetch });
+    const initialize = vi.spyOn(context.workspace, 'initialize').mockResolvedValue(undefined);
+    const workspace = context.workspace;
+
+    await context.auth.initialize();
+    context.auth.expire();
+    // The authenticated view may unmount here, but it now only releases its
+    // subscription; root disposal remains the sole permanent lifecycle action.
+    await context.auth.initialize();
+    const unsubscribe = workspace.subscribe(() => {});
+    await workspace.initialize();
+
+    expect(context.auth.current.status).toBe('authenticated');
+    expect(context.workspace).toBe(workspace);
+    expect(initialize).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    context.dispose();
+  });
+
+  it('permanently disposes the root workspace exactly once', async () => {
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
+      throw new Error('unexpected request');
+    });
+    const disposeWorkspace = vi.spyOn(LiveWorkspaceSession.prototype, 'dispose');
+    const context = createLiveRootContext({ fetch });
+    const disposeAuth = vi.spyOn(context.auth, 'dispose');
+
+    await context.auth.initialize();
+    context.dispose();
+    context.dispose();
+
+    expect(disposeWorkspace).toHaveBeenCalledTimes(1);
+    expect(disposeAuth).toHaveBeenCalledTimes(1);
   });
 });

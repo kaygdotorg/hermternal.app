@@ -12,7 +12,13 @@ export type RootRouteSelection =
 
 export interface LiveRootContext {
   readonly auth: BrowserAuthSession;
+  /**
+   * The authenticated view receives this shared session, but cannot destroy it:
+   * authentication expiry unmounts that view and a later sign-in remounts it.
+   */
   readonly workspace: LiveWorkspaceSession;
+  /** Permanently releases root-owned auth and workspace resources exactly once. */
+  dispose(): void;
 }
 
 export interface LiveRootDependencies {
@@ -59,5 +65,17 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
     // references before logout or expiry publishes its next observable state.
     invalidateLocalSession: () => workspace.invalidate()
   });
-  return { auth, workspace };
+
+  let disposed = false;
+
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    // The route is the sole permanent owner; its authenticated child is only a
+    // subscriber and may disappear during expiry without closing this session.
+    workspace.dispose();
+    auth.dispose();
+  }
+
+  return { auth, workspace, dispose };
 }
