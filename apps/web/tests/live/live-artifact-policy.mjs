@@ -6,6 +6,8 @@ export const LIVE_ARTIFACT_REDACTION = '[redacted-live-credential]';
 const LIVE_OUTPUT_PREFIX = 'hermternal-playwright-live-';
 const LIVE_DEFAULT_USERNAME = 'hermternal-test';
 const LIVE_SECRET_ENV_NAMES = ['HERMES_TEST_USERNAME', 'HERMES_TEST_PASSWORD'];
+const LIVE_PAGE_TERMINATION_PATTERN =
+  /(?:target page, context or browser has been closed|(?:page|browser|context)(?: has been| was| has)? closed|(?:page|browser|context)(?: has)? crashed)/iu;
 
 /**
  * Read the explicitly supplied live-proof values plus the fixed synthetic
@@ -67,12 +69,43 @@ export function redactLiveText(value, secrets = liveCredentialValues()) {
     /(<(?:input|textarea)\b[^>]*\bvalue=)(["'])(.*?)\2/giu,
     (_match, prefix, quote) => `${prefix}${quote}${LIVE_ARTIFACT_REDACTION}${quote}`
   );
-  return redacted.replace(/(<textarea\b[^>]*>)[\s\S]*?(<\/textarea>)/giu, `$1${LIVE_ARTIFACT_REDACTION}$2`);
+  redacted = redacted.replace(/(<textarea\b[^>]*>)[\s\S]*?(<\/textarea>)/giu, `$1${LIVE_ARTIFACT_REDACTION}$2`);
+  redacted = redacted.replace(/(<select\b[^>]*>)[\s\S]*?(<\/select>)/giu, `$1${LIVE_ARTIFACT_REDACTION}$2`);
+  return redacted.replace(
+    /(<[a-z][^>]*\bcontenteditable(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>)[\s\S]*?(<\/[a-z][^>]*>)/giu,
+    `$1${LIVE_ARTIFACT_REDACTION}$2`
+  );
+}
+
+/**
+ * Treat only an observed closed page or a known Playwright termination error as
+ * safe to skip. A generic evaluate failure must remain visible to the test so
+ * the teardown cannot silently pass with an unverified DOM scrub.
+ *
+ * @param {{ isClosed?: () => boolean } | undefined} page
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function isDefinitivelyClosedOrCrashed(page, error) {
+  try {
+    if (typeof page?.isClosed === 'function' && page.isClosed()) return true;
+  } catch {
+    // If page state cannot be read, the error still needs a known termination
+    // message before teardown may treat it as safe.
+  }
+  const errorRecord =
+    error !== null && typeof error === 'object'
+      ? /** @type {{ message?: unknown }} */ (error)
+      : undefined;
+  const message =
+    typeof error === 'string' ? error : typeof errorRecord?.message === 'string' ? errorRecord.message : '';
+  return LIVE_PAGE_TERMINATION_PATTERN.test(message);
 }
 
 /**
  * Mutate Playwright's structured error objects before a reporter can serialize
- * them. Only diagnostic fields are changed; source locations remain useful.
+ * them. Diagnostic strings are redacted recursively, including nested
+ * errorContext/matcherResult/ariaSnapshot values; source locations remain useful.
  *
  * @param {unknown} errors
  * @param {Iterable<string>} [secrets]
@@ -93,10 +126,45 @@ export function redactTestErrors(errors, secrets = liveCredentialValues(), visit
 function redactTestError(error, secrets, visited) {
   if (error === null || typeof error !== 'object' || visited.has(error)) return;
   visited.add(error);
-  for (const field of ['message', 'stack', 'snippet', 'value']) {
+  const directTextFields = new Set(['message', 'stack', 'snippet', 'value']);
+  for (const field of directTextFields) {
     if (typeof error[field] === 'string') error[field] = redactLiveText(error[field], secrets);
+    else if (error[field] && typeof error[field] === 'object') {
+      error[field] = redactTestDiagnosticValue(error[field], secrets, visited);
+    }
   }
-  if (error.cause) redactTestError(error.cause, secrets, visited);
+  for (const [field, value] of Object.entries(error)) {
+    if (directTextFields.has(field) || field === 'location') continue;
+    error[field] = redactTestDiagnosticValue(value, secrets, visited);
+  }
+  // Error properties such as `cause` and Playwright's error context can be
+  // non-enumerable in some serializers, so visit them explicitly as well.
+  for (const field of ['cause', 'errorContext', 'matcherResult']) {
+    if (field in error) error[field] = redactTestDiagnosticValue(error[field], secrets, visited);
+  }
+}
+
+/**
+ * @param {any} value
+ * @param {Iterable<string>} secrets
+ * @param {Set<object>} visited
+ * @returns {any}
+ */
+function redactTestDiagnosticValue(value, secrets, visited) {
+  if (typeof value === 'string') return redactLiveText(value, secrets);
+  if (value === null || typeof value !== 'object' || visited.has(value)) return value;
+  visited.add(value);
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      value[index] = redactTestDiagnosticValue(value[index], secrets, visited);
+    }
+    return value;
+  }
+  for (const [field, nestedValue] of Object.entries(value)) {
+    if (field === 'location') continue;
+    value[field] = redactTestDiagnosticValue(nestedValue, secrets, visited);
+  }
+  return value;
 }
 
 /**
@@ -104,31 +172,38 @@ function redactTestError(error, secrets, visited) {
  * last-resort boundary for DOM snapshots and manually attached diagnostics;
  * the live config separately disables screenshots, videos, and traces.
  *
- * @param {{ evaluate: (pageFunction: () => void) => Promise<unknown> }} page
+ * @param {{ evaluate: (pageFunction: () => void) => Promise<unknown>, isClosed?: () => boolean }} page
  * @returns {Promise<void>}
  */
 export async function scrubLivePage(page) {
-  await page.evaluate(() => {
-    for (const element of document.querySelectorAll('input, textarea, select, [contenteditable="true"]')) {
-      if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-        element.value = '';
-        element.removeAttribute('value');
-        if (element instanceof HTMLTextAreaElement) element.textContent = '';
+  try {
+    await page.evaluate(() => {
+      const editableModes = new Set(['', 'true', 'plaintext-only']);
+      for (const element of document.querySelectorAll('input, textarea, select, [contenteditable]')) {
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+          element.value = '';
+          element.removeAttribute('value');
+          if (element instanceof HTMLTextAreaElement) element.textContent = '';
+        }
+        if (element instanceof HTMLSelectElement) {
+          element.selectedIndex = -1;
+          // Remove option text and selected attributes too; selectedIndex alone
+          // does not erase serialized option content from a later DOM dump.
+          element.textContent = '';
+        }
+        const contentEditableMode = element.getAttribute('contenteditable')?.trim().toLowerCase() ?? null;
+        if (
+          element instanceof HTMLElement &&
+          (element.isContentEditable ||
+            (contentEditableMode !== null && editableModes.has(contentEditableMode)))
+        )
+          element.textContent = '';
       }
-      if (element instanceof HTMLSelectElement) {
-        element.selectedIndex = -1;
-        // Remove option text and selected attributes too; selectedIndex alone
-        // does not erase serialized option content from a later DOM dump.
-        element.textContent = '';
-      }
-      if (
-        element instanceof HTMLElement &&
-        (element.isContentEditable || element.getAttribute('contenteditable') === 'true')
-      )
-        element.textContent = '';
-    }
-    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-  });
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    });
+  } catch (error) {
+    if (!isDefinitivelyClosedOrCrashed(page, error)) throw error;
+  }
 }
 
 /**
