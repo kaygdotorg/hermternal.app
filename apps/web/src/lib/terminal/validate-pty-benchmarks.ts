@@ -457,7 +457,7 @@ function validateProvenance(
     "--name-only",
     `${sourceRevision}..${evidenceHead}`,
   ])
-    .split("\\n")
+    .split("\n")
     .map((path) => path.trim())
     .filter(Boolean);
   const allowedEvidencePaths = new Set([
