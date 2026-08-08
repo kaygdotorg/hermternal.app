@@ -1,14 +1,19 @@
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
-import { access, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   LIVE_ARTIFACT_REDACTION,
   finalizeLiveTest,
   liveArtifactOutputDirectory,
   liveCredentialValues,
   redactLiveText,
+  redactLiveTransportMessage,
   redactTestErrors,
   removeLiveArtifacts,
   scrubLivePage
@@ -22,6 +27,109 @@ async function exists(path: string): Promise<boolean> {
     return false;
   }
 }
+
+const execFileAsync = promisify(execFile);
+const appRoot = existsSync(resolve(process.cwd(), 'node_modules/@playwright/test/cli.js'))
+  ? resolve(process.cwd())
+  : resolve(process.cwd(), 'apps/web');
+const policyPath = resolve(appRoot, 'tests/live/live-artifact-policy.mjs');
+const teardownPath = resolve(appRoot, 'tests/live/live-artifact-teardown.mjs');
+const guardPath = resolve(appRoot, 'tests/live/live-ipc-guard.cjs');
+const playwrightCliPath = resolve(appRoot, 'node_modules/@playwright/test/cli.js');
+const playwrightEntryUrl = pathToFileURL(
+  resolve(appRoot, 'node_modules/@playwright/test/index.mjs')
+).href;
+
+/**
+ * Run an isolated Playwright 1.62.1 worker with the live policy imported before
+ * the test body. The reporter serializes worker-mapped errors, making a leaked
+ * credential observable without using the real Hermes lane or a browser.
+ */
+async function runSyntheticPlaywright(specSource: string): Promise<{
+  code: number;
+  stdout: string;
+  stderr: string;
+}> {
+  const workspace = await mkdtemp(join(tmpdir(), 'hermternal-live-policy-playwright-'));
+  const configPath = join(workspace, 'playwright.config.mjs');
+  const specPath = join(workspace, 'synthetic.spec.mjs');
+  const reporterPath = join(workspace, 'reporter.mjs');
+  const policyUrl = pathToFileURL(policyPath).href;
+  const reporterSource = `
+export default class SyntheticReporter {
+  onTestEnd(_test, result) {
+    process.stdout.write('TEST:' + result.status + ':' + JSON.stringify(result.errors) + '\\n');
+  }
+  onEnd(result) {
+    process.stdout.write('END:' + result.status + '\\n');
+  }
+}
+`;
+  const configSource = `
+import { defineConfig } from ${JSON.stringify(playwrightEntryUrl)};
+import {
+  liveArtifactOutputDirectory,
+  liveArtifactOutputOwnershipToken
+} from ${JSON.stringify(policyUrl)};
+const outputDir = liveArtifactOutputDirectory();
+process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR = outputDir;
+process.env.PLAYWRIGHT_LIVE_OUTPUT_TOKEN = liveArtifactOutputOwnershipToken();
+const guardPath = ${JSON.stringify(guardPath)};
+const existingNodeOptions = process.env.NODE_OPTIONS?.trim() ?? '';
+if (!existingNodeOptions.includes(guardPath))
+  process.env.NODE_OPTIONS = [existingNodeOptions, '--require=' + guardPath].filter(Boolean).join(' ');
+export default defineConfig({
+  testDir: ${JSON.stringify(workspace)},
+  testMatch: /synthetic\\.spec\\.mjs/,
+  fullyParallel: false,
+  workers: 1,
+  retries: 0,
+  timeout: 20_000,
+  outputDir,
+  preserveOutput: 'never',
+  reporter: [[${JSON.stringify(reporterPath)}]],
+  globalTeardown: ${JSON.stringify(teardownPath)},
+  use: {}
+});
+`;
+  await Promise.all([
+    writeFile(configPath, configSource, 'utf8'),
+    writeFile(specPath, specSource.replaceAll('__POLICY_URL__', policyUrl), 'utf8'),
+    writeFile(reporterPath, reporterSource, 'utf8')
+  ]);
+
+  try {
+    try {
+      const result = await execFileAsync(
+        process.execPath,
+        [playwrightCliPath, 'test', '--config', configPath],
+        {
+          cwd: appRoot,
+          env: { ...process.env, HERMES_TEST_PASSWORD: 'synthetic-password' },
+          maxBuffer: 4 * 1024 * 1024,
+          timeout: 10_000,
+          encoding: 'utf8'
+        }
+      );
+      return { code: 0, stdout: result.stdout, stderr: result.stderr };
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number };
+      return {
+        code: typeof failure.code === 'number' ? failure.code : 1,
+        stdout: failure.stdout ?? '',
+        stderr: failure.stderr ?? ''
+      };
+    }
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+}
+
+afterEach(async () => {
+  // Each unit test gets a clean run root. This is global cleanup for the Vitest
+  // harness; finalizeLiveTest itself only removes a per-test child directory.
+  await removeLiveArtifacts(liveArtifactOutputDirectory());
+});
 
 describe('live Playwright artifact policy', () => {
   it('redacts realistic Playwright error contexts, matcher results, and native Error causes', () => {
@@ -541,14 +649,15 @@ describe('live Playwright artifact policy', () => {
 
   it('replaces retained errors with trusted snapshots before cleanup', async () => {
     const outputRoot = liveArtifactOutputDirectory();
-    await mkdir(outputRoot, { recursive: true });
-    await writeFile(join(outputRoot, 'error-context.md'), 'synthetic-password', 'utf8');
+    const testOutput = join(outputRoot, 'replaces-retained-errors');
+    await mkdir(testOutput, { recursive: true });
+    await writeFile(join(testOutput, 'error-context.md'), 'synthetic-password', 'utf8');
 
     const sourceDiagnostic = { message: 'synthetic-password' };
     const testInfo = {
-      attachments: [{ name: 'live-error', path: join(outputRoot, 'error-context.md') }],
+      attachments: [{ name: 'live-error', path: join(testOutput, 'error-context.md') }],
       errors: [sourceDiagnostic],
-      outputDir: outputRoot
+      outputDir: testOutput
     };
 
     const sourceScrubError = new Error('scrub failed synthetic-password');
@@ -582,7 +691,8 @@ describe('live Playwright artifact policy', () => {
     expect(testInfo.errors.map((entry) => entry)).toHaveLength(2);
     expect(JSON.stringify(testInfo.errors)).not.toContain('synthetic-password');
     expect(sourceDiagnostic.message).toBe('synthetic-password');
-    expect(await exists(outputRoot)).toBe(false);
+    expect(await exists(testOutput)).toBe(false);
+    expect(await exists(outputRoot)).toBe(true);
   });
 
   it('protects Playwright worker-mapped IPC errors from inherited serializers', async () => {
@@ -637,17 +747,24 @@ describe('live Playwright artifact policy', () => {
       const mappedErrors = testInfo.errors.map((error) =>
         mapToTestInfoErrorPayload(error as Record<string, unknown>)
       );
-      expect(JSON.stringify(mappedErrors)).not.toContain('synthetic-password');
-      expect(mappedErrors).toHaveLength(1);
-      expect(mappedErrors[0].message).toBe(LIVE_ARTIFACT_REDACTION);
+      expect(JSON.stringify(mappedErrors)).toContain('synthetic-password');
+      const safeTransportMessage = redactLiveTransportMessage(
+        { errors: mappedErrors },
+        ['synthetic-password']
+      ) as { errors: Array<Record<string, unknown>> };
+      expect(JSON.stringify(safeTransportMessage)).not.toContain('synthetic-password');
+      expect(safeTransportMessage.errors).toHaveLength(1);
+      expect(safeTransportMessage.errors[0].message).toBe(LIVE_ARTIFACT_REDACTION);
 
       // The real worker keeps using the array after afterEach: push, map, and
       // iteration must remain ordinary Playwright-compatible operations.
       testInfo.errors.push({ message: LIVE_ARTIFACT_REDACTION });
       expect([...testInfo.errors]).toHaveLength(2);
-      expect(JSON.stringify(testInfo.errors.map((error) => ({ message: error.message })))).not.toContain(
-        'synthetic-password'
-      );
+      const postCleanupMapping = testInfo.errors.map((error) => ({ message: error.message }));
+      expect(JSON.stringify(postCleanupMapping)).toContain('synthetic-password');
+      expect(
+        JSON.stringify(redactLiveTransportMessage(postCleanupMapping, ['synthetic-password']))
+      ).not.toContain('synthetic-password');
     } finally {
       if (objectToJSON) Object.defineProperty(Object.prototype, 'toJSON', objectToJSON);
       else delete (Object.prototype as { toJSON?: unknown }).toJSON;
@@ -657,10 +774,89 @@ describe('live Playwright artifact policy', () => {
     }
   });
 
+  it('protects frozen read-only TestInfo errors at the actual Playwright IPC boundary', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { finalizeLiveTest } from '__POLICY_URL__';
+const secret = 'synthetic-password';
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test('frozen read-only errors', async ({}, testInfo) => {
+  test.fail();
+  const sourceErrors = Object.freeze([{ message: secret, stack: 'Error: ' + secret }]);
+  Object.defineProperty(testInfo, 'errors', {
+    configurable: true,
+    enumerable: true,
+    get: () => sourceErrors,
+    set: () => {
+      throw new Error('errors are read-only');
+    }
+  });
+});
+`);
+    expect(result.code).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain('synthetic-password');
+    expect(result.stdout).toContain(LIVE_ARTIFACT_REDACTION);
+  }, 30_000);
+
+  it('protects non-configurable hostile Object and Array serializers in a worker', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { finalizeLiveTest } from '__POLICY_URL__';
+const secret = 'synthetic-password';
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test('non-configurable hostile serializers', async () => {
+  test.fail();
+  Object.defineProperty(Object.prototype, 'toJSON', {
+    configurable: false,
+    enumerable: false,
+    value: () => ({ leaked: secret }),
+    writable: false
+  });
+  Object.defineProperty(Array.prototype, 'toJSON', {
+    configurable: false,
+    enumerable: false,
+    value: () => ({ leaked: secret }),
+    writable: false
+  });
+  await test.step('credential-bearing step', async () => {
+    throw new Error(secret);
+  });
+});
+`);
+    expect(result.code).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain('synthetic-password');
+    expect(result.stdout).toContain(LIVE_ARTIFACT_REDACTION);
+  }, 30_000);
+
+  it('protects step-end IPC emitted before afterEach runs', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { finalizeLiveTest } from '__POLICY_URL__';
+const secret = 'synthetic-password';
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test('step IPC before cleanup', async () => {
+  test.fail();
+  await test.step('credential-bearing step', async () => {
+    throw new Error(secret);
+  });
+});
+`);
+    expect(result.code).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain('synthetic-password');
+    expect(result.stdout).toContain(LIVE_ARTIFACT_REDACTION);
+  }, 30_000);
+
   it('runs attachment and output cleanup before propagating a redaction failure', async () => {
     const outputRoot = liveArtifactOutputDirectory();
-    await mkdir(outputRoot, { recursive: true });
-    await writeFile(join(outputRoot, 'error-context.md'), 'synthetic-password', 'utf8');
+    const testOutput = join(outputRoot, 'redaction-failure');
+    await mkdir(testOutput, { recursive: true });
+    await writeFile(join(testOutput, 'error-context.md'), 'synthetic-password', 'utf8');
 
     const throwingDiagnostic = {};
     Object.defineProperty(throwingDiagnostic, 'message', {
@@ -672,9 +868,9 @@ describe('live Playwright artifact policy', () => {
       set: () => undefined
     });
     const testInfo = {
-      attachments: [{ name: 'live-error', path: join(outputRoot, 'error-context.md') }],
+      attachments: [{ name: 'live-error', path: join(testOutput, 'error-context.md') }],
       errors: [throwingDiagnostic],
-      outputDir: outputRoot
+      outputDir: testOutput
     };
 
     await expect(
@@ -683,73 +879,27 @@ describe('live Playwright artifact policy', () => {
     expect(testInfo.attachments).toHaveLength(0);
     expect(testInfo.errors).toEqual([LIVE_ARTIFACT_REDACTION]);
     expect(JSON.stringify(testInfo.errors)).not.toContain('synthetic-password');
-    expect(await exists(outputRoot)).toBe(false);
+    expect(await exists(testOutput)).toBe(false);
+    expect(await exists(outputRoot)).toBe(true);
   });
 
-  it('binds cleanup to the owned inode across a replacement race', async () => {
+  it('binds cleanup to the owned inode across an initial replacement race', async () => {
     const outputRoot = liveArtifactOutputDirectory();
     const ownedArtifact = join(outputRoot, 'owned-only.txt');
-    const backupRoot = `${outputRoot}-race-backup`;
     const replacementArtifact = join(outputRoot, 'replacement.txt');
-    await rm(backupRoot, { recursive: true, force: true });
     await mkdir(outputRoot, { recursive: true });
     await writeFile(ownedArtifact, 'synthetic-password', 'utf8');
 
-    const originalRm = fsPromises.rm;
+    const originalRename = fsPromises.rename;
     let swapped = false;
-    fsPromises.rm = async (target, options) => {
-      if (!swapped) {
+    fsPromises.rename = async (source, target) => {
+      const result = await originalRename(source, target);
+      if (!swapped && String(source) === outputRoot) {
         swapped = true;
-        try {
-          await fsPromises.rename(outputRoot, backupRoot);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
         await mkdir(outputRoot, { recursive: true });
         await writeFile(replacementArtifact, 'replacement-survives', 'utf8');
       }
-      return originalRm(target, options);
-    };
-
-    try {
-      await removeLiveArtifacts(outputRoot);
-    } finally {
-      fsPromises.rm = originalRm;
-    }
-
-    expect(swapped).toBe(true);
-    expect(await exists(replacementArtifact)).toBe(true);
-    if (await exists(backupRoot)) {
-      expect(await exists(join(backupRoot, 'owned-only.txt'))).toBe(true);
-    }
-    await rm(outputRoot, { recursive: true, force: true });
-    await rm(backupRoot, { recursive: true, force: true });
-  });
-
-  it('preserves a quarantine replacement across the final identity check', async () => {
-    const outputRoot = liveArtifactOutputDirectory();
-    const ownedArtifact = join(outputRoot, 'owned-only.txt');
-    let quarantinePath = '';
-    let deletionPath = '';
-    let ownedBackup = '';
-    let renameCalls = 0;
-    await mkdir(outputRoot, { recursive: true });
-    await writeFile(ownedArtifact, 'owned-content', 'utf8');
-
-    const originalRename = fsPromises.rename;
-    fsPromises.rename = async (source, target) => {
-      renameCalls += 1;
-      const sourcePath = String(source);
-      const targetPath = String(target);
-      if (renameCalls === 2) {
-        quarantinePath = sourcePath;
-        deletionPath = targetPath;
-        ownedBackup = `${sourcePath}-owned-backup`;
-        await originalRename(source, ownedBackup);
-        await mkdir(sourcePath, { recursive: true });
-        await writeFile(join(sourcePath, 'replacement.txt'), 'replacement-survives', 'utf8');
-      }
-      return originalRename(source, target);
+      return result;
     };
 
     try {
@@ -758,16 +908,59 @@ describe('live Playwright artifact policy', () => {
       fsPromises.rename = originalRename;
     }
 
-    expect(renameCalls).toBeGreaterThanOrEqual(2);
-    expect(await exists(join(deletionPath, 'replacement.txt'))).toBe(true);
-    expect(await exists(join(ownedBackup, 'owned-only.txt'))).toBe(true);
-    expect(await exists(outputRoot)).toBe(false);
+    expect(swapped).toBe(true);
+    expect(await exists(replacementArtifact)).toBe(true);
+    expect(await exists(ownedArtifact)).toBe(false);
+    await rm(outputRoot, { recursive: true, force: true });
+  });
 
-    await rm(deletionPath, { recursive: true, force: true });
-    await rm(ownedBackup, { recursive: true, force: true });
-    if (deletionPath) {
-      await rm(resolve(deletionPath, '..'), { recursive: true, force: true });
+  it('preserves a final tombstone replacement and never calls recursive rm', async () => {
+    const outputRoot = liveArtifactOutputDirectory();
+    const ownedArtifact = join(outputRoot, 'owned-only.txt');
+    let finalTombstone = '';
+    let replacementRoot = '';
+    let originalBackup = '';
+    let replaced = false;
+    let recursiveRmCalled = false;
+    await mkdir(outputRoot, { recursive: true });
+    await writeFile(ownedArtifact, 'owned-content', 'utf8');
+
+    const originalRename = fsPromises.rename;
+    const originalRmdir = fsPromises.rmdir;
+    const originalRm = fsPromises.rm;
+    fsPromises.rm = async (...args) => {
+      recursiveRmCalled = true;
+      return originalRm(...args);
+    };
+    fsPromises.rmdir = async (target) => {
+      const targetPath = String(target);
+      if (!replaced && targetPath.includes('-owned-')) {
+        replaced = true;
+        finalTombstone = targetPath;
+        originalBackup = `${targetPath}-owned-backup`;
+        await originalRename(targetPath, originalBackup);
+        replacementRoot = targetPath;
+        await mkdir(replacementRoot, { recursive: true });
+        await writeFile(join(replacementRoot, 'replacement.txt'), 'replacement-survives', 'utf8');
+      }
+      return originalRmdir(target);
+    };
+
+    try {
+      await removeLiveArtifacts(outputRoot);
+    } finally {
+      fsPromises.rmdir = originalRmdir;
+      fsPromises.rm = originalRm;
     }
+
+    expect(replaced).toBe(true);
+    expect(finalTombstone).not.toBe('');
+    expect(await exists(join(replacementRoot, 'replacement.txt'))).toBe(true);
+    expect(await exists(originalBackup)).toBe(true);
+    expect(await exists(outputRoot)).toBe(false);
+    expect(recursiveRmCalled).toBe(false);
+
+    await rm(resolve(replacementRoot, '..'), { recursive: true, force: true });
   });
 
   it('cleans an empty quarantine parent after verification fails closed', async () => {
@@ -863,14 +1056,49 @@ describe('live Playwright artifact policy', () => {
     }
   });
 
+  it('preserves one owned run root across two Playwright tests and removes it globally', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { finalizeLiveTest } from '__POLICY_URL__';
+const root = process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+if (!root) throw new Error('missing synthetic output root');
+const secret = 'synthetic-password';
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test('first owned test', async ({}, testInfo) => {
+  await mkdir(testInfo.outputDir, { recursive: true });
+  await writeFile(join(testInfo.outputDir, 'per-test-secret.txt'), secret, 'utf8');
+  await writeFile(join(root, 'run-level.txt'), 'root-level-survives', 'utf8');
+});
+test('second owned test sees the same root', async ({}, testInfo) => {
+  const marker = await readFile(join(root, '.hermternal-live-artifact-owner'), 'utf8');
+  if (!marker.endsWith('\\n')) throw new Error('run marker was not preserved');
+  const runLevel = await readFile(join(root, 'run-level.txt'), 'utf8');
+  if (runLevel !== 'root-level-survives') throw new Error('root-level artifact was removed');
+  const entries = await readdir(root, { recursive: true });
+  if (entries.some((entry) => String(entry).endsWith('per-test-secret.txt')))
+    throw new Error('per-test output was not removed');
+  await mkdir(testInfo.outputDir, { recursive: true });
+});
+`);
+    if (result.code !== 0) throw new Error(`synthetic lifecycle failed\\n${result.stdout}\\n${result.stderr}`);
+    expect(result.stdout + result.stderr).not.toContain('synthetic-password');
+    expect(result.stdout).toContain('END:passed');
+  }, 30_000);
+
   it('pins the live config to no media artifacts, no retained output, and safe reporting', async () => {
-    const config = await readFile(resolve(process.cwd(), 'playwright.live.config.ts'), 'utf8');
+    const config = await readFile(resolve(appRoot, 'playwright.live.config.ts'), 'utf8');
 
     expect(config).toContain('outputDir: liveOutputDirectory');
     expect(config).toContain('PLAYWRIGHT_LIVE_OUTPUT_TOKEN');
     expect(config).toContain("preserveOutput: 'never'");
     expect(config).toContain("reporter: [['./tests/live/safe-reporter.mjs']]");
     expect(config).toContain("globalTeardown: './tests/live/live-artifact-teardown.mjs'");
+    expect(config).toContain('live-ipc-guard.cjs');
+    expect(config).toContain('NODE_OPTIONS');
     expect(config).toContain("trace: 'off'");
     expect(config).toContain("video: 'off'");
     expect(config).toContain("screenshot: 'off'");

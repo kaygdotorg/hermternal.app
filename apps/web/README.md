@@ -122,23 +122,29 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   registration, update/reload control, real offline cached navigation, and no-network requests.
 - Axe runs against success, empty, and failure states in both light and dark color schemes.
 - The password preview regression delays the hydration focus frame, sends rapid keyboard input, repeats
-  field transitions, and submits from the password control. The opt-in live lane uses a run-owned temporary
-  root with exact-root cleanup, disabled media artifacts, a status-only reporter, bounded descriptor-aware
-  structured-error redaction (including native Error causes, Playwright `errorContext`, matcher results,
-  logs, and ARIA snapshots) into detached trusted snapshots, with descriptor/read-back checks for data and
-  accessor properties and no retained source graph. Snapshot arrays remain real Playwright-compatible arrays
-  with safe own serialization and species behavior; the live worker also pins inherited `Object.prototype`
-  and `Array.prototype` serializers before Playwright maps `testInfo.errors` into ordinary IPC payloads.
-  Own `toJSON` hooks, stateful or inconsistent properties, incomplete descriptors, malformed values, and
-  over-budget graphs fail closed. Balanced serialized
-  contenteditable markup, raw-text textarea bodies, select/option nesting, and actual `value` attributes
-  are scanned structurally, including unquoted values. Comments, nested or mismatched form markup,
-  unclosed containers, malformed or unknown markup, duplicate or ambiguous attributes, and encoded
+  field transitions, and submits from the password control. The opt-in live lane uses one run-owned 0700
+  temporary root with an owner marker, disabled media artifacts, and a status-only reporter. Every
+  Playwright worker preloads `tests/live/live-ipc-guard.cjs` through `NODE_OPTIONS --require` before the
+  test body. The guard captures and pins `process.send`, never mutates `Object.prototype`,
+  `Array.prototype`, or `testInfo.errors`, and detaches/redacts every worker-to-parent payload, including
+  step, test-end, fatal, attachment, stdio, environment, and response messages. Unknown, trapped, or
+  over-budget values are replaced or not forwarded, so Playwright cannot fall back to serializing the
+  unsafe source graph. Per-test finalization only quarantines strict child output directories; it preserves
+  the shared marker, root, and root-level artifacts. Global teardown alone removes the complete root by
+  atomic quarantine plus bounded known-entry non-recursive `unlink`/`rmdir`, retaining any unknown,
+  replaced, or raced remnant. Detached descriptor-aware snapshots cover native Error causes, Playwright
+  `errorContext`, matcher results, logs, ARIA snapshots, and structured form values without retaining the
+  source graph. Snapshot arrays remain real Playwright-compatible arrays with normal push/map/iterator
+  behavior and safe own serialization/species behavior. Own `toJSON` hooks, stateful or inconsistent
+  properties, incomplete descriptors, malformed values, and over-budget graphs fail closed. Balanced
+  serialized contenteditable markup, raw-text textarea bodies, select/option nesting, and actual `value`
+  attributes are scanned structurally, including unquoted values. Comments, nested or mismatched form
+  markup, unclosed containers, malformed or unknown markup, duplicate or ambiguous attributes, and encoded
   credentials fail closed rather than allowing a later editable element to be skipped. Scrub failures fail
-  the proof unless `page.isClosed()` returns `true`; generic error text
-  such as `page crashed` is never accepted as termination proof. Attachments and output cleanup run in
-  `finally` even when redaction fails, so a failed proof cannot retain synthetic credentials in traces,
-  screenshots, reports, error contexts, or `test-results`.
+  the proof unless `page.isClosed()` returns `true`; generic error text such as `page crashed` is never
+  accepted as termination proof. Attachments and safe output cleanup run in `finally` even when redaction
+  fails, so a failed proof cannot retain synthetic credentials in traces, screenshots, reports, error
+  contexts, or `test-results`.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target
