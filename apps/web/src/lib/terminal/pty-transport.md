@@ -46,8 +46,11 @@ operations:
   and reattach notices/readiness are rechecked after observer callbacks. State
   events are captured before observers, but `onStateChange` runs only if that
   transition still owns the generation after `onEvent`. Ticket-pending
-  cancellation is rechecked before ticket minting or socket creation. A detach
-  timestamp is recorded only if adapter-controlled socket close returns without
+  cancellation is rechecked before ticket minting, and `connecting` cancellation
+  is rechecked again before constructing the opaque upgrade or invoking the
+  socket factory. Therefore a reentrant observer cannot allocate a stale socket
+  or consume a replacement generation's factory work. A detach timestamp is
+  recorded only if adapter-controlled socket close returns without
   a replacement claiming the generation, so an old A cleanup cannot write
   evidence after reentrant B connects. Late socket-factory values are closed
   exactly once even when cancellation wins before the abort listener is
@@ -102,10 +105,12 @@ and callback cleanup. Lifecycle regressions cover already-aborted attempts,
 pre-open retry races, pre-open failure classification, established error-only
 `onerror` detachment with a write-once retention anchor, stale-error expiry,
 identity-scoped expiry evidence, reentrant Close replacement,
-observer cancellation during `ticket_pending` and reattach, stale
-`onStateChange` suppression after `onEvent` Close, A-close/B replacement
+observer cancellation during `ticket_pending`, `connecting`, and reattach,
+stale `onStateChange` suppression after `onEvent` Close, A-close/B replacement
 retention evidence, abort-listener replacement races, post-ticket stale
-continuations, late socket ownership, duplicate-caller cancellation,
+continuations, and reentrant `connecting` cancellation, Detach, Close, caller
+abort, and replacement that produce no stale factory call or socket. It also
+covers late socket ownership, duplicate-caller cancellation,
 adapter-close reentrancy, reattach-retention restoration, and prior-true
 truncation resets across failure and replacement transitions. New deterministic
 deferred-adapter regressions prove that ignored validator, ticket, and factory
@@ -147,3 +152,16 @@ does not claim an impossible self-hash. Reproduce it with
 from `apps/web`, then commit the resulting evidence separately. The current
 artifact reports zero duplicate-owner violations; a latency threshold remains
 `null` because this issue establishes a baseline rather than inventing a budget.
+
+`pty-connecting-ownership.bench.ts` measures only the post-`connecting`
+ownership-decision path: from a reentrant observer's cancellation or replacement
+to the old operation's aborted settlement. It deliberately excludes ticket
+minting before `connecting`, network, credentials, PTY bytes, rendering, and the
+replacement's successful open. Thirty deterministic runs plus five warmups cover
+caller abort, Close, Detach, and replacement. Its sanitized artifact records
+factory, stale-factory, allocation, open, stale-state, and cleanup totals so a
+stale generation must have zero factory calls and zero allocated sockets.
+`provenance.sourceRevision` names the committed source revision measured before
+its artifact is committed, avoiding a circular self-hash. Reproduce with
+`GIT_SOURCE_REVISION=$(git rev-parse HEAD) bun src/lib/terminal/pty-connecting-ownership.bench.ts`
+from `apps/web`; no latency threshold is claimed.
