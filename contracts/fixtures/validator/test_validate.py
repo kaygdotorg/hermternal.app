@@ -24,12 +24,19 @@ import validate
 from fixture_authority_test_source import PROTECTED_OBJECTS, seed_protected_objects
 
 
-def _active_authority_environment() -> dict[str, str]:
-    """Provision the reviewed source constants as the external runtime pins."""
+def _authenticated_verifier():
+    """Load the verifier before provisioning pins for a test subprocess."""
 
+    return validate._authenticated_authority_verifier(validate.REPO_ROOT)
+
+
+def _active_authority_environment() -> dict[str, str]:
+    """Provision constants from the authenticated verifier as runtime pins."""
+
+    verifier = _authenticated_verifier()
     return {
-        validate.ACTIVE_AUTHORITY_COMMIT_ENV: validate.ACTIVE_AUTHORITY_COMMIT,
-        validate.ACTIVE_SOURCE_COMMIT_ENV: validate.ACTIVE_SOURCE_COMMIT,
+        validate.ACTIVE_AUTHORITY_COMMIT_ENV: verifier.EXPECTED_ACTIVE_AUTHORITY_COMMIT,
+        validate.ACTIVE_SOURCE_COMMIT_ENV: verifier.EXPECTED_ACTIVE_SOURCE_COMMIT,
     }
 
 
@@ -50,10 +57,11 @@ def _install_active_authority_environment(test_case: unittest.TestCase) -> None:
 def _protected_authority_objects() -> tuple[tuple[str, str], ...]:
     """Return every external authority/source object required by aggregate trust."""
 
+    verifier = _authenticated_verifier()
     active = _active_authority_environment()
     pinned = (
-        ("historical-authority", validate.EXPECTED_HISTORICAL_AUTHORITY_COMMIT),
-        ("historical-source", validate.EXPECTED_HISTORICAL_SOURCE_COMMIT),
+        ("historical-authority", verifier.EXPECTED_AUTHORITY_COMMIT),
+        ("historical-source", verifier.EXPECTED_SOURCE_COMMIT),
         ("active-authority", active[validate.ACTIVE_AUTHORITY_COMMIT_ENV]),
         ("active-source", active[validate.ACTIVE_SOURCE_COMMIT_ENV]),
     )
@@ -125,6 +133,7 @@ def _clone_plain_object_repository(*, seed: bool) -> tuple[tempfile.TemporaryDir
 def _create_alternate_authority_repository() -> tuple[tempfile.TemporaryDirectory[str], Path, str, str]:
     """Create a valid alternate authority/source pair for external-pin tests."""
 
+    verifier = _authenticated_verifier()
     temporary = tempfile.TemporaryDirectory(prefix="fixture-validator-alternate-authority-")
     object_repo = Path(temporary.name) / "repo"
     completed = subprocess.run(
@@ -151,7 +160,7 @@ def _create_alternate_authority_repository() -> tuple[tempfile.TemporaryDirector
     except AssertionError:
         temporary.cleanup()
         raise
-    source_commit = validate.ACTIVE_SOURCE_COMMIT
+    source_commit = verifier.EXPECTED_ACTIVE_SOURCE_COMMIT
     completed = subprocess.run(
         ["git", "checkout", "--quiet", "--detach", source_commit],
         cwd=object_repo,
@@ -164,7 +173,7 @@ def _create_alternate_authority_repository() -> tuple[tempfile.TemporaryDirector
         raise AssertionError(completed.stderr or completed.stdout)
     alternate_path = object_repo / "scripts/fixture_registry_authority.v2.alternate.json"
     authority_bytes = subprocess.check_output(
-        ["git", "show", f"{validate.ACTIVE_AUTHORITY_COMMIT}:{validate.VALIDATOR_AUTHORITY_PATH}"],
+        ["git", "show", f"{verifier.EXPECTED_ACTIVE_AUTHORITY_COMMIT}:{validate.VALIDATOR_AUTHORITY_PATH}"],
         cwd=object_repo,
     )
     alternate_path.write_bytes(authority_bytes)
