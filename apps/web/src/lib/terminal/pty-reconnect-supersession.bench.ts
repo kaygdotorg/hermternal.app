@@ -102,6 +102,7 @@ async function runStage(stage: Stage): Promise<RunProof> {
   let resolveValidation!: (value: boolean) => void;
   let resolveTicket!: (value: string) => void;
   let resolveFactory!: (value: BenchmarkSocket) => void;
+  let validationCalls = 0;
   let ticketRequests = 0;
   let socketFactoryCalls = 0;
   let openedSockets = 0;
@@ -110,7 +111,7 @@ async function runStage(stage: Stage): Promise<RunProof> {
   let transport!: PtyTransport;
 
   const validateAttachment = (): Promise<boolean> | true => {
-    if (stage !== "validator") return true;
+    if (stage !== "validator" || validationCalls++ > 0) return true;
     return new Promise<boolean>((resolve) => {
       resolveValidation = resolve;
     });
