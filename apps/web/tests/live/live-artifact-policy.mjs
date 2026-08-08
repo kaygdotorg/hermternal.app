@@ -6,8 +6,32 @@ export const LIVE_ARTIFACT_REDACTION = '[redacted-live-credential]';
 const LIVE_OUTPUT_PREFIX = 'hermternal-playwright-live-';
 const LIVE_DEFAULT_USERNAME = 'hermternal-test';
 const LIVE_SECRET_ENV_NAMES = ['HERMES_TEST_USERNAME', 'HERMES_TEST_PASSWORD'];
-const LIVE_PAGE_TERMINATION_PATTERN =
-  /(?:target page, context or browser has been closed|(?:page|browser|context)(?: has been| was| has)? closed|(?:page|browser|context)(?: has)? crashed)/iu;
+const REDACTION_MAX_DEPTH = 16;
+const REDACTION_MAX_NODES = 2048;
+const REDACTION_MAX_STRINGS = 4096;
+const REDACTION_MAX_STRING_LENGTH = 256 * 1024;
+const REDACTION_MAX_TOTAL_STRING_LENGTH = 4 * 1024 * 1024;
+const REDACTION_MAX_ARRAY_ITEMS = 512;
+const REDACTION_MAX_PROPERTIES = 1024;
+const REDACTION_BUDGET_MESSAGE = 'live artifact redaction budget exceeded';
+const REDACTION_FAILURE_MESSAGE = 'live artifact redaction failed';
+const EDITABLE_CONTENT_MODES = new Set(['', 'true', 'plaintext-only']);
+const HTML_VOID_ELEMENTS = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr'
+]);
 
 /**
  * Read the explicitly supplied live-proof values plus the fixed synthetic
@@ -50,6 +74,158 @@ export function isLiveArtifactDirectory(directory) {
 }
 
 /**
+ * Find the end of one HTML tag while respecting quoted attribute values.
+ * Returning no boundary is intentionally fail-closed for editable markup.
+ *
+ * @param {string} value
+ * @param {number} start
+ * @returns {number}
+ */
+function findHtmlTagEnd(value, start) {
+  let quote = '';
+  for (let index = start + 1; index < value.length; index += 1) {
+    const character = value[index];
+    if (quote) {
+      if (character === quote) quote = '';
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === '>') return index;
+  }
+  return -1;
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @param {number} end
+ * @returns {{ closing: boolean, name: string, selfClosing: boolean } | undefined}
+ */
+function parseHtmlTag(value, start, end) {
+  if (value.startsWith('<!--', start)) return undefined;
+  let cursor = start + 1;
+  let closing = false;
+  if (value[cursor] === '/') {
+    closing = true;
+    cursor += 1;
+  }
+  if (value[cursor] === '!' || value[cursor] === '?') return undefined;
+  while (cursor < end && /\s/u.test(value[cursor])) cursor += 1;
+  const nameStart = cursor;
+  if (!/[A-Za-z]/u.test(value[cursor] ?? '')) return undefined;
+  cursor += 1;
+  while (cursor < end && /[A-Za-z0-9:_-]/u.test(value[cursor])) cursor += 1;
+  const name = value.slice(nameStart, cursor).toLowerCase();
+  return {
+    closing,
+    name,
+    selfClosing: !closing && /\/\s*>$/u.test(value.slice(start, end + 1))
+  };
+}
+
+/**
+ * @param {string} tag
+ * @returns {boolean}
+ */
+function hasEditableContentAttribute(tag) {
+  const match = /(?:^|[\s<])contenteditable(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/iu.exec(tag);
+  if (!match) return false;
+  const mode = (match[1] ?? match[2] ?? match[3] ?? '').trim().toLowerCase();
+  return EDITABLE_CONTENT_MODES.has(mode);
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {{ start: number, end: number, tag: { closing: boolean, name: string, selfClosing: boolean } } | { malformedStart: number } | undefined}
+ */
+function findNextEditableOpening(value, start) {
+  let cursor = start;
+  while (cursor < value.length) {
+    const opening = value.indexOf('<', cursor);
+    if (opening < 0) return undefined;
+    const end = findHtmlTagEnd(value, opening);
+    if (end < 0) {
+      return hasEditableContentAttribute(value.slice(opening)) ? { malformedStart: opening } : undefined;
+    }
+    const tag = parseHtmlTag(value, opening, end);
+    if (tag && !tag.closing && !tag.selfClosing && hasEditableContentAttribute(value.slice(opening, end + 1))) {
+      return { start: opening, end, tag };
+    }
+    cursor = end + 1;
+  }
+  return undefined;
+}
+
+/**
+ * @param {string} value
+ * @param {{ end: number, tag: { name: string } }} opening
+ * @returns {{ start: number, end: number } | undefined}
+ */
+function findMatchingClosingTag(value, opening) {
+  const stack = [opening.tag.name];
+  let cursor = opening.end + 1;
+  while (cursor < value.length) {
+    const next = value.indexOf('<', cursor);
+    if (next < 0) return undefined;
+    const end = findHtmlTagEnd(value, next);
+    if (end < 0) return undefined;
+    const tag = parseHtmlTag(value, next, end);
+    if (tag) {
+      if (tag.closing) {
+        if (stack.at(-1) !== tag.name) return undefined;
+        stack.pop();
+        if (stack.length === 0) return { start: next, end };
+      } else if (!tag.selfClosing && !HTML_VOID_ELEMENTS.has(tag.name)) {
+        stack.push(tag.name);
+      }
+    }
+    cursor = end + 1;
+  }
+  return undefined;
+}
+
+/**
+ * Replace the contents of each valid contenteditable element using a balanced
+ * tag scan. A regular expression cannot distinguish an inner `</div>` from
+ * the matching close for an outer editable region, so an incomplete boundary
+ * redacts the remainder instead of leaving an untrusted fragment behind.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function redactContentEditableMarkup(value) {
+  let cursor = 0;
+  let redacted = '';
+  while (cursor < value.length) {
+    const opening = findNextEditableOpening(value, cursor);
+    if (!opening) {
+      redacted += value.slice(cursor);
+      break;
+    }
+    if ('malformedStart' in opening) {
+      redacted += value.slice(cursor, opening.malformedStart);
+      redacted += LIVE_ARTIFACT_REDACTION;
+      break;
+    }
+    redacted += value.slice(cursor, opening.start);
+    const closing = findMatchingClosingTag(value, opening);
+    redacted += value.slice(opening.start, opening.end + 1);
+    if (!closing) {
+      redacted += LIVE_ARTIFACT_REDACTION;
+      break;
+    }
+    redacted += LIVE_ARTIFACT_REDACTION;
+    redacted += value.slice(closing.start, closing.end + 1);
+    cursor = closing.end + 1;
+  }
+  return redacted;
+}
+
+/**
  * Replace known synthetic credentials first, then redact credential-shaped
  * input values from HTML snippets. The second pass protects failure contexts
  * that serialize a DOM value after a locator assertion has already failed.
@@ -60,6 +236,7 @@ export function isLiveArtifactDirectory(directory) {
  */
 export function redactLiveText(value, secrets = liveCredentialValues()) {
   if (typeof value !== 'string') return value;
+  if (value.length > REDACTION_MAX_STRING_LENGTH) throw new Error(REDACTION_BUDGET_MESSAGE);
   let redacted = value;
   for (const secret of [...new Set(secrets)].filter((item) => item.length > 0).sort((a, b) => b.length - a.length)) {
     redacted = redacted.split(secret).join(LIVE_ARTIFACT_REDACTION);
@@ -71,100 +248,179 @@ export function redactLiveText(value, secrets = liveCredentialValues()) {
   );
   redacted = redacted.replace(/(<textarea\b[^>]*>)[\s\S]*?(<\/textarea>)/giu, `$1${LIVE_ARTIFACT_REDACTION}$2`);
   redacted = redacted.replace(/(<select\b[^>]*>)[\s\S]*?(<\/select>)/giu, `$1${LIVE_ARTIFACT_REDACTION}$2`);
-  return redacted.replace(
-    /(<[a-z][^>]*\bcontenteditable(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>)[\s\S]*?(<\/[a-z][^>]*>)/giu,
-    `$1${LIVE_ARTIFACT_REDACTION}$2`
-  );
+  return redactContentEditableMarkup(redacted);
 }
 
 /**
- * Treat only an observed closed page or a known Playwright termination error as
- * safe to skip. A generic evaluate failure must remain visible to the test so
- * the teardown cannot silently pass with an unverified DOM scrub.
+ * Only an observed `page.isClosed() === true` result proves that teardown no
+ * longer has a live DOM boundary. Error message text is never trusted because
+ * a generic evaluator can report words such as "page crashed" while the page
+ * remains open and readable.
  *
  * @param {{ isClosed?: () => boolean } | undefined} page
- * @param {unknown} error
  * @returns {boolean}
  */
-export function isDefinitivelyClosedOrCrashed(page, error) {
+export function isDefinitivelyClosed(page) {
   try {
-    if (typeof page?.isClosed === 'function' && page.isClosed()) return true;
+    return typeof page?.isClosed === 'function' && page.isClosed() === true;
   } catch {
-    // If page state cannot be read, the error still needs a known termination
-    // message before teardown may treat it as safe.
+    return false;
   }
-  const errorRecord =
-    error !== null && typeof error === 'object'
-      ? /** @type {{ message?: unknown }} */ (error)
-      : undefined;
-  const message =
-    typeof error === 'string' ? error : typeof errorRecord?.message === 'string' ? errorRecord.message : '';
-  return LIVE_PAGE_TERMINATION_PATTERN.test(message);
+}
+
+/**
+ * @typedef {{ visited: Set<object>, nodes: number, strings: number, totalStringLength: number, arrayItems: number, properties: number }} RedactionState
+ */
+
+/**
+ * @returns {RedactionState}
+ */
+function createRedactionState() {
+  return {
+    visited: new Set(),
+    nodes: 0,
+    strings: 0,
+    totalStringLength: 0,
+    arrayItems: 0,
+    properties: 0
+  };
+}
+
+function throwRedactionBudget() {
+  throw new Error(REDACTION_BUDGET_MESSAGE);
+}
+
+function throwRedactionFailure() {
+  throw new Error(REDACTION_FAILURE_MESSAGE);
+}
+
+/**
+ * @param {RedactionState} state
+ * @param {number} depth
+ */
+function consumeRedactionNode(state, depth) {
+  if (depth > REDACTION_MAX_DEPTH || state.nodes >= REDACTION_MAX_NODES) throwRedactionBudget();
+  state.nodes += 1;
+}
+
+/**
+ * @param {string} value
+ * @param {Iterable<string>} secrets
+ * @param {RedactionState} state
+ * @returns {string}
+ */
+function redactBoundedString(value, secrets, state) {
+  if (
+    value.length > REDACTION_MAX_STRING_LENGTH ||
+    state.strings >= REDACTION_MAX_STRINGS ||
+    state.totalStringLength + value.length > REDACTION_MAX_TOTAL_STRING_LENGTH
+  ) {
+    throwRedactionBudget();
+  }
+  state.strings += 1;
+  state.totalStringLength += value.length;
+  return /** @type {string} */ (redactLiveText(value, secrets));
+}
+
+/**
+ * @param {object} target
+ * @param {string | symbol} key
+ * @param {PropertyDescriptor} descriptor
+ * @param {unknown} value
+ */
+function writeDiagnosticValue(target, key, descriptor, value) {
+  if (value === descriptor.value) return;
+  if (descriptor.writable !== true) throwRedactionFailure();
+  try {
+    Reflect.set(target, key, value);
+  } catch {
+    throwRedactionFailure();
+  }
+}
+
+/**
+ * @param {object} target
+ * @param {string | symbol} key
+ * @param {PropertyDescriptor} descriptor
+ * @param {Iterable<string>} secrets
+ * @param {RedactionState} state
+ * @param {number} depth
+ */
+function redactAccessorValue(target, key, descriptor, secrets, state, depth) {
+  if (typeof descriptor.get !== 'function') return;
+  let current;
+  try {
+    current = Reflect.get(target, key);
+  } catch {
+    throwRedactionFailure();
+  }
+  const redacted = redactTestDiagnosticValue(current, secrets, state, depth + 1);
+  if (redacted === current) return;
+  if (typeof descriptor.set !== 'function') throwRedactionFailure();
+  try {
+    Reflect.set(target, key, redacted);
+  } catch {
+    throwRedactionFailure();
+  }
+}
+
+/**
+ * Traverse own string and symbol properties, including non-enumerable native
+ * Error fields. Cycles are skipped by identity; every other limit fails closed
+ * so a reporter cannot serialize a partially redacted diagnostic graph.
+ *
+ * @param {any} value
+ * @param {Iterable<string>} secrets
+ * @param {RedactionState} state
+ * @param {number} depth
+ * @returns {any}
+ */
+function redactTestDiagnosticValue(value, secrets, state, depth) {
+  if (typeof value === 'string') return redactBoundedString(value, secrets, state);
+  if (value === null || typeof value !== 'object') return value;
+  if (state.visited.has(value)) return value;
+  consumeRedactionNode(state, depth);
+  state.visited.add(value);
+
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
+  if (Array.isArray(value)) {
+    if (value.length > REDACTION_MAX_ARRAY_ITEMS || state.arrayItems + value.length > REDACTION_MAX_ARRAY_ITEMS) {
+      throwRedactionBudget();
+    }
+    state.arrayItems += value.length;
+  }
+
+  for (const key of keys) {
+    if (Array.isArray(value) && key === 'length') continue;
+    if (key === 'location') continue;
+    state.properties += 1;
+    if (state.properties > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) continue;
+    if ('value' in descriptor) {
+      const redacted = redactTestDiagnosticValue(descriptor.value, secrets, state, depth + 1);
+      writeDiagnosticValue(value, key, descriptor, redacted);
+    } else {
+      redactAccessorValue(value, key, descriptor, secrets, state, depth);
+    }
+  }
+  return value;
 }
 
 /**
  * Mutate Playwright's structured error objects before a reporter can serialize
- * them. Diagnostic strings are redacted recursively, including nested
- * errorContext/matcherResult/ariaSnapshot values; source locations remain useful.
+ * them. Own non-enumerable Error fields, nested causes, TestInfoError strings,
+ * matcher results, and ARIA snapshots are all included in the bounded walk.
  *
  * @param {unknown} errors
  * @param {Iterable<string>} [secrets]
- * @param {Set<object>} [visited]
  * @returns {void}
  */
-export function redactTestErrors(errors, secrets = liveCredentialValues(), visited = new Set()) {
+export function redactTestErrors(errors, secrets = liveCredentialValues()) {
   if (!Array.isArray(errors)) return;
-  for (const error of errors) redactTestError(error, secrets, visited);
-}
-
-/**
- * @param {any} error
- * @param {Iterable<string>} secrets
- * @param {Set<object>} visited
- * @returns {void}
- */
-function redactTestError(error, secrets, visited) {
-  if (error === null || typeof error !== 'object' || visited.has(error)) return;
-  visited.add(error);
-  const directTextFields = new Set(['message', 'stack', 'snippet', 'value']);
-  for (const field of directTextFields) {
-    if (typeof error[field] === 'string') error[field] = redactLiveText(error[field], secrets);
-    else if (error[field] && typeof error[field] === 'object') {
-      error[field] = redactTestDiagnosticValue(error[field], secrets, visited);
-    }
-  }
-  for (const [field, value] of Object.entries(error)) {
-    if (directTextFields.has(field) || field === 'location') continue;
-    error[field] = redactTestDiagnosticValue(value, secrets, visited);
-  }
-  // Error properties such as `cause` and Playwright's error context can be
-  // non-enumerable in some serializers, so visit them explicitly as well.
-  for (const field of ['cause', 'errorContext', 'matcherResult']) {
-    if (field in error) error[field] = redactTestDiagnosticValue(error[field], secrets, visited);
-  }
-}
-
-/**
- * @param {any} value
- * @param {Iterable<string>} secrets
- * @param {Set<object>} visited
- * @returns {any}
- */
-function redactTestDiagnosticValue(value, secrets, visited) {
-  if (typeof value === 'string') return redactLiveText(value, secrets);
-  if (value === null || typeof value !== 'object' || visited.has(value)) return value;
-  visited.add(value);
-  if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index += 1) {
-      value[index] = redactTestDiagnosticValue(value[index], secrets, visited);
-    }
-    return value;
-  }
-  for (const [field, nestedValue] of Object.entries(value)) {
-    if (field === 'location') continue;
-    value[field] = redactTestDiagnosticValue(nestedValue, secrets, visited);
-  }
-  return value;
+  const state = createRedactionState();
+  redactTestDiagnosticValue(errors, secrets, state, 0);
 }
 
 /**
@@ -202,7 +458,7 @@ export async function scrubLivePage(page) {
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     });
   } catch (error) {
-    if (!isDefinitivelyClosedOrCrashed(page, error)) throw error;
+    if (!isDefinitivelyClosed(page)) throw error;
   }
 }
 
@@ -217,4 +473,46 @@ export async function scrubLivePage(page) {
 export async function removeLiveArtifacts(directory) {
   if (!isLiveArtifactDirectory(directory)) return;
   await rm(resolve(directory), { recursive: true, force: true });
+}
+
+/**
+ * Redact teardown diagnostics and always remove attachments/output. A redaction
+ * failure wins over the original scrub failure so an unredacted error is never
+ * rethrown; cleanup still runs from the `finally` block before propagation.
+ *
+ * @param {{ testInfo: { errors: unknown[], attachments: unknown[], outputDir: string }, scrubError?: unknown, secrets?: Iterable<string> }} options
+ * @returns {Promise<void>}
+ */
+export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCredentialValues() }) {
+  const scrubDiagnostics = scrubError === undefined ? undefined : [scrubError];
+  let redactionError;
+  let cleanupError;
+  try {
+    if (scrubDiagnostics) {
+      try {
+        redactTestErrors(scrubDiagnostics, secrets);
+      } catch (error) {
+        redactionError = error;
+      }
+    }
+    try {
+      redactTestErrors(testInfo.errors, secrets);
+    } catch (error) {
+      redactionError ??= error;
+    }
+  } finally {
+    try {
+      testInfo.attachments.length = 0;
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      await removeLiveArtifacts(testInfo.outputDir);
+    } catch (error) {
+      cleanupError ??= error;
+    }
+  }
+  if (redactionError !== undefined) throw redactionError;
+  if (scrubDiagnostics) throw scrubDiagnostics[0];
+  if (cleanupError !== undefined) throw cleanupError;
 }

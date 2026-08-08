@@ -123,10 +123,12 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
 - Axe runs against success, empty, and failure states in both light and dark color schemes.
 - The password preview regression delays the hydration focus frame, sends rapid keyboard input, repeats
   field transitions, and submits from the password control. The opt-in live lane uses temporary output,
-  disabled media artifacts, a status-only reporter, recursive structured-error redaction (including matcher
-  results and ARIA snapshots), and DOM cleanup. Scrub failures fail the proof unless the page is definitively
-  closed or crashed, so a failed proof cannot retain synthetic credentials in traces, screenshots, reports,
-  error contexts, or `test-results`.
+  disabled media artifacts, a status-only reporter, bounded descriptor-aware structured-error redaction
+  (including native Error causes, Playwright `errorContext`, matcher results, logs, and ARIA snapshots),
+  and DOM cleanup. Scrub failures fail the proof unless `page.isClosed()` returns `true`; generic error text
+  such as `page crashed` is never accepted as termination proof. Attachments and output cleanup run in
+  `finally` even when redaction fails, so a failed proof cannot retain synthetic credentials in traces,
+  screenshots, reports, error contexts, or `test-results`.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target

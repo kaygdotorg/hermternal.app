@@ -1,8 +1,7 @@
 import { expect, test as base } from '@playwright/test';
 import {
+  finalizeLiveTest,
   liveCredentialValues,
-  redactTestErrors,
-  removeLiveArtifacts,
   scrubLivePage
 } from './live-artifact-policy.mjs';
 
@@ -15,16 +14,9 @@ test.afterEach(async ({ page }, testInfo) => {
   try {
     await scrubLivePage(page);
   } catch (error) {
-    // scrubLivePage only absorbs a definitively closed or crashed page. Keep
-    // every other evaluator failure until cleanup completes, then fail the
-    // teardown instead of silently trusting an unverified DOM boundary.
+    // Only page.isClosed() can suppress the evaluator failure. Keep every
+    // other error until diagnostics are redacted and cleanup has completed.
     scrubError = error;
   }
-  if (scrubError) redactTestErrors([scrubError], secrets);
-  redactTestErrors(testInfo.errors, secrets);
-  // A custom reporter never serializes attachments, and removing references
-  // prevents a future reporter from retaining a file after the page is scrubbed.
-  testInfo.attachments.length = 0;
-  await removeLiveArtifacts(testInfo.outputDir);
-  if (scrubError) throw scrubError;
+  await finalizeLiveTest({ testInfo, scrubError, secrets });
 });
