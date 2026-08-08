@@ -191,15 +191,16 @@
     return 'Live boundary · unavailable · no credentials';
   }
 
-  function clearPasswordInputs(clearDefaults = true): void {
+  function clearPasswordInputs(): void {
     for (const input of [usernameInput, passwordInput]) {
       if (!input) continue;
-      // Clear the live property first. A reset event is cancelable and hostile
-      // listeners can otherwise restore a retained default after the action has
-      // already been observed. Guarding empty writes avoids retriggering an
-      // observer during the final property-only pass.
+      // Clear every credential-bearing representation in each bounded phase. A
+      // reset event is cancelable and hostile listeners can otherwise restore a
+      // retained default after the action has already been observed. Guarding
+      // empty writes avoids adding mutation records once a field is clean, while
+      // the final queued phase still removes any values restored by earlier
+      // observer tasks.
       if (input.value !== '') input.value = '';
-      if (!clearDefaults) continue;
       if (input.defaultValue !== '') input.defaultValue = '';
       if (input.hasAttribute('value')) input.removeAttribute('value');
     }
@@ -240,10 +241,11 @@
         passwordClearTimer = setTimeout(() => {
           passwordClearTimer = undefined;
           if (!isCurrent()) return;
-          // Defaults and value attributes are scrubbed by the earlier bounded
-          // passes. The queued-task pass only touches the live property, so it
-          // cannot retrigger a MutationObserver with no later scrub.
-          clearPasswordInputs(false);
+          // Earlier observer tasks can restore the live property, reset default,
+          // and serialized value after the microtask passes. The final bounded
+          // task must scrub all three representations before quiescence; it does
+          // not schedule another observer fight.
+          clearPasswordInputs();
         }, 0);
       });
     });

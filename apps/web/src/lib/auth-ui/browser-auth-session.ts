@@ -224,6 +224,16 @@ export class BrowserAuthSession {
     // A logout is a protected boundary: the caller may not abort it or replace
     // its pending or recovery state with discovery or signed-out UI before verification.
     if (this.isLogoutState()) return;
+    // Cancellation is owned by an active operation. Once the first cancel has
+    // published signed_out, a duplicate call must be a no-op rather than clear
+    // the provider and selected-provider retention used for a safe retry.
+    if (
+      this.snapshot.status !== 'refreshing' &&
+      this.snapshot.status !== 'discovering' &&
+      this.snapshot.status !== 'password_submitting'
+    ) {
+      return;
+    }
 
     const cancelledSnapshot = this.snapshot;
     const wasPasswordSubmission = cancelledSnapshot.status === 'password_submitting';
@@ -244,9 +254,7 @@ export class BrowserAuthSession {
       });
       return;
     }
-    if (this.snapshot.status !== 'authenticated') {
-      this.publish({ status: 'signed_out', providers: [] });
-    }
+    this.publish({ status: 'signed_out', providers: [] });
   }
 
   dispose(): void {

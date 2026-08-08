@@ -155,6 +155,44 @@ describe('BrowserAuthSession', () => {
     });
   });
 
+  it('makes duplicate password cancellation idempotent and retains provider selection', async () => {
+    const pending = deferred<{ identity: AuthIdentity; next: '/' }>();
+    let abortCount = 0;
+    const loginWithPassword = vi.fn<BrowserAuthClient['loginWithPassword']>((_input, signal) => {
+      signal?.addEventListener('abort', () => abortCount += 1, { once: true });
+      return pending.promise;
+    });
+    const session = new BrowserAuthSession({
+      client: client({ loginWithPassword }),
+      discoverProviders: async () => ({ providers: [passwordProvider] }),
+      invalidateLocalSession: vi.fn()
+    });
+    await session.retryDiscovery();
+    session.chooseProvider(passwordProvider.id);
+
+    const snapshots: unknown[] = [];
+    const unsubscribe = session.subscribe((snapshot) => snapshots.push(snapshot));
+    const login = session.loginWithPassword({ username: 'synthetic-user', password: 'transient-secret' });
+    const beforeCancelPublishCount = snapshots.length;
+
+    session.cancel();
+    const cancelledSnapshot = session.current;
+    session.cancel();
+
+    expect(abortCount).toBe(1);
+    expect(snapshots).toHaveLength(beforeCancelPublishCount + 1);
+    expect(session.current).toBe(cancelledSnapshot);
+    expect(session.current).toMatchObject({
+      status: 'signed_out',
+      providers: [passwordProvider],
+      selectedProviderId: passwordProvider.id
+    });
+
+    pending.resolve({ identity, next: '/' });
+    await login;
+    unsubscribe();
+  });
+
   it('ignores stale password errors after cancellation', async () => {
     const pending = deferred<{ identity: AuthIdentity; next: '/' }>();
     let requestSignal: AbortSignal | undefined;
