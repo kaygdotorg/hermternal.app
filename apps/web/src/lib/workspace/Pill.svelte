@@ -156,6 +156,10 @@
     --pill-muted: var(--muted, #667080);
     --pill-line: var(--line, #d8dde5);
     --pill-action: var(--signal, #4c6fff);
+    --pill-overlay-surface: var(--pill-surface);
+    --pill-overlay-line: var(--pill-line);
+    --pill-overlay-ink: var(--pill-ink);
+    --pill-overlay-shadow: none;
     box-sizing: border-box;
     display: inline-flex;
     min-height: 44px;
@@ -200,8 +204,10 @@
   }
 
   .pill.selected {
-    border-color: color-mix(in srgb, var(--pill-action) 36%, var(--pill-line));
-    background: color-mix(in srgb, var(--pill-action) 12%, var(--pill-surface));
+    --pill-overlay-surface: color-mix(in srgb, var(--pill-action) 12%, var(--pill-surface));
+    --pill-overlay-line: color-mix(in srgb, var(--pill-action) 36%, var(--pill-line));
+    border-color: var(--pill-overlay-line);
+    background: var(--pill-overlay-surface);
     color: var(--pill-ink);
   }
 
@@ -210,32 +216,47 @@
   }
 
   .pill.action {
+    --pill-overlay-surface: var(--pill-action);
+    --pill-overlay-line: var(--pill-action);
+    --pill-overlay-ink: var(--action-ink, #fff);
+    --pill-overlay-shadow: 0 6px 18px color-mix(in srgb, var(--pill-action) 22%, transparent);
     border-color: var(--pill-action);
     background: var(--pill-action);
     color: var(--action-ink, #fff);
-    box-shadow: 0 6px 18px color-mix(in srgb, var(--pill-action) 22%, transparent);
+    box-shadow: var(--pill-overlay-shadow);
   }
 
   .pill.action:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--pill-action) 88%, #000);
+    --pill-overlay-surface: color-mix(in srgb, var(--pill-action) 88%, #000);
+    background: var(--pill-overlay-surface);
   }
 
   .pill.danger {
-    border-color: var(--danger, #d94a4a);
-    background: var(--danger-surface, rgba(217, 74, 74, 0.1));
-    color: var(--danger-ink, var(--danger, #d94a4a));
+    --pill-overlay-surface: var(--danger-surface, rgba(217, 74, 74, 0.1));
+    --pill-overlay-line: var(--danger, #d94a4a);
+    --pill-overlay-ink: var(--danger-ink, var(--danger, #d94a4a));
+    border-color: var(--pill-overlay-line);
+    background: var(--pill-overlay-surface);
+    color: var(--pill-overlay-ink);
   }
 
   .pill.ghost {
+    --pill-overlay-surface: transparent;
+    --pill-overlay-line: transparent;
+    --pill-overlay-ink: var(--pill-muted);
     border-color: transparent;
     background: transparent;
     color: var(--pill-muted);
   }
 
   .pill:disabled {
-    border-color: color-mix(in srgb, var(--pill-line) 70%, transparent);
-    background: color-mix(in srgb, var(--pill-line) 48%, var(--pill-surface));
-    color: color-mix(in srgb, var(--pill-muted) 48%, transparent);
+    --pill-overlay-surface: color-mix(in srgb, var(--pill-line) 48%, var(--pill-surface));
+    --pill-overlay-line: color-mix(in srgb, var(--pill-line) 70%, transparent);
+    --pill-overlay-ink: color-mix(in srgb, var(--pill-muted) 48%, transparent);
+    --pill-overlay-shadow: none;
+    border-color: var(--pill-overlay-line);
+    background: var(--pill-overlay-surface);
+    color: var(--pill-overlay-ink);
     cursor: not-allowed;
     box-shadow: none;
   }
@@ -251,32 +272,64 @@
   }
 
   /* Paper keeps compact action islands icon-only at rest, then reveals the
-     label on hover or keyboard focus. The icon slot remains fixed so the
-     revealed copy never shifts the control's visual anchor. */
+     label on hover or keyboard focus. The label is a visual overlay rather
+     than a layout item: the 44px button and its icon anchor never move while
+     a stationary pointer is over the control or its siblings. */
   .pill.reveal-label {
-    justify-content: flex-start;
-    overflow: hidden;
+    position: relative;
+    width: 44px;
+    min-width: 44px;
+    flex: 0 0 44px;
+    justify-content: center;
+    overflow: visible;
     white-space: nowrap;
   }
 
   .pill.reveal-label .pill-copy {
+    position: absolute;
+    top: -1px;
+    left: -1px;
+    z-index: 1;
+    box-sizing: border-box;
+    display: flex;
+    width: max-content;
     max-width: 0;
-    flex: 0 1 auto;
-    opacity: 0;
+    min-width: 0;
+    height: calc(100% + 2px);
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-start;
     overflow: hidden;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: inherit;
+    background: var(--pill-overlay-surface);
+    color: var(--pill-overlay-ink);
+    box-shadow: var(--pill-overlay-shadow);
+    opacity: 0;
     pointer-events: none;
     transition:
       max-width 150ms cubic-bezier(0.22, 1, 0.36, 1),
+      padding 150ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 150ms ease,
       opacity 100ms ease;
+  }
+
+  .pill.reveal-label:is(:hover, :focus-visible) {
+    z-index: 4;
   }
 
   .pill.reveal-label:is(:hover, :focus-visible) .pill-copy {
     max-width: 180px;
+    padding: 8px 12px 8px 40px;
+    border-color: var(--pill-overlay-line);
     opacity: 1;
   }
 
-  .pill.reveal-label:is(:hover, :focus-visible) {
-    gap: 8px;
+  .pill.reveal-label .icon-slot,
+  .pill.reveal-label .monogram {
+    position: relative;
+    z-index: 2;
   }
 
   .icon-slot,
