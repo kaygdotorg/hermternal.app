@@ -59,6 +59,18 @@ and active hardened bindings are independently pinned, so a restack may leave
 their introduction objects on separate reviewed ancestry lines; the direct
 first-parent rule still applies within each binding.
 
+This is not a self-authenticating bootstrap root. Before executing the helper,
+the aggregate validator reads its SHA-256 and Git blob bindings from the mutable
+`contracts/fixtures/validator/validate.py` source; the helper then supplies the
+expected active authority and source OIDs that are compared with runtime pins.
+Those checks are consistency checks, not independent custody. A trusted launcher
+or immutable external pin record must protect the verifier digest, active OIDs,
+artifact and manifest generation or digest, and rollback policy before launch.
+Ordinary environment variables do not establish that root. If a candidate
+checkout can rewrite the validator, helper, bindings, and pins together, this
+fixture cannot prove that the reviewed verifier ran. The external
+fixture-authority root dependency remains unresolved in this fixture lane.
+
 The active hardened pins are authenticated external CI inputs supplied through
 `HERMTERNAL_FIXTURE_AUTHORITY_COMMIT` and
 `HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT`. The checked-in
@@ -148,7 +160,13 @@ do not require the active restack to preserve the historical binding as an
 ancestor. Only the validator's own baseline-manifest digest and derived byte
 total are normalized to avoid a self-reference. A schema-valid copy or
 coordinated scanner, manifest, baseline, local anchor, and test-constant
-replacement cannot rebind an immutable external authority.
+replacement cannot rebind an immutable external authority. This defense is
+conditional on the external verifier and pin root being trusted. The current
+coordinated-mutation probe rejected in both interpreter modes only because the
+f4 source changes left the checked-in baseline and manifest stale; that is not
+bootstrap authentication and does not predict behavior after a coordinated
+baseline/manifest regeneration. The probe therefore cannot replace the
+external fixture-authority root or deterministic authority-rotation tooling.
 
 Every ordinary file under a ready fixture root is inventoried, including hidden
 files, cache contents, bytecode, and binary artifacts. Symlinks and special files
