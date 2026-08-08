@@ -1,11 +1,16 @@
 import { defineConfig, devices } from '@playwright/test';
-import { liveArtifactOutputDirectory } from './tests/live/live-artifact-policy.mjs';
+import {
+  liveArtifactOutputDirectory,
+  liveArtifactOutputOwnershipToken
+} from './tests/live/live-artifact-policy.mjs';
 
 const port = Number(process.env.PLAYWRIGHT_LIVE_PORT ?? 4187);
 const liveOutputDirectory = liveArtifactOutputDirectory();
 // Global teardown may run in a separate Node process, so pass only the safe
-// temporary path through the environment; no credential value is exported.
+// temporary path and its run-ownership token through the environment; no
+// credential value is exported.
 process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR = liveOutputDirectory;
+process.env.PLAYWRIGHT_LIVE_OUTPUT_TOKEN = liveArtifactOutputOwnershipToken();
 
 export default defineConfig({
   testDir: './tests/live',

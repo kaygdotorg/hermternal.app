@@ -1,4 +1,5 @@
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -135,6 +136,31 @@ describe('live Playwright artifact policy', () => {
     expect(mismatchedRedacted).not.toContain('synthetic-user');
   });
 
+  it('fails closed when malformed text precedes later editable markup, including encoded secrets', () => {
+    const cases = [
+      'text < 5 <div contenteditable="true">synthetic-password</div>',
+      'text < 5 <div contenteditable="future-mode">unknown-credential</div>',
+      'text < 5 <div contenteditable="true">synthetic&#45;password</div>',
+      'text < 5 <div contenteditable="future-mode">unknown&#x2d;credential</div>'
+    ];
+
+    for (const markup of cases) {
+      const redacted = redactLiveText(markup, []) as string;
+      expect(redacted).toContain(LIVE_ARTIFACT_REDACTION);
+      expect(redacted).not.toContain('synthetic-password');
+      expect(redacted).not.toContain('synthetic&#45;password');
+      expect(redacted).not.toContain('unknown-credential');
+      expect(redacted).not.toContain('unknown&#x2d;credential');
+    }
+
+    const unknownMode = redactLiveText(
+      '<div contenteditable="future-mode">unknown-credential</div>',
+      []
+    ) as string;
+    expect(unknownMode).toContain(LIVE_ARTIFACT_REDACTION);
+    expect(unknownMode).not.toContain('unknown-credential');
+  });
+
   it('fails closed for unterminated comments before or inside editable markup', () => {
     const insideEditable =
       '<div contenteditable="plaintext-only"><!-- <span>synthetic-password</span>';
@@ -190,6 +216,84 @@ describe('live Playwright artifact policy', () => {
       'redaction failed'
     );
     expect(() => redactTestErrors([throwingDescriptor], ['synthetic-password'])).toThrow(
+      'redaction failed'
+    );
+  });
+
+  it('verifies unchanged data and accessor reads and rejects spoofed or incomplete descriptors', () => {
+    const spoofedDataTarget = { message: LIVE_ARTIFACT_REDACTION };
+    const spoofedData = new Proxy(spoofedDataTarget, {
+      get: (target, key, receiver) =>
+        key === 'message' ? 'synthetic-password' : Reflect.get(target, key, receiver),
+      getOwnPropertyDescriptor: () => ({
+        value: LIVE_ARTIFACT_REDACTION,
+        writable: true,
+        enumerable: true,
+        configurable: true
+      })
+    });
+    expect(() => redactTestErrors([spoofedData], ['synthetic-password'])).toThrow(
+      'redaction failed'
+    );
+
+    const incompleteDataTarget = { message: LIVE_ARTIFACT_REDACTION };
+    const incompleteData = new Proxy(incompleteDataTarget, {
+      getOwnPropertyDescriptor: () => ({ value: LIVE_ARTIFACT_REDACTION })
+    });
+    expect(() => redactTestErrors([incompleteData], ['synthetic-password'])).toThrow(
+      'redaction failed'
+    );
+
+    let accessorValue = 'synthetic-password';
+    const accessorTarget = {};
+    const accessorGetter = () => accessorValue;
+    const accessorSetter = (value: string) => {
+      accessorValue = value;
+    };
+    Object.defineProperty(accessorTarget, 'message', {
+      configurable: true,
+      enumerable: true,
+      get: accessorGetter,
+      set: accessorSetter
+    });
+    const spoofedAccessor = new Proxy(accessorTarget, {
+      get: (target, key, receiver) =>
+        key === 'message' ? LIVE_ARTIFACT_REDACTION : Reflect.get(target, key, receiver),
+      getOwnPropertyDescriptor: () => ({
+        configurable: true,
+        enumerable: true,
+        get: accessorGetter,
+        set: accessorSetter
+      })
+    });
+    expect(() => redactTestErrors([spoofedAccessor], ['synthetic-password'])).toThrow(
+      'redaction failed'
+    );
+
+    let ordinaryAccessorValue = 'synthetic-password';
+    const ordinaryAccessor = {};
+    Object.defineProperty(ordinaryAccessor, 'message', {
+      configurable: true,
+      enumerable: true,
+      get: () => ordinaryAccessorValue,
+      set: (value: string) => {
+        ordinaryAccessorValue = value;
+      }
+    });
+    redactTestErrors([ordinaryAccessor], ['synthetic-password']);
+    expect(ordinaryAccessorValue).toBe(LIVE_ARTIFACT_REDACTION);
+
+    const incompleteAccessorTarget = {};
+    Object.defineProperty(incompleteAccessorTarget, 'message', {
+      configurable: true,
+      enumerable: true,
+      get: () => LIVE_ARTIFACT_REDACTION,
+      set: () => undefined
+    });
+    const incompleteAccessor = new Proxy(incompleteAccessorTarget, {
+      getOwnPropertyDescriptor: () => ({ get: () => LIVE_ARTIFACT_REDACTION })
+    });
+    expect(() => redactTestErrors([incompleteAccessor], ['synthetic-password'])).toThrow(
       'redaction failed'
     );
   });
@@ -293,7 +397,6 @@ describe('live Playwright artifact policy', () => {
 
   it('runs attachment and output cleanup before propagating a redaction failure', async () => {
     const outputRoot = liveArtifactOutputDirectory();
-    await rm(outputRoot, { recursive: true, force: true });
     await mkdir(outputRoot, { recursive: true });
     await writeFile(join(outputRoot, 'error-context.md'), 'synthetic-password', 'utf8');
 
@@ -329,6 +432,16 @@ describe('live Playwright artifact policy', () => {
     expect(await exists(outputRoot)).toBe(false);
     expect(outputRoot).not.toContain(`${join('apps', 'web', 'test-results')}`);
 
+    const descendantRoot = liveArtifactOutputDirectory();
+    const descendant = join(descendantRoot, 'nested');
+    await mkdir(descendant, { recursive: true });
+    const descendantArtifact = join(descendant, 'report.txt');
+    await writeFile(descendantArtifact, 'safe fixture', 'utf8');
+    await removeLiveArtifacts(descendant);
+    expect(await exists(descendantArtifact)).toBe(true);
+    await removeLiveArtifacts(descendantRoot);
+    expect(await exists(descendantRoot)).toBe(false);
+
     const retainedDirectory = await import('node:fs/promises').then(({ mkdtemp }) =>
       mkdtemp(join('/tmp', 'hermternal-retained-'))
     );
@@ -337,6 +450,24 @@ describe('live Playwright artifact policy', () => {
       await writeFile(retainedArtifact, 'safe fixture', 'utf8');
       await removeLiveArtifacts(retainedDirectory);
       expect(await exists(retainedArtifact)).toBe(true);
+
+      const prefixCollision = join(tmpdir(), 'hermternal-playwright-live-prefix-collision');
+      await mkdir(prefixCollision, { recursive: true });
+      const collisionArtifact = join(prefixCollision, 'report.txt');
+      await writeFile(collisionArtifact, 'safe fixture', 'utf8');
+      await removeLiveArtifacts(prefixCollision);
+      expect(await exists(collisionArtifact)).toBe(true);
+
+      const symlinkDirectory = join(tmpdir(), 'hermternal-playwright-live-symlink');
+      try {
+        await symlink(retainedDirectory, symlinkDirectory);
+        await removeLiveArtifacts(symlinkDirectory);
+        expect(await exists(symlinkDirectory)).toBe(true);
+        expect(await exists(retainedArtifact)).toBe(true);
+      } finally {
+        await rm(symlinkDirectory, { recursive: true, force: true });
+        await rm(prefixCollision, { recursive: true, force: true });
+      }
     } finally {
       await rm(retainedDirectory, { recursive: true, force: true });
     }
@@ -346,6 +477,7 @@ describe('live Playwright artifact policy', () => {
     const config = await readFile(resolve(process.cwd(), 'playwright.live.config.ts'), 'utf8');
 
     expect(config).toContain('outputDir: liveOutputDirectory');
+    expect(config).toContain('PLAYWRIGHT_LIVE_OUTPUT_TOKEN');
     expect(config).toContain("preserveOutput: 'never'");
     expect(config).toContain("reporter: [['./tests/live/safe-reporter.mjs']]");
     expect(config).toContain("globalTeardown: './tests/live/live-artifact-teardown.mjs'");
