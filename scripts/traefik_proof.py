@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import http.server
 import json
+import math
 import os
 import re
 import stat
@@ -93,6 +94,10 @@ PUBLIC_HERMES_EXPOSURE = False
 # without retaining a credential, starting Hermes, or contacting a provider.
 TICKET_TTL_SECONDS = 30
 PTY_DETACHED_TTL_SECONDS = 30 * 60
+# Match the web transport's bounded Unix-second representation. This upper
+# bound is below 2**53, so accepted integers remain exact when compared with
+# finite floats; never coerce an arbitrary integer through float first.
+MAX_PTY_TIMESTAMP_SECONDS = 4_294_967_295
 UPGRADE_RETRY_POLICY = MappingProxyType({"chat": "disabled", "pty": "disabled"})
 SYNTHETIC_COOKIE_PREFIX = "__Host-"
 SYNTHETIC_COOKIE_SCOPE = "/hermes"
@@ -970,7 +975,7 @@ def render_manifest(
                 "SPA fallback maps only canonical client deep links to /200.html",
                 "the synthetic __Host- cookie canary requires Secure, HttpOnly, SameSite=Lax, Path=/, and no Domain",
                 "WebSocket tickets are single-use with a 30-second TTL and retained request material is redacted",
-                "PTY reattach rejects elapsed time beyond the 30-minute TTL before periodic cleanup, while reap deletes the stale handle after the boundary without retaining input bytes",
+                "PTY timestamps are finite non-negative bounded Unix seconds and monotonic against stored lifecycle events; reattach rejects elapsed time beyond the 30-minute TTL before periodic cleanup, while reap deletes the stale handle after the boundary without retaining input bytes",
                 "Chat and PTY WebSocket retries are disabled",
                 "the required Hermes boundary is private non-loopback TCP 9119 with no public exposure",
                 "blocked edge and direct-port vectors retain upstream_request=false",
@@ -1548,19 +1553,39 @@ def synthetic_ticket_lifecycle_observation() -> dict[str, object]:
     }
 
 
+def _validate_pty_timestamp(now: object) -> int | float:
+    """Validate a finite, bounded timestamp without lossy integer coercion."""
+
+    if type(now) is int:
+        if 0 <= now <= MAX_PTY_TIMESTAMP_SECONDS:
+            return now
+    elif type(now) is float:
+        if math.isfinite(now) and 0 <= now <= MAX_PTY_TIMESTAMP_SECONDS:
+            return now
+    raise ValueError(
+        f"PTY timestamp must be a finite number in [0, {MAX_PTY_TIMESTAMP_SECONDS}]"
+    )
+
+
 class SyntheticPtyLifecycle:
-    """Model detach plus eventual TTL cleanup without retaining PTY bytes."""
+    """Model monotonic detach plus eventual TTL cleanup without retaining PTY bytes."""
 
     def __init__(self, ttl_seconds: int = PTY_DETACHED_TTL_SECONDS) -> None:
         if type(ttl_seconds) is not int or ttl_seconds <= 0:
             raise ValueError("PTY TTL must be a positive integer")
         self.ttl_seconds = ttl_seconds
-        self._states: dict[str, float | None] = {}
+        self._states: dict[str, int | float | None] = {}
+        self._last_event_at: dict[str, int | float] = {}
 
-    def attach(self, attach_id: str, *, now: float) -> str:
+    def attach(self, attach_id: str, *, now: int | float) -> str:
         if type(attach_id) is not str or not re.fullmatch(PTY_ATTACH_VALUE_PATTERN, attach_id):
             raise ValueError("PTY attach identity is malformed")
+        timestamp = _validate_pty_timestamp(now)
+        previous = self._last_event_at.get(attach_id)
+        if previous is not None and timestamp < previous:
+            raise ValueError("PTY timestamp precedes stored lifecycle timestamp")
         self._states[attach_id] = None
+        self._last_event_at[attach_id] = timestamp
         return "attached"
 
     def send_input(self, attach_id: str, payload: bytes) -> str:
@@ -1571,46 +1596,56 @@ class SyntheticPtyLifecycle:
         # The payload is intentionally not stored or logged.
         return "forwarded"
 
-    def detach(self, attach_id: str, *, now: float) -> str:
+    def detach(self, attach_id: str, *, now: int | float) -> str:
+        timestamp = _validate_pty_timestamp(now)
         if attach_id not in self._states or self._states[attach_id] is not None:
             raise ValueError("PTY is not attached")
-        if type(now) not in {int, float} or isinstance(now, bool):
-            raise ValueError("PTY timestamp is malformed")
-        self._states[attach_id] = float(now)
+        attached_at = self._last_event_at[attach_id]
+        if timestamp < attached_at:
+            raise ValueError("PTY timestamp precedes stored lifecycle timestamp")
+        self._states[attach_id] = timestamp
+        self._last_event_at[attach_id] = timestamp
         return "detached"
 
-    def reattach(self, attach_id: str, *, now: float) -> str:
-        """Reattach a detached PTY that has not crossed the strict TTL boundary."""
+    def reattach(self, attach_id: str, *, now: int | float) -> str:
+        """Reattach only at a monotonic time within the strict TTL boundary."""
 
+        timestamp = _validate_pty_timestamp(now)
         if type(attach_id) is not str or not re.fullmatch(PTY_ATTACH_VALUE_PATTERN, attach_id):
             raise ValueError("PTY attach identity is malformed")
-        if type(now) not in {int, float} or isinstance(now, bool):
-            raise ValueError("PTY timestamp is malformed")
         if attach_id not in self._states:
             raise ValueError("PTY attachment has been reaped")
         detached_at = self._states[attach_id]
         if detached_at is None:
+            if timestamp < self._last_event_at[attach_id]:
+                raise ValueError("PTY timestamp precedes stored lifecycle timestamp")
             return "already_attached"
         # Reattach eligibility is checked independently of periodic cleanup so a
         # stale handle cannot be reused while its detached resource still exists.
-        if float(now) - detached_at > self.ttl_seconds:
+        if timestamp < detached_at:
+            raise ValueError("PTY timestamp precedes stored lifecycle timestamp")
+        if timestamp - detached_at > self.ttl_seconds:
             raise ValueError("PTY attachment has exceeded retention TTL")
         self._states[attach_id] = None
+        self._last_event_at[attach_id] = timestamp
         return "reattached"
 
-    def reap(self, *, now: float) -> int:
-        if type(now) not in {int, float} or isinstance(now, bool):
-            raise ValueError("PTY timestamp is malformed")
+    def reap(self, *, now: int | float) -> int:
+        timestamp = _validate_pty_timestamp(now)
+        for detached_at in self._states.values():
+            if detached_at is not None and timestamp < detached_at:
+                raise ValueError("PTY timestamp precedes stored lifecycle timestamp")
         expired = [
             attach_id
             for attach_id, detached_at in self._states.items()
             # Keep the handle reattachable at exactly the retention boundary;
             # reattach() enforces the same strict eligibility check immediately,
             # while this periodic pass deletes only already-ineligible handles.
-            if detached_at is not None and float(now) - detached_at > self.ttl_seconds
+            if detached_at is not None and timestamp - detached_at > self.ttl_seconds
         ]
         for attach_id in expired:
             del self._states[attach_id]
+            del self._last_event_at[attach_id]
         return len(expired)
 
 
