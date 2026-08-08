@@ -1,10 +1,18 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Pill from './Pill.svelte';
   import type { SessionSummary, WorkspaceActionHandler } from './types';
 
   export let sessions: SessionSummary[] = [];
   export let activeSessionId = '';
   export let onAction: WorkspaceActionHandler = () => {};
+  export let onSignOut: () => void = () => {};
+  export let accountMenuId = 'account-menu';
+
+  let accountMenuOpen = false;
+  let signOutPending = false;
+  let accountMenuTrigger: HTMLButtonElement | undefined;
+  let accountMenu: HTMLElement | undefined;
 
   $: pinned = sessions.filter((session) => session.group === 'pinned');
   $: recent = sessions.filter((session) => session.group === 'recent');
@@ -12,7 +20,69 @@
   function selectSession(sessionId: string): void {
     onAction({ type: 'select-session', sessionId });
   }
+
+  async function afterActivationFrame(): Promise<void> {
+    await tick();
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 0);
+    });
+  }
+
+  async function focusAccountMenuStart(): Promise<void> {
+    await afterActivationFrame();
+    accountMenu?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus();
+  }
+
+  async function openAccountMenu(): Promise<void> {
+    if (signOutPending) return;
+    accountMenuOpen = true;
+    void focusAccountMenuStart();
+  }
+
+  async function closeAccountMenu(restoreFocus = true): Promise<void> {
+    accountMenuOpen = false;
+    if (!restoreFocus) return;
+    await afterActivationFrame();
+    accountMenuTrigger?.focus();
+  }
+
+  function toggleAccountMenu(): void {
+    if (accountMenuOpen) void closeAccountMenu();
+    else void openAccountMenu();
+  }
+
+  function requestSignOut(): void {
+    if (signOutPending) return;
+    signOutPending = true;
+    accountMenuOpen = false;
+    // The root owns BrowserAuthSession.logout(); this narrow callback keeps the
+    // shell independent from auth transport and local workspace invalidation.
+    onSignOut();
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent): void {
+    if (!accountMenuOpen || event.key !== 'Escape') return;
+    event.preventDefault();
+    void closeAccountMenu();
+  }
+
+  function handleAccountMenuKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    // Stop the workspace drawer's global Escape handler from closing the
+    // surrounding mobile modal before this nested account menu restores focus.
+    event.preventDefault();
+    event.stopPropagation();
+    void closeAccountMenu();
+  }
+
+  function handleAccountMenuFocusOut(event: FocusEvent): void {
+    const next = event.relatedTarget as Node | null;
+    if (!next || !accountMenu?.contains(next)) void closeAccountMenu(false);
+  }
 </script>
+
+<svelte:window onkeydown={handleWindowKeydown} />
 
 <nav aria-label="Conversations" class="session-list">
   <div class="sidebar-heading">
@@ -94,15 +164,56 @@
     <span aria-hidden="true" class="avatar">H</span>
     <span class="profile-name">Hermes</span>
     <div class="profile-actions">
-      <Pill ariaLabel="Open profile" icon="conversation" iconOnly label="Profile" variant="ghost" />
+      <Pill
+        ariaControls={accountMenuId}
+        ariaHasPopup="menu"
+        ariaLabel="Open account menu"
+        bind:element={accountMenuTrigger}
+        expandable
+        expanded={accountMenuOpen}
+        icon="conversation"
+        iconOnly
+        label="Account"
+        variant="ghost"
+        onActivate={toggleAccountMenu}
+      />
       <Pill ariaLabel="Open settings" icon="shield" iconOnly label="Settings" variant="ghost" />
       <Pill ariaLabel="Open utilities" icon="menu" iconOnly label="Utilities" variant="ghost" />
     </div>
   </div>
+
+  {#if accountMenuOpen}
+    <div
+      id={accountMenuId}
+      aria-label="Account menu"
+      bind:this={accountMenu}
+      class="account-menu"
+      role="menu"
+      tabindex="-1"
+      onfocusout={handleAccountMenuFocusOut}
+      onkeydown={handleAccountMenuKeydown}
+    >
+      <div class="account-menu-header">
+        <span aria-hidden="true" class="menu-avatar">H</span>
+        <span class="menu-account-name">Hermes</span>
+      </div>
+      <Pill
+        ariaLabel={signOutPending ? 'Signing out' : 'Sign out'}
+        disabled={signOutPending}
+        fullWidth
+        icon="logout"
+        label={signOutPending ? 'Signing out' : 'Sign out'}
+        role="menuitem"
+        variant="ghost"
+        onActivate={requestSignOut}
+      />
+    </div>
+  {/if}
 </nav>
 
 <style>
   .session-list {
+    position: relative;
     box-sizing: border-box;
     display: flex;
     min-width: 0;
@@ -259,5 +370,83 @@
     min-width: 44px;
     min-height: 44px;
     padding-inline: 6px;
+  }
+
+  .account-menu {
+    position: absolute;
+    bottom: 72px;
+    left: 28px;
+    z-index: 8;
+    box-sizing: border-box;
+    display: flex;
+    width: min(242px, calc(100% - 32px));
+    max-width: calc(100% - 32px);
+    min-width: 0;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid var(--line, #d8dde5);
+    border-radius: var(--radius-popover, 18px);
+    background: var(--surface, var(--color-paper, #fff));
+    color: var(--ink, #16181d);
+    box-shadow: 0 18px 40px color-mix(in srgb, var(--ink, #16181d) 16%, transparent);
+  }
+
+  .account-menu-header {
+    display: flex;
+    min-height: 40px;
+    align-items: center;
+    gap: 8px;
+    padding-inline: 8px;
+  }
+
+  .menu-avatar {
+    display: inline-flex;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line, #d8dde5);
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--signal, #4c6fff) 12%, var(--surface, #fff));
+    color: var(--signal, #4c6fff);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 20px;
+  }
+
+  .menu-account-name {
+    min-width: 0;
+    color: var(--ink, #16181d);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 18px;
+  }
+
+  .account-menu :global(.pill) {
+    width: 100%;
+    min-height: 44px;
+    justify-content: flex-start;
+    gap: 10px;
+    padding-inline: 12px;
+    border-color: transparent;
+    color: var(--ink, #16181d);
+  }
+
+  .account-menu :global(.pill:hover:not(:disabled)) {
+    border-color: var(--line, #d8dde5);
+    background: var(--gate-state-surface, color-mix(in srgb, var(--signal, #4c6fff) 7%, var(--surface, #fff)));
+  }
+
+  /* Logout sheets specify a two-pixel focus treatment, narrower than the
+     shared pill default while preserving the same visible target and offset. */
+  .account-menu :global(.pill:focus-visible) {
+    outline: 2px solid var(--gate-focus, var(--focus, var(--signal, #4c6fff)));
+    outline-offset: 2px;
+  }
+
+  .account-menu :global(.pill:disabled) {
+    background: color-mix(in srgb, var(--line, #d8dde5) 48%, var(--surface, #fff));
   }
 </style>

@@ -7,6 +7,7 @@
   export let session: LiveWorkspaceSession;
   export let appearance: Appearance = 'light';
   export let onReturnToSignIn: () => void = () => {};
+  export let onSignOut: () => void = () => {};
 
   let snapshot: Readonly<LiveWorkspaceSnapshot> = session.current;
   let unsubscribe: (() => void) | undefined;
@@ -65,4 +66,5 @@
   timelineItems={snapshot.timeline}
   title={snapshot.title}
   onAction={handleAction}
+  {onSignOut}
 />

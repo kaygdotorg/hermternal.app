@@ -22,9 +22,11 @@
   export let expanded = false;
   export let expandable = false;
   export let ariaControls: string | undefined = undefined;
+  export let ariaHasPopup: boolean | 'menu' | 'listbox' | 'tree' | 'grid' | 'dialog' = false;
   export let ariaCurrent: 'page' | 'step' | 'location' | 'date' | 'time' | 'true' | 'false' | undefined = undefined;
   export let disabled = false;
   export let buttonType: 'button' | 'submit' | 'reset' = 'button';
+  export let role: string | undefined = undefined;
   export let onActivate: (() => void) | undefined = undefined;
   export let element: HTMLButtonElement | undefined = undefined;
 
@@ -105,7 +107,9 @@
   aria-controls={expandable ? ariaControls : undefined}
   aria-current={ariaCurrent}
   aria-expanded={expandable ? expanded : undefined}
+  aria-haspopup={ariaHasPopup || undefined}
   aria-label={ariaLabel}
+  role={role}
   aria-pressed={toggleable ? selected : undefined}
   class:full-width={fullWidth}
   class:icon-only={iconOnly}

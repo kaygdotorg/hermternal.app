@@ -71,13 +71,14 @@ function createWorkspace(
 
 function createContext(
   permanentFailure: LiveWorkspaceSnapshot['permanentFailure'],
-  state: LiveWorkspaceSnapshot['state'] = 'permanent-error'
+  state: LiveWorkspaceSnapshot['state'] = 'permanent-error',
+  logout: BrowserAuthClient['logout'] = vi.fn(async () => undefined)
 ) {
   const workspace = createWorkspace(permanentFailure, state);
   const client: BrowserAuthClient = {
     verify: vi.fn(async () => identity),
     loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
-    logout: vi.fn(async () => undefined)
+    logout
   };
   const auth = new BrowserAuthSession({
     client,
@@ -90,6 +91,33 @@ function createContext(
 }
 
 describe('live root route composition', () => {
+  it('routes visible Sign out through BrowserAuthSession.logout exactly once', async () => {
+    let resolveLogout!: () => void;
+    const logoutRequest = new Promise<void>((resolve) => {
+      resolveLogout = resolve;
+    });
+    const clientLogout = vi.fn(async () => logoutRequest);
+    const { auth, workspace } = createContext(undefined, 'ready', clientLogout);
+    const logout = vi.spyOn(auth, 'logout');
+
+    render(Page);
+
+    const trigger = await screen.findByRole('button', { name: 'Open account menu' });
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' });
+    fireEvent.click(trigger, { detail: 1 });
+    const signOut = await screen.findByRole('menuitem', { name: 'Sign out' });
+
+    fireEvent.pointerDown(signOut, { button: 0, pointerType: 'mouse' });
+    fireEvent.click(signOut, { detail: 1 });
+
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(workspace.invalidate).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'logout-pending'));
+    expect(screen.getByRole('heading', { name: 'Signing out' })).toBeInTheDocument();
+    resolveLogout();
+    await waitFor(() => expect(clientLogout).toHaveBeenCalledTimes(1));
+  });
+
   it('routes a rendered 4401 workspace action through BrowserAuthSession.expire', async () => {
     const { auth, workspace } = createContext({
       reason: 'authentication-required',

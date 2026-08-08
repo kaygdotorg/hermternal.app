@@ -19,6 +19,13 @@
     liveContext?.auth.expire();
   }
 
+  function requestLiveLogout(): void {
+    // Visible shell controls forward only to the root session authority. The
+    // BrowserAuthSession owns local invalidation ordering, server logout, and
+    // dedicated logout recovery; the shell never touches those boundaries.
+    void liveContext?.auth.logout();
+  }
+
   // Route selection waits for browser mount. The server and first client render
   // stay identical, while valid scenario queries retain the no-network lane.
   onMount(() => {
@@ -38,7 +45,11 @@
   <PrototypeShell transport={fixtureTransport} />
 {:else if routeMode === 'live' && liveContext}
   <BrowserAuthView session={liveContext.auth}>
-    <LiveWorkspaceView session={liveContext.workspace} onReturnToSignIn={returnLiveWorkspaceToSignIn} />
+    <LiveWorkspaceView
+      session={liveContext.workspace}
+      onReturnToSignIn={returnLiveWorkspaceToSignIn}
+      onSignOut={requestLiveLogout}
+    />
   </BrowserAuthView>
 {:else}
   <main aria-busy="true" aria-label="Starting Hermternal"></main>

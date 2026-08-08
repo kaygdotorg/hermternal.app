@@ -34,6 +34,7 @@
   export let interactionEnabled = true;
   export let artifactInspectorEnabled = true;
   export let onAction: WorkspaceActionHandler = () => {};
+  export let onSignOut: () => void = () => {};
 
   let inspectorVisible = artifactInspectorEnabled;
   let mobileSidebarOpen = false;
@@ -283,7 +284,13 @@
 
     <div class:inspector-hidden={!artifactInspectorEnabled || !inspectorVisible} class="workspace-grid">
       <aside class="sidebar">
-        <SessionList {activeSessionId} {sessions} onAction={handleAction} />
+        <SessionList
+          accountMenuId="desktop-account-menu"
+          {activeSessionId}
+          {sessions}
+          {onSignOut}
+          onAction={handleAction}
+        />
       </aside>
 
       <div class="conversation-panel">
@@ -338,7 +345,13 @@
       data-testid="mobile-session-drawer"
       role="dialog"
     >
-      <SessionList {activeSessionId} {sessions} onAction={handleAction} />
+      <SessionList
+        accountMenuId="mobile-account-menu"
+        {activeSessionId}
+        {sessions}
+        {onSignOut}
+        onAction={handleAction}
+      />
     </div>
   {/if}
 

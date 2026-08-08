@@ -10,6 +10,7 @@ export type IconName =
   | 'conversation'
   | 'image'
   | 'info'
+  | 'logout'
   | 'menu'
   | 'mic'
   | 'paperclip'

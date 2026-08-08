@@ -282,6 +282,45 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
   await expect(page.locator('.section-note').first()).toHaveText('send');
 });
 
+test('account menu exposes the approved Sign out state on desktop and in the mobile drawer', async ({ page }) => {
+  for (const viewport of [
+    { width: 1440, height: 960, scope: '.sidebar', menuId: 'desktop-account-menu' },
+    { width: 390, height: 844, scope: '[data-testid="mobile-session-drawer"]', menuId: 'mobile-account-menu' }
+  ]) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+    if (viewport.width < 760) {
+      await page.getByRole('button', { name: 'Open conversations' }).click();
+    }
+
+    const scope = page.locator(viewport.scope);
+    const trigger = scope.getByRole('button', { name: 'Open account menu' });
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    await expect(trigger).toHaveAttribute('aria-controls', viewport.menuId);
+
+    const menu = page.locator(`#${viewport.menuId}`);
+    await expect(menu).toHaveRole('menu');
+    const menuBox = await menu.boundingBox();
+    expect(menuBox?.width).toBe(242);
+    const menuA11y = await new AxeBuilder({ page }).include(`#${viewport.menuId}`).analyze();
+    expect(menuA11y.violations).toEqual([]);
+    await expect(menu.getByRole('menuitem', { name: 'Sign out' })).toBeFocused();
+    await expect(menu.getByRole('menuitem', { name: 'Sign out' })).toHaveCSS('min-height', '44px');
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+    await expect(trigger).toBeFocused();
+
+    if (viewport.width < 760) {
+      await page.keyboard.press('Escape');
+      await expect(page.getByTestId('mobile-session-drawer')).toBeHidden();
+    }
+  }
+});
+
 test('Paper effective width switches exactly at 760px without a tabbed desktop replacement', async ({ page }) => {
   for (const width of [760, 761]) {
     await page.setViewportSize({ width, height: 844 });

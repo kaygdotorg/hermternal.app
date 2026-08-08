@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
 import WorkspacePreview from './WorkspacePreview.svelte';
 
@@ -6,7 +6,6 @@ const deferredControls = [
   'Collapse conversations',
   'Automations',
   'Kanban',
-  'Open profile',
   'Open settings',
   'Open utilities',
   'Context usage 62 percent',
@@ -35,6 +34,63 @@ describe('WorkspacePreview', () => {
     fireEvent.keyDown(editor, { key: 'Enter' });
 
     expect(onAction).toHaveBeenCalledWith({ type: 'edit-title', title: 'Updated session' });
+  });
+
+  it('opens the account menu with native menu semantics and restores focus on Escape', async () => {
+    const onSignOut = vi.fn();
+    render(WorkspacePreview, { state: 'ready', onSignOut });
+
+    const trigger = screen.getByRole('button', { name: 'Open account menu' });
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    expect(trigger).toHaveAttribute('aria-controls', 'desktop-account-menu');
+    expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
+
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' });
+    fireEvent.click(trigger, { detail: 1 });
+
+    const menu = await screen.findByRole('menu', { name: 'Account menu' });
+    expect(menu).toHaveAttribute('id', 'desktop-account-menu');
+    const signOut = within(menu).getByRole('menuitem', { name: 'Sign out' });
+    expect(signOut).toBeEnabled();
+    await waitFor(() => expect(signOut).toHaveFocus());
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('menu', { name: 'Account menu' })).not.toBeInTheDocument());
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(onSignOut).not.toHaveBeenCalled();
+  });
+
+  it('forwards Sign out once from a pointer gesture and dedupes the compatibility click', async () => {
+    const onSignOut = vi.fn();
+    render(WorkspacePreview, { state: 'ready', onSignOut });
+
+    const trigger = screen.getByRole('button', { name: 'Open account menu' });
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' });
+    fireEvent.click(trigger, { detail: 1 });
+    const menu = await screen.findByRole('menu', { name: 'Account menu' });
+    const signOut = within(menu).getByRole('menuitem', { name: 'Sign out' });
+
+    fireEvent.pointerDown(signOut, { button: 0, pointerType: 'mouse' });
+    expect(onSignOut).toHaveBeenCalledTimes(1);
+    fireEvent.click(signOut, { detail: 1 });
+    expect(onSignOut).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole('menu', { name: 'Account menu' })).not.toBeInTheDocument());
+  });
+
+  it.each(['Enter', ' '])('forwards one native %s activation from the account menu', async (key) => {
+    const onSignOut = vi.fn();
+    const view = render(WorkspacePreview, { state: 'ready', onSignOut });
+
+    const trigger = screen.getByRole('button', { name: 'Open account menu' });
+    fireEvent.keyDown(trigger, { key });
+    fireEvent.click(trigger, { detail: 0 });
+    const menu = await screen.findByRole('menu', { name: 'Account menu' });
+    const signOut = within(menu).getByRole('menuitem', { name: 'Sign out' });
+
+    fireEvent.keyDown(signOut, { key });
+    fireEvent.click(signOut, { detail: 0 });
+    expect(onSignOut).toHaveBeenCalledTimes(1);
+    view.unmount();
   });
 
   it('sends a message with the command-enter keyboard contract', async () => {
