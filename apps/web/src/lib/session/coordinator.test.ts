@@ -446,6 +446,12 @@ describe('createSessionCoordinator', () => {
 
     expect(settlementB.sessionGeneration).toBe(settlementA.sessionGeneration);
     expect(settlementB.terminalLeaseSequence).not.toBe(settlementA.terminalLeaseSequence);
+    expect(
+      harness.coordinator.invalidateTerminalBinding({
+        sessionId: settlementA.sessionId,
+        sessionGeneration: settlementA.sessionGeneration
+      })
+    ).toBe(false);
     expect(harness.coordinator.invalidateTerminalBinding(settlementA)).toBe(false);
     expect(bindingB.invalidate).not.toHaveBeenCalled();
     expect(harness.terminal.release).toHaveBeenCalledTimes(1);
