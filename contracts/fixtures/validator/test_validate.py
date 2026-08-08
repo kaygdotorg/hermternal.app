@@ -547,6 +547,89 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             self._scan_artifact_bytes(relative_path, data)
 
+    def _run_scanner_probe(
+        self,
+        relative_path: str,
+        data: bytes,
+        *,
+        optimized: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run one artifact scanner in a fresh normal or optimized interpreter."""
+
+        suffix = Path(relative_path).suffix or ".txt"
+        with tempfile.TemporaryDirectory(prefix="fixture-scanner-probe-") as directory:
+            artifact = Path(directory) / ("artifact" + suffix)
+            artifact.write_bytes(data)
+            probe = (
+                "import importlib.util, pathlib, sys\n"
+                "spec = importlib.util.spec_from_file_location('probe_validate', sys.argv[1])\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "sys.modules['probe_validate'] = module\n"
+                "spec.loader.exec_module(module)\n"
+                "path = pathlib.Path(sys.argv[2])\n"
+                "relative = sys.argv[3]\n"
+                "data = path.read_bytes()\n"
+                "allowed_assignment = module.EXACT_ASSIGNMENT_ALLOWANCES.get(relative, frozenset())\n"
+                "allowed_full = module.SYNTHETIC_FULL_VALUE_ALLOWANCES.get(relative, frozenset())\n"
+                "allowed_urls = module.STRUCTURAL_URL_ALLOWANCES.get(relative, frozenset())\n"
+                "try:\n"
+                "    if path.suffix.casefold() == '.py':\n"
+                "        module._validate_python_file(path, data=data, "
+                "allow_synthetic_markers=relative in module.SYNTHETIC_MARKER_PATHS, "
+                "allow_test_negative_basic_auth=relative in module.TEST_NEGATIVE_BASIC_AUTH_PATHS, "
+                "allow_test_negative_rfc7617_token=relative in module.TEST_NEGATIVE_RFC7617_TOKEN_PATHS, "
+                "allowed_assignment_values=allowed_assignment, "
+                "allowed_synthetic_full_values=allowed_full, "
+                "allowed_structural_urls=allowed_urls)\n"
+                "    elif path.suffix.casefold() == '.json':\n"
+                "        document = module.load_json(path, require_object=False, reject_nul=False)\n"
+                "        module._validate_redaction_tree(document, allowed_assignment_values=allowed_assignment, "
+                "allowed_structural_urls=allowed_urls)\n"
+                "        module._reject_live_claims(document)\n"
+                "    else:\n"
+                "        module._validate_text_file(path, data=data, allowed_assignment_values=allowed_assignment, "
+                "allowed_structural_urls=allowed_urls)\n"
+                "except module.ValidationError:\n"
+                "    raise SystemExit(2)\n"
+                "raise SystemExit(0)\n"
+            )
+            command = [sys.executable]
+            if optimized:
+                command.append("-O")
+            command.extend(["-c", probe, str(validate.__file__), str(artifact), relative_path])
+            environment = dict(os.environ)
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            return subprocess.run(
+                command,
+                cwd=validate.REPO_ROOT,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+    def _assert_scanner_rejects_in_both_modes(self, relative_path: str, data: bytes) -> None:
+        results = []
+        for optimized in (False, True):
+            result = self._run_scanner_probe(relative_path, data, optimized=optimized)
+            self.assertEqual(result.returncode, 2, result)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
+            results.append((result.returncode, result.stdout, result.stderr))
+        self.assertEqual(results[0], results[1])
+
+    def _assert_scanner_accepts_in_both_modes(self, relative_path: str, data: bytes) -> None:
+        results = []
+        for optimized in (False, True):
+            result = self._run_scanner_probe(relative_path, data, optimized=optimized)
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
+            results.append((result.returncode, result.stdout, result.stderr))
+        self.assertEqual(results[0], results[1])
+
     def _assert_json_document_rejects(self, relative_path: str, document: dict[str, object]) -> None:
         self._assert_scanner_rejects(
             relative_path,
@@ -657,6 +740,57 @@ class CliTests(unittest.TestCase):
             "max": max(samples),
             "mean": statistics.mean(samples),
         }
+
+    def test_canonical_normal_execution_with_bytecode_disabled_does_not_self_reject_cache(self) -> None:
+        """Prove ``-B`` keeps the trusted canonical run outside its own cache boundary."""
+
+        repo_root = self._copy_fixture_repo()
+        source_commit = _active_authority_environment()[validate.ACTIVE_SOURCE_COMMIT_ENV]
+        # The checked-in registry is intentionally stale on this restack. Use
+        # the same trusted predecessor for every fixture artifact that drifted
+        # after its manifest was generated, while keeping this proof local to a
+        # disposable copy and never rewriting generated evidence in the branch.
+        trusted_paths = set(validate.CENTRAL_VALIDATOR_SOURCE_PATHS)
+        trusted_paths.update({
+            "contracts/fixtures/README.md",
+            "contracts/fixtures/deployment-security/host-origin-mapping/README.md",
+            "contracts/fixtures/deployment-security/host-origin-mapping/cases.json",
+            "contracts/fixtures/deployment-security/host-origin-mapping/test_validate.py",
+            "contracts/fixtures/deployment-security/host-origin-mapping/validate.py",
+            "contracts/fixtures/deployment-security/host-origin-mapping/validation-baseline.json",
+        })
+        for relative_path in trusted_paths:
+            trusted_bytes = subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    str(validate.REPO_ROOT),
+                    "show",
+                    f"{source_commit}:{relative_path}",
+                ],
+            )
+            target = repo_root / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(trusted_bytes)
+
+        cache_root = repo_root / "contracts/fixtures/validator/__pycache__"
+        # The source worktree may contain an ignored interpreter cache from a
+        # prior local test run. Remove that copied test artifact; the aggregate
+        # inventory still rejects a cache if one is present during validation.
+        if cache_root.exists():
+            shutil.rmtree(cache_root)
+        self.assertFalse(cache_root.exists())
+        completed = self._run(
+            repo_root=repo_root,
+            environment_overrides={"PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        self.assertEqual(completed.returncode, 0, completed)
+        self.assertEqual(completed.stderr, "")
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["fixture_count"], 30)
+        self.assertEqual(payload["coverage_count"], 29)
+        self.assertFalse(cache_root.exists())
+        self.assertEqual(tuple(repo_root.glob("**/__pycache__")), ())
 
     def test_normal_and_optimized_success_have_same_boundary(self) -> None:
         normal = self._run()
@@ -873,6 +1007,76 @@ class CliTests(unittest.TestCase):
                     assignment.encode("utf-8"),
                 )
 
+    def test_malformed_quoted_assignments_fail_closed_in_both_modes(self) -> None:
+        malformed = (
+            'password="unredacted-secret-value-123456\n',
+            'password="unredacted-secret-value-123456"suffix\n',
+            'password="unredacted-secret-value-123456\\"tail"\n',
+            'password="' + ("é" * 65) + '"\n',
+        )
+        for assignment in malformed:
+            with self.subTest(assignment=assignment):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/README.md",
+                    assignment.encode("utf-8"),
+                )
+
+        # The first literal is an exact reviewed marker, so rejection here
+        # proves that a later suffix or concatenated literal cannot hide behind
+        # the allowance rather than merely failing on the first value.
+        for assignment in (
+            'FORGED = "password=\\"redaction-canary\\" + \\"safe\\""\n',
+            'FORGED = "password=\\"redaction-canary\\"junk"\n',
+        ):
+            with self.subTest(assignment=assignment):
+                self._assert_scanner_rejects_in_both_modes(
+                    "deployment-security/host-origin-mapping/test_validate.py",
+                    assignment.encode("utf-8"),
+                )
+
+    def test_reviewed_quoted_assignment_marker_remains_bounded_and_accepted(self) -> None:
+        self._assert_scanner_accepts_in_both_modes(
+            "deployment-security/host-origin-mapping/test_validate.py",
+            b'FORGED = "password=\\"redaction-canary\\""\n',
+        )
+
+    def test_bounded_static_string_rendering_rejects_large_fields_and_collections_in_both_modes(self) -> None:
+        width = validate.MAX_STATIC_FORMAT_FIELD_WIDTH + 1
+        precision = validate.MAX_STATIC_FORMAT_FIELD_WIDTH + 1
+        large_collection = "[" + ", ".join('"x"' for _ in range(validate.MAX_STATIC_COLLECTION_ITEMS + 1)) + "]"
+        mapping_fields = "".join("{field" + str(index) + "}" for index in range(validate.MAX_STATIC_MAPPING_FIELDS + 1))
+        snippets = (
+            "runtime_secret = get_secret()\n"
+            + f'FORGED_FSTRING_WIDTH = f"Authorization: Basic {{runtime_secret:{width}}}"\n'
+            + f'FORGED_FSTRING_PRECISION = f"Authorization: {{runtime_number:.{precision}f}}"\n'
+            + f'FORGED_PERCENT_WIDTH = "Authorization: %{width}s" % runtime_secret\n'
+            + f'FORGED_PERCENT_PRECISION = "Authorization: %.{precision}s" % runtime_secret\n',
+            "runtime_secret = get_secret()\n"
+            + f'FORGED_FORMAT_WIDTH = "Authorization: {{0:{width}}}".format(runtime_secret)\n'
+            + f'FORGED_FORMAT_PRECISION = "Authorization: {{0:.{precision}f}}".format(runtime_number)\n',
+            "runtime_mapping = get_mapping()\n"
+            + f'FORGED_FORMAT_MAP = "Authorization: {{token:{width}}}".format_map(runtime_mapping)\n',
+            "runtime_secret = get_secret()\n"
+            + f"FORGED_JOIN_COLLECTION = \"Authorization: \".join({large_collection})\n"
+            + f'FORGED_JOIN_SEPARATOR = ("x" * {validate.MAX_STATIC_RENDER_BYTES + 1}).join(["Authorization: ", runtime_secret])\n',
+            "runtime_mapping = get_mapping()\n"
+            + f"FORGED_MAPPING_PROBE = {('Authorization: ' + mapping_fields)!r}.format_map(runtime_mapping)\n",
+        )
+        for source in snippets:
+            with self.subTest(source=source[:80]):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source.encode("utf-8"),
+                )
+
+    def test_unresolved_mapping_probe_cardinality_is_bounded(self) -> None:
+        template = "Authorization: " + "".join(
+            "{field" + str(index) + "}" for index in range(validate.MAX_STATIC_MAPPING_FIELDS * 4)
+        )
+        probe = validate._mapping_probe_from_template(template, format_map=True)
+        self.assertEqual(len(probe), validate.MAX_STATIC_MAPPING_FIELDS)
+        self.assertEqual(probe["field0"], "AAAAAAAAAAAAAAAA")
+
     def test_sensitive_key_aliases_are_rejected_in_both_modes(self) -> None:
         aliases = (
             "apiKey",
@@ -959,6 +1163,93 @@ class CliTests(unittest.TestCase):
                 self._assert_scanner_rejects(
                     "connection-restoration/README.md",
                     value.encode("utf-8"),
+                )
+
+    def test_regex_urls_share_raw_authority_query_and_port_policy(self) -> None:
+        regex_rejections = (
+            're.compile(r"https://user%3Aunredacted-secret-value-123456@synthetic\\.invalid")\n',
+            're.compile(r"https://evil\\.example\\.com\\\\@synthetic\\.invalid")\n',
+            're.compile(r"https://synthetic\\.invalid/%ZZ")\n',
+            're.compile(r"https://synthetic\\.invalid/?q=%")\n',
+            're.compile(r"https://synthetic\\.invalid/#%G0")\n',
+            're.compile(r"https://synthetic\\.invalid/?t%6fken=unredacted-secret-value-123456")\n',
+            're.compile(r"https://synthetic\\.invalid:0/path")\n',
+            're.compile(r"https://synthetic\\.invalid:65536/path")\n',
+            're.compile(r"https://synthetic\\.invalid:abc/path")\n',
+            're.compile(r"https://synthetic\\i\\.invalid/path")\n',
+        )
+        for source in regex_rejections:
+            with self.subTest(source=source):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source.encode("utf-8"),
+                )
+
+        query = "&".join(f"field{index}=1" for index in range(validate.MAX_URL_QUERY_PAIRS + 1))
+        query_source = f're.compile(r"https://synthetic\\.invalid/?{query}")\n'
+        self._assert_scanner_rejects_in_both_modes(
+            "connection-restoration/validate.py",
+            query_source.encode("utf-8"),
+        )
+
+        long_path = "/" + ("x" * (validate.MAX_URL_COMPONENT_LENGTH + 1))
+        long_source = f're.compile(r"https://synthetic\\.invalid{long_path}")\n'
+        self._assert_scanner_rejects_in_both_modes(
+            "connection-restoration/validate.py",
+            long_source.encode("utf-8"),
+        )
+        long_url = "/" + ("x" * validate.MAX_URL_COMPONENT_LENGTH) + "?" + ("y" * validate.MAX_URL_COMPONENT_LENGTH)
+        long_url_source = f're.compile(r"https://synthetic\\.invalid{long_url}")\n'
+        self._assert_scanner_rejects_in_both_modes(
+            "connection-restoration/validate.py",
+            long_url_source.encode("utf-8"),
+        )
+
+        self._assert_scanner_accepts_in_both_modes(
+            "connection-restoration/validate.py",
+            b're.compile(r"https://synthetic\\.invalid:443/v1/%2F")\n',
+        )
+
+        raw_rejections = (
+            b"https://user%3Aunredacted-secret-value-123456@synthetic.invalid\n",
+            b"https://evil.com\\@synthetic.invalid\n",
+            b"https://synthetic.invalid/%ZZ\n",
+            b"https://synthetic.invalid/?q=%\n",
+            b"https://synthetic.invalid:0/path\n",
+            b"https://synthetic.invalid:65536/path\n",
+            b"https://synthetic.invalid:abc/path\n",
+            ("https://synthetic.invalid" + long_url + "\n").encode("utf-8"),
+        )
+        for value in raw_rejections:
+            with self.subTest(value=value):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/README.md",
+                    value,
+                )
+        self._assert_scanner_accepts_in_both_modes(
+            "connection-restoration/README.md",
+            b"https://synthetic.invalid:443/v1/%2F\n",
+        )
+
+    def test_regex_query_pair_and_component_limits_are_bounded_before_rendering(self) -> None:
+        fragment = "#" + ("x" * (validate.MAX_URL_COMPONENT_LENGTH + 1))
+        source = f're.compile(r"https://synthetic\\.invalid{fragment}")\n'
+        self._assert_scanner_rejects_in_both_modes(
+            "connection-restoration/validate.py",
+            source.encode("utf-8"),
+        )
+
+    def test_regex_url_groups_classes_and_scheme_prefixes_do_not_create_false_ports(self) -> None:
+        snippets = (
+            b're.compile(r"^https://[a-z0-9.-]+\\.hermternal\\.test(?::[0-9]{1,5})?$")\n',
+            b're.compile(r"^https://[a-z0-9.-]+\\.hermternal\\.test(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~!$&\'()*+,;=:@/%-]*)?$")\n',
+            b'if target.startswith("https://"):\n    pass\n',
+        )
+        for source in snippets:
+            with self.subTest(source=source):
+                self._assert_scanner_accepts_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source,
                 )
 
     def test_structural_url_allowances_are_exact_and_path_scoped(self) -> None:
