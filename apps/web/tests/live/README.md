@@ -1,5 +1,51 @@
 # Official Hermes browser proof
 
+## Deterministic screenshot capture
+
+The live lane keeps Playwright's automatic screenshots, traces, videos, failure
+output, HTML context, DOM snapshots, and unsafe reporters disabled for every
+credential-bearing run. The only screenshot path is an explicit opt-in after
+the stable Chat assertion in `official-hermes.spec.ts`:
+
+```sh
+HERMTERNAL_LIVE_SCREENSHOT_CAPTURE=1 \
+HERMTERNAL_PAPER_PARITY_APPROVED=1 \
+HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA="$GITHUB_SHA" \
+  bun run --cwd apps/web test:e2e:live
+```
+
+The capture helper rejects missing or short client SHAs, non-root routes, any
+viewport other than `1440x960`, non-Chromium browser provenance, non-`en-US`
+locale, non-1 DPR or zoom, unexpected theme or reduced-motion inputs, and UI
+states outside the bounded `empty`/`ready` set. It records only the fixed-key
+manifest, the official Hermes image digest and source attestation, the exact
+safe test command, and the SHA-256 of the returned PNG. It never attaches or
+writes prompt text, transcripts, provider payloads, tickets, cookies,
+credentials, WebSocket frames, PTY bytes, stdout/stderr, traces, or test
+results.
+
+The default capture result stays in memory and is removed with the test
+process. Repository retention is a separate manual gate:
+
+```sh
+HERMTERNAL_LIVE_SCREENSHOT_CAPTURE=1 \
+HERMTERNAL_PAPER_PARITY_APPROVED=1 \
+HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA="$GITHUB_SHA" \
+HERMTERNAL_LIVE_SCREENSHOT_RETAIN=1 \
+HERMTERNAL_LIVE_SCREENSHOT_REVIEW=independent-approved \
+HERMTERNAL_LIVE_SCREENSHOT_DESTINATION="$PWD/tests/integration/hermes-chat" \
+  bun run --cwd apps/web test:e2e:live
+```
+
+The retention directory must already exist and contain no symlinked ancestor.
+Existing files are never overwritten. An independent reviewer must inspect the
+PNG bytes and the manifest together before the bytes are copied into the
+repository. This is a tooling contract only: the deterministic unit tests use
+synthetic page metadata and PNG bytes, while the opt-in Playwright lane is the
+only path that can observe the real Hermes Chat state. No live capture was run
+for this change; credentials and VM access are not required for the regression
+suite.
+
 This lane serves the production static build and proxies only `/api/*`, `/auth/*`, `/api/ws`, and the exact `/api/pty` WebSocket upgrade to a disposable local HTTP target. `HERMES_LIVE_TARGET` is accepted only as a plain HTTP loopback URL: canonical IPv4 in `127.0.0.0/8`, `[::1]`, or `localhost`, with an explicit unambiguous decimal port and an optional root slash. Set it from the selected launcher `.result.endpoint` (or an approved tunnel URL whose remote side was selected from that endpoint); do not use a remembered or inferred port. Hermes and its Dashboard stay on the VM loopback interface.
 
 The host rejects HTTPS, userinfo, non-loopback names, IPv4-mapped IPv6, decimal/octal/short IPv4 encodings, percent-encoded or backslash-containing authorities, ambiguous ports, and any path, query, or fragment before creating the proxy-capable server. This validation is the disposable proof boundary; it prevents auth traffic from being sent to a target that URL parsing could reinterpret.

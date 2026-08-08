@@ -50,6 +50,13 @@ export default defineConfig({
   expect: { timeout: 30_000 },
   use: {
     baseURL: `http://127.0.0.1:${port}`,
+    // These inputs are pinned for the explicit, manually reviewed screenshot
+    // path. The capture helper remains opt-in; ordinary live runs still retain
+    // no screenshot, trace, video, or failure output.
+    viewport: { width: 1440, height: 960 },
+    deviceScaleFactor: 1,
+    locale: 'en-US',
+    reducedMotion: 'reduce',
     trace: 'off',
     video: 'off',
     screenshot: 'off',
