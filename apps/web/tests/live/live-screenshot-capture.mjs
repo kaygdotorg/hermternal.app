@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   accessSync,
   constants as fsConstants,
@@ -9,9 +9,8 @@ import {
   realpathSync,
   promises as fsPromises
 } from 'node:fs';
-import { dirname, join, parse, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
 
 /**
  * This module is the only explicit screenshot path in the live lane. It is
@@ -38,13 +37,12 @@ const LIVE_SCREENSHOT_PLAYWRIGHT_VERSION = '1.62.1';
 const LIVE_SCREENSHOT_CHROMIUM_REVISION = '1234';
 const LIVE_SCREENSHOT_CHROMIUM_VERSION = '151.0.7922.34';
 const CHROMIUM_REVISION_PATTERN = /(?:^|[\\/])chromium-([0-9]+)(?:[\\/]|$)/u;
+const LIVE_SCREENSHOT_MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
+const LIVE_SCREENSHOT_APP_ROOT = resolve(LIVE_SCREENSHOT_MODULE_DIRECTORY, '../..');
+const LIVE_SCREENSHOT_REPOSITORY_ROOT = resolve(LIVE_SCREENSHOT_APP_ROOT, '../..');
 
 /** @typedef {{ playwrightVersion: string, revision: string, version: string }} ChromiumRegistry */
-/** @typedef {{ playwrightVersion: string, revision: string, version: string, executablePath: string, canonicalPath: string }} ChromiumProvenance */
-/** @type {ChromiumRegistry | undefined} */
-let pinnedChromiumRegistry;
-/** @type {ChromiumProvenance | undefined} */
-let pinnedChromiumProvenance;
+/** @typedef {{ playwrightVersion: string, revision: string, version: string, executablePath: string, canonicalPath: string, executableSha256: string, dev: number, ino: number }} ChromiumProvenance */
 
 /**
  * Resolve the registry metadata only after the explicit capture gate has been
@@ -53,43 +51,52 @@ let pinnedChromiumProvenance;
  * drift cannot silently select a different browsers.json.
  */
 function readPinnedChromiumRegistry() {
-  if (pinnedChromiumRegistry) return pinnedChromiumRegistry;
   try {
     const require = createRequire(import.meta.url);
+    /** @param {string} name */
+    const packageEntry = (name) => require.resolve(`${name}/package.json`);
+    const playwrightPackage = JSON.parse(readFileSync(packageEntry('playwright'), 'utf8'));
+    const testPackage = JSON.parse(readFileSync(packageEntry('@playwright/test'), 'utf8'));
     const playwrightCoreEntry = require.resolve('playwright-core');
-    const packagePath = join(dirname(playwrightCoreEntry), 'package.json');
+    const corePackage = JSON.parse(readFileSync(join(dirname(playwrightCoreEntry), 'package.json'), 'utf8'));
     const browsersPath = join(dirname(playwrightCoreEntry), 'browsers.json');
-    const packageManifest = JSON.parse(readFileSync(packagePath, 'utf8'));
     const browsersManifest = JSON.parse(readFileSync(browsersPath, 'utf8'));
-    const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-    const appPackage = JSON.parse(readFileSync(join(appRoot, 'package.json'), 'utf8'));
-    const lockfile = readFileSync(join(appRoot, 'bun.lock'), 'utf8');
+    const appPackage = JSON.parse(readFileSync(join(LIVE_SCREENSHOT_APP_ROOT, 'package.json'), 'utf8'));
+    const lockfile = readFileSync(join(LIVE_SCREENSHOT_APP_ROOT, 'bun.lock'), 'utf8');
     const browserEntries = /** @type {Array<{ name?: unknown, revision?: unknown, browserVersion?: unknown }>} */ (
       browsersManifest.browsers ?? []
     );
     const chromiumEntry = browserEntries.find((entry) => entry.name === 'chromium');
     const playwrightDependency = appPackage.devDependencies?.playwright;
     const testDependency = appPackage.devDependencies?.['@playwright/test'];
+    /** @param {string} name */
+    const exactLockEntry = (name) =>
+      lockfile.includes(`\"${name}\": [\"${name}@${LIVE_SCREENSHOT_PLAYWRIGHT_VERSION}\"`);
     if (
-      packageManifest.name !== 'playwright-core' ||
-      packageManifest.version !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
+      playwrightPackage.name !== 'playwright' ||
+      playwrightPackage.version !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
+      playwrightPackage.dependencies?.['playwright-core'] !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
+      testPackage.name !== '@playwright/test' ||
+      testPackage.version !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
+      testPackage.dependencies?.playwright !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
+      corePackage.name !== 'playwright-core' ||
+      corePackage.version !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
       playwrightDependency !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
       testDependency !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
-      !lockfile.includes(`@playwright/test@${LIVE_SCREENSHOT_PLAYWRIGHT_VERSION}`) ||
-      !lockfile.includes(`playwright@${LIVE_SCREENSHOT_PLAYWRIGHT_VERSION}`) ||
-      !lockfile.includes(`playwright-core@${LIVE_SCREENSHOT_PLAYWRIGHT_VERSION}`) ||
+      !exactLockEntry('@playwright/test') ||
+      !exactLockEntry('playwright') ||
+      !exactLockEntry('playwright-core') ||
       !chromiumEntry ||
       chromiumEntry.revision !== LIVE_SCREENSHOT_CHROMIUM_REVISION ||
       chromiumEntry.browserVersion !== LIVE_SCREENSHOT_CHROMIUM_VERSION
     ) {
       throw new Error('pinned Playwright or Chromium metadata is unavailable');
     }
-    pinnedChromiumRegistry = Object.freeze({
+    return Object.freeze({
       playwrightVersion: LIVE_SCREENSHOT_PLAYWRIGHT_VERSION,
       revision: chromiumEntry.revision,
       version: chromiumEntry.browserVersion
     });
-    return pinnedChromiumRegistry;
   } catch {
     throw new Error('live screenshot capture could not derive pinned Chromium registry');
   }
@@ -101,10 +108,11 @@ function readPinnedChromiumRegistry() {
  * retained in the public manifest or accepted from environment input.
  */
 function readPinnedChromiumProvenance() {
-  if (pinnedChromiumProvenance) return pinnedChromiumProvenance;
   const registry = readPinnedChromiumRegistry();
   try {
-    const executablePath = chromium.executablePath();
+    const require = createRequire(import.meta.url);
+    const playwright = require('playwright');
+    const executablePath = playwright.chromium.executablePath();
     if (typeof executablePath !== 'string' || !CHROMIUM_REVISION_PATTERN.test(executablePath)) {
       throw new Error('pinned Chromium executable path is unavailable');
     }
@@ -112,24 +120,65 @@ function readPinnedChromiumProvenance() {
     if (!revisionMatch || revisionMatch[1] !== registry.revision) {
       throw new Error('pinned Chromium executable revision is not approved');
     }
-    const stats = lstatSync(executablePath);
+    const statsBefore = lstatSync(executablePath);
     accessSync(executablePath, fsConstants.X_OK);
-    if (!stats.isFile() || stats.isSymbolicLink()) {
-      throw new Error('pinned Chromium executable is not a regular file');
+    const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+    if (
+      !statsBefore.isFile() ||
+      statsBefore.isSymbolicLink() ||
+      (currentUid !== undefined && statsBefore.uid !== currentUid) ||
+      (statsBefore.mode & 0o022) !== 0
+    ) {
+      throw new Error('pinned Chromium executable is not a private regular file');
     }
     const canonicalPath = realpathSync(executablePath);
     if (canonicalPath !== executablePath) {
       throw new Error('pinned Chromium executable path is not canonical');
     }
-    pinnedChromiumProvenance = Object.freeze({
+    const executableSha256 = createHash('sha256').update(readFileSync(executablePath)).digest('hex');
+    const statsAfter = lstatSync(executablePath);
+    if (
+      !statsAfter.isFile() ||
+      statsAfter.isSymbolicLink() ||
+      statsAfter.dev !== statsBefore.dev ||
+      statsAfter.ino !== statsBefore.ino ||
+      statsAfter.size !== statsBefore.size ||
+      realpathSync(executablePath) !== canonicalPath ||
+      createHash('sha256').update(readFileSync(executablePath)).digest('hex') !== executableSha256
+    ) {
+      throw new Error('pinned Chromium executable changed during validation');
+    }
+    return Object.freeze({
       ...registry,
       executablePath,
-      canonicalPath
+      canonicalPath,
+      executableSha256,
+      dev: statsAfter.dev,
+      ino: statsAfter.ino
     });
-    return pinnedChromiumProvenance;
   } catch {
     throw new Error('live screenshot capture could not derive pinned Chromium provenance');
   }
+}
+
+/**
+ * Resolve the only supported opt-in browser launch. Registry metadata is
+ * validated before Playwright is asked for its executable path; the returned
+ * path and digest are then revalidated by the capture helper before and after
+ * page work. The digest is passed only through the test process environment,
+ * never into public screenshot metadata except as an integrity hash.
+ */
+export function getLiveScreenshotChromiumLaunchOptions(environment = process.env) {
+  if (!isLiveScreenshotCaptureEnabled(environment)) {
+    return Object.freeze({ headless: true });
+  }
+  const configuration = validateLiveScreenshotCaptureConfiguration(environment);
+  if (!configuration) throw new Error('live screenshot capture configuration is unavailable');
+  const { provenance } = configuration;
+  return Object.freeze({
+    headless: true,
+    executablePath: provenance.executablePath
+  });
 }
 
 export function getLiveScreenshotChromiumRegistry() {
@@ -172,17 +221,69 @@ const SAFE_FILE_STEM_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const FORBIDDEN_PUBLIC_TEXT_PATTERN =
   /(?:password|credential|cookie|ticket|prompt|transcript|provider|websocket|web-socket|pty|stdout|stderr|trace|dom|html|request[._ -]?id|session[._ -]?id|hostname|secret)/iu;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const TRUSTED_PYTHON_EXECUTABLES = Object.freeze([
+  '/usr/bin/python3',
+  '/opt/homebrew/bin/python3',
+  '/usr/local/bin/python3',
+  '/opt/local/bin/python3'
+]);
+const TRUSTED_STAGING_SYSTEM_ROOT = process.platform === 'darwin' ? '/private/tmp' : '/tmp';
 const ATOMIC_RENAME_SCRIPT = String.raw`
 import ctypes
 import errno
 import os
 import platform
+import stat
 import sys
 
 source_fd = int(sys.argv[1])
 destination_fd = int(sys.argv[2])
 source_name = sys.argv[3].encode('utf-8')
 destination_name = sys.argv[4].encode('utf-8')
+source_dev = int(sys.argv[5])
+source_ino = int(sys.argv[6])
+parent_dev = int(sys.argv[7])
+parent_ino = int(sys.argv[8])
+screenshot_dev = int(sys.argv[9])
+screenshot_ino = int(sys.argv[10])
+screenshot_size = int(sys.argv[11])
+manifest_dev = int(sys.argv[12])
+manifest_ino = int(sys.argv[13])
+manifest_size = int(sys.argv[14])
+
+def verify_source():
+    parent_stat = os.fstat(source_fd)
+    if parent_stat.st_dev != parent_dev or parent_stat.st_ino != parent_ino:
+        raise OSError(errno.EAGAIN, 'staging parent identity changed')
+    source_directory_fd = os.open(
+        source_name,
+        os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0),
+        dir_fd=source_fd,
+    )
+    try:
+        source_stat = os.fstat(source_directory_fd)
+        if (
+            not stat.S_ISDIR(source_stat.st_mode)
+            or source_stat.st_dev != source_dev
+            or source_stat.st_ino != source_ino
+        ):
+            raise OSError(errno.EAGAIN, 'staging directory identity changed')
+        for name, expected_dev, expected_ino, expected_size in (
+            (b'screenshot.png', screenshot_dev, screenshot_ino, screenshot_size),
+            (b'manifest.json', manifest_dev, manifest_ino, manifest_size),
+        ):
+            entry_stat = os.stat(name, dir_fd=source_directory_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(entry_stat.st_mode)
+                or entry_stat.st_dev != expected_dev
+                or entry_stat.st_ino != expected_ino
+                or entry_stat.st_size != expected_size
+            ):
+                raise OSError(errno.EAGAIN, 'staging entry identity changed')
+    finally:
+        os.close(source_directory_fd)
+
+verify_source()
 
 libc = ctypes.CDLL(None, use_errno=True)
 if sys.platform == 'darwin':
@@ -222,6 +323,230 @@ if result != 0:
     sys.exit(error_number or 1)
 `;
 
+/** @returns {string} */
+function trustedPythonExecutable() {
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  for (const candidate of TRUSTED_PYTHON_EXECUTABLES) {
+    try {
+      const expectedPath = resolve(candidate);
+      const canonicalPath = realpathSync(expectedPath);
+      if (canonicalPath !== expectedPath) continue;
+      let current = expectedPath;
+      for (;;) {
+        const stats = lstatSync(current);
+        const canonical = realpathSync(current);
+        if (
+          (current !== expectedPath && !stats.isDirectory()) ||
+          stats.isSymbolicLink() ||
+          canonical !== resolve(current) ||
+          (stats.mode & 0o022) !== 0
+        ) {
+          throw new Error('untrusted Python path component');
+        }
+        if (current === parse(current).root) break;
+        current = dirname(current);
+      }
+      const stats = lstatSync(expectedPath);
+      accessSync(expectedPath, fsConstants.X_OK);
+      if (
+        stats.isFile() &&
+        !stats.isSymbolicLink() &&
+        (currentUid === undefined || stats.uid === currentUid || stats.uid === 0) &&
+        (stats.mode & 0o022) === 0
+      ) {
+        return expectedPath;
+      }
+    } catch {
+      // Try the next fixed system path. Environment PATH is intentionally not
+      // consulted because it is not a trusted executable-selection boundary.
+    }
+  }
+  throw new Error('live screenshot atomic rename Python executable is unavailable');
+}
+
+const ATOMIC_RENAME_CHILD_ENVIRONMENT = Object.freeze({
+  PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+  LC_ALL: 'C',
+  LANG: 'C',
+  PYTHONNOUSERSITE: '1'
+});
+
+export function getLiveScreenshotAtomicRenameChildConfiguration() {
+  return Object.freeze({
+    executable: trustedPythonExecutable(),
+    environment: ATOMIC_RENAME_CHILD_ENVIRONMENT
+  });
+}
+
+/**
+ * @typedef {{ path: string, canonical: string, dev: number, ino: number, systemCanonical: string, systemDev: number, systemIno: number }} StagingParentEvidence
+ */
+
+/** @returns {{ canonical: string, dev: number, ino: number }} */
+function readTrustedStagingSystemRoot() {
+  try {
+    const stats = lstatSync(TRUSTED_STAGING_SYSTEM_ROOT);
+    const canonical = realpathSync(TRUSTED_STAGING_SYSTEM_ROOT);
+    if (
+      !stats.isDirectory() ||
+      stats.isSymbolicLink() ||
+      canonical !== resolve(TRUSTED_STAGING_SYSTEM_ROOT) ||
+      ((stats.mode & 0o002) !== 0 && (stats.mode & 0o1000) === 0)
+    ) {
+      throw new Error('live screenshot staging system root is unsafe');
+    }
+    return { canonical, dev: stats.dev, ino: stats.ino };
+  } catch (error) {
+    if (error instanceof Error && error.message === 'live screenshot staging system root is unsafe') {
+      throw error;
+    }
+    throw new Error('live screenshot staging system root is unavailable');
+  }
+}
+
+/** @param {string} path @param {{ canonical: string, dev: number, ino: number }} systemRoot @returns {StagingParentEvidence} */
+function readStagingParentEvidence(path, systemRoot) {
+  try {
+    const stats = lstatSync(path);
+    const canonical = realpathSync(path);
+    const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+    if (
+      !stats.isDirectory() ||
+      stats.isSymbolicLink() ||
+      (stats.mode & 0o077) !== 0 ||
+      (currentUid !== undefined && stats.uid !== currentUid) ||
+      canonical !== resolve(path)
+    ) {
+      throw new Error('live screenshot staging parent is not private');
+    }
+    return {
+      path,
+      canonical,
+      dev: stats.dev,
+      ino: stats.ino,
+      systemCanonical: systemRoot.canonical,
+      systemDev: systemRoot.dev,
+      systemIno: systemRoot.ino
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message === 'live screenshot staging parent is not private') {
+      throw error;
+    }
+    throw new Error('live screenshot staging parent is unavailable');
+  }
+}
+
+/** @param {StagingParentEvidence} expected */
+function assertStagingParentEvidence(expected) {
+  let observed;
+  try {
+    const systemRoot = readTrustedStagingSystemRoot();
+    if (
+      systemRoot.canonical !== expected.systemCanonical ||
+      systemRoot.dev !== expected.systemDev ||
+      systemRoot.ino !== expected.systemIno
+    ) {
+      throw new Error('live screenshot staging parent changed');
+    }
+    observed = readStagingParentEvidence(expected.path, systemRoot);
+  } catch {
+    throw new Error('live screenshot staging parent changed');
+  }
+  if (
+    observed.canonical !== expected.canonical ||
+    observed.dev !== expected.dev ||
+    observed.ino !== expected.ino
+  ) {
+    throw new Error('live screenshot staging parent changed');
+  }
+  return observed;
+}
+
+/** @returns {Promise<StagingParentEvidence>} */
+async function createPrivateStagingParent() {
+  const systemBefore = readTrustedStagingSystemRoot();
+  const path = await fsPromises.mkdtemp(join(systemBefore.canonical, '.hermternal-live-staging-parent-'));
+  let createdIdentity;
+  try {
+    const createdStats = lstatSync(path);
+    if (!createdStats.isDirectory() || createdStats.isSymbolicLink()) {
+      throw new Error('live screenshot staging parent is not private');
+    }
+    createdIdentity = { dev: createdStats.dev, ino: createdStats.ino };
+    await fsPromises.chmod(path, 0o700);
+    const systemAfter = readTrustedStagingSystemRoot();
+    if (
+      systemAfter.canonical !== systemBefore.canonical ||
+      systemAfter.dev !== systemBefore.dev ||
+      systemAfter.ino !== systemBefore.ino
+    ) {
+      throw new Error('live screenshot staging system root changed');
+    }
+    const evidence = readStagingParentEvidence(path, systemBefore);
+    if (evidence.dev !== createdIdentity.dev || evidence.ino !== createdIdentity.ino) {
+      throw new Error('live screenshot staging parent changed');
+    }
+    return evidence;
+  } catch (error) {
+    if (createdIdentity) {
+      try {
+        const current = lstatSync(path);
+        if (
+          current.isDirectory() &&
+          !current.isSymbolicLink() &&
+          current.dev === createdIdentity.dev &&
+          current.ino === createdIdentity.ino
+        ) {
+          await fsPromises.rmdir(path);
+        }
+      } catch {
+        // Never follow a replacement path during rollback. The original fixed
+        // creation failure remains the only public result.
+      }
+    }
+    if (error instanceof Error && error.message.startsWith('live screenshot staging')) throw error;
+    throw new Error('live screenshot staging parent is unavailable');
+  }
+}
+
+/** @param {string} path @param {StagingParentEvidence} expected */
+async function removePrivateStagingParent(path, expected) {
+  if (resolve(path) !== resolve(expected.path)) {
+    throw new Error('live screenshot staging parent identity changed');
+  }
+  const observed = assertStagingParentEvidence(expected);
+  const tombstone = join(
+    dirname(expected.path),
+    `.${basename(expected.path)}-cleanup-${randomBytes(12).toString('hex')}`
+  );
+  try {
+    await fsPromises.rename(expected.path, tombstone);
+  } catch (error) {
+    if (isNotFoundError(error)) return;
+    throw new Error('live screenshot staging parent cleanup failed');
+  }
+  let tombstoneStats;
+  try {
+    tombstoneStats = lstatSync(tombstone);
+  } catch {
+    throw new Error('live screenshot staging parent cleanup failed');
+  }
+  if (
+    !tombstoneStats.isDirectory() ||
+    tombstoneStats.isSymbolicLink() ||
+    tombstoneStats.dev !== observed.dev ||
+    tombstoneStats.ino !== observed.ino
+  ) {
+    throw new Error('live screenshot staging parent identity changed');
+  }
+  try {
+    await fsPromises.rmdir(tombstone);
+  } catch (error) {
+    if (isNotFoundError(error)) return;
+    throw new Error('live screenshot staging parent cleanup failed');
+  }
+}
+
 const MANIFEST_KEYS = [
   'schema',
   'issue',
@@ -240,7 +565,7 @@ const MANIFEST_KEYS = [
   'review'
 ];
 const VIEWPORT_KEYS = ['width', 'height'];
-const BROWSER_KEYS = ['name', 'version', 'revision', 'zoom'];
+const BROWSER_KEYS = ['name', 'version', 'revision', 'executableSha256', 'zoom'];
 const HERMES_KEYS = ['imageDigest', 'sourceSha', 'attestation'];
 
 /** @param {unknown} value */
@@ -357,6 +682,12 @@ export function validateLiveScreenshotManifest(value) {
   if (manifest.browser.revision !== readPinnedChromiumRegistry().revision) {
     throw new Error('live screenshot manifest Chromium revision is not pinned');
   }
+  if (
+    typeof manifest.browser.executableSha256 !== 'string' ||
+    !SHA256_PATTERN.test(manifest.browser.executableSha256)
+  ) {
+    throw new Error('live screenshot manifest executable digest is not bounded');
+  }
   if (manifest.browser.zoom !== LIVE_SCREENSHOT_BROWSER_ZOOM) {
     throw new Error('live screenshot manifest browser zoom is not pinned');
   }
@@ -409,6 +740,7 @@ export function validateLiveScreenshotManifest(value) {
     ['browser.name', manifest.browser.name],
     ['browser.version', manifest.browser.version],
     ['browser.revision', manifest.browser.revision],
+    ['browser.executableSha256', manifest.browser.executableSha256],
     ['theme', manifest.theme],
     ['reducedMotion', manifest.reducedMotion],
     ['locale', manifest.locale],
@@ -431,6 +763,7 @@ export function validateLiveScreenshotManifest(value) {
  *   browserName: string,
  *   browserRevision: string,
  *   browserVersion: string,
+ *   browserExecutableSha256: string,
  *   clientSha: string,
  *   devicePixelRatio: number,
  *   imageSha256: string,
@@ -463,6 +796,7 @@ export function createLiveScreenshotManifest(input) {
       name: input.browserName,
       version: input.browserVersion,
       revision: input.browserRevision,
+      executableSha256: input.browserExecutableSha256,
       zoom: input.zoom
     },
     theme: input.theme,
@@ -501,8 +835,10 @@ export function isLiveScreenshotCaptureEnabled(environment = process.env) {
  * listener-free DOM clone that cannot receive WebSocket or component updates.
  * This function is self-contained because Playwright serializes it into the
  * page realm.
+ *
+ * @param {string[]} [sensitiveMarkers]
  */
-export function sanitizeLiveChatCapturePresentation() {
+export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = []) {
   const preview = document.querySelector('[data-testid="runtime-preview"]');
   if (!(preview instanceof HTMLElement)) {
     throw new Error('live screenshot capture workspace is unavailable');
@@ -512,25 +848,90 @@ export function sanitizeLiveChatCapturePresentation() {
     throw new Error('live screenshot capture workspace container is unavailable');
   }
   const captureSelector = '[data-capture-root="live-chat"]';
-  document.querySelector(captureSelector)?.remove();
+  document.querySelectorAll(captureSelector).forEach((node) => node.remove());
+  if (document.querySelector(captureSelector)) {
+    throw new Error('live screenshot capture found an unremovable capture root');
+  }
 
   // Keep placeholders inside this page-evaluated function; Playwright does not
   // serialize module lexical bindings with the function body.
   const modelPlaceholder = 'Model';
   const sessionCountPlaceholder = '—';
 
+  /** @returns {never} */
+  const privacyOverflow = () => {
+    throw new Error('live screenshot capture privacy scan exceeded bounds');
+  };
+  const maxSensitiveValues = 512;
+  const maxSensitiveValueLength = 4 * 1024;
+  const maxStorageEntries = 256;
+  const maxStorageBytes = 1024 * 1024;
+  const maxIndexedDbDatabases = 32;
+  const maxIndexedDbStores = 128;
+  const maxIndexedDbRecords = 512;
+  const maxCacheEntries = 64;
+  const maxCacheRequests = 512;
+  const maxCacheHeaders = 256;
+  const maxCacheBodyBytes = 4 * 1024 * 1024;
   /** @type {string[]} */
   const oldLiveValues = [];
   /** @type {string[]} */
   const oldMetadataValues = [];
   /** @param {unknown} value */
   const remember = (value) => {
-    if (typeof value === 'string' && value.trim().length > 0) oldLiveValues.push(value.trim());
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return;
+    if (trimmed.length > maxSensitiveValueLength || oldLiveValues.length >= maxSensitiveValues) {
+      privacyOverflow();
+    }
+    oldLiveValues.push(trimmed);
   };
   /** @param {unknown} value */
   const rememberMetadata = (value) => {
-    remember(value);
-    if (typeof value === 'string' && value.trim().length > 0) oldMetadataValues.push(value.trim());
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return;
+    if (trimmed.length > maxSensitiveValueLength || oldMetadataValues.length >= maxSensitiveValues) {
+      privacyOverflow();
+    }
+    oldMetadataValues.push(trimmed);
+  };
+  const markerValues = [
+    ...(Array.isArray(sensitiveMarkers) ? sensitiveMarkers : []),
+    'password',
+    'prompt',
+    'completion',
+    'ticket'
+  ].filter((value) => typeof value === 'string' && value.length > 0 && value.length <= maxSensitiveValueLength);
+  const markerPattern = /(?:password|prompt|completion|ticket)/iu;
+  /** @param {unknown} value @returns {string} */
+  const inspectionText = (value) => {
+    if (typeof value === 'string') {
+      if (value.length > maxSensitiveValueLength) privacyOverflow();
+      return value;
+    }
+    let serialized = '';
+    try {
+      serialized = JSON.stringify(value) ?? '';
+    } catch {
+      privacyOverflow();
+    }
+    if (serialized.length > maxSensitiveValueLength) {
+      privacyOverflow();
+    }
+    return serialized;
+  };
+  /** @param {unknown} value */
+  const containsPrivacyMarker = (value) => {
+    const text = inspectionText(value);
+    return markerPattern.test(text) || markerValues.some((marker) => {
+      if (marker.length <= 1) {
+        const escaped = marker.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+        return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:$|[^\\p{L}\\p{N}_])`, 'u').test(text);
+      }
+      return text.includes(marker);
+    });
   };
   /** @param {Element} element */
   const rememberDynamicAttributes = (element) => {
@@ -566,13 +967,13 @@ export function sanitizeLiveChatCapturePresentation() {
     return nodes.some((node) => {
       if (node.textContent?.trim() === value) return true;
       const candidate = /** @type {Element & { value?: unknown }} */ (node);
-      if (typeof candidate.value === 'string' && candidate.value.includes(value)) return true;
+      if (typeof candidate.value === 'string' && candidate.value === value) return true;
       return node.getAttributeNames().some((name) => {
         if (name === 'class' || name === 'style' || name === 'data-capture-sanitized') return false;
         if (!name.startsWith('aria-') && name !== 'title' && name !== 'value' && !name.startsWith('data-')) {
           return false;
         }
-        return node.getAttribute(name)?.includes(value) ?? false;
+        return node.getAttribute(name) === value;
       });
     });
   };
@@ -750,29 +1151,165 @@ export function sanitizeLiveChatCapturePresentation() {
 
   /** @param {Storage} storage */
   const scrubStorage = (storage) => {
+    if (!storage || typeof storage.length !== 'number' || typeof storage.key !== 'function' || typeof storage.clear !== 'function') {
+      throw new Error('live screenshot capture storage boundary is unavailable');
+    }
+    let entryCount = 0;
+    let byteCount = 0;
     for (let index = 0; index < storage.length; index += 1) {
+      entryCount += 1;
+      if (entryCount > maxStorageEntries) privacyOverflow();
       const key = storage.key(index);
-      if (key !== null) {
-        rememberMetadata(key);
-        rememberMetadata(storage.getItem(key));
-      }
+      if (typeof key !== 'string') throw new Error('live screenshot capture storage boundary is unavailable');
+      const value = storage.getItem(key);
+      if (typeof value !== 'string') throw new Error('live screenshot capture storage boundary is unavailable');
+      byteCount += key.length + value.length;
+      if (byteCount > maxStorageBytes) privacyOverflow();
+      rememberMetadata(key);
+      rememberMetadata(value);
+      containsPrivacyMarker(key);
+      containsPrivacyMarker(value);
     }
     storage.clear();
     if (storage.length !== 0) throw new Error('live screenshot capture storage was not cleared');
+    return entryCount;
   };
-  try {
-    scrubStorage(localStorage);
-    scrubStorage(sessionStorage);
-  } catch {
-    // jsdom and opaque about:blank probes do not expose origin storage. The
-    // real live lane always runs on the configured same-origin HTTP page and
-    // therefore remains fail-closed when storage is unavailable there.
-    const origin = typeof window === 'object' && window.location ? window.location.origin : '';
-    const userAgent = typeof navigator === 'object' ? navigator.userAgent : '';
-    if (origin !== 'null' && !/jsdom/iu.test(userAgent)) {
-      throw new Error('live screenshot capture storage boundary is unavailable');
+  if (typeof localStorage === 'undefined' || typeof sessionStorage === 'undefined') {
+    throw new Error('live screenshot capture storage boundary is unavailable');
+  }
+  const localStorageEntryCount = scrubStorage(localStorage);
+  const sessionStorageEntryCount = scrubStorage(sessionStorage);
+
+  const listIndexedDbDatabases = async () => {
+    if (typeof indexedDB === 'undefined' || typeof indexedDB.databases !== 'function' || typeof indexedDB.open !== 'function') {
+      throw new Error('live screenshot capture IndexedDB boundary is unavailable');
+    }
+    const databases = await indexedDB.databases();
+    if (!Array.isArray(databases) || databases.length > maxIndexedDbDatabases) privacyOverflow();
+    return databases;
+  };
+  /** @param {string} name @returns {Promise<IDBDatabase>} */
+  const openIndexedDb = (name) => new Promise((resolve, reject) => {
+    const request = indexedDB.open(name);
+    request.onerror = () => reject(new Error('live screenshot capture IndexedDB boundary is unavailable'));
+    request.onblocked = () => reject(new Error('live screenshot capture IndexedDB deletion was blocked'));
+    request.onsuccess = () => resolve(request.result);
+  });
+  /** @param {IDBDatabase} database @param {string} storeName @returns {Promise<number>} */
+  const scanIndexedDbStore = (database, storeName) => new Promise((resolve, reject) => {
+    let recordCount = 0;
+    let request;
+    try {
+      request = database.transaction(storeName, 'readonly').objectStore(storeName).openCursor();
+    } catch {
+      reject(new Error('live screenshot capture IndexedDB boundary is unavailable'));
+      return;
+    }
+    request.onerror = () => reject(new Error('live screenshot capture IndexedDB boundary is unavailable'));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve(recordCount);
+        return;
+      }
+      recordCount += 1;
+      if (recordCount > maxIndexedDbRecords) {
+        reject(new Error('live screenshot capture privacy scan exceeded bounds'));
+        return;
+      }
+      containsPrivacyMarker(cursor.key);
+      containsPrivacyMarker(cursor.value);
+      cursor.continue();
+    };
+  });
+  /** @param {string} name @returns {Promise<void>} */
+  const deleteIndexedDb = (name) => new Promise((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(name);
+    request.onerror = () => reject(new Error('live screenshot capture IndexedDB deletion failed'));
+    request.onblocked = () => reject(new Error('live screenshot capture IndexedDB deletion was blocked'));
+    request.onsuccess = () => resolve(undefined);
+  });
+  const indexedDbBefore = await listIndexedDbDatabases();
+  let indexedDbStoreCount = 0;
+  let indexedDbRecordCount = 0;
+  for (const databaseInfo of indexedDbBefore) {
+    if (!databaseInfo || typeof databaseInfo.name !== 'string' || databaseInfo.name.length > maxSensitiveValueLength) {
+      privacyOverflow();
+    }
+    const databaseName = /** @type {string} */ (databaseInfo.name);
+    containsPrivacyMarker(databaseName);
+    const database = await openIndexedDb(databaseName);
+    try {
+      const storeNames = [...database.objectStoreNames];
+      indexedDbStoreCount += storeNames.length;
+      if (indexedDbStoreCount > maxIndexedDbStores) privacyOverflow();
+      for (const storeName of storeNames) {
+        if (typeof storeName !== 'string' || storeName.length > maxSensitiveValueLength) privacyOverflow();
+        containsPrivacyMarker(storeName);
+        indexedDbRecordCount += await scanIndexedDbStore(database, storeName);
+        if (indexedDbRecordCount > maxIndexedDbRecords) privacyOverflow();
+      }
+    } finally {
+      database.close();
+    }
+    await deleteIndexedDb(databaseName);
+  }
+  if ((await listIndexedDbDatabases()).length !== 0) {
+    throw new Error('live screenshot capture IndexedDB was not cleared');
+  }
+
+  if (typeof caches === 'undefined' || typeof caches.keys !== 'function' || typeof caches.open !== 'function' || typeof caches.delete !== 'function') {
+    throw new Error('live screenshot capture Cache Storage boundary is unavailable');
+  }
+  const cacheNames = await caches.keys();
+  if (!Array.isArray(cacheNames) || cacheNames.length > maxCacheEntries) privacyOverflow();
+  let cacheRequestCount = 0;
+  let cacheHeaderCount = 0;
+  let cacheBodyBytes = 0;
+  for (const cacheName of cacheNames) {
+    if (typeof cacheName !== 'string' || cacheName.length > maxSensitiveValueLength) privacyOverflow();
+    containsPrivacyMarker(cacheName);
+    const cache = await caches.open(cacheName);
+    if (!cache || typeof cache.keys !== 'function' || typeof cache.match !== 'function') {
+      throw new Error('live screenshot capture Cache Storage boundary is unavailable');
+    }
+    const requests = await cache.keys();
+    if (!Array.isArray(requests) || requests.length > maxCacheRequests) privacyOverflow();
+    for (const request of requests) {
+      cacheRequestCount += 1;
+      if (cacheRequestCount > maxCacheRequests || !request || typeof request.url !== 'string') privacyOverflow();
+      containsPrivacyMarker(request.url);
+      for (const [name, value] of request.headers.entries()) {
+        cacheHeaderCount += 1;
+        if (cacheHeaderCount > maxCacheHeaders) privacyOverflow();
+        containsPrivacyMarker(name);
+        containsPrivacyMarker(value);
+      }
+      const response = await cache.match(request);
+      if (!response) continue;
+      for (const [name, value] of response.headers.entries()) {
+        cacheHeaderCount += 1;
+        if (cacheHeaderCount > maxCacheHeaders) privacyOverflow();
+        containsPrivacyMarker(name);
+        containsPrivacyMarker(value);
+      }
+      const body = await response.clone().text();
+      cacheBodyBytes += body.length;
+      if (cacheBodyBytes > maxCacheBodyBytes) privacyOverflow();
+      containsPrivacyMarker(body);
+    }
+    if (!(await caches.delete(cacheName))) {
+      throw new Error('live screenshot capture Cache Storage was not cleared');
     }
   }
+  if ((await caches.keys()).length !== 0) {
+    throw new Error('live screenshot capture Cache Storage was not cleared');
+  }
+  preview.querySelectorAll('.model-control select').forEach((select) => {
+    const candidate = /** @type {HTMLSelectElement} */ (select);
+    candidate.selectedIndex = 0;
+    candidate.value = modelPlaceholder;
+  });
 
   const fixedPresentationText = new Set([
     'Hermes',
@@ -787,13 +1324,29 @@ export function sanitizeLiveChatCapturePresentation() {
     'Message Hermes',
     'Conversation title'
   ]);
-  const serializedPage = `${document.documentElement.outerHTML}`;
-  const metadataValueSet = new Set(oldMetadataValues);
+  /** @param {Element} element */
+  const serializeResidualSurface = (element) => {
+    const projection = /** @type {Element} */ (element.cloneNode(true));
+    [projection, ...projection.querySelectorAll('*')].forEach((node) => {
+      node.getAttributeNames().forEach((name) => {
+        if (name === 'class' || name === 'style' || name.startsWith('data-svelte-')) {
+          node.removeAttribute(name);
+        }
+      });
+    });
+    return `${projection.textContent ?? ''}\n${projection.outerHTML}`;
+  };
+  const serializedPage = serializeResidualSurface(document.documentElement);
+  /** @param {string} serialized @param {string} value */
+  const valueAppears = (serialized, value) => {
+    if (value.length <= 1) {
+      const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+      return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:$|[^\\p{L}\\p{N}_])`, 'u').test(serialized);
+    }
+    return serialized.includes(value);
+  };
   const residual = [...new Set(oldLiveValues)].filter(
-    (value) =>
-      !metadataValueSet.has(value) &&
-      !fixedPresentationText.has(value) &&
-      serializedPage.includes(value)
+    (value) => !fixedPresentationText.has(value) && valueAppears(serializedPage, value)
   );
   const metadataSurfaces = [
     ...preview.querySelectorAll('.header-model, .group-count, .model-control, .model-control select, .model-control option')
@@ -803,11 +1356,11 @@ export function sanitizeLiveChatCapturePresentation() {
     (value) =>
       !fixedPresentationText.has(value) &&
       (metadataSurfaces.some((element) => metadataSurfaceContains(element, value)) ||
-        serializedMetadata.includes(value))
+        valueAppears(serializedMetadata, value))
   );
   if (residual.length > 0 || metadataResidual.length > 0) {
     throw new Error(
-      `live screenshot capture found prohibited live text or data (${residual.length} general, ${metadataResidual.length} metadata lengths ${metadataResidual.map((value) => value.length).join(',')})`
+      `live screenshot capture found prohibited live text or data (${residual.length} general, ${metadataResidual.length} metadata lengths ${residual.map((value) => value.length).join(',')}|${metadataResidual.map((value) => value.length).join(',')})`
     );
   }
 
@@ -858,10 +1411,16 @@ export function sanitizeLiveChatCapturePresentation() {
     (value) =>
       !fixedPresentationText.has(value) &&
       (cloneMetadataSurfaces.some((element) => metadataSurfaceContains(element, value)) ||
-        cloneSerializedMetadata.includes(value))
+        valueAppears(cloneSerializedMetadata, value))
+  );
+  const serializedClone = serializeResidualSurface(captureHost);
+  const cloneResidual = [...new Set(oldLiveValues)].filter(
+    (value) => !fixedPresentationText.has(value) && valueAppears(serializedClone, value)
   );
   if (
+    document.querySelectorAll(captureSelector).length !== 1 ||
     captureHost.querySelector('[data-live-content], .user-message, .assistant-copy, .tool-row') ||
+    cloneResidual.length > 0 ||
     cloneMetadataResidual.length > 0 ||
     cloneMetadataSurfaces.some((element) => {
       const candidate = /** @type {Element & { value?: unknown }} */ (element);
@@ -876,7 +1435,23 @@ export function sanitizeLiveChatCapturePresentation() {
     sanitized: true,
     captureSelector,
     removedValueCount: oldLiveValues.length,
-    prohibitedNodeCount: 0
+    prohibitedNodeCount: 0,
+    privacy: {
+      localStorageCleared: true,
+      sessionStorageCleared: true,
+      indexedDbCleared: true,
+      cacheStorageCleared: true,
+      serviceWorkerCacheCleared: true,
+      localStorageEntries: localStorageEntryCount,
+      sessionStorageEntries: sessionStorageEntryCount,
+      indexedDbDatabases: indexedDbBefore.length,
+      indexedDbStores: indexedDbStoreCount,
+      indexedDbRecords: indexedDbRecordCount,
+      cacheNames: cacheNames.length,
+      cacheRequests: cacheRequestCount,
+      cacheHeaders: cacheHeaderCount,
+      cacheBodyBytes
+    }
   });
 }
 
@@ -885,8 +1460,9 @@ export function sanitizeLiveChatCapturePresentation() {
  * interpreted as permission to capture or retain a live screenshot.
  *
  * @param {Record<string, string | undefined>} environment
+ * @param {string} [repositoryRoot]
  */
-function requireCaptureGate(environment) {
+function requireCaptureGate(environment, repositoryRoot = LIVE_SCREENSHOT_REPOSITORY_ROOT) {
   if (environment[LIVE_SCREENSHOT_PARITY_ENV] !== '1') {
     throw new Error('live screenshot capture requires approved issue #352 Paper parity');
   }
@@ -897,7 +1473,7 @@ function requireCaptureGate(environment) {
   let checkoutSha;
   try {
     checkoutSha = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: process.cwd(),
+      cwd: repositoryRoot,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore']
     }).trim();
@@ -907,7 +1483,35 @@ function requireCaptureGate(environment) {
   if (checkoutSha !== clientSha) {
     throw new Error('live screenshot capture client SHA does not match the checkout');
   }
+  let dirtyTrackedFiles;
+  try {
+    dirtyTrackedFiles = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=no'], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+  } catch {
+    throw new Error('live screenshot capture could not attest a clean client checkout');
+  }
+  if (dirtyTrackedFiles.length > 0) {
+    throw new Error('live screenshot capture requires a clean tracked checkout');
+  }
   return clientSha;
+}
+
+/**
+ * Synchronously validate the full capture configuration before Playwright can
+ * create an artifact root, start its web server, launch a browser, navigate, or
+ * hand credentials to the live host. Default-off calls perform no provenance
+ * lookup and return without filesystem mutation beyond module loading.
+ *
+ * @param {Record<string, string | undefined>} [environment]
+ */
+export function validateLiveScreenshotCaptureConfiguration(environment = process.env) {
+  if (!isLiveScreenshotCaptureEnabled(environment)) return undefined;
+  const clientSha = requireCaptureGate(environment);
+  const provenance = readPinnedChromiumProvenance();
+  return Object.freeze({ clientSha, provenance });
 }
 
 /** @param {unknown} page @param {string} method */
@@ -932,8 +1536,10 @@ function requirePageMethod(page, method) {
  *   paperParityApproved: boolean,
  *   stateStable: boolean,
  *   uiState: 'empty' | 'ready',
+ *   sensitiveMarkers?: string[],
  *   theme?: 'light' | 'dark',
- *   reducedMotion?: 'reduce' | 'no-preference'
+ *   reducedMotion?: 'reduce' | 'no-preference',
+ *   provenance?: ChromiumProvenance
  * }} options
  */
 async function captureLiveChatScreenshot({
@@ -943,8 +1549,10 @@ async function captureLiveChatScreenshot({
   paperParityApproved,
   stateStable,
   uiState,
+  sensitiveMarkers = [],
   theme = 'light',
-  reducedMotion = 'reduce'
+  reducedMotion = 'reduce',
+  provenance
 }) {
   if (!enabled) return undefined;
   if (paperParityApproved !== true) {
@@ -986,8 +1594,9 @@ async function captureLiveChatScreenshot({
     throw new Error('live screenshot capture viewport is not 1440x960');
   }
 
-  const pinnedChromium = readPinnedChromiumProvenance();
-  const browser = page.context().browser?.();
+  const pinnedChromium = provenance ?? readPinnedChromiumProvenance();
+  const pageContext = page.context();
+  const browser = pageContext.browser?.();
   if (!browser || typeof browser.browserType !== 'function' || typeof browser.version !== 'function') {
     throw new Error('live screenshot capture browser provenance is unavailable');
   }
@@ -1003,6 +1612,19 @@ async function captureLiveChatScreenshot({
     runtimeExecutablePath.match(CHROMIUM_REVISION_PATTERN)?.[1] !== pinnedChromium.revision
   ) {
     throw new Error('live screenshot capture Chromium provenance is not pinned');
+  }
+
+  if (typeof pageContext.cookies !== 'function' || typeof pageContext.clearCookies !== 'function') {
+    throw new Error('live screenshot capture cookie boundary is unavailable');
+  }
+  const cookiesBefore = await pageContext.cookies();
+  if (!Array.isArray(cookiesBefore)) {
+    throw new Error('live screenshot capture cookie boundary is unavailable');
+  }
+  await pageContext.clearCookies();
+  const cookiesAfter = await pageContext.cookies();
+  if (!Array.isArray(cookiesAfter) || cookiesAfter.length !== 0) {
+    throw new Error('live screenshot capture cookie boundary is unavailable');
   }
 
   await page.emulateMedia({
@@ -1032,12 +1654,19 @@ async function captureLiveChatScreenshot({
   // Complete all live proof assertions before this call. The sanitizer leaves
   // the Svelte-owned tree only as a checked source and creates an inert clone;
   // the screenshot locator targets that clone, never the mutable live page.
-  const presentation = await page.evaluate(sanitizeLiveChatCapturePresentation);
+  const presentation = await page.evaluate(sanitizeLiveChatCapturePresentation, sensitiveMarkers);
+  const privacy = presentation && isRecord(presentation.privacy) ? presentation.privacy : undefined;
   if (
     !presentation ||
     presentation.sanitized !== true ||
     presentation.prohibitedNodeCount !== 0 ||
-    presentation.captureSelector !== LIVE_SCREENSHOT_CAPTURE_SELECTOR
+    presentation.captureSelector !== LIVE_SCREENSHOT_CAPTURE_SELECTOR ||
+    !privacy ||
+    privacy.localStorageCleared !== true ||
+    privacy.sessionStorageCleared !== true ||
+    privacy.indexedDbCleared !== true ||
+    privacy.cacheStorageCleared !== true ||
+    privacy.serviceWorkerCacheCleared !== true
   ) {
     throw new Error('live screenshot capture presentation was not sanitized');
   }
@@ -1053,10 +1682,20 @@ async function captureLiveChatScreenshot({
       caret: 'hide'
     })
   );
+  const afterCaptureProvenance = provenance ?? readPinnedChromiumProvenance();
+  if (
+    afterCaptureProvenance.executablePath !== pinnedChromium.executablePath ||
+    afterCaptureProvenance.executableSha256 !== pinnedChromium.executableSha256 ||
+    afterCaptureProvenance.dev !== pinnedChromium.dev ||
+    afterCaptureProvenance.ino !== pinnedChromium.ino
+  ) {
+    throw new Error('live screenshot executable changed during capture');
+  }
   const manifest = createLiveScreenshotManifest({
     browserName,
     browserRevision: pinnedChromium.revision,
     browserVersion,
+    browserExecutableSha256: pinnedChromium.executableSha256,
     clientSha,
     devicePixelRatio: observed.devicePixelRatio,
     imageSha256: sha256Hex(bytes),
@@ -1075,15 +1714,15 @@ async function captureLiveChatScreenshot({
  * explicit independent-review value and an operator-supplied destination.
  *
  * @returns {Promise<LiveScreenshotCapture | undefined>}
- * @param {{ page: any, uiState: 'empty' | 'ready', environment?: Record<string, string | undefined> }} options
+ * @param {{ page: any, uiState: 'empty' | 'ready', environment?: Record<string, string | undefined>, provenance?: ChromiumProvenance }} options
  */
 export async function captureLiveChatScreenshotIfEnabled({
   page,
   uiState,
-  environment = process.env
+  environment = process.env,
+  provenance
 }) {
   if (!isLiveScreenshotCaptureEnabled(environment)) return undefined;
-  const clientSha = requireCaptureGate(environment);
   let retentionDestination;
   if (environment[LIVE_SCREENSHOT_RETAIN_ENV] === '1') {
     if (environment[LIVE_SCREENSHOT_REVIEW_ENV] !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
@@ -1098,13 +1737,20 @@ export async function captureLiveChatScreenshotIfEnabled({
     // check after capture to close the preflight-to-publish TOCTOU window.
     retentionDestination = safeDestinationEvidence(destination);
   }
+  const clientSha = requireCaptureGate(environment);
   const capture = await captureLiveChatScreenshot({
     page,
     clientSha,
     enabled: true,
     paperParityApproved: true,
     stateStable: true,
-    uiState
+    uiState,
+    sensitiveMarkers: /** @type {string[]} */ (
+      [environment.HERMES_TEST_PASSWORD, environment.HERMES_TEST_USERNAME].filter(
+        (value) => typeof value === 'string'
+      )
+    ),
+    provenance
   });
   if (!capture) throw new Error('live screenshot capture result is unavailable');
   if (retentionDestination) {
@@ -1228,7 +1874,15 @@ async function openVerifiedDestination(evidence) {
     }
     return handle;
   } catch (error) {
-    if (handle) await handle.close().catch(() => undefined);
+    let closeFailed = false;
+    if (handle) {
+      try {
+        await handle.close();
+      } catch {
+        closeFailed = true;
+      }
+    }
+    if (closeFailed) throw new Error('live screenshot retention handle cleanup failed');
     if (error instanceof Error && error.message.includes('destination changed')) throw error;
     throw new Error('live screenshot retention destination disappeared');
   }
@@ -1253,54 +1907,59 @@ function pathExists(path) {
 }
 
 /**
- * Remove only the two files this module created, and only while the original
- * staging directory identity is still present at its pathname. A replacement
- * directory or symlink is never followed and is left untouched.
+ * @typedef {{ dev: number, ino: number, size: number }} StagingFileIdentity
+ * @typedef {{ dev: number, ino: number, parent: StagingParentEvidence, screenshot: StagingFileIdentity, manifest: StagingFileIdentity }} StagingEvidence
+ * @typedef {{ dev: number, ino: number, parent: StagingParentEvidence, screenshot?: StagingFileIdentity, manifest?: StagingFileIdentity }} StagingCleanupEvidence
+ */
+
+/** @param {unknown} error */
+function isNotFoundError(error) {
+  return error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT';
+}
+
+/**
+ * Remove only files this module created, and only while the original staging
+ * directory, parent, and each observed file identity remain bound. Partial
+ * evidence is accepted after a write failure; an unexpected or unverified
+ * entry is preserved and reported instead of being followed.
  *
  * @param {string} directory
- * @param {{ dev: number, ino: number }} expected
+ * @param {StagingCleanupEvidence} expected
  */
 async function removePrivateStagingDirectory(directory, expected) {
+  if (resolve(dirname(directory)) !== resolve(expected.parent.path)) {
+    throw new Error('live screenshot staging parent binding changed');
+  }
+  assertStagingParentEvidence(expected.parent);
   let stats;
   try {
     stats = lstatSync(directory);
-  } catch {
-    return false;
+  } catch (error) {
+    if (isNotFoundError(error)) return;
+    throw new Error('live screenshot staging cleanup inspection failed');
   }
-  if (!stats.isDirectory() || stats.isSymbolicLink() || stats.dev !== expected.dev || stats.ino !== expected.ino) {
-    return false;
+  if (
+    !stats.isDirectory() ||
+    stats.isSymbolicLink() ||
+    stats.dev !== expected.dev ||
+    stats.ino !== expected.ino
+  ) {
+    throw new Error('live screenshot staging identity changed during cleanup');
   }
 
   let entries;
   try {
     entries = (await fsPromises.readdir(directory)).sort();
   } catch {
-    return false;
+    throw new Error('live screenshot staging cleanup inspection failed');
   }
   const ownedEntries = ['manifest.json', 'screenshot.png'];
-  if (entries.some((entry) => !ownedEntries.includes(entry))) return false;
-
-  for (const entry of entries) {
-    try {
-      const current = lstatSync(directory);
-      if (
-        !current.isDirectory() ||
-        current.isSymbolicLink() ||
-        current.dev !== expected.dev ||
-        current.ino !== expected.ino
-      ) {
-        return false;
-      }
-      const entryPath = join(directory, entry);
-      const entryStats = lstatSync(entryPath);
-      if (!entryStats.isFile() || entryStats.isSymbolicLink()) return false;
-      await fsPromises.unlink(entryPath);
-    } catch {
-      return false;
-    }
+  if (entries.some((entry) => !ownedEntries.includes(entry))) {
+    throw new Error('live screenshot staging cleanup found an unexpected entry');
   }
 
-  try {
+  for (const entry of entries) {
+    assertStagingParentEvidence(expected.parent);
     const current = lstatSync(directory);
     if (
       !current.isDirectory() ||
@@ -1308,17 +1967,64 @@ async function removePrivateStagingDirectory(directory, expected) {
       current.dev !== expected.dev ||
       current.ino !== expected.ino
     ) {
-      return false;
+      throw new Error('live screenshot staging identity changed during cleanup');
     }
+    const entryPath = join(directory, entry);
+    let entryStats;
+    try {
+      entryStats = lstatSync(entryPath);
+    } catch {
+      throw new Error('live screenshot staging entry disappeared during cleanup');
+    }
+    const expectedEntry = expected[entry === 'screenshot.png' ? 'screenshot' : 'manifest'];
+    if (
+      !expectedEntry ||
+      !entryStats.isFile() ||
+      entryStats.isSymbolicLink() ||
+      entryStats.dev !== expectedEntry.dev ||
+      entryStats.ino !== expectedEntry.ino ||
+      entryStats.size !== expectedEntry.size
+    ) {
+      throw new Error('live screenshot staging entry identity changed during cleanup');
+    }
+    try {
+      await fsPromises.unlink(entryPath);
+    } catch {
+      throw new Error('live screenshot staging entry cleanup failed');
+    }
+  }
+
+  assertStagingParentEvidence(expected.parent);
+  const current = lstatSync(directory);
+  if (
+    !current.isDirectory() ||
+    current.isSymbolicLink() ||
+    current.dev !== expected.dev ||
+    current.ino !== expected.ino
+  ) {
+    throw new Error('live screenshot staging identity changed during cleanup');
+  }
+  try {
     await fsPromises.rmdir(directory);
-    return true;
   } catch {
-    return false;
+    throw new Error('live screenshot staging cleanup left a remnant');
   }
 }
 
-/** @param {string} directory */
-async function verifyPrivateStagingDirectory(directory) {
+/**
+ * Validate and snapshot the private staging directory identity. The returned
+ * device/inode/size evidence is passed to the atomic rename child, which
+ * revalidates the source immediately before the no-overwrite rename.
+ *
+ * @param {string} directory
+ * @param {StagingParentEvidence} parent
+ * @returns {Promise<StagingEvidence>}
+ */
+async function verifyPrivateStagingDirectory(directory, parent) {
+  if (resolve(dirname(directory)) !== resolve(parent.path)) {
+    throw new Error('live screenshot staging parent binding changed');
+  }
+  assertStagingParentEvidence(parent);
   const stats = lstatSync(directory);
   const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
   if (
@@ -1333,13 +2039,50 @@ async function verifyPrivateStagingDirectory(directory) {
   if (entries.length !== 2 || entries[0] !== 'manifest.json' || entries[1] !== 'screenshot.png') {
     throw new Error('live screenshot staging bundle is incomplete');
   }
+  /** @type {Record<string, StagingFileIdentity>} */
+  const files = {};
   for (const entry of entries) {
     const entryPath = join(directory, entry);
     const entryStats = lstatSync(entryPath);
-    if (!entryStats.isFile() || entryStats.isSymbolicLink()) {
+    if (!entryStats.isFile() || entryStats.isSymbolicLink() || (entryStats.mode & 0o077) !== 0) {
       throw new Error('live screenshot staging bundle contains an unsafe entry');
     }
+    files[entry] = { dev: entryStats.dev, ino: entryStats.ino, size: entryStats.size };
   }
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    parent,
+    screenshot: files['screenshot.png'],
+    manifest: files['manifest.json']
+  };
+}
+
+/** @param {string} directory @param {StagingEvidence} expected */
+async function assertStagingEvidence(directory, expected) {
+  if (resolve(dirname(directory)) !== resolve(expected.parent.path)) {
+    throw new Error('live screenshot staging parent binding changed');
+  }
+  const observed = await verifyPrivateStagingDirectory(directory, expected.parent);
+  if (
+    observed.dev !== expected.dev ||
+    observed.ino !== expected.ino ||
+    observed.parent.dev !== expected.parent.dev ||
+    observed.parent.ino !== expected.parent.ino ||
+    !observed.screenshot ||
+    !observed.manifest ||
+    !expected.screenshot ||
+    !expected.manifest ||
+    observed.screenshot.dev !== expected.screenshot.dev ||
+    observed.screenshot.ino !== expected.screenshot.ino ||
+    observed.screenshot.size !== expected.screenshot.size ||
+    observed.manifest.dev !== expected.manifest.dev ||
+    observed.manifest.ino !== expected.manifest.ino ||
+    observed.manifest.size !== expected.manifest.size
+  ) {
+    throw new Error('live screenshot staging identity changed');
+  }
+  return observed;
 }
 
 /**
@@ -1348,8 +2091,15 @@ async function verifyPrivateStagingDirectory(directory) {
  * @returns {Promise<void>}
  */
 function runAtomicRename(args, fileDescriptors) {
+  // Do not inherit the live runner environment into the Python child. The
+  // primitive needs only fixed command lookup, locale stability, and the opt-
+  // out for user site packages; credentials, NODE_OPTIONS, PYTHONPATH, proxy
+  // settings, test markers, and runner debug variables must not cross this
+  // process boundary. Isolation flags also disable user startup/site hooks.
+  const childConfiguration = getLiveScreenshotAtomicRenameChildConfiguration();
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn('python3', args, {
+    const child = spawn(childConfiguration.executable, ['-I', '-S', ...args], {
+      env: childConfiguration.environment,
       stdio: ['ignore', 'ignore', 'ignore', ...fileDescriptors],
       windowsHide: true
     });
@@ -1372,19 +2122,47 @@ function runAtomicRename(args, fileDescriptors) {
  * Publish a complete staging directory with one exclusive atomic directory
  * rename. The Python shim calls the platform's no-replace rename primitive
  * (`renameatx_np` on macOS and `renameat2` on Linux) using open directory file
- * descriptors, so a replaced visible destination receives no bundle bytes.
+ * descriptors. It revalidates the staging parent, directory, and both bundle
+ * files by device/inode/size immediately before rename, so a source swap cannot
+ * publish attacker-controlled bytes and a replaced destination receives no
+ * bytes.
  *
- * @param {{ stagingDirectory: string, destination: DirectoryEvidence, beforeAtomicPublish?: () => Promise<void> }} options
+ * @param {{ stagingDirectory: string, stagingEvidence: StagingEvidence, destination: DirectoryEvidence, beforeAtomicPublish?: (directory: string) => Promise<void> }} options
+ * @returns {Promise<{ renamed: boolean, closeFailure?: Error }>}
  */
-async function publishStagedBundle({ stagingDirectory, destination, beforeAtomicPublish }) {
-  const stagingParentPath = parse(stagingDirectory).dir;
-  const stagingName = parse(stagingDirectory).base;
-  const stagingParent = await fsPromises.open(stagingParentPath, 'r');
-  const destinationHandle = await openVerifiedDestination(destination);
+async function publishStagedBundle({ stagingDirectory, stagingEvidence, destination, beforeAtomicPublish }) {
+  const stagingParentPath = dirname(stagingDirectory);
+  const stagingName = basename(stagingDirectory);
+  if (resolve(stagingParentPath) !== resolve(stagingEvidence.parent.path)) {
+    throw new Error('live screenshot staging parent binding changed');
+  }
+  let stagingParent;
+  let stagingHandle;
+  let destinationHandle;
+  let failure;
+  let renamed = false;
   try {
-    // Test-only adversarial hook. The real lane never supplies it; the open
-    // descriptor remains the publication anchor if the pathname is replaced.
-    if (beforeAtomicPublish) await beforeAtomicPublish();
+    stagingParent = await fsPromises.open(stagingParentPath, 'r');
+    stagingHandle = await fsPromises.open(stagingDirectory, 'r');
+    destinationHandle = await openVerifiedDestination(destination);
+
+    await assertStagingEvidence(stagingDirectory, stagingEvidence);
+    const openParentStats = await stagingParent.stat();
+    const openStagingStats = await stagingHandle.stat();
+    if (
+      !openParentStats.isDirectory() ||
+      openParentStats.dev !== stagingEvidence.parent.dev ||
+      openParentStats.ino !== stagingEvidence.parent.ino ||
+      !openStagingStats.isDirectory() ||
+      openStagingStats.dev !== stagingEvidence.dev ||
+      openStagingStats.ino !== stagingEvidence.ino
+    ) {
+      throw new Error('live screenshot staging identity changed');
+    }
+    // Test-only adversarial hook. The real lane never supplies it; all source
+    // and destination identities are revalidated after this hook returns.
+    if (beforeAtomicPublish) await beforeAtomicPublish(stagingDirectory);
+    await assertStagingEvidence(stagingDirectory, stagingEvidence);
     assertSameDestination(destination);
     await assertDestinationHandle(destinationHandle, destination);
     await runAtomicRename(
@@ -1394,19 +2172,124 @@ async function publishStagedBundle({ stagingDirectory, destination, beforeAtomic
         '3',
         '4',
         stagingName,
-        `${LIVE_SCREENSHOT_FILE_STEM}.bundle`
+        `${LIVE_SCREENSHOT_FILE_STEM}.bundle`,
+        String(stagingEvidence.dev),
+        String(stagingEvidence.ino),
+        String(stagingEvidence.parent.dev),
+        String(stagingEvidence.parent.ino),
+        String(stagingEvidence.screenshot.dev),
+        String(stagingEvidence.screenshot.ino),
+        String(stagingEvidence.screenshot.size),
+        String(stagingEvidence.manifest.dev),
+        String(stagingEvidence.manifest.ino),
+        String(stagingEvidence.manifest.size)
       ],
       [stagingParent.fd, destinationHandle.fd]
     );
+    // Record this before closing descriptors. A close failure must not make the
+    // caller treat the already-moved source as unpublished.
+    renamed = true;
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error && error.code === 17) {
-      throw new Error('live screenshot retention refuses to overwrite existing bundle');
+      failure = new Error('live screenshot retention refuses to overwrite existing bundle');
+    } else if (error instanceof Error && (
+      error.message.includes('destination changed') ||
+      error.message.includes('staging identity') ||
+      error.message.includes('staging entry') ||
+      error.message.includes('staging parent')
+    )) {
+      failure = error;
+    } else {
+      failure = new Error('live screenshot retention bundle publication failed');
     }
-    if (error instanceof Error && error.message.includes('destination changed')) throw error;
-    throw new Error('live screenshot retention bundle publication failed');
-  } finally {
-    await destinationHandle.close().catch(() => undefined);
-    await stagingParent.close().catch(() => undefined);
+  }
+
+  let closeFailure;
+  for (const handle of [destinationHandle, stagingHandle, stagingParent].reverse()) {
+    if (!handle) continue;
+    try {
+      await handle.close();
+    } catch {
+      closeFailure ??= new Error('live screenshot retention handle cleanup failed');
+    }
+  }
+  if (failure) throw failure;
+  return { renamed, closeFailure };
+}
+
+/**
+ * Verify the published bundle before reporting success. This checks the exact
+ * two-entry shape, private regular-file identities, manifest bytes, PNG bytes,
+ * and image hash after the atomic rename. Any replacement or content drift is
+ * reported with a fixed message; the final pathname is never accepted merely
+ * because the directory rename returned success.
+ *
+ * @param {string} bundlePath
+ * @param {Buffer} expectedBytes
+ * @param {string} expectedManifestText
+ */
+async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifestText) {
+  let bundleStats;
+  try {
+    bundleStats = lstatSync(bundlePath);
+  } catch {
+    throw new Error('live screenshot retention published bundle is unavailable');
+  }
+  if (!bundleStats.isDirectory() || bundleStats.isSymbolicLink()) {
+    throw new Error('live screenshot retention published bundle is unsafe');
+  }
+  let entries;
+  try {
+    entries = (await fsPromises.readdir(bundlePath)).sort();
+  } catch {
+    throw new Error('live screenshot retention published bundle is unavailable');
+  }
+  if (entries.length !== 2 || entries[0] !== 'manifest.json' || entries[1] !== 'screenshot.png') {
+    throw new Error('live screenshot retention published bundle shape changed');
+  }
+  /** @type {Record<string, { dev: number, ino: number, size: number }>} */
+  const identities = {};
+  for (const entry of entries) {
+    const entryPath = join(bundlePath, entry);
+    let stats;
+    try {
+      stats = lstatSync(entryPath);
+    } catch {
+      throw new Error('live screenshot retention published bundle entry disappeared');
+    }
+    if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o077) !== 0) {
+      throw new Error('live screenshot retention published bundle entry is unsafe');
+    }
+    identities[entry] = { dev: stats.dev, ino: stats.ino, size: stats.size };
+  }
+  let screenshot;
+  let manifest;
+  try {
+    screenshot = await fsPromises.readFile(join(bundlePath, 'screenshot.png'));
+    manifest = await fsPromises.readFile(join(bundlePath, 'manifest.json'), 'utf8');
+  } catch {
+    throw new Error('live screenshot retention published bundle content is unavailable');
+  }
+  if (!screenshot.equals(expectedBytes) || sha256Hex(screenshot) !== sha256Hex(expectedBytes)) {
+    throw new Error('live screenshot retention published PNG changed');
+  }
+  if (manifest !== expectedManifestText) {
+    throw new Error('live screenshot retention published manifest changed');
+  }
+  const afterBundleStats = lstatSync(bundlePath);
+  if (afterBundleStats.dev !== bundleStats.dev || afterBundleStats.ino !== bundleStats.ino) {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
+  for (const entry of entries) {
+    const after = lstatSync(join(bundlePath, entry));
+    const before = identities[entry];
+    if (
+      after.dev !== before.dev ||
+      after.ino !== before.ino ||
+      after.size !== before.size
+    ) {
+      throw new Error('live screenshot retention published bundle entry changed');
+    }
   }
 }
 
@@ -1421,7 +2304,8 @@ async function publishStagedBundle({ stagingDirectory, destination, beforeAtomic
  *   destinationDirectory: string,
  *   fileStem?: string,
  *   review: 'independent-approved',
- *   beforeAtomicPublish?: () => Promise<void>,
+ *   provenance?: ChromiumProvenance,
+ *   beforeAtomicPublish?: (directory: string) => Promise<void>,
  *   beforeStagingCleanup?: (directory: string) => Promise<void>
  * }} options
  */
@@ -1430,6 +2314,7 @@ export async function persistApprovedLiveScreenshot({
   destinationDirectory,
   fileStem = LIVE_SCREENSHOT_FILE_STEM,
   review,
+  provenance,
   beforeAtomicPublish,
   beforeStagingCleanup
 }) {
@@ -1455,10 +2340,19 @@ export async function persistApprovedLiveScreenshot({
   if (sourceManifest.imageSha256 !== sha256Hex(bytes)) {
     throw new Error('live screenshot bytes do not match the manifest hash');
   }
+  const currentProvenance = provenance ?? readPinnedChromiumProvenance();
+  if (
+    sourceManifest.browser.revision !== currentProvenance.revision ||
+    sourceManifest.browser.version !== currentProvenance.version ||
+    sourceManifest.browser.executableSha256 !== currentProvenance.executableSha256
+  ) {
+    throw new Error('live screenshot executable provenance changed');
+  }
   const manifest = createLiveScreenshotManifest({
     browserName: sourceManifest.browser.name,
     browserRevision: sourceManifest.browser.revision,
     browserVersion: sourceManifest.browser.version,
+    browserExecutableSha256: sourceManifest.browser.executableSha256,
     clientSha: sourceManifest.clientSha,
     devicePixelRatio: sourceManifest.devicePixelRatio,
     imageSha256: sourceManifest.imageSha256,
@@ -1477,60 +2371,130 @@ export async function persistApprovedLiveScreenshot({
   }
 
   let stagingDirectory;
+  /** @type {StagingParentEvidence | undefined} */
+  let stagingParentEvidence;
+  /** @type {StagingCleanupEvidence | undefined} */
   let stagingIdentity;
+  /** @type {StagingEvidence | undefined} */
+  let stagingEvidence;
   let published = false;
+  let result;
+  let operationError;
   try {
-    // Stage outside the destination pathname. Require the same filesystem so
-    // the final publication remains a single atomic rename, never a copy.
-    stagingDirectory = await fsPromises.mkdtemp(join(resolve(process.env.TMPDIR ?? '/tmp'), `.${fileStem}-capture-`));
+    // Stage below a private parent whose device/inode is retained through
+    // source revalidation, publication, and cleanup. This avoids trusting a
+    // replaceable TMPDIR path while keeping the final rename on one filesystem.
+    stagingParentEvidence = await createPrivateStagingParent();
+    stagingDirectory = await fsPromises.mkdtemp(
+      join(stagingParentEvidence.path, `.${fileStem}-capture-`)
+    );
     const createdStagingStats = lstatSync(stagingDirectory);
-    if (!createdStagingStats.isDirectory() || createdStagingStats.isSymbolicLink()) {
+    if (
+      !createdStagingStats.isDirectory() ||
+      createdStagingStats.isSymbolicLink() ||
+      resolve(dirname(stagingDirectory)) !== resolve(stagingParentEvidence.path)
+    ) {
       throw new Error('live screenshot staging directory is not private');
     }
-    stagingIdentity = { dev: createdStagingStats.dev, ino: createdStagingStats.ino };
+    stagingIdentity = {
+      dev: createdStagingStats.dev,
+      ino: createdStagingStats.ino,
+      parent: stagingParentEvidence
+    };
     await fsPromises.chmod(stagingDirectory, 0o700);
     await fsPromises.writeFile(join(stagingDirectory, 'screenshot.png'), bytes, {
       encoding: null,
       flag: 'wx',
       mode: 0o600
     });
+    const screenshotStats = lstatSync(join(stagingDirectory, 'screenshot.png'));
+    if (!screenshotStats.isFile() || screenshotStats.isSymbolicLink()) {
+      throw new Error('live screenshot staging bundle contains an unsafe entry');
+    }
+    stagingIdentity.screenshot = {
+      dev: screenshotStats.dev,
+      ino: screenshotStats.ino,
+      size: screenshotStats.size
+    };
     await fsPromises.writeFile(join(stagingDirectory, 'manifest.json'), manifestText, {
       encoding: 'utf8',
       flag: 'wx',
       mode: 0o600
     });
-    await verifyPrivateStagingDirectory(stagingDirectory);
-    const stagingStats = lstatSync(stagingDirectory);
+    const manifestStats = lstatSync(join(stagingDirectory, 'manifest.json'));
+    if (!manifestStats.isFile() || manifestStats.isSymbolicLink()) {
+      throw new Error('live screenshot staging bundle contains an unsafe entry');
+    }
+    stagingIdentity.manifest = {
+      dev: manifestStats.dev,
+      ino: manifestStats.ino,
+      size: manifestStats.size
+    };
+    stagingEvidence = await verifyPrivateStagingDirectory(stagingDirectory, stagingParentEvidence);
+    stagingIdentity = stagingEvidence;
     const destinationStats = lstatSync(evidence.candidate);
-    if (stagingStats.dev !== destinationStats.dev) {
+    if (stagingEvidence.dev !== destinationStats.dev) {
       throw new Error('live screenshot staging filesystem is not atomic');
     }
 
     assertSameDestination(evidence);
-    await publishStagedBundle({
+    const publication = await publishStagedBundle({
       stagingDirectory,
+      stagingEvidence,
       destination: evidence,
       beforeAtomicPublish
     });
-    published = true;
+    // The atomic rename has already moved the source when `renamed` is true;
+    // close failures must not send the outer cleanup back to the old pathname.
+    published = publication.renamed;
+    if (!published) throw new Error('live screenshot retention bundle publication failed');
     assertSameDestination(evidence);
-    return {
+    await verifyPublishedBundle(bundlePath, bytes, manifestText);
+    if (publication.closeFailure) throw publication.closeFailure;
+    result = {
       bundlePath,
       imagePath: join(bundlePath, 'screenshot.png'),
       manifestPath: join(bundlePath, 'manifest.json'),
       manifest
     };
-  } finally {
-    if (stagingDirectory && stagingIdentity && !published) {
-      try {
-        // Test-only race hook runs before identity-anchored cleanup. If it
-        // replaces the pathname, the helper observes the inode mismatch and
-        // leaves the replacement untouched.
-        await beforeStagingCleanup?.(stagingDirectory);
-        await removePrivateStagingDirectory(stagingDirectory, stagingIdentity);
-      } catch {
-        // Cleanup is best effort and never follows a replaced staging path.
-      }
+  } catch (error) {
+    operationError = error instanceof Error
+      ? error
+      : new Error('live screenshot retention publication failed');
+  }
+
+  /** @type {Error[]} */
+  const cleanupFailures = [];
+  if (stagingDirectory && stagingIdentity && !published) {
+    try {
+      // Test-only race hook runs before identity-anchored cleanup. If it
+      // replaces the pathname, the helper observes the inode mismatch and
+      // leaves the replacement untouched while reporting the failure.
+      await beforeStagingCleanup?.(stagingDirectory);
+    } catch {
+      cleanupFailures.push(new Error('live screenshot staging cleanup hook failed'));
+    }
+    try {
+      await removePrivateStagingDirectory(stagingDirectory, stagingIdentity);
+    } catch {
+      cleanupFailures.push(new Error('live screenshot staging cleanup failed'));
     }
   }
+  if (stagingParentEvidence) {
+    try {
+      await removePrivateStagingParent(stagingParentEvidence.path, stagingParentEvidence);
+    } catch {
+      cleanupFailures.push(new Error('live screenshot staging parent cleanup failed'));
+    }
+  }
+
+  if (operationError && cleanupFailures.length > 0) {
+    throw new Error('live screenshot retention publication and cleanup failed');
+  }
+  if (operationError) throw operationError;
+  if (cleanupFailures.length > 0) {
+    throw new Error('live screenshot retention cleanup failed');
+  }
+  if (!result) throw new Error('live screenshot retention result is unavailable');
+  return result;
 }

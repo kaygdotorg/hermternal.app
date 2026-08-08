@@ -17,14 +17,18 @@ HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA="$GITHUB_SHA" \
 The capture helper rejects missing or short client SHAs, non-root routes, any
 viewport other than `1440x960`, non-Chromium browser provenance, non-`en-US`
 locale, non-1 DPR or zoom, unexpected theme or reduced-motion inputs, and UI
-states outside the bounded `empty`/`ready` set. The opt-in live project forces
-headless mode and resolves the regular Playwright Chromium executable from the
-exact `playwright@1.62.1`, `@playwright/test@1.62.1`, and
-`playwright-core@1.62.1` package and lockfile pins; the helper then proves the
-running browser is exactly Chromium revision `1234`, browser version
-`151.0.7922.34`, and that executable path before `emulateMedia`, DOM evaluation,
-or capture.
-`PW_RUNNER_DEBUG` and `PWDEBUG` are rejected before workers start.
+states outside the bounded `empty`/`ready` set. Ordinary Vitest remains
+independent of the browser cache and Python child: only genuinely browser-
+dependent tests are skipped, and filesystem publication tests inject the
+controlled pinned provenance seam. The browser-dependent lane is explicit and
+requires `HERMTERNAL_LIVE_SCREENSHOT_BROWSER_PREREQUISITE=1`; it is never
+enabled by ordinary test commands. The opt-in live project forces headless mode
+and resolves the regular Playwright Chromium executable from the exact
+`playwright@1.62.1`, `@playwright/test@1.62.1`, and `playwright-core@1.62.1`
+package and lockfile pins; the helper then proves the running browser is exactly
+Chromium revision `1234`, browser version `151.0.7922.34`, the regular
+executable path, and its SHA-256 before `emulateMedia`, DOM evaluation, or
+capture. `PW_RUNNER_DEBUG` and `PWDEBUG` are rejected before workers start.
 
 All live proof assertions finish before the capture-only page transform. The
 transform replaces the live conversation timeline, session labels, conversation
@@ -41,6 +45,18 @@ the official Hermes image digest and source attestation, the exact safe test
 command, and the SHA-256 of the returned PNG. It never attaches or writes
 prompt text, transcripts, provider payloads, tickets, cookies, credentials,
 WebSocket frames, PTY bytes, stdout/stderr, traces, or test results.
+
+The live proof uses a bounded typed in-memory ledger. It retains only assertion-
+local method, route, event, request/session identity, status, boolean-match,
+and bounded-count projections. It requires login/auth/ticket/upgrade, one
+server-first `gateway.ready`, session create/resume identity, exactly one prompt
+and acknowledgement, correlated delta/completion, and a `200` REST history
+response whose canonical `session_id` and exact user/assistant pair match. It
+rejects duplicate sockets/events, wrong routes, missing ticket-only state,
+request-ID-free completions, reordered events, status mismatches, and missing
+canonical history identity. Logout is a separate same-context `302`/`401`
+check followed by cookie, IndexedDB, Cache Storage, service-worker cache, and
+Web Storage absence verification.
 
 The default capture result stays in memory and is removed with the test
 process. Repository retention is a separate manual gate:
@@ -62,19 +78,27 @@ same destination identity is checked again after capture and immediately around
 publication to close the capture-to-publish TOCTOU window.
 
 The complete PNG and manifest are first written to a private 0700 staging
-bundle. After destination and ancestor identity checks, one exclusive atomic
-directory rename publishes `hermternal-chat-proof.bundle/`, containing only
-`screenshot.png` and `manifest.json`. No PNG or manifest is opened through its
-final public pathname, and a replacement destination receives zero bundle
-bytes. Existing bundles are never overwritten. Failed staging cleanup checks
-the original directory device/inode, unlinks only known regular files, and uses
-non-recursive `rmdir`; a replacement pathname is never followed or recursively
-removed. An independent reviewer must inspect the PNG bytes and manifest
-together before the bundle is copied into the repository. This is a tooling contract only: deterministic unit tests use
-synthetic page metadata and PNG bytes, while the opt-in Playwright lane is the
-only path that can observe the real Hermes Chat state. No live capture was run
-for this change; credentials and VM access are not required for the regression
-suite.
+bundle below a trusted private staging parent. The parent system-root and
+parent device/inode are captured before creation and revalidated through source
+checks, publication, and cleanup. After destination and ancestor identity
+checks, one exclusive atomic directory rename publishes
+`hermternal-chat-proof.bundle/`, containing only `screenshot.png` and
+`manifest.json`. No PNG or manifest is opened through its final public pathname,
+and a replacement destination receives zero bundle bytes. Existing bundles are
+never overwritten. The atomic child uses a fixed absolute trusted Python
+executable, `-I -S`, and a minimal credential-free environment; macOS SDK
+variables added by the system interpreter are not credential or path inputs.
+Failed staging cleanup checks the original directory and file device/inode/size,
+unlinks only known regular files, and uses non-recursive `rmdir`; source swaps,
+parent swaps, replacement pathnames, quarantine remnants, and cleanup failures
+are preserved and surfaced rather than followed or silently discarded. An
+independent reviewer must inspect the PNG bytes and manifest together before
+the bundle is copied into the repository. This is a tooling contract only:
+deterministic unit tests use synthetic page metadata, controlled browser
+provenance, and PNG bytes, while the opt-in Playwright lane is the only path
+that can observe the real Hermes Chat state. No live Hermes run or retainable
+live screenshot was performed for this change; credentials and VM access are
+not required for the regression suite.
 
 This lane serves the production static build and proxies only `/api/*`, `/auth/*`, `/api/ws`, and the exact `/api/pty` WebSocket upgrade to a disposable local HTTP target. `HERMES_LIVE_TARGET` is accepted only as a plain HTTP loopback URL: canonical IPv4 in `127.0.0.0/8`, `[::1]`, or `localhost`, with an explicit unambiguous decimal port and an optional root slash. Set it from the selected launcher `.result.endpoint` (or an approved tunnel URL whose remote side was selected from that endpoint); do not use a remembered or inferred port. Hermes and its Dashboard stay on the VM loopback interface.
 
@@ -82,7 +106,7 @@ The host rejects HTTPS, userinfo, non-loopback names, IPv4-mapped IPv6, decimal/
 
 `/api/pty` is an exact `GET` WebSocket route. Its raw query must contain one non-empty opaque `ticket` and one non-empty opaque `resume`, plus an optional non-empty opaque `attach`; unknown, duplicate, missing, encoded, malformed, or overlong keys and values fail closed before an upstream connection. The host forwards the raw upgrade target unchanged and connects the two sockets with bounded stream plumbing. It does not decode, stringify, log, snapshot, or retain PTY frames. Evidence for live checks is limited to method/path, query-key names, bounded lengths, frame counts/lengths/digests, and close codes. `/api/ws` keeps its existing Chat upgrade behavior.
 
-The host is test-only. It is not a deployment server and does not add authentication, retries, transcript storage, or response logging. The live Playwright configuration creates one unique OS-temporary 0700 output root with an owner marker and token, sets `preserveOutput: 'never'`, disables traces, videos, and screenshots, and uses the safe status-only reporter. `tests/live/live-ipc-guard.cjs` is preloaded through `NODE_OPTIONS --require` before worker fixtures or test bodies. `PW_RUNNER_DEBUG` is incompatible with this lane: the live config and credential launcher reject any truthy value before a worker can start because Playwright otherwise inherits worker stderr directly. The guard captures immutable credential variants once at preload and pins `process.send`, never mutates `Object.prototype`, `Array.prototype`, or `testInfo.errors`, and detaches/redacts every worker-to-parent payload, including step, test-end, fatal, attachment, stdio, produced-environment, and response messages. The Node-side policy also captures every primordial it uses before test code runs—including object, reflection, array, string, regular-expression, Set/Map, and Buffer helpers—and invokes those references through captured `Reflect.apply`; the browser-realm DOM scrub remains a separate page-boundary operation. Playwright stdio buffers and attachment bodies are bounded-decoded from base64 and replaced when their bytes contain a captured credential encoding or end in any non-empty prefix of one; this closes split-write reconstruction across parent IPC messages while preserving buffers proven safe. Malformed or oversized binary fields fail closed. Unknown, trapped, or over-budget values are replaced or not forwarded, preventing Playwright's JSON fallback from serializing an unsafe source graph. The configured Playwright project output is a disposable child below the immutable run root because Playwright clears that project directory before a run; each worker adopts the inherited root only after validating its marker and token, so retries and sequential workers cannot create a second root. Per-test finalization validates every lstat/realpath ancestor from that root to the requested output directory and fails closed on a replaceable symlink ancestor before quarantine. Per-test finalization only accepts strict descendants of the owned root and quarantines those child directories; it never removes or recreates the shared root, owner marker, or root-level artifacts. The config routes Playwright's post-teardown `LastRunReporter` to `/dev/null`, preventing it from recreating a markerless `.last-run.json` directory after teardown. Global teardown alone removes the complete root through atomic quarantine and bounded known-entry non-recursive `unlink`/`rmdir` operations. It rechecks device/inode identity and the owner marker at each handoff, preserves unrelated replacements and unknown/raced remnants, and never recursively deletes a replaceable pathname. Prefix-collision directories, descendants, unrelated output, and symlink roots are preserved. The live fixture scrubs input, textarea, select, and every editable DOM mode (`true`, empty, and `plaintext-only`) before page close. It builds detached, trusted plain snapshots for known synthetic credentials and serialized form values without mutating source diagnostics. Snapshot arrays retain normal Playwright push/map/iterator behavior and safe own serialization/species behavior. The bounded walk includes non-enumerable native Error message/stack/cause fields, the string `TestInfoError.errorContext`, matcher results, logs, and ARIA snapshots. Descriptor shape and observable read-back are checked, while incomplete, spoofed, stateful, or inconsistent properties, throwing accessors, own `toJSON` hooks, cycles, and over-budget values fail closed without retaining the source graph. Serialized contenteditable markup, raw-text textarea bodies, select/option nesting, and actual `value` attributes are parsed structurally; malformed text, comments, nested or mismatched form markup, unclosed containers, unknown markup, duplicate or ambiguous attributes, unknown editable modes, unquoted `value` attributes, and encoded credentials fail closed instead of allowing a later editable element to be skipped. Attachment references and safe temporary output cleanup run in `finally` even when redaction fails. A scrub evaluator failure is suppressed only when `page.isClosed()` returns `true`; generic error text such as `page crashed` is never treated as proof of termination. These layers are deliberate: a failed live assertion must not leave a password in a trace, screenshot, report, error context, DOM dump, or the repository's retained `test-results` directory. The spec records only HTTP method/path pairs and JSON-RPC method or event names. It never records the WebSocket ticket, credential value, prompt response, cookie, or raw frame payload.
+The host is test-only. It is not a deployment server and does not add authentication, retries, transcript storage, or response logging. The live Playwright configuration creates one unique OS-temporary 0700 output root with an owner marker and token, sets `preserveOutput: 'never'`, disables traces, videos, and screenshots, and uses the safe status-only reporter. `tests/live/live-ipc-guard.cjs` is preloaded through `NODE_OPTIONS --require` before worker fixtures or test bodies. `PW_RUNNER_DEBUG` is incompatible with this lane: the live config and credential launcher reject any truthy value before a worker can start because Playwright otherwise inherits worker stderr directly. The guard captures immutable credential variants once at preload and pins `process.send`, never mutates `Object.prototype`, `Array.prototype`, or `testInfo.errors`, and detaches/redacts every worker-to-parent payload, including step, test-end, fatal, attachment, stdio, produced-environment, and response messages. The Node-side policy also captures every primordial it uses before test code runs—including object, reflection, array, string, regular-expression, Set/Map, and Buffer helpers—and invokes those references through captured `Reflect.apply`; the browser-realm DOM scrub remains a separate page-boundary operation. Playwright stdio buffers and attachment bodies are bounded-decoded from base64 and replaced when their bytes contain a captured credential encoding or end in any non-empty prefix of one; this closes split-write reconstruction across parent IPC messages while preserving buffers proven safe. Malformed or oversized binary fields fail closed. Unknown, trapped, or over-budget values are replaced or not forwarded, preventing Playwright's JSON fallback from serializing an unsafe source graph. The configured Playwright project output is a disposable child below the immutable run root because Playwright clears that project directory before a run; each worker adopts the inherited root only after validating its marker and token, so retries and sequential workers cannot create a second root. Per-test finalization validates every lstat/realpath ancestor from that root to the requested output directory and fails closed on a replaceable symlink ancestor before quarantine. Per-test finalization only accepts strict descendants of the owned root and quarantines those child directories; it never removes or recreates the shared root, owner marker, or root-level artifacts. The config routes Playwright's post-teardown `LastRunReporter` to the platform null sink, preventing it from recreating a markerless `.last-run.json` directory after teardown. Global teardown alone removes the complete root through atomic quarantine and bounded known-entry non-recursive `unlink`/`rmdir` operations. It rechecks device/inode identity and the owner marker at each handoff, preserves unrelated replacements and unknown/raced remnants, and never recursively deletes a replaceable pathname. Prefix-collision directories, descendants, unrelated output, and symlink roots are preserved. The live fixture scrubs input, textarea, select, and every editable DOM mode (`true`, empty, and `plaintext-only`) before page close. It builds detached, trusted plain snapshots for known synthetic credentials and serialized form values without mutating source diagnostics. Snapshot arrays retain normal Playwright push/map/iterator behavior and safe own serialization/species behavior. The bounded walk includes non-enumerable native Error message/stack/cause fields, the string `TestInfoError.errorContext`, matcher results, logs, and ARIA snapshots. Descriptor shape and observable read-back are checked, while incomplete, spoofed, stateful, or inconsistent properties, throwing accessors, own `toJSON` hooks, cycles, and over-budget values fail closed without retaining the source graph. Serialized contenteditable markup, raw-text textarea bodies, select/option nesting, and actual `value` attributes are parsed structurally; malformed text, comments, nested or mismatched form markup, unclosed containers, unknown markup, duplicate or ambiguous attributes, unknown editable modes, unquoted `value` attributes, and encoded credentials fail closed instead of allowing a later editable element to be skipped. Attachment references and safe temporary output cleanup run in `finally` even when redaction fails. A scrub evaluator failure is suppressed only when `page.isClosed()` returns `true`; generic error text such as `page crashed` is never treated as proof of termination. These layers are deliberate: a failed live assertion must not leave a password in a trace, screenshot, report, error context, DOM dump, or the repository's retained `test-results` directory. The spec records only HTTP method/path pairs and JSON-RPC method or event names. It never records the WebSocket ticket, credential value, prompt response, cookie, or raw frame payload.
 
 Run the lane only against the authorized disposable VM. From the repository root,
 parse the selected launcher result before starting Playwright:
@@ -117,7 +141,7 @@ report, or terminal output. The default Vitest, Playwright, no-network, and
 static lanes do not execute this live proof; the live Playwright configuration
 is an explicit opt-in.
 
-The implementation supports provider discovery, password login, `/api/auth/me`, session and message reads, one fresh ticket, the native WebSocket upgrade, server-first `gateway.ready`, `session.resume` or fresh `session.create`, one `prompt.submit`, streaming, completion, REST history reconciliation, and no automatic prompt replay. The executed authorized live proof reached authentication, ticket acquisition, `/api/ws`, `gateway.ready`, session restoration/creation, and `prompt.submit`. The disposable instance had no authenticated inference provider, so it stopped at the source `error` event before `message.delta`/`message.complete`; REST history reconciliation is therefore unproven. These live claims are not mocked, and no completion, delta, or history result is claimed. A source `error` event is recorded only by event name and never retains its payload.
+The implementation supports provider discovery, password login, `/api/auth/me`, session and message reads, one fresh ticket, the native WebSocket upgrade, server-first `gateway.ready`, `session.resume` or fresh `session.create`, one `prompt.submit`, streaming, completion, REST history reconciliation, and no automatic prompt replay. The historical issue-327 material in `tests/integration/hermes-chat` is synthetic-only fixture evidence and is not a live Hermes proof for this change. No live Hermes run, credential handoff, browser capture, or retainable screenshot was performed here, so no live completion, delta, or history result is claimed.
 
 The legacy browser composition has no client-visible PTY attach identity, so its `/api/pty` upgrade sends no `attach` and cannot claim true reattach evidence. The host accepts the optional field for the reviewed future contract but does not invent or persist a handle. True reattach remains blocked until the reviewed client-visible identity work in issue #349.
 

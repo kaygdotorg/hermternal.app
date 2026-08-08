@@ -22,6 +22,7 @@ const SAFE_ARRAY_SORT = Array.prototype.sort;
 const SAFE_BUFFER_FROM = Buffer.from;
 const SAFE_BUFFER_TO_STRING = Buffer.prototype.toString;
 const SAFE_ERROR = Error;
+const SAFE_AGGREGATE_ERROR = AggregateError;
 const SAFE_MAP = Map;
 const SAFE_MAP_GET = Map.prototype.get;
 const SAFE_MAP_HAS = Map.prototype.has;
@@ -209,6 +210,14 @@ const LIVE_OUTPUT_PREFIX = 'hermternal-playwright-live-';
 const LIVE_OUTPUT_OWNER_FILE = '.hermternal-live-artifact-owner';
 const LIVE_DEFAULT_USERNAME = 'hermternal-test';
 const LIVE_SECRET_ENV_NAMES = ['HERMES_TEST_USERNAME', 'HERMES_TEST_PASSWORD'];
+const PRELOADED_LIVE_CREDENTIAL_VALUES = SAFE_OBJECT_FREEZE(
+  trustedUniqueArray([
+    LIVE_DEFAULT_USERNAME,
+    ...LIVE_SECRET_ENV_NAMES
+      .map((name) => process.env[name])
+      .filter((value) => typeof value === 'string' && value.length > 0)
+  ])
+);
 const REDACTION_MAX_DEPTH = 16;
 const REDACTION_MAX_NODES = 2048;
 const REDACTION_MAX_STRINGS = 4096;
@@ -259,15 +268,17 @@ const HTML_VOID_ELEMENTS = new SAFE_SET([
 ]);
 
 /**
- * Read the explicitly supplied live-proof values plus the fixed synthetic
- * username fallback used by the live spec. The values stay in the test process
- * and are used to redact diagnostics; they are never written to a report or
- * passed to a browser artifact.
+ * Return the immutable credential snapshot captured when this worker module was
+ * preloaded. An explicit environment remains available for deterministic unit
+ * tests, but the default finalizer path never reads a worker-mutated env object.
  *
  * @param {Record<string, string | undefined>} [environment]
  * @returns {string[]}
  */
-export function liveCredentialValues(environment = process.env) {
+export function liveCredentialValues(environment) {
+  if (environment === undefined) {
+    return /** @type {string[]} */ (trustedArrayCopy(PRELOADED_LIVE_CREDENTIAL_VALUES));
+  }
   const values = [LIVE_DEFAULT_USERNAME];
   for (let index = 0; index < LIVE_SECRET_ENV_NAMES.length; index += 1) {
     const name = LIVE_SECRET_ENV_NAMES[index];
@@ -420,14 +431,16 @@ export function isLiveArtifactDirectory(directory) {
       const ownerStats = lstatSync(ownerPath);
       if (!ownerStats.isFile() || ownerStats.isSymbolicLink()) return false;
       return readFileSync(ownerPath, 'utf8') === `${ownerToken}\n`;
-    } catch {
+    } catch (error) {
       // A missing marker is never ownership evidence. The exact path may have
       // been removed and recreated by another process, so markerless roots are
       // refused even when the path still matches this run's configured root.
-      return false;
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return false;
+      throw new SAFE_ERROR('live artifact ownership inspection failed');
     }
-  } catch {
-    return false;
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return false;
+    throw new SAFE_ERROR('live artifact ownership inspection failed');
   }
 }
 
@@ -460,8 +473,9 @@ function liveArtifactEvidence(directory) {
       return undefined;
     }
     return { candidate, ownerToken, dev: rootStats.dev, ino: rootStats.ino };
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return undefined;
+    throw new SAFE_ERROR('live artifact ownership inspection failed');
   }
 }
 
@@ -488,8 +502,9 @@ function isVerifiedQuarantine(quarantinePath, evidence) {
       !ownerStats.isSymbolicLink() &&
       readFileSync(ownerPath, 'utf8') === `${evidence.ownerToken}\n`
     );
-  } catch {
-    return false;
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return false;
+    throw new SAFE_ERROR('live artifact quarantine inspection failed');
   }
 }
 
@@ -1560,22 +1575,55 @@ export async function scrubLivePage(page) {
 }
 
 /**
- * Remove an empty quarantine parent without recursively trusting its path. A
- * replacement or an unverified remnant makes the non-recursive remove fail,
- * which preserves that unrelated content for the caller to inspect.
- *
- * @param {string} quarantineParent
- * @returns {Promise<void>}
+ * @typedef {{ dev: number, ino: number }} DirectoryIdentity
  */
-async function removeEmptyQuarantineParent(quarantineParent) {
-  // rmdir is intentionally non-recursive and refuses non-empty directories, so
-  // a replacement cannot be removed as a cleanup side effect.
-  await fsPromises.rmdir(quarantineParent).catch(() => undefined);
+
+/** @param {string} directory @returns {DirectoryIdentity} */
+function readDirectoryIdentity(directory) {
+  try {
+    const stats = lstatSync(directory);
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      throw new SAFE_ERROR('live artifact quarantine identity is unsafe');
+    }
+    return { dev: stats.dev, ino: stats.ino };
+  } catch (error) {
+    if (error instanceof SAFE_ERROR) throw error;
+    throw new SAFE_ERROR('live artifact quarantine identity is unavailable');
+  }
 }
 
 /**
- * @typedef {{ dev: number, ino: number }} DirectoryIdentity
+ * Remove an empty quarantine parent without recursively trusting its path. The
+ * identity-bound rename to a unique tombstone closes the check-to-rmdir gap:
+ * only the directory whose device/inode was observed can reach non-recursive
+ * removal, while a replacement remains at its own tombstone if the handoff
+ * does not preserve identity.
+ *
+ * @param {string} quarantineParent
+ * @param {DirectoryIdentity} expected
+ * @returns {Promise<void>}
  */
+async function removeEmptyQuarantineParent(quarantineParent, expected) {
+  if (!sameDirectoryIdentity(quarantineParent, expected)) {
+    throw new SAFE_ERROR('live artifact quarantine identity changed');
+  }
+  const tombstone = uniqueSiblingPath(dirname(quarantineParent), basename(quarantineParent), 'parent-delete');
+  try {
+    await fsPromises.rename(quarantineParent, tombstone);
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return;
+    throw new SAFE_ERROR('live artifact quarantine cleanup failed');
+  }
+  if (!sameDirectoryIdentity(tombstone, expected)) {
+    throw new SAFE_ERROR('live artifact quarantine identity changed');
+  }
+  try {
+    await fsPromises.rmdir(tombstone);
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return;
+    throw new SAFE_ERROR('live artifact quarantine cleanup failed');
+  }
+}
 
 /**
  * @param {string} path
@@ -1588,9 +1636,77 @@ function sameDirectoryIdentity(path, expected) {
     return stats.isDirectory() && !stats.isSymbolicLink() && stats.dev === expected.dev && stats.ino === expected.ino
       ? stats
       : undefined;
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return undefined;
+    throw new SAFE_ERROR('live artifact identity inspection failed');
   }
+}
+
+const SAFE_CLEANUP_MESSAGES = new SAFE_SET([
+  'live artifact ownership inspection failed',
+  'live artifact quarantine inspection failed',
+  'live artifact path inspection failed',
+  'live artifact identity inspection failed',
+  'live artifact quarantine identity is unavailable',
+  'live artifact quarantine identity changed',
+  'live artifact quarantine cleanup failed',
+  'live artifact cleanup identity changed',
+  'live artifact cleanup handoff failed',
+  'live artifact cleanup inspection failed',
+  'live artifact cleanup child disappeared',
+  'live artifact cleanup child handoff failed',
+  'live artifact cleanup child identity changed',
+  'live artifact cleanup child removal failed',
+  'live artifact cleanup left a quarantine remnant',
+  'live artifact test output inspection failed',
+  'live artifact test output handoff failed',
+  'live artifact test output identity changed',
+  'live artifact root changed during test cleanup',
+  'live artifact cleanup failed',
+  'live test attachments could not be cleared'
+]);
+
+/**
+ * @param {unknown} error
+ * @param {string} fallback
+ * @returns {Error}
+ */
+function safeCleanupError(error, fallback) {
+  if (
+    error instanceof SAFE_ERROR &&
+    typeof error.message === 'string' &&
+    trustedApply(SAFE_SET_HAS, SAFE_CLEANUP_MESSAGES, [error.message])
+  ) {
+    return new SAFE_ERROR(error.message);
+  }
+  return new SAFE_ERROR(fallback);
+}
+
+/**
+ * @param {unknown[]} failures
+ * @param {string} message
+ * @returns {Error}
+ */
+function safeFailureAggregate(failures, message) {
+  /** @type {unknown[]} */
+  const safeFailures = new SAFE_ARRAY();
+  for (let index = 0; index < failures.length; index += 1) {
+    trustedApply(SAFE_ARRAY_PUSH, safeFailures, [failures[index]]);
+  }
+  return new SAFE_AGGREGATE_ERROR(safeFailures, message);
+}
+
+/**
+ * @param {unknown} primary
+ * @param {unknown} secondary
+ * @param {string} fallback
+ * @returns {Error}
+ */
+function combineCleanupFailures(primary, secondary, fallback) {
+  const first = safeCleanupError(primary, fallback);
+  if (secondary === undefined) return first;
+  const second = safeCleanupError(secondary, fallback);
+  return safeFailureAggregate([first, second], first.message);
 }
 
 /**
@@ -1641,8 +1757,9 @@ function hasOwnedPathAncestors(root, candidate) {
       if (canonicalCurrent !== expectedCanonical) return false;
     }
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return false;
+    throw new SAFE_ERROR('live artifact path inspection failed');
   }
 }
 
@@ -1650,30 +1767,33 @@ function hasOwnedPathAncestors(root, candidate) {
  * Delete one owned directory tree without recursively trusting a pathname. The
  * directory is first renamed to a fresh sibling tombstone, so a replacement at
  * the caller's path is never inspected or deleted. Every child is detached and
- * identity-checked before non-recursive unlink/rmdir. The quarantine parent is
- * mode 0700; the final identity check plus non-recursive rmdir is the safe
- * destructive boundary available through Node's path-based filesystem API.
+ * identity-checked before non-recursive unlink/rmdir. Any failed identity check
+ * or filesystem operation is reported while the unverified remnant is kept.
  *
  * @param {string} directory
  * @param {DirectoryIdentity} expected
- * @returns {Promise<boolean>}
+ * @returns {Promise<void>}
  */
 async function removeOwnedTree(directory, expected) {
-  if (!sameDirectoryIdentity(directory, expected)) return false;
+  if (!sameDirectoryIdentity(directory, expected)) {
+    throw new SAFE_ERROR('live artifact cleanup identity changed');
+  }
 
   const ownedPath = uniqueSiblingPath(dirname(directory), basename(directory), 'owned');
   try {
     await fsPromises.rename(directory, ownedPath);
   } catch {
-    return false;
+    throw new SAFE_ERROR('live artifact cleanup handoff failed');
   }
-  if (!sameDirectoryIdentity(ownedPath, expected)) return false;
+  if (!sameDirectoryIdentity(ownedPath, expected)) {
+    throw new SAFE_ERROR('live artifact cleanup identity changed');
+  }
 
   let entries;
   try {
     entries = await fsPromises.readdir(ownedPath, { withFileTypes: true });
   } catch {
-    return false;
+    throw new SAFE_ERROR('live artifact cleanup inspection failed');
   }
 
   for (const entry of entries) {
@@ -1682,40 +1802,51 @@ async function removeOwnedTree(directory, expected) {
     try {
       childStats = lstatSync(sourcePath);
     } catch {
-      continue;
+      throw new SAFE_ERROR('live artifact cleanup child disappeared');
     }
     const childPath = uniqueSiblingPath(ownedPath, entry.name, 'delete');
     try {
       await fsPromises.rename(sourcePath, childPath);
     } catch {
-      continue;
-    }
-
-    const movedStats = sameDirectoryIdentity(childPath, childStats);
-    if (movedStats) {
-      if (await removeOwnedTree(childPath, movedStats)) continue;
-      // A failed recursive handoff leaves the tombstone and any safe remnant in
-      // place. Never fall back to recursive deletion of that path.
-      continue;
+      throw new SAFE_ERROR('live artifact cleanup child handoff failed');
     }
 
     try {
-      const beforeUnlink = lstatSync(childPath);
-      if (beforeUnlink.dev !== childStats.dev || beforeUnlink.ino !== childStats.ino) continue;
-      await fsPromises.unlink(childPath);
-    } catch {
-      // Preserve an unreadable or replaced remnant.
+      const movedStats = lstatSync(childPath);
+      if (
+        movedStats.dev !== childStats.dev ||
+        movedStats.ino !== childStats.ino ||
+        (!movedStats.isDirectory() && !movedStats.isFile() && !movedStats.isSymbolicLink())
+      ) {
+        throw new SAFE_ERROR('live artifact cleanup child identity changed');
+      }
+      if (movedStats.isDirectory() && !movedStats.isSymbolicLink()) {
+        // A failed recursive handoff leaves the tombstone and any safe remnant
+        // in place. Never fall back to recursive deletion of that path.
+        await removeOwnedTree(childPath, movedStats);
+      } else {
+        // An exact identity-matched symlink is unlinked as a directory entry;
+        // its target is never followed. The same path is not reused after the
+        // handoff, so a replacement cannot become this unlink target.
+        await fsPromises.unlink(childPath);
+      }
+      continue;
+    } catch (error) {
+      if (error instanceof SAFE_ERROR) throw error;
+      // Preserve an unreadable or replaced remnant and report the failure.
+      throw new SAFE_ERROR('live artifact cleanup child removal failed');
     }
   }
 
-  if (!sameDirectoryIdentity(ownedPath, expected)) return false;
+  if (!sameDirectoryIdentity(ownedPath, expected)) {
+    throw new SAFE_ERROR('live artifact cleanup identity changed');
+  }
   try {
     // rmdir is intentionally non-recursive. A non-empty replacement fails and
     // remains available for inspection rather than being recursively removed.
     await fsPromises.rmdir(ownedPath);
-    return true;
   } catch {
-    return false;
+    throw new SAFE_ERROR('live artifact cleanup left a quarantine remnant');
   }
 }
 
@@ -1723,7 +1854,9 @@ async function removeOwnedTree(directory, expected) {
  * Remove one Playwright test output directory while preserving the run root,
  * owner marker, and root-level artifacts for later tests. Every ancestor is
  * lstat/realpath checked before the child is moved to a private quarantine;
- * replacement symlink ancestors fail closed before recursive traversal.
+ * replacement symlink ancestors fail closed before recursive traversal. Any
+ * owned cleanup or quarantine-parent failure is propagated without masking the
+ * other failure.
  *
  * @param {string} directory
  * @returns {Promise<void>}
@@ -1738,30 +1871,46 @@ async function removeLiveTestArtifacts(directory) {
   let candidateStats;
   try {
     candidateStats = lstatSync(candidate);
-  } catch {
-    return;
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return;
+    throw new SAFE_ERROR('live artifact test output inspection failed');
   }
   if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) return;
 
   /** @type {string | undefined} */
   let quarantineParent;
-  const quarantinePath = () =>
-    join(quarantineParent ?? '', basename(candidate));
+  /** @type {DirectoryIdentity | undefined} */
+  let quarantineIdentity;
+  let primaryError;
   try {
     quarantineParent = mkdtempSync(join(resolve(tmpdir()), 'hermternal-live-test-quarantine-'));
-    await fsPromises.rename(candidate, quarantinePath());
-  } catch {
-    if (quarantineParent) await removeEmptyQuarantineParent(quarantineParent);
-    return;
+    quarantineIdentity = readDirectoryIdentity(quarantineParent);
+    await fsPromises.rename(candidate, join(quarantineParent, basename(candidate)));
+    if (!isLiveArtifactDirectory(root) || !sameDirectoryIdentity(root, rootEvidence)) {
+      throw new SAFE_ERROR('live artifact root changed during test cleanup');
+    }
+    const quarantinedStats = sameDirectoryIdentity(
+      join(quarantineParent, basename(candidate)),
+      candidateStats
+    );
+    if (!quarantinedStats) {
+      throw new SAFE_ERROR('live artifact test output identity changed');
+    }
+    await removeOwnedTree(join(quarantineParent, basename(candidate)), quarantinedStats);
+  } catch (error) {
+    primaryError = safeCleanupError(error, 'live artifact test output handoff failed');
+  } finally {
+    if (quarantineParent && quarantineIdentity) {
+      try {
+        await removeEmptyQuarantineParent(quarantineParent, quarantineIdentity);
+      } catch (error) {
+        primaryError = primaryError
+          ? combineCleanupFailures(primaryError, error, 'live artifact quarantine cleanup failed')
+          : safeCleanupError(error, 'live artifact quarantine cleanup failed');
+      }
+    }
   }
-
-  if (!isLiveArtifactDirectory(root) || !sameDirectoryIdentity(root, rootEvidence)) {
-    await removeEmptyQuarantineParent(quarantineParent);
-    return;
-  }
-  const quarantinedStats = sameDirectoryIdentity(quarantinePath(), candidateStats);
-  if (quarantinedStats) await removeOwnedTree(quarantinePath(), quarantinedStats);
-  await removeEmptyQuarantineParent(quarantineParent);
+  if (primaryError) throw primaryError;
 }
 
 /**
@@ -1769,7 +1918,9 @@ async function removeLiveTestArtifacts(directory) {
  * handoff. The owned root moves through private, unguessable tombstones.
  * Recursive pathname deletion is deliberately not used: every child is
  * detached and verified before non-recursive removal, and a final replacement
- * survives a failed rmdir rather than becoming an rm target.
+ * survives a failed rmdir rather than becoming an rm target. Cleanup failures
+ * are propagated and combined so quarantine remnants are never silently
+ * abandoned or allowed to mask the primary identity failure.
  *
  * @param {string} directory
  * @returns {Promise<void>}
@@ -1779,50 +1930,45 @@ export async function removeLiveArtifacts(directory) {
   if (!evidence) return;
 
   let quarantineParent;
-  let quarantinePath;
+  let quarantineIdentity;
+  let primaryError;
   try {
     quarantineParent = mkdtempSync(join(resolve(tmpdir()), 'hermternal-live-quarantine-'));
-    quarantinePath = join(quarantineParent, basename(evidence.candidate));
+    quarantineIdentity = readDirectoryIdentity(quarantineParent);
+    const quarantinePath = join(quarantineParent, basename(evidence.candidate));
     await fsPromises.rename(evidence.candidate, quarantinePath);
-  } catch {
-    if (quarantineParent) await removeEmptyQuarantineParent(quarantineParent);
-    return;
-  }
+    if (!isVerifiedQuarantine(quarantinePath, evidence)) {
+      throw new SAFE_ERROR('live artifact cleanup identity changed');
+    }
 
-  if (!isVerifiedQuarantine(quarantinePath, evidence)) {
-    await removeEmptyQuarantineParent(quarantineParent);
-    return;
-  }
-
-  const deletionPath = uniqueSiblingPath(quarantineParent, basename(evidence.candidate), 'delete');
-  try {
+    const deletionPath = uniqueSiblingPath(quarantineParent, basename(evidence.candidate), 'delete');
     await fsPromises.rename(quarantinePath, deletionPath);
-  } catch {
-    await removeEmptyQuarantineParent(quarantineParent);
-    return;
-  }
+    if (!isVerifiedQuarantine(deletionPath, evidence)) {
+      throw new SAFE_ERROR('live artifact cleanup identity changed');
+    }
 
-  if (!isVerifiedQuarantine(deletionPath, evidence)) {
-    await removeEmptyQuarantineParent(quarantineParent);
-    return;
-  }
-
-  const finalPath = uniqueSiblingPath(quarantineParent, basename(evidence.candidate), 'final');
-  try {
+    const finalPath = uniqueSiblingPath(quarantineParent, basename(evidence.candidate), 'final');
     await fsPromises.rename(deletionPath, finalPath);
-  } catch {
-    await removeEmptyQuarantineParent(quarantineParent);
-    return;
-  }
+    const finalStats = sameDirectoryIdentity(finalPath, evidence);
+    if (!finalStats) {
+      throw new SAFE_ERROR('live artifact cleanup identity changed');
+    }
 
-  const finalStats = sameDirectoryIdentity(finalPath, evidence);
-  if (!finalStats) {
-    await removeEmptyQuarantineParent(quarantineParent);
-    return;
+    await removeOwnedTree(finalPath, finalStats);
+  } catch (error) {
+    primaryError = safeCleanupError(error, 'live artifact cleanup handoff failed');
+  } finally {
+    if (quarantineParent && quarantineIdentity) {
+      try {
+        await removeEmptyQuarantineParent(quarantineParent, quarantineIdentity);
+      } catch (error) {
+        primaryError = primaryError
+          ? combineCleanupFailures(primaryError, error, 'live artifact quarantine cleanup failed')
+          : safeCleanupError(error, 'live artifact quarantine cleanup failed');
+      }
+    }
   }
-
-  await removeOwnedTree(finalPath, finalStats);
-  await removeEmptyQuarantineParent(quarantineParent);
+  if (primaryError) throw primaryError;
 }
 
 /**
@@ -1860,11 +2006,10 @@ function replaceDiagnosticArray(testInfo, snapshot) {
 }
 
 /**
- * Redact teardown diagnostics and always remove attachments/output. A redaction
- * failure wins over the original scrub failure so an unredacted error is never
- * rethrown; cleanup still runs from the `finally` block before propagation.
- * Reporter-visible errors are replaced with trusted plain snapshots before the
- * function returns or throws.
+ * Redact teardown diagnostics and always remove attachments/output. Redaction,
+ * scrub, and cleanup failures are converted to fixed safe errors and aggregated
+ * so cleanup failure is never masked by an earlier assertion failure. Reporter-
+ * visible errors are replaced with trusted plain snapshots before propagation.
  *
  * @param {{ testInfo: { errors: unknown[], attachments: unknown[], outputDir: string }, scrubError?: unknown, secrets?: Iterable<string> }} options
  * @returns {Promise<void>}
@@ -1873,7 +2018,8 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
   const scrubDiagnostics = scrubError === undefined ? undefined : [scrubError];
   let safeScrubDiagnostic;
   let redactionError;
-  let cleanupError;
+  /** @type {unknown[]} */
+  const cleanupFailures = new SAFE_ARRAY();
   try {
     if (scrubDiagnostics) {
       try {
@@ -1896,17 +2042,47 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
     }
   } finally {
     try {
-      testInfo.attachments.length = 0;
-    } catch (error) {
-      cleanupError = error;
+      const attachments = testInfo.attachments;
+      if (!SAFE_ARRAY_IS_ARRAY(attachments)) {
+        throw new SAFE_ERROR('live test attachments were not cleared');
+      }
+      attachments.length = 0;
+      if (testInfo.attachments !== attachments || attachments.length !== 0) {
+        throw new SAFE_ERROR('live test attachments were not cleared');
+      }
+    } catch {
+      trustedApply(SAFE_ARRAY_PUSH, cleanupFailures, [
+        new SAFE_ERROR('live test attachments could not be cleared')
+      ]);
     }
     try {
       await removeLiveTestArtifacts(testInfo.outputDir ?? liveArtifactCleanupRoot());
-    } catch (error) {
-      cleanupError ??= error;
+    } catch {
+      trustedApply(SAFE_ARRAY_PUSH, cleanupFailures, [
+        new SAFE_ERROR('live artifact cleanup failed')
+      ]);
     }
   }
-  if (redactionError !== undefined) throw redactionError;
-  if (scrubDiagnostics) throw safeScrubDiagnostic ?? new Error('live page scrub failed');
-  if (cleanupError !== undefined) throw cleanupError;
+
+  /** @type {unknown[]} */
+  const failures = new SAFE_ARRAY();
+  if (redactionError !== undefined) {
+    const message = redactionError instanceof SAFE_ERROR &&
+      (redactionError.message === REDACTION_FAILURE_MESSAGE || redactionError.message === REDACTION_BUDGET_MESSAGE)
+      ? redactionError.message
+      : REDACTION_FAILURE_MESSAGE;
+    trustedApply(SAFE_ARRAY_PUSH, failures, [new SAFE_ERROR(message)]);
+  }
+  if (scrubDiagnostics) {
+    trustedApply(SAFE_ARRAY_PUSH, failures, [
+      safeScrubDiagnostic ?? new SAFE_ERROR('live page scrub failed')
+    ]);
+  }
+  for (let index = 0; index < cleanupFailures.length; index += 1) {
+    trustedApply(SAFE_ARRAY_PUSH, failures, [cleanupFailures[index]]);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw safeFailureAggregate(failures, 'live test finalization failed');
+  }
 }
