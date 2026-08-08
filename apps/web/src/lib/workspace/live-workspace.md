@@ -27,7 +27,9 @@ rather than merely hidden. The bridge's public state getter also projects a
 session-less detached state after rejection, while retaining the opaque
 transport identity only for later recovery. A session replacement clears the
 old terminal presentation state after synchronous PTY invalidation, so a late
-old terminal publication cannot appear on the replacement session.
+old terminal publication cannot appear on the replacement session. During
+attach-mode recovery, the coordinator adopts the fresh bridge lease before the
+transport can publish its recovered `attached` transition.
 
 `TerminalSurface` remains mounted while Chat is selected and hides only its
 presentation layer. It owns the host, lazy W-Term/Ghostty import, renderer mount
@@ -36,9 +38,13 @@ selection/copy, and accessible recovery actions. The bridge forwards raw
 `Uint8Array` output directly to that renderer and stores only redacted
 lifecycle state. The renderer-ready gate delays the first PTY connection until
 the lazy sink is mounted; reconnect keeps that mounted sink in place so a PTY
-generation change cannot open a zero-byte-loss window. An explicit Terminal
-close is a user-selected detach; an unexpected PTY exit is the failure path,
-and both revoke the coordinator lease before another Terminal action.
+generation change cannot open a zero-byte-loss window. Attach-mode reconnect is
+routed through coordinator-owned `reconnectBinding()` so a fresh lease is
+adopted before the recovered PTY is exposed. An explicit Terminal close is a
+user-selected detach; an unexpected PTY exit is the failure path, and both
+revoke the coordinator lease before another Terminal action. Detach/close also
+cancel renderer-gated waiters, while a renderer import or mount failure keeps
+readiness closed and detaches rather than attaching behind an error surface.
 
 The pinned server source does not expose a client-visible attach-token issuance
 route. The normal browser composition therefore uses a legacy PTY and labels

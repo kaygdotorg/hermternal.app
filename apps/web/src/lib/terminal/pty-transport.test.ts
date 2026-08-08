@@ -179,6 +179,23 @@ describe("PTY transport", () => {
     expect(harness.transport.state.status).toBe("attached");
   });
 
+  it("keeps exact-identity reconnect supported after coordinator detach", async () => {
+    const harness = makeHarness();
+    await open(harness);
+
+    harness.transport.detach();
+
+    expect(harness.transport.state).toMatchObject({
+      status: "detached",
+      reconnectSupported: true,
+    });
+    await reattach(harness);
+    expect(harness.transport.state).toMatchObject({
+      status: "attached",
+      reconnectSupported: true,
+    });
+  });
+
   it("uses one fresh ticket per upgrade without exposing or reusing it", async () => {
     const harness = makeHarness();
     await open(harness);
@@ -947,6 +964,7 @@ describe("PTY transport", () => {
       status: "detached",
       closeCode: 4409,
       closeClassification: "attachment-superseded",
+      reconnectSupported: false
     });
     await expect(harness.transport.reconnect()).rejects.toMatchObject({
       code: "attachment-superseded",
@@ -1398,7 +1416,11 @@ describe("PTY transport", () => {
       const harness = makeHarness();
       const socket = await open(harness);
       socket.closeFromServer(code);
-      expect(harness.transport.state).toMatchObject({ status, closeClassification: classification });
+      expect(harness.transport.state).toMatchObject({
+        status,
+        closeClassification: classification,
+        reconnectSupported: code === 4401 || code === 1011
+      });
       expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
     }
   });

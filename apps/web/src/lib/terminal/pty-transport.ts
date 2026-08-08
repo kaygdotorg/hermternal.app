@@ -108,6 +108,8 @@ export interface PtyConnectionState {
   readonly closeCode?: number;
   readonly closeClassification?: PtyCloseClassification;
   readonly outputMayBeTruncated: boolean;
+  /** False when transport policy has permanently blocked exact-identity reattach. */
+  readonly reconnectSupported?: boolean;
 }
 
 export interface PtyBytesEvent {
@@ -288,6 +290,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     generation: 0,
     mode: "legacy",
     outputMayBeTruncated: false,
+    reconnectSupported: false,
   };
   let currentInput: PtyConnectionInput | undefined;
   let activeContext: SocketContext | undefined;
@@ -353,6 +356,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       ...(observation?.code !== undefined ? { closeCode: observation.code } : {}),
       ...(observation ? { closeClassification: observation.classification } : {}),
       outputMayBeTruncated: truncated,
+      reconnectSupported: mode === "attach" && reattachBlocked === undefined && !userClosed,
     });
     currentState = nextState;
     // Publish the immutable transition before observers can synchronously
@@ -813,6 +817,9 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
           !contextAlreadyHandled &&
           currentState.status !== "failed"
         ) {
+          if (isPermanentReattachError(sanitized.code)) {
+            reattachBlocked = sanitized.code;
+          }
           setState(
             sanitized.code === "aborted" ? detachedStatus(normalized) : "failed",
             generation,
@@ -829,10 +836,11 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   };
 
   const stop = (closing: boolean): void => {
-    userClosed = true;
-    // Close is an authorization latch. Later cleanup calls cannot weaken it;
-    // only an explicit connect records replacement user intent.
-    if (closing) explicitlyClosed = true;
+    // A coordinator lease invalidation calls detach() to start the exact-identity
+    // retention window; only an explicit close() is a user-closed terminal that
+    // must hide reconnect. Keep these intents distinct in public retry state.
+    userClosed = closing;
+    explicitlyClosed = closing;
     reattachBlocked = undefined;
     const generation = ++currentGeneration;
     const input = currentInput;
@@ -1137,6 +1145,15 @@ function statusForClose(
     return mode === "attach" ? "detached" : "exited";
   }
   return "failed";
+}
+
+function isPermanentReattachError(code: PtyErrorCode): boolean {
+  return (
+    code === "attachment-superseded" ||
+    code === "expired-attachment" ||
+    code === "invalid-attachment" ||
+    code === "closed"
+  );
 }
 
 function retryBlockForClose(

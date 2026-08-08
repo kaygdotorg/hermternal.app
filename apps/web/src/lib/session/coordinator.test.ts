@@ -114,6 +114,7 @@ function createFakeChat(
 interface FakeTerminalHarness {
   terminal: TerminalSessionPort;
   attach: ReturnType<typeof vi.fn>;
+  reconnectBinding: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
   events: string[];
   deferNext(
@@ -159,9 +160,22 @@ function createFakeTerminal(): FakeTerminalHarness {
     }
     return makeBinding(sessionId);
   });
+  const reconnectBinding = vi.fn(
+    async (
+      sessionId: string,
+      signal: AbortSignal,
+      onBindingReady?: (binding: TerminalBinding) => void
+    ): Promise<TerminalBinding> => {
+      if (signal.aborted) throw new SessionCoordinatorError('aborted');
+      const binding = makeBinding(sessionId);
+      onBindingReady?.(binding);
+      return binding;
+    }
+  );
   return {
-    terminal: { attach, release },
+    terminal: { attach, reconnectBinding, release },
     attach,
+    reconnectBinding,
     release,
     events,
     deferNext(sessionId, binding = makeBinding(sessionId)) {
@@ -446,6 +460,72 @@ describe('createSessionCoordinator', () => {
       terminalStatus: 'attached',
       terminalSessionId: 'session-old'
     });
+  });
+
+  it('reacquires a fresh Terminal lease before attach-mode reconnect exposure', async () => {
+    const harness = createCoordinator();
+    await harness.coordinator.activate('terminal');
+    const first = await harness.terminal.attach.mock.results[0]!.value;
+    harness.coordinator.invalidateTerminalBinding('failed', 'session-old');
+    const observedDuringReconnect: Array<{ terminalStatus: string; terminalSessionId?: string }> = [];
+    const recoveredBinding: TerminalBinding = {
+      sessionId: 'session-old',
+      invalidate: vi.fn()
+    };
+    harness.terminal.reconnectBinding.mockImplementationOnce(
+      async (
+        sessionId: string,
+        signal: AbortSignal,
+        onBindingReady?: (binding: TerminalBinding) => void
+      ) => {
+        if (signal.aborted) throw new SessionCoordinatorError('aborted');
+        onBindingReady?.(recoveredBinding);
+        observedDuringReconnect.push({
+          terminalStatus: harness.coordinator.state.terminalStatus,
+          terminalSessionId: harness.coordinator.state.terminalSessionId
+        });
+        return recoveredBinding;
+      }
+    );
+
+    const recovered = await harness.coordinator.reconnectTerminal();
+
+    expect(observedDuringReconnect).toEqual([
+      { terminalStatus: 'attaching', terminalSessionId: 'session-old' }
+    ]);
+    expect(recovered.terminalStatus).toBe('attached');
+    expect(recovered.terminalSessionId).toBe('session-old');
+    expect(harness.terminal.reconnectBinding).toHaveBeenCalledWith(
+      'session-old',
+      expect.any(AbortSignal),
+      expect.any(Function)
+    );
+    expect(harness.terminal.attach).toHaveBeenCalledTimes(1);
+    const second = harness.terminal.reconnectBinding.mock.results[0]?.value as Promise<TerminalBinding> | undefined;
+    expect(second).toBeInstanceOf(Promise);
+    if (!second) throw new Error('missing reconnect binding promise');
+    const secondBinding = await second;
+    expect(secondBinding).toBe(recoveredBinding);
+    expect(secondBinding).not.toBe(first);
+
+    harness.coordinator.invalidateSession();
+    expect(secondBinding.invalidate).toHaveBeenCalledTimes(1);
+    expect(harness.terminal.release).toHaveBeenCalledWith(secondBinding);
+  });
+
+  it('cancels a renderer-gated Terminal attach through coordinator invalidation', async () => {
+    const harness = createCoordinator();
+    const pending = harness.terminal.deferNext('session-old');
+    const activation = harness.coordinator.activate('terminal');
+    await flush();
+
+    harness.coordinator.invalidateTerminalBinding('detached', 'session-old');
+    expect(harness.coordinator.state.terminalStatus).toBe('detached');
+    pending.deferred.resolve(pending.binding);
+    await activation;
+
+    expectInvalidatedThenReleased(harness.terminal, pending.binding);
+    expect(harness.coordinator.state).not.toHaveProperty('terminalSessionId');
   });
 
   it('does not resume session invalidation after binding cleanup reenters disposal', async () => {

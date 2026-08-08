@@ -15,7 +15,13 @@ rejection also invalidates the matching stale binding and detaches its PTY;
 stale state, notices, and bytes are not hidden while an old binding remains
 active. After that rejection, the bridge's public state getter projects a
 session-less detached state until a later attach or reconnect owns the session;
-the transport's opaque session identity remains private for recovery.
+the transport's opaque session identity remains private for recovery. Attach-mode
+reconnect is coordinator-owned and returns a fresh binding lease; the bridge
+invokes the coordinator's adoption callback before transport reconnect can
+publish a synchronous recovered attachment. Direct bridge transport reconnect
+is not a workspace action. Renderer import or mount failure keeps readiness
+closed and detaches any pending lease instead of attaching without a mounted
+sink.
 
 ## Runtime contract
 

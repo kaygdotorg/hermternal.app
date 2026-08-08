@@ -239,17 +239,23 @@ export class LiveWorkspaceSession {
 
   async reconnectTerminal(): Promise<void> {
     try {
-      await this.terminal?.reconnect(this.controller?.signal);
+      await this.coordinator?.reconnectTerminal(this.controller?.signal);
     } catch {
       // TerminalSurface renders the sanitized transport state; no raw error crosses the boundary.
     }
   }
 
   detachTerminal(): void {
+    const coordinator = this.coordinator;
+    const sessionId = this.snapshot.activeSessionId;
+    coordinator?.invalidateTerminalBinding('detached', sessionId);
     this.terminal?.detach();
   }
 
   closeTerminal(): void {
+    const coordinator = this.coordinator;
+    const sessionId = this.snapshot.activeSessionId;
+    coordinator?.invalidateTerminalBinding('detached', sessionId);
     this.terminal?.close();
   }
 
