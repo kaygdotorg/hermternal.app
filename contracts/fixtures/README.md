@@ -60,9 +60,9 @@ their introduction objects on separate reviewed ancestry lines; the direct
 first-parent rule still applies within each binding.
 
 This is not a self-authenticating bootstrap root. Before executing the helper,
-the aggregate validator reads its SHA-256 and Git blob bindings from the mutable
-`contracts/fixtures/validator/validate.py` source; the helper then supplies the
-expected active authority and source OIDs that are compared with runtime pins.
+the aggregate validator reads its SHA-256 binding from the mutable
+`contracts/fixtures/validator/validate.py` source; active authority and source
+OIDs arrive through runtime pins and are checked only for the reviewed shape.
 Those checks are consistency checks, not independent custody. A trusted launcher
 or immutable external pin record must protect the verifier digest, active OIDs,
 artifact and manifest generation or digest, and rollback policy before launch.

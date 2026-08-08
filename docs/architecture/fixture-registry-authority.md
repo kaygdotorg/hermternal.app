@@ -86,17 +86,16 @@ object database, and each authority must satisfy all of the following:
 
 This is not a self-authenticating bootstrap root. The aggregate validator
 captures `scripts/verify_fixture_registry_authority.py` and compares its SHA-256
-and Git blob identity with bindings stored in mutable
-`contracts/fixtures/validator/validate.py`, then uses the helper's active OID
-constants against runtime pins. Those values are consistency checks, not
+with the binding stored in mutable `contracts/fixtures/validator/validate.py`;
+active authority and source OIDs arrive through runtime pins and are checked
+only for the reviewed shape. These values are consistency checks, not
 independent custody. A trusted launcher or immutable external pin record must
 protect the verifier digest, active authority/source OIDs, artifact and
 manifest generation or digest, and rollback policy before launch; ordinary
 environment variables alone do not establish that root. A checkout that can
 rewrite the validator, helper, bindings, and pins together is outside this
-fixture's claim. The external enforcement and deterministic rotation procedure
-remain unresolved in this fixture lane; the external fixture-authority root
-and deterministic authority-rotation tooling dependencies are separate work.
+fixture's claim. The external fixture-authority root and deterministic
+authority-rotation tooling dependencies remain unresolved in this fixture lane.
 
 The legacy v1 path and bootstrap v2 path remain readable historical records.
 The final v2 path is the standalone verifier's historical trust input, while
