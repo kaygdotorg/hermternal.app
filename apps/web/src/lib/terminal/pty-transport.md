@@ -158,9 +158,13 @@ ownership-decision path: from a reentrant observer's cancellation or replacement
 to the old operation's aborted settlement. It deliberately excludes ticket
 minting before `connecting`, network, credentials, PTY bytes, rendering, and the
 replacement's successful open. Thirty deterministic runs plus five warmups cover
-caller abort, Close, Detach, and replacement. Its sanitized artifact records
-factory, stale-factory, allocation, open, stale-state, and cleanup totals so a
-stale generation must have zero factory calls and zero allocated sockets.
+caller abort, Close, Detach, and replacement. Its sanitized
+`pty-connecting-ownership-benchmark.json` artifact records factory,
+stale-factory, allocation, open, stale-state, and cleanup totals so a stale
+generation must have zero factory calls and zero allocated sockets. At source
+revision `7b02c3b25c95bee7928ef528ad6db97a95375fd8`, all 30 abort, Close, and
+Detach runs had zero factory/allocation/open/stale-state/cleanup totals; all 30
+replacement runs had one valid replacement socket and zero stale totals.
 `provenance.sourceRevision` names the committed source revision measured before
 its artifact is committed, avoiding a circular self-hash. Reproduce with
 `GIT_SOURCE_REVISION=$(git rev-parse HEAD) bun src/lib/terminal/pty-connecting-ownership.bench.ts`
