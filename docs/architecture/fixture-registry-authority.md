@@ -115,6 +115,34 @@ from a Git worktree. A fresh single-head clone can omit the unreachable
 historical and active binding/source objects after a restack, so callers must
 seed all four exact protected commit OIDs into local `refs/fixture-authority/*`
 refs before verification; the verifier never infers a replacement from `HEAD`.
+The aggregate and standalone regression suites consume the same explicit,
+offline, repository-versioned source at
+`scripts/fixture_registry_authority.objects.bundle`. Its 2,773,905 bytes are
+pinned by SHA-256
+`d7b53ef94f73ad46ced487a67605912b0f9fcbb53c974c9823a62de34f5860bb`, and its
+`git bundle list-heads` output is bounded to the four exact refs and OIDs:
+
+```text
+refs/fixture-authority/active-authority 09c31b705bb4cac683b88e65a4abbd82cfc67f0f
+refs/fixture-authority/active-source d236941781904514224701756c713d545320eb0e
+refs/fixture-authority/historical-authority 285acdcf9c11c049180a7844e689eee0f1490de4
+refs/fixture-authority/historical-source 263cb75adcf153d6fe252636b064e5fbc3e3f877
+```
+
+The shared test helper verifies the bundle digest, complete-bundle status, exact
+ref listing, and `commit` type/OID for every fetched object before installing
+those refs. It is the only provisioning source; no test fetches a remote or
+uses the reviewed checkout as authority. The explicit offline fetch shape is:
+
+```sh
+git -C "$OBJECT_REPO" fetch --no-tags --quiet \
+  "$PWD/scripts/fixture_registry_authority.objects.bundle" \
+  285acdcf9c11c049180a7844e689eee0f1490de4:refs/fixture-authority/historical-authority \
+  263cb75adcf153d6fe252636b064e5fbc3e3f877:refs/fixture-authority/historical-source \
+  09c31b705bb4cac683b88e65a4abbd82cfc67f0f:refs/fixture-authority/active-authority \
+  d236941781904514224701756c713d545320eb0e:refs/fixture-authority/active-source
+```
+
 The host's `/usr/bin/git` is checked as an absolute, regular executable; Git
 helper lookup is fixed to `/usr/bin:/bin`, while system/global config and
 inherited `GIT_*` redirect variables are removed.
@@ -226,11 +254,13 @@ first parent is the finalized scanner/index/test/baseline commit. When protected
 aggregate test bytes change, advance that source commit, the hardened authority
 commit, and the protected runtime pin in that order; never weaken the manifest
 or infer a replacement from `HEAD`. The current aggregate test classes seed all
-four historical/active authority/source objects and prove that an unseeded
-single-head clone is blocked before a seeded clone succeeds. Normal and
-optimized aggregate CLI and discovery gates must remain equivalent; a passing
-result is still partial synthetic registry evidence, not live Hermes,
-authentication, deployment, streaming, or Terminal proof.
+four historical/active authority/source objects from the exact checked-in bundle
+and prove that an unseeded clean single-head clone is blocked before a seeded
+clone succeeds. The standalone suite consumes that same bundle and checks the
+same four commit objects and refs. Normal and optimized aggregate CLI and
+discovery gates must remain equivalent; a passing result is still partial
+synthetic registry evidence, not live Hermes, authentication, deployment,
+streaming, or Terminal proof.
 
 DEP-03 Host/Origin remains web-only with `success` and `failure` states. Its
 local pins are reproducibility checks, not a separate trust root, and the

@@ -212,8 +212,35 @@ and must not use alternates, shallow or promisor metadata, replacement refs,
 grafts, or redirecting Git configuration. A fresh single-head clone does not
 necessarily retain those unreachable objects; seed all four protected OIDs into
 local `refs/fixture-authority/*` refs before running either validator mode. The
-aggregate test classes apply the same rule and assert that an unseeded clone is
-blocked before a seeded clone is accepted.
+aggregate and standalone suites consume the same explicit, offline,
+repository-versioned source at `scripts/fixture_registry_authority.objects.bundle`.
+Its 2,773,905 bytes are pinned by SHA-256
+`d7b53ef94f73ad46ced487a67605912b0f9fcbb53c974c9823a62de34f5860bb`, and
+`git bundle list-heads` is required to contain exactly these four refs:
+
+```text
+refs/fixture-authority/active-authority 09c31b705bb4cac683b88e65a4abbd82cfc67f0f
+refs/fixture-authority/active-source d236941781904514224701756c713d545320eb0e
+refs/fixture-authority/historical-authority 285acdcf9c11c049180a7844e689eee0f1490de4
+refs/fixture-authority/historical-source 263cb75adcf153d6fe252636b064e5fbc3e3f877
+```
+
+The shared test helper verifies the bundle digest, complete-bundle status, exact
+ref listing, and `commit` type/OID for each fetched object before installing the
+refs. Its explicit offline provisioning shape is:
+
+```sh
+git -C "$OBJECT_REPO" fetch --no-tags --quiet \
+  "$PWD/scripts/fixture_registry_authority.objects.bundle" \
+  285acdcf9c11c049180a7844e689eee0f1490de4:refs/fixture-authority/historical-authority \
+  263cb75adcf153d6fe252636b064e5fbc3e3f877:refs/fixture-authority/historical-source \
+  09c31b705bb4cac683b88e65a4abbd82cfc67f0f:refs/fixture-authority/active-authority \
+  d236941781904514224701756c713d545320eb0e:refs/fixture-authority/active-source
+```
+
+The aggregate test classes assert that an unseeded clean clone is blocked before
+a seeded clone is accepted. No test fetches a remote or uses the reviewed
+checkout as authority.
 
 The repository does not yet have a checked-in GitHub Actions workflow that
 runs this aggregate validator, its test suite, and the `python -O` equivalents.

@@ -25,6 +25,13 @@ from unittest import mock
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from fixture_authority_test_source import PROTECTED_OBJECTS, seed_protected_objects
+
+
 SCRIPT = ROOT / "scripts" / "verify_fixture_registry_authority.py"
 LEGACY_AUTHORITY_FILE = ROOT / "scripts" / "fixture_registry_authority.json"
 V2_AUTHORITY_FILE = ROOT / "scripts" / "fixture_registry_authority.v2.final.json"
@@ -39,42 +46,15 @@ sys.modules[spec.name] = verifier
 spec.loader.exec_module(verifier)
 
 
-def _seed_protected_objects(repository: Path, *, source: Path = ROOT) -> None:
-    """Add both pinned historical objects to a fresh single-head plain clone.
+def _seed_protected_objects(repository: Path) -> None:
+    """Seed all four protected objects from the shared trusted bundle."""
 
-    A local-path clone can copy unreachable objects and make a missing trust input
-    look present. Fetch both the authority introduction and its source explicitly
-    so every test object repository matches the production plain-clone contract.
-    """
-
-    protected = (
+    if PROTECTED_OBJECTS[:2] != (
         ("historical-authority", verifier.EXPECTED_AUTHORITY_COMMIT),
         ("historical-source", verifier.EXPECTED_SOURCE_COMMIT),
-    )
-    completed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            "fetch",
-            "--no-tags",
-            "--quiet",
-            str(source),
-            *(f"{commit}:refs/fixture-authority/{name}" for name, commit in protected),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise AssertionError(completed.stderr or completed.stdout)
-    for _, commit in protected:
-        object_type = subprocess.check_output(
-            ["git", "-C", str(repository), "cat-file", "-t", commit],
-            text=True,
-        ).strip()
-        if object_type != "commit":
-            raise AssertionError(f"protected authority object missing: {commit}")
+    ):
+        raise AssertionError("standalone verifier pins differ from the trusted bundle")
+    seed_protected_objects(repository)
 
 
 class FixtureRegistryAuthorityTests(unittest.TestCase):
@@ -245,8 +225,9 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         if completed.returncode != 0:
             self.fail(completed.stderr or completed.stdout)
         # The branch-only clone intentionally omits unreachable trust inputs;
-        # seed both pinned historical objects without changing its HEAD.
-        _seed_protected_objects(client, source=bare)
+        # seed all four pins from the shared repository-versioned bundle without
+        # treating the reviewed checkout or its local bare clone as authority.
+        _seed_protected_objects(client)
         pack_files = tuple((client / ".git/objects/pack").glob("*.pack"))
         self.assertTrue(pack_files)
         self.assertGreater(
@@ -500,16 +481,64 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
     def test_class_object_repository_contains_every_protected_object(self) -> None:
         """Keep the shared fixture repository honest about unreachable trust roots."""
 
-        for label, commit in (
-            ("historical-authority", verifier.EXPECTED_AUTHORITY_COMMIT),
-            ("historical-source", verifier.EXPECTED_SOURCE_COMMIT),
-        ):
+        for label, commit in PROTECTED_OBJECTS:
             with self.subTest(label=label):
                 object_type = subprocess.check_output(
                     ["git", "-C", str(self.object_repo), "cat-file", "-t", commit],
                     text=True,
                 ).strip()
                 self.assertEqual(object_type, "commit")
+                ref = f"refs/fixture-authority/{label}"
+                resolved = subprocess.check_output(
+                    ["git", "-C", str(self.object_repo), "rev-parse", ref],
+                    text=True,
+                ).strip()
+                self.assertEqual(resolved, commit)
+
+    def test_clean_single_head_clone_requires_the_versioned_bundle(self) -> None:
+        """Start from a fresh clone and provision no authority from checkout history."""
+
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-clean-clone-")
+        self.addCleanup(temporary.cleanup)
+        object_repo = Path(temporary.name) / "repo"
+        completed = subprocess.run(
+            [
+                "git",
+                "clone",
+                "--no-local",
+                "--single-branch",
+                "--no-hardlinks",
+                "--quiet",
+                str(ROOT),
+                str(object_repo),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        missing = [
+            (label, commit)
+            for label, commit in PROTECTED_OBJECTS
+            if subprocess.run(
+                ["git", "-C", str(object_repo), "cat-file", "-e", f"{commit}^{{commit}}"],
+                check=False,
+                capture_output=True,
+            ).returncode
+            != 0
+        ]
+        self.assertTrue(missing)
+        _seed_protected_objects(object_repo)
+        for label, commit in PROTECTED_OBJECTS:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    subprocess.check_output(
+                        ["git", "-C", str(object_repo), "rev-parse", f"refs/fixture-authority/{label}"],
+                        text=True,
+                    ).strip(),
+                    commit,
+                )
 
     def test_normal_and_optimized_success_are_identical(self) -> None:
         # The active checkout may contain corrected scanner bytes that are not
