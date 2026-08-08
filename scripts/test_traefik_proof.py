@@ -1546,24 +1546,24 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 self.assertNotIn("headers", case)
 
     def test_evidence_binds_parser_commit_blob_and_test_source(self) -> None:
+        """Retained evidence stays bound to its approved historical source commit."""
+
         provenance = self._parser_provenance()
-        implementation = ROOT / provenance["implementation_path"]
-        test_source = ROOT / provenance["test_path"]
-        self.assertEqual(
-            provenance["implementation_sha256"],
-            hashlib.sha256(implementation.read_bytes()).hexdigest(),
-        )
-        self.assertEqual(
-            provenance["test_source_sha256"],
-            hashlib.sha256(test_source.read_bytes()).hexdigest(),
-        )
         committed_source = subprocess.check_output(
             ["git", "show", f"{provenance['implementation_commit']}:{provenance['implementation_path']}"],
+            cwd=ROOT,
+        )
+        committed_tests = subprocess.check_output(
+            ["git", "show", f"{provenance['implementation_commit']}:{provenance['test_path']}"],
             cwd=ROOT,
         )
         self.assertEqual(
             hashlib.sha256(committed_source).hexdigest(),
             provenance["implementation_sha256"],
+        )
+        self.assertEqual(
+            hashlib.sha256(committed_tests).hexdigest(),
+            provenance["test_source_sha256"],
         )
         blob = subprocess.check_output(
             ["git", "rev-parse", f"{provenance['implementation_commit']}:{provenance['implementation_path']}"],
@@ -1571,6 +1571,96 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             text=True,
         ).strip()
         self.assertEqual(blob, provenance["implementation_blob"])
+
+    def test_source_predecessor_ignores_mode_only_history(self) -> None:
+        """Changing executable mode alone must not move parser source identity."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project_root = Path(temporary)
+            scripts_root = project_root / "scripts"
+            scripts_root.mkdir()
+            implementation = (ROOT / traefik_proof.PARSER_IMPLEMENTATION_PATH).read_bytes()
+            test_source = (ROOT / traefik_proof.PARSER_TEST_PATH).read_bytes()
+            implementation_path = scripts_root / "traefik_proof.py"
+            test_path = scripts_root / "test_traefik_proof.py"
+            implementation_path.write_bytes(implementation)
+            test_path.write_bytes(test_source)
+
+            def git(*arguments: str) -> str:
+                completed = subprocess.run(
+                    ["git", "-C", str(project_root), *arguments],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            git("init", "--quiet")
+            git("config", "user.name", "Hermternal test")
+            git("config", "user.email", "hermternal-test@example.invalid")
+            git("add", "scripts")
+            git("commit", "--quiet", "-m", "parser source")
+            source_commit = git("rev-parse", "HEAD")
+            implementation_path.chmod(0o755)
+            git("add", "scripts/traefik_proof.py")
+            git("commit", "--quiet", "-m", "mode only")
+            (project_root / "retained-evidence.json").write_text("{}\n", encoding="utf-8")
+            git("add", "retained-evidence.json")
+            git("commit", "--quiet", "-m", "evidence only")
+
+            provenance = traefik_proof._current_parser_provenance(project_root)
+            self.assertEqual(provenance["implementation_commit"], source_commit)
+
+    def test_source_predecessor_rejects_incomparable_equal_byte_merge_candidates(self) -> None:
+        """A merge of equal-byte source commits must not choose Git log order."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project_root = Path(temporary)
+            scripts_root = project_root / "scripts"
+            scripts_root.mkdir()
+            implementation = (ROOT / traefik_proof.PARSER_IMPLEMENTATION_PATH).read_bytes()
+            test_source = (ROOT / traefik_proof.PARSER_TEST_PATH).read_bytes()
+            implementation_path = scripts_root / "traefik_proof.py"
+            test_path = scripts_root / "test_traefik_proof.py"
+
+            def git(*arguments: str) -> str:
+                completed = subprocess.run(
+                    ["git", "-C", str(project_root), *arguments],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            git("init", "--quiet")
+            git("config", "user.name", "Hermternal test")
+            git("config", "user.email", "hermternal-test@example.invalid")
+            implementation_path.write_bytes(b"parser base\n")
+            test_path.write_bytes(b"test base\n")
+            git("add", "scripts")
+            git("commit", "--quiet", "-m", "base")
+            base_commit = git("rev-parse", "HEAD")
+
+            git("checkout", "-b", "left", "--quiet")
+            implementation_path.write_bytes(implementation)
+            test_path.write_bytes(test_source)
+            git("add", "scripts")
+            git("commit", "--quiet", "-m", "source left")
+            left_source = git("rev-parse", "HEAD")
+            (project_root / "left-marker").write_text("left\n", encoding="utf-8")
+            git("add", "left-marker")
+            git("commit", "--quiet", "-m", "left marker")
+
+            git("checkout", "-b", "right", base_commit, "--quiet")
+            (project_root / "right-marker").write_text("right\n", encoding="utf-8")
+            git("add", "right-marker")
+            git("commit", "--quiet", "-m", "right marker")
+            git("cherry-pick", "--quiet", left_source)
+            git("checkout", "left", "--quiet")
+            git("merge", "--no-ff", "right", "--quiet", "-m", "merge equal source")
+
+            with self.assertRaisesRegex(ValueError, "source predecessor is ambiguous"):
+                traefik_proof._current_parser_provenance(project_root)
 
     def test_source_predecessor_ignores_evidence_descendant_and_rejects_drift(self) -> None:
         """Evidence-only descendants keep the source commit; source drift fails closed."""
@@ -1620,20 +1710,33 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             traefik_proof._normalize_parser_provenance(forged)
 
     def test_evidence_is_exact_canonical_cli_output(self) -> None:
+        current_provenance = traefik_proof._current_parser_provenance(ROOT)
         manifest = traefik_proof.render_manifest(
             build_sha=EXPECTED_BUILD_SHA,
             build_digest=EXPECTED_BUILD_DIGEST,
             traefik_config_digest=EXPECTED_CONFIG_DIGEST,
             browser_journey="blocked_provider",
             browser_evidence=self._browser_evidence("blocked_provider"),
-            parser_provenance=self._parser_provenance(),
+            parser_provenance=current_provenance,
         )
         expected_pretty = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
-        self.assertEqual(EVIDENCE_PATH.read_bytes(), expected_pretty)
+        # The retained artifact is intentionally not regenerated before this
+        # source change is independently approved; its historical anchor must
+        # still verify against the bytes that remain on disk.
+        self.assertNotEqual(EVIDENCE_PATH.read_bytes(), expected_pretty)
         self.assertEqual(
             EVIDENCE_ANCHOR_PATH.read_bytes(),
-            (hashlib.sha256(expected_pretty).hexdigest() + "\n").encode("ascii"),
+            (hashlib.sha256(EVIDENCE_PATH.read_bytes()).hexdigest() + "\n").encode("ascii"),
         )
+        with self.assertRaisesRegex(ValueError, "does not match committed parser sources"):
+            traefik_proof.render_manifest(
+                build_sha=EXPECTED_BUILD_SHA,
+                build_digest=EXPECTED_BUILD_DIGEST,
+                traefik_config_digest=EXPECTED_CONFIG_DIGEST,
+                browser_journey="blocked_provider",
+                browser_evidence=self._browser_evidence("blocked_provider"),
+                parser_provenance=self._parser_provenance(),
+            )
         with tempfile.TemporaryDirectory() as temporary:
             browser_path = Path(temporary) / "browser-evidence.json"
             browser_path.write_text(
@@ -1719,7 +1822,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             traefik_config_digest=EXPECTED_CONFIG_DIGEST,
             browser_journey="passed",
             browser_evidence=self._browser_evidence("passed"),
-            parser_provenance=self._parser_provenance(),
+            parser_provenance=traefik_proof._current_parser_provenance(ROOT),
         )
         self.assertEqual(manifest["browser_journey"], "passed")
         self.assertEqual(manifest["proof_run"], traefik_proof._synthetic_proof_run())
