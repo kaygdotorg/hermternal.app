@@ -428,7 +428,10 @@ describe('LiveWorkspaceSession current-session Terminal integration', () => {
     expect(session.current.terminal?.sessionId).not.toBe(SESSION_2.id);
     expect(session.terminal?.state.status).toBe('detached');
     expect(session.terminal?.state.sessionId).toBeUndefined();
-    expect(pty.events.filter((event) => event === 'detach')).toHaveLength(1);
+    // The first detach cancels the stale binding; the second is the bridge's
+    // final cleanup after this adapter ignored cancellation and completed late.
+    expect(pty.events.filter((event) => event === 'detach')).toEqual(['detach', 'detach']);
+    expect(pty.pty.state.status).toBe('detached');
   });
 
   it('forwards one raw PTY byte view without adding bytes to workspace state', async () => {
