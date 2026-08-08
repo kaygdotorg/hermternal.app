@@ -10,7 +10,10 @@ delay the first PTY attach until the lazy TerminalSurface has a mounted sink;
 headless coordinator tests leave that gate disabled. TerminalSurface closes the
 gate before sink teardown, so a pending attach remains blocked for a later mount
 or is rejected by bridge disposal; teardown never resolves readiness, and no
-application-level byte buffer repairs a late attach.
+application-level byte buffer repairs a late attach. Workspace ownership
+rejection also invalidates the matching stale binding and detaches its PTY;
+stale state, notices, and bytes are not hidden while an old binding remains
+active.
 
 ## Runtime contract
 

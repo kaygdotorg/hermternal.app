@@ -68,6 +68,7 @@ function createFakePty() {
   return {
     pty,
     connect,
+    reconnect,
     detach,
     close,
     emit(event: PtyTransportEvent) {
@@ -181,6 +182,84 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(fake.connect).toHaveBeenCalledTimes(2);
   });
 
+  it('invalidates only the matching stale binding and allows a later attach to recover', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const events: CurrentSessionTerminalEvent[] = [];
+    bridge.subscribe((event) => events.push(event));
+
+    const staleBinding = await bridge.attach('session-one', new AbortController().signal);
+    events.length = 0;
+    bridge.invalidateBindingForSession('session-one');
+
+    expect(staleBinding.isValid?.()).toBe(false);
+    expect(fake.detach).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([]);
+
+    const freshBinding = await bridge.attach('session-one', new AbortController().signal);
+    const bytes = new Uint8Array([0xff, 0x00, 0x80]);
+    fake.emit({ type: 'bytes', generation: 2, bytes, outputMayBeTruncated: false });
+
+    expect(freshBinding.isValid?.()).toBe(true);
+    expect(events.find((event) => event.type === 'bytes')).toMatchObject({ bytes });
+
+    const otherFake = createFakePty();
+    const otherBridge = new CurrentSessionTerminalBridge({ createTransport: () => otherFake.pty });
+    const otherBinding = await otherBridge.attach('session-two', new AbortController().signal);
+    otherBridge.invalidateBindingForSession('session-one');
+    expect(otherBinding.isValid?.()).toBe(true);
+  });
+
+  it('stops later listeners after the first stale-state listener invalidates the binding', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const firstListener = vi.fn((event: CurrentSessionTerminalEvent) => {
+      if (event.type === 'state' && event.state.status === 'attached') {
+        bridge.invalidateBindingForSession('session-one');
+      }
+    });
+    const secondListener = vi.fn();
+    bridge.subscribe(firstListener);
+    bridge.subscribe(secondListener);
+    firstListener.mockClear();
+    secondListener.mockClear();
+
+    await expect(bridge.attach('session-one', new AbortController().signal)).rejects.toMatchObject({
+      code: 'aborted'
+    });
+
+    expect(firstListener).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'state', state: expect.objectContaining({ status: 'attached' }) })
+    );
+    expect(secondListener).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'state', state: expect.objectContaining({ status: 'attached' }) })
+    );
+    expect(fake.detach).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses stale bytes, notices, and immediate state replay after invalidation', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const events: CurrentSessionTerminalEvent[] = [];
+    await bridge.attach('session-one', new AbortController().signal);
+    bridge.subscribe((event) => events.push(event));
+    events.length = 0;
+    bridge.invalidateBindingForSession('session-one');
+
+    fake.emit({
+      type: 'bytes',
+      generation: 1,
+      bytes: new Uint8Array([1]),
+      outputMayBeTruncated: false
+    });
+    fake.emit({ type: 'notice', generation: 1, notice: 'output-may-be-truncated', replayCapacityBytes: 1 });
+    const laterEvents: CurrentSessionTerminalEvent[] = [];
+    bridge.subscribe((event) => laterEvents.push(event));
+
+    expect(events).toEqual([]);
+    expect(laterEvents).toEqual([]);
+  });
+
   it('checks cancellation before same-session binding reuse and isolates initial observer errors', async () => {
     const fake = createFakePty();
     const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
@@ -286,6 +365,48 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(fake.pty.reconnect).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(bridge.state)).not.toContain('attach-session-one');
     expect(JSON.stringify(bridge.state)).not.toContain('process-session-one');
+  });
+
+  it('allows a legitimate attach-mode reconnect to clear a stale marker', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({
+      createTransport: () => fake.pty,
+      createAttachment: () => ({ attach: 'attach-one', processIdentity: 'process-one' })
+    });
+    const events: CurrentSessionTerminalEvent[] = [];
+    bridge.subscribe((event) => events.push(event));
+    await bridge.attach('session-one', new AbortController().signal);
+    bridge.invalidateBindingForSession('session-one');
+    events.length = 0;
+    fake.reconnect.mockImplementation(async () => {
+      fake.emit({
+        type: 'state',
+        state: {
+          status: 'reattaching',
+          generation: 2,
+          mode: 'attach',
+          sessionId: 'session-one',
+          outputMayBeTruncated: false
+        }
+      });
+      fake.emit({
+        type: 'state',
+        state: {
+          status: 'attached',
+          generation: 2,
+          mode: 'attach',
+          sessionId: 'session-one',
+          outputMayBeTruncated: false
+        }
+      });
+    });
+
+    await bridge.reconnect();
+    const bytes = new Uint8Array([7]);
+    fake.emit({ type: 'bytes', generation: 2, bytes, outputMayBeTruncated: true });
+
+    expect(events.map((event) => event.type)).toEqual(['state', 'state', 'bytes']);
+    expect(events.at(-1)).toMatchObject({ type: 'bytes', bytes });
   });
 
   it('waits for renderer readiness before attach-mode reconnect', async () => {

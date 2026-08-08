@@ -374,6 +374,61 @@ describe('LiveWorkspaceSession current-session Terminal integration', () => {
     expect(session.current.coordinator?.activeSessionId).toBe(SESSION_3.id);
   });
 
+  it('rejects a late B Terminal publication after Chat mode and C visibility, and closes B', async () => {
+    const rest = createRest();
+    vi.mocked(rest.getSession).mockImplementation(async (sessionId) =>
+      sessionId === SESSION_2.id ? SESSION_2 : SESSION_3
+    );
+    vi.mocked(rest.getSessionMessages).mockImplementation(async (sessionId) => sessionMessages([], sessionId));
+    const { session, coordinator, pty } = await createInitializedWorkspace(rest);
+    await coordinator.activate('terminal');
+    await coordinator.activate('chat');
+
+    const deferredConnect = deferred<void>();
+    const originalConnect = pty.connect.getMockImplementation() as
+      | ((input: { readonly sessionId: string }) => Promise<void>)
+      | undefined;
+    if (!originalConnect) throw new Error('PTY connect implementation is missing');
+    pty.connect.mockImplementation(async (input) => {
+      if (input.sessionId === SESSION_2.id) await deferredConnect.promise;
+      return originalConnect(input);
+    });
+
+    const staleTerminalStates: string[] = [];
+    let sessionCVisible = false;
+    const unsubscribe = session.subscribe((snapshot) => {
+      if (snapshot.activeSessionId === SESSION_3.id) sessionCVisible = true;
+      if (sessionCVisible && snapshot.terminal?.sessionId === SESSION_2.id) {
+        staleTerminalStates.push('session-2');
+      }
+    });
+
+    await session.selectSession(SESSION_2.id);
+    const staleTerminalAttach = coordinator.activate('terminal');
+    await flush();
+    expect(pty.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: SESSION_2.id }),
+      expect.any(AbortSignal)
+    );
+
+    await coordinator.activate('chat');
+    pty.events.length = 0;
+    await session.selectSession(SESSION_3.id);
+    expect(sessionCVisible).toBe(true);
+    expect(session.current.activeSessionId).toBe(SESSION_3.id);
+    expect(session.current.coordinator?.activeSessionId).toBe(SESSION_3.id);
+
+    deferredConnect.resolve();
+    await staleTerminalAttach;
+    unsubscribe();
+
+    expect(staleTerminalStates).toEqual([]);
+    expect(session.current.activeSessionId).toBe(SESSION_3.id);
+    expect(session.current.coordinator?.activeSessionId).toBe(SESSION_3.id);
+    expect(session.current.terminal?.sessionId).not.toBe(SESSION_2.id);
+    expect(pty.events.filter((event) => event === 'detach')).toHaveLength(1);
+  });
+
   it('forwards one raw PTY byte view without adding bytes to workspace state', async () => {
     const { session, coordinator, terminal, pty } = await createInitializedWorkspace();
     await coordinator.activate('terminal');
