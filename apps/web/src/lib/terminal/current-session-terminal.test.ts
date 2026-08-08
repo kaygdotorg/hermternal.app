@@ -27,7 +27,8 @@ function createFakePty() {
       mode: input.attach ? 'attach' : 'legacy',
       sessionId: input.sessionId,
       ...(input.attach && input.processIdentity ? { processIdentity: input.processIdentity } : {}),
-      outputMayBeTruncated: false
+      outputMayBeTruncated: false,
+      reconnectSupported: Boolean(input.attach)
     };
     for (const listener of listeners) listener({ type: 'state', state });
   });
@@ -49,6 +50,13 @@ function createFakePty() {
     if (state.mode !== 'attach') {
       throw new PtyTransportError('legacy-reattach-prohibited', state.generation);
     }
+    state = {
+      ...state,
+      status: 'attached',
+      generation: state.generation + 1,
+      reconnectSupported: true
+    };
+    for (const listener of listeners) listener({ type: 'state', state });
   });
   const pty: PtyTransport = {
     get state() {
@@ -343,6 +351,28 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(fake.pty.reconnect).not.toHaveBeenCalled();
   });
 
+  it('hides deterministic attach-mode reconnect blocks from the public retry state', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    fake.emit({
+      type: 'state',
+      state: {
+        status: 'failed',
+        generation: 1,
+        mode: 'attach',
+        sessionId: 'session-one',
+        closeCode: 4403,
+        closeClassification: 'host-or-origin-rejected',
+        outputMayBeTruncated: false,
+        reconnectSupported: false
+      }
+    });
+
+    expect(bridge.state.reconnectSupported).toBe(false);
+    await expect(bridge.reconnect()).rejects.toMatchObject({ code: 'legacy-reattach-prohibited' });
+    expect(fake.reconnect).not.toHaveBeenCalled();
+  });
+
   it('keeps reviewed attach identity values inside the transport and exposes attach-mode reconnect', async () => {
     const fake = createFakePty();
     const createAttachment = vi.fn(async (sessionId: string) => ({
@@ -367,6 +397,82 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(fake.pty.reconnect).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(bridge.state)).not.toContain('attach-session-one');
     expect(JSON.stringify(bridge.state)).not.toContain('process-session-one');
+  });
+
+  it('returns a fresh binding for coordinator-owned attach-mode reconnect', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({
+      createTransport: () => fake.pty,
+      createAttachment: () => ({ attach: 'attach-one', processIdentity: 'process-one' })
+    });
+
+    const first = await bridge.attach('session-one', new AbortController().signal);
+    first.invalidate();
+    const second = await bridge.reconnectBinding('session-one', new AbortController().signal);
+
+    expect(second).not.toBe(first);
+    expect(second.isValid?.()).toBe(true);
+    expect(fake.reconnect).toHaveBeenCalledTimes(1);
+    second.invalidate();
+    expect(fake.detach).toHaveBeenCalledTimes(2);
+  });
+
+  it('invokes lease adoption before a synchronous recovered attached event', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({
+      createTransport: () => fake.pty,
+      createAttachment: () => ({ attach: 'attach-one', processIdentity: 'process-one' })
+    });
+    const first = await bridge.attach('session-one', new AbortController().signal);
+    first.invalidate();
+    const order: string[] = [];
+    fake.reconnect.mockImplementationOnce(async () => {
+      order.push('transport-reconnect');
+      fake.emit({
+        type: 'state',
+        state: {
+          status: 'attached',
+          generation: 2,
+          mode: 'attach',
+          sessionId: 'session-one',
+          outputMayBeTruncated: true,
+          reconnectSupported: true
+        }
+      });
+    });
+
+    const second = await bridge.reconnectBinding(
+      'session-one',
+      new AbortController().signal,
+      () => order.push('lease-adopted')
+    );
+
+    expect(order).toEqual(['lease-adopted', 'transport-reconnect']);
+    expect(second.isValid?.()).toBe(true);
+  });
+
+  it('cancels renderer-gated attach and reconnect on explicit detach', async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({
+      createTransport: () => fake.pty,
+      createAttachment: () => ({ attach: 'attach-one', processIdentity: 'process-one' })
+    });
+    bridge.setRendererReady(false);
+    const pendingAttach = bridge.attach('session-one', new AbortController().signal);
+    await Promise.resolve();
+    bridge.detach();
+    await expect(pendingAttach).rejects.toMatchObject({ code: 'aborted' });
+    bridge.setRendererReady(true);
+    expect(fake.connect).not.toHaveBeenCalled();
+
+    await bridge.attach('session-one', new AbortController().signal);
+    bridge.setRendererReady(false);
+    const pendingReconnect = bridge.reconnect();
+    await Promise.resolve();
+    bridge.detach();
+    await expect(pendingReconnect).rejects.toMatchObject({ code: 'aborted' });
+    bridge.setRendererReady(true);
+    expect(fake.reconnect).not.toHaveBeenCalled();
   });
 
   it('allows a legitimate attach-mode reconnect to clear a stale marker', async () => {

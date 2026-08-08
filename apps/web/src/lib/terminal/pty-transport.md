@@ -24,6 +24,9 @@ operations:
   attach, and process identity input, validates the 30-minute detached window,
   and mints a fresh single-use ticket. A `4409` superseded socket is blocked
   from reattaching because its replacement is already the active attachment.
+  Permanent close classifications and expired/invalid attachment evidence expose
+  `reconnectSupported: false`; `4401` remains recoverable through the auth path,
+  while `4403`, `4409`, `4410`, and other deterministic failures stay fail-closed.
 - `sendInput()` sends UTF-8 text or copied raw bytes only while attached.
 - `resize()` sends one binary `ESC [RESIZE:<cols>;<rows>]` frame after clamping
   exact integers to `1..2000` columns and `1..1000` rows.
@@ -86,14 +89,21 @@ presentation state. `CurrentSessionTerminalBridge` owns one transport and one
 same-session binding at a time. It rejects stale PTY generations before byte
 forwarding, invalidates a binding after unsolicited detach/failure/exit, and
 maps `4401` to `authentication-required` while leaving `4403` as
-`incompatible-origin`.
+`incompatible-origin`. `reconnectBinding()` creates a fresh opaque binding for
+coordinator-owned attach-mode recovery; callers must not use the direct
+transport reconnect method as a workspace lease. The coordinator may supply a
+binding-adoption callback; the bridge invokes it before starting reconnect so a
+synchronous transport `attached` event cannot outrun the new lease. Explicit
+detach/close also rejects renderer-gated waiters synchronously.
 
 The pinned source has no client-visible attach-token issuance route. The normal
 browser bridge therefore connects in legacy mode and reports reconnect as
 unsupported; it never fakes an attach identity or silently creates a replacement
 PTY. Callers with a separately reviewed opaque attach/process-identity provider
-may pass it to the bridge, in which case reconnect delegates to the transport's
-exact attach-mode retention and supersession rules.
+may pass it to the bridge, in which case `reconnectBinding()` delegates to the
+transport's exact attach-mode retention and supersession rules while returning a
+new coordinator lease. Deterministic transport blocks hide retry rather than
+presenting a reconnect action that cannot succeed.
 
 The bridge can wait for the lazy TerminalSurface renderer-ready signal before
 its first `connect()` and before an attach-mode `reconnect()`. This prevents
