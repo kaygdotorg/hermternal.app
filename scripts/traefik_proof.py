@@ -904,6 +904,8 @@ def render_manifest(
         "deployment": {
             "proxy": "traefik",
             "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+            # This is a semantic digest of the canonical compact bundle and
+            # runtime inputs, not a claim that emitted file bytes are retained.
             "runtime_config_sha256": traefik_config_digest,
             "runtime_inputs_schema": RUNTIME_INPUT_SCHEMA,
             "runtime_inputs": normalized_inputs,
@@ -956,6 +958,7 @@ def render_manifest(
             "scope": "pure Traefik renderer and policy model assertions",
             "route_vectors": "shared static-route grammar and deep-link fixture identities",
             "assertions": [
+                "all 34 retained route case IDs bind to private executable vectors and are evaluated by the local policy or boundary model",
                 "valid session and message deep links are accepted by the model",
                 "root-only scenario query is accepted by the model",
                 "static, client, and non-callback REST query mutations are model-denied",
@@ -975,7 +978,7 @@ def render_manifest(
                 "SPA fallback maps only canonical client deep links to /200.html",
                 "the synthetic __Host- cookie canary requires Secure, HttpOnly, SameSite=Lax, Path=/, and no Domain",
                 "WebSocket tickets are single-use with a 30-second TTL and retained request material is redacted",
-                "PTY timestamps are finite non-negative bounded Unix seconds and monotonic against stored lifecycle events; reattach rejects elapsed time beyond the 30-minute TTL before periodic cleanup, while reap deletes the stale handle after the boundary without retaining input bytes",
+                "PTY timestamps are finite non-negative bounded Unix seconds and monotonic against stored lifecycle events; active reattach advances its clock, reap preflights every handle atomically and advances survivors, duplicate retained IDs are rejected, reattach rejects elapsed time beyond the 30-minute TTL before periodic cleanup, and reap deletes the stale handle after the boundary without retaining input bytes",
                 "Chat and PTY WebSocket retries are disabled",
                 "the required Hermes boundary is private non-loopback TCP 9119 with no public exposure",
                 "blocked edge and direct-port vectors retain upstream_request=false",
@@ -983,7 +986,7 @@ def render_manifest(
             "request_material": "redacted",
         },
         "offline_harness": {
-            "status": "regression_tested",
+            "status": "declared",
             "scope": "loopback-only executable ForwardAuth adapter; no Traefik or Hermes process",
             "traefik_runtime": "not_run; configuration and rule compatibility are not claimed",
             "assertions": [
@@ -993,8 +996,9 @@ def render_manifest(
                 "C0, DEL, and C1 request-target controls are denied before route matching",
                 "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
                 "blocked edge and network vectors retain upstream_request=false in the annotated evidence",
+                "test command results are externally reported and are not retained in this manifest",
             ],
-            "no_upstream_observation": "edge_no_upstream evidence is reconstructed from bounded negative case metadata",
+            "no_upstream_observation": "edge_no_upstream evidence is recomputed from private executable vectors and the synthetic boundary model",
         },
         "cookie_proof": {
             "status": "not_proven",
@@ -1584,6 +1588,10 @@ class SyntheticPtyLifecycle:
         previous = self._last_event_at.get(attach_id)
         if previous is not None and timestamp < previous:
             raise ValueError("PTY timestamp precedes stored lifecycle timestamp")
+        if attach_id in self._states:
+            # A retained identity is never replaced in place: doing so could
+            # revive a stale detached resource without passing the TTL check.
+            raise ValueError("PTY attachment identity already exists")
         self._states[attach_id] = None
         self._last_event_at[attach_id] = timestamp
         return "attached"
@@ -1615,10 +1623,13 @@ class SyntheticPtyLifecycle:
             raise ValueError("PTY attach identity is malformed")
         if attach_id not in self._states:
             raise ValueError("PTY attachment has been reaped")
+        if timestamp < self._last_event_at[attach_id]:
+            raise ValueError("PTY timestamp precedes stored lifecycle timestamp")
         detached_at = self._states[attach_id]
         if detached_at is None:
-            if timestamp < self._last_event_at[attach_id]:
-                raise ValueError("PTY timestamp precedes stored lifecycle timestamp")
+            # Even an idempotent active reattach is a lifecycle event. Advance
+            # its clock so a later detach cannot move backward in time.
+            self._last_event_at[attach_id] = timestamp
             return "already_attached"
         # Reattach eligibility is checked independently of periodic cleanup so a
         # stale handle cannot be reused while its detached resource still exists.
@@ -1632,8 +1643,11 @@ class SyntheticPtyLifecycle:
 
     def reap(self, *, now: int | float) -> int:
         timestamp = _validate_pty_timestamp(now)
-        for detached_at in self._states.values():
-            if detached_at is not None and timestamp < detached_at:
+        # Preflight every lifecycle clock before changing either map. An active
+        # handle can be newer than a detached one; ignoring it would let a
+        # backward reap delete another handle and leave a mixed state mutated.
+        for last_event_at in self._last_event_at.values():
+            if timestamp < last_event_at:
                 raise ValueError("PTY timestamp precedes stored lifecycle timestamp")
         expired = [
             attach_id
@@ -1643,6 +1657,13 @@ class SyntheticPtyLifecycle:
             # while this periodic pass deletes only already-ineligible handles.
             if detached_at is not None and timestamp - detached_at > self.ttl_seconds
         ]
+        expired_ids = set(expired)
+        # All validation and deletion decisions are complete before mutation.
+        # Surviving handles observe the reap as a lifecycle event, including
+        # detached handles whose retention clock still starts at detached_at.
+        for attach_id in self._states:
+            if attach_id not in expired_ids:
+                self._last_event_at[attach_id] = timestamp
         for attach_id in expired:
             del self._states[attach_id]
             del self._last_event_at[attach_id]
@@ -1671,6 +1692,15 @@ def synthetic_pty_lifecycle_observation() -> dict[str, object]:
     else:
         expired_reattach_before_reap = "accepted"
     after_ttl = expired.reap(now=PTY_DETACHED_TTL_SECONDS + 1)
+    duplicate = SyntheticPtyLifecycle()
+    duplicate.attach("fixtureDuplicate", now=0)
+    duplicate.detach("fixtureDuplicate", now=0)
+    try:
+        duplicate.attach("fixtureDuplicate", now=PTY_DETACHED_TTL_SECONDS + 1)
+    except ValueError:
+        duplicate_attach = "rejected"
+    else:
+        duplicate_attach = "accepted"
     return {
         "status": "synthetic_observed",
         "host_requirement": "posix_or_wsl",
@@ -1682,6 +1712,7 @@ def synthetic_pty_lifecycle_observation() -> dict[str, object]:
         "boundary_reattach": boundary_reattach,
         "expired_elapsed_seconds": PTY_DETACHED_TTL_SECONDS + 1,
         "expired_reattach_before_reap": expired_reattach_before_reap,
+        "duplicate_attach": duplicate_attach,
         "before_ttl_reap": boundary_reap,
         "ttl_reap": after_ttl,
         "retry": UPGRADE_RETRY_POLICY["pty"],
@@ -1715,11 +1746,13 @@ def upgrade_retry_policy() -> dict[str, str]:
 def edge_no_upstream_observation(
     cases: Iterable[Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Summarize blocked vectors that must stop before any upstream request.
+    """Recompute blocked vectors before summarizing their no-upstream result.
 
-    The case identities and booleans are safe fixture metadata. No request
-    target, query, credential, or upstream payload is retained. Network-layer
-    direct-port denial is included because it is also a pre-upstream block.
+    Retained evidence contains only case IDs and expected outcomes. The
+    executable vectors stay in this module, use fixed redacted markers, and
+    are evaluated afresh so a stale boolean cannot manufacture a no-upstream
+    claim. The direct private-port case uses the synthetic boundary model
+    because it is outside the HTTP policy adapter.
     """
 
     selected = NEGATIVE_CASES if cases is None else cases
@@ -1732,17 +1765,19 @@ def edge_no_upstream_observation(
         layer = case.get("layer")
         if type(case_id) is not str or not case_id:
             raise ValueError("edge no-upstream case identity is malformed")
-        if case.get("upstream_request") is not False:
-            continue
-        if layer not in {"edge", "network"}:
-            raise ValueError("edge no-upstream case layer is outside the closed vocabulary")
-        blocked_ids.append(case_id)
-        layers.add(str(layer))
+        observed = not bool(route_case_observation(case)["upstream_request"])
+        if observed != (case.get("upstream_request") is False):
+            raise ValueError(f"no-upstream outcome drifted for route case {case_id}")
+        if observed:
+            if layer not in {"edge", "network"}:
+                raise ValueError("edge no-upstream case layer is outside the closed vocabulary")
+            blocked_ids.append(case_id)
+            layers.add(str(layer))
     if not blocked_ids:
         raise ValueError("edge no-upstream evidence requires at least one blocked case")
     return {
         "status": "synthetic_observed",
-        "scope": "annotated policy and network-boundary model",
+        "scope": "executable policy and network-boundary model",
         "blocked_case_count": len(blocked_ids),
         "blocked_case_ids": blocked_ids,
         "blocked_layers": sorted(layers),
@@ -2212,44 +2247,261 @@ def _static_path_matches(path: str, pattern: str) -> bool:
     return path == pattern
 
 
+def _route_vector(
+    method: str,
+    path: str,
+    query: str = "",
+    *,
+    host: str = "expected",
+    origin: str = "none",
+    upgrade: str = "none",
+    raw_target: str | None = None,
+    kind: str = "policy",
+    policy_expected: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Create a test-private request vector with only fixed redacted markers."""
+
+    if raw_target is None:
+        raw_target = path + (f"?{query}" if query else "")
+    vector: dict[str, object] = {
+        "kind": kind,
+        "method": method,
+        "path": path,
+        "query": query,
+        "host": host,
+        "origin": origin,
+        "upgrade": upgrade,
+        "raw_target": raw_target,
+    }
+    if policy_expected is not None:
+        vector["policy_expected"] = dict(policy_expected)
+    return vector
+
+
+# These vectors are executable test fixtures, not retained request evidence.
+# Query values are the literal redaction marker accepted by the grammar; they
+# are never issued as a live ticket or stored in the evidence manifest.
+ROUTE_CASE_VECTORS = {
+    "root_static": _route_vector("GET", "/"),
+    "root_scenario_static": _route_vector("GET", "/", "scenario=success"),
+    "deep_link_session": _route_vector("GET", "/v1/c/abcdefghijklmnop"),
+    "deep_link_message": _route_vector("GET", "/v1/c/abcdefghijklmnop/m/qrstuvwxyzabcdef"),
+    "dashboard_provider_discovery": _route_vector("GET", "/hermes/api/auth/providers"),
+    "password_login": _route_vector("POST", "/hermes/auth/password-login"),
+    "oauth_callback": _route_vector("GET", "/hermes/auth/callback", "code=redacted&state=redacted"),
+    "ws_ticket": _route_vector("POST", "/api/auth/ws-ticket"),
+    "ws_upgrade": _route_vector("GET", "/api/ws", "ticket=redacted", origin="expected", upgrade="websocket"),
+    "pty_upgrade": _route_vector(
+        "GET",
+        "/hermes/api/pty",
+        "ticket=redacted&resume=redacted&attach=redacted",
+        origin="expected",
+        upgrade="websocket",
+    ),
+    "mock_upstream_header_rebuild": _route_vector("GET", "/hermes/api/auth/providers"),
+    "wrong_host": _route_vector("GET", "/", host="wrong"),
+    "wrong_websocket_origin": _route_vector(
+        "GET", "/api/ws", "ticket=redacted", origin="wrong", upgrade="websocket"
+    ),
+    "unknown_route": _route_vector("GET", "/not-reviewed"),
+    "unknown_method": _route_vector("DELETE", "/"),
+    "duplicate_prefix": _route_vector("GET", "/hermes/hermes/api/auth/providers"),
+    "traversal": _route_vector("GET", "/hermes/../api/auth/providers"),
+    "encoded_separator": _route_vector(
+        "GET", "/v1/c/abcdefghijklmnop", raw_target="/v1/c/abcdefghijkl%2Fmnop"
+    ),
+    "encoded_dot": _route_vector(
+        "GET", "/v1/c/abcdefghijklmnop", raw_target="/v1/c/abcdefghijkl%2Emnop"
+    ),
+    "malformed_upgrade": _route_vector(
+        "GET", "/api/ws", "ticket=redacted", origin="expected", upgrade="malformed"
+    ),
+    "missing_ticket": _route_vector("GET", "/api/ws", origin="expected", upgrade="websocket"),
+    "root_query_mutation": _route_vector("GET", "/", "foo=redacted"),
+    "static_asset_query_mutation": _route_vector("GET", "/_app/app.js", "foo=redacted"),
+    "client_route_query_mutation": _route_vector(
+        "GET", "/v1/c/abcdefghijklmnop", "foo=redacted"
+    ),
+    "rest_query_mutation": _route_vector("GET", "/api/sessions", "foo=redacted"),
+    "pty_missing_resume": _route_vector(
+        "GET", "/api/pty", "ticket=redacted&attach=redacted", origin="expected", upgrade="websocket"
+    ),
+    "pty_extra_parameter": _route_vector(
+        "GET",
+        "/api/pty",
+        "ticket=redacted&resume=redacted&extra=redacted",
+        origin="expected",
+        upgrade="websocket",
+    ),
+    "pty_duplicate_parameter": _route_vector(
+        "GET",
+        "/api/pty",
+        "ticket=redacted&ticket=redacted&resume=redacted",
+        origin="expected",
+        upgrade="websocket",
+    ),
+    "pty_empty_value": _route_vector(
+        "GET", "/api/pty", "ticket=&resume=redacted", origin="expected", upgrade="websocket"
+    ),
+    "pty_fresh_parameter": _route_vector(
+        "GET", "/api/pty", "ticket=redacted&resume=redacted&fresh=redacted", origin="expected", upgrade="websocket"
+    ),
+    "invalid_ticket": _route_vector(
+        "GET",
+        "/api/ws",
+        "ticket=redacted",
+        origin="expected",
+        upgrade="websocket",
+        policy_expected={"status": 101, "layer": "hermes", "upstream_request": True},
+    ),
+    "ticket_expired": _route_vector(
+        "GET",
+        "/api/ws",
+        "ticket=redacted",
+        origin="expected",
+        upgrade="websocket",
+        policy_expected={"status": 101, "layer": "hermes", "upstream_request": True},
+    ),
+    "ticket_reuse": _route_vector(
+        "GET",
+        "/api/ws",
+        "ticket=redacted",
+        origin="expected",
+        upgrade="websocket",
+        policy_expected={"status": 101, "layer": "hermes", "upstream_request": True},
+    ),
+    "direct_private_port": _route_vector(
+        "GET", "/", host="wrong", kind="network"
+    ),
+}
+
+
+def _route_case_headers(runtime_inputs: Mapping[str, object], vector: Mapping[str, object]) -> list[tuple[str, str]]:
+    inputs = _validate_runtime_inputs(runtime_inputs)
+    authority = _authority(inputs)
+    host = authority if vector["host"] == "expected" else "wrong.test:19444"
+    headers = [
+        ("Host", host),
+        ("X-Forwarded-Host", authority),
+        ("X-Forwarded-Port", str(inputs["https_port"])),
+        ("X-Forwarded-Proto", "https"),
+    ]
+    origin = vector["origin"]
+    if origin == "expected":
+        headers.append(("Origin", f"https://{authority}"))
+    elif origin == "wrong":
+        headers.append(("Origin", "https://wrong.test:19444"))
+    elif origin != "none":
+        raise ValueError("route vector origin is outside the closed vocabulary")
+    upgrade = vector["upgrade"]
+    if upgrade == "websocket":
+        headers.extend([("Upgrade", "websocket"), ("Connection", "Upgrade")])
+    elif upgrade == "malformed":
+        headers.extend([("Upgrade", "http"), ("Connection", "keep-alive")])
+    elif upgrade != "none":
+        raise ValueError("route vector upgrade is outside the closed vocabulary")
+    return headers
+
+
+def policy_decision_for_case(
+    case: Mapping[str, object], runtime_inputs: Mapping[str, object] | None = None
+) -> dict[str, object]:
+    """Evaluate a retained case through its private executable policy vector."""
+
+    case_id = case.get("id")
+    if type(case_id) is not str or case_id not in ROUTE_CASE_VECTORS:
+        raise ValueError("route case has no executable vector")
+    vector = ROUTE_CASE_VECTORS[case_id]
+    if vector["kind"] != "policy":
+        raise ValueError("route case is outside the HTTP policy adapter")
+    inputs = reconstruction_inputs() if runtime_inputs is None else runtime_inputs
+    return policy_decision(
+        runtime_inputs=inputs,
+        method=str(vector["method"]),
+        path=str(vector["path"]),
+        query=str(vector["query"]),
+        headers=_route_case_headers(inputs, vector),
+        raw_target=str(vector["raw_target"]),
+        require_websocket_headers=True,
+    )
+
+
+def route_case_observation(
+    case: Mapping[str, object], runtime_inputs: Mapping[str, object] | None = None
+) -> dict[str, object]:
+    """Return the redacted final model result for one retained route case."""
+
+    case_id = case.get("id")
+    if type(case_id) is not str or case_id not in ROUTE_CASE_VECTORS:
+        raise ValueError("route case has no executable vector")
+    vector = ROUTE_CASE_VECTORS[case_id]
+    if vector["kind"] == "network":
+        return {
+            "status": private_hermes_boundary_observation("untrusted")["direct_result"],
+            "layer": "network",
+            "upstream_request": False,
+        }
+    policy_result = policy_decision_for_case(case, runtime_inputs)
+    if case_id == "invalid_ticket":
+        ledger = SyntheticTicketLedger()
+        outcome = ledger.consume("unknown", now=0)
+        return {"status": 400 if outcome == "invalid" else 500, "layer": "hermes", "upstream_request": True}
+    if case_id == "ticket_expired":
+        ledger = SyntheticTicketLedger()
+        ledger.issue("expired", now=0)
+        outcome = ledger.consume("expired", now=TICKET_TTL_SECONDS)
+        return {"status": 403 if outcome == "expired" else 500, "layer": "hermes", "upstream_request": True}
+    if case_id == "ticket_reuse":
+        ledger = SyntheticTicketLedger()
+        ledger.issue("reuse", now=0)
+        ledger.consume("reuse", now=1)
+        outcome = ledger.consume("reuse", now=2)
+        return {"status": 403 if outcome == "reused" else 500, "layer": "hermes", "upstream_request": True}
+    return {
+        "status": policy_result["status"],
+        "layer": policy_result["layer"],
+        "upstream_request": policy_result["upstream_request"],
+    }
+
+
 POSITIVE_CASES = [
-    {"id": "root_static", "status": 200, "layer": "static", "upstream_request": True},
-    {"id": "root_scenario_static", "status": 200, "layer": "static", "upstream_request": True, "query_policy": "reviewed scenario selector only"},
-    {"id": "deep_link_session", "status": 200, "layer": "static", "upstream_request": True, "fallback": "/200.html"},
-    {"id": "deep_link_message", "status": 200, "layer": "static", "upstream_request": True, "fallback": "/200.html"},
-    {"id": "dashboard_provider_discovery", "status": 200, "layer": "hermes", "upstream_request": True},
-    {"id": "password_login", "status": 200, "layer": "hermes", "upstream_request": True},
-    {"id": "oauth_callback", "status": 200, "layer": "hermes", "upstream_request": True, "query_policy": "reviewed code/state or provider-error forms; order-independent"},
-    {"id": "ws_ticket", "status": 200, "layer": "hermes", "upstream_request": True},
-    {"id": "ws_upgrade", "status": 101, "layer": "hermes", "upstream_request": True, "query_policy": "chat ticket-only"},
-    {"id": "pty_upgrade", "status": 101, "layer": "hermes", "upstream_request": True, "query_policy": "ticket plus resume with optional attach; order-independent"},
-    {"id": "mock_upstream_header_rebuild", "status": 200, "layer": "hermes", "upstream_request": True, "forwarding_policy": "forward-auth gate plus trusted header middleware", "prefix_policy": "single /hermes prefix"},
+    {"id": "root_static", "vector_id": "root_static", "status": 200, "layer": "static", "upstream_request": True},
+    {"id": "root_scenario_static", "vector_id": "root_scenario_static", "status": 200, "layer": "static", "upstream_request": True, "query_policy": "reviewed scenario selector only"},
+    {"id": "deep_link_session", "vector_id": "deep_link_session", "status": 200, "layer": "static", "upstream_request": True, "fallback": "/200.html"},
+    {"id": "deep_link_message", "vector_id": "deep_link_message", "status": 200, "layer": "static", "upstream_request": True, "fallback": "/200.html"},
+    {"id": "dashboard_provider_discovery", "vector_id": "dashboard_provider_discovery", "status": 200, "layer": "hermes", "upstream_request": True},
+    {"id": "password_login", "vector_id": "password_login", "status": 200, "layer": "hermes", "upstream_request": True},
+    {"id": "oauth_callback", "vector_id": "oauth_callback", "status": 200, "layer": "hermes", "upstream_request": True, "query_policy": "reviewed code/state or provider-error forms; order-independent"},
+    {"id": "ws_ticket", "vector_id": "ws_ticket", "status": 200, "layer": "hermes", "upstream_request": True},
+    {"id": "ws_upgrade", "vector_id": "ws_upgrade", "status": 101, "layer": "hermes", "upstream_request": True, "query_policy": "chat ticket-only"},
+    {"id": "pty_upgrade", "vector_id": "pty_upgrade", "status": 101, "layer": "hermes", "upstream_request": True, "query_policy": "ticket plus resume with optional attach; order-independent"},
+    {"id": "mock_upstream_header_rebuild", "vector_id": "mock_upstream_header_rebuild", "status": 200, "layer": "hermes", "upstream_request": True, "forwarding_policy": "forward-auth gate plus trusted header middleware", "prefix_policy": "single /hermes prefix"},
 ]
 
 NEGATIVE_CASES = [
-    {"id": "wrong_host", "status": 421, "layer": "edge", "upstream_request": False},
-    {"id": "wrong_websocket_origin", "status": 403, "layer": "edge", "upstream_request": False},
-    {"id": "unknown_route", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "unknown_method", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "duplicate_prefix", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "traversal", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "encoded_separator", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "encoded_dot", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "malformed_upgrade", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "missing_ticket", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "root_query_mutation", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "static_asset_query_mutation", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "client_route_query_mutation", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "rest_query_mutation", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "pty_missing_resume", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "pty_extra_parameter", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "pty_duplicate_parameter", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "pty_empty_value", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "pty_fresh_parameter", "status": 404, "layer": "edge", "upstream_request": False},
-    {"id": "invalid_ticket", "status": 400, "layer": "hermes", "upstream_request": True},
-    {"id": "ticket_expired", "status": 403, "layer": "hermes", "upstream_request": True},
-    {"id": "ticket_reuse", "status": 403, "layer": "hermes", "upstream_request": True},
-    {"id": "direct_private_port", "status": "connection_denied", "layer": "network", "upstream_request": False},
+    {"id": "wrong_host", "vector_id": "wrong_host", "status": 421, "layer": "edge", "upstream_request": False},
+    {"id": "wrong_websocket_origin", "vector_id": "wrong_websocket_origin", "status": 403, "layer": "edge", "upstream_request": False},
+    {"id": "unknown_route", "vector_id": "unknown_route", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "unknown_method", "vector_id": "unknown_method", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "duplicate_prefix", "vector_id": "duplicate_prefix", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "traversal", "vector_id": "traversal", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "encoded_separator", "vector_id": "encoded_separator", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "encoded_dot", "vector_id": "encoded_dot", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "malformed_upgrade", "vector_id": "malformed_upgrade", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "missing_ticket", "vector_id": "missing_ticket", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "root_query_mutation", "vector_id": "root_query_mutation", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "static_asset_query_mutation", "vector_id": "static_asset_query_mutation", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "client_route_query_mutation", "vector_id": "client_route_query_mutation", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "rest_query_mutation", "vector_id": "rest_query_mutation", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "pty_missing_resume", "vector_id": "pty_missing_resume", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "pty_extra_parameter", "vector_id": "pty_extra_parameter", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "pty_duplicate_parameter", "vector_id": "pty_duplicate_parameter", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "pty_empty_value", "vector_id": "pty_empty_value", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "pty_fresh_parameter", "vector_id": "pty_fresh_parameter", "status": 404, "layer": "edge", "upstream_request": False},
+    {"id": "invalid_ticket", "vector_id": "invalid_ticket", "status": 400, "layer": "hermes", "upstream_request": True},
+    {"id": "ticket_expired", "vector_id": "ticket_expired", "status": 403, "layer": "hermes", "upstream_request": True},
+    {"id": "ticket_reuse", "vector_id": "ticket_reuse", "status": 403, "layer": "hermes", "upstream_request": True},
+    {"id": "direct_private_port", "vector_id": "direct_private_port", "status": "connection_denied", "layer": "network", "upstream_request": False},
 ]
 
 

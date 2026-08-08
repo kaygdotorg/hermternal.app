@@ -96,7 +96,7 @@
       "network"
     ],
     "retained_request_material": "redacted",
-    "scope": "annotated policy and network-boundary model",
+    "scope": "executable policy and network-boundary model",
     "status": "synthetic_observed",
     "upstream_request": false
   },
@@ -137,6 +137,7 @@
   "issue": "92",
   "model_assertions": {
     "assertions": [
+      "all 34 retained route case IDs bind to private executable vectors and are evaluated by the local policy or boundary model",
       "valid session and message deep links are accepted by the model",
       "root-only scenario query is accepted by the model",
       "static, client, and non-callback REST query mutations are model-denied",
@@ -156,7 +157,7 @@
       "SPA fallback maps only canonical client deep links to /200.html",
       "the synthetic __Host- cookie canary requires Secure, HttpOnly, SameSite=Lax, Path=/, and no Domain",
       "WebSocket tickets are single-use with a 30-second TTL and retained request material is redacted",
-      "PTY timestamps are finite non-negative bounded Unix seconds and monotonic against stored lifecycle events; reattach rejects elapsed time beyond the 30-minute TTL before periodic cleanup, while reap deletes the stale handle after the boundary without retaining input bytes",
+      "PTY timestamps are finite non-negative bounded Unix seconds and monotonic against stored lifecycle events; active reattach advances its clock, reap preflights every handle atomically and advances survivors, duplicate retained IDs are rejected, reattach rejects elapsed time beyond the 30-minute TTL before periodic cleanup, and reap deletes the stale handle after the boundary without retaining input bytes",
       "Chat and PTY WebSocket retries are disabled",
       "the required Hermes boundary is private non-loopback TCP 9119 with no public exposure",
       "blocked edge and direct-port vectors retain upstream_request=false"
@@ -172,7 +173,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 421,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "wrong_host"
     },
     {
       "id": "wrong_websocket_origin",
@@ -180,7 +182,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 403,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "wrong_websocket_origin"
     },
     {
       "id": "unknown_route",
@@ -188,7 +191,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "unknown_route"
     },
     {
       "id": "unknown_method",
@@ -196,7 +200,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "unknown_method"
     },
     {
       "id": "duplicate_prefix",
@@ -204,7 +209,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "duplicate_prefix"
     },
     {
       "id": "traversal",
@@ -212,7 +218,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "traversal"
     },
     {
       "id": "encoded_separator",
@@ -220,7 +227,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "encoded_separator"
     },
     {
       "id": "encoded_dot",
@@ -228,7 +236,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "encoded_dot"
     },
     {
       "id": "malformed_upgrade",
@@ -236,7 +245,8 @@
       "observed_by": "policy_model;traefik_runtime_not_run",
       "proof_level": "model_plus_router_rule",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "malformed_upgrade"
     },
     {
       "id": "missing_ticket",
@@ -244,7 +254,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "missing_ticket"
     },
     {
       "id": "root_query_mutation",
@@ -252,7 +263,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "root_query_mutation"
     },
     {
       "id": "static_asset_query_mutation",
@@ -260,7 +272,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "static_asset_query_mutation"
     },
     {
       "id": "client_route_query_mutation",
@@ -268,7 +281,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "client_route_query_mutation"
     },
     {
       "id": "rest_query_mutation",
@@ -276,7 +290,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "rest_query_mutation"
     },
     {
       "id": "pty_missing_resume",
@@ -284,7 +299,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "pty_missing_resume"
     },
     {
       "id": "pty_extra_parameter",
@@ -292,7 +308,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "pty_extra_parameter"
     },
     {
       "id": "pty_duplicate_parameter",
@@ -300,7 +317,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "pty_duplicate_parameter"
     },
     {
       "id": "pty_empty_value",
@@ -308,7 +326,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "pty_empty_value"
     },
     {
       "id": "pty_fresh_parameter",
@@ -316,7 +335,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 404,
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "pty_fresh_parameter"
     },
     {
       "id": "invalid_ticket",
@@ -324,7 +344,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 400,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "invalid_ticket"
     },
     {
       "id": "ticket_expired",
@@ -332,7 +353,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 403,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "ticket_expired"
     },
     {
       "id": "ticket_reuse",
@@ -340,7 +362,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 403,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "ticket_reuse"
     },
     {
       "id": "direct_private_port",
@@ -348,7 +371,8 @@
       "observed_by": "offline_model_only",
       "proof_level": "model_boundary_only",
       "status": "connection_denied",
-      "upstream_request": false
+      "upstream_request": false,
+      "vector_id": "direct_private_port"
     }
   ],
   "offline_harness": {
@@ -358,11 +382,12 @@
       "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
       "C0, DEL, and C1 request-target controls are denied before route matching",
       "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
-      "blocked edge and network vectors retain upstream_request=false in the annotated evidence"
+      "blocked edge and network vectors retain upstream_request=false in the annotated evidence",
+      "test command results are externally reported and are not retained in this manifest"
     ],
-    "no_upstream_observation": "edge_no_upstream evidence is reconstructed from bounded negative case metadata",
+    "no_upstream_observation": "edge_no_upstream evidence is recomputed from private executable vectors and the synthetic boundary model",
     "scope": "loopback-only executable ForwardAuth adapter; no Traefik or Hermes process",
-    "status": "regression_tested",
+    "status": "declared",
     "traefik_runtime": "not_run; configuration and rule compatibility are not claimed"
   },
   "positive_cases": [
@@ -372,7 +397,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 200,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "root_static"
     },
     {
       "id": "root_scenario_static",
@@ -381,7 +407,8 @@
       "proof_level": "model",
       "query_policy": "reviewed scenario selector only",
       "status": 200,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "root_scenario_static"
     },
     {
       "fallback": "/200.html",
@@ -390,7 +417,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 200,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "deep_link_session"
     },
     {
       "fallback": "/200.html",
@@ -399,7 +427,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 200,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "deep_link_message"
     },
     {
       "id": "dashboard_provider_discovery",
@@ -407,7 +436,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 200,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "dashboard_provider_discovery"
     },
     {
       "id": "password_login",
@@ -415,7 +445,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 200,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "password_login"
     },
     {
       "id": "oauth_callback",
@@ -424,7 +455,8 @@
       "proof_level": "model",
       "query_policy": "reviewed code/state or provider-error forms; order-independent",
       "status": 200,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "oauth_callback"
     },
     {
       "id": "ws_ticket",
@@ -432,7 +464,8 @@
       "observed_by": "offline_policy_model",
       "proof_level": "model",
       "status": 200,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "ws_ticket"
     },
     {
       "id": "ws_upgrade",
@@ -441,7 +474,8 @@
       "proof_level": "model_plus_router_rule",
       "query_policy": "chat ticket-only",
       "status": 101,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "ws_upgrade"
     },
     {
       "id": "pty_upgrade",
@@ -450,7 +484,8 @@
       "proof_level": "model_plus_router_rule",
       "query_policy": "ticket plus resume with optional attach; order-independent",
       "status": 101,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "pty_upgrade"
     },
     {
       "forwarding_policy": "forward-auth gate plus trusted header middleware",
@@ -460,7 +495,8 @@
       "prefix_policy": "single /hermes prefix",
       "proof_level": "model",
       "status": 200,
-      "upstream_request": true
+      "upstream_request": true,
+      "vector_id": "mock_upstream_header_rebuild"
     }
   ],
   "product": {
@@ -483,6 +519,7 @@
     "boundary_reap": 0,
     "boundary_reattach": "reattached",
     "detach": "detached",
+    "duplicate_attach": "rejected",
     "expired_elapsed_seconds": 1801,
     "expired_reattach_before_reap": "rejected",
     "host_requirement": "posix_or_wsl",
