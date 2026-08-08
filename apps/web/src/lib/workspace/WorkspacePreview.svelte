@@ -250,7 +250,7 @@
     </div>
 
     <div class="mobile-toolbar">
-      <div class="mobile-title-island" aria-label="Navigation and conversation">
+      <div class="mobile-title-island" aria-label="Navigation and conversation" data-live-content="conversation-title">
       <Pill
         ariaLabel="Open conversations"
         bind:element={mobileSidebarTrigger}

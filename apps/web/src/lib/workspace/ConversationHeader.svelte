@@ -52,7 +52,7 @@
 </script>
 
 <header class="conversation-header">
-  <div class="title-region">
+  <div class="title-region" data-live-content="conversation-title">
     {#if editing}
       <label class="title-editor-label" for="conversation-title">Conversation title</label>
       <input

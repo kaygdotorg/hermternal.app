@@ -1,12 +1,17 @@
 import { promises as fsPromises } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { chromium } from 'playwright';
+import { render } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import WorkspacePreview from './workspace/WorkspacePreview.svelte';
+import liveConfig from '../../playwright.live.config';
 import {
   captureLiveChatScreenshot,
   captureLiveChatScreenshotIfEnabled,
   createLiveScreenshotManifest,
   persistApprovedLiveScreenshot,
+  sanitizeLiveChatCapturePresentation,
   serializeLiveScreenshotManifest,
   sha256Hex,
   validateLiveScreenshotManifest
@@ -31,13 +36,18 @@ function fakePage(options: { bytes?: Buffer; route?: string; viewport?: { width:
       })
     }),
     emulateMedia: vi.fn(async () => undefined),
-    evaluate: vi.fn(async () => ({
-      devicePixelRatio: 1,
-      locale: 'en-US',
-      reducedMotion: 'reduce',
-      theme: 'light',
-      zoom: 1
-    })),
+    evaluate: vi.fn(async (pageFunction: unknown) => {
+      if (pageFunction === sanitizeLiveChatCapturePresentation) {
+        return { sanitized: true, removedValueCount: 3, prohibitedNodeCount: 0 };
+      }
+      return {
+        devicePixelRatio: 1,
+        locale: 'en-US',
+        reducedMotion: 'reduce',
+        theme: 'light',
+        zoom: 1
+      };
+    }),
     screenshot: vi.fn(async () => bytes)
   };
   return page;
@@ -82,6 +92,87 @@ describe('deterministic live Chat screenshot capture', () => {
 
     expect(result).toBeUndefined();
     expect(screenshot).not.toHaveBeenCalled();
+  });
+
+  it('sanitizes real live component DOM before the capture-only presentation', () => {
+    render(WorkspacePreview, {
+      state: 'ready',
+      dataSource: 'live-runtime',
+      dataMode: 'live',
+      artifactInspectorEnabled: false,
+      title: 'private live title',
+      sessions: [
+        {
+          id: 'live-session',
+          title: 'private session title',
+          detail: 'private session detail',
+          group: 'recent'
+        }
+      ],
+      timelineItems: [
+        { kind: 'user-message', id: 'user-1', text: 'private user prompt' },
+        {
+          kind: 'assistant-message',
+          id: 'assistant-1',
+          text: 'private assistant transcript',
+          model: 'private model'
+        },
+        {
+          kind: 'tool',
+          id: 'tool-1',
+          label: 'private tool name',
+          detail: 'private tool output',
+          status: 'completed'
+        }
+      ]
+    });
+
+    const preview = document.querySelector('[data-testid="runtime-preview"]');
+    expect(preview).toBeTruthy();
+    expect(preview?.textContent).toContain('private user prompt');
+    expect(preview?.querySelector('[data-live-content="conversation-timeline"]')).toBeTruthy();
+
+    const result = sanitizeLiveChatCapturePresentation();
+    expect(result).toEqual({ sanitized: true, removedValueCount: expect.any(Number), prohibitedNodeCount: 0 });
+    expect(preview?.querySelector('[data-live-content]')).toBeNull();
+    expect(preview?.querySelector('.user-message, .assistant-copy, .tool-row')).toBeNull();
+    expect(preview?.querySelector('[data-capture-placeholder="conversation"]')).toHaveTextContent(
+      'Conversation preview'
+    );
+    expect(preview?.textContent).not.toContain('private user prompt');
+    expect(preview?.textContent).not.toContain('private assistant transcript');
+    expect(preview?.textContent).not.toContain('private tool output');
+    expect(preview?.textContent).not.toContain('private session title');
+    expect(preview?.textContent).not.toContain('private live title');
+  });
+
+  it('observes the resolved Chromium project viewport and reduced-motion preference', async () => {
+    const globalUse = (liveConfig.use ?? {}) as Record<string, unknown>;
+    const projectUse = (liveConfig.projects?.[0]?.use ?? {}) as Record<string, unknown>;
+    const resolvedUse = { ...globalUse, ...projectUse };
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const contextOptions = (resolvedUse.contextOptions ?? {}) as Record<string, unknown>;
+      const context = await browser.newContext({
+        viewport: resolvedUse.viewport as { width: number; height: number },
+        deviceScaleFactor: resolvedUse.deviceScaleFactor as number,
+        locale: resolvedUse.locale as string,
+        reducedMotion: contextOptions.reducedMotion as 'reduce' | 'no-preference'
+      });
+      const page = await context.newPage();
+      await page.setContent('<!doctype html><html><body>resolved page</body></html>');
+      expect(page.viewportSize()).toEqual({ width: 1440, height: 960 });
+      await expect(
+        page.evaluate(() => ({
+          width: window.innerWidth,
+          height: window.innerHeight,
+          reducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        }))
+      ).resolves.toEqual({ width: 1440, height: 960, reducedMotion: true });
+      await context.close();
+    } finally {
+      await browser.close();
+    }
   });
 
   it('requires the explicit parity gate and a full client SHA', async () => {
@@ -227,14 +318,14 @@ describe('deterministic live Chat screenshot capture', () => {
     );
   });
 
-  it('cleans private staging files when publication fails', async () => {
+  it('cleans private staging files when bundle construction fails', async () => {
     const destination = await temporaryDirectory();
-    const originalLink = fsPromises.link;
-    let linkCount = 0;
-    fsPromises.link = async (...args: Parameters<typeof originalLink>) => {
-      linkCount += 1;
-      if (linkCount === 2) throw new Error('synthetic manifest publication failure');
-      return originalLink(...args);
+    const originalWriteFile = fsPromises.writeFile;
+    let writeCount = 0;
+    fsPromises.writeFile = async (...args: Parameters<typeof originalWriteFile>) => {
+      writeCount += 1;
+      if (writeCount === 2) throw new Error('synthetic manifest staging failure');
+      return originalWriteFile(...args);
     };
 
     try {
@@ -244,12 +335,34 @@ describe('deterministic live Chat screenshot capture', () => {
           destinationDirectory: destination,
           review: 'independent-approved'
         })
-      ).rejects.toThrow('synthetic manifest publication failure');
+      ).rejects.toThrow('synthetic manifest staging failure');
     } finally {
-      fsPromises.link = originalLink;
+      fsPromises.writeFile = originalWriteFile;
     }
 
     expect(await fsPromises.readdir(destination)).toEqual([]);
+  });
+
+  it('publishes zero PNG or manifest bytes into a replacement destination during a race', async () => {
+    const root = await temporaryDirectory();
+    const destination = join(root, 'destination');
+    const replacement = join(root, 'replacement');
+    await fsPromises.mkdir(destination);
+    await fsPromises.mkdir(replacement);
+
+    await expect(
+      persistApprovedLiveScreenshot({
+        capture: { bytes: PNG_BYTES, manifest: manifestFixture() },
+        destinationDirectory: destination,
+        review: 'independent-approved',
+        beforeAtomicPublish: async () => {
+          await fsPromises.rm(destination, { recursive: true, force: true });
+          await fsPromises.symlink(replacement, destination);
+        }
+      })
+    ).rejects.toThrow('destination changed');
+
+    expect(await fsPromises.readdir(replacement)).toEqual([]);
   });
 
   it('persists only approved PNG bytes and the bounded manifest without overwrite', async () => {
@@ -260,6 +373,8 @@ describe('deterministic live Chat screenshot capture', () => {
       review: 'independent-approved'
     });
 
+    expect(result.bundlePath).toBe(join(destination, 'hermternal-chat-proof.bundle'));
+    expect(await fsPromises.readdir(destination)).toEqual(['hermternal-chat-proof.bundle']);
     expect(await fsPromises.readFile(result.imagePath)).toEqual(PNG_BYTES);
     expect(JSON.parse(await fsPromises.readFile(result.manifestPath, 'utf8'))).toEqual(
       result.manifest

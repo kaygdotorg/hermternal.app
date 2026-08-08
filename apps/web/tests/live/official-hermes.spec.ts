@@ -115,17 +115,19 @@ test('browser UI reaches the official Hermes gateway through completion', async 
     { timeout: 30_000 }
   ).toBeGreaterThan(initialMessageReadCount);
 
+  expect(requests.filter((entry) => entry === 'POST /api/auth/ws-ticket')).toHaveLength(1);
+  expect(sentMethods.filter((method) => method === 'prompt.submit')).toHaveLength(1);
+
   const captureState = await workspace.getAttribute('data-state');
   if (captureState !== 'empty' && captureState !== 'ready') {
     throw new Error('live screenshot capture state was not approved');
   }
-  // This is the sole explicit screenshot step. It returns bytes in memory and
-  // does nothing by default; retention additionally requires issue #352 parity,
-  // an exact client SHA, and a separate independent-review approval.
+  // Every live proof assertion is complete before this sole explicit screenshot
+  // step. The helper then replaces live-derived DOM content with bounded
+  // capture-only placeholders before rendering the PNG. It returns bytes in
+  // memory and does nothing by default; retention additionally requires issue
+  // #352 parity, an exact client SHA, and independent-review approval.
   await captureLiveChatScreenshotIfEnabled({ page, uiState: captureState });
-
-  expect(requests.filter((entry) => entry === 'POST /api/auth/ws-ticket')).toHaveLength(1);
-  expect(sentMethods.filter((method) => method === 'prompt.submit')).toHaveLength(1);
 });
 
 test('browser auth logs out of the official Hermes session', async ({ page }) => {

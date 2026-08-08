@@ -17,12 +17,16 @@ HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA="$GITHUB_SHA" \
 The capture helper rejects missing or short client SHAs, non-root routes, any
 viewport other than `1440x960`, non-Chromium browser provenance, non-`en-US`
 locale, non-1 DPR or zoom, unexpected theme or reduced-motion inputs, and UI
-states outside the bounded `empty`/`ready` set. It records only the fixed-key
-manifest, the official Hermes image digest and source attestation, the exact
-safe test command, and the SHA-256 of the returned PNG. It never attaches or
-writes prompt text, transcripts, provider payloads, tickets, cookies,
-credentials, WebSocket frames, PTY bytes, stdout/stderr, traces, or test
-results.
+states outside the bounded `empty`/`ready` set. All live proof assertions finish
+before the capture-only page transform. The transform replaces the live
+conversation timeline, session labels, conversation title, and composer values
+with bounded semantic placeholders, then asserts that prohibited transcript,
+user, assistant, tool, and live-data markers are absent from the DOM and web
+storage before `page.screenshot()` runs. It records only the fixed-key manifest,
+the official Hermes image digest and source attestation, the exact safe test
+command, and the SHA-256 of the returned PNG. It never attaches or writes
+prompt text, transcripts, provider payloads, tickets, cookies, credentials,
+WebSocket frames, PTY bytes, stdout/stderr, traces, or test results.
 
 The default capture result stays in memory and is removed with the test
 process. Repository retention is a separate manual gate:
@@ -38,9 +42,14 @@ HERMTERNAL_LIVE_SCREENSHOT_DESTINATION="$PWD/tests/integration/hermes-chat" \
 ```
 
 The retention directory must already exist and contain no symlinked ancestor.
-Existing files are never overwritten. An independent reviewer must inspect the
-PNG bytes and the manifest together before the bytes are copied into the
-repository. This is a tooling contract only: the deterministic unit tests use
+The complete PNG and manifest are first written to a private 0700 staging
+bundle. After destination and ancestor identity checks, one exclusive atomic
+directory rename publishes `hermternal-chat-proof.bundle/`, containing only
+`screenshot.png` and `manifest.json`. No PNG or manifest is opened through its
+final public pathname, and a replacement destination receives zero bundle
+bytes. Existing bundles are never overwritten. An independent reviewer must
+inspect the PNG bytes and manifest together before the bundle is copied into the
+repository. This is a tooling contract only: deterministic unit tests use
 synthetic page metadata and PNG bytes, while the opt-in Playwright lane is the
 only path that can observe the real Hermes Chat state. No live capture was run
 for this change; credentials and VM access are not required for the regression

@@ -46,7 +46,7 @@
   }
 </script>
 
-<form aria-label="Message composer" class="composer" onsubmit={handleSubmit}>
+<form aria-label="Message composer" class="composer" data-live-content="composer" onsubmit={handleSubmit}>
   <label class="message-field">
     <span class="sr-only">Message Hermes</span>
     <textarea

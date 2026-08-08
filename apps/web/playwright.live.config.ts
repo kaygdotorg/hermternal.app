@@ -56,7 +56,7 @@ export default defineConfig({
     viewport: { width: 1440, height: 960 },
     deviceScaleFactor: 1,
     locale: 'en-US',
-    reducedMotion: 'reduce',
+    contextOptions: { reducedMotion: 'reduce' },
     trace: 'off',
     video: 'off',
     screenshot: 'off',
@@ -73,7 +73,19 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium-live',
-      use: { ...devices['Desktop Chrome'] }
+      // Resolve device defaults first, then override every screenshot input.
+      // Desktop Chrome otherwise brings its own viewport and motion preference.
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1440, height: 960 },
+        deviceScaleFactor: 1,
+        locale: 'en-US',
+        contextOptions: { reducedMotion: 'reduce' },
+        colorScheme: 'light',
+        trace: 'off',
+        video: 'off',
+        screenshot: 'off'
+      }
     }
   ]
 });
