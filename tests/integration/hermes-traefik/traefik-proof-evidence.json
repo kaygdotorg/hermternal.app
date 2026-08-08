@@ -115,12 +115,12 @@
     ],
     "hop_by_hop": "direct injected hop-by-hop fields are rejected; only transport Connection: close is tolerated",
     "parser_provenance": {
-      "implementation_blob": "418de4043f13d1b2aac2a1be44f6b815dc3b8051",
-      "implementation_commit": "519ad9e71b2a2de28c93af0475fecf9d696782d2",
+      "implementation_blob": "f2d60fe74ff8343ab6c1466ff9f38abcfc2dd657",
+      "implementation_commit": "a9d323b522438fe6d3bf6839c0c249eba0e3645d",
       "implementation_path": "scripts/traefik_proof.py",
-      "implementation_sha256": "0f04fbdab4828ed61b091f0ac424ef33fd26b39c0843b0b054ba4348813e7173",
+      "implementation_sha256": "683cd633311c0314bda5433265077dce3c182616bec2099bae57a8c519b9c325",
       "test_path": "scripts/test_traefik_proof.py",
-      "test_source_sha256": "173fa654d69ca4b23d52ac771943c6dd785f15b69f1042e2900b30b6bdad921f"
+      "test_source_sha256": "24d40f7a810ad251fb00e6632a3c60928cfb450e74064e2a8731e30fd0f7a1df"
     },
     "port": "X-Forwarded-Port must use canonical decimal syntax and equal the configured HTTPS entrypoint port",
     "runtime_observed": false,
@@ -154,7 +154,7 @@
       "a present syntactically valid noncanonical X-Forwarded-Host reaches the policy model and returns edge 421; empty, whitespace/control, malformed-authority, missing, or duplicate metadata is adapter-denied with 400",
       "configured hosts and forwarded DNS authorities share per-label validation, reject trailing dots, and enforce 63-byte labels and a 253-byte host bound",
       "ForwardAuth ports use canonical decimal syntax in the 1..65535 range; parser-leading OWS is normalized consistently across generated metadata and Origin, while trailing/internal OWS and obs-fold are rejected before policy",
-      "ForwardAuth generation verifies the current committed parser implementation and test source, including Git commit/blob and recomputed SHA-256 identities; caller-supplied provenance cannot forge retained evidence",
+      "ForwardAuth generation verifies the stable source-predecessor commit containing the current parser implementation and test source, including Git commit/blob and recomputed SHA-256 identities; evidence-only descendants do not drift provenance and caller-supplied values cannot forge retained evidence",
       "X-Forwarded-Method is a nonempty HTTP token, X-Forwarded-For is a canonical comma-list of IP addresses with delimiter OWS, and present Origin is a nonempty serialized HTTP origin or null",
       "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
       "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
