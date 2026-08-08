@@ -24,6 +24,7 @@ import math
 import os
 import re
 import stat
+import subprocess
 import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -280,6 +281,7 @@ def _pty_query_patterns() -> tuple[str, ...]:
 PTY_QUERY_PATTERNS = _pty_query_patterns()
 
 DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+HTTP_METHOD_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 AUTHORITY_PORT_RE = re.compile(r"^[1-9][0-9]{0,4}$")
 
 
@@ -468,14 +470,9 @@ PARITY_FIXTURE_PATHS = {
 }
 PARSER_IMPLEMENTATION_PATH = "scripts/traefik_proof.py"
 PARSER_TEST_PATH = "scripts/test_traefik_proof.py"
-
-
-def _normalize_parser_provenance(value: Mapping[str, object] | None) -> dict[str, str]:
-    """Validate the source identities that make the retained adapter evidence reproducible."""
-
-    if not isinstance(value, Mapping):
-        raise ValueError("parser provenance is required")
-    expected_keys = {
+PARSER_SOURCE_MAX_BYTES = 1 << 20
+PARSER_PROVENANCE_KEYS = frozenset(
+    {
         "implementation_path",
         "implementation_commit",
         "implementation_blob",
@@ -483,34 +480,87 @@ def _normalize_parser_provenance(value: Mapping[str, object] | None) -> dict[str
         "test_path",
         "test_source_sha256",
     }
-    if set(value) != expected_keys:
-        raise ValueError("parser provenance keys are outside the closed contract")
-    implementation_path = value["implementation_path"]
-    test_path = value["test_path"]
-    if implementation_path != PARSER_IMPLEMENTATION_PATH or test_path != PARSER_TEST_PATH:
-        raise ValueError("parser provenance paths are not the reviewed sources")
-    implementation_commit = value["implementation_commit"]
-    implementation_blob = value["implementation_blob"]
-    implementation_sha256 = value["implementation_sha256"]
-    test_source_sha256 = value["test_source_sha256"]
-    if not isinstance(implementation_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", implementation_commit):
-        raise ValueError("parser implementation commit must be a lowercase Git SHA")
-    if not isinstance(implementation_blob, str) or not re.fullmatch(r"[0-9a-f]{40}", implementation_blob):
-        raise ValueError("parser implementation blob must be a lowercase Git blob OID")
-    for name, digest in (
-        ("implementation_sha256", implementation_sha256),
-        ("test_source_sha256", test_source_sha256),
-    ):
-        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise ValueError(f"{name} must be a SHA-256 digest")
+)
+
+
+def _git_output(project_root: Path, *arguments: str) -> bytes:
+    """Read one bounded Git result used to bind evidence to committed sources."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(project_root), *arguments],
+            check=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("parser provenance requires a readable local Git repository") from exc
+    output = completed.stdout
+    if len(output) > PARSER_SOURCE_MAX_BYTES:
+        raise ValueError("parser provenance source exceeds the bounded size limit")
+    return output
+
+
+def _git_blob_oid(source: bytes) -> str:
+    """Compute Git's SHA-1 blob identity; this is an object ID, not a security digest."""
+
+    header = f"blob {len(source)}\0".encode("ascii")
+    return hashlib.sha1(header + source).hexdigest()
+
+
+def _current_parser_provenance() -> dict[str, str]:
+    """Derive and verify parser source identity instead of trusting CLI claims."""
+
+    project_root = Path(__file__).resolve().parents[1]
+    implementation = _read_bounded_regular_file(
+        project_root / PARSER_IMPLEMENTATION_PATH,
+        PARSER_SOURCE_MAX_BYTES,
+        "parser implementation source",
+    )
+    test_source = _read_bounded_regular_file(
+        project_root / PARSER_TEST_PATH,
+        PARSER_SOURCE_MAX_BYTES,
+        "parser test source",
+    )
+    implementation_commit = _git_output(project_root, "rev-parse", "--verify", "HEAD").decode("ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", implementation_commit):
+        raise ValueError("current parser source commit is not a lowercase Git SHA")
+    committed_implementation = _git_output(
+        project_root,
+        "show",
+        f"{implementation_commit}:{PARSER_IMPLEMENTATION_PATH}",
+    )
+    committed_tests = _git_output(
+        project_root,
+        "show",
+        f"{implementation_commit}:{PARSER_TEST_PATH}",
+    )
+    if committed_implementation != implementation or committed_tests != test_source:
+        raise ValueError("parser provenance requires clean committed implementation and test sources")
     return {
-        "implementation_path": implementation_path,
+        "implementation_path": PARSER_IMPLEMENTATION_PATH,
         "implementation_commit": implementation_commit,
-        "implementation_blob": implementation_blob,
-        "implementation_sha256": implementation_sha256,
-        "test_path": test_path,
-        "test_source_sha256": test_source_sha256,
+        "implementation_blob": _git_blob_oid(committed_implementation),
+        "implementation_sha256": digest_bytes(implementation),
+        "test_path": PARSER_TEST_PATH,
+        "test_source_sha256": digest_bytes(test_source),
     }
+
+
+def _normalize_parser_provenance(value: Mapping[str, object] | None) -> dict[str, str]:
+    """Fail closed when supplied identity differs from the committed parser sources."""
+
+    actual = _current_parser_provenance()
+    if value is None:
+        return actual
+    if not isinstance(value, Mapping) or set(value) != PARSER_PROVENANCE_KEYS:
+        raise ValueError("parser provenance keys are outside the closed contract")
+    candidate = {key: value[key] for key in PARSER_PROVENANCE_KEYS}
+    if any(type(item) is not str for item in candidate.values()):
+        raise ValueError("parser provenance values must be strings")
+    if candidate != actual:
+        raise ValueError("parser provenance does not match committed parser sources")
+    return actual
 
 
 def parity_fixture_manifest() -> dict[str, dict[str, str]]:
@@ -1085,6 +1135,8 @@ def render_manifest(
                 "a present syntactically valid noncanonical X-Forwarded-Host reaches the policy model and returns edge 421; empty, whitespace/control, malformed-authority, missing, or duplicate metadata is adapter-denied with 400",
                 "configured hosts and forwarded DNS authorities share per-label validation, reject trailing dots, and enforce 63-byte labels and a 253-byte host bound",
                 "ForwardAuth ports use canonical decimal syntax in the 1..65535 range; parser-leading OWS is normalized consistently across generated metadata and Origin, while trailing/internal OWS and obs-fold are rejected before policy",
+                "ForwardAuth generation verifies the current committed parser implementation and test source, including Git commit/blob and recomputed SHA-256 identities; caller-supplied provenance cannot forge retained evidence",
+                "X-Forwarded-Method is a nonempty HTTP token, X-Forwarded-For is a canonical comma-list of IP addresses with delimiter OWS, and present Origin is a nonempty serialized HTTP origin or null",
                 "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
                 "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
                 "the adapter accepts only the generated ForwardAuth set, Origin, and explicit bounded transport headers; Authorization, Cookie, and unknown headers are denied",
@@ -1116,6 +1168,7 @@ def render_manifest(
                 "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
                 "a present syntactically valid noncanonical X-Forwarded-Host returns modeled edge 421; empty, whitespace/control, or malformed authority returns adapter 400",
                 "raw ForwardAuth tests accept parser-leading OWS across generated metadata and Origin but reject trailing/internal OWS plus canonical and noncanonical obs-fold before header normalization",
+                "raw ForwardAuth tests reject empty/OWS methods, malformed or empty Origin, garbage X-Forwarded-For, and invalid comma-list entries while accepting canonical IP chains",
                 "C0, DEL, and C1 request-target controls are denied before route matching",
                 "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
                 "blocked edge and network vectors retain upstream_request=false in the annotated evidence",
@@ -2214,6 +2267,79 @@ def _normalize_header_ows(value: str, name: str) -> str:
     return normalized
 
 
+def _validate_forwarded_for(value: str) -> str:
+    """Validate a bounded comma-list of canonical IP addresses from Traefik."""
+
+    if type(value) is not str or not value or any(
+        (
+            ord(character) <= 0x1F
+            or ord(character) == 0x7F
+            or 0x80 <= ord(character) <= 0x9F
+        )
+        and character not in " \t"
+        for character in value
+    ):
+        raise ValueError("ForwardAuth client address is malformed")
+    addresses: list[str] = []
+    for part in value.split(","):
+        address = part.strip(" \t")
+        if not address or any(character.isspace() for character in address):
+            raise ValueError("ForwardAuth client address list is malformed")
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise ValueError("ForwardAuth client address is not an IP address") from exc
+        if str(parsed) != address:
+            raise ValueError("ForwardAuth client address is not canonical")
+        addresses.append(address)
+    return ",".join(addresses)
+
+
+def _validate_http_method(value: str) -> str:
+    """Require a nonempty RFC token before the policy layer can return a route 404."""
+
+    if not value or len(value) > MAX_REQUEST_TARGET_BYTES or not HTTP_METHOD_RE.fullmatch(value):
+        raise ValueError("ForwardAuth method is empty or malformed")
+    return value
+
+
+def _validate_origin(value: str) -> str:
+    """Validate a present Origin as one serialized HTTP origin or ``null``."""
+
+    normalized = _normalize_header_ows(value, "Origin")
+    if not normalized:
+        raise ValueError("ForwardAuth Origin is empty")
+    if normalized == "null":
+        return normalized
+    try:
+        parsed = urlsplit(normalized)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("ForwardAuth Origin is malformed") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+        or host is None
+    ):
+        raise ValueError("ForwardAuth Origin is malformed")
+    try:
+        _validate_dns_host(host, lowercase=False)
+    except ValueError:
+        try:
+            ipaddress.ip_address(host)
+        except ValueError as exc:
+            raise ValueError("ForwardAuth Origin host is malformed") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("ForwardAuth Origin port is malformed")
+    return normalized
+
+
 def _forward_auth_policy_input(
     runtime_inputs: Mapping[str, object],
     headers: Sequence[tuple[str, str]],
@@ -2224,10 +2350,12 @@ def _forward_auth_policy_input(
     ``X-Forwarded-Host`` is a valid request to the policy boundary and must
     reach ``policy_decision`` so it returns the intended edge ``421``. Empty,
     whitespace/control, malformed-authority, missing, or duplicate metadata
-    remains a ``400`` adapter-contract failure. Parser-leading HTTP optional
-    whitespace is removed at this boundary; trailing or internal whitespace is
-    rejected, as are obsolete folded headers before parser normalization. Keeping
-    that distinction makes a
+    remains a ``400`` adapter-contract failure. The required method is a
+    nonempty HTTP token, Origin is validated when present, and X-Forwarded-For
+    is a comma-list of canonical IP addresses with OWS only around delimiters.
+    Parser-leading HTTP optional whitespace is removed at this boundary; trailing
+    or internal whitespace is rejected, as are obsolete folded headers before
+    parser normalization. Keeping that distinction makes a
     real Traefik wrong-host request behave like the retained vector instead of
     silently replacing it with a canonical synthetic header.
     """
@@ -2235,25 +2363,28 @@ def _forward_auth_policy_input(
     inputs = _validate_runtime_inputs(runtime_inputs)
     _validate_forward_auth_header_names(headers)
     _validate_forward_auth_transport_headers(headers)
-    required = {
-        name: _normalize_header_ows(
-            str(_single_header(headers, name, required=True)),
-            name,
-        )
+    raw_required = {
+        name: str(_single_header(headers, name, required=True))
         for name in TRAEFIK_FORWARDAUTH_GENERATED_HEADERS
+    }
+    forwarded_for = _validate_forwarded_for(raw_required["X-Forwarded-For"])
+    required = {
+        name: _normalize_header_ows(raw_required[name], name)
+        for name in TRAEFIK_FORWARDAUTH_GENERATED_HEADERS
+        if name != "X-Forwarded-For"
     }
     if (
         required["X-Forwarded-Port"] != str(inputs["https_port"])
         or required["X-Forwarded-Proto"] != "https"
     ):
         raise ValueError("ForwardAuth port or scheme is not canonical")
-    if not required["X-Forwarded-For"]:
-        raise ValueError("ForwardAuth client address is missing")
     forwarded_host = _validate_authority_syntax(required["X-Forwarded-Host"])
-    method = required["X-Forwarded-Method"]
+    method = _validate_http_method(required["X-Forwarded-Method"])
     path, query = _parse_forwarded_uri(required["X-Forwarded-Uri"])
     origin_value = _single_header(headers, "Origin")
-    origin = "" if origin_value is None else _normalize_header_ows(origin_value, "Origin")
+    origin = "" if origin_value is None else _validate_origin(origin_value)
+    # X-Forwarded-For is validated above but is deliberately not policy input.
+    _ = forwarded_for
     policy_headers = [
         ("X-Forwarded-Host", forwarded_host),
         ("X-Forwarded-Port", str(inputs["https_port"])),
@@ -2708,10 +2839,10 @@ def main(argv: list[str] | None = None) -> int:
     evidence.add_argument("--build-sha", required=True)
     evidence.add_argument("--build-digest", required=True)
     evidence.add_argument("--traefik-config-digest", required=True)
-    evidence.add_argument("--parser-implementation-commit", required=True)
-    evidence.add_argument("--parser-implementation-blob", required=True)
-    evidence.add_argument("--parser-implementation-sha256", required=True)
-    evidence.add_argument("--parser-test-sha256", required=True)
+    evidence.add_argument("--parser-implementation-commit")
+    evidence.add_argument("--parser-implementation-blob")
+    evidence.add_argument("--parser-implementation-sha256")
+    evidence.add_argument("--parser-test-sha256")
     evidence.add_argument("--browser-evidence", type=Path, required=True)
     evidence.add_argument("--browser-journey")
     args = parser.parse_args(argv)
@@ -2732,6 +2863,26 @@ def main(argv: list[str] | None = None) -> int:
         print(_build_static_digest(args.site_root))
         return 0
     if args.command == "evidence":
+        parser_values = (
+            args.parser_implementation_commit,
+            args.parser_implementation_blob,
+            args.parser_implementation_sha256,
+            args.parser_test_sha256,
+        )
+        if any(value is not None for value in parser_values) and not all(value is not None for value in parser_values):
+            raise ValueError("parser provenance CLI fields must be supplied together")
+        parser_provenance = None
+        if all(value is not None for value in parser_values):
+            parser_provenance = {
+                "implementation_path": PARSER_IMPLEMENTATION_PATH,
+                "implementation_commit": args.parser_implementation_commit,
+                "implementation_blob": args.parser_implementation_blob,
+                "implementation_sha256": args.parser_implementation_sha256,
+                "test_path": PARSER_TEST_PATH,
+                "test_source_sha256": args.parser_test_sha256,
+            }
+        # Validate source provenance before touching caller-supplied browser evidence.
+        parser_provenance = _normalize_parser_provenance(parser_provenance)
         evidence_bytes = _read_bounded_regular_file(
             args.browser_evidence,
             BROWSER_EVIDENCE_MAX_BYTES,
@@ -2749,14 +2900,7 @@ def main(argv: list[str] | None = None) -> int:
                     traefik_config_digest=args.traefik_config_digest,
                     browser_journey=args.browser_journey,
                     browser_evidence=browser_evidence,
-                    parser_provenance={
-                        "implementation_path": PARSER_IMPLEMENTATION_PATH,
-                        "implementation_commit": args.parser_implementation_commit,
-                        "implementation_blob": args.parser_implementation_blob,
-                        "implementation_sha256": args.parser_implementation_sha256,
-                        "test_path": PARSER_TEST_PATH,
-                        "test_source_sha256": args.parser_test_sha256,
-                    },
+                    parser_provenance=parser_provenance,
                 ),
                 sort_keys=True,
                 separators=(",", ":"),
