@@ -554,11 +554,20 @@ class TraefikRendererTests(unittest.TestCase):
 
     def test_pty_lifecycle_detaches_and_reaps_without_retaining_input(self) -> None:
         ttl_seconds = traefik_proof.PTY_DETACHED_TTL_SECONDS
+        before_boundary = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=ttl_seconds)
+        self.assertEqual(before_boundary.attach("fixtureBeforeBoundary", now=0), "attached")
+        self.assertEqual(before_boundary.detach("fixtureBeforeBoundary", now=0), "detached")
+        self.assertEqual(
+            before_boundary.reattach("fixtureBeforeBoundary", now=ttl_seconds - 1),
+            "reattached",
+        )
+
         boundary = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=ttl_seconds)
         self.assertEqual(boundary.attach("fixtureAttach", now=0), "attached")
         self.assertEqual(boundary.send_input("fixtureAttach", b"synthetic-input"), "forwarded")
         self.assertEqual(boundary.detach("fixtureAttach", now=0), "detached")
         # Exactly 1800 seconds remains eligible for reattach before reap.
+        self.assertEqual(boundary.reap(now=ttl_seconds), 0)
         self.assertEqual(boundary.reattach("fixtureAttach", now=ttl_seconds), "reattached")
         self.assertEqual(boundary.send_input("fixtureAttach", b"after-reattach"), "forwarded")
 
@@ -583,6 +592,68 @@ class TraefikRendererTests(unittest.TestCase):
         self.assertEqual(observation["ttl_reap"], 1)
         self.assertEqual(observation["retry"], "disabled")
         self.assertEqual(observation["retained_material"], "redacted")
+
+    def test_pty_lifecycle_rejects_invalid_timestamps_on_every_operation(self) -> None:
+        invalid_timestamps = (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            True,
+            False,
+            "0",
+            None,
+            -1,
+            traefik_proof.MAX_PTY_TIMESTAMP_SECONDS + 1,
+            1 << 100,
+            -(1 << 100),
+        )
+        for operation in ("attach", "detach", "reattach", "reap"):
+            for value in invalid_timestamps:
+                with self.subTest(operation=operation, value=repr(value)):
+                    lifecycle = traefik_proof.SyntheticPtyLifecycle()
+                    if operation == "attach":
+                        call = lambda: lifecycle.attach("fixtureInvalid", now=value)
+                    elif operation == "detach":
+                        lifecycle.attach("fixtureInvalid", now=0)
+                        call = lambda: lifecycle.detach("fixtureInvalid", now=value)
+                    elif operation == "reattach":
+                        lifecycle.attach("fixtureInvalid", now=0)
+                        lifecycle.detach("fixtureInvalid", now=0)
+                        call = lambda: lifecycle.reattach("fixtureInvalid", now=value)
+                    else:
+                        lifecycle.attach("fixtureInvalid", now=0)
+                        lifecycle.detach("fixtureInvalid", now=0)
+                        call = lambda: lifecycle.reap(now=value)
+                    with self.assertRaisesRegex(ValueError, "finite number"):
+                        call()
+
+    def test_pty_lifecycle_rejects_backward_time(self) -> None:
+        lifecycle = traefik_proof.SyntheticPtyLifecycle()
+        lifecycle.attach("fixtureAttach", now=10)
+        with self.assertRaisesRegex(ValueError, "precedes stored"):
+            lifecycle.attach("fixtureAttach", now=9)
+
+        lifecycle = traefik_proof.SyntheticPtyLifecycle()
+        lifecycle.attach("fixtureAttach", now=10)
+        with self.assertRaisesRegex(ValueError, "precedes stored"):
+            lifecycle.detach("fixtureAttach", now=9)
+
+        lifecycle = traefik_proof.SyntheticPtyLifecycle()
+        lifecycle.attach("fixtureAttach", now=10)
+        lifecycle.detach("fixtureAttach", now=10)
+        with self.assertRaisesRegex(ValueError, "precedes stored"):
+            lifecycle.reattach("fixtureAttach", now=9)
+
+        lifecycle = traefik_proof.SyntheticPtyLifecycle()
+        lifecycle.attach("fixtureAttach", now=10)
+        with self.assertRaisesRegex(ValueError, "precedes stored"):
+            lifecycle.reattach("fixtureAttach", now=9)
+
+        lifecycle = traefik_proof.SyntheticPtyLifecycle()
+        lifecycle.attach("fixtureAttach", now=10)
+        lifecycle.detach("fixtureAttach", now=10)
+        with self.assertRaisesRegex(ValueError, "precedes stored"):
+            lifecycle.reap(now=9)
 
     def test_private_boundary_no_retry_and_no_upstream_observation_are_explicit(self) -> None:
         boundary = traefik_proof.private_hermes_boundary_observation()
