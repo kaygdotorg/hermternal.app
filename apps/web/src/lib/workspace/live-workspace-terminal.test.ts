@@ -426,6 +426,8 @@ describe('LiveWorkspaceSession current-session Terminal integration', () => {
     expect(session.current.activeSessionId).toBe(SESSION_3.id);
     expect(session.current.coordinator?.activeSessionId).toBe(SESSION_3.id);
     expect(session.current.terminal?.sessionId).not.toBe(SESSION_2.id);
+    expect(session.terminal?.state.status).toBe('detached');
+    expect(session.terminal?.state.sessionId).toBeUndefined();
     expect(pty.events.filter((event) => event === 'detach')).toHaveLength(1);
   });
 
