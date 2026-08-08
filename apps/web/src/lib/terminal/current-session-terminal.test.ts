@@ -650,6 +650,132 @@ describe('CurrentSessionTerminalBridge', () => {
   });
 
   it.each([
+    ['file:///tmp/hermternal', 'file:'],
+    ['data:text/plain,opaque', 'data:'],
+    ['custom://reviewed.example', 'custom:'],
+    ['ws://reviewed.example', 'ws:'],
+    ['null', 'opaque'],
+    ['', 'missing']
+  ] as const)('rejects %s before constructing a PTY socket (%s)', async (origin, protocol) => {
+    expect(protocol).toBeTruthy();
+    vi.stubGlobal('location', origin === '' ? undefined : { origin });
+    const createSocket = vi.fn((): PtyWebSocket => ({
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      onclose: null,
+      readyState: 0,
+      send: vi.fn(),
+      close: vi.fn()
+    }));
+    const transport = createBrowserPtyTransport({
+      fetch: vi.fn(async () =>
+        new Response(JSON.stringify({ ticket: 'pty-ticket', ttl_seconds: 30 }), {
+          headers: { 'content-type': 'application/json' }
+        })
+      ),
+      createSocket
+    });
+
+    try {
+      await expect(transport.connect({ sessionId: 'session-one' })).rejects.toMatchObject({
+        code: 'invalid-options'
+      });
+      expect(createSocket).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects an unavailable origin before invoking the native WebSocket constructor', async () => {
+    class StubWebSocket {
+      static readonly instances: StubWebSocket[] = [];
+      binaryType = '';
+      readyState = 0;
+      onopen: ((event?: unknown) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event?: unknown) => void) | null = null;
+      onclose: ((event?: { readonly code?: number }) => void) | null = null;
+      readonly send = vi.fn();
+      readonly close = vi.fn((..._args: unknown[]) => {
+        this.readyState = 3;
+      });
+
+      constructor(readonly url: string) {
+        StubWebSocket.instances.push(this);
+      }
+    }
+    vi.stubGlobal('location', undefined);
+    vi.stubGlobal('WebSocket', StubWebSocket);
+    const transport = createBrowserPtyTransport({
+      fetch: vi.fn(async () =>
+        new Response(JSON.stringify({ ticket: 'pty-ticket', ttl_seconds: 30 }), {
+          headers: { 'content-type': 'application/json' }
+        })
+      )
+    });
+
+    try {
+      await expect(transport.connect({ sessionId: 'session-one' })).rejects.toMatchObject({
+        code: 'invalid-options'
+      });
+      expect(StubWebSocket.instances).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    ['abort, close, native onclose', ['abort', 'close', 'onclose']],
+    ['close, abort, native onclose', ['close', 'abort', 'onclose']],
+    ['abort, native onclose, close', ['abort', 'onclose', 'close']]
+  ] as const)('closes the default native PTY socket exactly once (%s)', async (_label, actions) => {
+    class StubWebSocket {
+      static readonly instances: StubWebSocket[] = [];
+      binaryType = '';
+      readyState = 0;
+      onopen: ((event?: unknown) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event?: unknown) => void) | null = null;
+      onclose: ((event?: { readonly code?: number }) => void) | null = null;
+      readonly send = vi.fn();
+      readonly close = vi.fn((..._args: unknown[]) => {
+        this.readyState = 3;
+      });
+
+      constructor(readonly url: string) {
+        StubWebSocket.instances.push(this);
+      }
+    }
+    vi.stubGlobal('location', { origin: 'http://localhost' });
+    vi.stubGlobal('WebSocket', StubWebSocket);
+    const transport = createBrowserPtyTransport({
+      fetch: vi.fn(async () =>
+        new Response(JSON.stringify({ ticket: 'pty-ticket', ttl_seconds: 30 }), {
+          headers: { 'content-type': 'application/json' }
+        })
+      )
+    });
+    const controller = new AbortController();
+    const pending = transport.connect({ sessionId: 'session-one' }, controller.signal);
+    await flush();
+    const native = StubWebSocket.instances[0];
+    if (!native) throw new Error('native WebSocket was not constructed');
+
+    try {
+      for (const action of actions) {
+        if (action === 'abort') controller.abort();
+        if (action === 'close') transport.close();
+        if (action === 'onclose') native.onclose?.({ code: 1000 });
+      }
+      await expect(pending).rejects.toBeInstanceOf(PtyTransportError);
+      expect(native.close).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
     [4401, 'authentication-rejected', 'authentication-required'],
     [4403, 'host-or-origin-rejected', 'incompatible-origin']
   ] as const)('preserves an initial PTY close classification through bridge attach (%s)', async (closeCode, closeClassification, failure) => {
@@ -716,6 +842,91 @@ describe('CurrentSessionTerminalBridge', () => {
     firstGate.resolve(undefined);
     await expect(first).rejects.toMatchObject({ code: 'aborted' });
     expect(bridge.state.sessionId).toBe('session-two');
+  });
+
+  it('cleans a late invalidated adapter owner by generation without detaching its replacement', async () => {
+    const listeners = new Set<(event: PtyTransportEvent) => void>();
+    const firstGate = deferred<void>();
+    const rawOwners = new Map<number, string>();
+    let nextGeneration = 0;
+    let visibleOwner: { readonly generation: number; readonly sessionId: string } | undefined;
+    let state: PtyConnectionState = {
+      status: 'closed',
+      generation: 0,
+      mode: 'legacy',
+      outputMayBeTruncated: false
+    };
+    const emitState = (next: PtyConnectionState): void => {
+      state = next;
+      for (const listener of listeners) listener({ type: 'state', state: next });
+    };
+    const connect = vi.fn(async (input: PtyConnectionInput) => {
+      const generation = ++nextGeneration;
+      if (input.sessionId === 'session-one') await firstGate.promise;
+      rawOwners.set(generation, input.sessionId);
+      visibleOwner = { generation, sessionId: input.sessionId };
+      emitState({
+        status: 'attached',
+        generation,
+        mode: 'legacy',
+        sessionId: input.sessionId,
+        outputMayBeTruncated: false
+      });
+    });
+    const detach = vi.fn((expectedGeneration?: number) => {
+      const generation = expectedGeneration ?? visibleOwner?.generation;
+      if (generation === undefined) return;
+      rawOwners.delete(generation);
+      if (visibleOwner?.generation !== generation) return;
+      const replacement = [...rawOwners.entries()].sort(([left], [right]) => right - left)[0];
+      if (!replacement) {
+        visibleOwner = undefined;
+        emitState({
+          ...state,
+          status: 'detached',
+          sessionId: undefined,
+          generation
+        });
+        return;
+      }
+      visibleOwner = { generation: replacement[0], sessionId: replacement[1] };
+      emitState({
+        ...state,
+        status: 'attached',
+        generation: replacement[0],
+        sessionId: replacement[1]
+      });
+    });
+    const close = vi.fn((expectedGeneration?: number) => detach(expectedGeneration));
+    const pty: PtyTransport = {
+      get state() {
+        return state;
+      },
+      connect,
+      reconnect: vi.fn(async () => undefined),
+      sendInput: vi.fn(),
+      resize: vi.fn(),
+      detach,
+      close,
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }
+    };
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => pty });
+
+    const first = bridge.attach('session-one', new AbortController().signal);
+    await flush();
+    bridge.invalidateBindingForSession('session-one');
+    const replacement = bridge.attach('session-two', new AbortController().signal);
+    await replacement;
+
+    firstGate.resolve(undefined);
+    await expect(first).rejects.toMatchObject({ code: 'aborted' });
+
+    expect(rawOwners).toEqual(new Map([[2, 'session-two']]));
+    expect(detach).toHaveBeenCalledWith(1);
+    expect(bridge.state).toMatchObject({ status: 'attached', sessionId: 'session-two', generation: 2 });
   });
 
   it('keeps direct reconnect binding ownership for later detach and close', async () => {

@@ -84,9 +84,9 @@ type TransportCleanup = 'detach' | 'close';
 /**
  * Tracks one adapter call that can still claim the bridge's sole PTY owner.
  * AbortSignal cancellation is only an optimization: an adapter may ignore it
- * and resolve after its binding was invalidated. The bridge therefore keeps the
- * operation quarantined until its promise settles, suppresses its events, and
- * performs a final adapter cleanup before another operation can start.
+ * and resolve after its binding was invalidated. A replacement may start
+ * immediately, while the old operation remains quarantined, suppresses its
+ * events, and receives generation-scoped cleanup after settlement.
  */
 interface PendingTransportOperation {
   readonly token: object;
@@ -98,6 +98,8 @@ interface PendingTransportOperation {
   initialCleanupIssued: boolean;
   initialCleanupMode?: TransportCleanup;
   finalCleanupIssued: boolean;
+  /** Generation claimed by a late state callback, when the adapter exposes one. */
+  transportGeneration?: number;
   cleanup: TransportCleanup;
 }
 
@@ -637,15 +639,20 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     ) {
       return;
     }
-    // A replacement may already own the shared adapter. Calling detach/close on
-    // the late old completion would tear down that newer lease; the transport's
-    // own generation fence is the cleanup boundary after handoff.
+    // A replacement may already own the shared adapter. Use the late callback's
+    // generation-scoped cleanup seam when available: a compliant adapter removes
+    // only the stale owner, while the concrete PTY transport no-ops after its
+    // generation fence has handed ownership to the replacement. Never issue an
+    // unscoped cleanup here because it could tear down that newer lease.
     if (
       (this.pendingTransportOperation !== undefined &&
         this.pendingTransportOperation !== operation) ||
       (this.activeBinding !== undefined && this.activeBinding.token !== operation.token)
     ) {
       operation.finalCleanupIssued = true;
+      if (operation.transportGeneration !== undefined) {
+        this.cleanupTransport(operation.cleanup, operation.transportGeneration);
+      }
       return;
     }
     operation.finalCleanupIssued = true;
@@ -659,17 +666,18 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     this.quarantinedTransportOperations.delete(operation);
   }
 
-  private cleanupTransport(cleanup: TransportCleanup): void {
+  private cleanupTransport(cleanup: TransportCleanup, expectedGeneration?: number): void {
     try {
-      if (cleanup === 'close') this.transport.close();
-      else this.transport.detach();
+      if (cleanup === 'close') this.transport.close(expectedGeneration);
+      else this.transport.detach(expectedGeneration);
     } catch {
       // A stale adapter must not escape the bridge's cleanup boundary. If a
       // detach implementation throws, close is the fail-closed fallback that
-      // prevents an adapter from retaining raw PTY ownership indefinitely.
+      // prevents an adapter from retaining raw PTY ownership indefinitely. Keep
+      // the generation scope on that fallback so a replacement lease is safe.
       if (cleanup === 'detach') {
         try {
-          this.transport.close();
+          this.transport.close(expectedGeneration);
         } catch {
           // The adapter remains responsible for its own last-resort failure.
         }
@@ -759,6 +767,17 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         (eventSessionId === operation.sessionId ||
           this.currentState.sessionId === operation.sessionId),
     );
+    const eventOperation =
+      event.type === 'state' && event.state.sessionId !== undefined
+        ? pending?.sessionId === event.state.sessionId
+          ? pending
+          : quarantined?.sessionId === event.state.sessionId
+            ? quarantined
+            : undefined
+        : undefined;
+    if (event.type === 'state' && eventOperation !== undefined) {
+      eventOperation.transportGeneration = event.state.generation;
+    }
     if (
       (pending?.invalidated || quarantined !== undefined) &&
       (eventSessionId === pending?.sessionId ||
@@ -921,6 +940,26 @@ function projectState(state: PtyConnectionState, explicitlyClosed: boolean): Cur
  * Browser-only transport composition. The ticket response is handed straight
  * to the PTY parser; no ticket, URL, or socket diagnostic enters bridge state.
  */
+function browserPtyOrigin(): URL {
+  const originValue = globalThis.location?.origin;
+  if (typeof originValue !== 'string' || originValue.length === 0 || originValue === 'null') {
+    throw new PtyTransportError('invalid-options');
+  }
+  let origin: URL;
+  try {
+    origin = new URL(originValue);
+  } catch {
+    throw new PtyTransportError('invalid-options');
+  }
+  // PTY upgrades are same-origin browser sockets. Opaque, file, custom, and
+  // unavailable origins cannot establish that boundary, so fail before any
+  // injected or native socket constructor can receive a URL.
+  if (origin.protocol !== 'http:' && origin.protocol !== 'https:') {
+    throw new PtyTransportError('invalid-options');
+  }
+  return origin;
+}
+
 export function createBrowserPtyTransport(options: BrowserPtyTransportOptions = {}): PtyTransport {
   const fetcher = options.fetch ?? globalThis.fetch?.bind(globalThis);
   if (!fetcher) throw new PtyTransportError('invalid-options');
@@ -934,8 +973,9 @@ export function createBrowserPtyTransport(options: BrowserPtyTransportOptions = 
   return createPtyTransport({
     ticketProvider,
     createWebSocket: (upgrade, signal) => {
-      const url = new URL(upgrade.path, globalThis.location?.origin ?? 'http://localhost');
-      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      const origin = browserPtyOrigin();
+      const url = new URL(upgrade.path, origin);
+      url.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
       url.searchParams.set('ticket', upgrade.query.ticket);
       url.searchParams.set('resume', upgrade.query.resume);
       if (upgrade.query.attach !== undefined) url.searchParams.set('attach', upgrade.query.attach);
@@ -948,23 +988,37 @@ function defaultBrowserPtySocket(url: string, signal: AbortSignal): PtyWebSocket
   if (typeof WebSocket === 'undefined') throw new PtyTransportError('invalid-options');
   const nativeSocket = new WebSocket(url);
   nativeSocket.binaryType = 'arraybuffer';
-  const adapter: PtyWebSocket = {
+  let closeIssued = false;
+  let adapter: PtyWebSocket;
+  const closeOnAbort = (): void => adapter.close(1000, 'cancelled');
+  const close = (code?: number, reason?: string): void => {
+    if (closeIssued) return;
+    closeIssued = true;
+    signal.removeEventListener('abort', closeOnAbort);
+    try {
+      nativeSocket.close(code, reason);
+    } catch {
+      // A native close failure is terminal for this adapter; do not retry from
+      // another cleanup path or turn an abort into repeated close calls.
+    }
+  };
+  adapter = {
     onopen: null,
     onmessage: null,
     onerror: null,
     onclose: null,
     send: (data) => nativeSocket.send(data as unknown as ArrayBuffer),
-    close: (code, reason) => nativeSocket.close(code, reason),
+    close,
     get readyState() {
       return nativeSocket.readyState;
     }
   };
-  const closeOnAbort = (): void => adapter.close(1000, 'cancelled');
   signal.addEventListener('abort', closeOnAbort, { once: true });
   nativeSocket.onopen = (event) => adapter.onopen?.(event);
   nativeSocket.onmessage = (event: MessageEvent) => adapter.onmessage?.({ data: event.data } as PtyMessageEvent);
   nativeSocket.onerror = (event) => adapter.onerror?.(event);
   nativeSocket.onclose = (event) => {
+    closeIssued = true;
     signal.removeEventListener('abort', closeOnAbort);
     adapter.onclose?.({ code: event.code });
   };
