@@ -182,6 +182,24 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         )
         if completed.returncode != 0:
             self.fail(completed.stderr or completed.stdout)
+        # A single-branch clone does not retain the separately pinned historical
+        # authority object. Fetch that exact local object without changing the
+        # client's HEAD, matching the production requirement for a plain object
+        # repository that carries both reviewed trust roots.
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(client),
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                str(bare),
+                f"{verifier.EXPECTED_AUTHORITY_COMMIT}:refs/fixture-authority/historical",
+            ],
+            check=True,
+            capture_output=True,
+        )
         pack_files = tuple((client / ".git/objects/pack").glob("*.pack"))
         self.assertTrue(pack_files)
         self.assertGreater(
@@ -957,13 +975,20 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 "--format=%H",
                 "--diff-filter=A",
                 "--first-parent",
-                "HEAD",
+                authority_commit,
                 "--",
                 verifier.AUTHORITY_PATH,
             ],
             text=True,
         ).splitlines()
         self.assertEqual(introduced, [authority_commit])
+        self.assertEqual(
+            verifier._authority_introduction_commit(
+                self.object_repo,
+                expected_commit=authority_commit,
+            ),
+            authority_commit,
+        )
         for record in trusted["artifact_manifest"]:
             object_bytes = subprocess.check_output(
                 ["git", "-C", str(self.object_repo), "show", f"{source_commit}:{record['path']}"],
