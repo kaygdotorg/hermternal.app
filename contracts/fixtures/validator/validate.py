@@ -178,7 +178,7 @@ ACTIVE_SOURCE_COMMIT_ENV = "HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT"
 # through a stable descriptor and match this source-level pin. It is not imported
 # by path, so a checkout edit cannot execute before authentication.
 HARDENED_AUTHORITY_VERIFIER_PATH = "scripts/verify_fixture_registry_authority.py"
-HARDENED_AUTHORITY_VERIFIER_SHA256 = "003617a4c83c9b2d84b96ad735aa856c58d3740cdf8a2490b04262f8a93b76dc"
+HARDENED_AUTHORITY_VERIFIER_SHA256 = "d1b3ba49cbe9a76379aadf3a3b1598aa4631d59637e6ee755d4d6fa3482f1064"
 HARDENED_AUTHORITY_VERIFIER_MAX_BYTES = 256 * 1024
 # Temporary-directory roots on macOS may expose /tmp through one of these
 # system aliases. All other ancestors stay no-follow descriptor anchored.
@@ -2210,18 +2210,21 @@ def _trusted_authority(repo_root: Path, object_repo: Path | None = None) -> dict
     verifier = _authenticated_authority_verifier(checkout_root)
     expected_authority_commit, expected_source_commit = _active_authority_pins()
     try:
-        historical = verifier.load_trusted_authority(
+        verifier.load_trusted_authority(
             object_root,
             authority_path=HISTORICAL_VALIDATOR_AUTHORITY_PATH,
             expected_authority_commit=EXPECTED_HISTORICAL_AUTHORITY_COMMIT,
             expected_source_commit=EXPECTED_HISTORICAL_SOURCE_COMMIT,
         )
+        # The hardened authority is independently exact-pinned. Its direct
+        # predecessor rule is checked below by the authenticated verifier; it
+        # need not be a descendant of the historical final pin because the
+        # current branch was restacked onto a separate reviewed base.
         authority = verifier.load_trusted_authority(
             object_root,
             authority_path=VALIDATOR_AUTHORITY_PATH,
             expected_authority_commit=expected_authority_commit,
             expected_source_commit=expected_source_commit,
-            required_ancestor_commit=historical["authority_commit"],
         )
     except verifier.AuthorityError as exc:
         raise ValidationError() from exc

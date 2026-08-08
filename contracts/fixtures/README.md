@@ -41,8 +41,10 @@ external predecessor. The active final binding is the distinct
 schema `hermternal.fixture-registry-authority.v2` and role
 `aggregate_predecessor`.
 
-The standalone verifier and aggregate validator load only that final path from
-its immutable Git introduction object. The authority records the exact source
+The standalone verifier authenticates that historical final path from its
+exact protected Git binding object. The aggregate validator authenticates the
+same historical record, then loads the distinct hardened path from its own
+protected binding and source pins. Each authority records the exact source
 commit and four artifact records for the combined checkout:
 `contracts/fixtures/index.json`, `contracts/fixtures/validator/test_validate.py`,
 `contracts/fixtures/validator/validate.py`, and
@@ -52,7 +54,10 @@ cannot self-authorize scanner or baseline changes in the same commit. Both
 loaders enforce exact key order, blob OIDs, byte sizes, SHA-256 digests,
 `synthetic_only: true`, and `live_claim: false` before comparing checkout bytes.
 The v1 and bootstrap v2 records remain historical compatibility evidence; they
-are not fallbacks for the active final trust root.
+are not fallbacks for either exact-pinned v2 trust root. The historical final
+and active hardened bindings are independently pinned, so a restack may leave
+their introduction objects on separate reviewed ancestry lines; the direct
+first-parent rule still applies within each binding.
 
 The verifier's object repository must be a canonical absolute plain checkout,
 not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
@@ -124,16 +129,16 @@ does not run them and makes no network request.
 
 The `--index`, `--schema`, and `--baseline` inputs are bound to their canonical
 reviewed paths. The exact central-validator, validator-test, index, and baseline
-bytes are pinned by `scripts/fixture_registry_authority.v2.final.json` from an
-immutable Git object, not from checkout constants. The final authority is added
-in a commit after the predecessor source commit; its direct-parent check keeps a
-weakened scanner from being introduced together with the authority that would
-approve it. The historical v1 and bootstrap v2 records remain preserved, while
-the final binding supplies the current aggregate trust root. Only the
-validator's own baseline-manifest digest and derived byte total are normalized
-to avoid a self-reference. A schema-valid copy or coordinated scanner,
-manifest, baseline, local anchor, and test-constant replacement cannot rebind
-an immutable external authority.
+bytes are pinned by the distinct v2 authority objects from immutable Git
+objects, not from checkout constants: the historical final path is the
+standalone verifier's trust input, and the hardened path is the aggregate
+validator's active trust input. Each exact binding is checked against its own
+first-parent source commit; the two v2 bindings are independently pinned and
+do not require the active restack to preserve the historical binding as an
+ancestor. Only the validator's own baseline-manifest digest and derived byte
+total are normalized to avoid a self-reference. A schema-valid copy or
+coordinated scanner, manifest, baseline, local anchor, and test-constant
+replacement cannot rebind an immutable external authority.
 
 Every ordinary file under a ready fixture root is inventoried, including hidden
 files, cache contents, bytecode, and binary artifacts. Symlinks and special files
@@ -192,7 +197,8 @@ python3 -m py_compile \
 ```
 
 The protected values are review/CI inputs, not values inferred from a branch,
-tag, or the checkout. The plain clone must not be a linked worktree and must
+tag, or the checkout. The plain clone must contain the exact protected
+historical and active binding objects, must not be a linked worktree, and must
 not use alternates, shallow or promisor metadata, replacement refs, grafts, or
 redirecting Git configuration.
 

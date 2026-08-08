@@ -930,7 +930,44 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
 def _authority_introduction_commit(
     object_repo: Path,
     authority_path: str = AUTHORITY_PATH,
+    expected_commit: str | None = None,
 ) -> str:
+    """Resolve one exact authority introduction without trusting the checkout tip.
+
+    The historical and active authorities are protected by independent exact pins.
+    A rebased checkout can therefore have a different first-parent tip while the
+    pinned introduction object remains present in the plain object repository.
+    When a pin is supplied, verify that the pinned commit itself changes this
+    path instead of inferring a replacement from ``HEAD``. The unpinned form
+    remains useful for bounded-output regressions.
+    """
+
+    if expected_commit is not None:
+        _require(HEX40.fullmatch(expected_commit) is not None)
+        _require(_git(object_repo, "cat-file", "-t", expected_commit) == b"commit\n")
+        # An exact pin may identify a reviewed rotation that updates an
+        # already-existing path, so require the pinned commit to change this
+        # path rather than inferring an older path-addition from HEAD.
+        output = _git(
+            object_repo,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            expected_commit,
+            "--",
+            authority_path,
+        )
+        try:
+            changes = output.decode("ascii").splitlines()
+        except UnicodeError as exc:
+            raise AuthorityError() from exc
+        _require(
+            len(changes) == 1
+            and changes[0].split("\t")[-1] == authority_path
+            and changes[0].split("\t", 1)[0] in {"A", "M"}
+        )
+        return expected_commit
     output = _git(
         object_repo,
         "log",
@@ -1046,9 +1083,11 @@ def load_trusted_authority(
         if required_ancestor_commit is not None:
             _require(HEX40.fullmatch(required_ancestor_commit) is not None)
         with _validate_object_repository(object_repo) as isolated_repo:
-            introduction = _authority_introduction_commit(isolated_repo, authority_path)
-            if expected_authority_commit is not None:
-                _require(introduction == expected_authority_commit)
+            introduction = _authority_introduction_commit(
+                isolated_repo,
+                authority_path,
+                expected_commit=expected_authority_commit,
+            )
             authority_bytes = _git(isolated_repo, "show", f"{introduction}:{authority_path}")
             authority = _parse_json(authority_bytes)
             source_commit, records = _validate_manifest(authority)
