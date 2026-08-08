@@ -70,6 +70,35 @@ class CaddyProofRendererTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             caddy_proof._validate_runtime_inputs({})
 
+    def test_renderer_rejects_caddy_path_string_injection(self) -> None:
+        fields = ("site_root", "cert_path", "key_path", "storage_root")
+        forbidden_values = (
+            "/tmp/caddy-proof/quote\"path",
+            "/tmp/caddy-proof/single'quote",
+            "/tmp/caddy-proof/back\\slash",
+            "/tmp/caddy-proof/new\nline",
+            "/tmp/caddy-proof/carriage\rreturn",
+            "/tmp/caddy-proof/tab\tpath",
+            "/tmp/caddy-proof/nul\x00path",
+            "/tmp/caddy-proof/delete\x7fpath",
+            "/tmp/caddy-proof/c1\x80path",
+        )
+        for field in fields:
+            for value in forbidden_values:
+                inputs = {
+                    "host": "caddy-156.test",
+                    "https_port": 19443,
+                    "hermes_port": 19256,
+                    "site_root": "/tmp/caddy-proof-site",
+                    "cert_path": "/tmp/caddy-proof/tls.crt",
+                    "key_path": "/tmp/caddy-proof/tls.key",
+                    "storage_root": "/tmp/caddy-proof",
+                }
+                inputs[field] = value
+                with self.subTest(field=field, value=repr(value)):
+                    with self.assertRaises(ValueError):
+                        caddy_proof.render_caddyfile(**inputs)
+
     def test_host_origin_and_raw_uri_denials_are_explicit(self) -> None:
         rendered = self._render()
         self.assertIn("respond @bad_host \"host denied\" 421", rendered)
@@ -248,6 +277,38 @@ class CaddyProofEvidenceTests(unittest.TestCase):
         deployment = manifest["deployment"]
         self.assertNotIn("caddy_version", deployment)
         self.assertNotIn("official_image_digest", deployment)
+
+    def test_render_manifest_rejects_false_pass_without_completion_evidence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "completion evidence"):
+            caddy_proof.render_manifest(
+                build_sha=EXPECTED_BUILD_SHA,
+                build_digest=EXPECTED_BUILD_DIGEST,
+                caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
+                browser_journey="passed",
+            )
+        incomplete = dict(caddy_proof.BROWSER_COMPLETION_EVIDENCE)
+        incomplete["message.complete"] = "error"
+        with self.assertRaisesRegex(ValueError, "successful journey"):
+            caddy_proof.render_manifest(
+                build_sha=EXPECTED_BUILD_SHA,
+                build_digest=EXPECTED_BUILD_DIGEST,
+                caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
+                browser_journey="passed",
+                browser_completion_evidence=incomplete,
+            )
+
+    def test_render_manifest_derives_pass_only_from_closed_completion_statuses(self) -> None:
+        manifest = caddy_proof.render_manifest(
+            build_sha=EXPECTED_BUILD_SHA,
+            build_digest=EXPECTED_BUILD_DIGEST,
+            caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
+            browser_completion_evidence=caddy_proof.BROWSER_COMPLETION_EVIDENCE,
+        )
+        self.assertEqual(manifest["browser_journey"], "passed")
+        self.assertEqual(
+            manifest["browser_completion_evidence"],
+            caddy_proof.BROWSER_COMPLETION_EVIDENCE,
+        )
 
     def test_retained_evidence_schema_narrows_unverified_claims(self) -> None:
         self.assertEqual(
@@ -634,6 +695,15 @@ class CaddyBlackBoxTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("expected the allowed request to reach the mock upstream")
         raise AssertionError("unreachable")
+
+    def test_formatted_renderer_output_passes_caddy_validate(self) -> None:
+        result = subprocess.run(
+            ["caddy", "validate", "--config", str(self.caddyfile_path), "--adapter", "caddyfile"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_deep_link_fixture_vectors_match_edge_results(self) -> None:
         fixture_path = ROOT / caddy_proof.PARITY_FIXTURE_PATHS["deep_link_cases"]

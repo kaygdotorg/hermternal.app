@@ -63,11 +63,14 @@ static-route grammar and deep-link fixture digests above; it does not contact
 Hermes or the VM during correction runs.
 
 The retained browser state is `blocked_provider`. No gateway, session, or
-prompt event artifact is retained or claimed, and the official launcher did not
-provide an inference credential. The browser journey therefore remains an
-incomplete provider/API-key proof before `message.delta` or `message.complete`;
-this is not a successful real-product journey and no preview URL may be
-published.
+prompt event artifact is retained or claimed: `gateway.ready`, `session.resume`,
+`prompt.submit`, `message.delta`, and `message.complete` are all unproven. The
+renderer rejects a `passed` browser status unless a separate closed,
+status-specific completion map proves every required event and records
+`message.complete` as `complete`. The official launcher did not provide an
+inference credential. The browser journey therefore remains an incomplete
+provider/API-key proof before `message.delta` or `message.complete`; this is not
+a successful real-product journey and no preview URL may be published.
 
 The local mock emitted no `Set-Cookie`. The renderer test proves only that the
 Caddyfile contains its current `Secure` rewrite; `HttpOnly`, `SameSite`, and

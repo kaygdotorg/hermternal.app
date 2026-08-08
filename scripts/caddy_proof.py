@@ -25,6 +25,19 @@ DEFAULT_HOST = "caddy-156.test"
 DEFAULT_HTTPS_PORT = 19443
 DEFAULT_HERMES_PORT = 19256
 
+# A successful browser journey is a separate claim from this local edge proof.
+# Keep its completion contract explicit so a caller cannot turn an arbitrary
+# status string into a successful journey without recording every required
+# status, including the terminal message-complete status.
+BROWSER_COMPLETION_EVIDENCE = {
+    "gateway.ready": "proven",
+    "session.resume": "proven",
+    "prompt.submit": "proven",
+    "message.delta": "proven",
+    "message.complete": "complete",
+}
+BROWSER_BLOCKED_JOURNEYS = {"blocked_provider", "blocked_empty_session", "failed"}
+
 # These are deterministic proof paths, not operator or user home paths. Keeping
 # them committed makes the retained runtime digest reproducible without storing
 # the disposable VM's filesystem layout in evidence.
@@ -187,11 +200,22 @@ def _validate_port(value: int, name: str) -> int:
 
 
 def _validate_path(value: str, name: str) -> str:
+    """Validate a path before interpolating it into a quoted Caddyfile value.
+
+    Rejecting rather than escaping keeps the rendered proof byte-for-byte
+    deterministic and prevents a future caller from changing Caddy's parser
+    context with a quote, backslash, or control character.
+    """
+
     if type(value) is not str:
-        raise ValueError(f"{name} must be an absolute path without newlines")
+        raise ValueError(f"{name} must be an absolute path")
     path = Path(value)
-    if not value or not path.is_absolute() or "\n" in value or "\r" in value:
-        raise ValueError(f"{name} must be an absolute path without newlines")
+    if not value or not path.is_absolute():
+        raise ValueError(f"{name} must be an absolute path")
+    if any(character in value for character in ('"', "'", "\\")):
+        raise ValueError(f"{name} must not contain Caddy quotes or backslashes")
+    if any(ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F for character in value):
+        raise ValueError(f"{name} must not contain Caddy control characters")
     return value
 
 
@@ -530,12 +554,49 @@ def render_from_inputs(value: Mapping[str, object]) -> str:
     return render_caddyfile(**inputs)
 
 
+def _resolve_browser_journey(
+    browser_journey: str | None,
+    browser_completion_evidence: Mapping[str, object] | None,
+) -> tuple[str, dict[str, str] | None]:
+    """Resolve a browser status without allowing an unsupported false pass.
+
+    The current retained lane has no browser completion evidence and therefore
+    remains blocked. A future successful lane must provide the closed,
+    status-specific evidence map; merely passing ``browser_journey="passed"``
+    is rejected.
+    """
+
+    if browser_journey is not None and browser_journey not in {
+        *BROWSER_BLOCKED_JOURNEYS,
+        "passed",
+    }:
+        raise ValueError("browser_journey is outside the fixed proof vocabulary")
+    if browser_completion_evidence is None:
+        if browser_journey == "passed":
+            raise ValueError("browser_journey=passed requires completion evidence")
+        return browser_journey or "blocked_provider", None
+    if browser_journey in BROWSER_BLOCKED_JOURNEYS:
+        raise ValueError("completion evidence cannot accompany a blocked journey")
+    if not isinstance(browser_completion_evidence, Mapping):
+        raise ValueError("completion evidence must be a mapping")
+    if set(browser_completion_evidence) != set(BROWSER_COMPLETION_EVIDENCE):
+        raise ValueError("completion evidence must contain the closed event set")
+    normalized = {
+        event: browser_completion_evidence[event]
+        for event in BROWSER_COMPLETION_EVIDENCE
+    }
+    if normalized != BROWSER_COMPLETION_EVIDENCE:
+        raise ValueError("completion evidence does not prove a successful journey")
+    return "passed", dict(normalized)
+
+
 def render_manifest(
     *,
     build_sha: str,
     build_digest: str,
     caddyfile_digest: str,
-    browser_journey: str,
+    browser_journey: str | None = None,
+    browser_completion_evidence: Mapping[str, object] | None = None,
     runtime_inputs: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Create redacted evidence metadata; values are never request material."""
@@ -545,8 +606,10 @@ def render_manifest(
     for name, value in (("build_digest", build_digest), ("caddyfile_digest", caddyfile_digest)):
         if not re.fullmatch(r"[0-9a-f]{64}", value):
             raise ValueError(f"{name} must be a SHA-256 digest")
-    if browser_journey not in {"passed", "blocked_provider", "blocked_empty_session", "failed"}:
-        raise ValueError("browser_journey is outside the fixed proof vocabulary")
+    resolved_journey, normalized_completion = _resolve_browser_journey(
+        browser_journey,
+        browser_completion_evidence,
+    )
 
     normalized_inputs = _validate_runtime_inputs(
         reconstruction_inputs() if runtime_inputs is None else runtime_inputs
@@ -559,7 +622,7 @@ def render_manifest(
     # trust root. Retain only renderer output and deterministic inputs here;
     # deployment identity must be separately collected and validated before a
     # real deployment claim is made.
-    return {
+    manifest: dict[str, object] = {
         "schema": SCHEMA,
         "contract": "dashboard-v0.0.1",
         "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
@@ -575,7 +638,7 @@ def render_manifest(
             "build_commit": build_sha,
             "static_manifest_sha256": build_digest,
         },
-        "browser_journey": browser_journey,
+        "browser_journey": resolved_journey,
         "retention": {
             "credentials": "redacted",
             "cookies": "redacted",
@@ -586,6 +649,10 @@ def render_manifest(
             "transcripts": "redacted",
         },
     }
+    if normalized_completion is not None:
+        # These are status markers only, never browser payloads or transcripts.
+        manifest["browser_completion_evidence"] = normalized_completion
+    return manifest
 
 
 def _build_static_digest(site_root: Path) -> str:

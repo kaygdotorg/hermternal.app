@@ -354,6 +354,9 @@ paths are deterministic proof placeholders, not retained user or VM paths.
 The retained browser state is `blocked_provider`: no browser event artifact is
 retained, so the fixture does not claim `gateway.ready`, `session.resume`, or
 `prompt.submit`; it also does not claim `message.delta` or `message.complete`.
-It contains no credential, cookie, ticket, ticket fragment, provider payload,
-or transcript. A Caddy binary version or image digest is not retained or
-validated by this local fixture.
+`render_manifest` rejects `browser_journey="passed"` unless the closed,
+status-specific completion map proves every required event, including
+`message.complete` with status `complete`; the current lane supplies no such
+map. It contains no credential, cookie, ticket, ticket fragment, provider
+payload, or transcript. A Caddy binary version or image digest is not retained
+or validated by this local fixture.
