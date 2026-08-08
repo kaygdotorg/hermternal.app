@@ -8,11 +8,7 @@ is introduced only after its direct predecessor commit has finalized the
 scanner, index, tests, and baseline. The checkout is compared with authority
 bytes read from the local Git object database, so replacing the visible
 authority file or refreshing local hashes cannot silently authorize different
-scanner inputs. This source and the checked-in authority records are not
-self-authenticating roots: the active authority and source OIDs must arrive
-through an independently reviewed environment or launcher. The verifier proves
-only local Git-object and checkout integrity for synthetic fixture evidence; it
-makes no production or live Hermes claim.
+scanner inputs.
 """
 
 from __future__ import annotations
