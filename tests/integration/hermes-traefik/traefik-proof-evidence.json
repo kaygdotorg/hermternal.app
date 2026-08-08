@@ -115,12 +115,12 @@
     ],
     "hop_by_hop": "direct injected hop-by-hop fields are rejected; only transport Connection: close is tolerated",
     "parser_provenance": {
-      "implementation_blob": "f862b539e1adef539301f45a6433342d1cf11dc4",
-      "implementation_commit": "9985738d377ec5d8133baa5e6bea363fa0866d57",
+      "implementation_blob": "418de4043f13d1b2aac2a1be44f6b815dc3b8051",
+      "implementation_commit": "519ad9e71b2a2de28c93af0475fecf9d696782d2",
       "implementation_path": "scripts/traefik_proof.py",
-      "implementation_sha256": "bd0819cec3e2d4439ef2b3d817930ac359ffef5b4d3f5bf0179e8054e9adcd6d",
+      "implementation_sha256": "0f04fbdab4828ed61b091f0ac424ef33fd26b39c0843b0b054ba4348813e7173",
       "test_path": "scripts/test_traefik_proof.py",
-      "test_source_sha256": "eda4b1669cb5fe603a9f480980085286781807d80129afdc79ea7f96586be7be"
+      "test_source_sha256": "173fa654d69ca4b23d52ac771943c6dd785f15b69f1042e2900b30b6bdad921f"
     },
     "port": "X-Forwarded-Port must use canonical decimal syntax and equal the configured HTTPS entrypoint port",
     "runtime_observed": false,
@@ -154,6 +154,8 @@
       "a present syntactically valid noncanonical X-Forwarded-Host reaches the policy model and returns edge 421; empty, whitespace/control, malformed-authority, missing, or duplicate metadata is adapter-denied with 400",
       "configured hosts and forwarded DNS authorities share per-label validation, reject trailing dots, and enforce 63-byte labels and a 253-byte host bound",
       "ForwardAuth ports use canonical decimal syntax in the 1..65535 range; parser-leading OWS is normalized consistently across generated metadata and Origin, while trailing/internal OWS and obs-fold are rejected before policy",
+      "ForwardAuth generation verifies the current committed parser implementation and test source, including Git commit/blob and recomputed SHA-256 identities; caller-supplied provenance cannot forge retained evidence",
+      "X-Forwarded-Method is a nonempty HTTP token, X-Forwarded-For is a canonical comma-list of IP addresses with delimiter OWS, and present Origin is a nonempty serialized HTTP origin or null",
       "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
       "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
       "the adapter accepts only the generated ForwardAuth set, Origin, and explicit bounded transport headers; Authorization, Cookie, and unknown headers are denied",
@@ -393,6 +395,7 @@
       "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
       "a present syntactically valid noncanonical X-Forwarded-Host returns modeled edge 421; empty, whitespace/control, or malformed authority returns adapter 400",
       "raw ForwardAuth tests accept parser-leading OWS across generated metadata and Origin but reject trailing/internal OWS plus canonical and noncanonical obs-fold before header normalization",
+      "raw ForwardAuth tests reject empty/OWS methods, malformed or empty Origin, garbage X-Forwarded-For, and invalid comma-list entries while accepting canonical IP chains",
       "C0, DEL, and C1 request-target controls are denied before route matching",
       "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
       "blocked edge and network vectors retain upstream_request=false in the annotated evidence",
