@@ -19,8 +19,9 @@
   });
 
   onDestroy(() => {
+    // The route root owns final disposal. This authenticated projection only
+    // releases its subscription so expiry can remount the same workspace.
     unsubscribe?.();
-    session.dispose();
   });
 
   function handleAction(action: WorkspaceAction): void {

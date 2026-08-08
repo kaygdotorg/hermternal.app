@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import BrowserAuthView from '$lib/auth-ui/BrowserAuthView.svelte';
   import PrototypeShell from '$lib/components/PrototypeShell.svelte';
   import { createLiveRootContext, resolveRootRoute, type LiveRootContext } from '$lib/root-route';
@@ -11,11 +11,9 @@
   let liveContext: LiveRootContext | undefined;
 
   function returnLiveWorkspaceToSignIn(): void {
-    // Only the semantic authentication-required boundary may invalidate the
-    // authenticated root: ticket HTTP 401, JsonRpcChatError auth-required,
-    // and chat close 4401. The BrowserAuthSession owns generation, local
-    // workspace invalidation, and the signed-in-to-expired transition; 403 and
-    // 4403 incompatible-origin failures never call this bridge.
+    // The rendered workspace only reports the semantic authentication-required
+    // boundary. It has no truthful PTY lifecycle lease, so ordinary expiry stays
+    // with BrowserAuthSession until #368 supplies that Terminal bridge contract.
     liveContext?.auth.expire();
   }
 
@@ -31,6 +29,13 @@
 
     liveContext = createLiveRootContext();
     routeMode = 'live';
+  });
+
+  onDestroy(() => {
+    // The page is the final owner. Auth expiry only removes the authenticated
+    // projection; route teardown permanently closes Chat, PTY, coordinator
+    // subscriptions, and their sockets through the root context exactly once.
+    liveContext?.dispose();
   });
 </script>
 
