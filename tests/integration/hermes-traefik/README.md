@@ -116,7 +116,9 @@ live Traefik runtime has exercised a retry path.
 
 The synthetic PTY lifecycle models POSIX/WSL attach, input forwarding without
 retaining bytes, detach, no cleanup before the 30-minute detached TTL, and
-one eventual TTL reap. It deliberately does not claim immediate PTY kill or
+one eventual TTL reap. The model keeps a detached handle reconnectable at
+exactly 30 minutes and reaps only after the boundary, at elapsed 30 minutes
+plus one second. It deliberately does not claim immediate PTY kill or
 replay-before-live ordering. These are lifecycle contract labels, not a live
 Hermes process observation.
 

@@ -553,15 +553,28 @@ class TraefikRendererTests(unittest.TestCase):
         self.assertEqual(observation["retry"], "disabled")
 
     def test_pty_lifecycle_detaches_and_reaps_without_retaining_input(self) -> None:
-        lifecycle = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=30)
-        self.assertEqual(lifecycle.attach("fixtureAttach", now=0), "attached")
-        self.assertEqual(lifecycle.send_input("fixtureAttach", b"synthetic-input"), "forwarded")
-        self.assertEqual(lifecycle.detach("fixtureAttach", now=1), "detached")
-        self.assertEqual(lifecycle.reap(now=30), 0)
-        self.assertEqual(lifecycle.reap(now=31), 1)
+        boundary = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=30)
+        self.assertEqual(boundary.attach("fixtureAttach", now=0), "attached")
+        self.assertEqual(boundary.send_input("fixtureAttach", b"synthetic-input"), "forwarded")
+        self.assertEqual(boundary.detach("fixtureAttach", now=0), "detached")
+        # Exactly 30 seconds remains reconnectable and is not reaped.
+        self.assertEqual(boundary.reap(now=30), 0)
+        self.assertEqual(boundary.reattach("fixtureAttach", now=30), "reattached")
+        self.assertEqual(boundary.send_input("fixtureAttach", b"after-reattach"), "forwarded")
+
+        expired = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=30)
+        self.assertEqual(expired.attach("fixtureExpired", now=0), "attached")
+        self.assertEqual(expired.detach("fixtureExpired", now=0), "detached")
+        # Cleanup starts strictly after the 30-second retention boundary.
+        self.assertEqual(expired.reap(now=31), 1)
         with self.assertRaises(ValueError):
-            lifecycle.send_input("fixtureAttach", b"after-detach")
+            expired.reattach("fixtureExpired", now=31)
+
         observation = traefik_proof.synthetic_pty_lifecycle_observation()
+        self.assertEqual(observation["boundary_elapsed_seconds"], 30 * 60)
+        self.assertEqual(observation["boundary_reap"], 0)
+        self.assertEqual(observation["boundary_reattach"], "reattached")
+        self.assertEqual(observation["expired_elapsed_seconds"], 30 * 60 + 1)
         self.assertEqual(observation["before_ttl_reap"], 0)
         self.assertEqual(observation["ttl_reap"], 1)
         self.assertEqual(observation["retry"], "disabled")
