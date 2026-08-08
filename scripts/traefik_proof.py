@@ -279,19 +279,34 @@ def _pty_query_patterns() -> tuple[str, ...]:
 
 PTY_QUERY_PATTERNS = _pty_query_patterns()
 
-HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$")
-# ForwardAuth receives an HTTP authority, not an arbitrary policy string. Keep
-# the syntax grammar separate from the lowercase renderer-host validator so a
-# syntactically valid uppercase or wrong DNS authority can still reach policy
-# and receive the intended 421 mismatch result.
-AUTHORITY_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?$")
-AUTHORITY_PORT_RE = re.compile(r"^[0-9]{1,5}$")
+DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+AUTHORITY_PORT_RE = re.compile(r"^[1-9][0-9]{0,4}$")
+
+
+def _validate_dns_host(host: str, *, lowercase: bool) -> str:
+    """Validate the shared concrete DNS grammar used by config and authorities."""
+
+    if type(host) is not str or not host:
+        raise ValueError("host must be a concrete DNS name")
+    try:
+        host_bytes = host.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("host must be a concrete ASCII DNS name") from exc
+    if len(host_bytes) > 253:
+        raise ValueError("host must be at most 253 bytes")
+    if lowercase and host != host.lower():
+        raise ValueError("host must be a concrete lowercase DNS name")
+    labels = host.split(".")
+    if any(not label or len(label) > 63 or not DNS_LABEL_RE.fullmatch(label) for label in labels):
+        raise ValueError("host must contain nonempty DNS labels with interior hyphens only")
+    return host
 
 
 def _validate_host(host: str) -> str:
-    if type(host) is not str or not HOST_RE.fullmatch(host) or ".." in host or host.endswith("."):
-        raise ValueError("host must be a concrete lowercase DNS label")
-    return host
+    try:
+        return _validate_dns_host(host, lowercase=True)
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("host must be a concrete lowercase DNS name") from exc
 
 
 def _validate_authority_syntax(authority: str) -> str:
@@ -330,8 +345,10 @@ def _validate_authority_syntax(authority: str) -> str:
         if authority.count(":") != 1:
             raise ValueError("ForwardAuth authority must contain one host port separator")
         host, port = authority.rsplit(":", 1)
-        if not AUTHORITY_HOST_RE.fullmatch(host) or ".." in host or host.endswith("."):
-            raise ValueError("ForwardAuth authority host is malformed")
+        try:
+            _validate_dns_host(host, lowercase=False)
+        except ValueError as exc:
+            raise ValueError("ForwardAuth authority host is malformed") from exc
 
     if not AUTHORITY_PORT_RE.fullmatch(port) or not 1 <= int(port) <= 65535:
         raise ValueError("ForwardAuth authority port is malformed")
@@ -449,6 +466,51 @@ PARITY_FIXTURE_PATHS = {
     "static_route_grammar": "apps/web/src/lib/static-route-grammar.mjs",
     "deep_link_cases": "contracts/fixtures/deep-link-grammar/cases.json",
 }
+PARSER_IMPLEMENTATION_PATH = "scripts/traefik_proof.py"
+PARSER_TEST_PATH = "scripts/test_traefik_proof.py"
+
+
+def _normalize_parser_provenance(value: Mapping[str, object] | None) -> dict[str, str]:
+    """Validate the source identities that make the retained adapter evidence reproducible."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("parser provenance is required")
+    expected_keys = {
+        "implementation_path",
+        "implementation_commit",
+        "implementation_blob",
+        "implementation_sha256",
+        "test_path",
+        "test_source_sha256",
+    }
+    if set(value) != expected_keys:
+        raise ValueError("parser provenance keys are outside the closed contract")
+    implementation_path = value["implementation_path"]
+    test_path = value["test_path"]
+    if implementation_path != PARSER_IMPLEMENTATION_PATH or test_path != PARSER_TEST_PATH:
+        raise ValueError("parser provenance paths are not the reviewed sources")
+    implementation_commit = value["implementation_commit"]
+    implementation_blob = value["implementation_blob"]
+    implementation_sha256 = value["implementation_sha256"]
+    test_source_sha256 = value["test_source_sha256"]
+    if not isinstance(implementation_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", implementation_commit):
+        raise ValueError("parser implementation commit must be a lowercase Git SHA")
+    if not isinstance(implementation_blob, str) or not re.fullmatch(r"[0-9a-f]{40}", implementation_blob):
+        raise ValueError("parser implementation blob must be a lowercase Git blob OID")
+    for name, digest in (
+        ("implementation_sha256", implementation_sha256),
+        ("test_source_sha256", test_source_sha256),
+    ):
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"{name} must be a SHA-256 digest")
+    return {
+        "implementation_path": implementation_path,
+        "implementation_commit": implementation_commit,
+        "implementation_blob": implementation_blob,
+        "implementation_sha256": implementation_sha256,
+        "test_path": test_path,
+        "test_source_sha256": test_source_sha256,
+    }
 
 
 def parity_fixture_manifest() -> dict[str, dict[str, str]]:
@@ -930,6 +992,7 @@ def render_manifest(
     browser_journey: str | None = None,
     browser_evidence: Mapping[str, object] | None = None,
     runtime_inputs: Mapping[str, object] | None = None,
+    parser_provenance: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     if not re.fullmatch(r"[0-9a-f]{40}", build_sha):
         raise ValueError("build_sha must be a lowercase commit SHA")
@@ -950,6 +1013,7 @@ def render_manifest(
             runtime_inputs_sha256=runtime_inputs_sha256,
         ),
     )
+    normalized_parser_provenance = _normalize_parser_provenance(parser_provenance)
     return {
         "schema": SCHEMA,
         "issue": "92",
@@ -986,8 +1050,9 @@ def render_manifest(
             "generated_headers": list(TRAEFIK_FORWARDAUTH_GENERATED_HEADERS),
             "copied_headers": list(FORWARD_AUTH_HEADERS),
             "transport_headers": list(FORWARD_AUTH_TRANSPORT_HEADERS),
+            "parser_provenance": normalized_parser_provenance,
             "auth_request_host": "transport-only-auth-service-authority-not-public-authority",
-            "port": "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
+            "port": "X-Forwarded-Port must use canonical decimal syntax and equal the configured HTTPS entrypoint port",
             "uri": "X-Forwarded-Uri includes query; it is not raw-target evidence",
             "websocket": "router-matcher-only; Upgrade and Connection are not ForwardAuth observations",
             "hop_by_hop": "direct injected hop-by-hop fields are rejected; only transport Connection: close is tolerated",
@@ -1018,6 +1083,8 @@ def render_manifest(
                 "OAuth callback accepts only the reviewed code/state or provider-error query forms",
                 "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Port, X-Forwarded-Proto, and X-Forwarded-Uri",
                 "a present syntactically valid noncanonical X-Forwarded-Host reaches the policy model and returns edge 421; empty, whitespace/control, malformed-authority, missing, or duplicate metadata is adapter-denied with 400",
+                "configured hosts and forwarded DNS authorities share per-label validation, reject trailing dots, and enforce 63-byte labels and a 253-byte host bound",
+                "ForwardAuth ports use canonical decimal syntax in the 1..65535 range; parser-leading OWS is normalized consistently across generated metadata and Origin, while trailing/internal OWS and obs-fold are rejected before policy",
                 "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
                 "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
                 "the adapter accepts only the generated ForwardAuth set, Origin, and explicit bounded transport headers; Authorization, Cookie, and unknown headers are denied",
@@ -1048,6 +1115,7 @@ def render_manifest(
                 "X-Forwarded-Port is checked against the configured HTTPS entrypoint port",
                 "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
                 "a present syntactically valid noncanonical X-Forwarded-Host returns modeled edge 421; empty, whitespace/control, or malformed authority returns adapter 400",
+                "raw ForwardAuth tests accept parser-leading OWS across generated metadata and Origin but reject trailing/internal OWS plus canonical and noncanonical obs-fold before header normalization",
                 "C0, DEL, and C1 request-target controls are denied before route matching",
                 "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
                 "blocked edge and network vectors retain upstream_request=false in the annotated evidence",
@@ -2137,6 +2205,15 @@ def build_traefik_forward_auth_headers(
     return result
 
 
+def _normalize_header_ows(value: str, name: str) -> str:
+    """Accept only parser-leading OWS; reject trailing or internal whitespace."""
+
+    normalized = value.lstrip(" \t")
+    if _contains_request_controls(normalized) or any(character in normalized for character in (" ", "\t")):
+        raise ValueError(f"{name} contains trailing or internal whitespace")
+    return normalized
+
+
 def _forward_auth_policy_input(
     runtime_inputs: Mapping[str, object],
     headers: Sequence[tuple[str, str]],
@@ -2147,16 +2224,22 @@ def _forward_auth_policy_input(
     ``X-Forwarded-Host`` is a valid request to the policy boundary and must
     reach ``policy_decision`` so it returns the intended edge ``421``. Empty,
     whitespace/control, malformed-authority, missing, or duplicate metadata
-    remains a ``400`` adapter-contract failure. Keeping that distinction makes
-    a real Traefik wrong-host request behave like the retained vector instead
-    of silently replacing it with a canonical synthetic header.
+    remains a ``400`` adapter-contract failure. Parser-leading HTTP optional
+    whitespace is removed at this boundary; trailing or internal whitespace is
+    rejected, as are obsolete folded headers before parser normalization. Keeping
+    that distinction makes a
+    real Traefik wrong-host request behave like the retained vector instead of
+    silently replacing it with a canonical synthetic header.
     """
 
     inputs = _validate_runtime_inputs(runtime_inputs)
     _validate_forward_auth_header_names(headers)
     _validate_forward_auth_transport_headers(headers)
     required = {
-        name: _single_header(headers, name, required=True)
+        name: _normalize_header_ows(
+            str(_single_header(headers, name, required=True)),
+            name,
+        )
         for name in TRAEFIK_FORWARDAUTH_GENERATED_HEADERS
     }
     if (
@@ -2166,10 +2249,11 @@ def _forward_auth_policy_input(
         raise ValueError("ForwardAuth port or scheme is not canonical")
     if not required["X-Forwarded-For"]:
         raise ValueError("ForwardAuth client address is missing")
-    forwarded_host = _validate_authority_syntax(str(required["X-Forwarded-Host"]))
-    method = str(required["X-Forwarded-Method"])
-    path, query = _parse_forwarded_uri(str(required["X-Forwarded-Uri"]))
-    origin = _single_header(headers, "Origin") or ""
+    forwarded_host = _validate_authority_syntax(required["X-Forwarded-Host"])
+    method = required["X-Forwarded-Method"]
+    path, query = _parse_forwarded_uri(required["X-Forwarded-Uri"])
+    origin_value = _single_header(headers, "Origin")
+    origin = "" if origin_value is None else _normalize_header_ows(origin_value, "Origin")
     policy_headers = [
         ("X-Forwarded-Host", forwarded_host),
         ("X-Forwarded-Port", str(inputs["https_port"])),
@@ -2185,8 +2269,12 @@ class _HeaderLimitExceeded(ValueError):
     pass
 
 
+class _ObsFoldHeader(ValueError):
+    """Raised while raw-reading an obsolete folded header line."""
+
+
 class _BoundedHeaderReader:
-    """Limit header bytes while delegating body reads to the real socket."""
+    """Limit header bytes and reject obs-fold before parser normalization."""
 
     def __init__(self, raw: object, limit: int) -> None:
         self.raw = raw
@@ -2202,6 +2290,8 @@ class _BoundedHeaderReader:
         self.total += len(line)
         if self.total > self.limit:
             raise _HeaderLimitExceeded("request headers exceed the byte limit")
+        if line[:1] in (b" ", b"\t"):
+            raise _ObsFoldHeader("obsolete folded headers are outside the ForwardAuth contract")
         return line
 
 
@@ -2242,6 +2332,10 @@ class _ForwardAuthHandler(http.server.BaseHTTPRequestHandler):
         self.rfile = bounded  # type: ignore[assignment]
         try:
             return super().parse_request()
+        except _ObsFoldHeader:
+            self._respond(400, "deny")
+            self.close_connection = True
+            return False
         except _HeaderLimitExceeded:
             self._respond(431, "deny")
             self.close_connection = True
@@ -2614,6 +2708,10 @@ def main(argv: list[str] | None = None) -> int:
     evidence.add_argument("--build-sha", required=True)
     evidence.add_argument("--build-digest", required=True)
     evidence.add_argument("--traefik-config-digest", required=True)
+    evidence.add_argument("--parser-implementation-commit", required=True)
+    evidence.add_argument("--parser-implementation-blob", required=True)
+    evidence.add_argument("--parser-implementation-sha256", required=True)
+    evidence.add_argument("--parser-test-sha256", required=True)
     evidence.add_argument("--browser-evidence", type=Path, required=True)
     evidence.add_argument("--browser-journey")
     args = parser.parse_args(argv)
@@ -2651,6 +2749,14 @@ def main(argv: list[str] | None = None) -> int:
                     traefik_config_digest=args.traefik_config_digest,
                     browser_journey=args.browser_journey,
                     browser_evidence=browser_evidence,
+                    parser_provenance={
+                        "implementation_path": PARSER_IMPLEMENTATION_PATH,
+                        "implementation_commit": args.parser_implementation_commit,
+                        "implementation_blob": args.parser_implementation_blob,
+                        "implementation_sha256": args.parser_implementation_sha256,
+                        "test_path": PARSER_TEST_PATH,
+                        "test_source_sha256": args.parser_test_sha256,
+                    },
                 ),
                 sort_keys=True,
                 separators=(",", ":"),
