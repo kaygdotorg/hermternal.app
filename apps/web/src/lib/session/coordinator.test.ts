@@ -845,4 +845,44 @@ describe('createSessionCoordinator', () => {
     expect(normal.coordinator.state.mode).toBe(reduced.coordinator.state.mode);
     expect(normal.coordinator.state.activeSessionId).toBe(reduced.coordinator.state.activeSessionId);
   });
+
+  it('clears a Terminal focus intent when its lease is invalidated', async () => {
+    const harness = createCoordinator();
+    await harness.coordinator.activate('terminal');
+    expect(harness.coordinator.state.focusIntent?.target).toBe('w-term-input');
+
+    harness.coordinator.invalidateTerminalBinding('detached', 'session-old');
+
+    expect(harness.coordinator.state).not.toHaveProperty('focusIntent');
+    expect(harness.coordinator.state.terminalStatus).toBe('detached');
+  });
+
+  it('does not publish attached after callback-adopted reconnect is invalidated', async () => {
+    const harness = createCoordinator();
+    await harness.coordinator.activate('terminal');
+    harness.coordinator.invalidateTerminalBinding('failed', 'session-old');
+    const recoveredBinding: TerminalBinding = {
+      sessionId: 'session-old',
+      invalidate: vi.fn()
+    };
+    harness.terminal.reconnectBinding.mockImplementationOnce(
+      async (
+        sessionId: string,
+        signal: AbortSignal,
+        onBindingReady?: (binding: TerminalBinding) => void
+      ) => {
+        if (signal.aborted) throw new SessionCoordinatorError('aborted');
+        onBindingReady?.(recoveredBinding);
+        harness.coordinator.invalidateTerminalBinding('detached', sessionId);
+        return recoveredBinding;
+      }
+    );
+
+    await harness.coordinator.reconnectTerminal();
+
+    expect(recoveredBinding.invalidate).toHaveBeenCalledTimes(1);
+    expect(harness.terminal.release).toHaveBeenCalledWith(recoveredBinding);
+    expect(harness.coordinator.state.terminalStatus).toBe('detached');
+    expect(harness.coordinator.state).not.toHaveProperty('terminalSessionId');
+  });
 });

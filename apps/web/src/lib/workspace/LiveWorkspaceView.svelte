@@ -7,6 +7,8 @@
   export let session: LiveWorkspaceSession;
   export let appearance: Appearance = 'light';
   export let onReturnToSignIn: () => void = () => {};
+  /** Root auth owns the shared session; standalone previews retain local cleanup. */
+  export let disposeSessionOnDestroy = true;
 
   let snapshot: Readonly<LiveWorkspaceSnapshot> = session.current;
   let unsubscribe: (() => void) | undefined;
@@ -25,9 +27,8 @@
   });
 
   onDestroy(() => {
-    // The route root owns final disposal. This authenticated projection only
-    // releases its subscription so expiry can remount the same workspace.
     unsubscribe?.();
+    if (disposeSessionOnDestroy) session.dispose();
   });
 
   function handleAction(action: WorkspaceAction): void {
@@ -56,11 +57,7 @@
     if (action.type === 'stop') void session.stop();
     if (action.type === 'retry' || action.type === 'check-connection') void session.retryConnection();
     if (action.type === 'cancel-reconnect') session.cancelReconnect();
-    if (action.type === 'approve-tool') {
-      // The preview carries once/session/always metadata; this live adapter is
-      // intentionally limited to the existing boolean approval transport.
-      void session.approve(action.itemId, true);
-    }
+    if (action.type === 'approve-tool') void session.approve(action.itemId, true);
     if (action.type === 'reject-tool') void session.approve(action.itemId, false);
     if (action.type === 'answer-clarification') {
       void session.answerClarification(action.itemId, action.answer);

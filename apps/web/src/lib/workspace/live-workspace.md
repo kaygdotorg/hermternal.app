@@ -23,13 +23,16 @@ second Chat transport, or dispose Chat. Terminal state, notices, and byte
 publications are owned by the current workspace generation, selected session,
 and coordinator identity. A stale event is rejected before it can update the
 workspace snapshot, and the matching bridge binding is invalidated/detached
-rather than merely hidden. The bridge's public state getter also projects a
-session-less detached state after rejection, while retaining the opaque
-transport identity only for later recovery. A session replacement clears the
-old terminal presentation state after synchronous PTY invalidation, so a late
-old terminal publication cannot appear on the replacement session. During
+rather than merely hidden. The bridge's public state getter removes the stale session identity after
+rejection and suppresses reconnect, while preserving a classified terminal
+outcome such as PTY `4401` or `4403` for recovery guidance. User detach and
+close publish truthful `detached`/`exited` or `closed` state even when a generic
+adapter keeps its attached snapshot. A session replacement clears the old
+terminal presentation state after synchronous PTY invalidation, so a late old
+terminal publication cannot appear on the replacement session. During
 attach-mode recovery, the coordinator adopts the fresh bridge lease before the
-transport can publish its recovered `attached` transition.
+transport can publish its recovered `attached` transition; an invalidated
+callback-adopted lease cannot republish that transition.
 
 `TerminalSurface` remains mounted while Chat is selected and hides only its
 presentation layer. It owns the host, lazy W-Term/Ghostty import, renderer mount
@@ -55,9 +58,14 @@ transport's exact session/attach/process-identity reconnect contract later.
 `4401` remains an authentication-required recovery path for Chat and PTY. The
 root composition expires the authenticated BrowserAuthSession from a PTY `4401`
 even while Chat hides TerminalSurface. `4403` remains an incompatible-origin
-failure and never invokes sign-in recovery. These are prototype boundaries
-backed by synthetic tests; same-session proof against hermternal-dev is still
-required after review and merge.
+failure and never invokes sign-in recovery. The root-owned `LiveWorkspaceSession`
+uses a non-disposing authenticated view so auth expiry can unmount and later
+remount the child without permanently destroying the reusable session; explicit
+root/session disposal still clears all resources. Composer focus intents remain
+pending through disabled or streaming states and are consumed only when the
+same Chat session and coordinator generation are current. These are prototype
+boundaries backed by synthetic tests; same-session proof against hermternal-dev
+is still required after review and merge.
 
 ## Prompt delivery
 

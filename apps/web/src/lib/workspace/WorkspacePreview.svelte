@@ -215,7 +215,9 @@
           </div>
 
           <Composer
+            coordinator={coordinator}
             disabled={composerDisabled}
+            focusIntent={focusIntent}
             isStreaming={state === 'streaming'}
             model={localModel}
             onAction={handleAction}
