@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
+import SessionList from './SessionList.svelte';
 import WorkspacePreview from './WorkspacePreview.svelte';
 
 const deferredControls = [
@@ -218,6 +219,63 @@ describe('WorkspacePreview', () => {
 
     await waitFor(() => expect(screen.queryByRole('menu', { name: 'Account menu' })).not.toBeInTheDocument());
     expect(nextControl).toHaveFocus();
+  });
+
+  it('fences a released hidden owner after another instance claims before close rAF', async () => {
+    const frames: FrameRequestCallback[] = [];
+    const oldView = render(SessionList, { accountMenuId: 'old-account-menu' });
+    const oldTrigger = within(oldView.container).getByRole('button', { name: 'Open account menu' });
+    let newView: ReturnType<typeof render> | undefined;
+
+    try {
+      fireEvent.pointerDown(oldTrigger, { button: 0, pointerType: 'mouse' });
+      const oldMenu = await within(oldView.container).findByRole('menu', { name: 'Account menu' });
+      const oldSignOut = within(oldMenu).getByRole('menuitem', { name: 'Sign out' });
+      await waitFor(() => expect(oldSignOut).toHaveFocus());
+
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+        frames.push(callback);
+        return frames.length;
+      });
+
+      fireEvent.keyDown(window, { key: 'Escape' });
+      await waitFor(() => expect(oldMenu).not.toBeInTheDocument());
+      await waitFor(() => expect(frames).toHaveLength(1));
+      const staleClose = frames.shift();
+      expect(staleClose).toBeDefined();
+
+      const oldSessionList = oldTrigger.closest('.session-list') as HTMLElement;
+      expect(oldSessionList).toBeInTheDocument();
+      oldSessionList.style.display = 'none';
+
+      newView = render(SessionList, { accountMenuId: 'new-account-menu' });
+      const newTrigger = within(newView.container).getByRole('button', { name: 'Open account menu' });
+      fireEvent.pointerDown(newTrigger, { button: 0, pointerType: 'mouse' });
+      const newMenu = await within(newView.container).findByRole('menu', { name: 'Account menu' });
+      const newSignOut = within(newMenu).getByRole('menuitem', { name: 'Sign out' });
+
+      // The old close callback runs after the new instance owns the menu but
+      // before its own focus frame. It must not move focus into the hidden row.
+      staleClose?.(0);
+      await Promise.resolve();
+      expect(oldTrigger).not.toHaveFocus();
+      expect(newMenu).toBeInTheDocument();
+
+      await waitFor(() => expect(frames).toHaveLength(2));
+      for (const callback of frames.splice(0)) callback(0);
+      await waitFor(() => expect(newSignOut).toHaveFocus());
+
+      // The replacement owner still handles Escape and restores its own trigger.
+      fireEvent.keyDown(window, { key: 'Escape' });
+      await waitFor(() => expect(within(newView!.container).queryByRole('menu')).not.toBeInTheDocument());
+      await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+      for (const callback of frames.splice(0)) callback(0);
+      await waitFor(() => expect(newTrigger).toHaveFocus());
+    } finally {
+      newView?.unmount();
+      oldView.unmount();
+      vi.unstubAllGlobals();
+    }
   });
 
   it('invalidates stale focus continuations across rapid mobile close and reopen', async () => {

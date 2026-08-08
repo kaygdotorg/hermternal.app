@@ -130,6 +130,16 @@
     return activeAccountMenuOwner?.token === accountMenuOwnerToken;
   }
 
+  function canRestoreClosedMenuFocus(): boolean {
+    if (!sessionList?.isConnected || !accountMenuTrigger?.isConnected) return false;
+    if (!refreshAccountMenuVisibility()) return false;
+
+    // Closing releases ownership before awaiting the frame, so no owner is the
+    // legitimate handoff state. A different token means a responsive instance
+    // claimed the menu and this continuation must not focus the old trigger.
+    return !activeAccountMenuOwner || activeAccountMenuOwner.token === accountMenuOwnerToken;
+  }
+
   $: pinned = sessions.filter((session) => session.group === 'pinned');
   $: recent = sessions.filter((session) => session.group === 'recent');
 
@@ -260,6 +270,7 @@
       generation !== accountMenuFocusGeneration ||
       visibilityEpochAtClose !== accountMenuVisibilityEpoch ||
       accountMenuOpen ||
+      !canRestoreClosedMenuFocus() ||
       hasUnrelatedFocusTransfer(focusEpochAtClose, closingMenu)
     )
       return;
