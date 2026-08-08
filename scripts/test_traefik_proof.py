@@ -1582,6 +1582,52 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "overall time budget exhausted"):
                 traefik_proof._current_parser_provenance(ROOT)
 
+    def test_source_provenance_uses_repository_object_format(self) -> None:
+        """Commit and blob validation must follow a SHA-256 repository."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project_root = Path(temporary)
+            scripts_root = project_root / "scripts"
+            scripts_root.mkdir()
+            implementation = (ROOT / traefik_proof.PARSER_IMPLEMENTATION_PATH).read_bytes()
+            test_source = (ROOT / traefik_proof.PARSER_TEST_PATH).read_bytes()
+            (scripts_root / "traefik_proof.py").write_bytes(implementation)
+            (scripts_root / "test_traefik_proof.py").write_bytes(test_source)
+
+            def git(*arguments: str) -> str:
+                completed = subprocess.run(
+                    ["git", "-C", str(project_root), *arguments],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            git("init", "--quiet", "--object-format=sha256")
+            git("config", "user.name", "Hermternal test")
+            git("config", "user.email", "hermternal-test@example.invalid")
+            git("add", "scripts")
+            git("commit", "--quiet", "-m", "parser source")
+            source_commit = git("rev-parse", "HEAD")
+            (project_root / "retained-evidence.json").write_text("{}\n", encoding="utf-8")
+            git("add", "retained-evidence.json")
+            git("commit", "--quiet", "-m", "evidence only")
+
+            self.assertEqual(git("rev-parse", "--show-object-format"), "sha256")
+            provenance = traefik_proof._current_parser_provenance(project_root)
+            oid_width = hashlib.sha256().digest_size * 2
+            self.assertEqual(len(source_commit), oid_width)
+            self.assertEqual(len(provenance["implementation_commit"]), oid_width)
+            self.assertEqual(len(provenance["implementation_blob"]), oid_width)
+            self.assertEqual(
+                provenance["implementation_blob"],
+                git("rev-parse", f"{source_commit}:{traefik_proof.PARSER_IMPLEMENTATION_PATH}"),
+            )
+
+        with mock.patch.object(traefik_proof, "_git_output", return_value=b"sha512\n"):
+            with self.assertRaisesRegex(ValueError, "object format is unsupported"):
+                traefik_proof._git_object_format(ROOT)
+
     def test_source_predecessor_ignores_mode_only_history(self) -> None:
         """Changing executable mode alone must not move parser source identity."""
 
@@ -1715,7 +1761,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 traefik_proof._current_parser_provenance(project_root)
 
         forged = self._parser_provenance()
-        forged["implementation_commit"] = "0" * 40
+        forged["implementation_commit"] = "0" * len(forged["implementation_commit"])
         with self.assertRaisesRegex(ValueError, "does not match committed parser sources"):
             traefik_proof._normalize_parser_provenance(forged)
 
@@ -1775,6 +1821,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             completed.stdout,
             (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
         )
+        oid_width = len(current_provenance["implementation_commit"])
         forged = subprocess.run(
             [
                 sys.executable,
@@ -1787,9 +1834,9 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 "--traefik-config-digest",
                 EXPECTED_CONFIG_DIGEST,
                 "--parser-implementation-commit",
-                "0" * 40,
+                "0" * oid_width,
                 "--parser-implementation-blob",
-                "1" * 40,
+                "1" * oid_width,
                 "--parser-implementation-sha256",
                 "2" * 64,
                 "--parser-test-sha256",
@@ -1822,7 +1869,10 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 build_sha=EXPECTED_BUILD_SHA,
                 build_digest=EXPECTED_BUILD_DIGEST,
                 traefik_config_digest=EXPECTED_CONFIG_DIGEST,
-                browser_evidence=self._browser_evidence("blocked_provider", provenance={"build_sha": "0" * 40}),
+                browser_evidence=self._browser_evidence(
+                    "blocked_provider",
+                    provenance={"build_sha": "0" * len(EXPECTED_BUILD_SHA)},
+                ),
             )
 
     def test_browser_events_do_not_upgrade_synthetic_deployment_claim(self) -> None:
