@@ -26,9 +26,10 @@ import subprocess
 import sys
 import tokenize
 import types
+from dataclasses import dataclass
 import unicodedata
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from urllib.parse import urlsplit
 
 
@@ -134,6 +135,14 @@ MAX_JSON_DEPTH = 64
 MAX_JSON_NODES = 200_000
 MAX_JSON_STRING_LENGTH = 4_096
 MAX_JSON_KEY_LENGTH = 256
+# Filesystem inventory is metadata too. Bound cardinality and retained path
+# storage independently of artifact byte budgets so empty entries cannot consume
+# unbounded Python lists/sets before a later content check runs.
+MAX_FIXTURE_TRAVERSAL_ENTRIES = 2_048
+MAX_FIXTURE_TRAVERSAL_DIRECTORIES = 512
+MAX_FIXTURE_TRAVERSAL_FILES = 1_024
+MAX_FIXTURE_TRAVERSAL_DEPTH = 64
+MAX_FIXTURE_PATH_STORAGE_BYTES = 512 * 1024
 MAX_INTEGER_DIGITS = 100
 MAX_INTEGER = 10**MAX_INTEGER_DIGITS - 1
 MAX_ERROR_LENGTH = 240
@@ -178,7 +187,7 @@ ACTIVE_SOURCE_COMMIT_ENV = "HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT"
 # through a stable descriptor and match this source-level pin. It is not imported
 # by path, so a checkout edit cannot execute before authentication.
 HARDENED_AUTHORITY_VERIFIER_PATH = "scripts/verify_fixture_registry_authority.py"
-HARDENED_AUTHORITY_VERIFIER_SHA256 = "d1b3ba49cbe9a76379aadf3a3b1598aa4631d59637e6ee755d4d6fa3482f1064"
+HARDENED_AUTHORITY_VERIFIER_SHA256 = "ac33cb2bfc0d0e4d06dadad0e09f46e31883fa36368062aa3acc65b9d0ab8561"
 HARDENED_AUTHORITY_VERIFIER_MAX_BYTES = 256 * 1024
 # Temporary-directory roots on macOS may expose /tmp through one of these
 # system aliases. All other ancestors stay no-follow descriptor anchored.
@@ -230,11 +239,17 @@ JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9
 # for JSON and Python AST targets. This keeps aliases such as ``x-api-key`` and
 # ``refresh_token`` in one fail-closed boundary without treating every ordinary
 # ``name=value`` example as a credential.
+# Assignment values may be bare protocol tokens or quoted source/text values.
+# Keep the quoted branch bounded and line-local: decoding arbitrary source syntax
+# would turn this scanner into an interpreter and could retain unbounded text.
 ASSIGNMENT_SECRET_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<key>[A-Za-z][A-Za-z0-9_.:/-]{0,64})\s*[=:]\s*"
-    r"(?P<value>[A-Za-z0-9._~+/=%-]{8,})",
+    r"(?P<value>\"[^\"\r\n]{8,128}\"|'[^'\r\n]{8,128}'|[A-Za-z0-9._~+/=%-]{8,128})",
     re.IGNORECASE,
 )
+MAX_URL_LENGTH = 8 * 1024
+MAX_URL_COMPONENT_LENGTH = 4 * 1024
+MAX_URL_QUERY_PAIRS = 128
 # Sensitive JSON fields accept only reviewed semantic markers. A broad shape
 # such as arbitrary snake_case or `synthetic-*` can disguise provider tokens,
 # URLs, or newly introduced credential values under a sensitive key.
@@ -580,6 +595,12 @@ STRUCTURAL_URL_ALLOWANCES = {
         "https://retained.invalid/",
         "https://retained.invalid/synthetic.invalid",
     }),
+    # This reviewed source keeps an indirect regular-expression URL literal;
+    # preserve that exact escaped-dot pattern without reopening backslash
+    # handling for ordinary URL text.
+    "source-audit/oauth-browser/test_oauth_browser.py": frozenset({
+        "https://github\\.com/NousResearch/hermes-agent/blob/",
+    }),
 }
 EXACT_ASSIGNMENT_ALLOWANCES = {
     # These are retained source-review or negative-test fragments. Every
@@ -604,6 +625,26 @@ EXACT_ASSIGNMENT_ALLOWANCES = {
     "source-audit/oauth-browser/source_excerpts/routes_auth.py.txt": frozenset({"session.access_token", "session.refresh_token"}),
     "source-audit/oauth-browser/test_oauth_browser.py": frozenset({"request.get", "session.access_token", "session.refresh_token"}),
     "source-audit/pty-attach/validate.py": frozenset({"abcdefghijkl"}),
+    # These exact loop-local values are redaction-test inputs, not retained
+    # credentials. Keep the new target-flow scanner narrow without treating
+    # synthetic or generic values as globally safe.
+    "deployment-security/browser-auth/test_validate.py": frozenset({
+        "raw-cookie-json",
+        "raw-csrf-json",
+        "raw-pkce-json",
+        "raw-session-id",
+        "raw-session-json",
+        "raw-state-json",
+        "raw-ticket-id",
+        "raw-ticket-json",
+        "synthetic.invalid",
+        "untrusted-value",
+    }),
+    "deployment-security/private-network-firewall/test_validate.py": frozenset({"iptables"}),
+    "deployment-security/pty-local-adapter/validate.py": frozenset({"synthetic.invalid"}),
+    "provider-discovery/test_provider_discovery.py": frozenset({"synthetic.invalid"}),
+    "pty-detach-race/test_validate.py": frozenset({"-Infinity", "Infinity"}),
+    "pty-detach-race/validate.py": frozenset({"synthetic.invalid"}),
 }
 # Host/Origin's focused test source intentionally keeps exact private-key and
 # detector canaries to prove its own scanner rejects them. The aggregate layer
@@ -1069,12 +1110,118 @@ def _require_allowed_url_host(host: str, *, allow_synthetic_markers: bool) -> No
     )
 
 
+def _assignment_candidate_from_match(match: re.Match[str]) -> str:
+    candidate = match.group("value")
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in "'\"":
+        return candidate[1:-1]
+    return candidate
+
+
+def _validate_assignment_candidate(
+    key: str,
+    candidate: str,
+    *,
+    allow_synthetic_markers: bool,
+    allowed_assignment_values: frozenset[str],
+    exact_full_allowance: bool = False,
+) -> None:
+    if not _is_credential_key_alias(key):
+        return
+    exact_assignment_allowance = candidate in allowed_assignment_values
+    placeholder = _is_placeholder(
+        candidate,
+        allow_synthetic_markers=allow_synthetic_markers,
+        allow_structural_placeholders=False,
+    )
+    require(
+        exact_assignment_allowance or exact_full_allowance or placeholder,
+        "credential-shaped value is not allowed",
+    )
+
+
+def _decode_url_component(component: str, *, plus_as_space: bool) -> str:
+    """Decode one bounded URL component without accepting malformed escapes."""
+
+    require(len(component) <= MAX_URL_COMPONENT_LENGTH, "URL component is too large")
+    decoded = bytearray()
+    index = 0
+    while index < len(component):
+        character = component[index]
+        if character == "%":
+            require(index + 2 < len(component), "URL escape is incomplete")
+            digits = component[index + 1:index + 3]
+            require(re.fullmatch(r"[0-9A-Fa-f]{2}", digits) is not None, "URL escape is malformed")
+            decoded.append(int(digits, 16))
+            index += 3
+            continue
+        if plus_as_space and character == "+":
+            character = " "
+        try:
+            encoded = character.encode("utf-8")
+        except UnicodeError as exc:
+            raise ValidationError() from exc
+        decoded.extend(encoded)
+        require(len(decoded) <= MAX_URL_COMPONENT_LENGTH, "decoded URL component is too large")
+        index += 1
+    try:
+        result = bytes(decoded).decode("utf-8")
+    except UnicodeError as exc:
+        raise ValidationError() from exc
+    require(len(result) <= MAX_URL_COMPONENT_LENGTH, "decoded URL component is too large")
+    return result
+
+
+def _url_authority(raw_url: str) -> str:
+    separator = raw_url.find("://")
+    require(separator > 0, "URL scheme is missing")
+    start = separator + 3
+    end = len(raw_url)
+    for marker in "/?#":
+        candidate = raw_url.find(marker, start)
+        if candidate >= 0:
+            end = min(end, candidate)
+    authority = raw_url[start:end]
+    require(authority, "URL authority is missing")
+    return authority
+
+
+def _validate_url_query(
+    query: str,
+    *,
+    allow_synthetic_markers: bool,
+    allowed_assignment_values: frozenset[str],
+    allowed_synthetic_full_values: frozenset[str],
+    source_value: str,
+) -> None:
+    require(len(query) <= MAX_URL_COMPONENT_LENGTH, "URL query is too large")
+    pairs = re.split(r"[&;]", query)
+    require(len(pairs) <= MAX_URL_QUERY_PAIRS, "URL query has too many fields")
+    exact_full_allowance = source_value in allowed_synthetic_full_values
+    for pair in pairs:
+        if not pair:
+            continue
+        key_text, separator, value_text = pair.partition("=")
+        if not separator:
+            continue
+        key = _decode_url_component(key_text, plus_as_space=True)
+        candidate = _decode_url_component(value_text, plus_as_space=True)
+        _validate_assignment_candidate(
+            key,
+            candidate,
+            allow_synthetic_markers=allow_synthetic_markers,
+            allowed_assignment_values=allowed_assignment_values,
+            exact_full_allowance=exact_full_allowance,
+        )
+
+
 def _validate_url_hosts(
     value: str,
     *,
     allow_synthetic_markers: bool = False,
     regex_pattern: bool = False,
     allowed_structural_urls: frozenset[str] = frozenset(),
+    allowed_assignment_values: frozenset[str] = frozenset(),
+    allowed_synthetic_full_values: frozenset[str] = frozenset(),
 ) -> None:
     if regex_pattern:
         for match in REGEX_SCHEME_PATTERN.finditer(value):
@@ -1084,25 +1231,38 @@ def _validate_url_hosts(
         return
     for match in URL_PATTERN.finditer(value):
         raw_url = match.group(0)
+        require(len(raw_url) <= MAX_URL_LENGTH, "URL is too large")
         # Domain validators retain exact malformed and reserved URL values as
         # negative-test vocabulary. Do not generalize the allowance to a host
         # suffix: a path-scoped exact token is the only structural bypass.
         if raw_url in allowed_structural_urls:
             continue
+        authority = _url_authority(raw_url)
+        # Backslash is a special-scheme authority separator under WHATWG URL
+        # parsing. Reject it before Python's urlsplit can reinterpret an evil
+        # host as an allowlisted path/userinfo combination.
+        require("\\" not in authority, "ambiguous URL authority is not allowed")
+        if "@" in authority:
+            raw_userinfo = authority.rsplit("@", 1)[0]
+            decoded_userinfo = _decode_url_component(raw_userinfo, plus_as_space=False)
+            if ":" in decoded_userinfo:
+                _username, password = decoded_userinfo.split(":", 1)
+                require(
+                    not password or _is_explicit_synthetic_marker(password),
+                    "URL userinfo is not allowed",
+                )
         try:
             parsed = urlsplit(raw_url)
             host = parsed.hostname
         except ValueError as exc:
             raise ValidationError() from exc
-        if parsed.password:
-            # A password-bearing userinfo is credential material even when the
-            # hostname is synthetic or allowlisted. Explicit synthetic markers
-            # remain available to reviewed negative-test vocabulary; arbitrary
-            # ``user:password@host`` strings fail closed.
-            require(
-                _is_explicit_synthetic_marker(parsed.password),
-                "URL userinfo is not allowed",
-            )
+        _validate_url_query(
+            parsed.query,
+            allow_synthetic_markers=allow_synthetic_markers,
+            allowed_assignment_values=allowed_assignment_values,
+            allowed_synthetic_full_values=allowed_synthetic_full_values,
+            source_value=value,
+        )
         if host:
             _require_allowed_url_host(host, allow_synthetic_markers=allow_synthetic_markers)
 
@@ -1166,19 +1326,18 @@ def _validate_text_value(
         for pattern in patterns:
             for match in pattern.finditer(scanned_value):
                 if pattern is ASSIGNMENT_SECRET_PATTERN:
-                    key = match.group("key")
-                    if not _is_credential_key_alias(key):
-                        continue
-                    candidate = match.group("value")
-                else:
-                    candidate = match.group(1) if match.lastindex else match.group(0)
+                    _validate_assignment_candidate(
+                        match.group("key"),
+                        _assignment_candidate_from_match(match),
+                        allow_synthetic_markers=allow_synthetic_markers,
+                        allowed_assignment_values=allowed_assignment_values,
+                        exact_full_allowance=value in allowed_synthetic_full_values,
+                    )
+                    continue
+                candidate = match.group(1) if match.lastindex else match.group(0)
                 exact_basic_allowance = (
                     pattern is BASIC_VALUE_PATTERN
                     and candidate in allowed_basic_auth_candidates
-                )
-                exact_assignment_allowance = (
-                    pattern is ASSIGNMENT_SECRET_PATTERN
-                    and candidate in allowed_assignment_values
                 )
                 exact_full_allowance = value in allowed_synthetic_full_values
                 # Synthetic marker vocabulary is useful only for path-scoped
@@ -1194,7 +1353,6 @@ def _validate_text_value(
                 )
                 require(
                     exact_basic_allowance
-                    or exact_assignment_allowance
                     or exact_full_allowance
                     or placeholder,
                     "credential-shaped value is not allowed",
@@ -1204,6 +1362,8 @@ def _validate_text_value(
             allow_synthetic_markers=allow_synthetic_markers,
             regex_pattern=regex_pattern,
             allowed_structural_urls=allowed_structural_urls,
+            allowed_assignment_values=allowed_assignment_values,
+            allowed_synthetic_full_values=allowed_synthetic_full_values,
         )
 
 
@@ -1674,6 +1834,21 @@ def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
     return _STATIC_DYNAMIC_VALUE
 
 
+def _ast_name_value_pairs(target: ast.AST, value_node: ast.AST) -> tuple[tuple[str, ast.AST], ...]:
+    if isinstance(target, ast.Name):
+        return ((target.id, value_node),)
+    if isinstance(target, ast.Starred):
+        return _ast_name_value_pairs(target.value, value_node)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        values = value_node.elts if isinstance(value_node, (ast.Tuple, ast.List)) else ()
+        pairs: list[tuple[str, ast.AST]] = []
+        for index, child in enumerate(target.elts):
+            child_value = values[index] if index < len(values) else value_node
+            pairs.extend(_ast_name_value_pairs(child, child_value))
+        return tuple(pairs)
+    return ()
+
+
 def _collect_static_bindings(tree: ast.AST) -> dict[str, Any]:
     bindings: dict[str, Any] = {}
     # A few fixed passes resolve simple module/function-local chains without
@@ -1684,36 +1859,40 @@ def _collect_static_bindings(tree: ast.AST) -> dict[str, Any]:
         changed = False
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign):
-                value = _static_value(node.value, bindings)
+                value_node = node.value
                 targets = node.targets
             elif isinstance(node, ast.AnnAssign):
-                value = _static_value(node.value, bindings) if node.value is not None else _STATIC_UNKNOWN
+                value_node = node.value
                 targets = (node.target,)
             elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-                value = _STATIC_UNKNOWN
+                value_node = None
                 targets = (node.target,)
             elif isinstance(node, ast.NamedExpr):
-                value = _static_value(node.value, bindings)
+                value_node = node.value
                 targets = (node.target,)
             else:
                 continue
-            if value is not _STATIC_UNKNOWN and not isinstance(value, (str, list, tuple, dict)):
-                value = _STATIC_UNKNOWN
             for target in targets:
-                if not isinstance(target, ast.Name):
-                    continue
-                previous = bindings.get(target.id)
-                if previous is None and target.id not in bindings:
-                    merged = value
-                elif previous is _STATIC_UNKNOWN or value is _STATIC_UNKNOWN:
-                    merged = _STATIC_UNKNOWN
-                elif previous == value:
-                    merged = previous
+                if value_node is None:
+                    pairs = ((target.id, target),) if isinstance(target, ast.Name) else ()
                 else:
-                    merged = _STATIC_UNKNOWN
-                if target.id not in bindings or bindings[target.id] != merged:
-                    bindings[target.id] = merged
-                    changed = True
+                    pairs = _ast_name_value_pairs(target, value_node)
+                for name, source_node in pairs:
+                    value = _STATIC_UNKNOWN if value_node is None else _static_value(source_node, bindings)
+                    if value is not _STATIC_UNKNOWN and not isinstance(value, (str, list, tuple, dict)):
+                        value = _STATIC_UNKNOWN
+                    previous = bindings.get(name)
+                    if previous is None and name not in bindings:
+                        merged = value
+                    elif previous is _STATIC_UNKNOWN or value is _STATIC_UNKNOWN:
+                        merged = _STATIC_UNKNOWN
+                    elif previous == value:
+                        merged = previous
+                    else:
+                        merged = _STATIC_UNKNOWN
+                    if name not in bindings or bindings[name] != merged:
+                        bindings[name] = merged
+                        changed = True
         if not changed:
             break
     return bindings
@@ -1770,6 +1949,13 @@ def _ast_root_name(node: ast.AST) -> str | None:
 def _ast_target_names(node: ast.AST, bindings: dict[str, Any]) -> tuple[str, ...]:
     if isinstance(node, ast.Name):
         return (node.id,)
+    if isinstance(node, ast.Starred):
+        return _ast_target_names(node.value, bindings)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for child in node.elts:
+            names.extend(_ast_target_names(child, bindings))
+        return tuple(names)
     if isinstance(node, ast.Attribute):
         return (node.attr,)
     if isinstance(node, ast.Subscript):
@@ -1794,6 +1980,40 @@ def _ast_target_names(node: ast.AST, bindings: dict[str, Any]) -> tuple[str, ...
             return (DYNAMIC_CREDENTIAL_TARGET,)
         return ()
     return ()
+
+
+def _ast_target_value_pairs(
+    target: ast.AST,
+    value_node: ast.AST,
+    bindings: dict[str, Any],
+) -> tuple[tuple[str, ast.AST], ...]:
+    """Keep destructured target names paired with their source expressions."""
+
+    if isinstance(target, ast.Starred):
+        target = target.value
+    if isinstance(target, (ast.Tuple, ast.List)):
+        values = value_node.elts if isinstance(value_node, (ast.Tuple, ast.List)) else ()
+        pairs: list[tuple[str, ast.AST]] = []
+        for index, child in enumerate(target.elts):
+            child_value = values[index] if index < len(values) else value_node
+            pairs.extend(_ast_target_value_pairs(child, child_value, bindings))
+        return tuple(pairs)
+    return tuple((key, value_node) for key in _ast_target_names(target, bindings))
+
+
+def _ast_iteration_value_pairs(
+    target: ast.AST,
+    iterable: ast.AST,
+    bindings: dict[str, Any],
+) -> tuple[tuple[str, ast.AST], ...]:
+    """Pair literal loop elements with target names without executing source."""
+
+    if isinstance(iterable, (ast.List, ast.Tuple, ast.Set)):
+        pairs: list[tuple[str, ast.AST]] = []
+        for element in iterable.elts:
+            pairs.extend(_ast_target_value_pairs(target, element, bindings))
+        return tuple(pairs)
+    return _ast_target_value_pairs(target, iterable, bindings)
 
 
 def _is_nonretained_ast_value(node: ast.AST) -> bool:
@@ -1926,17 +2146,23 @@ def _validate_python_file(
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                for key in _ast_target_names(target, bindings):
-                    _validate_ast_sensitive_assignment(key, node.value, bindings, scan)
+                for key, value_node in _ast_target_value_pairs(target, node.value, bindings):
+                    _validate_ast_sensitive_assignment(key, value_node, bindings, scan)
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            for key in _ast_target_names(node.target, bindings):
-                _validate_ast_sensitive_assignment(key, node.value, bindings, scan)
+            for key, value_node in _ast_target_value_pairs(node.target, node.value, bindings):
+                _validate_ast_sensitive_assignment(key, value_node, bindings, scan)
         elif isinstance(node, ast.AugAssign):
-            for key in _ast_target_names(node.target, bindings):
-                _validate_ast_sensitive_assignment(key, node.value, bindings, scan)
+            for key, value_node in _ast_target_value_pairs(node.target, node.value, bindings):
+                _validate_ast_sensitive_assignment(key, value_node, bindings, scan)
         elif isinstance(node, ast.NamedExpr):
-            for key in _ast_target_names(node.target, bindings):
-                _validate_ast_sensitive_assignment(key, node.value, bindings, scan)
+            for key, value_node in _ast_target_value_pairs(node.target, node.value, bindings):
+                _validate_ast_sensitive_assignment(key, value_node, bindings, scan)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            for key, value_node in _ast_iteration_value_pairs(node.target, node.iter, bindings):
+                _validate_ast_sensitive_assignment(key, value_node, bindings, scan)
+        elif isinstance(node, ast.comprehension):
+            for key, value_node in _ast_iteration_value_pairs(node.target, node.iter, bindings):
+                _validate_ast_sensitive_assignment(key, value_node, bindings, scan)
         elif isinstance(node, ast.keyword) and node.arg is not None:
             _validate_ast_sensitive_assignment(node.arg, node.value, bindings, scan)
         elif isinstance(node, ast.Dict):
@@ -2370,11 +2596,100 @@ def _reject_live_claims(value: Any) -> None:
             _reject_live_claims(child)
 
 
-def _actual_fixture_files(relative_root: str, fixtures_root: Path) -> list[str]:
+@dataclass
+class _FixtureTraversalBudget:
+    entries: int = 0
+    directories: int = 0
+    files: int = 0
+    path_storage_bytes: int = 0
+
+    def account(self, relative: str, *, directory: bool, depth: int) -> None:
+        self.entries += 1
+        require(self.entries <= MAX_FIXTURE_TRAVERSAL_ENTRIES, "fixture entry count exceeds the safe limit")
+        require(depth <= MAX_FIXTURE_TRAVERSAL_DEPTH, "fixture traversal is too deep")
+        try:
+            path_bytes = len(os.fsencode(relative)) + 1
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValidationError() from exc
+        self.path_storage_bytes += path_bytes
+        require(
+            self.path_storage_bytes <= MAX_FIXTURE_PATH_STORAGE_BYTES,
+            "fixture path storage exceeds the safe limit",
+        )
+        if directory:
+            self.directories += 1
+            require(
+                self.directories <= MAX_FIXTURE_TRAVERSAL_DIRECTORIES,
+                "fixture directory count exceeds the safe limit",
+            )
+        else:
+            self.files += 1
+            require(
+                self.files <= MAX_FIXTURE_TRAVERSAL_FILES,
+                "fixture file count exceeds the safe limit",
+            )
+
+
+def _iter_fixture_tree(
+    directory: Path,
+    *,
+    relative_root: str,
+    budget: _FixtureTraversalBudget,
+) -> Iterator[tuple[str, bool]]:
+    """Yield fixture entries lazily while bounding names and descriptors."""
+
+    try:
+        root_metadata = os.lstat(directory)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValidationError() from exc
+    require(stat.S_ISDIR(root_metadata.st_mode), "fixture root is missing")
+    pending: list[tuple[Path, str, int]] = [(directory, relative_root, 0)]
+    while pending:
+        current, current_relative, depth = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                while True:
+                    try:
+                        entry = next(entries)
+                    except StopIteration:
+                        break
+                    except OSError as exc:
+                        raise ValidationError() from exc
+                    name = entry.name
+                    require(name not in {"", ".", ".."}, "fixture entry name is invalid")
+                    relative = f"{current_relative}/{name}" if current_relative else name
+                    try:
+                        metadata = entry.stat(follow_symlinks=False)
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        raise ValidationError() from exc
+                    mode = metadata.st_mode
+                    if stat.S_ISLNK(mode):
+                        raise ValidationError()
+                    if stat.S_ISDIR(mode):
+                        budget.account(relative, directory=True, depth=depth + 1)
+                        yield relative, True
+                        pending.append((current / name, relative, depth + 1))
+                        continue
+                    require(stat.S_ISREG(mode), "fixture contains an unsafe file")
+                    budget.account(relative, directory=False, depth=depth + 1)
+                    yield relative, False
+        except ValidationError:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValidationError() from exc
+
+
+def _actual_fixture_files(
+    relative_root: str,
+    fixtures_root: Path,
+    *,
+    traversal_budget: _FixtureTraversalBudget | None = None,
+) -> list[str]:
     candidate = fixtures_root / relative_root
     require(not candidate.is_symlink(), "fixture root must not be a symlink")
-    # Use one canonical root for containment and relative paths; on macOS,
-    # temporary roots can be reached through a /tmp alias during rglob().
+    # Use one canonical root for containment and relative paths. The lazy walk
+    # below intentionally replaces Path.rglob so no directory listing or path
+    # list is materialized before the finite metadata budget is checked.
     root = fixtures_root.resolve()
     directory = candidate.resolve()
     try:
@@ -2382,17 +2697,17 @@ def _actual_fixture_files(relative_root: str, fixtures_root: Path) -> list[str]:
     except ValueError as exc:
         raise ValidationError() from exc
     require(directory.is_dir(), "fixture root is missing")
-    files: list[str] = []
-    for path in sorted(directory.rglob("*")):
-        # Every ordinary-root entry is part of the reviewed boundary. Dotfiles,
-        # cache trees, bytecode, binaries, symlinks, and special files must be
-        # rejected or explicitly manifested; silently skipping any of them
-        # would create an unscanned credential boundary.
-        require(not path.is_symlink(), "fixture contains a symlink")
-        if path.is_dir():
-            continue
-        require(path.is_file(), "fixture contains an unsafe file")
-        files.append(path.relative_to(root).as_posix())
+    budget = traversal_budget or _FixtureTraversalBudget()
+    files = [
+        relative
+        for relative, is_directory in _iter_fixture_tree(
+            directory,
+            relative_root=relative_root,
+            budget=budget,
+        )
+        if not is_directory
+    ]
+    files.sort()
     require(bool(files), "fixture root has no files")
     return files
 
@@ -2431,6 +2746,7 @@ def _validate_fixture_roots(
     state_ids: tuple[str, ...],
     coverage_ids: set[str],
     fixtures_root: Path,
+    traversal_budget: _FixtureTraversalBudget,
 ) -> tuple[dict[str, str], dict[str, dict[str, frozenset[str]]], set[str]]:
     roots = document["fixture_roots"]
     require(type(roots) is list and bool(roots), "fixture roots are missing")
@@ -2477,7 +2793,11 @@ def _validate_fixture_roots(
         # entry point that can validate its listed cases.
         require(type(validator) is str and bool(validator), "ready fixture must name a validator")
         require(bool(files), "ready fixture must list artifacts")
-        actual_files = _actual_fixture_files(path, fixtures_root)
+        actual_files = _actual_fixture_files(
+            path,
+            fixtures_root,
+            traversal_budget=traversal_budget,
+        )
         listed: list[str] = []
         for file_index, file_record in enumerate(files):
             record_path, _, _ = _validate_file_record(file_record, file_index)
@@ -2592,11 +2912,13 @@ def _validate_index_document(document: dict[str, Any], repo_root: Path) -> tuple
     require(benchmark["build_mode"] == "N/A - no production or release executable", "benchmark build mode changed")
     _safe_child(fixtures_root, benchmark_path)
 
+    traversal_budget = _FixtureTraversalBudget()
     fixture_statuses, fixture_details, owned_files = _validate_fixture_roots(
         document,
         state_ids,
         set(item["id"] for item in document["coverage"]),
         fixtures_root,
+        traversal_budget,
     )
     coverage_ids, referenced_fixtures = _validate_coverage(
         document,
@@ -2616,25 +2938,28 @@ def _validate_index_document(document: dict[str, Any], repo_root: Path) -> tuple
     # future helper files must be reviewed and explicitly added before use.
     validator_root = fixtures_root / "validator"
     actual_central: set[str] = set()
-    for path in validator_root.rglob("*"):
-        require(not path.is_symlink(), "central validator contains a symlink")
-        if path.is_dir():
+    for relative, is_directory in _iter_fixture_tree(
+        validator_root,
+        relative_root="validator",
+        budget=traversal_budget,
+    ):
+        if is_directory:
             continue
-        require(path.is_file(), "central validator contains a special file")
-        actual_central.add(path.relative_to(fixtures_root).as_posix())
+        actual_central.add(relative)
     require(actual_central == CENTRAL_VALIDATOR_ARTIFACTS, "central validator artifact inventory changed")
 
     all_owned_candidates: set[str] = set()
     separate_artifacts: set[str] = set()
-    for path in fixtures_root.rglob("*"):
-        # Do not skip hidden files, cache contents, bytecode, binaries, or
-        # special entries. They are either explicitly rejected here or become
-        # an unowned manifest entry and fail closed below.
-        require(not path.is_symlink(), "fixture inventory contains a symlink")
-        if path.is_dir():
+    for relative, is_directory in _iter_fixture_tree(
+        fixtures_root,
+        relative_root="",
+        budget=traversal_budget,
+    ):
+        if is_directory:
             continue
-        require(path.is_file(), "fixture inventory contains a special file")
-        relative = path.relative_to(fixtures_root).as_posix()
+        # Do not skip hidden files, cache contents, bytecode, binaries, or
+        # special entries. They are either explicitly rejected by the lazy
+        # walker or become an unowned manifest entry and fail closed below.
         if relative in INTENTIONALLY_SEPARATE_ARTIFACTS:
             separate_artifacts.add(relative)
             continue
@@ -2814,6 +3139,17 @@ def validate_all(
 ) -> tuple[int, int]:
     _validate_schema_document(schema)
     root = repo_root.resolve()
+    # ``validate_all`` is a public API used by tests and tooling as well as the
+    # CLI. Do not let a caller mutate a previously parsed index and bypass the
+    # canonical checkout binding that protects the on-disk CLI path. Read the
+    # canonical bytes through the stable descriptor helper before consuming the
+    # caller object; equality is intentional, so semantic-but-different inputs
+    # remain rejected while the file itself stays protected against replacement
+    # races.
+    canonical_index = _parse_json_bytes(
+        _stable_file_bytes(root, "contracts/fixtures/index.json", MAX_JSON_BYTES),
+    )
+    require(index == canonical_index, "index object is not canonical")
     counts = _validate_index_document(index, root)
     canonical_baseline_path = _indexed_baseline_path(index, root)
     _validate_baseline(

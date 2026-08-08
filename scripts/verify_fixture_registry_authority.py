@@ -80,6 +80,14 @@ GIT_TIMEOUT_SECONDS = 10.0
 MAX_SNAPSHOT_FILE_BYTES = 1 * 1024 * 1024
 MAX_SNAPSHOT_PACK_FILE_BYTES = 8 * 1024 * 1024
 MAX_SNAPSHOT_TOTAL_BYTES = 32 * 1024 * 1024
+# Snapshot metadata is bounded separately from copied bytes. A repository with
+# unlimited empty entries could otherwise exhaust directory listings, retained
+# names, or descriptor stacks before any byte budget is reached.
+MAX_SNAPSHOT_ENTRIES = 4_096
+MAX_SNAPSHOT_DIRECTORIES = 1_024
+MAX_SNAPSHOT_FILES = 3_072
+MAX_SNAPSHOT_DEPTH = 64
+MAX_SNAPSHOT_PATH_STORAGE_BYTES = 1 * 1024 * 1024
 SNAPSHOT_TIMEOUT_SECONDS = 30.0
 MAX_ERROR_LENGTH = 220
 SAFE_ERROR_MESSAGE = "fixture registry authority rejected"
@@ -332,7 +340,7 @@ def _validate_local_config(data: bytes) -> None:
         _require(key not in {"insteadof", "pushinsteadof"})
 
 
-def _walk_plain_tree(path: Path) -> None:
+def _walk_plain_tree(path: Path, budget: "_SnapshotBudget | None" = None) -> None:
     """Descriptor-walk a Git tree without following nested symlinks."""
 
     no_follow = getattr(os, "O_NOFOLLOW", None)
@@ -340,30 +348,49 @@ def _walk_plain_tree(path: Path) -> None:
     directory_flag = getattr(os, "O_DIRECTORY", None)
     _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock
+    active_budget = budget or _SnapshotBudget.start()
     root_fd: int | None = None
-    pending: list[int] = []
+    pending: list[tuple[int, PurePosixPath, int]] = []
     try:
+        active_budget.check()
         root_fd = os.open(path, flags | directory_flag)
-        pending.append(root_fd)
+        pending.append((root_fd, PurePosixPath(), 0))
         root_fd = None
         while pending:
-            directory_fd = pending.pop()
+            active_budget.check()
+            directory_fd, relative_directory, depth = pending.pop()
             try:
                 _require(stat.S_ISDIR(os.fstat(directory_fd).st_mode))
-                for name in os.listdir(directory_fd):
-                    _require(name not in ("", ".", ".."))
-                    child_fd: int | None = None
-                    try:
-                        child_fd = os.open(name, flags, dir_fd=directory_fd)
-                        mode = os.fstat(child_fd).st_mode
-                        if stat.S_ISDIR(mode):
-                            pending.append(child_fd)
-                            child_fd = None
-                        else:
-                            _require(stat.S_ISREG(mode))
-                    finally:
-                        if child_fd is not None:
-                            os.close(child_fd)
+                with os.scandir(directory_fd) as entries:
+                    while True:
+                        active_budget.check()
+                        try:
+                            entry = next(entries)
+                        except StopIteration:
+                            break
+                        except OSError as exc:
+                            raise AuthorityError() from exc
+                        name = entry.name
+                        _require(name not in ("", ".", ".."))
+                        child_relative = relative_directory / name
+                        child_fd: int | None = None
+                        try:
+                            child_fd = os.open(name, flags, dir_fd=directory_fd)
+                            mode = os.fstat(child_fd).st_mode
+                            is_directory = stat.S_ISDIR(mode)
+                            active_budget.account_entry(
+                                child_relative,
+                                directory=is_directory,
+                                depth=depth + 1,
+                            )
+                            if is_directory:
+                                pending.append((child_fd, child_relative, depth + 1))
+                                child_fd = None
+                            else:
+                                _require(stat.S_ISREG(mode))
+                        finally:
+                            if child_fd is not None:
+                                os.close(child_fd)
             finally:
                 os.close(directory_fd)
     except AuthorityError:
@@ -377,7 +404,7 @@ def _walk_plain_tree(path: Path) -> None:
             except OSError:
                 pass
         while pending:
-            descriptor = pending.pop()
+            descriptor, _relative, _depth = pending.pop()
             try:
                 os.close(descriptor)
             except OSError:
@@ -401,6 +428,10 @@ class _SnapshotBudget:
 
     deadline: float
     total_bytes: int = 0
+    entries: int = 0
+    directories: int = 0
+    files: int = 0
+    path_storage_bytes: int = 0
 
     @classmethod
     def start(cls) -> "_SnapshotBudget":
@@ -408,6 +439,30 @@ class _SnapshotBudget:
 
     def check(self) -> None:
         _require(time.monotonic() <= self.deadline)
+
+    def account_entry(
+        self,
+        relative_path: PurePosixPath,
+        *,
+        directory: bool,
+        depth: int,
+    ) -> None:
+        self.check()
+        self.entries += 1
+        _require(self.entries <= MAX_SNAPSHOT_ENTRIES)
+        _require(depth <= MAX_SNAPSHOT_DEPTH)
+        try:
+            path_bytes = len(str(relative_path).encode("utf-8", "surrogatepass")) + 1
+        except (UnicodeError, ValueError) as exc:
+            raise AuthorityError() from exc
+        self.path_storage_bytes += path_bytes
+        _require(self.path_storage_bytes <= MAX_SNAPSHOT_PATH_STORAGE_BYTES)
+        if directory:
+            self.directories += 1
+            _require(self.directories <= MAX_SNAPSHOT_DIRECTORIES)
+        else:
+            self.files += 1
+            _require(self.files <= MAX_SNAPSHOT_FILES)
 
     def check_file_size(self, size: int, file_limit: int) -> None:
         self.check()
@@ -507,28 +562,42 @@ def _copy_git_tree(
     try:
         os.mkdir(destination, 0o700)
         budget.check()
-        for name in os.listdir(source_fd):
-            budget.check()
-            _require(name not in ("", ".", ".."))
-            child_fd: int | None = None
-            child_destination = destination / name
-            child_relative_path = relative_path / name
-            try:
-                child_fd = os.open(name, flags, dir_fd=source_fd)
-                mode = os.fstat(child_fd).st_mode
-                if stat.S_ISDIR(mode):
-                    _copy_git_tree(child_fd, child_destination, budget, child_relative_path)
-                else:
-                    _require(stat.S_ISREG(mode))
-                    _copy_regular_from_fd(
-                        child_fd,
-                        child_destination,
-                        budget,
+        with os.scandir(source_fd) as entries:
+            while True:
+                budget.check()
+                try:
+                    entry = next(entries)
+                except StopIteration:
+                    break
+                except OSError as exc:
+                    raise AuthorityError() from exc
+                name = entry.name
+                _require(name not in ("", ".", ".."))
+                child_fd: int | None = None
+                child_destination = destination / name
+                child_relative_path = relative_path / name
+                try:
+                    child_fd = os.open(name, flags, dir_fd=source_fd)
+                    mode = os.fstat(child_fd).st_mode
+                    is_directory = stat.S_ISDIR(mode)
+                    budget.account_entry(
                         child_relative_path,
+                        directory=is_directory,
+                        depth=len(child_relative_path.parts),
                     )
-            finally:
-                if child_fd is not None:
-                    os.close(child_fd)
+                    if is_directory:
+                        _copy_git_tree(child_fd, child_destination, budget, child_relative_path)
+                    else:
+                        _require(stat.S_ISREG(mode))
+                        _copy_regular_from_fd(
+                            child_fd,
+                            child_destination,
+                            budget,
+                            child_relative_path,
+                        )
+                finally:
+                    if child_fd is not None:
+                        os.close(child_fd)
         budget.check()
         _require(_file_stat_fingerprint(before) == _file_stat_fingerprint(os.fstat(source_fd)))
     except AuthorityError:

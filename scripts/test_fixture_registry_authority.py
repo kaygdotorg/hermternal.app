@@ -913,6 +913,46 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
             self.assertLess(time.monotonic() - started, 5)
 
+    def test_snapshot_zero_byte_file_cardinality_is_bounded_in_both_modes(self) -> None:
+        object_temporary, object_repo = self.copy_object_repo()
+        self.addCleanup(object_temporary.cleanup)
+        git_dir = object_repo / ".git"
+        for index in range(verifier.MAX_SNAPSHOT_FILES + 1):
+            (git_dir / f"snapshot-empty-file-{index}").touch()
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_snapshot_zero_byte_directory_cardinality_is_bounded_in_both_modes(self) -> None:
+        object_temporary, object_repo = self.copy_object_repo()
+        self.addCleanup(object_temporary.cleanup)
+        git_dir = object_repo / ".git"
+        for index in range(verifier.MAX_SNAPSHOT_DIRECTORIES + 1):
+            (git_dir / f"snapshot-empty-directory-{index}").mkdir()
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_snapshot_depth_is_bounded_in_both_modes(self) -> None:
+        object_temporary, object_repo = self.copy_object_repo()
+        self.addCleanup(object_temporary.cleanup)
+        current = object_repo / ".git"
+        for index in range(verifier.MAX_SNAPSHOT_DEPTH + 1):
+            current = current / f"d{index}"
+            current.mkdir()
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_snapshot_path_storage_is_bounded_before_byte_budget(self) -> None:
+        object_temporary, object_repo = self.copy_object_repo()
+        self.addCleanup(object_temporary.cleanup)
+        current = object_repo / ".git"
+        for index in range(8):
+            current = current / ("snapshot-path-directory-" + ("x" * 64) + str(index))
+            current.mkdir()
+        for index in range(1_300):
+            (current / (f"snapshot-path-file-{index:04d}" + ("y" * 100))).touch()
+        with self.copy_checkout() as checkout_temporary:
+            self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
     def test_snapshot_deadline_fails_closed(self) -> None:
         object_temporary, object_repo = self.copy_object_repo()
         self.addCleanup(object_temporary.cleanup)
