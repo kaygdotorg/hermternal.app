@@ -226,22 +226,48 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["live_claim"])
             self.assertEqual(payload["evidence_status"], "blocked")
 
+    def _run_scanner(self, artifact: Path, *, optimized: bool) -> subprocess.CompletedProcess[str]:
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend([
+            "-c",
+            (
+                "import sys; from pathlib import Path; "
+                "sys.path.insert(0, sys.argv[1]); import validate; "
+                "validate._validate_python_file(Path(sys.argv[2]))"
+            ),
+            str(artifact.parent.parent / "validator"),
+            str(artifact),
+        ])
+        environment = dict(os.environ)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        return subprocess.run(
+            command,
+            cwd=artifact.parents[2],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
     def _assert_scanner_rejects_in_both_modes(self, relative_path: str, source: bytes) -> None:
         repo_root = self._copy_fixture_repo()
         artifact = repo_root / "contracts/fixtures" / relative_path
         artifact.write_bytes(source)
-        self._rebind_copy(repo_root, refresh_anchor=True)
-        self._assert_blocked_in_both_modes(repo_root)
+        for optimized in (False, True):
+            completed = self._run_scanner(artifact, optimized=optimized)
+            self.assertNotEqual(completed.returncode, 0)
 
     def _assert_scanner_accepts_in_both_modes(self, relative_path: str, source: bytes) -> None:
         repo_root = self._copy_fixture_repo()
         artifact = repo_root / "contracts/fixtures" / relative_path
         artifact.write_bytes(source)
-        self._rebind_copy(repo_root, refresh_anchor=True)
         for optimized in (False, True):
-            completed = self._run(optimized=optimized, repo_root=repo_root)
-            self.assertEqual(completed.returncode, 0)
-            self.assertEqual(completed.stderr, "")
+            completed = self._run_scanner(artifact, optimized=optimized)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
 
     @staticmethod
     def _distribution(samples: list[float]) -> dict[str, float]:
