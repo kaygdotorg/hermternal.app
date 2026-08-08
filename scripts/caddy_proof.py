@@ -25,10 +25,11 @@ DEFAULT_HOST = "caddy-156.test"
 DEFAULT_HTTPS_PORT = 19443
 DEFAULT_HERMES_PORT = 19256
 
-# A successful browser journey is a separate claim from this local edge proof.
-# Keep its completion contract explicit so a caller cannot turn an arbitrary
-# status string into a successful journey without recording every required
-# status, including the terminal message-complete status.
+# A browser journey is a separate claim from this local edge proof. Keep its
+# evidence contract bounded and provenance-bound so a caller cannot turn an
+# arbitrary status string or event map into a result for a different run.
+BROWSER_EVIDENCE_SCHEMA = "hermternal.caddy-proof.browser-evidence.v1"
+BROWSER_EVIDENCE_MAX_BYTES = 4096
 BROWSER_COMPLETION_EVIDENCE = {
     "gateway.ready": "proven",
     "session.resume": "proven",
@@ -36,7 +37,20 @@ BROWSER_COMPLETION_EVIDENCE = {
     "message.delta": "proven",
     "message.complete": "complete",
 }
-BROWSER_BLOCKED_JOURNEYS = {"blocked_provider", "blocked_empty_session", "failed"}
+BROWSER_EVIDENCE_ROOT_KEYS = ("schema", "status", "provenance", "observations")
+BROWSER_EVIDENCE_PROVENANCE_KEYS = (
+    "build_sha",
+    "build_digest",
+    "caddyfile_digest",
+    "runtime_inputs_sha256",
+)
+BROWSER_BLOCKED_JOURNEYS = {"blocked_provider", "blocked_empty_session"}
+BROWSER_JOURNEYS = {"passed", *BROWSER_BLOCKED_JOURNEYS, "failed"}
+BROWSER_BLOCKER_CODES = {
+    "blocked_provider": "provider_unavailable",
+    "blocked_empty_session": "empty_session",
+}
+BROWSER_FAILURE_CODE = "browser_assertion_failed"
 
 # These are deterministic proof paths, not operator or user home paths. Keeping
 # them committed makes the retained runtime digest reproducible without storing
@@ -554,40 +568,99 @@ def render_from_inputs(value: Mapping[str, object]) -> str:
     return render_caddyfile(**inputs)
 
 
+def _browser_evidence_provenance(
+    *,
+    build_sha: str,
+    build_digest: str,
+    caddyfile_digest: str,
+    runtime_inputs_sha256: str,
+) -> dict[str, str]:
+    """Return the immutable run identity a browser artifact must match."""
+
+    return {
+        "build_sha": build_sha,
+        "build_digest": build_digest,
+        "caddyfile_digest": caddyfile_digest,
+        "runtime_inputs_sha256": runtime_inputs_sha256,
+    }
+
+
 def _resolve_browser_journey(
     browser_journey: str | None,
-    browser_completion_evidence: Mapping[str, object] | None,
-) -> tuple[str, dict[str, str] | None]:
-    """Resolve a browser status without allowing an unsupported false pass.
+    browser_evidence: Mapping[str, object] | None,
+    expected_provenance: Mapping[str, str],
+) -> tuple[str, dict[str, object]]:
+    """Derive a browser status from one bounded, exact-run evidence map.
 
-    The current retained lane has no browser completion evidence and therefore
-    remains blocked. A future successful lane must provide the closed,
-    status-specific evidence map; merely passing ``browser_journey="passed"``
-    is rejected.
+    ``browser_journey`` is accepted only as an optional assertion for callers
+    migrating from the original fixture API. It is never a source of status.
+    Every status has a fixed observation shape and the provenance must match
+    the build, static manifest, rendered Caddyfile, and runtime-input digest
+    for this exact proof run.
     """
 
-    if browser_journey is not None and browser_journey not in {
-        *BROWSER_BLOCKED_JOURNEYS,
-        "passed",
-    }:
+    if browser_evidence is None:
+        raise ValueError("browser evidence is required for every journey status")
+    if not isinstance(browser_evidence, Mapping):
+        raise ValueError("browser evidence must be a mapping")
+    if browser_journey is not None and (
+        type(browser_journey) is not str or browser_journey not in BROWSER_JOURNEYS
+    ):
         raise ValueError("browser_journey is outside the fixed proof vocabulary")
-    if browser_completion_evidence is None:
-        if browser_journey == "passed":
-            raise ValueError("browser_journey=passed requires completion evidence")
-        return browser_journey or "blocked_provider", None
-    if browser_journey in BROWSER_BLOCKED_JOURNEYS:
-        raise ValueError("completion evidence cannot accompany a blocked journey")
-    if not isinstance(browser_completion_evidence, Mapping):
-        raise ValueError("completion evidence must be a mapping")
-    if set(browser_completion_evidence) != set(BROWSER_COMPLETION_EVIDENCE):
-        raise ValueError("completion evidence must contain the closed event set")
-    normalized = {
-        event: browser_completion_evidence[event]
-        for event in BROWSER_COMPLETION_EVIDENCE
+    if set(browser_evidence) != set(BROWSER_EVIDENCE_ROOT_KEYS):
+        raise ValueError("browser evidence must contain the closed root key set")
+    if browser_evidence["schema"] != BROWSER_EVIDENCE_SCHEMA:
+        raise ValueError("browser evidence schema is unsupported")
+
+    status = browser_evidence["status"]
+    if type(status) is not str or status not in BROWSER_JOURNEYS:
+        raise ValueError("browser evidence status is unsupported")
+    if browser_journey is not None and browser_journey != status:
+        raise ValueError("browser_journey does not match browser evidence")
+
+    provenance = browser_evidence["provenance"]
+    if not isinstance(provenance, Mapping) or set(provenance) != set(BROWSER_EVIDENCE_PROVENANCE_KEYS):
+        raise ValueError("browser evidence provenance keys are incomplete")
+    normalized_provenance = {
+        key: provenance[key] for key in BROWSER_EVIDENCE_PROVENANCE_KEYS
     }
-    if normalized != BROWSER_COMPLETION_EVIDENCE:
-        raise ValueError("completion evidence does not prove a successful journey")
-    return "passed", dict(normalized)
+    if normalized_provenance != dict(expected_provenance):
+        raise ValueError("browser evidence provenance is stale or mismatched")
+
+    observations = browser_evidence["observations"]
+    if not isinstance(observations, Mapping):
+        raise ValueError("browser evidence observations must be a mapping")
+    if status == "passed":
+        if set(observations) != {"events"}:
+            raise ValueError("passed browser evidence must contain only events")
+        events = observations["events"]
+        if not isinstance(events, Mapping) or set(events) != set(BROWSER_COMPLETION_EVIDENCE):
+            raise ValueError("passed browser evidence must contain the closed event set")
+        normalized_events = {
+            event: events[event] for event in BROWSER_COMPLETION_EVIDENCE
+        }
+        if normalized_events != BROWSER_COMPLETION_EVIDENCE:
+            raise ValueError("passed browser evidence does not prove a complete journey")
+        normalized_observations: dict[str, object] = {"events": normalized_events}
+    elif status in BROWSER_BLOCKED_JOURNEYS:
+        if set(observations) != {"blocker"}:
+            raise ValueError("blocked browser evidence must contain only a blocker")
+        if observations["blocker"] != BROWSER_BLOCKER_CODES[status]:
+            raise ValueError("blocked browser evidence does not match its status")
+        normalized_observations = {"blocker": BROWSER_BLOCKER_CODES[status]}
+    else:
+        if set(observations) != {"failure"}:
+            raise ValueError("failed browser evidence must contain only a failure")
+        if observations["failure"] != BROWSER_FAILURE_CODE:
+            raise ValueError("failed browser evidence does not match its status")
+        normalized_observations = {"failure": BROWSER_FAILURE_CODE}
+
+    return status, {
+        "schema": BROWSER_EVIDENCE_SCHEMA,
+        "status": status,
+        "provenance": dict(expected_provenance),
+        "observations": normalized_observations,
+    }
 
 
 def render_manifest(
@@ -596,6 +669,7 @@ def render_manifest(
     build_digest: str,
     caddyfile_digest: str,
     browser_journey: str | None = None,
+    browser_evidence: Mapping[str, object] | None = None,
     browser_completion_evidence: Mapping[str, object] | None = None,
     runtime_inputs: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
@@ -606,22 +680,32 @@ def render_manifest(
     for name, value in (("build_digest", build_digest), ("caddyfile_digest", caddyfile_digest)):
         if not re.fullmatch(r"[0-9a-f]{64}", value):
             raise ValueError(f"{name} must be a SHA-256 digest")
-    resolved_journey, normalized_completion = _resolve_browser_journey(
-        browser_journey,
-        browser_completion_evidence,
-    )
 
+    if browser_evidence is not None and browser_completion_evidence is not None:
+        raise ValueError("browser evidence was supplied twice")
+    evidence = browser_evidence if browser_evidence is not None else browser_completion_evidence
     normalized_inputs = _validate_runtime_inputs(
         reconstruction_inputs() if runtime_inputs is None else runtime_inputs
     )
     rendered_digest = digest_bytes(render_from_inputs(normalized_inputs).encode("utf-8"))
     if caddyfile_digest != rendered_digest:
         raise ValueError("caddyfile_digest does not match the committed runtime inputs")
+    runtime_inputs_sha256 = runtime_input_digest(normalized_inputs)
+    resolved_journey, normalized_evidence = _resolve_browser_journey(
+        browser_journey,
+        evidence,
+        _browser_evidence_provenance(
+            build_sha=build_sha,
+            build_digest=build_digest,
+            caddyfile_digest=caddyfile_digest,
+            runtime_inputs_sha256=runtime_inputs_sha256,
+        ),
+    )
 
     # A VM-reported binary version or image digest is not an immutable local
-    # trust root. Retain only renderer output and deterministic inputs here;
-    # deployment identity must be separately collected and validated before a
-    # real deployment claim is made.
+    # trust root. Retain only renderer output, deterministic inputs, and fixed
+    # browser status markers; deployment identity must be separately collected
+    # and validated before a real deployment claim is made.
     manifest: dict[str, object] = {
         "schema": SCHEMA,
         "contract": "dashboard-v0.0.1",
@@ -631,7 +715,7 @@ def render_manifest(
             "runtime_config_sha256": caddyfile_digest,
             "runtime_inputs_schema": RUNTIME_INPUT_SCHEMA,
             "runtime_inputs": normalized_inputs,
-            "runtime_inputs_sha256": runtime_input_digest(normalized_inputs),
+            "runtime_inputs_sha256": runtime_inputs_sha256,
             "parity_fixtures": parity_fixture_manifest(),
         },
         "product": {
@@ -639,6 +723,7 @@ def render_manifest(
             "static_manifest_sha256": build_digest,
         },
         "browser_journey": resolved_journey,
+        "browser_evidence": normalized_evidence,
         "retention": {
             "credentials": "redacted",
             "cookies": "redacted",
@@ -649,9 +734,6 @@ def render_manifest(
             "transcripts": "redacted",
         },
     }
-    if normalized_completion is not None:
-        # These are status markers only, never browser payloads or transcripts.
-        manifest["browser_completion_evidence"] = normalized_completion
     return manifest
 
 
@@ -684,7 +766,8 @@ def main(argv: list[str] | None = None) -> int:
     evidence.add_argument("--build-sha", required=True)
     evidence.add_argument("--build-digest", required=True)
     evidence.add_argument("--caddyfile-digest", required=True)
-    evidence.add_argument("--browser-journey", required=True)
+    evidence.add_argument("--browser-evidence", type=Path, required=True)
+    evidence.add_argument("--browser-journey")
     args = parser.parse_args(argv)
 
     if args.command == "render":
@@ -710,6 +793,13 @@ def main(argv: list[str] | None = None) -> int:
         print(_build_static_digest(args.site_root))
         return 0
     if args.command == "evidence":
+        evidence_bytes = args.browser_evidence.read_bytes()
+        if len(evidence_bytes) > BROWSER_EVIDENCE_MAX_BYTES:
+            raise ValueError("browser evidence exceeds the bounded input size")
+        try:
+            browser_evidence = json.loads(evidence_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("browser evidence is not valid JSON") from exc
         print(
             json.dumps(
                 render_manifest(
@@ -717,6 +807,7 @@ def main(argv: list[str] | None = None) -> int:
                     build_digest=args.build_digest,
                     caddyfile_digest=args.caddyfile_digest,
                     browser_journey=args.browser_journey,
+                    browser_evidence=browser_evidence,
                 ),
                 sort_keys=True,
                 separators=(",", ":"),

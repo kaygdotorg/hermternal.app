@@ -45,10 +45,14 @@ upgrades use separate exact grammars. The current browser PTY client sends only
 and remains edge-denied. The proxy resets all inbound forwarding headers before
 rebuilding trusted public metadata. Local black-box
 Caddy/mock-upstream tests assert these behaviors against the shared static
-route and deep-link fixture identities. The browser journey remains
-`blocked_provider`: the official launcher has no provider credential, so this
-fixture retains no browser event artifact and does not claim `gateway.ready`,
-`session.resume`, `prompt.submit`, `message.delta`, or `message.complete`.
+route and deep-link fixture identities. The browser journey is derived from
+the bounded `browser_evidence` map: its fixed schema binds `passed`,
+`blocked_provider`, `blocked_empty_session`, or `failed` to the exact build,
+static manifest, rendered Caddyfile, and runtime-input digests. The retained
+map is `blocked_provider` with only `provider_unavailable`; no browser event
+payload is retained. A passed map requires the closed event set, including
+`message.complete: complete`; every other status requires its matching fixed
+marker. Missing, stale, mismatched, malformed, or extra-key maps fail closed.
 The local mock emits no `Set-Cookie`; the renderer-only `Secure` rewrite is not
 an attribute proof, so `HttpOnly`, `SameSite`, and `Path` remain unproven. A
 Caddy binary version or image digest is likewise external metadata, not a

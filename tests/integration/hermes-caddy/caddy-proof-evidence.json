@@ -35,6 +35,19 @@
     "static_manifest_sha256": "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
   },
   "browser_journey": "blocked_provider",
+  "browser_evidence": {
+    "schema": "hermternal.caddy-proof.browser-evidence.v1",
+    "status": "blocked_provider",
+    "provenance": {
+      "build_sha": "521ede32b904a42e22eebb279fd7d404074cd318",
+      "build_digest": "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21",
+      "caddyfile_digest": "342952687f19e425bd47126a47b5d17767c27aed99942252d6a6711b2b94f15c",
+      "runtime_inputs_sha256": "94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4"
+    },
+    "observations": {
+      "blocker": "provider_unavailable"
+    }
+  },
   "positive_cases": [
     {
       "id": "root_static",

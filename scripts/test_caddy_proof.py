@@ -255,6 +255,46 @@ class CaddyProofEvidenceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.evidence = json.loads(EVIDENCE_PATH.read_text(encoding="utf-8"))
 
+    def browser_evidence(
+        self,
+        status: str,
+        *,
+        provenance: dict[str, str] | None = None,
+        observations: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        expected_provenance = {
+            "build_sha": EXPECTED_BUILD_SHA,
+            "build_digest": EXPECTED_BUILD_DIGEST,
+            "caddyfile_digest": EXPECTED_CADDYFILE_DIGEST,
+            "runtime_inputs_sha256": caddy_proof.runtime_input_digest(
+                caddy_proof.reconstruction_inputs()
+            ),
+        }
+        if provenance is not None:
+            expected_provenance.update(provenance)
+        if observations is None:
+            if status == "passed":
+                observations = {"events": dict(caddy_proof.BROWSER_COMPLETION_EVIDENCE)}
+            elif status in caddy_proof.BROWSER_BLOCKED_JOURNEYS:
+                observations = {"blocker": caddy_proof.BROWSER_BLOCKER_CODES[status]}
+            else:
+                observations = {"failure": caddy_proof.BROWSER_FAILURE_CODE}
+        return {
+            "schema": caddy_proof.BROWSER_EVIDENCE_SCHEMA,
+            "status": status,
+            "provenance": expected_provenance,
+            "observations": observations,
+        }
+
+    def render_manifest(self, *, browser_evidence: dict[str, object], browser_journey: str | None = None) -> dict[str, object]:
+        return caddy_proof.render_manifest(
+            build_sha=EXPECTED_BUILD_SHA,
+            build_digest=EXPECTED_BUILD_DIGEST,
+            caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
+            browser_journey=browser_journey,
+            browser_evidence=browser_evidence,
+        )
+
     def test_evidence_anchor_matches_retained_bytes(self) -> None:
         expected = EVIDENCE_ANCHOR_PATH.read_text(encoding="utf-8").strip()
         actual = hashlib.sha256(EVIDENCE_PATH.read_bytes()).hexdigest()
@@ -266,6 +306,25 @@ class CaddyProofEvidenceTests(unittest.TestCase):
         self.assertEqual(self.evidence["product"]["static_manifest_sha256"], EXPECTED_BUILD_DIGEST)
         self.assertEqual(self.evidence["deployment"]["runtime_config_sha256"], EXPECTED_CADDYFILE_DIGEST)
         self.assertEqual(self.evidence["browser_journey"], "blocked_provider")
+        self.assertEqual(self.evidence["browser_evidence"]["status"], "blocked_provider")
+        self.assertEqual(
+            self.evidence["browser_evidence"]["provenance"]["runtime_inputs_sha256"],
+            caddy_proof.runtime_input_digest(caddy_proof.reconstruction_inputs()),
+        )
+
+    def test_runtime_digest_reconstructs_exact_generated_bytes(self) -> None:
+        deployment = self.evidence["deployment"]
+        runtime_inputs = deployment["runtime_inputs"]
+        rendered = caddy_proof.render_from_inputs(runtime_inputs)
+        self.assertEqual(
+            caddy_proof.digest_bytes(rendered.encode("utf-8")),
+            EXPECTED_CADDYFILE_DIGEST,
+        )
+        self.assertEqual(
+            caddy_proof.digest_bytes(rendered.encode("utf-8")),
+            deployment["runtime_config_sha256"],
+        )
+        self.assertEqual(rendered, caddy_proof.render_from_inputs(caddy_proof.reconstruction_inputs()))
 
     def test_rendered_evidence_does_not_claim_unverified_runtime_identity(self) -> None:
         manifest = caddy_proof.render_manifest(
@@ -273,42 +332,70 @@ class CaddyProofEvidenceTests(unittest.TestCase):
             build_digest=EXPECTED_BUILD_DIGEST,
             caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
             browser_journey="blocked_provider",
+            browser_evidence=self.browser_evidence("blocked_provider"),
         )
         deployment = manifest["deployment"]
         self.assertNotIn("caddy_version", deployment)
         self.assertNotIn("official_image_digest", deployment)
 
-    def test_render_manifest_rejects_false_pass_without_completion_evidence(self) -> None:
-        with self.assertRaisesRegex(ValueError, "completion evidence"):
+    def test_render_manifest_rejects_missing_and_false_pass_evidence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "browser evidence is required"):
             caddy_proof.render_manifest(
                 build_sha=EXPECTED_BUILD_SHA,
                 build_digest=EXPECTED_BUILD_DIGEST,
                 caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
                 browser_journey="passed",
             )
-        incomplete = dict(caddy_proof.BROWSER_COMPLETION_EVIDENCE)
-        incomplete["message.complete"] = "error"
-        with self.assertRaisesRegex(ValueError, "successful journey"):
-            caddy_proof.render_manifest(
-                build_sha=EXPECTED_BUILD_SHA,
-                build_digest=EXPECTED_BUILD_DIGEST,
-                caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
-                browser_journey="passed",
-                browser_completion_evidence=incomplete,
-            )
+        incomplete = self.browser_evidence("passed")
+        incomplete["observations"] = {"events": {"message.complete": "error"}}
+        with self.assertRaisesRegex(ValueError, "closed event set"):
+            self.render_manifest(browser_evidence=incomplete, browser_journey="passed")
+        incomplete = self.browser_evidence("passed")
+        incomplete["observations"]["events"]["message.complete"] = "error"  # type: ignore[index]
+        with self.assertRaisesRegex(ValueError, "complete journey"):
+            self.render_manifest(browser_evidence=incomplete, browser_journey="passed")
 
-    def test_render_manifest_derives_pass_only_from_closed_completion_statuses(self) -> None:
-        manifest = caddy_proof.render_manifest(
-            build_sha=EXPECTED_BUILD_SHA,
-            build_digest=EXPECTED_BUILD_DIGEST,
-            caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
-            browser_completion_evidence=caddy_proof.BROWSER_COMPLETION_EVIDENCE,
+    def test_render_manifest_derives_pass_only_from_provenance_bound_evidence(self) -> None:
+        manifest = self.render_manifest(
+            browser_evidence=self.browser_evidence("passed"),
+            browser_journey="passed",
         )
         self.assertEqual(manifest["browser_journey"], "passed")
+        self.assertEqual(manifest["browser_evidence"]["status"], "passed")
         self.assertEqual(
-            manifest["browser_completion_evidence"],
+            manifest["browser_evidence"]["observations"]["events"],
             caddy_proof.BROWSER_COMPLETION_EVIDENCE,
         )
+
+    def test_render_manifest_requires_matching_blocked_and_failed_evidence(self) -> None:
+        blocked = self.render_manifest(browser_evidence=self.browser_evidence("blocked_provider"))
+        self.assertEqual(blocked["browser_journey"], "blocked_provider")
+        with self.assertRaisesRegex(ValueError, "does not match its status"):
+            self.render_manifest(
+                browser_evidence=self.browser_evidence(
+                    "blocked_provider", observations={"blocker": "empty_session"}
+                )
+            )
+        failed = self.render_manifest(browser_evidence=self.browser_evidence("failed"))
+        self.assertEqual(failed["browser_journey"], "failed")
+        with self.assertRaisesRegex(ValueError, "does not match its status"):
+            self.render_manifest(
+                browser_evidence=self.browser_evidence(
+                    "failed", observations={"failure": "provider_unavailable"}
+                )
+            )
+
+    def test_render_manifest_rejects_stale_or_mismatched_evidence_maps(self) -> None:
+        stale = self.browser_evidence("passed", provenance={"build_sha": "0" * 40})
+        with self.assertRaisesRegex(ValueError, "stale or mismatched"):
+            self.render_manifest(browser_evidence=stale)
+        mismatch = self.browser_evidence("blocked_provider")
+        with self.assertRaisesRegex(ValueError, "does not match browser evidence"):
+            self.render_manifest(browser_evidence=mismatch, browser_journey="failed")
+        malformed = self.browser_evidence("blocked_provider")
+        malformed["unexpected"] = "rejected"
+        with self.assertRaisesRegex(ValueError, "closed root key set"):
+            self.render_manifest(browser_evidence=malformed)
 
     def test_retained_evidence_schema_narrows_unverified_claims(self) -> None:
         self.assertEqual(
@@ -320,6 +407,7 @@ class CaddyProofEvidenceTests(unittest.TestCase):
                 "deployment",
                 "product",
                 "browser_journey",
+                "browser_evidence",
                 "positive_cases",
                 "negative_cases",
                 "black_box",
@@ -337,6 +425,33 @@ class CaddyProofEvidenceTests(unittest.TestCase):
                 "reason": "local mock emitted no Set-Cookie; renderer-only Secure rewriting is not a complete cookie-attribute proof",
             },
         )
+
+    def test_statuses_and_docs_do_not_claim_unproven_browser_events(self) -> None:
+        self.assertEqual(self.evidence["browser_journey"], "blocked_provider")
+        self.assertEqual(self.evidence["cookie_proof"]["status"], "not_proven")
+        raw_evidence = EVIDENCE_PATH.read_text(encoding="utf-8")
+        for event in (
+            "gateway.ready",
+            "session.resume",
+            "prompt.submit",
+            "message.delta",
+            "message.complete",
+        ):
+            with self.subTest(event=event):
+                self.assertNotIn(f'"{event}"', raw_evidence)
+
+        caddy_readme = (ROOT / "tests/integration/hermes-caddy/README.md").read_text(encoding="utf-8")
+        scripts_readme = (ROOT / "scripts/README.md").read_text(encoding="utf-8")
+        for document in (caddy_readme, scripts_readme):
+            with self.subTest(document=document[:32]):
+                self.assertIn("blocked_provider", document)
+                self.assertIn("message.complete", document)
+                self.assertIn("not_proven", document)
+        self.assertIn("No browser event payload is", caddy_readme)
+        self.assertIn("contains no browser event payload", scripts_readme)
+        self.assertIn("HttpOnly", caddy_readme)
+        self.assertIn("SameSite", caddy_readme)
+        self.assertIn("Path", caddy_readme)
 
     def test_retained_evidence_nested_shapes_are_closed(self) -> None:
         """Reject unsupported fields inside retained evidence collections."""
@@ -363,6 +478,15 @@ class CaddyProofEvidenceTests(unittest.TestCase):
         self.assertEqual(set(deployment["parity_fixtures"]), {"static_route_grammar", "deep_link_cases"})
         for fixture in deployment["parity_fixtures"].values():
             self.assertEqual(set(fixture), {"path", "sha256"})
+
+        browser_evidence = self.evidence["browser_evidence"]
+        self.assertEqual(set(browser_evidence), set(caddy_proof.BROWSER_EVIDENCE_ROOT_KEYS))
+        self.assertEqual(
+            set(browser_evidence["provenance"]),
+            set(caddy_proof.BROWSER_EVIDENCE_PROVENANCE_KEYS),
+        )
+        self.assertEqual(set(browser_evidence["observations"]), {"blocker"})
+        self.assertEqual(browser_evidence["observations"]["blocker"], "provider_unavailable")
 
         positive_key_sets = {
             "root_static": {"id", "status", "layer", "upstream_request"},

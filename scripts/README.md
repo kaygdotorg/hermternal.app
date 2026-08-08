@@ -317,8 +317,9 @@ unsupported `fresh` parameters at the edge. The renderer strips
 all inbound `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` headers before
 rebuilding trusted public metadata, and applies the private upstream
 Host/Origin mapping and current `Secure` cookie rewrite. The local mock emits
-no `Set-Cookie`, so `HttpOnly`, `SameSite`, and `Path` attributes are not proven
-by this fixture. Caddy's canonical formatter uses tabs, so the renderer emits
+no `Set-Cookie`, so `cookie_proof.status` remains `not_proven`; `HttpOnly`,
+`SameSite`, and `Path` attributes are not proven by this fixture. Caddy's
+canonical formatter uses tabs, so the renderer emits
 that form directly; the runtime digest therefore covers the exact file that
 was validated.
 
@@ -351,12 +352,15 @@ runtime Caddyfile digest
 The runtime input manifest digest is
 `94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4`; its
 paths are deterministic proof placeholders, not retained user or VM paths.
-The retained browser state is `blocked_provider`: no browser event artifact is
-retained, so the fixture does not claim `gateway.ready`, `session.resume`, or
-`prompt.submit`; it also does not claim `message.delta` or `message.complete`.
-`render_manifest` rejects `browser_journey="passed"` unless the closed,
-status-specific completion map proves every required event, including
-`message.complete` with status `complete`; the current lane supplies no such
-map. It contains no credential, cookie, ticket, ticket fragment, provider
+The retained browser state is derived from the bounded `browser_evidence` map
+in `caddy-proof-evidence.json`. Its fixed
+`hermternal.caddy-proof.browser-evidence.v1` schema binds the status to the
+exact build, static manifest, rendered Caddyfile, and runtime-input digests.
+The current map is `blocked_provider` with only the semantic marker
+`provider_unavailable`; it contains no browser event payload. `render_manifest`
+rejects missing, malformed, stale, mismatched, or extra-key maps. `passed`
+requires the closed event set with `message.complete` set to `complete`, while
+`blocked_empty_session` and `failed` require their matching fixed marker. The
+fixture contains no credential, cookie, ticket, ticket fragment, provider
 payload, or transcript. A Caddy binary version or image digest is not retained
 or validated by this local fixture.

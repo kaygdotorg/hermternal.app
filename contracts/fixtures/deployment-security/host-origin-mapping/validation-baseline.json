@@ -97,31 +97,31 @@
       "mean": 0.24904960706666665
     }
   },
-  "semantics_sha256": "0d2cab9a0a709f9f1bf88ff91c53053af3d12c3d1cc5eb3dd0e227a02f71372f",
+  "semantics_sha256": "3d9fb573e84dd354c685e352534bfdbce91760f937c2090e06a4185bb4a86c84",
   "artifact": {
     "files": [
       {
         "path": "README.md",
-        "bytes": 8253,
-        "sha256": "0ff1ee8c929dc0ac70292b7ed4876cbf96ff93f84d68e3799b3adb82607c7f40"
+        "bytes": 12251,
+        "sha256": "7a1a913f43de99f06ff8977aadfb43e728a044ecfb32b90b9386e47ca50c822d"
       },
       {
         "path": "cases.json",
         "bytes": 52421,
-        "sha256": "0cf4f545eef2b9dba17792cef04fb8bfee1f785ada06c44d53a8e116a66b0b34"
+        "sha256": "fdff3685b8e8e3a583a6d75b79db426824661bf1d0ce44e51320031ebdf49e32"
       },
       {
         "path": "test_validate.py",
-        "bytes": 16401,
-        "sha256": "eb7e6c3290f3643235f56822245f245c9f5b46a7ff9703d197c18556da667f1e"
+        "bytes": 45430,
+        "sha256": "c26b484d3396be9496e055540e7c1e103777d8ba7cfbacc9f2c22096483c5e94"
       },
       {
         "path": "validate.py",
-        "bytes": 41535,
-        "sha256": "adc43a0e3e7414d35d888cacc14ef10d503ff32e51bd6c15a0eb62b4c245ea12"
+        "bytes": 60433,
+        "sha256": "a088481536a2737d7402517976d87287b11d290ba90cbc581cfb2e7db42d30a2"
       }
     ],
-    "bytes": 118610,
-    "sha256": "a177208dea9d1163b5945bc2531985ae1b0f85b2c930db2006e94a38594f2519"
+    "bytes": 170535,
+    "sha256": "4caf124879ce5093eb6dfde046e807cd480eaec2a178e2a356196f52c2415c07"
   }
 }

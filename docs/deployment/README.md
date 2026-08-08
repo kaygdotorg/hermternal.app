@@ -63,10 +63,13 @@ upstream path, body, prefix, query policy, and rebuilt headers. It does not
 contact the disposable VM during correction work.
 
 The official launcher intentionally publishes Hermes only on VM loopback. The
-retained browser state is `blocked_provider`: the launcher supplied no provider
-credential, so this fixture does not claim `gateway.ready`, `session.resume`, or
-`prompt.submit`, and it does not claim `message.delta` or `message.complete`.
-No browser event artifact or provider payload is retained. No preview URL is
+retained `browser_journey` is derived from the bounded `browser_evidence` map,
+not from a caller-supplied status. Its fixed schema binds the status to the
+build, static manifest, rendered Caddyfile, and runtime-input digests. The
+current map is `blocked_provider` with only `provider_unavailable`; no browser
+event payload or provider payload is retained. Passed, blocked-empty-session,
+and failed statuses each require their matching validated evidence, and missing,
+stale, mismatched, malformed, or extra-key maps fail closed. No preview URL is
 valid. This lane does not implement or attest Traefik.
 
 The local Caddy/mock-upstream proof emits no `Set-Cookie`. Its renderer test
