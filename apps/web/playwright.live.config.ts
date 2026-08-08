@@ -1,19 +1,30 @@
 import { defineConfig, devices } from '@playwright/test';
+import { liveArtifactOutputDirectory } from './tests/live/live-artifact-policy.mjs';
 
 const port = Number(process.env.PLAYWRIGHT_LIVE_PORT ?? 4187);
+const liveOutputDirectory = liveArtifactOutputDirectory();
+// Global teardown may run in a separate Node process, so pass only the safe
+// temporary path through the environment; no credential value is exported.
+process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR = liveOutputDirectory;
 
 export default defineConfig({
   testDir: './tests/live',
   fullyParallel: false,
   forbidOnly: true,
   retries: 0,
-  reporter: 'list',
+  // Live credentials must never enter the repository's retained test-results
+  // directory or a standard reporter's locator/DOM failure context.
+  outputDir: liveOutputDirectory,
+  preserveOutput: 'never',
+  reporter: [['./tests/live/safe-reporter.mjs']],
+  globalTeardown: './tests/live/live-artifact-teardown.mjs',
   timeout: 120_000,
   expect: { timeout: 30_000 },
   use: {
     baseURL: `http://127.0.0.1:${port}`,
-    // Live credentials must never enter retained Playwright traces.
     trace: 'off',
+    video: 'off',
+    screenshot: 'off',
     colorScheme: 'light'
   },
   webServer: {
