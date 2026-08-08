@@ -26,6 +26,10 @@ Svelte TerminalSurface owns renderer lifecycle.
   settles without suppressing later cleanup. If overlapping attaches return the
   same raw object, a stale completion never cleans the raw binding owned by the
   active lease; a distinct stale binding still receives exactly-once cleanup.
+- `reconnectTerminal()` invalidates the old lease before asking the adapter for a
+  fresh exact-identity binding. The adapter cannot expose a recovered PTY through
+  the direct transport reconnect seam; the coordinator adopts the new lease first
+  so later input, resize, session replacement, and logout retain ownership.
 - `logout()` and `dispose()` claim lifecycle state before adapter cleanup. They
   close Chat and clean the active Terminal lease at most once, increment the
   session generation once, and treat `disposed` as higher precedence than
@@ -34,7 +38,9 @@ Svelte TerminalSurface owns renderer lifecycle.
   transport remains open and usable. Switching back to Chat focuses the composer
   without retrying or replaying a prompt.
 - `reconnect()` coalesces concurrent calls to the existing Chat transport. It
-  does not reattach an already valid Terminal binding.
+  does not reattach an already valid Terminal binding. Terminal recovery uses
+  `reconnectTerminal()`, which requires the adapter's fresh-binding seam rather
+  than bypassing the coordinator lease.
 - `restore(sessionId)` uses the server-backed Chat restore boundary after a
   browser refresh. No messages, prompt text, or local transcript mirror are
   retained by this module.
@@ -84,15 +90,19 @@ const coordinator = createSessionCoordinator({
 
 `chat` is the existing `JsonRpcChatTransport` shape from issue #118. The
 `terminal` adapter returns an opaque `{ sessionId, invalidate() }` binding. It
-must not return PTY bytes or transcript data. The coordinator owns each returned
-binding through an attachment lease. One lease calls `invalidate()` and then
-optional `release()` exactly once; a later lease may wrap the same raw object
-after the earlier lease settles. During overlapping attaches, a stale result
-that matches the raw binding currently owned by the active lease is not wrapped
-in a second lease or cleaned; a distinct stale result receives its own lease and
-is cleaned exactly once. This ordering applies on session replacement, logout,
-disposal, and a stale asynchronous completion; a late binding is never installed
-into the new session.
+must not return PTY bytes or transcript data. An attach-mode adapter may also
+implement `reconnectBinding(sessionId, signal, onBindingReady)`; it must return
+a fresh binding, not merely reconnect the underlying transport. The optional
+callback lets the coordinator adopt that lease before a synchronous transport
+`attached` event can reach workspace presentation. The coordinator owns each
+returned binding through an attachment lease. One lease calls `invalidate()` and
+then optional `release()` exactly once; a later lease may wrap the same raw
+object after the earlier lease settles. During overlapping attaches, a stale
+result that matches the raw binding currently owned by the active lease is not
+wrapped in a second lease or cleaned; a distinct stale result receives its own
+lease and is cleaned exactly once. This ordering applies on session replacement,
+logout, disposal, and a stale asynchronous completion; a late binding is never
+installed into the new session.
 
 This is offline prototype evidence. The injected adapters are the only places
 where a later runtime may connect to a server or renderer; this change itself

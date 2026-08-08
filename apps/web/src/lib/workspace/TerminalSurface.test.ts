@@ -168,6 +168,23 @@ describe('TerminalSurface', () => {
     expect(bridge.setRendererReady).not.toHaveBeenCalledWith(true);
   });
 
+  it('keeps readiness closed and detaches when renderer mount fails', async () => {
+    const bridge = createBridge();
+    const implementation = rendererHarness.createTerminalRenderer.getMockImplementation();
+    if (!implementation) throw new Error('renderer implementation is missing');
+    rendererHarness.createTerminalRenderer.mockImplementationOnce((options) => {
+      const renderer = implementation(options);
+      renderer.mount.mockRejectedValueOnce(new Error('untrusted renderer detail'));
+      return renderer;
+    });
+
+    render(TerminalSurface, { bridge, active: true });
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Terminal unavailable.'));
+
+    expect(bridge.setRendererReady).toHaveBeenLastCalledWith(false);
+    expect(bridge.detach).toHaveBeenCalledTimes(1);
+  });
+
   it('applies coordinator focus intent and exposes lifecycle recovery actions', async () => {
     const bridge = createBridge();
     const focusIntent: FocusIntent = {

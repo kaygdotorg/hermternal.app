@@ -285,10 +285,73 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     }
   }
 
+  /**
+   * Reacquires a coordinator-owned binding before an attach-mode reconnect is
+   * exposed as attached. Direct transport reconnect remains available only for
+   * the bridge's transport seam; workspace actions must use this lease path.
+   */
+  async reconnectBinding(
+    sessionId: string,
+    signal?: AbortSignal,
+    onBindingReady?: (binding: TerminalBinding) => void
+  ): Promise<TerminalBinding> {
+    if (this.disposed) throw new PtyTransportError('closed');
+    if (signal?.aborted) throw new PtyTransportError('aborted');
+    if (this.currentState.sessionId !== sessionId) throw new PtyTransportError('aborted');
+    if (!this.currentState.reconnectSupported) {
+      throw new PtyTransportError('legacy-reattach-prohibited', this.currentState.generation);
+    }
+
+    this.invalidateActiveBinding();
+    await this.waitForRendererReady(signal);
+    if (this.disposed) throw new PtyTransportError('closed');
+    if (signal?.aborted) throw new PtyTransportError('aborted');
+
+    this.explicitlyClosed = false;
+    const token = {};
+    const binding: ActiveBinding = {
+      token,
+      sessionId,
+      valid: true,
+      invalidate: () => {
+        if (!binding.valid) return;
+        binding.valid = false;
+        if (this.activeBinding?.token !== token) return;
+        this.activeBinding = undefined;
+        this.transport.detach();
+      },
+      isValid: () => binding.valid
+    };
+    this.activeBinding = binding;
+    this.reconnectingSessionId = sessionId;
+
+    try {
+      // The coordinator adopts this fresh lease before reconnect can publish a
+      // synchronous attached transition. Direct bridge callers may omit the
+      // callback and retain the transport-only reconnect behavior.
+      onBindingReady?.(binding);
+      await this.transport.reconnect(signal);
+      if (this.disposed || !binding.valid || this.activeBinding?.token !== token) {
+        binding.valid = false;
+        throw new PtyTransportError('aborted');
+      }
+      return binding;
+    } catch (error) {
+      binding.valid = false;
+      if (this.activeBinding?.token === token) this.activeBinding = undefined;
+      if (this.reconnectingSessionId === sessionId) this.reconnectingSessionId = undefined;
+      if (error instanceof PtyTransportError && error.code === 'authentication-required') {
+        this.publishState({ ...this.currentState, status: 'failed', failure: 'authentication-required' });
+      }
+      throw error;
+    }
+  }
+
   detach(): void {
     if (this.disposed) return;
     this.explicitlyClosed = false;
     this.reconnectingSessionId = undefined;
+    this.cancelRendererReadyWaiters(new PtyTransportError('aborted'));
     this.invalidateActiveBinding();
   }
 
@@ -296,6 +359,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     if (this.disposed) return;
     this.explicitlyClosed = true;
     this.reconnectingSessionId = undefined;
+    this.cancelRendererReadyWaiters(new PtyTransportError('closed'));
     this.invalidateActiveBinding(false);
     this.transport.close();
     this.publishState(projectState(this.transport.state, true));
@@ -310,13 +374,17 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     this.reconnectingSessionId = undefined;
     this.unsubscribeTransport();
     this.listeners.clear();
+    this.cancelRendererReadyWaiters(new PtyTransportError('closed'));
+    this.invalidateActiveBinding(false);
+    this.transport.close();
+  }
+
+  private cancelRendererReadyWaiters(error: PtyTransportError): void {
     for (const waiter of [...this.rendererReadyWaiters]) {
       this.rendererReadyWaiters.delete(waiter);
       if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort);
-      waiter.reject(new PtyTransportError('closed'));
+      waiter.reject(error);
     }
-    this.invalidateActiveBinding(false);
-    this.transport.close();
   }
 
   private waitForRendererReady(signal?: AbortSignal): Promise<void> {
@@ -477,7 +545,7 @@ function projectState(state: PtyConnectionState, explicitlyClosed: boolean): Cur
     ...(state.closeClassification === undefined ? {} : { closeClassification: state.closeClassification }),
     outputMayBeTruncated: state.outputMayBeTruncated,
     explicitlyClosed,
-    reconnectSupported: state.mode === 'attach',
+    reconnectSupported: state.reconnectSupported ?? state.mode === 'attach',
     ...(failure === undefined ? {} : { failure })
   });
 }

@@ -12,9 +12,7 @@ W-Term renderer, session coordinator, workspace shell, or Chat UI.
 
 `createFreshPtyTicketProvider` adapts the reviewed authenticated request seam to
 one same-origin `POST /api/auth/ws-ticket` request per call. It requires the
-closed `{ ticket }` response shape and keeps no reusable credential state. Ticket
-HTTP 401 and 403 both become the workspace-neutral `authentication-required`
-error; response bodies, credentials, and ticket fragments never enter the error.
+closed `{ ticket }` response shape and keeps no reusable credential state.
 
 `createPtyTransport` exposes state and byte/event subscriptions plus these
 operations:
@@ -22,79 +20,51 @@ operations:
 - `connect(input)` opens the active Hermes session. Missing or empty `attach`
   omits the query value and selects legacy mode. A non-empty `attach` requires
   the injected fail-closed attachment validator before ticket mint or upgrade.
-- `reconnect()` is explicit and attach-only. Attachment identity is exactly the
-  session ID, attach handle, and process identity; `detachedAtMs` remains local
-  expiry evidence and cannot change a `4409` retry decision. Authorized reconnect
-  validates the 30-minute detached window and mints a fresh single-use ticket.
+- `reconnect()` is explicit and attach-only. It reuses the exact session,
+  attach, and process identity input, validates the 30-minute detached window,
+  and mints a fresh single-use ticket. A `4409` superseded socket is blocked
+  from reattaching because its replacement is already the active attachment.
+  Permanent close classifications and expired/invalid attachment evidence expose
+  `reconnectSupported: false`; `4401` remains recoverable through the auth path,
+  while `4403`, `4409`, `4410`, and other deterministic failures stay fail-closed.
 - `sendInput()` sends UTF-8 text or copied raw bytes only while attached.
 - `resize()` sends one binary `ESC [RESIZE:<cols>;<rows>]` frame after clamping
   exact integers to `1..2000` columns and `1..1000` rows.
 - `detach()` and `close()` remove every socket callback before closing. Attach
   mode enters `detached`; legacy mode enters `exited` because its bridge owns
-  the child process lifetime. Ordinary detach preserves an unresolved validator,
-  ticket, or socket-factory quarantine, so same-identity `connect()` and
-  `reconnect()` return the deterministic aborted result until that raw adapter
-  settles. Explicit `close()` authorizes a same-identity replacement after an
-  ordinary user Close, but it does not erase a server 4403 or 4409 fence; only a
-  different identity or the documented 4401 recovery transition clears those
-  fences. Close is therefore an explicit replacement path, not a retry bypass.
+  the child process lifetime. Explicit `close()` also blocks `reconnect()` until
+  a new `connect()` call makes the user's intent current again.
 - An established attach socket that reports `onerror` without `onclose` enters
-  `detached` and remains eligible for explicit reconnect. Before its callbacks
-  are removed, that error records one write-once local retention anchor for the
-  exact session, attach, and process identity. Repeated or stale errors cannot
-  move that anchor; explicit reattach is permitted through the reviewed
-  30-minute window and rejected after it. Every pre-open error or close remains
-  `failed` and removes no existing anchor, but it cannot seed or extend one.
-  Established 4401 also remains `failed`, retains the exact anchor, and blocks
-  `reconnect()` with `authentication-required`; after authentication, an
-  explicit same-identity `connect()` is the only recovery action and performs
-  one bounded reattach. Established 4403 remains a host/origin fence, and 4409
-  remains a supersession fence, across detach and Close cleanup. Changing
-  current-session identity discards old expiry evidence and clears those fences.
+  `detached` and remains eligible for explicit reconnect. An error or close
+  before `onopen` remains `failed` and cannot seed a detach-retention window.
+  Detached timestamps are scoped to the exact session, attach, and process
+  identity; changing current-session identity discards the old expiry evidence.
   Cleanup and state observers are generation-guarded so a synchronous retry or
   replacement cannot be overwritten by the old failure or Close path. A new
   attempt claims its generation and active slot before aborting the old adapter,
   and reattach notices/readiness are rechecked after observer callbacks. State
   events are captured before observers, but `onStateChange` runs only if that
-  transition still owns the generation after `onEvent`. The external caller's
-  `AbortSignal` is registered with the attempt before the validator is invoked;
-  synchronous validator, `onStateChange`, `onEvent`, and `subscribe(listener)`
-  cancellation or replacement therefore prevents ticket and socket work. The
-  owner is rechecked before every validator, ticket, upgrade, and socket-factory
-  stage. `ticket_pending` cancellation is rechecked before ticket minting, and
-  `connecting` cancellation is rechecked again before constructing the opaque
-  upgrade or invoking the socket factory. Therefore a reentrant observer cannot
-  allocate a stale socket or consume a replacement generation's factory work. A
-  detach timestamp is recorded only if adapter-controlled socket close returns
-  without
+  transition still owns the generation after `onEvent`. Ticket-pending
+  cancellation is rechecked before ticket minting or socket creation. A detach
+  timestamp is recorded only if adapter-controlled socket close returns without
   a replacement claiming the generation, so an old A cleanup cannot write
   evidence after reentrant B connects. Late socket-factory values are closed
   exactly once even when cancellation wins before the abort listener is
   installed. Coalesced callers share one ticket and socket, but each caller's
   abort signal only rejects that caller's wait; the shared attempt continues
-  while another caller still owns a wait. If cancellation reaches an adapter
-  that ignores its signal, the transport keeps that same-identity owner
-  quarantined until its validator, ticket provider, or socket factory settles.
-  A duplicate reconnect receives the deterministic aborted result instead of
-  minting parallel low-level work; its late ticket or validator cannot publish
-  state, and its late factory socket is closed without handlers. Explicit
-  same-identity `connect()` after Close is different replacement intent: it may
-  safely claim a new generation before the quarantined raw work settles, while
-  `reconnect()` remains denied by the Close latch. A different identity may
-  replace the current generation, but stale settlement can never reclaim it. If
-  an established reattach is cancelled after `onopen`, its exact
-  identity's detach-retention evidence is restored. `outputMayBeTruncated` is
-  true only for the current successful reattach and resets on detach, Close,
-  cancellation, failure, replacement, and unrelated generations.
+  while another caller still owns a wait. If an established reattach is
+  cancelled after `onopen`, its exact identity's detach-retention evidence is
+  restored. `outputMayBeTruncated` is true only for the current successful
+  reattach and resets on detach, Close, cancellation, failure, replacement, and
+  unrelated generations.
 
 The transport never queues input or resize frames. It has no prompt or tool
-action method, so reconnect cannot replay those actions. The transport owns one
-fresh ticket only while constructing its structured, same-origin
-`PtyWebSocketUpgradeRequest.query` handoff; it does not copy the ticket into
-state, storage, navigation, logs, or errors. The injected WebSocket factory owns
-its received upgrade request and must not retain, log, or expose ticket material.
-Errors are a closed semantic set and never include ticket values, ticket
-fragments, attach handles, terminal bytes, socket reasons, or adapter errors.
+action method, so reconnect cannot replay those actions. The structured
+`PtyWebSocketUpgradeRequest.query` is the one ephemeral, same-origin
+upgrade-URL handoff for the fresh ticket; the transport does not copy it into
+state, storage, navigation, logs, or errors. Errors are a closed semantic set
+and never include ticket values, ticket fragments, attach handles, terminal
+bytes, socket reasons, or adapter errors.
 
 ## Retained output and races
 
@@ -119,14 +89,21 @@ presentation state. `CurrentSessionTerminalBridge` owns one transport and one
 same-session binding at a time. It rejects stale PTY generations before byte
 forwarding, invalidates a binding after unsolicited detach/failure/exit, and
 maps `4401` to `authentication-required` while leaving `4403` as
-`incompatible-origin`.
+`incompatible-origin`. `reconnectBinding()` creates a fresh opaque binding for
+coordinator-owned attach-mode recovery; callers must not use the direct
+transport reconnect method as a workspace lease. The coordinator may supply a
+binding-adoption callback; the bridge invokes it before starting reconnect so a
+synchronous transport `attached` event cannot outrun the new lease. Explicit
+detach/close also rejects renderer-gated waiters synchronously.
 
 The pinned source has no client-visible attach-token issuance route. The normal
 browser bridge therefore connects in legacy mode and reports reconnect as
 unsupported; it never fakes an attach identity or silently creates a replacement
 PTY. Callers with a separately reviewed opaque attach/process-identity provider
-may pass it to the bridge, in which case reconnect delegates to the transport's
-exact attach-mode retention and supersession rules.
+may pass it to the bridge, in which case `reconnectBinding()` delegates to the
+transport's exact attach-mode retention and supersession rules while returning a
+new coordinator lease. Deterministic transport blocks hide retry rather than
+presenting a reconnect action that cannot succeed.
 
 The bridge can wait for the lazy TerminalSurface renderer-ready signal before
 its first `connect()` and before an attach-mode `reconnect()`. This prevents
@@ -143,125 +120,24 @@ types, active-session replacement, process-identity continuity, reconnect,
 retention equality and expiry, truncation notice, receive-order races, no action
 replay, `4409` stale cleanup, close-code classification, cancellation, Close,
 and callback cleanup. Lifecycle regressions cover already-aborted attempts,
-pre-open retry races, pre-open failure classification, established error-only
-`onerror` detachment with a write-once retention anchor, stale-error expiry,
-identity-scoped expiry evidence, reentrant Close replacement,
-observer cancellation during `ticket_pending`, `connecting`, and reattach,
-stale `onStateChange` suppression after `onEvent` Close, A-close/B replacement
+pre-open retry races, pre-open failure classification, established `onerror`
+detach semantics, identity-scoped expiry evidence, reentrant Close replacement,
+observer cancellation during `ticket_pending` and reattach, stale
+`onStateChange` suppression after `onEvent` Close, A-close/B replacement
 retention evidence, abort-listener replacement races, post-ticket stale
-continuations, and reentrant `connecting` cancellation, Detach, Close, caller
-abort, and replacement that produce no stale factory call or socket. It also
-covers late socket ownership, duplicate-caller cancellation,
+continuations, late socket ownership, duplicate-caller cancellation,
 adapter-close reentrancy, reattach-retention restoration, and prior-true
-truncation resets across failure and replacement transitions. New deterministic
-deferred-adapter regressions prove that ignored validator, ticket, and factory
-cancellation fences the current identity until settlement: no duplicate ticket
-or factory work starts, and a late factory socket is closed without state,
-bytes, notice, or retry publication. Companion Close regressions prove that
-explicit same-identity `connect()` safely supersedes each quarantined stage,
-while reconnect stays closed-latched. Tests also verify that terminal bytes and
-ticket material are not logged or retained in public state.
+truncation resets across failure and replacement transitions. Tests
+also verify that terminal bytes and ticket material are not logged or retained
+in public state.
 
 Accessibility is N/A for this transport-only change. It adds no UI nodes and
 does not alter the renderer contract. Keyboard, focus, semantic naming, browser
 zoom, contrast, reduced motion/transparency, and touch-target verification
 remain owned by the Terminal renderer and workspace integration issues.
 
-`pty-retry-authorization.bench.ts` measures only the synchronous same-identity
-retry decision after a prepared `4409`; ticket minting, socket creation,
-rendering, and network work remain outside the timed region. The checked-in
-1,000-evaluation artifact reports p50 `0.000708 ms`, p95 `0.002461 ms`, and p99
-`0.004835 ms`, with one setup ticket/socket and no blocked-attempt ticket/socket.
-`threshold` is `null` because no reviewed latency budget exists. Reproduce it
-with `bun src/lib/terminal/pty-retry-authorization.bench.ts` from `apps/web`.
-
-`pty-error-retention.bench.ts` measures 1,000 opened attach adapter-error cleanup
-and retention-anchor captures. It excludes setup ticket minting, socket creation,
-rendering, and network work. The checked-in artifact reports p50 `0.000583 ms`,
-p95 `0.002252 ms`, and p99 `0.004003 ms`; `threshold` is `null` until reviewed
-latency evidence defines a budget. Reproduce it with
-`bun src/lib/terminal/pty-error-retention.bench.ts` from `apps/web`.
-
-`pty-reconnect-supersession.bench.ts` captures 30 deterministic cancellation
-runs for each ignored adapter stage (`validator`, `ticket`, and `factory`), after
-five warmups. Stages execute sequentially, never with `Promise.all`. The
-transport's PTY owner is the full structured tuple `{ sessionId, attach,
-processIdentity }`; `detachedAtMs` is local expiry evidence and is not part of
-that identity. The JSON proof records the non-secret owner/session label used by
-the synthetic upgrade in `expectedOwnerIdentity`, `activeOwnerIdentities`,
-`staleSocketIdentity`, and `replacementSocketIdentity`; it does not copy attach
-handles or process identities into evidence. Each socket allocation remains a
-separate ordered `socketClosures` row with its identity label and exact
-`closeCalls` count. These are unique per-socket records, not a promise that the
-serialized owner label is globally unique: same-owner stale and replacement
-sockets can share a label, but cannot be collapsed into one cleanup count. The
-validator requires the expected owner set, no duplicate active owner, exact
-per-socket cleanup, and exactly-once close proofs.
-
-Each run retains its rounded raw settle sample, exact validator counts
-(`validatorCalls` is `2` and `validatorCallsBeforeRecovery` is `1`),
-stage-dependent ticket and socket-factory counts before and after recovery,
-opened-socket count, stale/replacement identities and close counts, callback
-nulling, all four late-callback dispatch counts, post-close state/bytes/notice
-counts, and exact proof assertions. The harness exercises the real replacement
-`onopen`, late `onmessage`/`onerror`/server-close emitters, and bounded waits.
-Recovery is outside the measured quarantine-settlement interval. The checked-in
-artifact is evidence of behavior and cleanup, not a latency claim;
-`threshold` remains `null` because no reviewed budget exists.
-
-`pty-connecting-ownership.bench.ts` measures only the ownership decision after
-the `connecting` state observer runs. Its timer starts immediately before the
-observer's Abort, Close, Detach, or replacement action and ends when the
-cancelled operation rejects; ticket/connect setup before that observer is not in
-the metric. It excludes network, Hermes, credentials, PTY bytes, rendering, and
-unsupported latency budgets. Its synthetic validator returns immediately and
-is not a timed or serialized validator-call metric. For Abort, Close, and
-Detach, the connecting guard wins before socket allocation: the artifact must
-show one ticket request, zero socket-factory calls, no socket allocation,
-identity row, or callbacks, and zero late-event dispatches. In those runs,
-`connectingGuard` is the primary proof; callback-null and late-callback
-assertions are conditional over the
-empty socket set, not fabricated callback coverage. Replacement allocates one
-identity-owned socket, proves its real `onopen`, and then proves callback nulling,
-late-event suppression, and exactly-once close. The v2 artifact retains raw
-samples, expected ticket/factory counts, duplicate-owner checks, the ordered
-per-socket cleanup ledger, and the conditional callback proof.
-
-The validator recomputes every distribution from rounded raw samples and every
-total from the raw run counters. It enforces exact schema-specific run,
-counter, assertion, owner, and close-ledger expectations; sequential stage
-metadata; and all proven-true cleanup and late-event assertions. Standard
-validation (`bun run validate:benchmark:pty`) performs those provenance and
-proof-ledger checks without requiring top-level key ordering or canonical
-`sourceBlobs` ordering. Optimized validation (`--optimized`) reruns the same
-checks and additionally requires the exact top-level schema shape and canonical
-source-blob order; it is a stricter evidence mode, not a different benchmark.
-Both modes reject failed or renamed proofs, wrong validator/ticket/factory
-counts, concurrent-stage metadata, missing provenance, or arbitrary source
-revisions.
-
-Both v2 artifacts record the actual full source commit and generation commit,
-source tree, and Git blob plus SHA-256 hashes for exactly the declared benchmark
-source, transport, package manifest, and lockfile. Provenance also records a
-clean detached checkout. Runtime provenance distinguishes Bun's embedded Node
-version from the host Node executable, records Bun/package-manager and declared
-engine versions, and requires the host Node to match `package.json`; it also
-records OS release, architecture, CPU model, and CPU count. Detached checkout
-provenance describes evidence generation and is separate from PTY
-`detachedAtMs`. The helper derives `sourceRevision` from the actual `HEAD` and
-rejects an arbitrary `GIT_SOURCE_REVISION` override. Generate evidence from a
-clean detached source checkout, writing outside the repository so the output
-file cannot make the checkout dirty:
-
-```sh
-git switch --detach <sourceRevision>
-bun src/lib/terminal/pty-reconnect-supersession.bench.ts > /tmp/pty-reconnect.json
-bun src/lib/terminal/pty-connecting-ownership.bench.ts > /tmp/pty-connecting.json
-```
-
-Run those commands from `apps/web`, then copy the two JSON files into
-`src/lib/terminal/` and commit them in a later evidence-only change. Validate
-both artifacts from `apps/web` with `bun run test:benchmark:pty`, which runs
-standard and `--optimized` validator modes. The benchmark command is
-synthetic-only and never contacts Hermes, opens a live endpoint, logs a ticket,
-or uses credentials.
+Performance evidence is limited to the bounded implementation rules: no local
+replay accumulation, one serialized conversion chain per active socket, and
+immediate stale-context release. No
+reviewed runtime latency or memory budget exists, so this issue does not claim a
+threshold.

@@ -14,6 +14,7 @@
     subscribe(listener: (event: CurrentSessionTerminalEvent) => void): () => void;
     sendInput(input: string | Uint8Array): void;
     resize(cols: number, rows: number): void;
+    detach?(): void;
     setRendererReady?(ready: boolean): void;
   };
 
@@ -182,11 +183,13 @@
       if (focusIntent && focusIntent.sequence === lastFocusSequence) renderer.focus();
     } catch {
       if (generation !== mountGeneration) return;
+      // A failed lazy mount has no byte sink. Keep readiness closed and detach
+      // the coordinator/bridge lease so a pending attach cannot start behind an
+      // error placeholder or later write into a missing renderer.
+      bridge.setRendererReady?.(false);
+      bridge.detach?.();
       rendererState = 'error';
       rendererError = { code: 'wasm-initialization-failed', message: 'Terminal unavailable.' };
-      // Do not leave coordinator activation pending forever when the optional
-      // renderer fails. The visible error remains local and redacted.
-      bridge.setRendererReady?.(true);
     } finally {
       rendererLoading = false;
       if (active && mounted && !renderer && generation !== mountGeneration && rendererState === 'idle') {
