@@ -222,7 +222,12 @@ success claim.
 The final baseline records the measured normal and optimized process samples,
 its canonical digest, and the four-artifact predecessor manifest. The final v2
 authority path is introduced in a separate descendant commit whose direct
-first parent is the finalized scanner/index/test/baseline commit. Normal and
+first parent is the finalized scanner/index/test/baseline commit. When protected
+aggregate test bytes change, advance that source commit, the hardened authority
+commit, and the protected runtime pin in that order; never weaken the manifest
+or infer a replacement from `HEAD`. The current aggregate test classes seed all
+four historical/active authority/source objects and prove that an unseeded
+single-head clone is blocked before a seeded clone succeeds. Normal and
 optimized aggregate CLI and discovery gates must remain equivalent; a passing
 result is still partial synthetic registry evidence, not live Hermes,
 authentication, deployment, streaming, or Terminal proof.
