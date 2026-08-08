@@ -712,13 +712,44 @@ describe("PTY transport", () => {
     expect(harness.sockets).toHaveLength(2);
   });
 
-  it("preserves attach retention when an adapter reports error without close", async () => {
-    const attached = makeHarness();
-    const socket = await open(attached);
+  it("anchors opened error-only attach retention once for the detached reattach state", async () => {
+    let now = 100_000;
+    const harness = makeHarness({ now: () => now });
+    const socket = await open(harness);
+    const staleError = socket.onerror;
+
     socket.onerror?.();
-    expect(attached.transport.state.status).toBe("detached");
-    await reattach(attached);
-    expect(attached.ticketProvider).toHaveBeenCalledTimes(2);
+    expect(harness.transport.state.status).toBe("detached");
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+
+    now += PTY_DETACH_RETENTION_MS - 1;
+    await reattach(harness);
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(2);
+
+    // The detached callback was removed. A buggy adapter may still invoke its
+    // captured error function, but that stale event cannot create a new anchor.
+    staleError?.();
+    expect(harness.transport.state.status).toBe("attached");
+  });
+
+  it("does not extend an error-only retention anchor with repeated stale errors", async () => {
+    let now = 200_000;
+    const harness = makeHarness({ now: () => now });
+    const socket = await open(harness);
+    const staleError = socket.onerror;
+
+    socket.onerror?.();
+    now += PTY_DETACH_RETENTION_MS + 1;
+    staleError?.();
+
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({
+      code: "expired-attachment",
+    });
+    // Expiry is a failed reattach preflight, so the exposed action changes from
+    // detached Reattach to the existing failed-state safe recovery contract.
+    expect(harness.transport.state.status).toBe("failed");
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+    expect(harness.sockets).toHaveLength(1);
   });
 
   it("emits immutable state transitions before reentrant Close transitions", async () => {

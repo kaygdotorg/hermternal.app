@@ -1,0 +1,28 @@
+{
+  "schema": "hermternal.pty-error-retention-benchmark.v1",
+  "operation": "opened attach adapter error cleanup and retention-anchor capture",
+  "metric": {
+    "name": "error_cleanup_and_anchor_wall_time",
+    "unit": "ms",
+    "clock": "performance.now"
+  },
+  "method": "R-7 inclusive linear interpolation",
+  "repetitions": 1000,
+  "warmups": 100,
+  "exclusions": [
+    "ticket minting",
+    "socket creation",
+    "rendering",
+    "network"
+  ],
+  "setupProof": {
+    "openedAttachPerOperation": 1,
+    "errorOnly": true
+  },
+  "distribution": {
+    "p50": 0.000583,
+    "p95": 0.002252,
+    "p99": 0.004003
+  },
+  "threshold": null
+}

@@ -33,10 +33,13 @@ operations:
   later cleanup such as `detach()` cannot weaken it. Only a new `connect()` call
   makes replacement user intent current again.
 - An established attach socket that reports `onerror` without `onclose` enters
-  `detached` and remains eligible for explicit reconnect. An error or close
-  before `onopen` remains `failed` and cannot seed a detach-retention window.
-  Detached timestamps are scoped to the exact session, attach, and process
-  identity; changing current-session identity discards the old expiry evidence.
+  `detached` and remains eligible for explicit reconnect. Before its callbacks
+  are removed, that error records one write-once local retention anchor for the
+  exact session, attach, and process identity. Repeated or stale errors cannot
+  move that anchor; explicit reattach is permitted through the reviewed
+  30-minute window and rejected after it. An error or close before `onopen`
+  remains `failed` and cannot seed or extend a detach-retention window. Changing
+  current-session identity discards the old expiry evidence.
   Cleanup and state observers are generation-guarded so a synchronous retry or
   replacement cannot be overwritten by the old failure or Close path. A new
   attempt claims its generation and active slot before aborting the old adapter,
@@ -57,12 +60,13 @@ operations:
   unrelated generations.
 
 The transport never queues input or resize frames. It has no prompt or tool
-action method, so reconnect cannot replay those actions. The structured
-`PtyWebSocketUpgradeRequest.query` is the one ephemeral, same-origin
-upgrade-URL handoff for the fresh ticket; the transport does not copy it into
-state, storage, navigation, logs, or errors. Errors are a closed semantic set
-and never include ticket values, ticket fragments, attach handles, terminal
-bytes, socket reasons, or adapter errors.
+action method, so reconnect cannot replay those actions. The transport owns one
+fresh ticket only while constructing its structured, same-origin
+`PtyWebSocketUpgradeRequest.query` handoff; it does not copy the ticket into
+state, storage, navigation, logs, or errors. The injected WebSocket factory owns
+its received upgrade request and must not retain, log, or expose ticket material.
+Errors are a closed semantic set and never include ticket values, ticket
+fragments, attach handles, terminal bytes, socket reasons, or adapter errors.
 
 ## Retained output and races
 
@@ -86,8 +90,9 @@ types, active-session replacement, process-identity continuity, reconnect,
 retention equality and expiry, truncation notice, receive-order races, no action
 replay, `4409` stale cleanup, close-code classification, cancellation, Close,
 and callback cleanup. Lifecycle regressions cover already-aborted attempts,
-pre-open retry races, pre-open failure classification, established `onerror`
-detach semantics, identity-scoped expiry evidence, reentrant Close replacement,
+pre-open retry races, pre-open failure classification, established error-only
+`onerror` detachment with a write-once retention anchor, stale-error expiry,
+identity-scoped expiry evidence, reentrant Close replacement,
 observer cancellation during `ticket_pending` and reattach, stale
 `onStateChange` suppression after `onEvent` Close, A-close/B replacement
 retention evidence, abort-listener replacement races, post-ticket stale
@@ -109,3 +114,10 @@ rendering, and network work remain outside the timed region. The checked-in
 `0.004835 ms`, with one setup ticket/socket and no blocked-attempt ticket/socket.
 `threshold` is `null` because no reviewed latency budget exists. Reproduce it
 with `bun src/lib/terminal/pty-retry-authorization.bench.ts` from `apps/web`.
+
+`pty-error-retention.bench.ts` measures 1,000 opened attach adapter-error cleanup
+and retention-anchor captures. It excludes setup ticket minting, socket creation,
+rendering, and network work. The checked-in artifact reports p50 `0.000583 ms`,
+p95 `0.002252 ms`, and p99 `0.004003 ms`; `threshold` is `null` until reviewed
+latency evidence defines a budget. Reproduce it with
+`bun src/lib/terminal/pty-error-retention.bench.ts` from `apps/web`.

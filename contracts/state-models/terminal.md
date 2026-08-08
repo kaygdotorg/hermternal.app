@@ -84,7 +84,7 @@ The source audit and deterministic regression fixtures for this distinction live
 | Already-open superseded socket | `detached` | The stale socket receives `4409` before the replacement is assigned; then the replacement attaches, and stale cleanup cannot detach or retry it. |
 | Legacy Hermternal **Close** | `exited` | Follow the legacy disconnect path, close the bridge, terminate the PTY, and offer a new terminal; reattach is prohibited. |
 | Attach Hermternal **Close** | `detached` | Detach the socket, retain the PTY for the keep-alive window, and stop client retries; do not claim that attach-mode Close killed the process. |
-| Network loss | `detached` | Reattach with the same token while the 30-minute window remains. |
+| Established attach adapter `error` without `close`, or network loss | `detached` | Record one local retention anchor before adapter callbacks are removed. Reattach with the same token while the 30-minute window remains; stale or repeated errors cannot extend it. An error before `open` is `failed` and offers no reattach. |
 
 Unknown close codes are compatibility failures. Do not treat them as permission to issue shell commands or to create a fresh session automatically.
 
