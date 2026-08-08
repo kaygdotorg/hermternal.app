@@ -80,6 +80,24 @@ PROOF_RUN_TOPOLOGY = "loopback_only_disposable"
 PROOF_RUN_REQUIRED_TOPOLOGY = "private_non_loopback_hermes_9119_default_deny_proxy_identity"
 PROOF_RUN_COMPLETION_GATE = "exact_reviewed_merged_commit_authorized_real_hermes"
 
+# The real deployment boundary is intentionally separate from this disposable
+# loopback fixture.  Keep the private Hermes port and bind class explicit so a
+# future proof cannot accidentally turn the synthetic service ports into a
+# public listener or claim that loopback is production-compatible.
+REQUIRED_HERMES_PORT = 9119
+REQUIRED_HERMES_BIND_CLASS = "private_non_loopback"
+PUBLIC_HERMES_EXPOSURE = False
+
+# Authentication and lifecycle observations below are synthetic models only.
+# They make the redaction, one-shot ticket, and PTY cleanup contracts executable
+# without retaining a credential, starting Hermes, or contacting a provider.
+TICKET_TTL_SECONDS = 30
+PTY_DETACHED_TTL_SECONDS = 30 * 60
+UPGRADE_RETRY_POLICY = MappingProxyType({"chat": "disabled", "pty": "disabled"})
+SYNTHETIC_COOKIE_PREFIX = "__Host-"
+SYNTHETIC_COOKIE_SCOPE = "/hermes"
+SYNTHETIC_COOKIE_ATTRIBUTES = ("Secure", "HttpOnly", "SameSite=Lax", "Path=/")
+
 # These are deterministic proof paths, not operator or user home paths.  The
 # dynamic file is part of the validated runtime manifest so the static file
 # provider always names the file the renderer emits.
@@ -886,7 +904,14 @@ def render_manifest(
             "runtime_inputs": normalized_inputs,
             "runtime_inputs_sha256": runtime_inputs_sha256,
             "parity_fixtures": parity_fixture_manifest(),
+            # These fields distinguish the disposable loopback fixture from the
+            # required production boundary. The fixture must never be treated
+            # as proof that Hermes may bind publicly or on a different port.
             "hermes_listener": "loopback-only",
+            "required_hermes_port": REQUIRED_HERMES_PORT,
+            "required_hermes_bind_class": REQUIRED_HERMES_BIND_CLASS,
+            "public_hermes_exposure": PUBLIC_HERMES_EXPOSURE,
+            "production_topology": PROOF_RUN_REQUIRED_TOPOLOGY,
             "public_listener": "loopback-only-disposable",
             "edge_policy": "local-forward-auth-closed-query-gate",
         },
@@ -941,6 +966,14 @@ def render_manifest(
                 "arbitrary inbound forwarding aliases are outside the finite Traefik override claim and require separate live deployment proof",
                 "the v3.7.6 minimum and HeaderRegexp rule syntax are recorded requirements, not runtime compatibility evidence",
                 "chat and PTY upgrade grammars remain distinct in the model",
+                "the /hermes prefix is stripped exactly once; duplicated and near-prefix paths are denied",
+                "SPA fallback maps only canonical client deep links to /200.html",
+                "the synthetic __Host- cookie canary requires Secure, HttpOnly, SameSite=Lax, Path=/, and no Domain",
+                "WebSocket tickets are single-use with a 30-second TTL and retained request material is redacted",
+                "PTY detach is followed by eventual 30-minute TTL cleanup without retaining input bytes",
+                "Chat and PTY WebSocket retries are disabled",
+                "the required Hermes boundary is private non-loopback TCP 9119 with no public exposure",
+                "blocked edge and direct-port vectors retain upstream_request=false",
             ],
             "request_material": "redacted",
         },
@@ -954,12 +987,22 @@ def render_manifest(
                 "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
                 "C0, DEL, and C1 request-target controls are denied before route matching",
                 "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
+                "blocked edge and network vectors retain upstream_request=false in the annotated evidence",
             ],
+            "no_upstream_observation": "edge_no_upstream evidence is reconstructed from bounded negative case metadata",
         },
         "cookie_proof": {
             "status": "not_proven",
             "reason": "Traefik renderer output does not prove HttpOnly, SameSite, Path, or Secure on a real Set-Cookie response",
+            "synthetic_model": secure_prefixed_cookie_observation(
+                "__Host-fixture=synthetic; Secure; HttpOnly; SameSite=Lax; Path=/"
+            ),
         },
+        "ticket_lifecycle": synthetic_ticket_lifecycle_observation(),
+        "pty_lifecycle": synthetic_pty_lifecycle_observation(),
+        "upgrade_retry_policy": upgrade_retry_policy(),
+        "hermes_boundary": private_hermes_boundary_observation(),
+        "edge_no_upstream": edge_no_upstream_observation(),
         "retention": {
             "credentials": "redacted",
             "cookies": "redacted",
@@ -1343,6 +1386,295 @@ def _header_value(headers: Mapping[str, str] | Sequence[tuple[str, str]] | None,
 
 def _query_matches(query: str, patterns: Iterable[str]) -> bool:
     return any(re.fullmatch(pattern, query) for pattern in patterns)
+
+
+def map_public_path(path: str) -> dict[str, object] | None:
+    """Return the one-prefix mapping used by the synthetic route proof.
+
+    Traefik's ``stripPrefix`` middleware is configured separately from this
+    model. Keeping the mapping executable here prevents a broad ``/hermes``
+    rule from silently accepting a duplicated prefix or a near-prefix such as
+    ``/hermesx``.
+    """
+
+    if type(path) is not str or not path.startswith("/") or _contains_request_controls(path):
+        return None
+    # Keep prefix mapping structural: encoded separators, dot segments, and
+    # raw-target obfuscation must be denied before stripPrefix can run.
+    if _unsafe_target(path, "", path):
+        return None
+    if path == "/hermes":
+        return {"public_prefix": "/hermes", "upstream_path": "/", "stripped": True}
+    if path.startswith("/hermes/"):
+        upstream_path = path[len("/hermes") :]
+        if upstream_path == "/hermes" or upstream_path.startswith("/hermes/"):
+            return None
+        return {"public_prefix": "/hermes", "upstream_path": upstream_path, "stripped": True}
+    if path.startswith("/hermes"):
+        return None
+    return {"public_prefix": "", "upstream_path": path, "stripped": False}
+
+
+def spa_fallback_path(path: str) -> str | None:
+    """Return the reviewed shell path for one canonical client deep link."""
+
+    if type(path) is not str or _contains_request_controls(path):
+        return None
+    return "/200.html" if re.fullmatch(CLIENT_ROUTE_PATTERN, path) else None
+
+
+def secure_prefixed_cookie_observation(set_cookie: str) -> dict[str, object]:
+    """Validate a redacted synthetic ``__Host-`` cookie canary.
+
+    Traefik is not started by this lane, so this is deliberately a model
+    observation rather than a real ``Set-Cookie`` proof. The value is accepted
+    only long enough to validate the grammar and is never returned.
+    """
+
+    if type(set_cookie) is not str or not set_cookie or len(set_cookie.encode("utf-8")) > 4096:
+        raise ValueError("synthetic Set-Cookie canary is malformed")
+    if _contains_request_controls(set_cookie):
+        raise ValueError("synthetic Set-Cookie canary contains controls")
+    parts = [part.strip() for part in set_cookie.split(";")]
+    if not parts or "=" not in parts[0]:
+        raise ValueError("synthetic Set-Cookie canary is missing its name")
+    name, value = parts[0].split("=", 1)
+    if not name.startswith(SYNTHETIC_COOKIE_PREFIX) or not value:
+        raise ValueError("synthetic cookie is outside the __Host- prefix contract")
+    attributes: dict[str, str | None] = {}
+    for part in parts[1:]:
+        if not part:
+            raise ValueError("synthetic cookie has an empty attribute")
+        key, separator, raw_value = part.partition("=")
+        key = key.strip().lower()
+        if key in attributes or not key:
+            raise ValueError("synthetic cookie has a duplicate or empty attribute")
+        if key in {"secure", "httponly"}:
+            if separator:
+                raise ValueError("boolean cookie attributes must not have values")
+            attributes[key] = None
+        elif key in {"samesite", "path"}:
+            if not separator or not raw_value:
+                raise ValueError("cookie attribute value is missing")
+            attributes[key] = raw_value.strip()
+        elif key == "domain":
+            raise ValueError("__Host- cookies must not declare Domain")
+        else:
+            raise ValueError("synthetic cookie attribute is outside the closed contract")
+    if set(attributes) != {"secure", "httponly", "samesite", "path"}:
+        raise ValueError("synthetic cookie security attributes are incomplete")
+    if attributes["path"] != "/" or str(attributes["samesite"]).lower() != "lax":
+        raise ValueError("synthetic cookie scope or SameSite policy is unsafe")
+    return {
+        "status": "synthetic_observed",
+        "name_prefix": SYNTHETIC_COOKIE_PREFIX,
+        "scope": SYNTHETIC_COOKIE_SCOPE,
+        "attributes": list(SYNTHETIC_COOKIE_ATTRIBUTES),
+        "value": "redacted",
+    }
+
+
+def redact_ticket_material(path: str, query: str) -> dict[str, str]:
+    """Remove the full upgrade target and bounded ticket fragment from logs."""
+
+    if type(path) is not str or type(query) is not str or not path.startswith("/"):
+        raise ValueError("ticket request material is malformed")
+    if _contains_request_controls(path) or _contains_request_controls(query):
+        raise ValueError("ticket request material contains controls")
+    if not any(part.partition("=")[0] == "ticket" for part in query.split("&")):
+        raise ValueError("ticket request material does not contain a ticket")
+    # Never return the input path or query. The caller can retain only these
+    # fixed markers, which also covers Hermes' bounded first-eight fragment.
+    return {
+        "request_target": "redacted",
+        "query": "redacted",
+        "ticket": "redacted",
+        "ticket_fragment": "redacted",
+    }
+
+
+class SyntheticTicketLedger:
+    """Model the pinned single-use, short-lived ticket boundary in memory."""
+
+    def __init__(self, ttl_seconds: int = TICKET_TTL_SECONDS) -> None:
+        if type(ttl_seconds) is not int or ttl_seconds <= 0:
+            raise ValueError("ticket TTL must be a positive integer")
+        self.ttl_seconds = ttl_seconds
+        self._issued: dict[str, float] = {}
+        self._consumed: set[str] = set()
+
+    def issue(self, token: str, *, now: float) -> None:
+        if type(token) is not str or not re.fullmatch(CHAT_TICKET_VALUE_PATTERN, token):
+            raise ValueError("ticket token is outside the bounded synthetic grammar")
+        if type(now) not in {int, float} or isinstance(now, bool):
+            raise ValueError("ticket timestamp is malformed")
+        self._issued[token] = float(now)
+
+    def consume(self, token: str, *, now: float) -> str:
+        if type(token) is not str or not re.fullmatch(CHAT_TICKET_VALUE_PATTERN, token):
+            return "invalid"
+        if type(now) not in {int, float} or isinstance(now, bool):
+            raise ValueError("ticket timestamp is malformed")
+        issued_at = self._issued.get(token)
+        if issued_at is None:
+            return "invalid"
+        if token in self._consumed:
+            return "reused"
+        self._consumed.add(token)
+        if float(now) - issued_at >= self.ttl_seconds:
+            return "expired"
+        return "accepted"
+
+
+def synthetic_ticket_lifecycle_observation() -> dict[str, object]:
+    """Return labels for one synthetic ticket, without retaining its value."""
+
+    ledger = SyntheticTicketLedger()
+    ledger.issue("fixtureTicket", now=0)
+    first_use = ledger.consume("fixtureTicket", now=1)
+    reused = ledger.consume("fixtureTicket", now=2)
+    ledger.issue("expiredTicket", now=0)
+    expired = ledger.consume("expiredTicket", now=TICKET_TTL_SECONDS + 1)
+    invalid = ledger.consume("unknownTicket", now=1)
+    return {
+        "status": "synthetic_observed",
+        "ttl_seconds": TICKET_TTL_SECONDS,
+        "first_use": first_use,
+        "reused_use": reused,
+        "expired_use": expired,
+        "invalid_use": invalid,
+        "retry": UPGRADE_RETRY_POLICY["chat"],
+        "redaction": redact_ticket_material("/api/ws", "ticket=fixtureTicket"),
+    }
+
+
+class SyntheticPtyLifecycle:
+    """Model detach plus eventual TTL cleanup without retaining PTY bytes."""
+
+    def __init__(self, ttl_seconds: int = PTY_DETACHED_TTL_SECONDS) -> None:
+        if type(ttl_seconds) is not int or ttl_seconds <= 0:
+            raise ValueError("PTY TTL must be a positive integer")
+        self.ttl_seconds = ttl_seconds
+        self._states: dict[str, float | None] = {}
+
+    def attach(self, attach_id: str, *, now: float) -> str:
+        if type(attach_id) is not str or not re.fullmatch(PTY_ATTACH_VALUE_PATTERN, attach_id):
+            raise ValueError("PTY attach identity is malformed")
+        self._states[attach_id] = None
+        return "attached"
+
+    def send_input(self, attach_id: str, payload: bytes) -> str:
+        if attach_id not in self._states or self._states[attach_id] is not None:
+            raise ValueError("PTY is not attached")
+        if not isinstance(payload, bytes):
+            raise ValueError("PTY input must be bytes")
+        # The payload is intentionally not stored or logged.
+        return "forwarded"
+
+    def detach(self, attach_id: str, *, now: float) -> str:
+        if attach_id not in self._states or self._states[attach_id] is not None:
+            raise ValueError("PTY is not attached")
+        if type(now) not in {int, float} or isinstance(now, bool):
+            raise ValueError("PTY timestamp is malformed")
+        self._states[attach_id] = float(now)
+        return "detached"
+
+    def reap(self, *, now: float) -> int:
+        if type(now) not in {int, float} or isinstance(now, bool):
+            raise ValueError("PTY timestamp is malformed")
+        expired = [
+            attach_id
+            for attach_id, detached_at in self._states.items()
+            if detached_at is not None and float(now) - detached_at >= self.ttl_seconds
+        ]
+        for attach_id in expired:
+            del self._states[attach_id]
+        return len(expired)
+
+
+def synthetic_pty_lifecycle_observation() -> dict[str, object]:
+    """Return detach and eventual-reap labels with all PTY material redacted."""
+
+    lifecycle = SyntheticPtyLifecycle()
+    attached = lifecycle.attach("fixtureAttach", now=0)
+    forwarded = lifecycle.send_input("fixtureAttach", b"synthetic-input")
+    detached = lifecycle.detach("fixtureAttach", now=1)
+    before_ttl = lifecycle.reap(now=PTY_DETACHED_TTL_SECONDS)
+    after_ttl = lifecycle.reap(now=PTY_DETACHED_TTL_SECONDS + 1)
+    return {
+        "status": "synthetic_observed",
+        "host_requirement": "posix_or_wsl",
+        "attach": attached,
+        "input": forwarded,
+        "detach": detached,
+        "before_ttl_reap": before_ttl,
+        "ttl_reap": after_ttl,
+        "retry": UPGRADE_RETRY_POLICY["pty"],
+        "kill": "not_claimed",
+        "replay_before_live": "not_claimed",
+        "retained_material": "redacted",
+    }
+
+
+def private_hermes_boundary_observation(source_identity: str = "untrusted") -> dict[str, object]:
+    """Describe the fixed private :9119 boundary without opening a socket."""
+
+    if source_identity not in {"proxy_identity", "untrusted"}:
+        raise ValueError("source identity is outside the synthetic firewall vocabulary")
+    return {
+        "status": "synthetic_observed",
+        "port": REQUIRED_HERMES_PORT,
+        "bind_class": REQUIRED_HERMES_BIND_CLASS,
+        "public_exposure": PUBLIC_HERMES_EXPOSURE,
+        "source_identity": source_identity,
+        "direct_result": "connection_denied" if source_identity == "untrusted" else "proxy_only",
+    }
+
+
+def upgrade_retry_policy() -> dict[str, str]:
+    """Return the fixed no-retry contract for both WebSocket routes."""
+
+    return dict(UPGRADE_RETRY_POLICY)
+
+
+def edge_no_upstream_observation(
+    cases: Iterable[Mapping[str, object]] | None = None,
+) -> dict[str, object]:
+    """Summarize blocked vectors that must stop before any upstream request.
+
+    The case identities and booleans are safe fixture metadata. No request
+    target, query, credential, or upstream payload is retained. Network-layer
+    direct-port denial is included because it is also a pre-upstream block.
+    """
+
+    selected = NEGATIVE_CASES if cases is None else cases
+    blocked_ids: list[str] = []
+    layers: set[str] = set()
+    for case in selected:
+        if not isinstance(case, Mapping):
+            raise ValueError("edge no-upstream cases must be mappings")
+        case_id = case.get("id")
+        layer = case.get("layer")
+        if type(case_id) is not str or not case_id:
+            raise ValueError("edge no-upstream case identity is malformed")
+        if case.get("upstream_request") is not False:
+            continue
+        if layer not in {"edge", "network"}:
+            raise ValueError("edge no-upstream case layer is outside the closed vocabulary")
+        blocked_ids.append(case_id)
+        layers.add(str(layer))
+    if not blocked_ids:
+        raise ValueError("edge no-upstream evidence requires at least one blocked case")
+    return {
+        "status": "synthetic_observed",
+        "scope": "annotated policy and network-boundary model",
+        "blocked_case_count": len(blocked_ids),
+        "blocked_case_ids": blocked_ids,
+        "blocked_layers": sorted(layers),
+        "all_blocked_cases_have_no_upstream_request": True,
+        "upstream_request": False,
+        "retained_request_material": "redacted",
+    }
 
 
 def _contains_request_controls(value: str) -> bool:

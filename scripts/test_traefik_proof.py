@@ -471,6 +471,116 @@ class TraefikRendererTests(unittest.TestCase):
                 headers=[("Host", self.authority), ("host", self.authority)],
             )
 
+    def test_prefix_mapping_and_spa_fallback_are_exactly_bounded(self) -> None:
+        self.assertEqual(
+            traefik_proof.map_public_path("/hermes"),
+            {"public_prefix": "/hermes", "upstream_path": "/", "stripped": True},
+        )
+        self.assertEqual(
+            traefik_proof.map_public_path("/hermes/api/auth/providers"),
+            {"public_prefix": "/hermes", "upstream_path": "/api/auth/providers", "stripped": True},
+        )
+        self.assertEqual(
+            traefik_proof.map_public_path("/api/auth/providers"),
+            {"public_prefix": "", "upstream_path": "/api/auth/providers", "stripped": False},
+        )
+        for path in (
+            "/hermes/hermes/api/ws",
+            "/hermes/hermes",
+            "/hermesx/api/ws",
+            "/hermes/../api/ws",
+            "/hermes/%2Fapi/ws",
+            "/hermes\x00/api/ws",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNone(traefik_proof.map_public_path(path))
+        self.assertEqual(traefik_proof.spa_fallback_path("/v1/c/abcdefghijklmnop"), "/200.html")
+        self.assertEqual(
+            traefik_proof.spa_fallback_path("/v1/c/abcdefghijklmnop/m/qrstuvwxyzabcdef"),
+            "/200.html",
+        )
+        for path in ("/v1/c/short", "/v1/c/abcdefghijklmnop?x", "/_app/app.js", "/v1/c/foo\x7f"):
+            with self.subTest(path=path):
+                self.assertIsNone(traefik_proof.spa_fallback_path(path))
+
+    def test_secure_prefixed_cookie_canary_is_synthetic_and_closed(self) -> None:
+        observed = traefik_proof.secure_prefixed_cookie_observation(
+            "__Host-fixture=synthetic; Secure; HttpOnly; SameSite=Lax; Path=/"
+        )
+        self.assertEqual(observed["status"], "synthetic_observed")
+        self.assertEqual(observed["name_prefix"], "__Host-")
+        self.assertEqual(observed["scope"], "/hermes")
+        self.assertEqual(observed["attributes"], ["Secure", "HttpOnly", "SameSite=Lax", "Path=/"])
+        self.assertEqual(observed["value"], "redacted")
+        invalid = (
+            "__Host-fixture=synthetic; HttpOnly; SameSite=Lax; Path=/",
+            "__Host-fixture=synthetic; Secure; SameSite=Lax; Path=/",
+            "__Host-fixture=synthetic; Secure; HttpOnly; SameSite=None; Path=/",
+            "__Host-fixture=synthetic; Secure; HttpOnly; SameSite=Lax; Path=/hermes",
+            "__Host-fixture=synthetic; Secure; HttpOnly; SameSite=Lax; Path=/; Domain=example.test",
+            "__Host-fixture=synthetic; Secure; HttpOnly; SameSite=Lax; Path=/; Secure",
+            "__Host-fixture=synthetic; Secure; HttpOnly; SameSite=Lax; Path=/; Priority=High",
+        )
+        for header in invalid:
+            with self.subTest(header=header):
+                with self.assertRaises(ValueError):
+                    traefik_proof.secure_prefixed_cookie_observation(header)
+
+    def test_ticket_lifecycle_is_single_use_expiring_and_redacted(self) -> None:
+        ledger = traefik_proof.SyntheticTicketLedger(ttl_seconds=30)
+        ledger.issue("fixtureTicket", now=0)
+        self.assertEqual(ledger.consume("fixtureTicket", now=1), "accepted")
+        self.assertEqual(ledger.consume("fixtureTicket", now=2), "reused")
+        ledger.issue("expiredTicket", now=0)
+        self.assertEqual(ledger.consume("expiredTicket", now=30), "expired")
+        self.assertEqual(ledger.consume("unknownTicket", now=1), "invalid")
+        redacted = traefik_proof.redact_ticket_material("/api/ws", "ticket=fixtureTicket")
+        self.assertEqual(
+            redacted,
+            {
+                "request_target": "redacted",
+                "query": "redacted",
+                "ticket": "redacted",
+                "ticket_fragment": "redacted",
+            },
+        )
+        self.assertNotIn("fixtureTicket", json.dumps(redacted))
+        observation = traefik_proof.synthetic_ticket_lifecycle_observation()
+        self.assertEqual(observation["first_use"], "accepted")
+        self.assertEqual(observation["reused_use"], "reused")
+        self.assertEqual(observation["expired_use"], "expired")
+        self.assertEqual(observation["invalid_use"], "invalid")
+        self.assertEqual(observation["retry"], "disabled")
+
+    def test_pty_lifecycle_detaches_and_reaps_without_retaining_input(self) -> None:
+        lifecycle = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=30)
+        self.assertEqual(lifecycle.attach("fixtureAttach", now=0), "attached")
+        self.assertEqual(lifecycle.send_input("fixtureAttach", b"synthetic-input"), "forwarded")
+        self.assertEqual(lifecycle.detach("fixtureAttach", now=1), "detached")
+        self.assertEqual(lifecycle.reap(now=30), 0)
+        self.assertEqual(lifecycle.reap(now=31), 1)
+        with self.assertRaises(ValueError):
+            lifecycle.send_input("fixtureAttach", b"after-detach")
+        observation = traefik_proof.synthetic_pty_lifecycle_observation()
+        self.assertEqual(observation["before_ttl_reap"], 0)
+        self.assertEqual(observation["ttl_reap"], 1)
+        self.assertEqual(observation["retry"], "disabled")
+        self.assertEqual(observation["retained_material"], "redacted")
+
+    def test_private_boundary_no_retry_and_no_upstream_observation_are_explicit(self) -> None:
+        boundary = traefik_proof.private_hermes_boundary_observation()
+        self.assertEqual(boundary["port"], 9119)
+        self.assertEqual(boundary["bind_class"], "private_non_loopback")
+        self.assertFalse(boundary["public_exposure"])
+        self.assertEqual(boundary["direct_result"], "connection_denied")
+        self.assertEqual(traefik_proof.upgrade_retry_policy(), {"chat": "disabled", "pty": "disabled"})
+        no_upstream = traefik_proof.edge_no_upstream_observation()
+        self.assertEqual(no_upstream["blocked_case_count"], 20)
+        self.assertTrue(no_upstream["all_blocked_cases_have_no_upstream_request"])
+        self.assertFalse(no_upstream["upstream_request"])
+        self.assertIn("network", no_upstream["blocked_layers"])
+        self.assertIn("direct_private_port", no_upstream["blocked_case_ids"])
+
     def test_runtime_digest_is_stable_and_evidence_is_redacted(self) -> None:
         self.assertEqual(traefik_proof.rendered_config_digest(self.inputs), EXPECTED_CONFIG_DIGEST)
         self.assertEqual(
@@ -891,6 +1001,11 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 "model_assertions",
                 "offline_harness",
                 "cookie_proof",
+                "ticket_lifecycle",
+                "pty_lifecycle",
+                "upgrade_retry_policy",
+                "hermes_boundary",
+                "edge_no_upstream",
                 "retention",
             },
         )
@@ -908,6 +1023,10 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 "hermes_listener",
                 "public_listener",
                 "edge_policy",
+                "required_hermes_port",
+                "required_hermes_bind_class",
+                "public_hermes_exposure",
+                "production_topology",
             },
         )
         self.assertEqual(set(deployment["runtime_inputs"]), set(traefik_proof.DEFAULT_RUNTIME_INPUTS))
@@ -935,11 +1054,23 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         self.assertEqual(set(self.evidence["browser_evidence"]), set(traefik_proof.BROWSER_EVIDENCE_ROOT_KEYS))
         self.assertEqual(self.evidence["browser_evidence"]["observations"], {"blocker": "provider_unavailable"})
         self.assertEqual(self.evidence["proof_run"], traefik_proof._synthetic_proof_run())
+        self.assertEqual(deployment["required_hermes_port"], traefik_proof.REQUIRED_HERMES_PORT)
+        self.assertEqual(deployment["required_hermes_bind_class"], traefik_proof.REQUIRED_HERMES_BIND_CLASS)
+        self.assertFalse(deployment["public_hermes_exposure"])
+        self.assertEqual(deployment["production_topology"], traefik_proof.PROOF_RUN_REQUIRED_TOPOLOGY)
         self.assertEqual(self.evidence["offline_harness"]["status"], "regression_tested")
         self.assertEqual(
             self.evidence["offline_harness"]["traefik_runtime"],
             "not_run; configuration and rule compatibility are not claimed",
         )
+        self.assertIn("no_upstream_observation", self.evidence["offline_harness"])
+        self.assertEqual(self.evidence["cookie_proof"]["status"], "not_proven")
+        self.assertEqual(self.evidence["cookie_proof"]["synthetic_model"]["value"], "redacted")
+        self.assertEqual(self.evidence["ticket_lifecycle"]["retry"], "disabled")
+        self.assertEqual(self.evidence["pty_lifecycle"]["ttl_reap"], 1)
+        self.assertEqual(self.evidence["upgrade_retry_policy"], {"chat": "disabled", "pty": "disabled"})
+        self.assertEqual(self.evidence["hermes_boundary"], traefik_proof.private_hermes_boundary_observation())
+        self.assertEqual(self.evidence["edge_no_upstream"]["blocked_case_count"], 20)
         self.assertEqual(len(self.evidence["positive_cases"]), 11)
         self.assertEqual(len(self.evidence["negative_cases"]), 23)
         for case in [*self.evidence["positive_cases"], *self.evidence["negative_cases"]]:

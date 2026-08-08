@@ -100,9 +100,31 @@ alias deletion either. Those runtime guarantees remain a future real Traefik
 plus recording-upstream capture requirement or a dedicated sanitizer boundary,
 outside this offline harness. Root and dashboard WebSocket routes use separate
 header middleware so prefix stripping does not erase the `/hermes` contract.
-The proof does not claim that a cookie has `Secure`, `HttpOnly`, `SameSite`, or
-`Path`: no real `Set-Cookie` response is captured, so `cookie_proof.status`
-remains `not_proven`.
+The proof does not claim that a live Traefik/Hermes response has a cookie with
+`Secure`, `HttpOnly`, `SameSite`, or `Path`: no real `Set-Cookie` response is
+captured, so `cookie_proof.status` remains `not_proven`. It does retain a
+synthetic `__Host-` canary model that requires `Secure`, `HttpOnly`,
+`SameSite=Lax`, `Path=/`, and no `Domain`; the canary value is always
+`redacted` and is not a live cookie observation.
+
+The synthetic ticket ledger models the contract's 30-second, single-use Chat
+and PTY ticket boundary. It records only fixed outcomes for first use, reuse,
+expiry, and invalid tickets. Upgrade targets, queries, ticket values, and the
+bounded ticket fragment are all represented by fixed `redacted` markers. Chat
+and PTY upgrade retries are explicitly `disabled`; this does not claim that a
+live Traefik runtime has exercised a retry path.
+
+The synthetic PTY lifecycle models POSIX/WSL attach, input forwarding without
+retaining bytes, detach, no cleanup before the 30-minute detached TTL, and
+one eventual TTL reap. It deliberately does not claim immediate PTY kill or
+replay-before-live ordering. These are lifecycle contract labels, not a live
+Hermes process observation.
+
+The annotated negative evidence includes an explicit no-upstream summary. All
+edge-denied and direct-private-port vectors retain `upstream_request=false`.
+The direct-port vector describes untrusted access denied at the required
+private non-loopback Hermes TCP `9119` boundary; no socket is opened by this
+fixture and no firewall is exercised.
 
 ## Offline harness and generated files
 
@@ -134,7 +156,8 @@ before making that runtime claim.
 - the same static build and shared route/deep-link fixture identities used by
   the disposable Caddy proof;
 - the deterministic Traefik static/dynamic configuration digest;
-- the deterministic runtime-input digest; and
+- the deterministic runtime-input digest;
+- the synthetic cookie, ticket, PTY, no-retry, and no-upstream model outputs; and
 - the fixed synthetic proof-run boundary (`live_run=false`, `compatible=false`).
 
 The browser state is `blocked_provider` with only the fixed
@@ -164,8 +187,10 @@ These checks are offline and use only standard-library policy, renderer, and
 loopback adapter code. They do not invoke a Traefik CLI, and therefore do not
 claim Traefik configuration parsing, `v3.7.6` minimum compatibility, or runtime
 `HeaderRegexp` behavior. The suite does not claim a live Traefik deployment, a
-Hermes process, provider availability, cookie attributes, firewall behavior,
-or issue #90 completion. The fixture keeps `proof_run.live_run=false` and
+Hermes process, provider availability, live cookie attributes, firewall behavior,
+or issue #90 completion. Synthetic cookie and lifecycle models make the
+reviewed invariants executable without upgrading them into live deployment
+proof. The fixture keeps `proof_run.live_run=false` and
 `proof_run.compatible=false`; only an authorized live exercise of the exact
 reviewed and merged build against real Hermes in the required private topology
 can clear that deployment gate.
