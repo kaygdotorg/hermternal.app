@@ -24,20 +24,15 @@ function cloneArtifact(path: string): MutableArtifact {
   return JSON.parse(JSON.stringify(readArtifact(path))) as MutableArtifact;
 }
 
-function runCli(
-  path: string,
-  optimized = false,
+function runCliArgs(
+  args: readonly string[],
 ): { readonly ok: boolean; readonly output: string } {
   try {
-    const output = execFileSync(
-      "bun",
-      [CLI, ...(optimized ? ["--optimized"] : []), path],
-      {
-        cwd: process.cwd(),
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    const output = execFileSync("bun", [CLI, ...args], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     return { ok: true, output };
   } catch (error) {
     const failure = error as {
@@ -57,6 +52,13 @@ function runCli(
   }
 }
 
+function runCli(
+  path: string,
+  optimized = false,
+): { readonly ok: boolean; readonly output: string } {
+  return runCliArgs([...(optimized ? ["--optimized"] : []), path]);
+}
+
 function withTempArtifact<T>(
   artifact: MutableArtifact,
   callback: (path: string) => T,
@@ -64,6 +66,17 @@ function withTempArtifact<T>(
   const directory = mkdtempSync(join(tmpdir(), "hermternal-pty-validator-"));
   const path = join(directory, "artifact.json");
   writeFileSync(path, JSON.stringify(artifact, null, 2));
+  try {
+    return callback(path);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function withTempJson<T>(source: string, callback: (path: string) => T): T {
+  const directory = mkdtempSync(join(tmpdir(), "hermternal-pty-json-"));
+  const path = join(directory, "artifact.json");
+  writeFileSync(path, source);
   try {
     return callback(path);
   } finally {
@@ -84,9 +97,13 @@ function expectCliFailure(
 }
 
 describe("PTY benchmark evidence validator", () => {
-  it("validates the checked-in deterministic artifacts through the file API", () => {
-    expect(() => validatePtyBenchmarkFile(RECONNECT_ARTIFACT)).not.toThrow();
-    expect(() => validatePtyBenchmarkFile(CONNECTING_ARTIFACT)).not.toThrow();
+  it("validates both checked-in v2 artifacts in both modes", () => {
+    for (const path of [RECONNECT_ARTIFACT, CONNECTING_ARTIFACT]) {
+      expect(() => validatePtyBenchmarkFile(path)).not.toThrow();
+      expect(() =>
+        validatePtyBenchmarkFile(path, { optimized: true }),
+      ).not.toThrow();
+    }
   });
 
   it("runs distinct standard and optimized CLI validation", () => {
@@ -98,14 +115,19 @@ describe("PTY benchmark evidence validator", () => {
       expect(JSON.parse(standard.output)).toMatchObject({
         valid: true,
         optimized: false,
-        validationMode: "standard-provenance-and-proof-ledger",
+        validationMode: "standard-order-insensitive-provenance-and-proof-ledger",
       });
       expect(optimized.ok).toBe(true);
       expect(JSON.parse(optimized.output)).toMatchObject({
         valid: true,
         optimized: true,
-        validationMode: "strict-provenance-and-proof-ledger",
+        validationMode: "optimized-canonical-provenance-and-proof-ledger",
       });
+    });
+
+    withTempArtifact(cloneArtifact(CONNECTING_ARTIFACT), (path) => {
+      expect(runCli(path).ok).toBe(true);
+      expect(runCli(path, true).ok).toBe(true);
     });
 
     const reordered = cloneArtifact(RECONNECT_ARTIFACT);
@@ -118,7 +140,7 @@ describe("PTY benchmark evidence validator", () => {
     });
   });
 
-  it("rejects schema-specific operation and metric metadata drift through the CLI", () => {
+  it("rejects schema-specific operation and metric metadata drift in both modes", () => {
     const cases = [
       {
         path: RECONNECT_ARTIFACT,
@@ -147,26 +169,106 @@ describe("PTY benchmark evidence validator", () => {
     ] as const;
 
     for (const { path, operation, metric } of cases) {
-      const operationDrift = cloneArtifact(path);
-      operationDrift.operation = `${operation} drift`;
-      expectCliFailure(operationDrift, /operation/iu);
+      for (const optimized of [false, true]) {
+        const operationDrift = cloneArtifact(path);
+        operationDrift.operation = `${operation} drift`;
+        expectCliFailure(operationDrift, /operation/iu, optimized);
 
-      for (const field of ["name", "unit", "clock", "start", "end"] as const) {
-        const metricDrift = cloneArtifact(path);
-        metricDrift.metric[field] = `${metric[field]} drift`;
-        expectCliFailure(metricDrift, new RegExp(`metric\\.${field}`, "iu"));
+        const missingOperation = cloneArtifact(path);
+        delete missingOperation.operation;
+        expectCliFailure(
+          missingOperation,
+          /operation|keys did not match/iu,
+          optimized,
+        );
+
+        const methodDrift = cloneArtifact(path);
+        methodDrift.method = `${methodDrift.method} drift`;
+        expectCliFailure(methodDrift, /method/iu, optimized);
+
+        for (const field of ["name", "unit", "clock", "start", "end"] as const) {
+          const metricDrift = cloneArtifact(path);
+          metricDrift.metric[field] = `${metric[field]} drift`;
+          expectCliFailure(
+            metricDrift,
+            new RegExp(`metric\\.${field}`, "iu"),
+            optimized,
+          );
+        }
+
+        const missingStart = cloneArtifact(path);
+        delete missingStart.metric.start;
+        expectCliFailure(missingStart, /metric\.start|keys did not match/iu, optimized);
+
+        const extraMetric = cloneArtifact(path);
+        extraMetric.metric.extra = "not reviewed";
+        expectCliFailure(extraMetric, /metric|keys did not match/iu, optimized);
+      }
+    }
+  });
+
+  it("enforces exact root metadata and nested runtime or OS keys in both modes", () => {
+    for (const path of [RECONNECT_ARTIFACT, CONNECTING_ARTIFACT]) {
+      for (const optimized of [false, true]) {
+        const missingMethod = cloneArtifact(path);
+        delete missingMethod.method;
+        expectCliFailure(missingMethod, /method|keys did not match/iu, optimized);
+
+        const extraRoot = cloneArtifact(path);
+        extraRoot.unreviewed = true;
+        expectCliFailure(extraRoot, /artifact|keys did not match/iu, optimized);
+
+        const reorderedRoot = Object.fromEntries(
+          Object.entries(cloneArtifact(path)).reverse(),
+        ) as MutableArtifact;
+        const reorderedResult = withTempArtifact(reorderedRoot, (tempPath) =>
+          runCli(tempPath, optimized),
+        );
+        if (optimized) {
+          expect(reorderedResult.ok).toBe(false);
+          expect(reorderedResult.output).toMatch(/canonical order/iu);
+        } else {
+          expect(reorderedResult.ok).toBe(true);
+        }
+
+        for (const nested of ["runtime", "os"] as const) {
+          const nestedArtifact = cloneArtifact(path);
+          const nestedValue = nestedArtifact.provenance[nested];
+          const key = nested === "runtime" ? "bun" : "platform";
+          delete nestedValue[key];
+          expectCliFailure(
+            nestedArtifact,
+            new RegExp(`provenance\\.${nested}.*keys|provenance\\.${nested}\\.${key}`, "iu"),
+            optimized,
+          );
+
+          const extraNested = cloneArtifact(path);
+          extraNested.provenance[nested].unreviewed = true;
+          expectCliFailure(
+            extraNested,
+            new RegExp(`provenance\\.${nested}.*keys|reviewed`, "iu"),
+            optimized,
+          );
+        }
       }
     }
   });
 
   it("rejects arbitrary tracked blobs and source or command drift", () => {
-    const arbitraryBlob = cloneArtifact(RECONNECT_ARTIFACT);
-    arbitraryBlob.provenance.sourceBlobs[0].path =
-      "apps/web/src/lib/terminal/pty-transport.md";
-    expectCliFailure(
-      arbitraryBlob,
-      /expected benchmark input|omitted an expected/iu,
-    );
+    for (const optimized of [false, true]) {
+      const arbitraryBlob = cloneArtifact(RECONNECT_ARTIFACT);
+      arbitraryBlob.provenance.sourceBlobs[0].path =
+        "apps/web/src/lib/terminal/pty-transport.md";
+      expectCliFailure(
+        arbitraryBlob,
+        /expected benchmark input|omitted an expected/iu,
+        optimized,
+      );
+
+      const extraBlobKey = cloneArtifact(RECONNECT_ARTIFACT);
+      extraBlobKey.provenance.sourceBlobs[0].unreviewed = true;
+      expectCliFailure(extraBlobKey, /sourceBlobs.*keys/iu, optimized);
+    }
 
     const sourcePath = cloneArtifact(RECONNECT_ARTIFACT);
     sourcePath.sourcePath = "apps/web/src/lib/terminal/pty-transport.md";
@@ -175,6 +277,42 @@ describe("PTY benchmark evidence validator", () => {
     const command = cloneArtifact(RECONNECT_ARTIFACT);
     command.command = "bun src/lib/terminal/pty-connecting-ownership.bench.ts";
     expectCliFailure(command, /sourcePath and command/iu);
+  });
+
+  it("rejects unsupported v1 before attempting v2 metric checks in both modes", () => {
+    const v1 = readArtifact("src/lib/terminal/pty-error-retention-benchmark.json");
+    delete v1.metric.start;
+    for (const optimized of [false, true]) {
+      expectCliFailure(v1, /unsupported PTY benchmark schema/iu, optimized);
+    }
+  });
+
+  it("rejects unknown and duplicate CLI flags while accepting the delimiter", () => {
+    const unknown = runCliArgs(["--unknown"]);
+    expect(unknown.ok).toBe(false);
+    expect(unknown.output).toMatch(/unknown option --unknown/iu);
+    expect(unknown.output).not.toMatch(/ENOENT|no such file/iu);
+
+    const duplicate = runCliArgs(["--optimized", "--optimized"]);
+    expect(duplicate.ok).toBe(false);
+    expect(duplicate.output).toMatch(/duplicate --optimized/iu);
+
+    const delimited = runCliArgs(["--", RECONNECT_ARTIFACT]);
+    expect(delimited.ok).toBe(true);
+
+    const defaults = runCliArgs([]);
+    expect(defaults.ok).toBe(true);
+  });
+
+  it("rejects duplicate JSON object keys before JSON.parse overwrites them", () => {
+    withTempJson(
+      '{"schema":"hermternal.pty-unsupported-benchmark.v1","schema":"hermternal.pty-reconnect-supersession-benchmark.v2"}',
+      (path) => {
+        expect(() => validatePtyBenchmarkFile(path)).toThrow(
+          /duplicate JSON object key/iu,
+        );
+      },
+    );
   });
 
   it("requires exact schema assertion keys and proven true values", () => {
@@ -241,21 +379,27 @@ describe("PTY benchmark evidence validator", () => {
   });
 
   it("rejects attached checkout and runtime or engine provenance drift", () => {
-    const attached = cloneArtifact(RECONNECT_ARTIFACT);
-    attached.provenance.detachedHead = false;
-    expectCliFailure(attached, /detached clean checkout/iu);
+    for (const optimized of [false, true]) {
+      const attached = cloneArtifact(RECONNECT_ARTIFACT);
+      attached.provenance.detachedHead = false;
+      expectCliFailure(attached, /detached clean checkout/iu, optimized);
 
-    const hostNode = cloneArtifact(RECONNECT_ARTIFACT);
-    hostNode.provenance.runtime.hostNode = "24.3.0";
-    expectCliFailure(hostNode, /hostNode|package runtime|engines/iu);
+      const hostNode = cloneArtifact(RECONNECT_ARTIFACT);
+      hostNode.provenance.runtime.hostNode = "24.3.0";
+      expectCliFailure(hostNode, /hostNode|reviewed|package runtime|engines/iu, optimized);
 
-    const declaredNode = cloneArtifact(RECONNECT_ARTIFACT);
-    declaredNode.provenance.runtime.declaredNode = "24.3.0";
-    expectCliFailure(declaredNode, /package runtime|engines/iu);
+      const declaredNode = cloneArtifact(RECONNECT_ARTIFACT);
+      declaredNode.provenance.runtime.declaredNode = "24.3.0";
+      expectCliFailure(declaredNode, /package runtime|reviewed|engines/iu, optimized);
+
+      const cpuModel = cloneArtifact(RECONNECT_ARTIFACT);
+      cpuModel.provenance.os.cpuModel = "attacker-cpu";
+      expectCliFailure(cpuModel, /cpuModel|reviewed/iu, optimized);
+    }
   });
 
   it("fails generation on the attached checkout instead of fabricating evidence", () => {
-    expect(() =>
+    try {
       execFileSync(
         "bun",
         ["src/lib/terminal/pty-reconnect-supersession.bench.ts"],
@@ -264,8 +408,18 @@ describe("PTY benchmark evidence validator", () => {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
         },
-      ),
-    ).toThrow(/detached clean checkout/iu);
+      );
+      throw new Error("benchmark unexpectedly succeeded");
+    } catch (error) {
+      const failure = error as { readonly stderr?: string | Uint8Array };
+      const stderr =
+        typeof failure.stderr === "string"
+          ? failure.stderr
+          : failure.stderr
+            ? new TextDecoder().decode(failure.stderr)
+            : "";
+      expect(stderr).toMatch(/clean checkout/iu);
+    }
   });
 
   it("rejects arbitrary source revisions or missing raw proof through the API", () => {

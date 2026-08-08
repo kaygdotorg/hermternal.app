@@ -21,6 +21,33 @@ export const PTY_BENCHMARK_SOURCES = {
   },
 } as const;
 
+/** The helper is execution-critical: changing it changes the evidence contract. */
+export const PTY_BENCHMARK_PROVENANCE_SOURCE =
+  "apps/web/src/lib/terminal/pty-benchmark-provenance.ts";
+
+/**
+ * Values reviewed for the checked-in synthetic evidence. Keeping this profile
+ * in code prevents a mutable artifact from choosing the runtime or host that
+ * supposedly produced it; a different harness requires an explicit review.
+ */
+export const REVIEWED_PTY_BENCHMARK_ENVIRONMENT = {
+  runtime: {
+    bun: "1.3.14",
+    node: "24.3.0",
+    hostNode: "26.7.0",
+    packageManager: "bun@1.3.14",
+    declaredBun: "1.3.14",
+    declaredNode: "26.7.0",
+  },
+  os: {
+    platform: "darwin",
+    release: "25.5.0",
+    architecture: "arm64",
+    cpuModel: "Apple M2 Max",
+    cpuCount: 12,
+  },
+} as const;
+
 export interface PtyBenchmarkProvenance {
   readonly sourceRevision: string;
   readonly generationCommit: string;
@@ -157,26 +184,73 @@ export function capturePtyBenchmarkProvenance(
   }
 
   const repoRoot = git(["rev-parse", "--show-toplevel"]);
-  const paths = [benchmarkPath, "apps/web/src/lib/terminal/pty-transport.ts", "apps/web/package.json", "apps/web/bun.lock"];
+  const paths = [
+    benchmarkPath,
+    "apps/web/src/lib/terminal/pty-transport.ts",
+    "apps/web/package.json",
+    "apps/web/bun.lock",
+    PTY_BENCHMARK_PROVENANCE_SOURCE,
+  ];
   const sourceBlobs = paths.map((path) => ({
     path,
     gitBlobSha: git(["rev-parse", `${sourceRevision}:${path}`]),
     sha256: fileSha256(join(repoRoot, path)),
   }));
-  const runtime = packageRuntime();
+  const packageMetadata = packageRuntime();
   const bunVersion = process.versions.bun ?? "";
-  if (runtime.packageManager !== `bun@${bunVersion}` || runtime.declaredBun !== bunVersion) {
+  if (
+    packageMetadata.packageManager !== `bun@${bunVersion}` ||
+    packageMetadata.declaredBun !== bunVersion
+  ) {
     throw new Error(
-      `PTY benchmark Bun runtime ${bunVersion} does not match package runtime ${runtime.packageManager} / ${runtime.declaredBun}`,
+      `PTY benchmark Bun runtime ${bunVersion} does not match package runtime ${packageMetadata.packageManager} / ${packageMetadata.declaredBun}`,
     );
   }
   const hostNode = hostNodeVersion();
-  if (hostNode !== runtime.declaredNode) {
+  if (hostNode !== packageMetadata.declaredNode) {
     throw new Error(
-      `PTY benchmark host Node ${hostNode} does not match package.json engines.node ${runtime.declaredNode}`,
+      `PTY benchmark host Node ${hostNode} does not match package.json engines.node ${packageMetadata.declaredNode}`,
     );
   }
   const cpu = cpus();
+  const environment = {
+    runtime: {
+      bun: bunVersion,
+      node: process.versions.node ?? "",
+      hostNode,
+      packageManager: packageMetadata.packageManager,
+      declaredBun: packageMetadata.declaredBun,
+      declaredNode: packageMetadata.declaredNode,
+    },
+    os: {
+      platform: process.platform,
+      release: release(),
+      architecture: process.arch,
+      cpuModel: cpu[0]?.model ?? "unknown",
+      cpuCount: cpu.length,
+    },
+  } as const;
+  if (
+    environment.runtime.bun !== REVIEWED_PTY_BENCHMARK_ENVIRONMENT.runtime.bun ||
+    environment.runtime.node !== REVIEWED_PTY_BENCHMARK_ENVIRONMENT.runtime.node ||
+    environment.runtime.hostNode !== REVIEWED_PTY_BENCHMARK_ENVIRONMENT.runtime.hostNode ||
+    environment.runtime.packageManager !==
+      REVIEWED_PTY_BENCHMARK_ENVIRONMENT.runtime.packageManager ||
+    environment.runtime.declaredBun !==
+      REVIEWED_PTY_BENCHMARK_ENVIRONMENT.runtime.declaredBun ||
+    environment.runtime.declaredNode !==
+      REVIEWED_PTY_BENCHMARK_ENVIRONMENT.runtime.declaredNode ||
+    environment.os.platform !== REVIEWED_PTY_BENCHMARK_ENVIRONMENT.os.platform ||
+    environment.os.release !== REVIEWED_PTY_BENCHMARK_ENVIRONMENT.os.release ||
+    environment.os.architecture !==
+      REVIEWED_PTY_BENCHMARK_ENVIRONMENT.os.architecture ||
+    environment.os.cpuModel !== REVIEWED_PTY_BENCHMARK_ENVIRONMENT.os.cpuModel ||
+    environment.os.cpuCount !== REVIEWED_PTY_BENCHMARK_ENVIRONMENT.os.cpuCount
+  ) {
+    throw new Error(
+      "PTY benchmark environment does not match the reviewed synthetic harness",
+    );
+  }
   const checkout = cleanCheckout();
   return {
     sourceRevision,
@@ -186,21 +260,8 @@ export function capturePtyBenchmarkProvenance(
     ...checkout,
     command,
     sourceCheckout: "git switch --detach <sourceRevision>",
-    runtime: {
-      bun: bunVersion,
-      node: process.versions.node ?? "",
-      hostNode,
-      packageManager: runtime.packageManager,
-      declaredBun: runtime.declaredBun,
-      declaredNode: runtime.declaredNode,
-    },
-    os: {
-      platform: process.platform,
-      release: release(),
-      architecture: process.arch,
-      cpuModel: cpu[0]?.model ?? "unknown",
-      cpuCount: cpu.length,
-    },
+    runtime: environment.runtime,
+    os: environment.os,
   };
 }
 

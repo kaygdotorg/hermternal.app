@@ -1,13 +1,81 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { PTY_BENCHMARK_SOURCES } from "./pty-benchmark-provenance";
+import {
+  PTY_BENCHMARK_PROVENANCE_SOURCE,
+  PTY_BENCHMARK_SOURCES,
+  REVIEWED_PTY_BENCHMARK_ENVIRONMENT,
+} from "./pty-benchmark-provenance";
 
 const TRANSPORT_SOURCE = "apps/web/src/lib/terminal/pty-transport.ts";
 const PACKAGE_SOURCE = "apps/web/package.json";
 const LOCKFILE_SOURCE = "apps/web/bun.lock";
 const EXPECTED_REPETITIONS = 30;
 const EXPECTED_WARMUPS = 5;
+const REVIEWED_METHOD = "R-7 inclusive linear interpolation over rounded raw samples";
+const ROOT_KEYS = [
+  "schema",
+  "operation",
+  "metric",
+  "method",
+  "sourcePath",
+  "command",
+  "stageOrder",
+  "sequential",
+  "concurrentStages",
+  "repetitions",
+  "warmups",
+  "networkPolicy",
+  "exclusions",
+  "provenance",
+  "results",
+  "threshold",
+] as const;
+const RUNTIME_KEYS = [
+  "bun",
+  "node",
+  "hostNode",
+  "packageManager",
+  "declaredBun",
+  "declaredNode",
+] as const;
+const OS_KEYS = ["platform", "release", "architecture", "cpuModel", "cpuCount"] as const;
+const PROVENANCE_KEYS = [
+  "sourceRevision",
+  "generationCommit",
+  "sourceTree",
+  "sourceBlobs",
+  "cleanCheckout",
+  "detachedHead",
+  "command",
+  "sourceCheckout",
+  "runtime",
+  "os",
+] as const;
+// The four-blob artifacts predate this correction. Their helper identity is
+// still checked against this reviewed historical record; new evidence must
+// carry the helper as its fifth execution input.
+const REVIEWED_HELPER_IDENTITIES = [
+  {
+    gitBlobSha: "bf9d564df819dbfffc1b76649aab124907b471e7",
+    sha256: "1ee7ee726a0486442df55e4865bacf5407754e30e23f7478203f04cef84a7e9b",
+    legacySourceBlobs: true,
+  },
+  {
+    gitBlobSha: "45c2b2b1d993f7097b972af7c2c64c083383c106",
+    sha256: "2539798548a46391c3ed821b9d56d1f9eef0f9e62251ae50e31405aa0dc6edeb",
+    legacySourceBlobs: false,
+  },
+] as const;
+const ALLOWED_EVIDENCE_CHANGE_PATHS = new Set([
+  "apps/web/src/lib/terminal/pty-reconnect-supersession-benchmark.json",
+  "apps/web/src/lib/terminal/pty-connecting-ownership-benchmark.json",
+  "apps/web/src/lib/terminal/pty-benchmark-provenance.ts",
+  "apps/web/src/lib/terminal/pty-benchmark-validator.test.ts",
+  "apps/web/src/lib/terminal/pty-benchmark-validator.ts",
+  "apps/web/src/lib/terminal/pty-transport.md",
+  "apps/web/src/lib/terminal/validate-pty-benchmarks.ts",
+]);
 
 const BENCHMARK_SPECS = {
   "hermternal.pty-reconnect-supersession-benchmark.v2": {
@@ -19,6 +87,16 @@ const BENCHMARK_SPECS = {
       start: "connect attempt starts",
       end: "ignored adapter settles after detach and blocked reconnect",
     },
+    method: REVIEWED_METHOD,
+    rootKeys: ROOT_KEYS,
+    exclusions: [
+      "network",
+      "Hermes",
+      "credentials",
+      "PTY bytes",
+      "rendering",
+      "latency threshold",
+    ],
     source: PTY_BENCHMARK_SOURCES.reconnect,
     stages: ["validator", "ticket", "factory"],
     assertionKeys: [
@@ -122,6 +200,16 @@ const BENCHMARK_SPECS = {
         "performance.now immediately before connecting observer cancellation or replacement action",
       end: "cancelled operation rejects",
     },
+    method: REVIEWED_METHOD,
+    rootKeys: ROOT_KEYS,
+    exclusions: [
+      "network",
+      "Hermes",
+      "credentials",
+      "PTY bytes",
+      "rendering",
+      "latency threshold",
+    ],
     source: PTY_BENCHMARK_SOURCES.connecting,
     stages: ["abort", "close", "detach", "replace"],
     assertionKeys: [
@@ -209,7 +297,7 @@ interface RecordLike {
 }
 
 export interface PtyBenchmarkValidationOptions {
-  /** Strict mode checks canonical provenance ordering and the complete ledger. */
+  /** Optimized mode adds canonical representation checks to the same semantics. */
   readonly optimized?: boolean;
 }
 
@@ -319,6 +407,27 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function validateReviewedProvenanceHelper(
+  sourceRevision: string,
+): (typeof REVIEWED_HELPER_IDENTITIES)[number] {
+  const path = `${sourceRevision}:${PTY_BENCHMARK_PROVENANCE_SOURCE}`;
+  const identity = {
+    gitBlobSha: git(["rev-parse", path]),
+    sha256: sha256(gitBytes(["show", path])),
+  };
+  const reviewed = REVIEWED_HELPER_IDENTITIES.find(
+    (candidate) =>
+      candidate.gitBlobSha === identity.gitBlobSha &&
+      candidate.sha256 === identity.sha256,
+  );
+  if (!reviewed) {
+    throw new Error(
+      "provenance helper identity was not one of the reviewed PTY harness versions",
+    );
+  }
+  return reviewed;
+}
+
 function round(value: number): number {
   return Number(value.toFixed(6));
 }
@@ -351,20 +460,35 @@ function assertExactKeys(
   }
 }
 
+function assertCanonicalKeys(
+  value: RecordLike,
+  expected: readonly string[],
+  label: string,
+): void {
+  if (Object.keys(value).join("\n") !== expected.join("\n")) {
+    throw new Error(`${label} keys did not match the optimized canonical order`);
+  }
+}
+
 // Keep the operation and timing boundaries schema-specific so evidence cannot
 // be relabeled while retaining a valid ownership proof ledger.
 function validateOperationAndMetric(
   root: RecordLike,
   schema: BenchmarkSchema,
+  optimized: boolean,
 ): void {
   const spec = BENCHMARK_SPECS[schema];
   if (asString(root.operation, `${schema}.operation`) !== spec.operation) {
     throw new Error(`${schema}.operation did not match the reviewed operation`);
   }
+  if (asString(root.method, `${schema}.method`) !== spec.method) {
+    throw new Error(`${schema}.method did not match the reviewed method`);
+  }
 
   const metric = asRecord(root.metric, `${schema}.metric`);
   const metricKeys = ["name", "unit", "clock", "start", "end"] as const;
   assertExactKeys(metric, metricKeys, `${schema}.metric`);
+  if (optimized) assertCanonicalKeys(metric, metricKeys, `${schema}.metric`);
   for (const key of metricKeys) {
     if (asString(metric[key], `${schema}.metric.${key}`) !== spec.metric[key]) {
       throw new Error(
@@ -426,8 +550,21 @@ function expectedRunCounters(
   };
 }
 
-function validateRuntimeAndHost(provenance: RecordLike): void {
+function validateRuntimeAndHost(
+  provenance: RecordLike,
+  optimized: boolean,
+): void {
   const runtime = asRecord(provenance.runtime, "provenance.runtime");
+  assertExactKeys(runtime, RUNTIME_KEYS, "provenance.runtime");
+  if (optimized) assertCanonicalKeys(runtime, RUNTIME_KEYS, "provenance.runtime");
+  const reviewedRuntime = REVIEWED_PTY_BENCHMARK_ENVIRONMENT.runtime;
+  for (const key of RUNTIME_KEYS) {
+    if (runtime[key] !== reviewedRuntime[key]) {
+      throw new Error(
+        `provenance.runtime.${key} did not match the reviewed synthetic harness`,
+      );
+    }
+  }
   const bun = asString(runtime.bun, "provenance.runtime.bun");
   const node = asString(runtime.node, "provenance.runtime.node");
   const hostNode = asString(runtime.hostNode, "provenance.runtime.hostNode");
@@ -461,6 +598,16 @@ function validateRuntimeAndHost(provenance: RecordLike): void {
   }
 
   const os = asRecord(provenance.os, "provenance.os");
+  assertExactKeys(os, OS_KEYS, "provenance.os");
+  if (optimized) assertCanonicalKeys(os, OS_KEYS, "provenance.os");
+  const reviewedOs = REVIEWED_PTY_BENCHMARK_ENVIRONMENT.os;
+  for (const key of OS_KEYS) {
+    if (os[key] !== reviewedOs[key]) {
+      throw new Error(
+        `provenance.os.${key} did not match the reviewed synthetic harness`,
+      );
+    }
+  }
   const platform = asString(os.platform, "provenance.os.platform");
   const release = asString(os.release, "provenance.os.release");
   const architecture = asString(os.architecture, "provenance.os.architecture");
@@ -485,6 +632,23 @@ function validateRuntimeAndHost(provenance: RecordLike): void {
   }
 }
 
+function validateRootMetadata(
+  root: RecordLike,
+  schema: BenchmarkSchema,
+  optimized: boolean,
+): void {
+  const spec = BENCHMARK_SPECS[schema];
+  assertExactKeys(root, spec.rootKeys, `${schema} artifact`);
+  if (optimized) assertCanonicalKeys(root, spec.rootKeys, `${schema} artifact`);
+  const exclusions = asStringArray(root.exclusions, `${schema}.exclusions`);
+  if (
+    exclusions.length !== spec.exclusions.length ||
+    exclusions.some((value, index) => value !== spec.exclusions[index])
+  ) {
+    throw new Error(`${schema}.exclusions did not match the reviewed scope`);
+  }
+}
+
 function validateProvenance(
   root: RecordLike,
   schema: BenchmarkSchema,
@@ -500,6 +664,10 @@ function validateProvenance(
   }
 
   const provenance = asRecord(root.provenance, `${schema}.provenance`);
+  assertExactKeys(provenance, PROVENANCE_KEYS, `${schema}.provenance`);
+  if (optimized) {
+    assertCanonicalKeys(provenance, PROVENANCE_KEYS, `${schema}.provenance`);
+  }
   const sourceRevision = asString(
     provenance.sourceRevision,
     "provenance.sourceRevision",
@@ -529,6 +697,7 @@ function validateProvenance(
   if (git(["rev-parse", `${sourceRevision}^{tree}`]) !== sourceTree) {
     throw new Error("provenance.sourceTree does not match sourceRevision");
   }
+  const helperIdentity = validateReviewedProvenanceHelper(sourceRevision);
   const evidenceHead = git(["rev-parse", "HEAD"]);
   try {
     execFileSync(
@@ -551,11 +720,7 @@ function validateProvenance(
     .split("\n")
     .map((path) => path.trim())
     .filter(Boolean);
-  const allowedEvidencePaths = new Set([
-    "apps/web/src/lib/terminal/pty-reconnect-supersession-benchmark.json",
-    "apps/web/src/lib/terminal/pty-connecting-ownership-benchmark.json",
-  ]);
-  if (evidenceChangedPaths.some((path) => !allowedEvidencePaths.has(path))) {
+  if (evidenceChangedPaths.some((path) => !ALLOWED_EVIDENCE_CHANGE_PATHS.has(path))) {
     throw new Error(
       "provenance.sourceRevision was not followed only by evidence changes",
     );
@@ -576,23 +741,44 @@ function validateProvenance(
       "provenance.sourceCheckout must document detached source generation",
     );
   }
-  validateRuntimeAndHost(provenance);
+  validateRuntimeAndHost(provenance, optimized);
 
   const blobs = provenance.sourceBlobs;
-  const expectedPaths = [
+  const legacyPaths = [
     spec.source.path,
     TRANSPORT_SOURCE,
     PACKAGE_SOURCE,
     LOCKFILE_SOURCE,
-  ];
-  if (!Array.isArray(blobs) || blobs.length !== expectedPaths.length) {
+  ] as const;
+  const currentPaths = [
+    ...legacyPaths,
+    PTY_BENCHMARK_PROVENANCE_SOURCE,
+  ] as const;
+  const expectedPaths =
+    Array.isArray(blobs) && blobs.length === currentPaths.length
+      ? currentPaths
+      : legacyPaths;
+  if (
+    !Array.isArray(blobs) ||
+    (blobs.length !== legacyPaths.length && blobs.length !== currentPaths.length)
+  ) {
     throw new Error(
-      "provenance.sourceBlobs must pin the benchmark source and transport inputs",
+      "provenance.sourceBlobs must pin the benchmark, transport, package, lockfile, and reviewed helper inputs",
+    );
+  }
+  if (blobs.length === legacyPaths.length && !helperIdentity.legacySourceBlobs) {
+    throw new Error(
+      "provenance.sourceBlobs must include the reviewed helper for new evidence",
     );
   }
   const seen = new Set<string>();
   for (const [index, rawBlob] of blobs.entries()) {
     const blob = asRecord(rawBlob, `provenance.sourceBlobs[${index}]`);
+    assertExactKeys(
+      blob,
+      ["path", "gitBlobSha", "sha256"],
+      `provenance.sourceBlobs[${index}]`,
+    );
     const path = asString(blob.path, `provenance.sourceBlobs[${index}].path`);
     const gitBlobSha = asString(
       blob.gitBlobSha,
@@ -605,7 +791,7 @@ function validateProvenance(
     if (seen.has(path))
       throw new Error(`duplicate provenance blob path ${path}`);
     seen.add(path);
-    if (!expectedPaths.includes(path as (typeof expectedPaths)[number])) {
+    if (!expectedPaths.some((expectedPath) => expectedPath === path)) {
       throw new Error(
         `provenance blob ${path} was not an expected benchmark input`,
       );
@@ -891,25 +1077,6 @@ function validateOptimizedShape(
   root: RecordLike,
   schema: BenchmarkSchema,
 ): void {
-  const expectedTopLevel = [
-    "schema",
-    "operation",
-    "metric",
-    "method",
-    "sourcePath",
-    "command",
-    "stageOrder",
-    "sequential",
-    "concurrentStages",
-    "repetitions",
-    "warmups",
-    "networkPolicy",
-    "exclusions",
-    "provenance",
-    "results",
-    "threshold",
-  ];
-  assertExactKeys(root, expectedTopLevel, `${schema} artifact`);
   const spec = BENCHMARK_SPECS[schema];
   const blobs = asRecord(root.provenance, `${schema}.provenance`).sourceBlobs;
   if (!Array.isArray(blobs))
@@ -919,11 +1086,16 @@ function validateOptimizedShape(
     TRANSPORT_SOURCE,
     PACKAGE_SOURCE,
     LOCKFILE_SOURCE,
+    PTY_BENCHMARK_PROVENANCE_SOURCE,
   ];
+  const legacyExpectedPaths = expectedPaths.slice(0, -1);
+  const canonicalPaths =
+    blobs.length === expectedPaths.length ? expectedPaths : legacyExpectedPaths;
   if (
+    blobs.length !== canonicalPaths.length ||
     blobs.some(
       (rawBlob, index) =>
-        asRecord(rawBlob, "provenance blob").path !== expectedPaths[index],
+        asRecord(rawBlob, "provenance blob").path !== canonicalPaths[index],
     )
   ) {
     throw new Error(
@@ -940,15 +1112,132 @@ export function validatePtyBenchmarkArtifact(
   const schema = asString(root.schema, "benchmark.schema");
   expectedSpec(schema);
   const benchmarkSchema = schema as BenchmarkSchema;
-  validateOperationAndMetric(root, benchmarkSchema);
-  validateProvenance(root, benchmarkSchema, options.optimized === true);
+  const optimized = options.optimized === true;
+  // Dispatch before any v2 metadata checks so unsupported v1 artifacts fail
+  // as unsupported schemas, not as misleading metric-shape errors.
+  validateRootMetadata(root, benchmarkSchema, optimized);
+  validateOperationAndMetric(root, benchmarkSchema, optimized);
+  validateProvenance(root, benchmarkSchema, optimized);
   validateResults(root, benchmarkSchema);
-  if (options.optimized === true) validateOptimizedShape(root, benchmarkSchema);
+  if (optimized) validateOptimizedShape(root, benchmarkSchema);
+}
+
+function parseJsonWithoutDuplicateKeys(source: string): unknown {
+  let index = 0;
+
+  const skipWhitespace = (): void => {
+    while (index < source.length && /\s/u.test(source[index]!)) index += 1;
+  };
+
+  const parseString = (): string => {
+    const start = index;
+    if (source[index] !== '"') throw new Error("invalid JSON artifact");
+    index += 1;
+    while (index < source.length) {
+      const character = source[index]!;
+      if (character === "\\") {
+        index += 2;
+        continue;
+      }
+      index += 1;
+      if (character === '"') {
+        try {
+          const value = JSON.parse(source.slice(start, index)) as unknown;
+          if (typeof value !== "string") throw new Error("invalid JSON artifact");
+          return value;
+        } catch {
+          throw new Error("invalid JSON artifact");
+        }
+      }
+    }
+    throw new Error("invalid JSON artifact");
+  };
+
+  const parseValue = (): void => {
+    skipWhitespace();
+    const character = source[index];
+    if (character === '"') {
+      parseString();
+      return;
+    }
+    if (character === "{") {
+      index += 1;
+      skipWhitespace();
+      const keys = new Set<string>();
+      if (source[index] === "}") {
+        index += 1;
+        return;
+      }
+      while (index < source.length) {
+        skipWhitespace();
+        const key = parseString();
+        if (keys.has(key)) throw new Error("duplicate JSON object key");
+        keys.add(key);
+        skipWhitespace();
+        if (source[index] !== ":") throw new Error("invalid JSON artifact");
+        index += 1;
+        parseValue();
+        skipWhitespace();
+        if (source[index] === "}") {
+          index += 1;
+          return;
+        }
+        if (source[index] !== ",") throw new Error("invalid JSON artifact");
+        index += 1;
+      }
+      throw new Error("invalid JSON artifact");
+    }
+    if (character === "[") {
+      index += 1;
+      skipWhitespace();
+      if (source[index] === "]") {
+        index += 1;
+        return;
+      }
+      while (index < source.length) {
+        parseValue();
+        skipWhitespace();
+        if (source[index] === "]") {
+          index += 1;
+          return;
+        }
+        if (source[index] !== ",") throw new Error("invalid JSON artifact");
+        index += 1;
+      }
+      throw new Error("invalid JSON artifact");
+    }
+    for (const literal of ["true", "false", "null"] as const) {
+      if (source.startsWith(literal, index)) {
+        index += literal.length;
+        return;
+      }
+    }
+    const numberStart = index;
+    while (
+      index < source.length &&
+      !/[\s,\]}]/u.test(source[index]!)
+    ) {
+      index += 1;
+    }
+    if (numberStart === index) throw new Error("invalid JSON artifact");
+  };
+
+  parseValue();
+  skipWhitespace();
+  if (index !== source.length) throw new Error("invalid JSON artifact");
+  try {
+    return JSON.parse(source) as unknown;
+  } catch {
+    throw new Error("invalid JSON artifact");
+  }
 }
 
 export function validatePtyBenchmarkFile(
   path: string,
   options: PtyBenchmarkValidationOptions = {},
 ): void {
-  validatePtyBenchmarkArtifact(JSON.parse(readFileSync(path, "utf8")), options);
+  validatePtyBenchmarkArtifact(
+    parseJsonWithoutDuplicateKeys(readFileSync(path, "utf8")),
+    options,
+  );
 }

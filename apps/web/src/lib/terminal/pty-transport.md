@@ -203,30 +203,38 @@ samples, expected ticket/factory counts, duplicate-owner checks, the ordered
 per-socket cleanup ledger, and the conditional callback proof.
 
 The validator recomputes every distribution from rounded raw samples and every
-total from the raw run counters. It enforces exact schema-specific run,
-counter, assertion, owner, and close-ledger expectations; sequential stage
-metadata; and all proven-true cleanup and late-event assertions. Standard
-validation (`bun run validate:benchmark:pty`) performs those provenance and
-proof-ledger checks without requiring top-level key ordering or canonical
-`sourceBlobs` ordering. Optimized validation (`--optimized`) reruns the same
-checks and additionally requires the exact top-level schema shape and canonical
-source-blob order; it is a stricter evidence mode, not a different benchmark.
-Both modes reject failed or renamed proofs, wrong validator/ticket/factory
-counts, concurrent-stage metadata, missing provenance, or arbitrary source
-revisions.
+total from the raw run counters. It binds each v2 schema to its exact operation,
+metric fields, `R-7 inclusive linear interpolation over rounded raw samples`
+method, source/command pair, exclusions, and root key set. It also enforces exact
+nested `runtime`, `os`, `provenance`, source-blob, run, counter, assertion, owner,
+and close-ledger keys; sequential stage metadata; and all proven-true cleanup and
+late-event assertions. Unsupported v1 schemas are rejected during schema dispatch
+before any v2 metric validation.
 
-Both v2 artifacts record the actual full source commit and generation commit,
-source tree, and Git blob plus SHA-256 hashes for exactly the declared benchmark
-source, transport, package manifest, and lockfile. Provenance also records a
-clean detached checkout. Runtime provenance distinguishes Bun's embedded Node
-version from the host Node executable, records Bun/package-manager and declared
-engine versions, and requires the host Node to match `package.json`; it also
-records OS release, architecture, CPU model, and CPU count. Detached checkout
-provenance describes evidence generation and is separate from PTY
-`detachedAtMs`. The helper derives `sourceRevision` from the actual `HEAD` and
-rejects an arbitrary `GIT_SOURCE_REVISION` override. Generate evidence from a
-clean detached source checkout, writing outside the repository so the output
-file cannot make the checkout dirty:
+Standard validation (`bun run validate:benchmark:pty`) is semantic and
+representation-tolerant: object key order and source-blob order may vary, but
+membership, values, hashes, and proof ledgers must match. Optimized validation
+(`--optimized`) reruns the same semantic checks and additionally requires the
+canonical root/provenance/metric/runtime/OS key order and canonical source-blob
+order. It is a stricter evidence representation mode, not a different benchmark.
+Both modes reject unknown or duplicate CLI flags, duplicate JSON object keys,
+failed or renamed proofs, wrong validator/ticket/factory counts,
+concurrent-stage metadata, missing provenance, or arbitrary source revisions.
+
+The generator now includes `pty-benchmark-provenance.ts` in new source-blob
+identity records. Existing four-blob v2 evidence remains accepted only for its
+reviewed historical helper identity until the separate evidence-only refresh;
+new evidence must carry the helper as the fifth input. Both modes bind runtime
+and OS metadata to the reviewed synthetic harness profile: Bun `1.3.14`, Bun's
+embedded Node `24.3.0`, host Node `26.7.0`, `bun@1.3.14`, declared Node
+`26.7.0`, Darwin `25.5.0`, `arm64`, Apple M2 Max, and 12 CPUs. These values are
+not trusted because an artifact repeats them. A different harness requires an
+explicitly reviewed profile update. Provenance also records the actual full
+source and generation commits, source tree, Git blobs, SHA-256 hashes, and a
+clean detached checkout. The helper derives `sourceRevision` from actual
+`HEAD` and rejects an arbitrary `GIT_SOURCE_REVISION` override. Generate future
+evidence from a clean detached source checkout, writing outside the repository
+so the output file cannot make the checkout dirty:
 
 ```sh
 git switch --detach <sourceRevision>
@@ -237,6 +245,8 @@ bun src/lib/terminal/pty-connecting-ownership.bench.ts > /tmp/pty-connecting.jso
 Run those commands from `apps/web`, then copy the two JSON files into
 `src/lib/terminal/` and commit them in a later evidence-only change. Validate
 both artifacts from `apps/web` with `bun run test:benchmark:pty`, which runs
-standard and `--optimized` validator modes. The benchmark command is
-synthetic-only and never contacts Hermes, opens a live endpoint, logs a ticket,
-or uses credentials.
+standard and `--optimized` validator modes. The validator accepts zero or one
+`--optimized` flag, an optional `--` delimiter, and positional artifact paths;
+unknown options and duplicate `--optimized` flags fail before any file read.
+The benchmark command is synthetic-only and never contacts Hermes, opens a live
+endpoint, logs a ticket, or uses credentials.
