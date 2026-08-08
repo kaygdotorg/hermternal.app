@@ -167,7 +167,9 @@ async function runStage(stage: Stage): Promise<RunProof> {
   // Recovery is outside the measured quarantine-settlement interval. It proves
   // that late cleanup released exactly one owner and that the replacement's
   // real onopen callback, not a synthetic counter, reached attached state.
-  const recovery = transport.reconnect();
+  // Pre-open detach cannot seed a retention anchor, so recover with an explicit
+  // same-identity connect rather than claiming a reattach authorization.
+  const recovery = transport.connect(INPUT);
   await flush();
   const replacement = sockets.find((socket) => socket !== staleSocket && !socket.closed && !socket.opened);
   if (!replacement) throw new Error(`${stage} recovery did not allocate an owned replacement socket`);
