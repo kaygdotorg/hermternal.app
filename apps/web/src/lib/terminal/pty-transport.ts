@@ -201,8 +201,13 @@ export interface PtyTransport {
   reconnect(signal?: AbortSignal): Promise<void>;
   sendInput(input: string | Uint8Array): void;
   resize(cols: number, rows: number): void;
-  detach(): void;
-  close(): void;
+  /**
+   * Stop the current owner, or no-op when an expected generation is stale.
+   * The generation-scoped form lets a bridge quarantine a late adapter
+   * completion without detaching a replacement owner.
+   */
+  detach(expectedGeneration?: number): void;
+  close(expectedGeneration?: number): void;
   subscribe(listener: (event: PtyTransportEvent) => void): () => void;
 }
 
@@ -871,7 +876,12 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     return waitForAttempt(attempt, signal);
   };
 
-  const stop = (closing: boolean): void => {
+  const stop = (closing: boolean, expectedGeneration?: number): void => {
+    // A late invalidated adapter completion may carry the generation that it
+    // tried to claim. Ignore scoped cleanup once a newer generation owns the
+    // transport; an old detach must never tear down that replacement.
+    if (expectedGeneration !== undefined && expectedGeneration !== currentGeneration) return;
+
     // A coordinator lease invalidation calls detach() to start the exact-identity
     // retention window; only an explicit close() is a user-closed terminal that
     // must hide reconnect. Keep these intents distinct in public retry state.
@@ -961,11 +971,11 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       const context = requireAttached(activeContext, currentGeneration);
       sendBytes(context, encodeResize(cols, rows));
     },
-    detach() {
-      stop(false);
+    detach(expectedGeneration) {
+      stop(false, expectedGeneration);
     },
-    close() {
-      stop(true);
+    close(expectedGeneration) {
+      stop(true, expectedGeneration);
     },
     subscribe(listener) {
       if (typeof listener !== "function") throw new PtyTransportError("invalid-options");

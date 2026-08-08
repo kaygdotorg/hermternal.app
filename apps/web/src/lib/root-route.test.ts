@@ -247,6 +247,125 @@ describe('root route composition', () => {
     context.auth.dispose();
   });
 
+  it('expires each recreated authenticated PTY bridge once across two 4401 cycles', async () => {
+    const harnesses: ReturnType<typeof createSocketHarness>[] = [];
+    const chatSocket = {
+      onopen: null as (() => void) | null,
+      onmessage: null as ((event: { readonly data: unknown }) => void) | null,
+      onerror: null as (() => void) | null,
+      onclose: null as ((event?: { readonly code?: number }) => void) | null,
+      readyState: 1,
+      sent: [] as string[],
+      send: vi.fn((data: string) => {
+        chatSocket.sent.push(data);
+        const parsed = JSON.parse(data) as { readonly id?: string };
+        if (parsed.id) {
+          queueMicrotask(() => {
+            chatSocket.onmessage?.({
+              data: JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: { restored: true } })
+            });
+          });
+        }
+      }),
+      close: vi.fn()
+    };
+    const session = {
+      id: 'session-two',
+      source: 'web',
+      model: 'Hermes',
+      title: 'Session two',
+      started_at: 1,
+      ended_at: null,
+      last_active: 2,
+      is_active: true,
+      message_count: 0,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      preview: ''
+    };
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return jsonResponse(IDENTITY);
+      if (path === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket', ttl_seconds: 30 });
+      if (path.startsWith('/api/sessions/session-two/messages')) {
+        return jsonResponse({
+          session_id: 'session-two',
+          messages: [],
+          pagination: { limit: 500, offset: 0, returned: 0 }
+        });
+      }
+      if (path.startsWith('/api/sessions?')) {
+        return jsonResponse({ sessions: [session], total: 1, limit: 100, offset: 0 });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    });
+    const context = createLiveRootContext({
+      fetch,
+      createSocket: () => chatSocket,
+      createPtySocket: () => {
+        const harness = harnesses.at(-1);
+        if (!harness) throw new Error('missing PTY socket harness');
+        return harness.socket;
+      }
+    });
+    await context.auth.initialize();
+    const expire = vi.spyOn(context.auth, 'expire');
+
+    const attachAndExpire = async (sessionId: string): Promise<void> => {
+      const harness = createSocketHarness();
+      harnesses.push(harness);
+      const terminal = context.workspace.terminal;
+      if (!terminal) throw new Error('terminal bridge was not composed');
+      const pending = terminal.attach(sessionId, new AbortController().signal);
+      await flush();
+      harness.open();
+      await pending;
+      const closeHandler = harness.socket.onclose;
+      harness.closeFromServer(4401);
+      // The transport removes its native close handler after the first event;
+      // invoke the saved callback once more to prove duplicate 4401 delivery
+      // stays inside the same epoch's expiry dedupe boundary.
+      closeHandler?.({ code: 4401 });
+      await flush();
+    };
+
+    await attachAndExpire('session-one');
+    expect(expire).toHaveBeenCalledTimes(1);
+    expect(context.auth.current.status).toBe('expired');
+
+    await context.auth.initialize();
+    expect(context.auth.current.status).toBe('authenticated');
+    // Recreate the lazy bridge before restore so coordinator ownership can adopt
+    // the session before its PTY state callbacks arrive.
+    const recreatedTerminal = context.workspace.terminal;
+    if (!recreatedTerminal) throw new Error('terminal bridge was not recreated');
+    const initialization = context.workspace.initialize();
+    for (let attempt = 0; attempt < 100 && !chatSocket.onopen; attempt += 1) await flush();
+    chatSocket.onopen?.();
+    for (let attempt = 0; attempt < 100 && !chatSocket.onmessage; attempt += 1) await flush();
+    chatSocket.onmessage?.({
+      data: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'event',
+        params: {
+          type: 'gateway.ready',
+          payload: { skin: 'official', change_events: true }
+        }
+      })
+    });
+    await flush();
+    await initialization;
+    expect(context.workspace.current.activeSessionId).toBe('session-two');
+    await attachAndExpire('session-two');
+
+    expect(expire).toHaveBeenCalledTimes(2);
+    expect(context.workspace.current.terminal).toBeUndefined();
+
+    context.workspace.dispose();
+    context.auth.dispose();
+  });
+
   it('keeps PTY 4403 outside authenticated recovery', async () => {
     const harness = createSocketHarness();
     const fetch: LiveRestFetch = vi.fn(async (input) => {
