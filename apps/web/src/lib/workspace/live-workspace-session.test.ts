@@ -28,12 +28,16 @@ const SESSION: LiveSession = {
   preview: 'must not enter presentation state'
 };
 
-function sessionMessages(messages: LiveMessage[]): SessionMessages {
+function sessionMessagesFor(sessionId: string, messages: LiveMessage[]): SessionMessages {
   return {
-    sessionId: SESSION.id,
+    sessionId,
     messages,
     pagination: { limit: 500, offset: 0, returned: messages.length }
   };
+}
+
+function sessionMessages(messages: LiveMessage[]): SessionMessages {
+  return sessionMessagesFor(SESSION.id, messages);
 }
 
 class BrowserChatSocket implements JsonRpcWebSocket {
@@ -415,6 +419,28 @@ describe('LiveWorkspaceSession', () => {
     expect(JSON.stringify(session.current)).not.toContain('must not enter presentation state');
   });
 
+  it('rejects foreign history before initial restore publishes or creates chat', async () => {
+    const rest = createRest([]);
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce(
+      sessionMessagesFor('foreign-session', [
+        { role: 'user', content: 'Foreign initial prompt' },
+        { role: 'assistant', content: 'Foreign initial answer' }
+      ])
+    );
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    const published: string[] = [];
+    session.subscribe((snapshot) => published.push(JSON.stringify(snapshot)));
+
+    await session.initialize();
+
+    expect(session.current).toMatchObject({ state: 'retryable-error' });
+    expect(session.current.activeSessionId).toBeUndefined();
+    expect(session.current.timeline).toEqual([]);
+    expect(chat.createChat).not.toHaveBeenCalled();
+    expect(published.every((snapshot) => !snapshot.includes('Foreign initial'))).toBe(true);
+  });
+
   it('retries a pre-identity persisted restore without creating a new session', async () => {
     const rest = createRest([]);
     vi.mocked(rest.getSessionMessages).mockRejectedValueOnce(new Error('synthetic history parse failure'));
@@ -434,6 +460,29 @@ describe('LiveWorkspaceSession', () => {
     expect(chat.createChat).toHaveBeenCalledTimes(1);
     expect(chat.transport.createSession).not.toHaveBeenCalled();
     expect(session.current).toMatchObject({ state: 'empty', activeSessionId: 'session-1' });
+  });
+
+  it('rejects foreign history on pre-identity restore retry before creating chat', async () => {
+    const rest = createRest([]);
+    vi.mocked(rest.getSessionMessages)
+      .mockRejectedValueOnce(new Error('synthetic history parse failure'))
+      .mockResolvedValueOnce(
+        sessionMessagesFor('foreign-session', [
+          { role: 'user', content: 'Foreign retry prompt' },
+          { role: 'assistant', content: 'Foreign retry answer' }
+        ])
+      );
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+    await session.retryConnection();
+
+    expect(session.current).toMatchObject({ state: 'retryable-error' });
+    expect(session.current.activeSessionId).toBeUndefined();
+    expect(session.current.timeline).toEqual([]);
+    expect(chat.createChat).not.toHaveBeenCalled();
+    expect(JSON.stringify(session.current)).not.toContain('Foreign retry');
   });
 
   it('retries a pre-identity restore through history and session.resume in order', async () => {
@@ -641,6 +690,35 @@ describe('LiveWorkspaceSession', () => {
     expect(session.current.activeSessionId).toBe('session-2');
     expect(session.current.title).toBe('Second session');
     expect(chat.createChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects foreign history during session replacement without publishing or committing it', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Owned session answer' }]);
+    const replacement = { ...SESSION, id: 'session-2', title: 'Replacement', isActive: false };
+    vi.mocked(rest.getSession)
+      .mockResolvedValueOnce(SESSION)
+      .mockResolvedValueOnce(replacement);
+    vi.mocked(rest.getSessionMessages)
+      .mockResolvedValueOnce(sessionMessages([{ role: 'assistant', content: 'Owned session answer' }]))
+      .mockResolvedValueOnce(
+        sessionMessagesFor('foreign-session', [
+          { role: 'user', content: 'Foreign replacement prompt' },
+          { role: 'assistant', content: 'Foreign replacement answer' }
+        ])
+      );
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    const published: string[] = [];
+    session.subscribe((snapshot) => published.push(JSON.stringify(snapshot)));
+
+    await session.initialize();
+    await session.selectSession(replacement.id);
+
+    expect(session.current).toMatchObject({ state: 'retryable-error', activeSessionId: replacement.id });
+    expect(session.current.timeline).toEqual([]);
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(chat.transport.promoteSession).not.toHaveBeenCalled();
+    expect(published.every((snapshot) => !snapshot.includes('Foreign replacement'))).toBe(true);
   });
 
   it('shows bounded streaming text and then replaces it from server history', async () => {
@@ -1434,6 +1512,35 @@ describe('LiveWorkspaceSession', () => {
     ]);
   });
 
+  it('rejects foreign history during reconnect without replacing committed history', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Initial answer' }]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce(
+      sessionMessagesFor('foreign-session', [
+        { role: 'user', content: 'Foreign reconnect prompt' },
+        { role: 'assistant', content: 'Foreign reconnect answer' }
+      ])
+    );
+
+    await session.retryConnection();
+
+    expect(chat.transport.reconnect).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(session.current).toMatchObject({ state: 'retryable-error', activeSessionId: SESSION.id });
+    expect(session.current.timeline).toEqual([
+      {
+        kind: 'assistant-message',
+        id: 'session-1:message:0',
+        text: 'Initial answer',
+        model: 'Hermes 4',
+        status: 'complete'
+      }
+    ]);
+    expect(chat.transport.promoteSession).not.toHaveBeenCalled();
+    expect(JSON.stringify(session.current.timeline)).not.toContain('Foreign reconnect');
+  });
+
   it('keeps reconnect history retryable after a generic terminal callback', async () => {
     const rest = createRest([{ role: 'assistant', content: 'Initial answer' }]);
     const chat = createChatHarness();
@@ -1785,6 +1892,7 @@ describe('LiveWorkspaceSession', () => {
     vi.mocked(rest.getSession).mockResolvedValueOnce({ ...SESSION, id: 'session-2', title: 'Replacement' });
     vi.mocked(chat.createChat).mockImplementationOnce(() => replacement);
     vi.mocked(rest.getSessionMessages).mockClear();
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce(sessionMessagesFor('session-2', []));
 
     const retry = session.retryConnection();
     await session.selectSession('session-2');

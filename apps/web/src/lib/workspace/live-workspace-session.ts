@@ -548,12 +548,22 @@ export class LiveWorkspaceSession {
     // read succeeds. This private retry target covers failures that occur
     // before the active session can be published to the presentation state.
     if (!this.ownsOperation(operation)) return;
+    const expectedActiveSessionId = this.snapshot.activeSessionId;
     this.failedRestore = { generation: operation.generation, sessionId: session.id };
     const response = await this.rest.getSessionMessages(session.id, { limit: 500, offset: 0 }, operation.signal);
     // Cancellation may leave the generation unchanged while aborting the
     // controller. Do not publish a late provisional timeline over the user's
     // explicit offline state when a REST adapter resolves after abort.
     if (!this.ownsOperation(operation)) return;
+    // The REST boundary may resolve aliases, but this workspace operation is
+    // owned by the requested durable session. Reject foreign history before it
+    // can enter presentation state or create a transport that would commit it.
+    if (
+      response.sessionId !== session.id ||
+      (expectedActiveSessionId !== undefined && response.sessionId !== expectedActiveSessionId)
+    ) {
+      throw new LiveRestError('invalid-response');
+    }
     const model = session.model?.trim() || 'Hermes';
     const timeline = mapLiveMessages(session.id, response.messages, model);
     // Once history is available, the normal snapshot now carries the selected
