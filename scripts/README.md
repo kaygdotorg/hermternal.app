@@ -169,16 +169,19 @@ launcher_output="$(
     --instance "$INSTANCE" \
     --port "$PORT"
 )"
-# Continue only when .result.status from this command is exactly "running".
+# The start result must report .result.status exactly "ready"; it is not the
+# liveness probe. Separately, continue only when the status result is exactly
+# "running".
 python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
 
-The status command must report `.result.status` exactly as `running` immediately
-before the parsed endpoint and credential-file values are used. A stopped,
-removed, or absent instance must abort the handoff; retained endpoint metadata is
-not proof of a live listener. This operator trust gap is tracked in issue #345.
+A successful `start` result has `.result.status` `ready`; the separate `status`
+probe must report `running` immediately before the parsed endpoint and credential
+file are used. A stopped, removed, or absent instance must abort the handoff;
+retained endpoint metadata is not proof of a live listener. The status probe is
+an operator check only, not liveness enforcement. Issue #345 remains open.
 
 Run any requested count with unique names and consecutive loopback ports:
 
@@ -192,7 +195,7 @@ python3 scripts/hermes_agent.py start-many \
 Other operations are:
 
 ```sh
-# Continue only when this reports .result.status == "running".
+# Continue only when this separate status probe reports .result.status == "running".
 python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
@@ -215,18 +218,19 @@ non-secret launcher state defaults to
 `~/.local/state/hermternal/hermes-agent/`. Tests may override all three roots.
 
 The preceding `status` command must report `.result.status` as `running`
-immediately before the endpoint and credential-file values are used. The
-following `endpoint` command is the source of truth for the selected instance
-only after that check. `read_launcher_result.py` parses `.result.endpoint` and
-`.result.credential_file`; it never infers a port or substitutes a remembered
-listener. Retained metadata after a stop is not proof of a live listener; this
-operator trust gap is tracked in issue #345. Use the checked values at the local
-live-proof handoff:
+immediately before the endpoint and credential-file values are used. A successful
+`start` result is `ready`, not `running`; the following `endpoint` command is the
+source of truth for the selected instance only after the separate status probe.
+`read_launcher_result.py` parses `.result.endpoint` and `.result.credential_file`;
+it never infers a port or substitutes a remembered listener. Retained metadata
+after a stop is not proof of a live listener. This status probe is an operator
+check only, not liveness enforcement. Issue #345 remains open. Use the checked
+values at the local live-proof handoff:
 
 ```sh
 HERMES_LIVE_TARGET="$endpoint" \
   python3 scripts/with_live_credential.py "$credential_file" -- \
-  bun --cwd apps/web run test:e2e:live
+  bun run --cwd apps/web test:e2e:live
 ```
 
 The helper reads the credential file as bytes, removes only trailing CR/LF, and
@@ -279,7 +283,7 @@ python3 -O -m unittest scripts.test_hermes_agent scripts.test_with_live_credenti
 ```
 
 The 29-test launcher suite uses a fake Podman boundary and local synthetic HTTP
-server. The 5-test credential handoff and 6-test launcher-result suites use only
+server. The 6-test credential handoff and 6-test launcher-result suites use only
 synthetic bytes and mocked local process boundaries. None of these suites starts
 Hermes or reads a real credential. The launcher suite covers immutable image
 binding, rootless checks, environment cleanup, deterministic scaling, upstream

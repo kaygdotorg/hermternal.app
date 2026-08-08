@@ -10,6 +10,10 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
+import shlex
+import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -25,6 +29,27 @@ if spec is None or spec.loader is None:
 helper = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = helper
 spec.loader.exec_module(helper)
+
+DOCUMENTED_HANDOFF_DOCS = (
+    ROOT / "scripts" / "README.md",
+    ROOT / "apps" / "web" / "tests" / "live" / "README.md",
+)
+EXPECTED_BUN_COMMAND = ["bun", "run", "--cwd", "apps/web", "test:e2e:live"]
+
+
+def documented_bun_command(path: Path) -> list[str]:
+    """Extract one documented handoff command without executing README text."""
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    marker = 'HERMES_LIVE_TARGET="$endpoint" \\'
+    helper_line = 'python3 scripts/with_live_credential.py "$credential_file" -- \\'
+    for index, line in enumerate(lines[:-2]):
+        if line.strip() != marker:
+            continue
+        if lines[index + 1].strip() != helper_line:
+            continue
+        return shlex.split(lines[index + 2].strip())
+    raise AssertionError(f"No documented live handoff found in {path}")
 
 
 class LiveProofCredentialTests(unittest.TestCase):
@@ -111,6 +136,47 @@ class LiveProofCredentialTests(unittest.TestCase):
 
         self.assertEqual(status, 1)
         self.assertFalse(execvpe.called)
+
+    def test_documented_handoff_invokes_valid_bun_command(self) -> None:
+        for document in DOCUMENTED_HANDOFF_DOCS:
+            with self.subTest(document=document):
+                self.assertEqual(documented_bun_command(document), EXPECTED_BUN_COMMAND)
+
+        # Use only the synthetic fixture value from setUp. The fake child records
+        # argv but never writes or prints HERMES_TEST_PASSWORD.
+        bin_directory = Path(self.temporary.name) / "bin"
+        bin_directory.mkdir()
+        capture = Path(self.temporary.name) / "argv"
+        fake_bun = bin_directory / "bun"
+        fake_bun.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "import sys\n"
+            "if not os.environ.get('HERMES_TEST_PASSWORD'):\n"
+            "    raise SystemExit(97)\n"
+            "Path(os.environ['HANDOFF_CAPTURE']).write_text('\\n'.join(sys.argv[1:]) + '\\n')\n",
+            encoding="utf-8",
+        )
+        fake_bun.chmod(stat.S_IRWXU)
+        self.path.write_bytes(self.value + b"\n")
+        environment = os.environ.copy()
+        environment["PATH"] = f"{bin_directory}{os.pathsep}{environment['PATH']}"
+        environment["HANDOFF_CAPTURE"] = str(capture)
+        environment["HERMES_LIVE_TARGET"] = "http://127.0.0.1:19124"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), str(self.path), "--", *EXPECTED_BUN_COMMAND],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(capture.read_text(encoding="utf-8").splitlines(), EXPECTED_BUN_COMMAND[1:])
+        self.assertEqual(self.path.read_bytes(), self.value + b"\n")
 
 
 if __name__ == "__main__":

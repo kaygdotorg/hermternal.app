@@ -46,19 +46,22 @@ launcher_output="$(
     --instance "$INSTANCE" \
     --port "$PORT"
 )"
-# Continue only when .result.status from this command is exactly "running".
+# The start result must report .result.status exactly "ready"; it is not the
+# liveness probe. Separately, continue only when the status result is exactly
+# "running".
 python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
 
-The launcher emits public metadata under `.result`. `read_launcher_result.py`
+The launcher emits public metadata under `.result`. A successful `start` result
+has `.result.status` `ready`; the separate `status` probe must report `running`
+before the endpoint and credential file are used. `read_launcher_result.py`
 parses `.result.endpoint` and `.result.credential_file`; it never prints the
-password or infers a port. `endpoint` is the authoritative private loopback
-Dashboard URL for this launcher-owned instance only after the status check
-reports `running`. Do not hand a retained endpoint or credential file to a
-proof command when status is `stopped`, `removed`, or `absent`; this operator
-trust boundary is tracked in issue #345.
+password or infers a port. Do not hand a retained endpoint or credential file to
+a proof command when status is `stopped`, `removed`, or `absent`. The status
+probe is an operator check only, not liveness enforcement. Issue #345 remains
+open.
 
 Do not print the credential file. A local test process may read it through the
 repository helper. `with_live_credential.py` removes only terminal CR/LF bytes,
@@ -96,7 +99,7 @@ prefix, count, or remembered deployment.
 
 ```sh
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
-# Continue only when .result.status is exactly "running".
+# Continue only when the separate status result is exactly "running".
 python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
@@ -104,12 +107,13 @@ credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launche
 ```
 
 The status check must report `.result.status` exactly as `running` immediately
-before the endpoint and credential-file values are used. The endpoint command is
-the source of truth for the selected instance only after that check. If a browser
-runs outside the VM, use the approved tunnel with the endpoint selected from that
-output; do not replace it with a sample port or an unrelated listener. Retained
-state after a stop is not proof of a live listener; this trust gap is tracked in
-issue #345.
+before the endpoint and credential-file values are used. A successful `start`
+result is `ready`, not `running`; the endpoint command is the source of truth
+only after the separate status probe. If a browser runs outside the VM, use the
+approved tunnel with the endpoint selected from that output; do not replace it
+with a sample port or an unrelated listener. Retained state after a stop is not
+proof of a live listener. This status probe is an operator check only, not
+liveness enforcement. Issue #345 remains open.
 
 ## Stop and clean up
 
