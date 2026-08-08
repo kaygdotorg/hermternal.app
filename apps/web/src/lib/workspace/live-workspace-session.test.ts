@@ -1140,7 +1140,7 @@ describe('LiveWorkspaceSession', () => {
     expect(countAssistantMarkers()).toBe(1);
   });
 
-  it('keeps committed persisted history ready after a late generic terminal callback', async () => {
+  it('keeps initial restore history retryable after a generic terminal callback', async () => {
     const rest = createRest([
       { role: 'user', content: 'Persisted prompt' },
       { role: 'assistant', content: 'Persisted answer' }
@@ -1160,9 +1160,11 @@ describe('LiveWorkspaceSession', () => {
       }
     ]);
 
+    // Restore history is not evidence that a prompt completed on this chat.
+    // A later generic close must therefore remain actionable recovery.
     socket.emitClose(1011, 'redacted');
 
-    expect(session.current.state).toBe('ready');
+    expect(session.current.state).toBe('retryable-error');
     expect(session.current.timeline).toEqual([
       { kind: 'user-message', id: 'session-1:message:0', text: 'Persisted prompt' },
       {
@@ -1173,6 +1175,32 @@ describe('LiveWorkspaceSession', () => {
         status: 'complete'
       }
     ]);
+  });
+
+  it('keeps reconnect history retryable after a generic terminal callback', async () => {
+    const rest = createRest([{ role: 'assistant', content: 'Initial answer' }]);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce(
+      sessionMessages([{ role: 'assistant', content: 'Reconnected answer' }])
+    );
+    await session.retryConnection();
+
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'assistant-message', text: 'Reconnected answer' })
+    );
+
+    // Reconnect history is not evidence that a new prompt completed. A later
+    // generic transport failure must not inherit completion suppression.
+    chat.changeState({ status: 'failed', generation: 1 });
+
+    expect(session.current.state).toBe('retryable-error');
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'assistant-message', text: 'Reconnected answer' })
+    );
   });
 
   it('does not let committed history suppress permanent authentication or origin closes', async () => {

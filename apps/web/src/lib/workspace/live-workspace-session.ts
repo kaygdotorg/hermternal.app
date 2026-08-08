@@ -56,6 +56,8 @@ interface ActivePromptOwnership {
   /** Epoch allocated after the synchronous transport send has returned. */
   readonly promptEpoch: number;
   readonly signal?: AbortSignal;
+  /** Set only after this exact prompt receives a successful message.complete event. */
+  completionObserved: boolean;
 }
 
 interface RetryOwnership {
@@ -68,6 +70,14 @@ interface CommittedHistoryOwnership {
   readonly generation: number;
   readonly sessionId: string;
   readonly chat: JsonRpcChatTransport;
+  readonly refreshEpoch: number;
+}
+
+interface CommittedCompletionOwnership {
+  readonly generation: number;
+  readonly sessionId: string;
+  readonly chat: JsonRpcChatTransport;
+  readonly request: JsonRpcChatRequest;
   readonly refreshEpoch: number;
 }
 
@@ -108,11 +118,15 @@ export class LiveWorkspaceSession {
   // overlap: a newer prompt, reconnect, terminal connection state, or
   // lifecycle reset revokes every older refresh's publication authority.
   private refreshEpoch = 0;
-  // A successful REST replacement is a narrow commit barrier. A late generic
-  // transport callback may not regress that committed server view, but the
-  // barrier is cleared by every newer operation and never covers auth/origin
-  // failures or a history read that is still pending.
+  // A successful REST replacement is a general history barrier for retaining
+  // the server-owned timeline. Generic failure suppression is narrower and
+  // requires committedCompletion below; this barrier is cleared by every newer
+  // operation and never covers auth/origin failures or pending reads.
   private committedHistory: CommittedHistoryOwnership | undefined;
+  // Generic late failures may be ignored only after the exact prompt observed a
+  // successful message.complete and its REST reconciliation committed. Initial
+  // restore and reconnect history use committedHistory but never this marker.
+  private committedCompletion: CommittedCompletionOwnership | undefined;
   private failedRestore: FailedRestoreOwnership | undefined;
   private disposed = false;
 
@@ -278,7 +292,8 @@ export class LiveWorkspaceSession {
       sessionId,
       chat,
       promptEpoch,
-      signal: operationSignal
+      signal: operationSignal,
+      completionObserved: false
     };
     this.activeRequest = request;
     this.activePromptOwnership = ownership;
@@ -567,6 +582,9 @@ export class LiveWorkspaceSession {
     }
 
     if (event.type === 'message.complete' && request && event.requestId === request.id) {
+      if (this.activePromptOwnership?.request === request && isSuccessfulMessageComplete(event.payload)) {
+        this.activePromptOwnership.completionObserved = true;
+      }
       const text = payloadText(event.payload);
       if (text) this.updateStreamingText(request.id, text, true);
       return;
@@ -645,14 +663,13 @@ export class LiveWorkspaceSession {
   private handleConnectionState(generation: number, state: JsonRpcConnectionState): void {
     if (!this.isCurrent(generation)) return;
 
-    // A completed REST replacement is a narrow server-history commit. Hermes
-    // can report a generic failed/uncertain callback after that commit because
+    // Hermes can report a generic failed/uncertain callback after REST because
     // prompt events, acknowledgements, and socket close notifications are not
-    // ordered as one client transaction. Preserve the committed view only for
-    // the exact generation/session/chat; pending history must still lose to a
+    // ordered as one client transaction. Only an exact completed-prompt marker
+    // can suppress generic failure; pending history must still lose to a
     // failure, and auth/origin classifications always remain authoritative.
     const committedHistory = this.ownsCommittedHistory();
-    const preserveLateGenericFailure = state.status === 'failed' && committedHistory;
+    const preserveLateGenericFailure = state.status === 'failed' && this.ownsCommittedCompletion();
     const preserveLateUncertainty = state.status === 'delivery_uncertain' && committedHistory;
 
     if (
@@ -724,7 +741,8 @@ export class LiveWorkspaceSession {
       ownership.generation,
       ownership.chat,
       ownership.signal,
-      ownership.promptEpoch
+      ownership.promptEpoch,
+      ownership.completionObserved ? ownership : undefined
     );
   }
 
@@ -733,7 +751,8 @@ export class LiveWorkspaceSession {
     generation: number,
     expectedChat: JsonRpcChatTransport | undefined,
     signal: AbortSignal | undefined,
-    refreshEpoch: number
+    refreshEpoch: number,
+    completionOwnership?: ActivePromptOwnership
   ): Promise<void> {
     try {
       const response = await this.rest.getSessionMessages(
@@ -744,7 +763,10 @@ export class LiveWorkspaceSession {
       if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
       const timeline = mapLiveMessages(sessionId, response.messages, this.snapshot.model);
       if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
-      if (expectedChat) this.commitHistory(generation, sessionId, expectedChat);
+      if (expectedChat) {
+        this.commitHistory(generation, sessionId, expectedChat);
+        if (completionOwnership) this.commitCompletionHistory(completionOwnership);
+      }
       this.publish({ ...this.snapshot, timeline, state: timeline.length === 0 ? 'empty' : 'ready' });
     } catch (error) {
       // Abort and stale non-abort failures are both deliberately silent. A
@@ -935,6 +957,7 @@ export class LiveWorkspaceSession {
   private advanceRefreshEpoch(): number {
     this.refreshEpoch += 1;
     this.committedHistory = undefined;
+    this.committedCompletion = undefined;
     return this.refreshEpoch;
   }
 
@@ -1063,8 +1086,35 @@ export class LiveWorkspaceSession {
     };
   }
 
+  private commitCompletionHistory(ownership: ActivePromptOwnership): void {
+    if (
+      !ownership.completionObserved ||
+      ownership.promptEpoch !== this.refreshEpoch ||
+      !this.ownsChat(ownership.generation, ownership.chat, ownership.sessionId)
+    )
+      return;
+    this.committedCompletion = {
+      generation: ownership.generation,
+      sessionId: ownership.sessionId,
+      chat: ownership.chat,
+      request: ownership.request,
+      refreshEpoch: this.refreshEpoch
+    };
+  }
+
   private ownsCommittedHistory(): boolean {
     const committed = this.committedHistory;
+    return (
+      committed !== undefined &&
+      committed.generation === this.generation &&
+      committed.sessionId === this.snapshot.activeSessionId &&
+      committed.chat === this.chat &&
+      committed.refreshEpoch === this.refreshEpoch
+    );
+  }
+
+  private ownsCommittedCompletion(): boolean {
+    const committed = this.committedCompletion;
     return (
       committed !== undefined &&
       committed.generation === this.generation &&
@@ -1121,6 +1171,12 @@ function initialSnapshot(): LiveWorkspaceSnapshot {
 
 function withoutStreamingItem(timeline: readonly TimelineItem[], requestId: string): TimelineItem[] {
   return timeline.filter((item) => item.id !== `${requestId}:stream`);
+}
+
+function isSuccessfulMessageComplete(payload: BoundedJsonValue): boolean {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return true;
+  const status = payload.status ?? payload.outcome;
+  return status !== 'error' && status !== 'failed' && status !== 'cancelled';
 }
 
 function payloadText(payload: BoundedJsonValue): string | undefined {
