@@ -121,30 +121,46 @@ web transport's timestamp domain; integers are retained without float coercion
 so a large numeric input cannot round across the TTL boundary. Each operation
 rejects a timestamp earlier than the handle's stored lifecycle event because a
 backward clock sample could otherwise revive or reap a handle at the wrong
-point in its lifetime. A detached handle remains eligible for reattach through
-exactly 30 minutes; `reattach()` rejects elapsed time beyond that boundary even
-if periodic cleanup has not run. The periodic `reap()` deletes the stale
-detached handle only after the boundary, at elapsed 30 minutes plus one second.
-It deliberately does not claim immediate PTY kill or replay-before-live ordering.
-These are lifecycle contract labels, not a live Hermes process observation.
+point in its lifetime. An active idempotent `reattach()` still advances that
+handle's lifecycle clock. `reap()` preflights every handle clock before any
+deletion, advances surviving clocks to the reap timestamp, and performs no
+partial mutation when the timestamp is rejected. A retained attach identity
+cannot be overwritten, so duplicate attach cannot revive an expired detached
+resource; an identity may be reused only after its old handle has been fully
+reaped and is therefore a new lifecycle. A detached handle remains eligible for
+reattach through exactly 30 minutes; `reattach()` rejects elapsed time beyond
+that boundary even if periodic cleanup has not run. The periodic `reap()`
+deletes the stale detached handle only after the boundary, at elapsed 30 minutes
+plus one second. It deliberately does not claim immediate PTY kill or
+replay-before-live ordering. These are lifecycle contract labels, not a live
+Hermes process observation.
 
 The annotated negative evidence includes an explicit no-upstream summary. All
 edge-denied and direct-private-port vectors retain `upstream_request=false`.
-The direct-port vector describes untrusted access denied at the required
-private non-loopback Hermes TCP `9119` boundary; no socket is opened by this
-fixture and no firewall is exercised.
+The 34 retained case IDs bind to private executable vectors in
+`scripts/traefik_proof.py`; the vectors are evaluated by the local policy model
+or the synthetic private-boundary model, but only vector IDs and redacted
+expected outcomes are retained in this manifest. `upstream_request=true`
+means that the model allows forwarding; it is not an observed network request.
+The three invalid, expired, or reused ticket cases first pass the WebSocket
+shape policy and then receive their declared Hermes-layer result from the
+synthetic ticket ledger. The direct-port vector uses
+`private_hermes_boundary_observation("untrusted")`, opens no socket, and
+exercises no firewall.
 
 ## Offline harness and generated files
 
-The regression suite starts `make_forward_auth_server()` on an ephemeral
-loopback port and sends real standard-library `http.client` requests through
-the adapter. The server bounds the request line, header count and bytes,
-content length, the closed ForwardAuth header contract, and transport framing.
-It rejects C0, DEL, and C1 request-target controls, symlinks, FIFOs, special
-files, replacement races, and digest traversal or byte/time budget overruns.
-Adapter allows are ForwardAuth `200` decisions; they are not WebSocket `101`
-observations. This is an executable local policy harness only: it does not
-start Traefik, Hermes, a provider, or any deployment listener.
+The offline harness status in the manifest is `declared`: command results are
+externally reported and are not retained in the JSON artifact. The regression
+suite starts `make_forward_auth_server()` on an ephemeral loopback port and
+sends real standard-library `http.client` requests through the adapter. The
+server bounds the request line, header count and bytes, content length, the
+closed ForwardAuth header contract, and transport framing. It rejects C0, DEL,
+and C1 request-target controls, symlinks, FIFOs, special files, replacement
+races, and digest traversal or byte/time budget overruns. Adapter allows are
+ForwardAuth `200` decisions; they are not WebSocket `101` observations. This
+is an executable local policy harness only: it does not start Traefik, Hermes,
+a provider, or any deployment listener.
 
 `render_to_directory()` writes `traefik-static.json` and
 `traefik-dynamic.json` under the requested output directory and binds the file
@@ -163,7 +179,7 @@ before making that runtime claim.
 - the reviewed Hermes source SHA;
 - the same static build and shared route/deep-link fixture identities used by
   the disposable Caddy proof;
-- the deterministic Traefik static/dynamic configuration digest;
+- the semantic digest of the canonical compact Traefik static/dynamic bundle and runtime inputs (not independently retained emitted-file bytes);
 - the deterministic runtime-input digest;
 - the synthetic cookie, ticket, PTY, no-retry, and no-upstream model outputs; and
 - the fixed synthetic proof-run boundary (`live_run=false`, `compatible=false`).
@@ -192,13 +208,17 @@ python3 -m py_compile scripts/traefik_proof.py scripts/test_traefik_proof.py
 ```
 
 These checks are offline and use only standard-library policy, renderer, and
-loopback adapter code. They do not invoke a Traefik CLI, and therefore do not
-claim Traefik configuration parsing, `v3.7.6` minimum compatibility, or runtime
-`HeaderRegexp` behavior. The suite does not claim a live Traefik deployment, a
-Hermes process, provider availability, live cookie attributes, firewall behavior,
-or issue #90 completion. Synthetic cookie and lifecycle models make the
-reviewed invariants executable without upgrading them into live deployment
-proof. The fixture keeps `proof_run.live_run=false` and
-`proof_run.compatible=false`; only an authorized live exercise of the exact
-reviewed and merged build against real Hermes in the required private topology
-can clear that deployment gate.
+loopback adapter code. The CLI serialization contract is also checked:
+`render` emits compact bundle JSON to stdout, `render --output-dir DIR` emits
+pretty static and dynamic JSON with trailing newlines, and `evidence` emits
+compact manifest JSON to stdout while the retained artifact uses the pretty
+canonical serialization bound by its SHA file. No command invokes a Traefik
+CLI, and therefore these checks do not claim Traefik configuration parsing,
+`v3.7.6` minimum compatibility, or runtime `HeaderRegexp` behavior. The suite
+does not claim a live Traefik deployment, a Hermes process, provider
+availability, live cookie attributes, firewall behavior, or issue #90
+completion. Synthetic cookie and lifecycle models make the reviewed
+invariants executable without upgrading them into live deployment proof. The
+fixture keeps `proof_run.live_run=false` and `proof_run.compatible=false`; only
+an authorized live exercise of the exact reviewed and merged build against
+real Hermes in the required private topology can clear that deployment gate.
