@@ -8,6 +8,16 @@ import { parseRawRequestTarget } from '../../src/lib/static-route-grammar.mjs';
 import { resolveStaticPath } from '../static/static-host.mjs';
 
 const PROXY_PREFIXES = Object.freeze(['/api/', '/auth/']);
+const PTY_WEBSOCKET_PATH = '/api/pty';
+const CHAT_WEBSOCKET_PATH = '/api/ws';
+const PTY_QUERY_KEYS = new Set(['ticket', 'resume', 'attach']);
+const PTY_QUERY_LIMITS = Object.freeze({
+  ticket: 512,
+  resume: 128,
+  attach: 512
+});
+const MAX_PTY_QUERY_LENGTH = 1_200;
+const SAFE_OPAQUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/u;
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'keep-alive',
@@ -22,6 +32,84 @@ const HOP_BY_HOP_HEADERS = new Set([
 /** @param {string} pathname @returns {boolean} */
 function isProxyTarget(pathname) {
   return PROXY_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
+
+/** @param {string} pathname @returns {boolean} */
+function isPtyPath(pathname) {
+  // Keep PTY routing exact. Otherwise the broader /api/ proxy prefix could
+  // accidentally turn /api/pty/anything into a credentialed upstream route.
+  return pathname === PTY_WEBSOCKET_PATH || pathname.startsWith(`${PTY_WEBSOCKET_PATH}/`);
+}
+
+/**
+ * Validate the PTY query lexically and retain no opaque values. The browser
+ * transport already constrains these values to safe opaque ASCII; repeating
+ * that boundary here prevents URL decoding from changing the upstream target.
+ *
+ * @param {string} rawTarget
+ * @returns {{queryKeyNames: readonly string[], valueLengths: Readonly<Record<string, number>>} | undefined}
+ */
+function parsePtyUpgradeTarget(rawTarget) {
+  const parsed = parseRawRequestTarget(rawTarget);
+  if (!parsed || parsed.pathname !== PTY_WEBSOCKET_PATH || !parsed.hasQuery) return undefined;
+
+  const queryStart = rawTarget.indexOf('?');
+  const rawQuery = rawTarget.slice(queryStart + 1);
+  if (rawQuery.length === 0 || rawQuery.length > MAX_PTY_QUERY_LENGTH || rawQuery.includes('?')) {
+    return undefined;
+  }
+
+  const queryKeyNames = [];
+  /** @type {Record<string, number>} */
+  const valueLengths = {};
+  const seenKeys = new Set();
+  for (const pair of rawQuery.split('&')) {
+    const equalsIndex = pair.indexOf('=');
+    if (equalsIndex <= 0 || equalsIndex !== pair.lastIndexOf('=')) return undefined;
+    const key = pair.slice(0, equalsIndex);
+    const value = pair.slice(equalsIndex + 1);
+    const limit =
+      key === 'ticket'
+        ? PTY_QUERY_LIMITS.ticket
+        : key === 'resume'
+          ? PTY_QUERY_LIMITS.resume
+          : key === 'attach'
+            ? PTY_QUERY_LIMITS.attach
+            : undefined;
+    if (!PTY_QUERY_KEYS.has(key) || seenKeys.has(key) || limit === undefined) return undefined;
+    if (value.length === 0 || value.length > limit || !SAFE_OPAQUE_PATTERN.test(value)) return undefined;
+    seenKeys.add(key);
+    queryKeyNames.push(key);
+    valueLengths[key] = value.length;
+  }
+
+  if (!seenKeys.has('ticket') || !seenKeys.has('resume')) return undefined;
+  return Object.freeze({
+    queryKeyNames: Object.freeze(queryKeyNames),
+    valueLengths: Object.freeze(valueLengths)
+  });
+}
+
+/** @param {import('node:http').IncomingMessage} request @returns {boolean} */
+function hasWebSocketUpgrade(request) {
+  const upgrade = request.headers.upgrade;
+  const connection = request.headers.connection;
+  if (typeof upgrade !== 'string' || upgrade.trim().toLowerCase() !== 'websocket') return false;
+  if (typeof connection !== 'string') return false;
+  return connection.split(',').some((token) => token.trim().toLowerCase() === 'upgrade');
+}
+
+/**
+ * @param {import('node:stream').Duplex} socket
+ * @param {number} statusCode
+ * @param {string} statusMessage
+ * @param {Record<string, string>} [headers]
+ */
+function denyUpgrade(socket, statusCode, statusMessage, headers = {}) {
+  const lines = [`HTTP/1.1 ${statusCode} ${statusMessage}`];
+  for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`);
+  lines.push('Connection: close', '', '');
+  socket.end(lines.join('\r\n'));
 }
 
 /** @param {string} pathname @returns {string} */
@@ -106,18 +194,43 @@ function proxyHttp(request, response, target) {
  * @param {URL} target
  */
 function proxyUpgrade(request, socket, head, target) {
-  const parsed = parseRawRequestTarget(request.url ?? '');
-  if (!parsed || parsed.pathname !== '/api/ws') {
-    socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+  const rawTarget = request.url ?? '';
+  const parsed = parseRawRequestTarget(rawTarget);
+  if (!parsed) {
+    denyUpgrade(socket, 400, 'Bad Request');
+    return;
+  }
+  if (request.method !== 'GET') {
+    denyUpgrade(socket, 405, 'Method Not Allowed', { Allow: 'GET' });
+    return;
+  }
+  if (!hasWebSocketUpgrade(request)) {
+    denyUpgrade(socket, 426, 'Upgrade Required', { Upgrade: 'websocket' });
     return;
   }
 
+  const isPtyTarget = parsed.pathname === PTY_WEBSOCKET_PATH;
+  const ptyTarget = isPtyTarget ? parsePtyUpgradeTarget(rawTarget) : undefined;
+  if (isPtyTarget && ptyTarget === undefined) {
+    denyUpgrade(socket, 400, 'Bad Request');
+    return;
+  }
+  if (!isPtyTarget && parsed.pathname !== CHAT_WEBSOCKET_PATH) {
+    // Keep /api/ws as the reviewed Chat route, while refusing every other
+    // upgrade before any credentialed upstream request is created.
+    denyUpgrade(socket, 404, 'Not Found');
+    return;
+  }
+
+  // `ptyTarget` contains only key names and bounded lengths. The raw target is
+  // forwarded unchanged so ticket, resume, and attach remain opaque and no
+  // WebSocket payload listener can decode or buffer PTY bytes.
   const upstream = createRequest({
     protocol: target.protocol,
     hostname: target.hostname,
     port: target.port,
     method: 'GET',
-    path: request.url,
+    path: rawTarget,
     headers: {
       ...proxyHeaders(request.headers, target),
       connection: 'Upgrade',
@@ -141,6 +254,9 @@ function proxyUpgrade(request, socket, head, target) {
     socket.write(`HTTP/1.1 ${statusCode} ${statusMessage}\r\n${rawHeaders.join('\r\n')}\r\n\r\n`);
     if (head.length > 0) upstreamSocket.write(head);
     if (upstreamHead.length > 0) socket.write(upstreamHead);
+    // These are raw duplex pipes by design. No PTY frame is decoded,
+    // stringified, copied into an application buffer, or written to a log;
+    // close frames therefore preserve their exact code bytes end to end.
     upstreamSocket.pipe(socket);
     socket.pipe(upstreamSocket);
   });
@@ -249,6 +365,30 @@ export function createLiveHost({
     if (!parsed) {
       response.statusCode = 400;
       response.end('bad request');
+      return;
+    }
+    if (isPtyPath(parsed.pathname)) {
+      if (parsed.pathname !== PTY_WEBSOCKET_PATH) {
+        response.statusCode = 404;
+        response.end('not found');
+        return;
+      }
+      if (request.method !== 'GET') {
+        response.statusCode = 405;
+        response.setHeader('allow', 'GET');
+        response.end('method not allowed');
+        return;
+      }
+      if (parsePtyUpgradeTarget(rawTarget) === undefined) {
+        response.statusCode = 400;
+        response.end('bad pty upgrade target');
+        return;
+      }
+      // A normal HTTP request cannot open a PTY. Reject it locally rather than
+      // forwarding a credential-bearing query to Hermes without an upgrade.
+      response.statusCode = 426;
+      response.setHeader('upgrade', 'websocket');
+      response.end('upgrade required');
       return;
     }
     if (isProxyTarget(parsed.pathname)) {
