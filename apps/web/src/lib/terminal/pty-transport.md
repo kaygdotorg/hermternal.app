@@ -140,7 +140,10 @@ latency evidence defines a budget. Reproduce it with
 bursts per ignored adapter stage (validator, ticket, and factory), after five
 warmups. Its checked-in sanitized test-mode artifact records min, median, and
 p95 settle time plus ticket, validator, factory, opened-socket, cleanup, and
-duplicate-owner totals. The current artifact reports zero duplicate-owner
-violations; a latency threshold remains `null` because this issue establishes a
-baseline rather than inventing a budget. Reproduce it with
-`bun src/lib/terminal/pty-reconnect-supersession.bench.ts` from `apps/web`.
+duplicate-owner totals. `provenance.sourceRevision` is the immutable source
+commit at which the benchmark ran; the artifact is committed afterward, so it
+does not claim an impossible self-hash. Reproduce it with
+`GIT_SOURCE_REVISION=$(git rev-parse HEAD) bun src/lib/terminal/pty-reconnect-supersession.bench.ts`
+from `apps/web`, then commit the resulting evidence separately. The current
+artifact reports zero duplicate-owner violations; a latency threshold remains
+`null` because this issue establishes a baseline rather than inventing a budget.

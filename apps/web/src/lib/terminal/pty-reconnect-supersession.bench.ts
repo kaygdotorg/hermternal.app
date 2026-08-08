@@ -172,8 +172,11 @@ console.log(JSON.stringify({
   metric: { name: "reconnect_burst_settle_wall_time", unit: "ms", clock: "performance.now" },
   method: "R-7 inclusive linear interpolation",
   provenance: {
-    commitSha: process.env.GIT_COMMIT ?? "unrecorded",
-    command: "GIT_COMMIT=<source-sha> bun src/lib/terminal/pty-reconnect-supersession.bench.ts",
+    // Evidence is committed after the measured source revision, avoiding an
+    // impossible self-hash while keeping the benchmark's code relationship
+    // independently reproducible from the immutable parent commit.
+    sourceRevision: process.env.GIT_SOURCE_REVISION ?? "unrecorded",
+    command: "GIT_SOURCE_REVISION=<source-sha> bun src/lib/terminal/pty-reconnect-supersession.bench.ts",
     exitStatus: 0,
     runtime: `Bun ${process.versions.bun ?? "unknown"}`,
     platform: process.platform,
