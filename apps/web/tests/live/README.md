@@ -19,10 +19,11 @@ viewport other than `1440x960`, non-Chromium browser provenance, non-`en-US`
 locale, non-1 DPR or zoom, unexpected theme or reduced-motion inputs, and UI
 states outside the bounded `empty`/`ready` set. All live proof assertions finish
 before the capture-only page transform. The transform replaces the live
-conversation timeline, session labels, conversation title, and composer values
+conversation timeline, session labels, conversation title, provider/model
+metadata (`.header-model`), session counts (`.group-count`), and composer values
 with bounded semantic placeholders, then asserts that prohibited transcript,
-user, assistant, tool, and live-data markers are absent from the DOM and web
-storage before `page.screenshot()` runs. It records only the fixed-key manifest,
+user, assistant, tool, metadata, and live-data markers are absent from the DOM
+and web storage before `page.screenshot()` runs. It records only the fixed-key manifest,
 the official Hermes image digest and source attestation, the exact safe test
 command, and the SHA-256 of the returned PNG. It never attaches or writes
 prompt text, transcripts, provider payloads, tickets, cookies, credentials,

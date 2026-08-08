@@ -100,6 +100,7 @@ describe('deterministic live Chat screenshot capture', () => {
       dataSource: 'live-runtime',
       dataMode: 'live',
       artifactInspectorEnabled: false,
+      model: 'PRIVATE PROVIDER MODEL',
       title: 'private live title',
       sessions: [
         {
@@ -131,6 +132,11 @@ describe('deterministic live Chat screenshot capture', () => {
     expect(preview).toBeTruthy();
     expect(preview?.textContent).toContain('private user prompt');
     expect(preview?.querySelector('[data-live-content="conversation-timeline"]')).toBeTruthy();
+    expect(preview?.querySelector('.header-model')).toHaveTextContent('PRIVATE PROVIDER MODEL');
+    expect([...preview!.querySelectorAll('.group-count')].map((node) => node.textContent)).toEqual([
+      '0',
+      '1'
+    ]);
 
     const result = sanitizeLiveChatCapturePresentation();
     expect(result).toEqual({ sanitized: true, removedValueCount: expect.any(Number), prohibitedNodeCount: 0 });
@@ -144,6 +150,56 @@ describe('deterministic live Chat screenshot capture', () => {
     expect(preview?.textContent).not.toContain('private tool output');
     expect(preview?.textContent).not.toContain('private session title');
     expect(preview?.textContent).not.toContain('private live title');
+    expect(preview?.textContent).not.toContain('PRIVATE PROVIDER MODEL');
+    expect(preview?.querySelector('.header-model')).toHaveTextContent('Model');
+    expect(preview?.querySelector('.header-model')).toHaveAttribute('aria-label', 'Current model');
+    expect([...preview!.querySelectorAll('.group-count')].map((node) => node.textContent)).toEqual([
+      '—',
+      '—'
+    ]);
+    expect([...preview!.querySelectorAll('.group-count')].map((node) => node.textContent)).not.toContain('1');
+  });
+
+  it('scrubs metadata in the real Chromium page realm', async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await page.setContent(`
+        <section data-testid="runtime-preview">
+          <section data-live-content="conversation-timeline">
+            <p class="assistant-copy">PRIVATE TRANSCRIPT</p>
+          </section>
+          <div class="header-model" aria-label="Current model PRIVATE PROVIDER MODEL">
+            <span>PRIVATE PROVIDER MODEL</span>
+          </div>
+          <span class="group-count">1</span>
+        </section>
+      `);
+
+      await expect(page.evaluate(sanitizeLiveChatCapturePresentation)).resolves.toMatchObject({
+        sanitized: true,
+        prohibitedNodeCount: 0
+      });
+      await expect(
+        page.evaluate(() => ({
+          model: document.querySelector('.header-model')?.textContent?.trim(),
+          modelLabel: document.querySelector('.header-model')?.getAttribute('aria-label'),
+          count: document.querySelector('.group-count')?.textContent,
+          sourceModel: document.documentElement.outerHTML.includes('PRIVATE PROVIDER MODEL'),
+          sourceCount: document.querySelector('.group-count')?.textContent === '1'
+        }))
+      ).resolves.toEqual({
+        model: 'Model',
+        modelLabel: 'Current model',
+        count: '—',
+        sourceModel: false,
+        sourceCount: false
+      });
+      await context.close();
+    } finally {
+      await browser.close();
+    }
   });
 
   it('observes the resolved Chromium project viewport and reduced-motion preference', async () => {

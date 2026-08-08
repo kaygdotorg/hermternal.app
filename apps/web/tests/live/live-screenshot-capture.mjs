@@ -364,20 +364,32 @@ export function isLiveScreenshotCaptureEnabled(environment = process.env) {
  * placeholders before the PNG is rendered. This function is intentionally
  * self-contained because Playwright serializes it into the page realm. The
  * component markers identify the only DOM regions that may contain live
- * session, transcript, or composer data; the post-transform assertions fail
- * closed if a marker or a known live value remains.
+ * session, transcript, provider/model metadata, or composer data; the
+ * post-transform assertions fail closed if a marker or a known live value
+ * remains.
  */
 export function sanitizeLiveChatCapturePresentation() {
   const preview = document.querySelector('[data-testid="runtime-preview"]');
   if (!(preview instanceof HTMLElement)) {
     throw new Error('live screenshot capture workspace is unavailable');
   }
+  // Keep placeholders inside this page-evaluated function; Playwright does not
+  // serialize module lexical bindings with the function body.
+  const modelPlaceholder = 'Model';
+  const sessionCountPlaceholder = '—';
 
   /** @type {string[]} */
   const oldLiveValues = [];
+  /** @type {string[]} */
+  const oldMetadataValues = [];
   /** @param {unknown} value */
   const remember = (value) => {
     if (typeof value === 'string' && value.trim().length > 0) oldLiveValues.push(value.trim());
+  };
+  /** @param {unknown} value */
+  const rememberMetadata = (value) => {
+    remember(value);
+    if (typeof value === 'string' && value.trim().length > 0) oldMetadataValues.push(value.trim());
   };
   /** @param {Element} element */
   const rememberDynamicAttributes = (element) => {
@@ -403,6 +415,15 @@ export function sanitizeLiveChatCapturePresentation() {
     remember(row.querySelector('.pill-description')?.textContent);
     const button = row.querySelector('button');
     if (button) rememberDynamicAttributes(button);
+  });
+
+  preview.querySelectorAll('.header-model').forEach((model) => {
+    rememberMetadata(model.textContent);
+    rememberMetadata(model.getAttribute('aria-label'));
+    rememberMetadata(model.getAttribute('title'));
+  });
+  preview.querySelectorAll('.group-count').forEach((count) => {
+    rememberMetadata(count.textContent);
   });
 
   preview.querySelectorAll('[data-live-content="conversation-title"]').forEach((region) => {
@@ -436,6 +457,19 @@ export function sanitizeLiveChatCapturePresentation() {
     });
     list.setAttribute('data-capture-sanitized', '1');
     list.removeAttribute('data-live-content');
+  });
+
+  preview.querySelectorAll('.header-model').forEach((model) => {
+    const label = model.querySelector('span');
+    if (label) label.textContent = modelPlaceholder;
+    else model.textContent = modelPlaceholder;
+    model.setAttribute('aria-label', 'Current model');
+    model.setAttribute('title', 'Current model');
+    model.setAttribute('data-capture-sanitized', '1');
+  });
+  preview.querySelectorAll('.group-count').forEach((count) => {
+    count.textContent = sessionCountPlaceholder;
+    count.setAttribute('data-capture-sanitized', '1');
   });
 
   preview.querySelectorAll('[data-live-content="conversation-title"]').forEach((region) => {
@@ -487,6 +521,9 @@ export function sanitizeLiveChatCapturePresentation() {
   const serializedPage = `${document.documentElement.outerHTML}\n${storageText}`;
   const fixedPresentationText = new Set([
     'Hermes',
+    'Model',
+    'Current model',
+    '—',
     'Conversation',
     'Open conversation',
     'Chat session',
@@ -498,7 +535,17 @@ export function sanitizeLiveChatCapturePresentation() {
   const residual = [...new Set(oldLiveValues)].filter(
     (value) => value.length >= 3 && !fixedPresentationText.has(value) && serializedPage.includes(value)
   );
-  if (residual.length > 0) {
+  const metadataResidual = [...new Set(oldMetadataValues)].filter((value) => {
+    if (fixedPresentationText.has(value)) return false;
+    return [...preview.querySelectorAll('.header-model, .group-count')].some((element) => {
+      return (
+        element.textContent?.includes(value) ||
+        element.getAttribute('aria-label')?.includes(value) ||
+        element.getAttribute('title')?.includes(value)
+      );
+    });
+  });
+  if (residual.length > 0 || metadataResidual.length > 0) {
     throw new Error('live screenshot capture found prohibited live text or data');
   }
 
@@ -652,8 +699,9 @@ export async function captureLiveChatScreenshot({
 
   // Complete all live proof assertions before this call. The page is then
   // transformed in-place into a capture-only presentation that contains no
-  // user, assistant, tool, title, or composer values. The sanitizer validates
-  // the DOM and storage boundary immediately before the screenshot operation.
+  // user, assistant, tool, title, provider/model metadata, session counts, or
+  // composer values. The sanitizer validates the DOM and storage boundary
+  // immediately before the screenshot operation.
   const presentation = await page.evaluate(sanitizeLiveChatCapturePresentation);
   if (!presentation || presentation.sanitized !== true || presentation.prohibitedNodeCount !== 0) {
     throw new Error('live screenshot capture presentation was not sanitized');
