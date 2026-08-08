@@ -20,17 +20,18 @@ operations:
 - `connect(input)` opens the active Hermes session. Missing or empty `attach`
   omits the query value and selects legacy mode. A non-empty `attach` requires
   the injected fail-closed attachment validator before ticket mint or upgrade.
-- `reconnect()` is explicit and attach-only. It reuses the exact session,
-  attach, and process identity input, validates the 30-minute detached window,
-  and mints a fresh single-use ticket. A `4409` superseded socket is blocked
-  from reattaching because its replacement is already the active attachment.
+- `reconnect()` is explicit and attach-only. Attachment identity is exactly the
+  session ID, attach handle, and process identity; `detachedAtMs` remains local
+  expiry evidence and cannot change a `4409` retry decision. Authorized reconnect
+  validates the 30-minute detached window and mints a fresh single-use ticket.
 - `sendInput()` sends UTF-8 text or copied raw bytes only while attached.
 - `resize()` sends one binary `ESC [RESIZE:<cols>;<rows>]` frame after clamping
   exact integers to `1..2000` columns and `1..1000` rows.
 - `detach()` and `close()` remove every socket callback before closing. Attach
   mode enters `detached`; legacy mode enters `exited` because its bridge owns
-  the child process lifetime. Explicit `close()` also blocks `reconnect()` until
-  a new `connect()` call makes the user's intent current again.
+  the child process lifetime. Explicit `close()` latches the reconnect denial;
+  later cleanup such as `detach()` cannot weaken it. Only a new `connect()` call
+  makes replacement user intent current again.
 - An established attach socket that reports `onerror` without `onclose` enters
   `detached` and remains eligible for explicit reconnect. An error or close
   before `onopen` remains `failed` and cannot seed a detach-retention window.
@@ -101,8 +102,10 @@ does not alter the renderer contract. Keyboard, focus, semantic naming, browser
 zoom, contrast, reduced motion/transparency, and touch-target verification
 remain owned by the Terminal renderer and workspace integration issues.
 
-Performance evidence is limited to the bounded implementation rules: no local
-replay accumulation, one serialized conversion chain per active socket, and
-immediate stale-context release. No
-reviewed runtime latency or memory budget exists, so this issue does not claim a
-threshold.
+`pty-retry-authorization.bench.ts` measures only the synchronous same-identity
+retry decision after a prepared `4409`; ticket minting, socket creation,
+rendering, and network work remain outside the timed region. The checked-in
+1,000-evaluation artifact reports p50 `0.000708 ms`, p95 `0.002461 ms`, and p99
+`0.004835 ms`, with one setup ticket/socket and no blocked-attempt ticket/socket.
+`threshold` is `null` because no reviewed latency budget exists. Reproduce it
+with `bun src/lib/terminal/pty-retry-authorization.bench.ts` from `apps/web`.

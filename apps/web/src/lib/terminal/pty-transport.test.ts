@@ -1124,11 +1124,20 @@ describe("PTY transport", () => {
 
   it("blocks reconnect after explicit Close until a new connect", async () => {
     const harness = makeHarness();
-    await open(harness);
+    const first = await open(harness);
+    const staleOpen = first.onopen;
+    const staleClose = first.onclose;
     harness.transport.close();
+    harness.transport.detach();
     await expect(harness.transport.reconnect()).rejects.toMatchObject({
       code: "closed",
     });
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+    expect(harness.sockets).toHaveLength(1);
+
+    staleOpen?.();
+    staleClose?.({ code: 1006 });
+    expect(harness.transport.state.status).toBe("detached");
 
     const replacementPending = harness.transport.connect(ATTACH_INPUT);
     await flush();
@@ -1136,6 +1145,9 @@ describe("PTY transport", () => {
     if (!replacement) throw new Error("missing replacement fake socket");
     replacement.open();
     await replacementPending;
+    expect(harness.transport.state.status).toBe("attached");
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(2);
+    expect(harness.sockets).toHaveLength(2);
   });
 
   it("keeps observer failures outside lifecycle and retained diagnostics", async () => {
