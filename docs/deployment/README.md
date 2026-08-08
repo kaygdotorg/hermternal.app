@@ -63,14 +63,28 @@ upstream path, body, prefix, query policy, and rebuilt headers. It does not
 contact the disposable VM during correction work.
 
 The official launcher intentionally publishes Hermes only on VM loopback. The
-retained `browser_journey` is derived from the bounded `browser_evidence` map,
-not from a caller-supplied status. Its fixed schema binds the status to the
-build, static manifest, rendered Caddyfile, and runtime-input digests. The
-current map is `blocked_provider` with only `provider_unavailable`; no browser
-event payload or provider payload is retained. Passed, blocked-empty-session,
-and failed statuses each require their matching validated evidence, and missing,
-stale, mismatched, malformed, or extra-key maps fail closed. No preview URL is
-valid. This lane does not implement or attest Traefik.
+browser proof has two explicit input workflows. A standalone browser map is a
+temporary input and must be supplied with a static-build root; the verifier
+derives the checked-out Git `HEAD` and the digest of the actual static bytes
+before it accepts browser provenance. The optional CLI build SHA and digest
+flags are assertions against those derived values, not trust roots. The static
+root must contain `index.html`, `200.html`, `manifest.webmanifest`, and
+`service-worker.js`, and the temporary browser map must remain outside that
+root so it cannot alter the bytes being hashed.
+
+The retained workflow instead accepts the complete committed evidence file
+explicitly. It verifies the file's `caddy-proof-evidence-sha256.txt` anchor,
+checks the historical build pair, and reconstructs the deterministic runtime
+inputs; it does not require the historical static build to exist locally. The
+fixed browser schema binds either workflow's status to the verified build,
+static manifest, rendered Caddyfile, and runtime-input digests. Browser JSON is
+bounded to 4096 bytes, requires UTF-8, and rejects duplicate object keys at
+every nesting level. The current retained map is `blocked_provider` with only
+`provider_unavailable`; no browser event payload or provider payload is
+retained. Passed, blocked-empty-session, and failed statuses each require
+their matching validated evidence, and missing, stale, mismatched, malformed,
+oversized, or extra-key maps fail closed. No preview URL is valid. This lane
+does not implement or attest Traefik.
 
 The local Caddy/mock-upstream proof emits no `Set-Cookie`. Its renderer test
 covers only the configured `Secure` rewrite; `HttpOnly`, `SameSite`, and `Path`

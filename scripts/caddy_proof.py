@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -30,6 +31,19 @@ DEFAULT_HERMES_PORT = 19256
 # arbitrary status string or event map into a result for a different run.
 BROWSER_EVIDENCE_SCHEMA = "hermternal.caddy-proof.browser-evidence.v1"
 BROWSER_EVIDENCE_MAX_BYTES = 4096
+RETAINED_EVIDENCE_MAX_BYTES = 64 * 1024
+GIT_COMMAND_TIMEOUT_SECONDS = 5
+HEX40_RE = re.compile(r"[0-9a-f]{40}")
+HEX64_RE = re.compile(r"[0-9a-f]{64}")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RETAINED_EVIDENCE_PATH = PROJECT_ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence.json"
+RETAINED_EVIDENCE_ANCHOR_PATH = PROJECT_ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence-sha256.txt"
+STATIC_BUILD_REQUIRED_FILES = (
+    "index.html",
+    "200.html",
+    "manifest.webmanifest",
+    "service-worker.js",
+)
 BROWSER_COMPLETION_EVIDENCE = {
     "gateway.ready": "proven",
     "session.resume": "proven",
@@ -568,6 +582,191 @@ def render_from_inputs(value: Mapping[str, object]) -> str:
     return render_caddyfile(**inputs)
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate object members before JSON semantics can collapse them."""
+
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _read_bounded_bytes(path: Path, limit: int, label: str) -> bytes:
+    """Read at most one byte beyond a fixture limit before rejecting it."""
+
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(limit + 1)
+    except OSError as exc:
+        raise ValueError(f"{label} could not be read") from exc
+    if len(data) > limit:
+        raise ValueError(f"{label} exceeds the bounded input size")
+    return data
+
+
+def _load_bounded_json(path: Path, *, limit: int, label: str) -> object:
+    """Decode one bounded UTF-8 JSON document with duplicate-key rejection."""
+
+    raw = _read_bounded_bytes(path, limit, label)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{label} is not valid UTF-8") from exc
+    try:
+        return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+    except ValueError as exc:
+        if str(exc) == "duplicate JSON object key":
+            raise ValueError(f"{label} contains a duplicate JSON object key") from exc
+        raise ValueError(f"{label} is not valid JSON") from exc
+
+
+def _git_text(repository_root: Path, *arguments: str) -> str:
+    """Read one bounded, exact Git value from the repository trust root."""
+
+    root = Path(repository_root).resolve()
+    if not root.is_dir():
+        raise ValueError("Git repository root is unavailable")
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(root), *arguments),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="ascii",
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+    except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("Git provenance could not be checked") from exc
+    if result.returncode != 0:
+        raise ValueError("Git provenance could not be checked")
+    value = result.stdout.strip()
+    if not value or "\\n" in value or "\\r" in value:
+        raise ValueError("Git provenance output is malformed")
+    return value
+
+
+def _git_head(repository_root: Path = PROJECT_ROOT) -> str:
+    """Return the full checked-out commit, never a caller-provided alias."""
+
+    head = _git_text(repository_root, "rev-parse", "--verify", "HEAD^{commit}")
+    if HEX40_RE.fullmatch(head) is None:
+        raise ValueError("Git HEAD is not a full commit SHA")
+    return head
+
+
+def _verify_git_commit(build_sha: str, repository_root: Path = PROJECT_ROOT) -> None:
+    """Require a real commit reachable from this checkout's current HEAD."""
+
+    if type(build_sha) is not str or HEX40_RE.fullmatch(build_sha) is None:
+        raise ValueError("build_sha must be a lowercase commit SHA")
+    resolved = _git_text(repository_root, "rev-parse", "--verify", f"{build_sha}^{{commit}}")
+    if resolved != build_sha:
+        raise ValueError("build_sha is not an exact Git commit")
+    head = _git_head(repository_root)
+    if build_sha == head:
+        return
+    root = Path(repository_root).resolve()
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(root), "merge-base", "--is-ancestor", build_sha, head),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("Git build ancestry could not be checked") from exc
+    if result.returncode != 0:
+        raise ValueError("build_sha is not an ancestor of the checked-out Git HEAD")
+
+
+def _validate_build_digest(build_digest: object) -> str:
+    if type(build_digest) is not str or HEX64_RE.fullmatch(build_digest) is None:
+        raise ValueError("build_digest must be a SHA-256 digest")
+    return build_digest
+
+
+def _derive_git_static_build_provenance(
+    static_build_root: Path,
+    repository_root: Path = PROJECT_ROOT,
+) -> dict[str, str]:
+    """Derive the build identity from Git and the actual static tree bytes."""
+
+    root = Path(static_build_root).resolve()
+    if not root.is_dir():
+        raise ValueError("static build root is unavailable")
+    for relative_path in STATIC_BUILD_REQUIRED_FILES:
+        if not (root / relative_path).is_file():
+            raise ValueError("static build is missing a reviewed entry point")
+    build_sha = _git_head(repository_root)
+    build_digest = _build_static_digest(root)
+    return {"build_sha": build_sha, "build_digest": build_digest}
+
+
+def _committed_retained_build_provenance() -> dict[str, str]:
+    """Read the reviewed historical build pair without trusting CLI strings."""
+
+    evidence_bytes = _read_bounded_bytes(
+        RETAINED_EVIDENCE_PATH,
+        RETAINED_EVIDENCE_MAX_BYTES,
+        "committed retained evidence",
+    )
+    try:
+        evidence = json.loads(
+            evidence_bytes.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("committed retained evidence is malformed") from exc
+    if not isinstance(evidence, Mapping):
+        raise ValueError("committed retained evidence must be an object")
+    product = evidence.get("product")
+    if not isinstance(product, Mapping):
+        raise ValueError("committed retained evidence product is malformed")
+    build_sha = product.get("build_commit")
+    build_digest = product.get("static_manifest_sha256")
+    if type(build_sha) is not str or type(build_digest) is not str:
+        raise ValueError("committed retained build provenance is malformed")
+    if HEX40_RE.fullmatch(build_sha) is None or HEX64_RE.fullmatch(build_digest) is None:
+        raise ValueError("committed retained build provenance is malformed")
+    try:
+        anchor = RETAINED_EVIDENCE_ANCHOR_PATH.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("committed retained evidence anchor is unavailable") from exc
+    if HEX64_RE.fullmatch(anchor) is None or digest_bytes(evidence_bytes) != anchor:
+        raise ValueError("committed retained evidence anchor does not match")
+    return {"build_sha": build_sha, "build_digest": build_digest}
+
+
+def _verify_build_provenance(
+    *,
+    build_sha: str,
+    build_digest: str,
+    mode: str,
+    static_build_root: Path | None = None,
+    repository_root: Path = PROJECT_ROOT,
+) -> None:
+    """Verify derived standalone or anchored retained build identity."""
+
+    _validate_build_digest(build_digest)
+    if mode == "standalone":
+        if static_build_root is None:
+            raise ValueError("standalone evidence requires a static build root")
+        derived = _derive_git_static_build_provenance(static_build_root, repository_root)
+        if {"build_sha": build_sha, "build_digest": build_digest} != derived:
+            raise ValueError("CLI build provenance does not match Git and static-build bytes")
+    elif mode == "retained":
+        expected = _committed_retained_build_provenance()
+        if {"build_sha": build_sha, "build_digest": build_digest} != expected:
+            raise ValueError("retained build provenance does not match committed evidence")
+    else:
+        raise ValueError("unsupported build provenance mode")
+    _verify_git_commit(build_sha, repository_root)
+
+
 def _browser_evidence_provenance(
     *,
     build_sha: str,
@@ -670,30 +869,45 @@ def render_manifest(
     caddyfile_digest: str,
     browser_journey: str | None = None,
     browser_evidence: Mapping[str, object] | None = None,
-    browser_completion_evidence: Mapping[str, object] | None = None,
     runtime_inputs: Mapping[str, object] | None = None,
+    provenance_mode: str = "retained",
+    static_build_root: Path | None = None,
+    repository_root: Path = PROJECT_ROOT,
 ) -> dict[str, object]:
-    """Create redacted evidence metadata; values are never request material."""
+    """Create redacted evidence metadata; values are never request material.
 
-    if not re.fullmatch(r"[0-9a-f]{40}", build_sha):
+    Retained evidence uses the committed historical build anchor. Standalone
+    browser evidence must instead provide a static tree so Git HEAD and its
+    exact bytes are derived locally; caller-supplied identity flags are only
+    checked assertions and never establish provenance.
+    """
+
+    if not HEX40_RE.fullmatch(build_sha):
         raise ValueError("build_sha must be a lowercase commit SHA")
-    for name, value in (("build_digest", build_digest), ("caddyfile_digest", caddyfile_digest)):
-        if not re.fullmatch(r"[0-9a-f]{64}", value):
-            raise ValueError(f"{name} must be a SHA-256 digest")
-
-    if browser_evidence is not None and browser_completion_evidence is not None:
-        raise ValueError("browser evidence was supplied twice")
-    evidence = browser_evidence if browser_evidence is not None else browser_completion_evidence
+    _validate_build_digest(build_digest)
+    if not HEX64_RE.fullmatch(caddyfile_digest):
+        raise ValueError("caddyfile_digest must be a SHA-256 digest")
+    if browser_evidence is None:
+        raise ValueError("browser evidence is required for every journey status")
+    if not isinstance(browser_evidence, Mapping):
+        raise ValueError("browser evidence must be a mapping")
     normalized_inputs = _validate_runtime_inputs(
         reconstruction_inputs() if runtime_inputs is None else runtime_inputs
     )
     rendered_digest = digest_bytes(render_from_inputs(normalized_inputs).encode("utf-8"))
     if caddyfile_digest != rendered_digest:
         raise ValueError("caddyfile_digest does not match the committed runtime inputs")
+    _verify_build_provenance(
+        build_sha=build_sha,
+        build_digest=build_digest,
+        mode=provenance_mode,
+        static_build_root=static_build_root,
+        repository_root=repository_root,
+    )
     runtime_inputs_sha256 = runtime_input_digest(normalized_inputs)
     resolved_journey, normalized_evidence = _resolve_browser_journey(
         browser_journey,
-        evidence,
+        browser_evidence,
         _browser_evidence_provenance(
             build_sha=build_sha,
             build_digest=build_digest,
@@ -746,6 +960,37 @@ def _build_static_digest(site_root: Path) -> str:
     return digest_bytes(b"".join(entries))
 
 
+def _load_retained_input(path: Path) -> dict[str, object]:
+    """Load a complete retained manifest for the explicit historical workflow."""
+
+    value = _load_bounded_json(path, limit=RETAINED_EVIDENCE_MAX_BYTES, label="retained input")
+    if not isinstance(value, Mapping):
+        raise ValueError("retained input must be an object")
+    product = value.get("product")
+    deployment = value.get("deployment")
+    browser_evidence = value.get("browser_evidence")
+    if not isinstance(product, Mapping) or not isinstance(deployment, Mapping):
+        raise ValueError("retained input is missing product or deployment provenance")
+    if not isinstance(browser_evidence, Mapping):
+        raise ValueError("retained input is missing browser evidence")
+    build_sha = product.get("build_commit")
+    build_digest = product.get("static_manifest_sha256")
+    caddyfile_digest = deployment.get("runtime_config_sha256")
+    runtime_inputs = deployment.get("runtime_inputs")
+    if type(build_sha) is not str or type(build_digest) is not str or type(caddyfile_digest) is not str:
+        raise ValueError("retained input provenance is malformed")
+    if not isinstance(runtime_inputs, Mapping):
+        raise ValueError("retained input runtime inputs are malformed")
+    return {
+        "build_sha": build_sha,
+        "build_digest": build_digest,
+        "caddyfile_digest": caddyfile_digest,
+        "runtime_inputs": runtime_inputs,
+        "browser_evidence": browser_evidence,
+        "browser_journey": value.get("browser_journey"),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -763,10 +1008,21 @@ def main(argv: list[str] | None = None) -> int:
     build = subparsers.add_parser("build-digest")
     build.add_argument("site_root", type=Path)
     evidence = subparsers.add_parser("evidence")
-    evidence.add_argument("--build-sha", required=True)
-    evidence.add_argument("--build-digest", required=True)
-    evidence.add_argument("--caddyfile-digest", required=True)
-    evidence.add_argument("--browser-evidence", type=Path, required=True)
+    evidence_sources = evidence.add_mutually_exclusive_group(required=True)
+    evidence_sources.add_argument("--browser-evidence", type=Path)
+    evidence_sources.add_argument("--retained-input", type=Path)
+    evidence.add_argument(
+        "--static-build-root",
+        "--build-root",
+        dest="static_build_root",
+        type=Path,
+        help="standalone mode: derive Git HEAD and the static-tree digest from this output",
+    )
+    # These flags remain optional compatibility assertions. They are checked
+    # against derived or committed provenance and never serve as trust roots.
+    evidence.add_argument("--build-sha")
+    evidence.add_argument("--build-digest")
+    evidence.add_argument("--caddyfile-digest")
     evidence.add_argument("--browser-journey")
     args = parser.parse_args(argv)
 
@@ -793,26 +1049,55 @@ def main(argv: list[str] | None = None) -> int:
         print(_build_static_digest(args.site_root))
         return 0
     if args.command == "evidence":
-        evidence_bytes = args.browser_evidence.read_bytes()
-        if len(evidence_bytes) > BROWSER_EVIDENCE_MAX_BYTES:
-            raise ValueError("browser evidence exceeds the bounded input size")
-        try:
-            browser_evidence = json.loads(evidence_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("browser evidence is not valid JSON") from exc
-        print(
-            json.dumps(
-                render_manifest(
-                    build_sha=args.build_sha,
-                    build_digest=args.build_digest,
-                    caddyfile_digest=args.caddyfile_digest,
-                    browser_journey=args.browser_journey,
-                    browser_evidence=browser_evidence,
-                ),
-                sort_keys=True,
-                separators=(",", ":"),
+        if args.retained_input is not None:
+            if any(
+                value is not None
+                for value in (
+                    args.static_build_root,
+                    args.build_sha,
+                    args.build_digest,
+                    args.caddyfile_digest,
+                    args.browser_journey,
+                )
+            ):
+                raise ValueError("retained input cannot be combined with standalone assertions")
+            retained = _load_retained_input(args.retained_input)
+            manifest = render_manifest(
+                build_sha=retained["build_sha"],  # type: ignore[arg-type]
+                build_digest=retained["build_digest"],  # type: ignore[arg-type]
+                caddyfile_digest=retained["caddyfile_digest"],  # type: ignore[arg-type]
+                browser_journey=retained["browser_journey"],  # type: ignore[arg-type]
+                browser_evidence=retained["browser_evidence"],  # type: ignore[arg-type]
+                runtime_inputs=retained["runtime_inputs"],  # type: ignore[arg-type]
+                provenance_mode="retained",
             )
-        )
+        else:
+            if args.static_build_root is None:
+                raise ValueError("standalone evidence requires --static-build-root")
+            if args.caddyfile_digest is None:
+                raise ValueError("standalone evidence requires --caddyfile-digest")
+            derived = _derive_git_static_build_provenance(args.static_build_root)
+            build_sha = derived["build_sha"]
+            build_digest = derived["build_digest"]
+            if args.build_sha is not None and args.build_sha != build_sha:
+                raise ValueError("--build-sha does not match derived Git HEAD")
+            if args.build_digest is not None and args.build_digest != build_digest:
+                raise ValueError("--build-digest does not match the static build bytes")
+            browser_evidence = _load_bounded_json(
+                args.browser_evidence,
+                limit=BROWSER_EVIDENCE_MAX_BYTES,
+                label="browser evidence",
+            )
+            manifest = render_manifest(
+                build_sha=build_sha,
+                build_digest=build_digest,
+                caddyfile_digest=args.caddyfile_digest,
+                browser_journey=args.browser_journey,
+                browser_evidence=browser_evidence,  # type: ignore[arg-type]
+                provenance_mode="standalone",
+                static_build_root=args.static_build_root,
+            )
+        print(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
         return 0
     raise AssertionError("unreachable")
 
