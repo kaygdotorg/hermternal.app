@@ -143,10 +143,26 @@ class TraefikRendererTests(unittest.TestCase):
 
     def test_renderer_inputs_reject_ambiguous_hosts_ports_and_paths(self) -> None:
         self.assertEqual(traefik_proof._validate_host("traefik-92.test"), "traefik-92.test")
+        self.assertEqual(traefik_proof._validate_host("a" * 63 + ".test"), "a" * 63 + ".test")
         with self.assertRaises(ValueError):
             traefik_proof._validate_host("traefik..test")
         with self.assertRaises(ValueError):
             traefik_proof._validate_host(123)  # type: ignore[arg-type]
+        for malformed_host in (
+            "wrong-.test",
+            "wrong.-test",
+            "a.-.b",
+            "a" * 64 + ".test",
+            "a.test.",
+            "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 62 + "e",
+        ):
+            with self.subTest(host=malformed_host):
+                bad = dict(self.inputs)
+                bad["host"] = malformed_host
+                with self.assertRaises(ValueError):
+                    traefik_proof._validate_runtime_inputs(bad)
+                with self.assertRaises(ValueError):
+                    traefik_proof.render_bundle(bad)
         self.assertEqual(traefik_proof._validate_port(19444, "https_port"), 19444)
         with self.assertRaises(ValueError):
             traefik_proof._validate_port(443, "https_port")
@@ -1083,20 +1099,32 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def _send_raw_x_forwarded_host(self, value: bytes) -> tuple[int, dict[str, str]]:
-        """Send raw authority bytes so parser-permitted controls reach the adapter."""
+    def _send_raw_x_forwarded_host(
+        self,
+        value: bytes,
+        *,
+        forwarded_for: bytes = b"127.0.0.1",
+        forwarded_port: bytes = b"19444",
+        forwarded_proto: bytes = b"https",
+        origin: bytes | None = None,
+        folded_suffix: bytes = b"",
+    ) -> tuple[int, dict[str, str]]:
+        """Send raw authority bytes before BaseHTTPRequestHandler normalization."""
 
         port = str(self.server.server_address[1]).encode("ascii")
+        origin_line = b"" if origin is None else b"Origin: " + origin + b"\r\n"
         request = b"".join(
             (
                 b"POST /check HTTP/1.0\r\n",
                 b"Host: 127.0.0.1:" + port + b"\r\n",
-                b"X-Forwarded-For: 127.0.0.1\r\n",
+                b"X-Forwarded-For: " + forwarded_for + b"\r\n",
                 b"X-Forwarded-Host: " + value + b"\r\n",
+                folded_suffix,
                 b"X-Forwarded-Method: GET\r\n",
-                b"X-Forwarded-Port: 19444\r\n",
-                b"X-Forwarded-Proto: https\r\n",
+                b"X-Forwarded-Port: " + forwarded_port + b"\r\n",
+                b"X-Forwarded-Proto: " + forwarded_proto + b"\r\n",
                 b"X-Forwarded-Uri: /\r\n",
+                origin_line,
                 b"\r\n",
             )
         )
@@ -1252,6 +1280,7 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         self.assertEqual(response_headers["x-hermternal-policy"], "deny")
 
     def test_adapter_raw_authority_vectors_keep_valid_wrong_host_at_421(self) -> None:
+        max_host = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 61)).encode("ascii")
         invalid_authorities = (
             ("empty", b""),
             ("space", b" "),
@@ -1261,7 +1290,17 @@ class ForwardAuthAdapterTests(unittest.TestCase):
             ("missing_port", b"wrong.test"),
             ("empty_port", b"wrong.test:"),
             ("non_numeric_port", b"wrong.test:notaport"),
+            ("zero_port", b"wrong.test:0"),
+            ("zero_padded_port", b"wrong.test:00001"),
+            ("short_padded_port", b"wrong.test:01"),
             ("out_of_range_port", b"wrong.test:65536"),
+            ("trailing_label_hyphen", b"wrong-.test:19444"),
+            ("leading_label_hyphen", b"wrong.-test:19444"),
+            ("hyphen_only_label", b"a.-.b:19444"),
+            ("empty_label", b"wrong..test:19444"),
+            ("trailing_dot", b"wrong.test.:19444"),
+            ("label_over_63", b"a" * 64 + b".test:19444"),
+            ("host_over_253", max_host + b"e:19444"),
             ("malformed_bracket", b"[::1:19444"),
             ("unbracketed_ipv6", b"::1:19444"),
             ("bracket_without_separator", b"[::1]19444"),
@@ -1273,20 +1312,65 @@ class ForwardAuthAdapterTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertEqual(response_headers["x-hermternal-policy"], "deny")
 
-        for label, authority, expected_status, expected_policy in (
+        valid_authorities = (
             ("canonical", b"traefik-92.test:19444", 200, "allow"),
             ("valid_wrong", b"wrong.test:19444", 421, "deny"),
-        ):
+            ("valid_max_label", b"a" * 63 + b".test:19444", 421, "deny"),
+            ("valid_max_host", max_host + b":19444", 421, "deny"),
+            ("max_port", b"wrong.test:65535", 421, "deny"),
+        )
+        for label, authority, expected_status, expected_policy in valid_authorities:
             with self.subTest(authority=label):
                 status, response_headers = self._send_raw_x_forwarded_host(authority)
                 self.assertEqual(status, expected_status)
                 self.assertEqual(response_headers["x-hermternal-policy"], expected_policy)
+
+    def test_adapter_preserves_leading_ows_and_rejects_other_ows_before_policy(self) -> None:
+        leading_ows = b" \t"
+        status, response_headers = self._send_raw_x_forwarded_host(
+            leading_ows + b"traefik-92.test:19444",
+            forwarded_for=leading_ows + b"127.0.0.1",
+            forwarded_port=leading_ows + b"19444",
+            forwarded_proto=leading_ows + b"https",
+            origin=leading_ows + b"https://traefik-92.test:19444",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(response_headers["x-hermternal-policy"], "allow")
+
+        for label, kwargs in (
+            ("host_trailing_ows", {"value": b"traefik-92.test:19444 "}),
+            ("host_internal_ows", {"value": b"traefik-92.test: 19444"}),
+            ("xff_trailing_ows", {"value": b"traefik-92.test:19444", "forwarded_for": b"127.0.0.1 "}),
+            ("xff_only_ows", {"value": b"traefik-92.test:19444", "forwarded_for": b" \t"}),
+            ("port_trailing_ows", {"value": b"traefik-92.test:19444", "forwarded_port": b"19444 "}),
+            ("proto_internal_ows", {"value": b"traefik-92.test:19444", "forwarded_proto": b"ht tps"}),
+            ("origin_trailing_ows", {"value": b"traefik-92.test:19444", "origin": b"https://traefik-92.test:19444 "}),
+        ):
+            with self.subTest(authority=label):
+                status, response_headers = self._send_raw_x_forwarded_host(**kwargs)
+                self.assertEqual(status, 400)
+                self.assertEqual(response_headers["x-hermternal-policy"], "deny")
+
+        for label, authority in (
+            ("canonical_obs_fold", b"traefik-92.test:19444"),
+            ("wrong_obs_fold", b"wrong.test:19444"),
+        ):
+            with self.subTest(authority=label):
+                status, response_headers = self._send_raw_x_forwarded_host(
+                    authority,
+                    folded_suffix=b"\t\r\n",
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(response_headers["x-hermternal-policy"], "deny")
 
 
 class TraefikEvidenceContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.evidence = json.loads(EVIDENCE_PATH.read_text(encoding="utf-8"))
+
+    def _parser_provenance(self) -> dict[str, str]:
+        return dict(self.evidence["forward_auth_contract"]["parser_provenance"])
 
     def _browser_evidence(self, status: str, *, provenance: dict[str, str] | None = None) -> dict[str, object]:
         expected = {
@@ -1370,6 +1454,19 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             },
         )
         contract = self.evidence["forward_auth_contract"]
+        self.assertEqual(
+            set(contract["parser_provenance"]),
+            {
+                "implementation_path",
+                "implementation_commit",
+                "implementation_blob",
+                "implementation_sha256",
+                "test_path",
+                "test_source_sha256",
+            },
+        )
+        self.assertEqual(contract["parser_provenance"]["implementation_path"], traefik_proof.PARSER_IMPLEMENTATION_PATH)
+        self.assertEqual(contract["parser_provenance"]["test_path"], traefik_proof.PARSER_TEST_PATH)
         self.assertEqual(contract["generated_headers"], list(traefik_proof.TRAEFIK_FORWARDAUTH_GENERATED_HEADERS))
         self.assertEqual(contract["copied_headers"], list(traefik_proof.FORWARD_AUTH_HEADERS))
         self.assertEqual(contract["transport_headers"], list(traefik_proof.FORWARD_AUTH_TRANSPORT_HEADERS))
@@ -1418,6 +1515,33 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 self.assertNotIn("query", case)
                 self.assertNotIn("headers", case)
 
+    def test_evidence_binds_parser_commit_blob_and_test_source(self) -> None:
+        provenance = self._parser_provenance()
+        implementation = ROOT / provenance["implementation_path"]
+        test_source = ROOT / provenance["test_path"]
+        self.assertEqual(
+            provenance["implementation_sha256"],
+            hashlib.sha256(implementation.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            provenance["test_source_sha256"],
+            hashlib.sha256(test_source.read_bytes()).hexdigest(),
+        )
+        committed_source = subprocess.check_output(
+            ["git", "show", f"{provenance['implementation_commit']}:{provenance['implementation_path']}"],
+            cwd=ROOT,
+        )
+        self.assertEqual(
+            hashlib.sha256(committed_source).hexdigest(),
+            provenance["implementation_sha256"],
+        )
+        blob = subprocess.check_output(
+            ["git", "rev-parse", f"{provenance['implementation_commit']}:{provenance['implementation_path']}"],
+            cwd=ROOT,
+            text=True,
+        ).strip()
+        self.assertEqual(blob, provenance["implementation_blob"])
+
     def test_evidence_is_exact_canonical_cli_output(self) -> None:
         manifest = traefik_proof.render_manifest(
             build_sha=EXPECTED_BUILD_SHA,
@@ -1425,6 +1549,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             traefik_config_digest=EXPECTED_CONFIG_DIGEST,
             browser_journey="blocked_provider",
             browser_evidence=self._browser_evidence("blocked_provider"),
+            parser_provenance=self._parser_provenance(),
         )
         expected_pretty = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
         self.assertEqual(EVIDENCE_PATH.read_bytes(), expected_pretty)
@@ -1449,6 +1574,14 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                     EXPECTED_BUILD_DIGEST,
                     "--traefik-config-digest",
                     EXPECTED_CONFIG_DIGEST,
+                    "--parser-implementation-commit",
+                    self._parser_provenance()["implementation_commit"],
+                    "--parser-implementation-blob",
+                    self._parser_provenance()["implementation_blob"],
+                    "--parser-implementation-sha256",
+                    self._parser_provenance()["implementation_sha256"],
+                    "--parser-test-sha256",
+                    self._parser_provenance()["test_source_sha256"],
                     "--browser-evidence",
                     str(browser_path),
                 ],
@@ -1490,6 +1623,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             traefik_config_digest=EXPECTED_CONFIG_DIGEST,
             browser_journey="passed",
             browser_evidence=self._browser_evidence("passed"),
+            parser_provenance=self._parser_provenance(),
         )
         self.assertEqual(manifest["browser_journey"], "passed")
         self.assertEqual(manifest["proof_run"], traefik_proof._synthetic_proof_run())
