@@ -1212,56 +1212,544 @@ def _regex_scheme_match_at(text: str, index: int) -> int | None:
     return None
 
 
-def _regex_dynamic_scheme_match_at(text: str, index: int) -> int | None:
-    """Find bounded scheme syntax whose matched protocol is not deterministic."""
+MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH = 5
+MAX_REGEX_SCHEME_PREFIX_OUTPUTS = 128
+_REGEX_SCHEME_TARGETS = ("http", "https", "ws", "wss")
 
-    class_span = _regex_class_span(text, index)
-    if class_span is not None:
-        class_end, body = class_span
-        # A multi-character first class can match ``h`` while the suffix proves
-        # the source is attempting to express an HTTP-family scheme.
-        if len(body) > 1:
-            suffix_end = _regex_literal_sequence_end(text, class_end, "ttps")
-            if suffix_end is not None:
-                delimiter_end = _regex_scheme_delimiter_end(text, suffix_end)
-                if delimiter_end is not None:
-                    return delimiter_end
 
-    first_end = _regex_scheme_token(text, index, "h")
-    if first_end is not None:
-        class_span = _regex_class_span(text, first_end)
-        if class_span is not None and len(class_span[1]) > 1:
-            suffix_end = _regex_literal_sequence_end(text, class_span[0], "tps")
-            if suffix_end is not None:
-                delimiter_end = _regex_scheme_delimiter_end(text, suffix_end)
-                if delimiter_end is not None:
-                    return delimiter_end
+@dataclass(frozen=True)
+class _RegexSchemePrefixResult:
+    outputs: frozenset[tuple[str | None, ...]]
+    end: int
+    uncertain: bool = False
+    construct: bool = False
 
-    for prefix in ("https", "http", "wss", "ws"):
-        prefix_end = _regex_literal_sequence_end(text, index, prefix)
-        if prefix_end is None:
+
+@dataclass(frozen=True)
+class _RegexSchemeProbe:
+    scheme_end: int | None
+    skip_end: int
+
+
+def _regex_unknown_prefix_outputs(*, variable_length: bool) -> frozenset[tuple[str | None, ...]]:
+    lengths = range(MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH + 1) if variable_length else (1,)
+    return frozenset(tuple(None for _ in range(length)) for length in lengths)
+
+
+def _regex_prefix_matches_target(pattern: tuple[str | None, ...], target: str) -> bool:
+    if len(pattern) != len(target):
+        return False
+    return all(character is None or character == target[index] for index, character in enumerate(pattern))
+
+
+def _regex_prefix_can_start_target(pattern: tuple[str | None, ...]) -> bool:
+    return any(
+        len(pattern) <= len(target)
+        and all(character is None or character == target[index] for index, character in enumerate(pattern))
+        for target in _REGEX_SCHEME_TARGETS
+    )
+
+
+def _regex_prefix_union(
+    left: frozenset[tuple[str | None, ...]],
+    right: frozenset[tuple[str | None, ...]],
+) -> frozenset[tuple[str | None, ...]]:
+    merged = set(left)
+    merged.update(right)
+    if len(merged) <= MAX_REGEX_SCHEME_PREFIX_OUTPUTS:
+        return frozenset(merged)
+    return _regex_unknown_prefix_outputs(variable_length=True)
+
+
+def _regex_prefix_concat(
+    left: frozenset[tuple[str | None, ...]],
+    right: frozenset[tuple[str | None, ...]],
+) -> frozenset[tuple[str | None, ...]]:
+    merged: set[tuple[str | None, ...]] = set()
+    for left_pattern in left:
+        for right_pattern in right:
+            pattern = left_pattern + right_pattern
+            if len(pattern) <= MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH:
+                merged.add(pattern)
+            if len(merged) > MAX_REGEX_SCHEME_PREFIX_OUTPUTS:
+                return _regex_unknown_prefix_outputs(variable_length=True)
+    return frozenset(merged)
+
+
+def _regex_prefix_result(
+    outputs: frozenset[tuple[str | None, ...]],
+    end: int,
+    *,
+    uncertain: bool = False,
+    construct: bool = False,
+) -> _RegexSchemePrefixResult:
+    return _RegexSchemePrefixResult(outputs, end, uncertain, construct)
+
+
+def _regex_class_atom_values(
+    text: str,
+    index: int,
+) -> tuple[set[str] | None, int, bool]:
+    if index >= len(text):
+        return None, index, True
+    if text[index] != "\\":
+        return {text[index]}, index + 1, False
+    if index + 1 >= len(text):
+        return None, index + 1, True
+    marker = text[index + 1]
+    if marker == "d":
+        return set(string.digits), index + 2, False
+    if marker == "s":
+        return set(" \\t\\r\\n\\f\\v"), index + 2, False
+    if marker == "w":
+        return set(string.ascii_letters + string.digits + "_"), index + 2, False
+    if marker in "DSW":
+        return None, index + 2, True
+    if marker in "abfnrtv":
+        return {bytes("\\" + marker, "ascii").decode("unicode_escape")}, index + 2, False
+    decoded, consumed, uncertain = _decode_regex_escape(text, index)
+    if not uncertain and len(decoded) == 1:
+        return {decoded}, consumed, False
+    return None, max(index + 1, consumed), True
+
+
+def _regex_class_prefix_result(text: str, index: int) -> _RegexSchemePrefixResult:
+    span = _regex_class_span(text, index)
+    if span is None:
+        return _regex_prefix_result(
+            _regex_unknown_prefix_outputs(variable_length=False),
+            min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH),
+            uncertain=True,
+            construct=True,
+        )
+    end, body = span
+    if not body or body.startswith("^"):
+        return _regex_prefix_result(
+            _regex_unknown_prefix_outputs(variable_length=False),
+            end,
+            uncertain=True,
+            construct=True,
+        )
+    values: set[str] = set()
+    cursor = 0
+    uncertain = False
+    while cursor < len(body):
+        first, first_end, first_uncertain = _regex_class_atom_values(body, cursor)
+        if first_end <= cursor:
+            uncertain = True
+            break
+        cursor = first_end
+        if cursor < len(body) - 1 and body[cursor] == "-":
+            second, second_end, second_uncertain = _regex_class_atom_values(body, cursor + 1)
+            if second is not None and len(first) == 1 and len(second) == 1:
+                start = ord(next(iter(first)))
+                finish = ord(next(iter(second)))
+                if start <= finish and finish - start <= MAX_REGEX_SCHEME_PREFIX_OUTPUTS:
+                    values.update(chr(codepoint) for codepoint in range(start, finish + 1))
+                    cursor = second_end
+                else:
+                    uncertain = True
+                    cursor = max(cursor + 1, second_end)
+            else:
+                uncertain = True
+                cursor = max(cursor + 1, second_end)
+            uncertain = uncertain or first_uncertain or second_uncertain
             continue
-        if prefix_end < len(text) and text[prefix_end] == "?":
-            delimiter_end = _regex_scheme_delimiter_end(text, prefix_end + 1)
-            if delimiter_end is not None:
-                return delimiter_end
-        if prefix_end < len(text) and text[prefix_end] == "\\":
-            _decoded, escape_end, uncertain = _decode_regex_escape(text, prefix_end)
-            if uncertain:
-                delimiter_end = _regex_scheme_delimiter_end(text, escape_end)
-                if delimiter_end is not None:
-                    return delimiter_end
+        values.update(first or ())
+        uncertain = uncertain or first_uncertain
+    if uncertain or not values:
+        return _regex_prefix_result(
+            _regex_unknown_prefix_outputs(variable_length=False),
+            end,
+            uncertain=True,
+            construct=True,
+        )
+    outputs = frozenset((character.casefold(),) for character in values if len(character.casefold()) == 1)
+    if not outputs:
+        outputs = _regex_unknown_prefix_outputs(variable_length=False)
+        uncertain = True
+    return _regex_prefix_result(outputs, end, uncertain=uncertain, construct=True)
 
-    # Keep the alternation grammar deliberately tiny. The inner ``https?``
-    # otherwise stops before ``|`` and would not be recognized as a URL scheme.
-    if text.startswith("(?:", index):
+
+def _regex_group_end(text: str, index: int) -> int:
+    limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
+    depth = 0
+    in_class = False
+    cursor = index
+    while cursor < limit:
+        character = text[cursor]
+        if character == "\\":
+            _decoded, consumed, _uncertain = _decode_regex_escape(text, cursor)
+            cursor = max(cursor + 1, min(consumed, limit))
+            continue
+        if in_class:
+            if character == "]":
+                in_class = False
+            cursor += 1
+            continue
+        if character == "[":
+            in_class = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth <= 0:
+                return cursor + 1
+        cursor += 1
+    return limit
+
+
+def _regex_group_body_start(text: str, index: int) -> tuple[int | None, int, bool]:
+    """Return bounded group-body start, assertion mode, and recognition status."""
+
+    if not text.startswith("(", index):
+        return None, 0, False
+    if text.startswith("(?:", index) or text.startswith("(?>", index):
+        return index + 3, 0, True
+    if text.startswith("(?=", index):
+        return index + 3, 1, True
+    if text.startswith("(?!", index):
+        return index + 3, -1, True
+    if text.startswith("(?<=", index):
+        return index + 4, 1, True
+    if text.startswith("(?<!", index):
+        return index + 4, -1, True
+    if text.startswith("(?P<", index) or text.startswith("(?<", index):
+        closing = text.find(">", index + 3, min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH))
+        if closing >= 0:
+            return closing + 1, 0, True
+        return None, 0, False
+    if text.startswith("(?", index):
         limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
-        closing = text.find(")", index + 3, limit)
-        if closing >= 0 and text[index + 3:closing] in {"https?|http", "http|https?"}:
-            delimiter_end = _regex_scheme_delimiter_end(text, closing + 1)
-            if delimiter_end is not None:
-                return delimiter_end
+        colon = text.find(":", index + 2, limit)
+        if colon >= 0:
+            flags = text[index + 2:colon]
+            if flags and all(character.isalpha() or character == "-" for character in flags):
+                return colon + 1, 0, True
+        return None, 0, False
+    return index + 1, 0, True
+
+
+def _regex_parse_source_prefix(
+    text: str,
+    index: int,
+    depth: int,
+    required_length: int,
+) -> frozenset[tuple[str | None, ...]]:
+    """Parse only a bounded upcoming prefix for lookaround assertions."""
+
+    values: frozenset[tuple[str | None, ...]] = frozenset({()})
+    cursor = index
+    limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
+    while cursor < limit and max((len(pattern) for pattern in values), default=0) < required_length:
+        atom = _regex_apply_quantifier(text, _regex_parse_atom(text, cursor, depth))
+        if atom.end <= cursor:
+            break
+        values = _regex_prefix_concat(values, atom.outputs)
+        cursor = min(atom.end, limit)
+    return values
+
+
+def _regex_assertion_is_contradictory(
+    text: str,
+    index: int,
+    assertion_outputs: frozenset[tuple[str | None, ...]],
+    mode: int,
+    depth: int,
+) -> bool:
+    exact_outputs = tuple(
+        output for output in assertion_outputs
+        if output and all(character is not None for character in output)
+    )
+    if not exact_outputs:
+        return False
+    required_length = max(len(output) for output in exact_outputs)
+    upcoming = _regex_parse_source_prefix(text, index, depth, required_length)
+    if not upcoming:
+        return mode == 1
+    if mode == 1:
+        return not any(
+            any(
+                len(pattern) >= len(output)
+                and all(
+                    pattern[position] is None or pattern[position] == output[position]
+                    for position in range(len(output))
+                )
+                for output in exact_outputs
+            )
+            for pattern in upcoming
+        )
+    return all(
+        any(
+            len(pattern) == len(output)
+            and all(
+                pattern[position] is not None and pattern[position] == output[position]
+                for position in range(len(output))
+            )
+            for output in exact_outputs
+        )
+        for pattern in upcoming
+    )
+
+
+def _regex_parse_atom(text: str, index: int, depth: int) -> _RegexSchemePrefixResult:
+    if depth > 16 or index >= len(text):
+        return _regex_prefix_result(
+            _regex_unknown_prefix_outputs(variable_length=True),
+            min(len(text), index + 1),
+            uncertain=True,
+            construct=True,
+        )
+    character = text[index]
+    if character == "[":
+        return _regex_class_prefix_result(text, index)
+    if character == "(":
+        body_start, assertion_mode, recognized = _regex_group_body_start(text, index)
+        group_end = _regex_group_end(text, index)
+        if body_start is None:
+            # Unknown group syntax is itself a potential dynamic construct. Do
+            # not descend into it and later rediscover a hidden URL prefix.
+            return _regex_prefix_result(
+                _regex_unknown_prefix_outputs(variable_length=True),
+                group_end,
+                uncertain=True,
+                construct=True,
+            )
+        result = _regex_parse_alternation(text, body_start, depth + 1)
+        if assertion_mode:
+            contradictory = _regex_assertion_is_contradictory(
+                text,
+                result.end,
+                result.outputs,
+                assertion_mode,
+                depth + 1,
+            )
+            return _regex_prefix_result(
+                frozenset() if contradictory else frozenset({()}),
+                result.end,
+                uncertain=not contradictory,
+                construct=True,
+            )
+        return _regex_prefix_result(
+            result.outputs,
+            result.end,
+            uncertain=result.uncertain or not recognized,
+            construct=True,
+        )
+    if character == "\\":
+        if index + 1 >= len(text):
+            return _regex_prefix_result(
+                _regex_unknown_prefix_outputs(variable_length=False),
+                index + 1,
+                uncertain=True,
+                construct=True,
+            )
+        marker = text[index + 1]
+        if marker in "bBAZzG":
+            return _regex_prefix_result(frozenset({()}), index + 2, uncertain=True, construct=True)
+        if marker == "d":
+            return _regex_prefix_result(
+                frozenset((digit,) for digit in string.digits), index + 2, construct=True
+            )
+        if marker == "s":
+            return _regex_prefix_result(
+                frozenset((character,) for character in " \\t\\r\\n\\f\\v"), index + 2, construct=True
+            )
+        if marker == "w":
+            return _regex_prefix_result(
+                frozenset((character.casefold(),) for character in string.ascii_letters + string.digits + "_"),
+                index + 2,
+                construct=True,
+            )
+        if marker in "DSW":
+            return _regex_prefix_result(
+                _regex_unknown_prefix_outputs(variable_length=False),
+                index + 2,
+                uncertain=True,
+                construct=True,
+            )
+        decoded, consumed, uncertain = _decode_regex_escape(text, index)
+        if not uncertain and len(decoded) == 1:
+            return _regex_prefix_result(
+                frozenset({(decoded.casefold(),)}), consumed, construct=True
+            )
+        return _regex_prefix_result(
+            _regex_unknown_prefix_outputs(variable_length=True),
+            max(index + 1, consumed),
+            uncertain=True,
+            construct=True,
+        )
+    if character == ".":
+        return _regex_prefix_result(
+            _regex_unknown_prefix_outputs(variable_length=False), index + 1, uncertain=True, construct=True
+        )
+    if character in "^$":
+        return _regex_prefix_result(frozenset({()}), index + 1, uncertain=True, construct=True)
+    if character in "|)":
+        return _regex_prefix_result(frozenset({()}), index, uncertain=False)
+    if character in "*+?{}":
+        return _regex_prefix_result(
+            _regex_unknown_prefix_outputs(variable_length=True), index + 1, uncertain=True, construct=True
+        )
+    return _regex_prefix_result(frozenset({(character.casefold(),)}), index + 1)
+
+
+def _regex_quantifier(text: str, index: int) -> tuple[tuple[int, ...] | None, int, bool]:
+    if index >= len(text):
+        return None, index, False
+    marker = text[index]
+    if marker == "?":
+        end = index + 1
+        if end < len(text) and text[end] == "?":
+            end += 1
+        return (0, 1), end, True
+    if marker == "*":
+        end = index + 1
+        if end < len(text) and text[end] == "?":
+            end += 1
+        return tuple(range(MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH + 1)), end, True
+    if marker == "+":
+        end = index + 1
+        if end < len(text) and text[end] == "?":
+            end += 1
+        return tuple(range(1, MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH + 1)), end, True
+    if marker != "{":
+        return None, index, False
+    closing = text.find("}", index + 1, min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH))
+    if closing < 0:
+        return None, index + 1, True
+    body = text[index + 1:closing]
+    match = re.fullmatch(r"([0-9]{1,3})(?:,([0-9]{0,3}))?", body)
+    if match is None:
+        return None, closing + 1, True
+    minimum = int(match.group(1))
+    maximum_text = match.group(2)
+    maximum = minimum if maximum_text is None else (
+        MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH if maximum_text == "" else int(maximum_text)
+    )
+    maximum = min(maximum, MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH)
+    end = closing + 1
+    if end < len(text) and text[end] == "?":
+        end += 1
+    return tuple(range(minimum, maximum + 1)), end, True
+
+
+def _regex_apply_quantifier(text: str, result: _RegexSchemePrefixResult) -> _RegexSchemePrefixResult:
+    counts, end, is_quantifier = _regex_quantifier(text, result.end)
+    if not is_quantifier:
+        return result
+    if counts is None:
+        return _regex_prefix_result(
+            _regex_unknown_prefix_outputs(variable_length=True),
+            end,
+            uncertain=True,
+            construct=True,
+        )
+    outputs: set[tuple[str | None, ...]] = set()
+    for count in counts:
+        for pattern in result.outputs:
+            repeated = pattern * count
+            if len(repeated) <= MAX_REGEX_SCHEME_PREFIX_OUTPUT_LENGTH:
+                outputs.add(repeated)
+    return _regex_prefix_result(
+        frozenset(outputs),
+        end,
+        uncertain=result.uncertain,
+        construct=True,
+    )
+
+
+def _regex_parse_sequence(text: str, index: int, depth: int) -> _RegexSchemePrefixResult:
+    values = frozenset({()})
+    cursor = index
+    uncertain = False
+    construct = False
+    limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
+    while cursor < limit and text[cursor] not in "|)":
+        atom = _regex_apply_quantifier(text, _regex_parse_atom(text, cursor, depth))
+        if atom.end <= cursor:
+            return _regex_prefix_result(values, cursor + 1, uncertain=True, construct=True)
+        values = _regex_prefix_concat(values, atom.outputs)
+        uncertain = uncertain or atom.uncertain
+        construct = construct or atom.construct
+        cursor = min(atom.end, limit)
+    return _regex_prefix_result(values, cursor, uncertain=uncertain, construct=construct)
+
+
+def _regex_parse_alternation(text: str, index: int, depth: int) -> _RegexSchemePrefixResult:
+    values: frozenset[tuple[str | None, ...]] = frozenset()
+    cursor = index
+    uncertain = False
+    construct = True
+    limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
+    while cursor < limit:
+        branch = _regex_parse_sequence(text, cursor, depth)
+        values = _regex_prefix_union(values, branch.outputs)
+        uncertain = uncertain or branch.uncertain
+        cursor = branch.end
+        if cursor >= limit:
+            uncertain = True
+            break
+        if text[cursor] == "|":
+            cursor += 1
+            continue
+        if text[cursor] == ")":
+            return _regex_prefix_result(values, cursor + 1, uncertain=uncertain, construct=construct)
+        uncertain = True
+        break
+    if not values:
+        values = _regex_unknown_prefix_outputs(variable_length=True)
+    return _regex_prefix_result(values, max(index + 1, cursor), uncertain=True, construct=construct)
+
+
+def _regex_dynamic_scheme_probe_at(text: str, index: int) -> _RegexSchemeProbe | None:
+    if index >= len(text) or text[index] not in "hH[(\\":
+        return None
+    values: frozenset[tuple[str | None, ...]] = frozenset({()})
+    cursor = index
+    uncertain = False
+    construct = False
+    limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
+    while cursor < limit:
+        if text[cursor].isspace() or text[cursor] in "\"'<>":
+            break
+        if text[cursor] in "|)":
+            break
+        atom = _regex_apply_quantifier(text, _regex_parse_atom(text, cursor, 0))
+        if atom.end <= cursor:
+            break
+        values = _regex_prefix_concat(values, atom.outputs)
+        uncertain = uncertain or atom.uncertain
+        construct = construct or atom.construct
+        cursor = min(atom.end, limit)
+        for target in _REGEX_SCHEME_TARGETS:
+            if any(_regex_prefix_matches_target(pattern, target) for pattern in values):
+                delimiter_end = _regex_scheme_delimiter_end(text, cursor)
+                if delimiter_end is not None:
+                    return _RegexSchemeProbe(delimiter_end, cursor)
+        if not uncertain and not any(_regex_prefix_can_start_target(pattern) for pattern in values):
+            break
+    if construct:
+        skip_end = max(index + 1, cursor)
+        proven_nonmatch = not uncertain and not any(
+            _regex_prefix_can_start_target(pattern) for pattern in values
+        )
+        if proven_nonmatch:
+            # A failed assertion or an impossible branch may be followed by a
+            # literal-looking ``https`` suffix. Consume that suffix with the
+            # failed construct so the scanner cannot rediscover it as a URL.
+            suffix_end = _regex_scheme_match_at(text, skip_end)
+            if suffix_end is not None:
+                skip_end = suffix_end
+        return _RegexSchemeProbe(None, skip_end)
     return None
+
+
+def _regex_dynamic_scheme_match_at(text: str, index: int) -> int | None:
+    """Return a bounded dynamic scheme end without scanning inside unknown syntax."""
+
+    probe = _regex_dynamic_scheme_probe_at(text, index)
+    return None if probe is None else probe.scheme_end
 
 
 def _regex_dynamic_authority_is_live(text: str, scheme_end: int) -> bool:
@@ -1278,8 +1766,10 @@ def _regex_dynamic_authority_is_live(text: str, scheme_end: int) -> bool:
     authority_marker = _regex_component_delimiter(text, scheme_end)
     authority_end = authority_marker[0] if authority_marker is not None else len(text)
     authority = text[scheme_end:authority_end]
+    # A detector prefix may intentionally stop at ``://`` without carrying an
+    # authority. There is no concrete URL to classify in that bounded source.
     if not authority:
-        return True
+        return False
     decoded_authority, uncertain = _decode_regex_host(authority)
     policy_authority, class_flags, policy_uncertain = _regex_decoded_component_tokens(authority)
     if "\\" in decoded_authority or any(
@@ -1356,16 +1846,25 @@ def _regex_scheme_matches(text: str) -> Iterator[tuple[int, int]]:
     while index < len(text):
         character = text[index]
         if not in_class:
-            dynamic_end = _regex_dynamic_scheme_match_at(text, index)
-            if dynamic_end is not None:
-                if _regex_dynamic_authority_is_live(text, dynamic_end):
-                    raise ValidationError()
-                index = dynamic_end
-                continue
+            # Singleton classes and deterministic escapes remain ordinary URL
+            # matches. Dynamic parsing follows only after this proof attempt so
+            # a safe ``[h]ttps`` cannot be reclassified as an ambiguous scheme.
             match_end = _regex_scheme_match_at(text, index)
             if match_end is not None:
                 yield index, match_end
                 index = match_end
+                continue
+            probe = _regex_dynamic_scheme_probe_at(text, index)
+            if probe is not None:
+                if probe.scheme_end is not None:
+                    if _regex_dynamic_authority_is_live(text, probe.scheme_end):
+                        raise ValidationError()
+                    index = probe.scheme_end
+                else:
+                    # Consume the whole bounded group/class/quantifier probe.
+                    # Never advance one byte and rediscover a URL hidden inside
+                    # a regex construct that the prefix parser could not prove.
+                    index = max(index + 1, probe.skip_end)
                 continue
         if in_class:
             if character == "\\":

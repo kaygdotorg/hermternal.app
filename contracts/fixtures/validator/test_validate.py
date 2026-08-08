@@ -1299,6 +1299,63 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(completed.stdout, "")
                 self.assertEqual(completed.stderr, "")
 
+    def test_dynamic_regex_scheme_prefixes_fail_closed_without_scanning_unknown_constructs(self) -> None:
+        """Reject every bounded HTTP(S) regex construct before authority parsing."""
+
+        live_patterns = (
+            r'ht[tT]ps://api.live.invalid/x',
+            r'htt[pP]s://api.live.invalid/x',
+            r'http[sS]://api.live.invalid/x',
+            r'[hH][tT]tps://api.live.invalid/x',
+            r'h(?:t|T)tps://api.live.invalid/x',
+            r'(?:https|http)://api.live.invalid/x',
+            r'(https|http)://api.live.invalid/x',
+            r'h(?:ttps?)://api.live.invalid/x',
+            r'http(?:s)?://api.live.invalid/x',
+            r'(?i:https)://api.live.invalid/x',
+            r'(?:h)ttps://api.live.invalid/x',
+            r'h{1}ttps://api.live.invalid/x',
+            r'https{1}://api.live.invalid/x',
+            r'(?:(?:h(?:t|T)tps)|ftp)://api.live.invalid/x',
+            r'(?i:(?:h)(?:t|T)tps)://api.live.invalid/x',
+            r'h{1}(?:t){1}tps://api.live.invalid/x',
+            r'http(?:s{1})://api.live.invalid/x',
+            r'[hH](?:t|T)(?:t)[pP]s://api.live.invalid/x',
+            r'(?:(?:https)|(?:http))://api.live.invalid/x',
+            r'(?i:(?:https|http))://api.live.invalid/x',
+            r'(?P=scheme)https://api.live.invalid/x',
+        )
+        # Keep one unknown regex escape in the generated source. ``pattern!r``
+        # would double the backslash and test a literal backslash instead.
+        self._assert_scanner_rejects_in_both_modes(
+            "connection-restoration/validate.py",
+            f"re.compile(r'h{chr(92)}Qttps://api.live.invalid/x')\n".encode("utf-8"),
+        )
+        for pattern in live_patterns:
+            with self.subTest(pattern=pattern):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    f"re.compile(r{pattern!r})\n".encode("utf-8"),
+                )
+
+        non_matching_patterns = (
+            r'h[xy]tps://api.live.invalid/x',
+            r'h(?:x|y)tps://api.live.invalid/x',
+            r'h{2}ttps://api.live.invalid/x',
+            r'(?:(?:h{2}ttps)|ftp)://api.live.invalid/x',
+            r'(?i:ftp)://api.live.invalid/x',
+            r'(?:ghttps|httpsx)://api.live.invalid/x',
+            r'(?=x)https://api.live.invalid/x',
+            r'(?!h)https://api.live.invalid/x',
+            r'h(?=x)ttps://api.live.invalid/x',
+        )
+        for pattern in non_matching_patterns:
+            with self.subTest(pattern=pattern):
+                self._assert_scanner_accepts_in_both_modes(
+                    "connection-restoration/validate.py",
+                    f"re.compile(r{pattern!r})\n".encode("utf-8"),
+                )
+
     def test_regex_urls_share_raw_authority_query_and_port_policy(self) -> None:
         regex_rejections = (
             're.compile(r"https:\\/\\/api.live.invalid/token")\n',
