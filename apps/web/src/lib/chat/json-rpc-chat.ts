@@ -362,6 +362,12 @@ export interface JsonRpcChatTransport {
   connect(signal?: AbortSignal): Promise<void>;
   reconnect(signal?: AbortSignal): Promise<void>;
   createSession(signal?: AbortSignal): Promise<JsonRpcCreatedSession>;
+  /**
+   * Bind a created live session to its server-confirmed durable REST identity.
+   * Call only after the first persisted turn is confirmed; empty drafts cannot
+   * be resumed on a later socket.
+   */
+  promoteSession(storedSessionId: string): void;
   restore(sessionId?: string, signal?: AbortSignal): Promise<void>;
   close(): void;
   sendPrompt(
@@ -503,6 +509,12 @@ export function createJsonRpcChatTransport(
   let nextGeneratedId = 0;
   let currentGeneration = 0;
   let selectedSessionId = options.selectedSessionId;
+  // Only server-owned IDs may cross a socket boundary. `session.create` gives
+  // the first prompt a connection-local live ID, then workspace confirmation
+  // explicitly promotes the paired stored ID after persistence succeeds.
+  let reconnectSessionId = options.selectedSessionId;
+  let ephemeralSessionGeneration: number | undefined;
+  let pendingStoredSessionId: string | undefined;
   let currentState: JsonRpcConnectionState = {
     status: "offline",
     generation: 0,
@@ -1488,8 +1500,8 @@ export function createJsonRpcChatTransport(
             if (!isCurrentContext(context) || !ownsAttempt()) {
               throw new JsonRpcChatError("connection-failed", generation);
             }
-            if (selectedSessionId !== undefined) {
-              await restoreInternal(context, selectedSessionId, controller.signal);
+            if (reconnectSessionId !== undefined) {
+              await restoreInternal(context, reconnectSessionId, controller.signal);
             }
             resolve();
           } catch (error) {
@@ -1637,17 +1649,44 @@ export function createJsonRpcChatTransport(
       if (!created) {
         throw new JsonRpcChatError("protocol-violation", currentGeneration);
       }
-      // The first prompt addresses the ephemeral live ID. REST reconciliation uses
-      // the separately returned stored ID after Hermes persists the first turn.
+      // The first prompt addresses the ephemeral live ID on this exact socket.
+      // The paired stored ID stays non-resumable until workspace reconciliation
+      // confirms the first turn, then `promoteSession` owns the durable swap.
       selectedSessionId = created.sessionId;
+      reconnectSessionId = undefined;
+      ephemeralSessionGeneration = context.generation;
+      pendingStoredSessionId = created.storedSessionId;
       return created;
     } finally {
       sessionTransitionPending = false;
     }
   };
 
+  const promoteSession = (storedSessionId: string): void => {
+    validateSessionId(storedSessionId);
+    const context = activeContext;
+    if (
+      !context?.gatewayReady ||
+      currentState.status !== "ready" ||
+      activeRequests.size > 0 ||
+      sessionTransitionPending ||
+      // A reconnect replaces the live socket that created this draft. Its
+      // delayed REST continuation may not promote a server ID on the successor.
+      ephemeralSessionGeneration !== currentGeneration ||
+      pendingStoredSessionId !== storedSessionId
+    ) {
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
+    }
+    // Do not let a stale completion or a replacement workspace promote an ID
+    // after another session transition has changed this transport's owner.
+    selectedSessionId = storedSessionId;
+    reconnectSessionId = storedSessionId;
+    ephemeralSessionGeneration = undefined;
+    pendingStoredSessionId = undefined;
+  };
+
   const restore = async (
-    sessionId = selectedSessionId,
+    sessionId = reconnectSessionId,
     signal?: AbortSignal,
   ): Promise<void> => {
     if (sessionId === undefined) {
@@ -1665,6 +1704,9 @@ export function createJsonRpcChatTransport(
     selectedSessionId = sessionId;
     try {
       await restoreInternal(context, sessionId, signal);
+      reconnectSessionId = sessionId;
+      ephemeralSessionGeneration = undefined;
+      pendingStoredSessionId = undefined;
     } finally {
       sessionTransitionPending = false;
     }
@@ -1719,7 +1761,14 @@ export function createJsonRpcChatTransport(
       throw new JsonRpcChatError("not-connected", currentGeneration);
     }
     validatePrompt(prompt);
-    if (selectedSessionId === undefined || sessionTransitionPending) {
+    if (
+      selectedSessionId === undefined ||
+      sessionTransitionPending ||
+      // A live `session.create` ID belongs only to the socket that returned it.
+      // Reconnect must wait for an explicit fresh create, never replay it.
+      (reconnectSessionId === undefined &&
+        ephemeralSessionGeneration !== context.generation)
+    ) {
       throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
     if (requestOptions.signal?.aborted) {
@@ -1934,6 +1983,7 @@ export function createJsonRpcChatTransport(
     connect,
     reconnect,
     createSession,
+    promoteSession,
     restore,
     close,
     sendPrompt,
