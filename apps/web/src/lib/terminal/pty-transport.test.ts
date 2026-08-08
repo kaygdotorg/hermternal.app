@@ -979,6 +979,19 @@ describe("PTY transport", () => {
     expect(harness.sockets).toHaveLength(1);
   });
 
+  it("does not clear a deterministic reconnect block on detach", async () => {
+    const harness = makeHarness();
+    const socket = await open(harness);
+    socket.closeFromServer(4409);
+
+    harness.transport.detach();
+
+    expect(harness.transport.state.reconnectSupported).toBe(false);
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({
+      code: "attachment-superseded",
+    });
+  });
+
   it("does not extend expiry after a failed unopened reattach", async () => {
     let now = 0;
     const harness = makeHarness({ now: () => now });
