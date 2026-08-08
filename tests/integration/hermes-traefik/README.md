@@ -40,9 +40,11 @@ Traefik's native matchers alone prove exact query denial.
 Traefik router rules use the normalized host name (`traefik-92.test`) because
 that is the router matcher contract. The executable policy adapter requires the
 standard ForwardAuth metadata: exactly one `X-Forwarded-Host` authority with
-`:19444`, `X-Forwarded-Method`, `X-Forwarded-Proto: https`, `X-Forwarded-Uri`,
-and a non-empty `X-Forwarded-For`. The adapter's ordinary `Host` is the
-ForwardAuth service authority and is not treated as the public authority.
+`:19444`, `X-Forwarded-For`, `X-Forwarded-Method`,
+`X-Forwarded-Port: 19444`, `X-Forwarded-Proto: https`, and `X-Forwarded-Uri`.
+The adapter's ordinary `Host` is the ForwardAuth service authority and is not
+treated as the public authority. The port value is checked against the
+configured HTTPS entrypoint rather than trusted as arbitrary forwarded input.
 `X-Forwarded-Uri` includes the query and is parsed for the closed route grammar;
 it is not raw request-target evidence. No separate raw-target, path, query,
 Upgrade, or Connection observation is claimed at the adapter boundary.
@@ -110,9 +112,10 @@ provider to that exact absolute dynamic filename. A Traefik `check-config`
 probe runs only when a local `traefik` binary is available. The retained
 recording was made without that binary, so `offline_harness.traefik_check_config`
 is explicitly `skipped_unavailable`, `traefik_runtime.status` is `not_run`,
-and `traefik_runtime.version` is `not_recorded`; no binary or runtime
-compatibility validation is claimed. The generated router syntax is recorded
-as the intended Traefik v3 `HeaderRegexp` model output only.
+`traefik_runtime.version` is `not_recorded`, and the minimum safe Traefik v3
+version is recorded as `v3.7.6`; no binary or runtime compatibility validation
+is claimed. The generated router syntax is recorded as the intended Traefik v3
+`HeaderRegexp` model output only.
 
 ## Evidence bindings
 

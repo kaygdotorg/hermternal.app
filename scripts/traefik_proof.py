@@ -32,12 +32,13 @@ from types import MappingProxyType
 from urllib.parse import urlsplit
 
 
-SCHEMA = "hermternal.traefik-proof.v2"
+SCHEMA = "hermternal.traefik-proof.v3"
 RUNTIME_INPUT_SCHEMA = "hermternal.traefik-proof.runtime-inputs.v1"
 BROWSER_EVIDENCE_SCHEMA = "hermternal.traefik-proof.browser-evidence.v1"
 TRAEFIK_RUNTIME_STATUS = "not_run"
 TRAEFIK_RUNTIME_VERSION = "not_recorded"
 TRAEFIK_RUNTIME_BINARY = "unavailable_in_recording_environment"
+TRAEFIK_RUNTIME_MINIMUM_SAFE_VERSION = "v3.7.6"
 TRAEFIK_RULE_SYNTAX = "Traefik v3 HeaderRegexp; model output not runtime-validated"
 DEFAULT_HOST = "traefik-92.test"
 DEFAULT_HTTPS_PORT = 19444
@@ -116,14 +117,16 @@ MAX_DIGEST_CHUNK_BYTES = 64 << 10
 MAX_DIGEST_INPUT_BYTES = MAX_DIGEST_TOTAL_BYTES
 MAX_DIGEST_SECONDS = 2.0
 
-# Traefik ForwardAuth always supplies these five generated metadata headers.
-# ``authRequestHeaders`` only selects additional original request headers; this
-# fixture copies Origin for the edge Origin policy. No separate raw target,
-# path, query, Upgrade, Connection, or original Host field is claimed here.
+# Traefik ForwardAuth supplies these generated metadata headers for the pinned
+# safe-version range, including the HTTPS entrypoint port. ``authRequestHeaders``
+# only selects additional original request headers; this fixture copies Origin
+# for the edge Origin policy. No separate raw target, path, query, Upgrade,
+# Connection, or original Host field is claimed here.
 TRAEFIK_FORWARDAUTH_GENERATED_HEADERS = (
     "X-Forwarded-For",
     "X-Forwarded-Host",
     "X-Forwarded-Method",
+    "X-Forwarded-Port",
     "X-Forwarded-Proto",
     "X-Forwarded-Uri",
 )
@@ -140,6 +143,7 @@ HERMES_FORWARDING_ALLOWLIST = (
     "X-Forwarded-Host",
     "X-Forwarded-Method",
     "X-Forwarded-Path",
+    "X-Forwarded-Port",
     "X-Forwarded-Prefix",
     "X-Forwarded-Proto",
     "X-Forwarded-Query",
@@ -452,6 +456,7 @@ def render_static_config(value: Mapping[str, object]) -> dict[str, object]:
 
 def _request_headers(
     authority: str,
+    public_port: int,
     hermes_port: int,
     prefix: str,
     *,
@@ -473,6 +478,7 @@ def _request_headers(
         "Origin": f"http://{private_authority}",
         "X-Forwarded-For": "127.0.0.1",
         "X-Forwarded-Host": authority,
+        "X-Forwarded-Port": str(public_port),
         "X-Forwarded-Prefix": prefix,
         "X-Forwarded-Proto": "https",
         "X-Forwarded-Upgrade": "websocket" if websocket else "",
@@ -501,6 +507,7 @@ def render_dynamic_config(value: Mapping[str, object]) -> dict[str, object]:
     inputs = _validate_runtime_inputs(value)
     host = str(inputs["host"])
     authority = _authority(inputs)
+    https_port = int(inputs["https_port"])
     hermes_port = int(inputs["hermes_port"])
     static_port = int(inputs["static_port"])
     policy_port = int(inputs["policy_port"])
@@ -639,7 +646,7 @@ def render_dynamic_config(value: Mapping[str, object]) -> dict[str, object]:
                     "forwardAuth": {
                         "address": f"http://127.0.0.1:{policy_port}/check",
                         "trustForwardHeader": False,
-                        # Traefik supplies the five X-Forwarded-* metadata
+                        # Traefik supplies the six X-Forwarded-* metadata
                         # fields itself; only Origin is copied from the client.
                         "authRequestHeaders": list(FORWARD_AUTH_HEADERS),
                     }
@@ -665,24 +672,24 @@ def render_dynamic_config(value: Mapping[str, object]) -> dict[str, object]:
                     }
                 },
                 "root-hermes-headers": {
-                    "headers": {"customRequestHeaders": _request_headers(authority, hermes_port, "")}
+                    "headers": {"customRequestHeaders": _request_headers(authority, https_port, hermes_port, "")}
                 },
                 "root-websocket-hermes-headers": {
                     "headers": {
                         "customRequestHeaders": _request_headers(
-                            authority, hermes_port, "", websocket=True
+                            authority, https_port, hermes_port, "", websocket=True
                         )
                     }
                 },
                 "dashboard-websocket-hermes-headers": {
                     "headers": {
                         "customRequestHeaders": _request_headers(
-                            authority, hermes_port, "/hermes", websocket=True
+                            authority, https_port, hermes_port, "/hermes", websocket=True
                         )
                     }
                 },
                 "dashboard-hermes-headers": {
-                    "headers": {"customRequestHeaders": _request_headers(authority, hermes_port, "/hermes")}
+                    "headers": {"customRequestHeaders": _request_headers(authority, https_port, hermes_port, "/hermes")}
                 },
             },
             "services": {
@@ -877,6 +884,7 @@ def render_manifest(
         "traefik_runtime": {
             "status": TRAEFIK_RUNTIME_STATUS,
             "version": TRAEFIK_RUNTIME_VERSION,
+            "minimum_safe_version": TRAEFIK_RUNTIME_MINIMUM_SAFE_VERSION,
             "binary": TRAEFIK_RUNTIME_BINARY,
             "rule_syntax": TRAEFIK_RULE_SYNTAX,
         },
@@ -884,6 +892,7 @@ def render_manifest(
             "generated_headers": list(TRAEFIK_FORWARDAUTH_GENERATED_HEADERS),
             "copied_headers": list(FORWARD_AUTH_HEADERS),
             "auth_request_host": "auth-service-authority-not-public-authority",
+            "port": "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
             "uri": "X-Forwarded-Uri includes query; it is not raw-target evidence",
             "websocket": "router-matcher-only; Upgrade and Connection are not ForwardAuth observations",
             "hop_by_hop": "direct injected hop-by-hop fields are rejected; Traefik observation is not claimed",
@@ -911,7 +920,8 @@ def render_manifest(
                 "root-only scenario query is accepted by the model",
                 "static, client, and non-callback REST query mutations are model-denied",
                 "OAuth callback accepts only the reviewed code/state or provider-error query forms",
-                "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Proto, and X-Forwarded-Uri",
+                "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Port, X-Forwarded-Proto, and X-Forwarded-Uri",
+                "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
                 "only Origin is selected as an additional original request header; the auth request Host is not treated as the public authority",
                 "X-Forwarded-Uri is parsed for path and query policy but is not raw-target evidence",
                 "WebSocket Upgrade and Connection enforcement is represented only by router HeaderRegexp matchers",
@@ -928,6 +938,7 @@ def render_manifest(
             "traefik_check_config": "skipped_unavailable",
             "assertions": [
                 "actual HTTP requests reach the bounded standard-header policy adapter",
+                "X-Forwarded-Port is checked against the configured HTTPS entrypoint port",
                 "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
                 "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
             ],
@@ -1451,10 +1462,14 @@ def policy_decision(
         header_items = _header_items(headers)
         host_values = _header_values(header_items, "Host")
         forwarded_host_values = _header_values(header_items, "X-Forwarded-Host")
+        forwarded_port_values = _header_values(header_items, "X-Forwarded-Port")
         forwarded_proto_values = _header_values(header_items, "X-Forwarded-Proto")
+        expected_port = str(inputs["https_port"])
         if host_values and (len(host_values) != 1 or host_values[0] != authority):
             return {"status": 421, "layer": "edge", "upstream_request": False}
         if len(forwarded_host_values) != 1 or forwarded_host_values[0] != authority:
+            return {"status": 421, "layer": "edge", "upstream_request": False}
+        if len(forwarded_port_values) != 1 or forwarded_port_values[0] != expected_port:
             return {"status": 421, "layer": "edge", "upstream_request": False}
         if len(forwarded_proto_values) != 1 or forwarded_proto_values[0] != "https":
             return {"status": 421, "layer": "edge", "upstream_request": False}
@@ -1550,6 +1565,7 @@ def build_traefik_forward_auth_headers(
         ("X-Forwarded-For", "127.0.0.1"),
         ("X-Forwarded-Host", authority),
         ("X-Forwarded-Method", method),
+        ("X-Forwarded-Port", str(inputs["https_port"])),
         ("X-Forwarded-Proto", "https"),
         ("X-Forwarded-Uri", uri),
     ]
@@ -1569,8 +1585,12 @@ def _forward_auth_policy_input(
         name: _single_header(headers, name, required=True)
         for name in TRAEFIK_FORWARDAUTH_GENERATED_HEADERS
     }
-    if required["X-Forwarded-Host"] != authority or required["X-Forwarded-Proto"] != "https":
-        raise ValueError("ForwardAuth authority or scheme is not canonical")
+    if (
+        required["X-Forwarded-Host"] != authority
+        or required["X-Forwarded-Port"] != str(inputs["https_port"])
+        or required["X-Forwarded-Proto"] != "https"
+    ):
+        raise ValueError("ForwardAuth authority, port, or scheme is not canonical")
     if not required["X-Forwarded-For"]:
         raise ValueError("ForwardAuth client address is missing")
     method = str(required["X-Forwarded-Method"])
@@ -1578,6 +1598,7 @@ def _forward_auth_policy_input(
     origin = _single_header(headers, "Origin") or ""
     policy_headers = [
         ("X-Forwarded-Host", authority),
+        ("X-Forwarded-Port", str(inputs["https_port"])),
         ("X-Forwarded-Proto", "https"),
         ("Origin", origin),
     ]

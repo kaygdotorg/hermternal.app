@@ -7,7 +7,7 @@
       "build_digest": "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21",
       "build_sha": "521ede32b904a42e22eebb279fd7d404074cd318",
       "runtime_inputs_sha256": "4880b6d1ca97fe22b2f0015dce5d5f446354969edf42a282eed1237ce96c0114",
-      "traefik_config_digest": "0c146d6271615ed13726290ae53a0c4c5fd1da82e483cc79bd177b927cf0ebcc"
+      "traefik_config_digest": "3da2c93e74b4c205cac0aee16fcbed93cb6e87948b59e4592e1247a426da5e36"
     },
     "schema": "hermternal.traefik-proof.browser-evidence.v1",
     "status": "blocked_provider"
@@ -34,7 +34,7 @@
     },
     "proxy": "traefik",
     "public_listener": "loopback-only-disposable",
-    "runtime_config_sha256": "0c146d6271615ed13726290ae53a0c4c5fd1da82e483cc79bd177b927cf0ebcc",
+    "runtime_config_sha256": "3da2c93e74b4c205cac0aee16fcbed93cb6e87948b59e4592e1247a426da5e36",
     "runtime_inputs": {
       "cert_path": "/opt/hermternal/traefik-proof/tls.crt",
       "dynamic_filename": "/opt/hermternal/traefik-proof/traefik-dynamic.json",
@@ -59,10 +59,12 @@
       "X-Forwarded-For",
       "X-Forwarded-Host",
       "X-Forwarded-Method",
+      "X-Forwarded-Port",
       "X-Forwarded-Proto",
       "X-Forwarded-Uri"
     ],
     "hop_by_hop": "direct injected hop-by-hop fields are rejected; Traefik observation is not claimed",
+    "port": "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
     "runtime_observed": false,
     "uri": "X-Forwarded-Uri includes query; it is not raw-target evidence",
     "websocket": "router-matcher-only; Upgrade and Connection are not ForwardAuth observations"
@@ -74,7 +76,8 @@
       "root-only scenario query is accepted by the model",
       "static, client, and non-callback REST query mutations are model-denied",
       "OAuth callback accepts only the reviewed code/state or provider-error query forms",
-      "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Proto, and X-Forwarded-Uri",
+      "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Port, X-Forwarded-Proto, and X-Forwarded-Uri",
+      "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
       "only Origin is selected as an additional original request header; the auth request Host is not treated as the public authority",
       "X-Forwarded-Uri is parsed for path and query policy but is not raw-target evidence",
       "WebSocket Upgrade and Connection enforcement is represented only by router HeaderRegexp matchers",
@@ -275,6 +278,7 @@
   "offline_harness": {
     "assertions": [
       "actual HTTP requests reach the bounded standard-header policy adapter",
+      "X-Forwarded-Port is checked against the configured HTTPS entrypoint port",
       "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
       "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed"
     ],
@@ -403,9 +407,10 @@
     "tickets": "redacted",
     "transcripts": "redacted"
   },
-  "schema": "hermternal.traefik-proof.v2",
+  "schema": "hermternal.traefik-proof.v3",
   "traefik_runtime": {
     "binary": "unavailable_in_recording_environment",
+    "minimum_safe_version": "v3.7.6",
     "rule_syntax": "Traefik v3 HeaderRegexp; model output not runtime-validated",
     "status": "not_run",
     "version": "not_recorded"

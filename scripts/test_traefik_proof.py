@@ -34,7 +34,7 @@ EVIDENCE_PATH = ROOT / "tests/integration/hermes-traefik/traefik-proof-evidence.
 EVIDENCE_ANCHOR_PATH = ROOT / "tests/integration/hermes-traefik/traefik-proof-evidence-sha256.txt"
 EXPECTED_BUILD_SHA = "521ede32b904a42e22eebb279fd7d404074cd318"
 EXPECTED_BUILD_DIGEST = "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
-EXPECTED_CONFIG_DIGEST = "0c146d6271615ed13726290ae53a0c4c5fd1da82e483cc79bd177b927cf0ebcc"
+EXPECTED_CONFIG_DIGEST = "3da2c93e74b4c205cac0aee16fcbed93cb6e87948b59e4592e1247a426da5e36"
 
 
 class TraefikRendererTests(unittest.TestCase):
@@ -55,6 +55,7 @@ class TraefikRendererTests(unittest.TestCase):
         return [
             ("Host", self.authority),
             ("X-Forwarded-Host", self.authority),
+            ("X-Forwarded-Port", "19444"),
             ("X-Forwarded-Proto", "https"),
             *extra,
         ]
@@ -216,6 +217,7 @@ class TraefikRendererTests(unittest.TestCase):
             policy_headers,
             [
                 ("X-Forwarded-Host", self.authority),
+                ("X-Forwarded-Port", "19444"),
                 ("X-Forwarded-Proto", "https"),
                 ("Origin", f"https://{self.authority}"),
             ],
@@ -243,6 +245,7 @@ class TraefikRendererTests(unittest.TestCase):
             self.assertEqual(headers["Forwarded"], "for=127.0.0.1;host=traefik-92.test:19444;proto=https")
             self.assertEqual(headers["Host"], "127.0.0.1:19257")
             self.assertEqual(headers["Origin"], "http://127.0.0.1:19257")
+            self.assertEqual(headers["X-Forwarded-Port"], "19444")
             self.assertEqual(headers["X-Forwarded-Proto"], "https")
             self.assertEqual(headers["X-Real-IP"], "127.0.0.1")
             self.assertNotIn("X-Forwarded-Debug", headers)
@@ -335,6 +338,20 @@ class TraefikRendererTests(unittest.TestCase):
                 result = self._policy("GET", "/", headers=headers)
                 self.assertEqual((result["status"], result["layer"], result["upstream_request"]), (421, "edge", False))
 
+    def test_policy_requires_exact_forwarded_port(self) -> None:
+        wrong_port = self._headers()
+        wrong_port = [
+            (name, "443") if name == "X-Forwarded-Port" else (name, value)
+            for name, value in wrong_port
+        ]
+        result = self._policy("GET", "/", headers=wrong_port)
+        self.assertEqual((result["status"], result["layer"], result["upstream_request"]), (421, "edge", False))
+        missing_port = [
+            (name, value) for name, value in self._headers() if name != "X-Forwarded-Port"
+        ]
+        result = self._policy("GET", "/", headers=missing_port)
+        self.assertEqual((result["status"], result["layer"], result["upstream_request"]), (421, "edge", False))
+
     def test_policy_keeps_host_origin_ticket_and_upgrade_layers_separate(self) -> None:
         upgrade = self._headers(
             ("Origin", f"https://{self.authority}"),
@@ -407,6 +424,7 @@ class TraefikRendererTests(unittest.TestCase):
                 ("X-Forwarded-For", "127.0.0.1"),
                 ("X-Forwarded-Host", self.authority),
                 ("X-Forwarded-Method", "GET"),
+                ("X-Forwarded-Port", "19444"),
                 ("X-Forwarded-Proto", "https"),
                 ("X-Forwarded-Uri", "/v1/c/abcdefghijklmnop"),
                 ("Origin", f"https://{self.authority}"),
@@ -724,6 +742,12 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         headers.append(("X-Forwarded-Unknown", "spoof"))
         status, _ = self._send(headers)
         self.assertEqual(status, 400)
+        headers = [
+            (name, "443") if name == "X-Forwarded-Port" else (name, value)
+            for name, value in self._forwarded()
+        ]
+        status, _ = self._send(headers)
+        self.assertEqual(status, 400)
         headers = self._forwarded()
         headers.append(("Connection", "Upgrade"))
         status, _ = self._send(headers)
@@ -831,6 +855,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             {
                 "status": traefik_proof.TRAEFIK_RUNTIME_STATUS,
                 "version": traefik_proof.TRAEFIK_RUNTIME_VERSION,
+                "minimum_safe_version": traefik_proof.TRAEFIK_RUNTIME_MINIMUM_SAFE_VERSION,
                 "binary": traefik_proof.TRAEFIK_RUNTIME_BINARY,
                 "rule_syntax": traefik_proof.TRAEFIK_RULE_SYNTAX,
             },
@@ -839,6 +864,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         self.assertEqual(contract["generated_headers"], list(traefik_proof.TRAEFIK_FORWARDAUTH_GENERATED_HEADERS))
         self.assertEqual(contract["copied_headers"], list(traefik_proof.FORWARD_AUTH_HEADERS))
         self.assertFalse(contract["runtime_observed"])
+        self.assertIn("configured HTTPS entrypoint port", contract["port"])
         self.assertIn("not raw-target", contract["uri"])
         self.assertIn("router-matcher-only", contract["websocket"])
         self.assertIn("rejected", contract["hop_by_hop"])
