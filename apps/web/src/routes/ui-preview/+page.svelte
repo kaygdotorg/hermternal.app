@@ -51,6 +51,9 @@
   let providers: AuthProvider[] = DEFAULT_PROVIDERS;
   let lastRuntimeAction = 'No runtime action yet';
   let lastAuthAction = 'No authentication action yet';
+  // Credential-free count only. Browser regressions use it to prove one gesture
+  // emits one action without retaining action payloads or form values.
+  let authActionCount = 0;
   let discoveryAbortController: AbortController | undefined;
   let discoveryAttempt = 0;
   let discoveryActive = false;
@@ -104,6 +107,7 @@
   }
 
   function handleAuthAction(action: AuthAction): void {
+    authActionCount += 1;
     lastAuthAction = action.type;
 
     if (action.type === 'retry-discovery' && discoveryMode === 'live') {
@@ -255,7 +259,7 @@
         {/if}
       </label>
     </div>
-    <p class="section-note">{lastAuthAction}</p>
+    <p class="section-note" data-auth-action-count={authActionCount}>{lastAuthAction}</p>
     <div class="auth-stage">
       <AuthPreview {appearance} {discoveryMode} {providers} state={authState} onAction={handleAuthAction} />
     </div>

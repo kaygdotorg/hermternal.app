@@ -98,25 +98,29 @@ describe('AuthPreview', () => {
     expect(username).toHaveFocus();
   });
 
-  it('submits a credential-free fixture action once and resets the form immediately', async () => {
+  it('keeps pointer ownership while submitting one credential-free action and clearing synchronously', async () => {
     const onAction = vi.fn();
     render(AuthPreview, { state: 'password', onAction });
     await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
 
-    fireEvent.input(screen.getByLabelText('Username'), {
-      target: { value: 'sam' }
-    });
-    fireEvent.input(screen.getByLabelText('Password'), {
-      target: { value: 'not-a-secret-fixture' }
-    });
-    const form = screen.getByRole('form', { name: 'Hermes password sign in' });
-    fireEvent.submit(form);
-    fireEvent.submit(form);
+    const username = screen.getByLabelText('Username');
+    const password = screen.getByLabelText('Password');
+    const signIn = screen.getByRole('button', { name: 'Sign in' });
+    fireEvent.input(username, { target: { value: 'fixture-user' } });
+    fireEvent.input(password, { target: { value: 'fixture-password' } });
 
+    fireEvent.pointerDown(signIn, { button: 0, pointerType: 'mouse' });
+
+    expect(username).toHaveValue('');
+    expect(password).toHaveValue('');
     expect(onAction).toHaveBeenCalledTimes(1);
     expect(onAction).toHaveBeenCalledWith({ type: 'submit-password-fixture' });
-    expect(JSON.stringify(onAction.mock.calls)).not.toContain('not-a-secret-fixture');
-    await waitFor(() => expect(screen.getByLabelText('Password')).toHaveValue(''));
+    expect(JSON.stringify(onAction.mock.calls)).not.toContain('fixture-password');
+    await waitFor(() => expect(signIn).toBeInTheDocument());
+
+    fireEvent.pointerUp(signIn, { button: 0, pointerType: 'mouse' });
+    fireEvent.click(signIn, { detail: 1 });
+    expect(onAction).toHaveBeenCalledTimes(1);
   });
 
   it('passes live credentials only to the transient password callback and clears the form', async () => {
