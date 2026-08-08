@@ -110,15 +110,18 @@
         ariaLabel="Open artifact preview"
         disabled
         icon="arrow-up"
-        label="Open"
+        iconOnly
+        label="Open artifact"
+        revealLabel
         title="Artifact preview is presentation-only"
-        variant="ghost"
+        variant="action"
       />
       <Pill
         ariaLabel="Download artifact preview"
         icon="arrow-down"
         iconOnly
         label="Download"
+        revealLabel
         title="Download is deferred in this preview"
         variant="ghost"
       />

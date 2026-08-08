@@ -41,7 +41,14 @@
   }
 </script>
 
-<section aria-label="Conversation timeline" class="timeline" data-testid="conversation-timeline" role="log">
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -- The scrollable log is intentionally focusable for keyboard users and Safari. -->
+<section
+  aria-label="Conversation timeline"
+  class="timeline"
+  data-testid="conversation-timeline"
+  role="log"
+  tabindex="0"
+>
   {#if items.length === 0}
     <div class="timeline-empty">
       <Icon name="conversation" size={20} />
@@ -94,6 +101,7 @@
         </div>
         <p>{item.description}</p>
         {#if item.status === 'pending'}
+          <!-- Scope labels and events are synthetic fixture behavior; live transport stays boolean. -->
           <div class="approval-actions" aria-label="Approval choices">
             <Pill
               ariaLabel={timelineActionsDisabled ? `${item.confirmLabel}, unavailable` : item.confirmLabel}
@@ -101,19 +109,21 @@
               icon="check"
               iconOnly
               label={item.confirmLabel}
+              revealLabel
               title={timelineActionsDisabled ? approvalDisabledReason : item.confirmLabel}
               variant="action"
-              onActivate={() => onAction({ type: 'approve-tool', itemId: item.id })}
+              onActivate={() => onAction({ type: 'approve-tool', itemId: item.id, scope: 'once' })}
             />
             <Pill
               ariaLabel={timelineActionsDisabled ? 'Allow for session, unavailable' : 'Allow for session'}
               disabled={timelineActionsDisabled}
               icon="clock"
               iconOnly
-              label="Allow for session"
+              label="For session"
+              revealLabel
               title={timelineActionsDisabled ? approvalDisabledReason : 'Allow for session'}
               variant="ghost"
-              onActivate={() => onAction({ type: 'approve-tool', itemId: item.id })}
+              onActivate={() => onAction({ type: 'approve-tool', itemId: item.id, scope: 'session' })}
             />
             <Pill
               ariaLabel={timelineActionsDisabled ? 'Always allow, unavailable' : 'Always allow'}
@@ -121,9 +131,10 @@
               icon="shield"
               iconOnly
               label="Always allow"
+              revealLabel
               title={timelineActionsDisabled ? approvalDisabledReason : 'Always allow'}
               variant="ghost"
-              onActivate={() => onAction({ type: 'approve-tool', itemId: item.id })}
+              onActivate={() => onAction({ type: 'approve-tool', itemId: item.id, scope: 'always' })}
             />
             <Pill
               ariaLabel={timelineActionsDisabled ? `${item.rejectLabel}, unavailable` : item.rejectLabel}
@@ -131,9 +142,10 @@
               icon="close"
               iconOnly
               label={item.rejectLabel}
+              revealLabel
               title={timelineActionsDisabled ? approvalDisabledReason : item.rejectLabel}
               variant="danger"
-              onActivate={() => onAction({ type: 'reject-tool', itemId: item.id })}
+              onActivate={() => onAction({ type: 'reject-tool', itemId: item.id, scope: 'deny' })}
             />
           </div>
           {#if timelineActionsDisabled}
