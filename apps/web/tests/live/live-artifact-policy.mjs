@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { lstatSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 export const LIVE_ARTIFACT_REDACTION = '[redacted-live-credential]';
@@ -222,7 +222,7 @@ function liveArtifactEvidence(directory) {
 /**
  * Verify a quarantined directory without trusting its new path. Both the
  * original directory identity and its run-owned marker must still match before
- * recursive deletion is permitted.
+ * bounded cleanup is permitted.
  *
  * @param {string} quarantinePath
  * @param {LiveArtifactEvidence} evidence
@@ -769,66 +769,6 @@ function throwRedactionFailure() {
 }
 
 /**
- * Node's IPC serializer invokes an inherited `toJSON` on the ordinary object
- * literals produced by Playwright's worker-side `toTestInfoErrorPayload`.
- * Keep the normal Array push/map/iterator lifecycle intact, but pin the two
- * ambient prototype hooks to a detached null-prototype serializer before the
- * worker returns the test result. A non-configurable hostile hook cannot be
- * made safe, so the live lane fails closed rather than allowing an untrusted
- * IPC payload.
- */
-/** @this {Record<string, unknown> | unknown[]} */
-function safeWorkerToJSON() {
-  const source = this;
-  if (Array.isArray(source)) {
-    /** @type {unknown[]} */
-    const snapshot = [];
-    // A null prototype keeps Vitest/Node serializers from calling this hook
-    // again while preserving Array.isArray and JSON array transport semantics.
-    Object.setPrototypeOf(snapshot, null);
-    for (let index = 0; index < source.length; index += 1) snapshot[index] = source[index];
-    return snapshot;
-  }
-  const snapshot = Object.create(null);
-  for (const key of Object.keys(source)) snapshot[key] = source[key];
-  return snapshot;
-}
-
-function installSafeWorkerSerialization() {
-  for (const prototype of [Object.prototype, Array.prototype]) {
-    let descriptor;
-    try {
-      descriptor = Object.getOwnPropertyDescriptor(prototype, 'toJSON');
-    } catch {
-      throwRedactionFailure();
-    }
-    if (descriptor && !('value' in descriptor) && !descriptor.configurable) {
-      throwRedactionFailure();
-    }
-    if (descriptor && 'value' in descriptor && !descriptor.configurable && descriptor.writable === false) {
-      throwRedactionFailure();
-    }
-    try {
-      Object.defineProperty(prototype, 'toJSON', {
-        configurable: descriptor?.configurable ?? true,
-        enumerable: descriptor?.enumerable ?? false,
-        value: safeWorkerToJSON,
-        writable: descriptor?.writable ?? true
-      });
-    } catch {
-      throwRedactionFailure();
-    }
-    try {
-      if (Object.getOwnPropertyDescriptor(prototype, 'toJSON')?.value !== safeWorkerToJSON) {
-        throwRedactionFailure();
-      }
-    } catch {
-      throwRedactionFailure();
-    }
-  }
-}
-
-/**
  * @param {RedactionState} state
  * @param {number} depth
  */
@@ -1036,7 +976,15 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
 
     for (const key of keys) {
       if (typeof key !== 'string') continue;
-      if (key === 'location' || key === 'toJSON' || (Array.isArray(value) && key === 'length')) continue;
+      // Safe snapshot arrays own non-configurable `toJSON` and `constructor`
+      // properties. They are transport mechanics, not diagnostic fields; copying
+      // the constructor back would collide with the destination's pinned species
+      // constructor and fail closed under an inherited hostile serializer.
+      if (
+        key === 'location' ||
+        key === 'toJSON' ||
+        (Array.isArray(value) && (key === 'length' || key === 'constructor'))
+      ) continue;
       state.properties += 1;
       if (state.properties > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
       /** @type {PropertyDescriptor | undefined} */
@@ -1112,6 +1060,22 @@ export function redactTestErrors(errors, secrets = liveCredentialValues()) {
 }
 
 /**
+ * Detach and redact one complete Playwright worker IPC message. This boundary
+ * runs on `process.send`, not in afterEach: step-end and test-end payloads can
+ * be emitted before a fixture cleanup hook, and Playwright's mapped error
+ * objects are ordinary objects that do not inherit our array snapshot hooks.
+ * If traversal fails, the caller must not send the original message.
+ *
+ * @param {unknown} message
+ * @param {Iterable<string>} [secrets]
+ * @returns {unknown}
+ */
+export function redactLiveTransportMessage(message, secrets = liveCredentialValues()) {
+  const state = createRedactionState();
+  return redactTestDiagnosticValue(message, secrets, state, 0);
+}
+
+/**
  * Scrub every live form control before Playwright closes the page. This is a
  * last-resort boundary for DOM snapshots and manually attached diagnostics;
  * the live config separately disables screenshots, videos, and traces.
@@ -1159,18 +1123,175 @@ export async function scrubLivePage(page) {
  * @returns {Promise<void>}
  */
 async function removeEmptyQuarantineParent(quarantineParent) {
-  // rmdir is intentionally non-recursive and refuses symlinks/non-empty
-  // directories, so a replacement cannot be removed as a cleanup side effect.
+  // rmdir is intentionally non-recursive and refuses non-empty directories, so
+  // a replacement cannot be removed as a cleanup side effect.
   await fsPromises.rmdir(quarantineParent).catch(() => undefined);
 }
 
 /**
- * Remove a live output directory only after an identity-bound atomic handoff.
- * The owned root is first renamed into a private temporary quarantine. It is
- * then renamed again to an unguessable tombstone and reverified at that final
- * path before recursive deletion. The second rename means a replacement at the
- * quarantine path is never passed directly to rm; an identity mismatch fails
- * closed and safe remnants are cleaned without recursive path trust.
+ * @typedef {{ dev: number, ino: number }} DirectoryIdentity
+ */
+
+/**
+ * @param {string} path
+ * @param {DirectoryIdentity} expected
+ * @returns {import('node:fs').Stats | undefined}
+ */
+function sameDirectoryIdentity(path, expected) {
+  try {
+    const stats = lstatSync(path);
+    return stats.isDirectory() && !stats.isSymbolicLink() && stats.dev === expected.dev && stats.ino === expected.ino
+      ? stats
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * @param {string} parent
+ * @param {string} name
+ * @param {string} purpose
+ * @returns {string}
+ */
+function uniqueSiblingPath(parent, name, purpose) {
+  return join(parent, `.${name}-${purpose}-${randomBytes(16).toString('hex')}`);
+}
+
+/**
+ * @param {string} root
+ * @param {string} candidate
+ * @returns {boolean}
+ */
+function isStrictOwnedDescendant(root, candidate) {
+  const remainder = relative(resolve(root), resolve(candidate));
+  return remainder.length > 0 && remainder !== '..' && !remainder.startsWith(`..${sep}`);
+}
+
+/**
+ * Delete one owned directory tree without recursively trusting a pathname. The
+ * directory is first renamed to a fresh sibling tombstone, so a replacement at
+ * the caller's path is never inspected or deleted. Every child is detached and
+ * identity-checked before non-recursive unlink/rmdir. The quarantine parent is
+ * mode 0700; the final identity check plus non-recursive rmdir is the safe
+ * destructive boundary available through Node's path-based filesystem API.
+ *
+ * @param {string} directory
+ * @param {DirectoryIdentity} expected
+ * @returns {Promise<boolean>}
+ */
+async function removeOwnedTree(directory, expected) {
+  if (!sameDirectoryIdentity(directory, expected)) return false;
+
+  const ownedPath = uniqueSiblingPath(dirname(directory), basename(directory), 'owned');
+  try {
+    await fsPromises.rename(directory, ownedPath);
+  } catch {
+    return false;
+  }
+  if (!sameDirectoryIdentity(ownedPath, expected)) return false;
+
+  let entries;
+  try {
+    entries = await fsPromises.readdir(ownedPath, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+
+  for (const entry of entries) {
+    const sourcePath = join(ownedPath, entry.name);
+    let childStats;
+    try {
+      childStats = lstatSync(sourcePath);
+    } catch {
+      continue;
+    }
+    const childPath = uniqueSiblingPath(ownedPath, entry.name, 'delete');
+    try {
+      await fsPromises.rename(sourcePath, childPath);
+    } catch {
+      continue;
+    }
+
+    const movedStats = sameDirectoryIdentity(childPath, childStats);
+    if (movedStats) {
+      if (await removeOwnedTree(childPath, movedStats)) continue;
+      // A failed recursive handoff leaves the tombstone and any safe remnant in
+      // place. Never fall back to recursive deletion of that path.
+      continue;
+    }
+
+    try {
+      const beforeUnlink = lstatSync(childPath);
+      if (beforeUnlink.dev !== childStats.dev || beforeUnlink.ino !== childStats.ino) continue;
+      await fsPromises.unlink(childPath);
+    } catch {
+      // Preserve an unreadable or replaced remnant.
+    }
+  }
+
+  if (!sameDirectoryIdentity(ownedPath, expected)) return false;
+  try {
+    // rmdir is intentionally non-recursive. A non-empty replacement fails and
+    // remains available for inspection rather than being recursively removed.
+    await fsPromises.rmdir(ownedPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove one Playwright test output directory while preserving the run root,
+ * owner marker, and root-level artifacts for later tests. The child is moved to
+ * a private quarantine before recursive traversal, so replacement at the
+ * original output path is never trusted.
+ *
+ * @param {string} directory
+ * @returns {Promise<void>}
+ */
+async function removeLiveTestArtifacts(directory) {
+  const root = liveArtifactCleanupRoot();
+  const rootEvidence = liveArtifactEvidence(root);
+  if (!rootEvidence) return;
+  const candidate = resolve(directory);
+  if (!isStrictOwnedDescendant(root, candidate)) return;
+
+  let candidateStats;
+  try {
+    candidateStats = lstatSync(candidate);
+  } catch {
+    return;
+  }
+  if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) return;
+
+  /** @type {string | undefined} */
+  let quarantineParent;
+  const quarantinePath = () =>
+    join(quarantineParent ?? '', basename(candidate));
+  try {
+    quarantineParent = mkdtempSync(join(resolve(tmpdir()), 'hermternal-live-test-quarantine-'));
+    await fsPromises.rename(candidate, quarantinePath());
+  } catch {
+    if (quarantineParent) await removeEmptyQuarantineParent(quarantineParent);
+    return;
+  }
+
+  if (!isLiveArtifactDirectory(root) || !sameDirectoryIdentity(root, rootEvidence)) {
+    await removeEmptyQuarantineParent(quarantineParent);
+    return;
+  }
+  const quarantinedStats = sameDirectoryIdentity(quarantinePath(), candidateStats);
+  if (quarantinedStats) await removeOwnedTree(quarantinePath(), quarantinedStats);
+  await removeEmptyQuarantineParent(quarantineParent);
+}
+
+/**
+ * Remove the complete live output root only after an identity-bound atomic
+ * handoff. The owned root moves through private, unguessable tombstones.
+ * Recursive pathname deletion is deliberately not used: every child is
+ * detached and verified before non-recursive removal, and a final replacement
+ * survives a failed rmdir rather than becoming an rm target.
  *
  * @param {string} directory
  * @returns {Promise<void>}
@@ -1195,10 +1316,7 @@ export async function removeLiveArtifacts(directory) {
     return;
   }
 
-  const deletionPath = join(
-    quarantineParent,
-    `.${basename(evidence.candidate)}-delete-${randomBytes(16).toString('hex')}`
-  );
+  const deletionPath = uniqueSiblingPath(quarantineParent, basename(evidence.candidate), 'delete');
   try {
     await fsPromises.rename(quarantinePath, deletionPath);
   } catch {
@@ -1207,18 +1325,26 @@ export async function removeLiveArtifacts(directory) {
   }
 
   if (!isVerifiedQuarantine(deletionPath, evidence)) {
-    // Do not move an unverified entry back over a path that may now belong to
-    // another process. Leaving the non-empty private quarantine parent is the
-    // safe outcome; the caller can inspect or remove those untrusted remnants.
     await removeEmptyQuarantineParent(quarantineParent);
     return;
   }
 
+  const finalPath = uniqueSiblingPath(quarantineParent, basename(evidence.candidate), 'final');
   try {
-    await fsPromises.rm(deletionPath, { recursive: true, force: true });
-  } finally {
+    await fsPromises.rename(deletionPath, finalPath);
+  } catch {
     await removeEmptyQuarantineParent(quarantineParent);
+    return;
   }
+
+  const finalStats = sameDirectoryIdentity(finalPath, evidence);
+  if (!finalStats) {
+    await removeEmptyQuarantineParent(quarantineParent);
+    return;
+  }
+
+  await removeOwnedTree(finalPath, finalStats);
+  await removeEmptyQuarantineParent(quarantineParent);
 }
 
 /**
@@ -1290,15 +1416,6 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
     } catch (error) {
       redactionError ??= error;
     }
-    try {
-      // Playwright maps this array into ordinary IPC payload objects after the
-      // hook returns. Pin inherited serializers before that worker handoff;
-      // replacing only the source array would leave those mapped objects
-      // exposed to Object.prototype.toJSON.
-      installSafeWorkerSerialization();
-    } catch (error) {
-      redactionError ??= error;
-    }
   } finally {
     try {
       testInfo.attachments.length = 0;
@@ -1306,7 +1423,7 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
       cleanupError = error;
     }
     try {
-      await removeLiveArtifacts(liveArtifactCleanupRoot());
+      await removeLiveTestArtifacts(testInfo.outputDir ?? liveArtifactCleanupRoot());
     } catch (error) {
       cleanupError ??= error;
     }

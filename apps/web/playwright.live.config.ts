@@ -1,10 +1,18 @@
 import { defineConfig, devices } from '@playwright/test';
+import { resolve } from 'node:path';
 import {
   liveArtifactOutputDirectory,
   liveArtifactOutputOwnershipToken
 } from './tests/live/live-artifact-policy.mjs';
 
 const port = Number(process.env.PLAYWRIGHT_LIVE_PORT ?? 4187);
+const liveIpcGuard = resolve(process.cwd(), 'tests/live/live-ipc-guard.cjs');
+const existingNodeOptions = process.env.NODE_OPTIONS?.trim() ?? '';
+if (!existingNodeOptions.includes(liveIpcGuard)) {
+  process.env.NODE_OPTIONS = [existingNodeOptions, `--require=${liveIpcGuard}`]
+    .filter(Boolean)
+    .join(' ');
+}
 const liveOutputDirectory = liveArtifactOutputDirectory();
 // Global teardown may run in a separate Node process, so pass only the safe
 // temporary path and its run-ownership token through the environment; no
