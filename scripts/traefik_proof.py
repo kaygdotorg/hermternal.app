@@ -473,8 +473,14 @@ PARSER_TEST_PATH = "scripts/test_traefik_proof.py"
 PARSER_SOURCE_MAX_BYTES = 1 << 20
 PARSER_SOURCE_MAX_COMMITS = 4096
 PARSER_SOURCE_MAX_SUBPROCESSES = 2048
-PARSER_SOURCE_MAX_SECONDS = 12.0
+PARSER_SOURCE_MAX_SECONDS = 60.0
 PARSER_GIT_COMMAND_TIMEOUT_SECONDS = 5.0
+PARSER_OBJECT_HASHES = MappingProxyType(
+    {
+        "sha1": hashlib.sha1,
+        "sha256": hashlib.sha256,
+    }
+)
 PARSER_PROVENANCE_KEYS = frozenset(
     {
         "implementation_path",
@@ -534,17 +540,68 @@ def _git_output(
     return output
 
 
-def _git_blob_oid(source: bytes) -> str:
-    """Compute Git's SHA-1 blob identity; this is an object ID, not a security digest."""
+def _git_object_format(
+    project_root: Path,
+    *,
+    budget: _ParserGitBudget | None = None,
+) -> str:
+    """Read the repository object format under the explicit supported contract."""
 
+    try:
+        values = _git_output(
+            project_root,
+            "rev-parse",
+            "--show-object-format",
+            budget=budget,
+        ).decode("ascii").splitlines()
+    except (UnicodeDecodeError, ValueError) as exc:
+        if isinstance(exc, _ParserBudgetExceeded):
+            raise
+        raise ValueError("parser provenance repository object format cannot be read") from exc
+    if len(values) != 1 or values[0] not in PARSER_OBJECT_HASHES:
+        raise ValueError("parser provenance repository object format is unsupported")
+    return values[0]
+
+
+def _git_oid_hex_width(object_format: str) -> int:
+    try:
+        return PARSER_OBJECT_HASHES[object_format]().digest_size * 2
+    except KeyError as exc:
+        raise ValueError("parser provenance repository object format is unsupported") from exc
+
+
+def _validate_git_oid(value: str, object_format: str, label: str) -> str:
+    width = _git_oid_hex_width(object_format)
+    if type(value) is not str or not re.fullmatch(rf"[0-9a-f]{{{width}}}", value):
+        raise ValueError(f"{label} is not a valid {object_format} Git object ID")
+    return value
+
+
+def _validate_external_git_oid(value: object, label: str) -> str:
+    if type(value) is not str or not value.isascii() or not re.fullmatch(r"[0-9a-f]+", value):
+        raise ValueError(f"{label} must be a lowercase Git object ID")
+    if len(value) not in {_git_oid_hex_width(name) for name in PARSER_OBJECT_HASHES}:
+        raise ValueError(f"{label} uses an unsupported Git object ID width")
+    return value
+
+
+def _git_blob_oid(source: bytes, *, object_format: str) -> str:
+    """Compute the repository-format Git blob ID, not the SHA-256 evidence digest."""
+
+    try:
+        digest = PARSER_OBJECT_HASHES[object_format]()
+    except KeyError as exc:
+        raise ValueError("parser provenance repository object format is unsupported") from exc
     header = f"blob {len(source)}\0".encode("ascii")
-    return hashlib.sha1(header + source).hexdigest()
+    digest.update(header + source)
+    return digest.hexdigest()
 
 
 def _parser_tree_pair(
     project_root: Path,
     revision: str,
     *,
+    object_format: str,
     budget: _ParserGitBudget | None = None,
 ) -> tuple[str | None, str | None]:
     """Return the two source blob OIDs while deliberately ignoring file modes.
@@ -577,6 +634,7 @@ def _parser_tree_pair(
             raise ValueError("parser provenance source tree is malformed") from exc
         if kind_text != "blob" or path not in PARSER_SOURCE_PATHS:
             raise ValueError("parser provenance source tree contains an unexpected entry")
+        _validate_git_oid(oid, object_format, "parser provenance source tree blob")
         entries[path] = (oid, mode.decode("ascii"))
     return tuple(entries.get(path, (None, ""))[0] for path in PARSER_SOURCE_PATHS)  # type: ignore[return-value]
 
@@ -587,6 +645,7 @@ def _parser_source_predecessor(
     test_source: bytes,
     head: str,
     *,
+    object_format: str,
     budget: _ParserGitBudget | None = None,
 ) -> tuple[str, bytes, bytes]:
     """Find one unambiguous source-changing predecessor of the current bytes.
@@ -620,8 +679,10 @@ def _parser_source_predecessor(
     parents_by_commit: dict[str, tuple[str, ...]] = {}
     for line in history_lines:
         fields = line.split()
-        if not fields or any(not re.fullmatch(r"[0-9a-f]{40}", field) for field in fields):
-            raise ValueError("parser provenance source history contains an invalid Git SHA")
+        if not fields:
+            raise ValueError("parser provenance source history contains an invalid Git object ID")
+        for field in fields:
+            _validate_git_oid(field, object_format, "parser provenance source history object ID")
         commit, *parents = fields
         if commit in parents_by_commit:
             raise ValueError("parser provenance source history contains a duplicate commit")
@@ -631,7 +692,12 @@ def _parser_source_predecessor(
 
     def pair(revision: str) -> tuple[str | None, str | None]:
         if revision not in pair_cache:
-            pair_cache[revision] = _parser_tree_pair(project_root, revision, budget=budget)
+            pair_cache[revision] = _parser_tree_pair(
+                project_root,
+                revision,
+                object_format=object_format,
+                budget=budget,
+            )
         return pair_cache[revision]
 
     current_pair = pair(head)
@@ -705,10 +771,10 @@ def _parser_source_predecessor(
         budget=budget,
     ).decode("ascii").strip()
     if (
-        not re.fullmatch(r"[0-9a-f]{40}", implementation_blob)
-        or not re.fullmatch(r"[0-9a-f]{40}", test_blob)
-        or implementation_blob != _git_blob_oid(committed_implementation)
-        or test_blob != _git_blob_oid(committed_tests)
+        _validate_git_oid(implementation_blob, object_format, "parser implementation blob")
+        != _git_blob_oid(committed_implementation, object_format=object_format)
+        or _validate_git_oid(test_blob, object_format, "parser test blob")
+        != _git_blob_oid(committed_tests, object_format=object_format)
     ):
         raise ValueError("parser provenance Git blob identity does not match source bytes")
     return candidate, committed_implementation, committed_tests
@@ -729,6 +795,7 @@ def _current_parser_provenance(project_root: Path | None = None) -> dict[str, st
         "parser test source",
     )
     budget = _ParserGitBudget()
+    object_format = _git_object_format(project_root, budget=budget)
     implementation_commit = _git_output(
         project_root,
         "rev-parse",
@@ -736,13 +803,13 @@ def _current_parser_provenance(project_root: Path | None = None) -> dict[str, st
         "HEAD",
         budget=budget,
     ).decode("ascii").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", implementation_commit):
-        raise ValueError("current parser source commit is not a lowercase Git SHA")
+    _validate_git_oid(implementation_commit, object_format, "current parser source commit")
     implementation_commit, committed_implementation, committed_tests = _parser_source_predecessor(
         project_root,
         implementation,
         test_source,
         implementation_commit,
+        object_format=object_format,
         budget=budget,
     )
     if committed_implementation != implementation or committed_tests != test_source:
@@ -750,7 +817,7 @@ def _current_parser_provenance(project_root: Path | None = None) -> dict[str, st
     return {
         "implementation_path": PARSER_IMPLEMENTATION_PATH,
         "implementation_commit": implementation_commit,
-        "implementation_blob": _git_blob_oid(committed_implementation),
+        "implementation_blob": _git_blob_oid(committed_implementation, object_format=object_format),
         "implementation_sha256": digest_bytes(implementation),
         "test_path": PARSER_TEST_PATH,
         "test_source_sha256": digest_bytes(test_source),
@@ -1254,8 +1321,7 @@ def render_manifest(
     runtime_inputs: Mapping[str, object] | None = None,
     parser_provenance: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    if not re.fullmatch(r"[0-9a-f]{40}", build_sha):
-        raise ValueError("build_sha must be a lowercase commit SHA")
+    _validate_external_git_oid(build_sha, "build_sha")
     for name, value in (("build_digest", build_digest), ("traefik_config_digest", traefik_config_digest)):
         if not re.fullmatch(r"[0-9a-f]{64}", value):
             raise ValueError(f"{name} must be a SHA-256 digest")
