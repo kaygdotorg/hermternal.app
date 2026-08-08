@@ -308,7 +308,10 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   };
 
   const markDetached = (input: PtyConnectionInput, atMs: number): void => {
-    if (modeFor(input) !== "attach") return;
+    if (modeFor(input) !== "attach" || detachedAtFor(input) !== undefined) return;
+    // A transport-loss anchor is write-once for one attachment identity. Error
+    // callbacks may be repeated or delivered after handler removal, but none may
+    // extend the bounded reattachment authorization window.
     detachedAttachment = { input, atMs };
   };
 
@@ -388,9 +391,12 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   ): void => {
     if (!isCurrent(context)) return;
     const generation = context.generation;
+    // Capture the one bounded retention anchor while this opened adapter is
+    // still authoritative. Detaching its callbacks first can otherwise erase
+    // the only evidence that an error-only transport loss may reattach.
+    if (status === "detached") markDetached(context.input, now());
     invalidateContext(context);
     clearAttempt(generation);
-    if (status === "detached") markDetached(context.input, now());
     safeClose(context.socket);
     context.rejectReady(error);
     // Adapter close hooks are user-controlled and may synchronously start a
