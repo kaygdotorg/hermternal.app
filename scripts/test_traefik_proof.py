@@ -1572,6 +1572,16 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         ).strip()
         self.assertEqual(blob, provenance["implementation_blob"])
 
+    def test_source_provenance_fails_closed_on_overall_budget(self) -> None:
+        """A per-command timeout cannot permit unbounded aggregate Git work."""
+
+        with mock.patch.object(traefik_proof, "PARSER_SOURCE_MAX_SUBPROCESSES", 1):
+            with self.assertRaisesRegex(ValueError, "subprocess budget exhausted"):
+                traefik_proof._current_parser_provenance(ROOT)
+        with mock.patch.object(traefik_proof, "PARSER_SOURCE_MAX_SECONDS", 0.0):
+            with self.assertRaisesRegex(ValueError, "overall time budget exhausted"):
+                traefik_proof._current_parser_provenance(ROOT)
+
     def test_source_predecessor_ignores_mode_only_history(self) -> None:
         """Changing executable mode alone must not move parser source identity."""
 
