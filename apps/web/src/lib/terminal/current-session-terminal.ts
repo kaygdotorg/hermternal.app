@@ -93,6 +93,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   private explicitlyClosed = false;
   private rendererReadyGateEnabled = false;
   private rendererReady = false;
+  /** A workspace rejection marks this session until a later attach/reconnect owns it. */
+  private invalidatedSessionId: string | undefined;
+  /** Explicit reconnect owns a recovery attempt even before a binding is returned. */
+  private reconnectingSessionId: string | undefined;
   private rendererReadyWaiters = new Set<{
     resolve: () => void;
     reject: (error: PtyTransportError) => void;
@@ -130,10 +134,20 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   subscribe(listener: CurrentSessionTerminalListener): () => void {
     if (this.disposed) return () => {};
     this.listeners.add(listener);
-    try {
-      listener({ type: 'state', state: this.currentState });
-    } catch {
-      // A presentation observer cannot interrupt bridge setup or transport flow.
+    // A workspace rejection may leave the transport's last state tagged with
+    // the stale session while its detach callback is still settling. Do not
+    // replay that stale presentation state to a later renderer subscriber;
+    // only a new binding state may clear the rejection marker.
+    if (
+      this.currentState.sessionId === undefined ||
+      this.currentState.sessionId !== this.invalidatedSessionId ||
+      this.activeBinding !== undefined
+    ) {
+      try {
+        listener({ type: 'state', state: this.currentState });
+      } catch {
+        // A presentation observer cannot interrupt bridge setup or transport flow.
+      }
     }
     return () => this.listeners.delete(listener);
   }
@@ -164,6 +178,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       },
       isValid: () => binding.valid
     };
+    this.reconnectingSessionId = undefined;
     this.activeBinding = binding;
 
     try {
@@ -198,6 +213,29 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     // no-op so coordinator lease cleanup cannot close a newer binding.
   }
 
+  /**
+   * Closes a binding whose event crossed a workspace/session ownership fence.
+   * This is separate from a user detach so a stale publication cannot merely be
+   * hidden while the PTY remains active. A later attach clears the marker when
+   * its own transport state is observed.
+   */
+  invalidateBindingForSession(sessionId: string): void {
+    const binding = this.activeBinding;
+    const reconnecting = this.reconnectingSessionId === sessionId;
+    // A newer binding owns the transport and must never be detached by an old
+    // session event. With no binding left, a matching reconnect is still an
+    // owned transport attempt and must also be closed; otherwise retain only the
+    // rejection marker so reentrant listeners cannot receive stale state.
+    if (binding && binding.sessionId !== sessionId) return;
+    this.invalidatedSessionId = sessionId;
+    if (binding) {
+      this.invalidateActiveBinding();
+    } else if (reconnecting) {
+      this.reconnectingSessionId = undefined;
+      this.transport.detach();
+    }
+  }
+
   sendInput(input: string | Uint8Array): void {
     if (this.disposed) throw new PtyTransportError('closed');
     this.transport.sendInput(input);
@@ -220,18 +258,29 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     if (this.disposed) throw new PtyTransportError('closed');
     if (signal?.aborted) throw new PtyTransportError('aborted');
     this.explicitlyClosed = false;
-    await this.transport.reconnect(signal);
+    const reconnectingSessionId = this.currentState.sessionId;
+    if (reconnectingSessionId !== undefined) this.reconnectingSessionId = reconnectingSessionId;
+    try {
+      await this.transport.reconnect(signal);
+    } catch (error) {
+      if (this.reconnectingSessionId === reconnectingSessionId) {
+        this.reconnectingSessionId = undefined;
+      }
+      throw error;
+    }
   }
 
   detach(): void {
     if (this.disposed) return;
     this.explicitlyClosed = false;
+    this.reconnectingSessionId = undefined;
     this.invalidateActiveBinding();
   }
 
   close(): void {
     if (this.disposed) return;
     this.explicitlyClosed = true;
+    this.reconnectingSessionId = undefined;
     this.invalidateActiveBinding(false);
     this.transport.close();
     this.publishState(projectState(this.transport.state, true));
@@ -243,6 +292,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     // browser WebSocket shims emit synchronously from close(); a disposed bridge
     // must not publish a final state into a torn-down workspace.
     this.disposed = true;
+    this.reconnectingSessionId = undefined;
     this.unsubscribeTransport();
     this.listeners.clear();
     for (const waiter of [...this.rendererReadyWaiters]) {
@@ -292,8 +342,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     if (event.type === 'bytes') {
       // Generation is checked before forwarding, while the payload remains an
       // opaque view. The renderer owns its bounded queue; this bridge never
-      // copies, decodes, inspects, or retains terminal bytes.
+      // copies, decodes, inspects, or retains terminal bytes. A session rejected
+      // by the workspace fence stays closed until a later attach owns it again.
       if (event.generation !== this.currentState.generation) return;
+      if (this.invalidatedSessionId === this.currentState.sessionId) return;
       this.emit({
         type: 'bytes',
         generation: event.generation,
@@ -304,6 +356,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     }
     if (event.type === 'notice') {
       if (event.generation !== this.currentState.generation) return;
+      if (this.invalidatedSessionId === this.currentState.sessionId) return;
       this.emit({
         type: 'notice',
         generation: event.generation,
@@ -322,6 +375,39 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       // second boundary fail-closed so a late state cannot revive an old lease.
       return;
     }
+    const reconnecting =
+      this.reconnectingSessionId !== undefined &&
+      this.reconnectingSessionId === event.state.sessionId &&
+      event.state.generation >= this.currentState.generation;
+    if (this.activeBinding?.sessionId === event.state.sessionId) {
+      // A new binding owns the transport again. It may clear a prior workspace
+      // rejection only after its own state, not an old callback, is observed.
+      this.invalidatedSessionId = undefined;
+      this.reconnectingSessionId = undefined;
+    } else if (reconnecting) {
+      // Explicit reconnect owns a transport attempt before it can return a
+      // binding. Its generation-tagged lifecycle states are the only no-binding
+      // events allowed to clear the stale marker.
+      this.invalidatedSessionId = undefined;
+      if (
+        event.state.status === 'attached' ||
+        event.state.status === 'detached' ||
+        event.state.status === 'failed' ||
+        event.state.status === 'exited'
+      ) {
+        this.reconnectingSessionId = undefined;
+      }
+    }
+    if (
+      event.state.sessionId !== undefined &&
+      event.state.sessionId === this.invalidatedSessionId &&
+      !this.activeBinding
+    ) {
+      // Keep the bridge state current for later recovery, but do not publish a
+      // nested detach/close transition from the stale transport to renderers.
+      this.currentState = projectState(event.state, this.explicitlyClosed);
+      return;
+    }
     if (event.state.status === 'detached' || event.state.status === 'failed' || event.state.status === 'exited') {
       // An unsolicited terminal failure makes the coordinator lease stale. The
       // next Terminal activation must be allowed to attach again.
@@ -338,6 +424,20 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
 
   private emit(event: CurrentSessionTerminalEvent): void {
     for (const listener of [...this.listeners]) {
+      if (
+        event.type !== 'state' &&
+        this.invalidatedSessionId === this.currentState.sessionId
+      ) {
+        return;
+      }
+      if (
+        event.type === 'state' &&
+        event.state.sessionId !== undefined &&
+        event.state.sessionId === this.invalidatedSessionId &&
+        !this.activeBinding
+      ) {
+        return;
+      }
       try {
         listener(event);
       } catch {

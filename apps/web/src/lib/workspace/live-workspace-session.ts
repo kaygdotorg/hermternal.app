@@ -113,6 +113,11 @@ interface CoordinatorOwnership {
   readonly sessionId?: string;
 }
 
+interface TerminalEventOwnership {
+  readonly workspaceGeneration: number;
+  readonly sessionId?: string;
+}
+
 /**
  * Keeps only the opaque persisted session identity needed to route Retry back
  * through restore after history loading fails before the session is published.
@@ -154,6 +159,7 @@ export class LiveWorkspaceSession {
   private terminalBridge: CurrentSessionTerminalBridge | undefined;
   private coordinatorState: SessionCoordinatorState | undefined;
   private coordinatorOwnership: CoordinatorOwnership | undefined;
+  private terminalEventOwnership: TerminalEventOwnership = { workspaceGeneration: 0 };
   private terminalUnsubscribe: (() => void) | undefined;
   // History reads are presentation-owned operations. A generation protects
   // session replacement, while this monotonic epoch also protects same-session
@@ -598,6 +604,7 @@ export class LiveWorkspaceSession {
     if (!this.terminalBridge) {
       const terminal = new CurrentSessionTerminalBridge({ createTransport: this.createTerminal });
       this.terminalBridge = terminal;
+      this.terminalEventOwnership = { workspaceGeneration: this.generation };
       this.terminalUnsubscribe = terminal.subscribe((event) => this.handleTerminalEvent(event));
     }
 
@@ -687,6 +694,37 @@ export class LiveWorkspaceSession {
 
   private handleTerminalEvent(event: CurrentSessionTerminalEvent): void {
     if (this.disposed) return;
+    const eventSessionId =
+      event.type === 'state' ? event.state.sessionId : this.terminalBridge?.state.sessionId;
+    const ownership = this.terminalEventOwnership;
+    const coordinatorSessionId = this.coordinatorInstance?.activeSessionId;
+    const coordinatorStateSessionId = this.coordinatorState?.activeSessionId;
+    // The root composition exposes the bridge before workspace initialization
+    // for transport-only seams. Preserve that no-session bootstrap path; once
+    // begin() claims generation 1, every event must satisfy the full fence.
+    const bootstrapWithoutWorkspaceSession =
+      this.generation === 0 &&
+      ownership.workspaceGeneration === 0 &&
+      this.snapshot.activeSessionId === undefined &&
+      coordinatorSessionId === undefined &&
+      coordinatorStateSessionId === undefined;
+    const ownsEvent =
+      bootstrapWithoutWorkspaceSession ||
+      (ownership.workspaceGeneration === this.generation &&
+        ownership.sessionId === eventSessionId &&
+        this.snapshot.activeSessionId === eventSessionId &&
+        coordinatorSessionId === eventSessionId &&
+        coordinatorStateSessionId === eventSessionId);
+    if (!ownsEvent) {
+      // The bridge may have already emitted the state to this listener before
+      // the stale callback is discovered. Close that exact binding so the PTY
+      // cannot continue producing bytes behind a hidden snapshot; the bridge
+      // suppresses the remaining listener publications for the same event.
+      if (eventSessionId !== undefined) {
+        this.terminalBridge?.invalidateBindingForSession(eventSessionId);
+      }
+      return;
+    }
     if (event.type === 'bytes') return;
     if (event.type === 'state') {
       if (
@@ -733,6 +771,11 @@ export class LiveWorkspaceSession {
       currentState.activeSessionId === sessionId
         ? currentState.sessionGeneration
         : currentState.sessionGeneration + 1;
+    // The coordinator may attach Terminal synchronously during setSession when
+    // Terminal is the current mode. Claim the new workspace/session before that
+    // call so its first PTY state is publishable, while begin() has already
+    // revoked the old generation and binding.
+    this.terminalEventOwnership = { workspaceGeneration: generation, sessionId };
     this.coordinatorOwnership = {
       workspaceGeneration: generation,
       coordinatorGeneration: expectedGeneration,
@@ -766,6 +809,7 @@ export class LiveWorkspaceSession {
     this.terminalBridge = undefined;
     this.coordinatorOwnership = undefined;
     this.coordinatorState = undefined;
+    this.terminalEventOwnership = { workspaceGeneration: this.generation };
     this.terminalUnsubscribe?.();
     this.terminalUnsubscribe = undefined;
     coordinator?.dispose();
@@ -1247,6 +1291,10 @@ export class LiveWorkspaceSession {
     this.generation += 1;
     this.failedRestore = undefined;
     const generation = this.generation;
+    // Revoke Terminal publication before aborting or detaching any old resource.
+    // Synchronous PTY callbacks from the old generation must be rejected rather
+    // than repopulating the replacement snapshot.
+    this.terminalEventOwnership = { workspaceGeneration: generation };
     this.advanceRefreshEpoch();
     this.supersedeRetry();
     this.factoryRetryGeneration = undefined;
@@ -1302,6 +1350,7 @@ export class LiveWorkspaceSession {
     this.generation += 1;
     this.failedRestore = undefined;
     const generation = this.generation;
+    this.terminalEventOwnership = { workspaceGeneration: generation };
     this.advanceRefreshEpoch();
     this.supersedeRetry();
     this.factoryRetryGeneration = undefined;
