@@ -56,6 +56,108 @@ def _install_active_authority_environment(test_case: unittest.TestCase) -> None:
     test_case.addClassCleanup(restore)
 
 
+def _protected_authority_objects() -> tuple[tuple[str, str], ...]:
+    """Return every external authority/source object required by aggregate trust."""
+
+    active = _active_authority_environment()
+    return (
+        ("historical-authority", validate.EXPECTED_HISTORICAL_AUTHORITY_COMMIT),
+        ("historical-source", validate.EXPECTED_HISTORICAL_SOURCE_COMMIT),
+        ("active-authority", active[validate.ACTIVE_AUTHORITY_COMMIT_ENV]),
+        ("active-source", active[validate.ACTIVE_SOURCE_COMMIT_ENV]),
+    )
+
+
+def _seed_protected_objects(repository: Path, *, source: Path = validate.REPO_ROOT) -> None:
+    """Seed all pinned authority/source commits into a fresh plain clone.
+
+    A local-path clone can copy unreachable objects and make a missing trust input
+    look present. Fetch each externally pinned object into a local fixture ref so
+    these aggregate tests exercise the same fail-closed object-repository contract.
+    """
+
+    protected = _protected_authority_objects()
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "fetch",
+            "--no-tags",
+            "--quiet",
+            str(source),
+            *(f"{commit}:refs/fixture-authority/{name}" for name, commit in protected),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr or completed.stdout)
+    for name, commit in protected:
+        verified = subprocess.run(
+            ["git", "-C", str(repository), "cat-file", "-t", commit],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if verified.returncode != 0 or verified.stdout.strip() != "commit":
+            raise AssertionError(f"protected {name} object missing: {commit}")
+
+
+def _assert_protected_objects_missing(repository: Path) -> None:
+    """Prove an unseeded single-head clone omitted at least one trust root.
+
+    The active rotation may be reachable from the reviewed head, while the
+    preserved historical roots are intentionally not. One omitted required
+    object is sufficient to prove that seeding is necessary before validation.
+    """
+
+    missing: list[str] = []
+    for name, commit in _protected_authority_objects():
+        verified = subprocess.run(
+            ["git", "-C", str(repository), "cat-file", "-t", commit],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if verified.returncode != 0:
+            missing.append(name)
+    if not missing:
+        raise AssertionError("unseeded clone retained every protected authority object")
+
+
+def _clone_plain_object_repository(*, seed: bool) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    """Create a clean single-head object repository, optionally seeding trust roots."""
+
+    temporary = tempfile.TemporaryDirectory(prefix="fixture-validator-regression-")
+    object_repo = Path(temporary.name) / "repo"
+    completed = subprocess.run(
+        [
+            "git",
+            "clone",
+            "--no-local",
+            "--single-branch",
+            "--no-hardlinks",
+            "--quiet",
+            str(validate.REPO_ROOT),
+            str(object_repo),
+        ],
+        cwd=validate.REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        temporary.cleanup()
+        raise AssertionError(completed.stderr or completed.stdout)
+    if seed:
+        _seed_protected_objects(object_repo)
+    else:
+        _assert_protected_objects_missing(object_repo)
+    return temporary, object_repo
+
+
 class StrictJsonTests(unittest.TestCase):
     def _write(self, payload: bytes) -> Path:
         handle = tempfile.NamedTemporaryFile(prefix="fixture-validator-", suffix=".json", delete=False)
@@ -112,7 +214,16 @@ class RegistryTests(unittest.TestCase):
         cls.object_repo_temporary = tempfile.TemporaryDirectory(prefix="fixture-validator-object-repo-")
         cls.object_repo = Path(cls.object_repo_temporary.name) / "repo"
         completed = subprocess.run(
-            ["git", "clone", "--no-hardlinks", "--quiet", str(validate.REPO_ROOT), str(cls.object_repo)],
+            [
+                "git",
+                "clone",
+                "--no-local",
+                "--single-branch",
+                "--no-hardlinks",
+                "--quiet",
+                str(validate.REPO_ROOT),
+                str(cls.object_repo),
+            ],
             cwd=validate.REPO_ROOT,
             check=False,
             capture_output=True,
@@ -121,6 +232,11 @@ class RegistryTests(unittest.TestCase):
         if completed.returncode != 0:
             cls.object_repo_temporary.cleanup()
             raise AssertionError(completed.stderr or completed.stdout)
+        try:
+            _seed_protected_objects(cls.object_repo)
+        except AssertionError:
+            cls.object_repo_temporary.cleanup()
+            raise
         cls.addClassCleanup(cls.object_repo_temporary.cleanup)
 
     def test_checked_in_registry_is_valid_and_partial_is_not_success(self) -> None:
@@ -279,6 +395,17 @@ class RegistryTests(unittest.TestCase):
     def test_canonical_baseline_anchor_matches_checked_in_content(self) -> None:
         self.assertEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
 
+    def test_class_object_repository_contains_all_protected_objects(self) -> None:
+        """Keep the shared aggregate object repository complete and explicit."""
+
+        for name, commit in _protected_authority_objects():
+            with self.subTest(name=name):
+                verified = subprocess.check_output(
+                    ["git", "-C", str(self.object_repo), "cat-file", "-t", commit],
+                    text=True,
+                ).strip()
+                self.assertEqual(verified, "commit")
+
     def test_git_object_authority_matches_direct_v2_predecessor(self) -> None:
         authority = validate._trusted_authority(validate.REPO_ROOT, self.object_repo)
         self.assertEqual(authority["schema"], validate.VALIDATOR_AUTHORITY_SCHEMA)
@@ -308,7 +435,16 @@ class CliTests(unittest.TestCase):
         cls.object_repo_temporary = tempfile.TemporaryDirectory(prefix="fixture-validator-cli-object-repo-")
         cls.object_repo = Path(cls.object_repo_temporary.name) / "repo"
         completed = subprocess.run(
-            ["git", "clone", "--no-hardlinks", "--quiet", str(validate.REPO_ROOT), str(cls.object_repo)],
+            [
+                "git",
+                "clone",
+                "--no-local",
+                "--single-branch",
+                "--no-hardlinks",
+                "--quiet",
+                str(validate.REPO_ROOT),
+                str(cls.object_repo),
+            ],
             cwd=validate.REPO_ROOT,
             check=False,
             capture_output=True,
@@ -317,6 +453,11 @@ class CliTests(unittest.TestCase):
         if completed.returncode != 0:
             cls.object_repo_temporary.cleanup()
             raise AssertionError(completed.stderr or completed.stdout)
+        try:
+            _seed_protected_objects(cls.object_repo)
+        except AssertionError:
+            cls.object_repo_temporary.cleanup()
+            raise
         cls.addClassCleanup(cls.object_repo_temporary.cleanup)
 
     def _run(
@@ -464,6 +605,31 @@ class CliTests(unittest.TestCase):
         self.assertEqual(same.returncode, 1)
         self.assertEqual(same.stderr, "")
         self.assertEqual(json.loads(same.stdout)["evidence_status"], "blocked")
+
+    def test_unseeded_plain_clone_fails_and_seeded_clone_succeeds(self) -> None:
+        """Require explicit trust-object provisioning instead of local clone luck."""
+
+        unseeded_temporary, unseeded = _clone_plain_object_repository(seed=False)
+        self.addCleanup(unseeded_temporary.cleanup)
+        for optimized in (False, True):
+            with self.subTest(state="unseeded", optimized=optimized):
+                blocked = self._run(optimized=optimized, object_repo=unseeded)
+                self.assertEqual(blocked.returncode, 1)
+                self.assertEqual(blocked.stderr, "")
+                self.assertEqual(json.loads(blocked.stdout)["evidence_status"], "blocked")
+
+        seeded_temporary, seeded = _clone_plain_object_repository(seed=True)
+        self.addCleanup(seeded_temporary.cleanup)
+        for optimized in (False, True):
+            with self.subTest(state="seeded", optimized=optimized):
+                accepted = self._run(optimized=optimized, object_repo=seeded)
+                self.assertEqual(accepted.returncode, 0)
+                payload = json.loads(accepted.stdout)
+                self.assertEqual(payload["fixture_count"], 30)
+                self.assertEqual(payload["coverage_count"], 29)
+                self.assertEqual(payload["evidence_status"], "partial")
+                self.assertFalse(payload["live_claim"])
+                self.assertEqual(accepted.stderr, "")
 
     def _append_artifact_and_block(self, relative_path: str, addition: str) -> None:
         artifact = validate.FIXTURES_ROOT / relative_path
