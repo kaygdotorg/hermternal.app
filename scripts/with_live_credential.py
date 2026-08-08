@@ -20,6 +20,7 @@ from typing import NoReturn, Sequence
 
 PASSWORD_PATTERN = re.compile(rb"[0-9a-f]{48}\Z")
 MAX_CREDENTIAL_BYTES = 256
+LIVE_RUNNER_DEBUG_ENV = "PW_RUNNER_DEBUG"
 
 
 class LiveProofCredentialError(Exception):
@@ -58,6 +59,8 @@ def run_with_credential(path: Path, command: Sequence[str]) -> NoReturn:
 
     if not command:
         raise LiveProofCredentialError("command_missing")
+    if os.environ.get(LIVE_RUNNER_DEBUG_ENV):
+        raise LiveProofCredentialError("live_runner_debug_incompatible")
     password = read_credential_file(path)
     environment = os.environ.copy()
     environment["HERMES_TEST_PASSWORD"] = password

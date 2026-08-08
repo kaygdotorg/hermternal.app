@@ -7,9 +7,13 @@
 if (typeof process.send === 'function') {
   const originalSend = process.send.bind(process);
   const policy = require('./live-artifact-policy.mjs');
+  // Capture every credential variant before Playwright loads the worker or a
+  // test can delete/replace its environment. The frozen array is passed on
+  // every send; worker code cannot clear the guard's closed-over values.
+  const capturedLiveSecrets = Object.freeze([...policy.liveCredentialValues()]);
   const safeSend = (message, ...rest) => {
     try {
-      const safeMessage = policy.redactLiveTransportMessage(message);
+      const safeMessage = policy.redactLiveTransportMessage(message, capturedLiveSecrets);
       return originalSend(safeMessage, ...rest);
     } catch {
       // Playwright falls back to JSON.stringify(message) when process.send

@@ -241,7 +241,9 @@ The helper reads the credential file as bytes, removes only trailing CR/LF, and
 requires exactly 48 lowercase hexadecimal characters. It then replaces itself
 with the child command and supplies `HERMES_TEST_PASSWORD` only in that child
 process environment. It never prints or writes the password; invalid input
-fails locally before the child starts. The launcher-generated `password\n` file
+fails locally before the child starts. `PW_RUNNER_DEBUG` is also rejected before the
+credential file is read or the child starts because Playwright's debug mode inherits
+worker stderr outside the redaction boundary. The launcher-generated `password\n` file
 format is unchanged.
 
 `start` first requires local rootless Podman and verifies the requested official

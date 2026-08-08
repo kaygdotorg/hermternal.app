@@ -104,6 +104,23 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertFalse(execvpe.called)
         self.assertNotIn(self.value.decode("ascii"), stderr.getvalue())
 
+    def test_runner_debug_fails_before_reading_credential_or_starting_child(self) -> None:
+        self.path.write_bytes(self.value + b"\n")
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(helper.os.environ, {helper.LIVE_RUNNER_DEBUG_ENV: "1"}),
+            mock.patch.object(helper, "read_credential_file") as read_credential_file,
+            mock.patch.object(helper.os, "execvpe") as execvpe,
+            contextlib.redirect_stderr(stderr),
+        ):
+            status = helper.main([str(self.path), "--", "synthetic-proof"])
+
+        self.assertEqual(status, 1)
+        self.assertEqual(stderr.getvalue(), "live_runner_debug_incompatible\n")
+        read_credential_file.assert_not_called()
+        self.assertFalse(execvpe.called)
+        self.assertNotIn(self.value.decode("ascii"), stderr.getvalue())
+
     def test_valid_value_is_only_passed_to_child_environment(self) -> None:
         raw = self.value + b"\r\n"
         self.path.write_bytes(raw)

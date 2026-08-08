@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
@@ -9,6 +10,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   LIVE_ARTIFACT_REDACTION,
+  assertLiveRunnerDebugDisabled,
   finalizeLiveTest,
   liveArtifactOutputDirectory,
   liveCredentialValues,
@@ -42,10 +44,18 @@ const playwrightEntryUrl = pathToFileURL(
 
 /**
  * Run an isolated Playwright 1.62.1 worker with the live policy imported before
- * the test body. The reporter serializes worker-mapped errors, making a leaked
- * credential observable without using the real Hermes lane or a browser.
+ * the test body. The reporter serializes worker-mapped errors, stdio, and
+ * attachment bodies, making a leaked credential observable without using the
+ * real Hermes lane or a browser.
  */
-async function runSyntheticPlaywright(specSource: string): Promise<{
+async function runSyntheticPlaywright(
+  specSource: string,
+  options: {
+    runnerDebug?: string;
+    retries?: number;
+    reportOutputRoot?: boolean;
+  } = {}
+): Promise<{
   code: number;
   stdout: string;
   stderr: string;
@@ -56,22 +66,50 @@ async function runSyntheticPlaywright(specSource: string): Promise<{
   const reporterPath = join(workspace, 'reporter.mjs');
   const policyUrl = pathToFileURL(policyPath).href;
   const reporterSource = `
+function render(value) {
+  if (Buffer.isBuffer(value)) {
+    return JSON.stringify({ base64: value.toString('base64'), text: value.toString('utf8') });
+  }
+  return JSON.stringify(value);
+}
 export default class SyntheticReporter {
+  onStdOut(chunk) {
+    process.stdout.write('STDOUT:' + render(chunk) + '\\n');
+  }
+  onStdErr(chunk) {
+    process.stdout.write('STDERR:' + render(chunk) + '\\n');
+  }
+  onStepEnd(_test, _result, step) {
+    process.stdout.write('STEP:' + JSON.stringify(step.error) + '\\n');
+  }
   onTestEnd(_test, result) {
-    process.stdout.write('TEST:' + result.status + ':' + JSON.stringify(result.errors) + '\\n');
+    const attachments = (result.attachments ?? []).map((attachment) => ({
+      name: attachment.name,
+      body: attachment.body === undefined ? undefined : render(attachment.body)
+    }));
+    process.stdout.write('TEST:' + result.status + ':' + JSON.stringify({ errors: result.errors, attachments }) + '\\n');
   }
   onEnd(result) {
+    if (process.env.SYNTHETIC_REPORT_OUTPUT_ROOT)
+      process.stdout.write('ROOT:' + process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR + '\\n');
     process.stdout.write('END:' + result.status + '\\n');
   }
 }
 `;
   const configSource = `
 import { defineConfig } from ${JSON.stringify(playwrightEntryUrl)};
+import { join } from 'node:path';
 import {
+  assertLiveRunnerDebugDisabled,
   liveArtifactOutputDirectory,
   liveArtifactOutputOwnershipToken
 } from ${JSON.stringify(policyUrl)};
+assertLiveRunnerDebugDisabled();
+// Keep Playwright's post-teardown LastRunReporter from recreating a markerless
+// project-output directory after global teardown removes the owned root.
+process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = '/dev/null';
 const outputDir = liveArtifactOutputDirectory();
+const projectOutputDir = join(outputDir, '.playwright-output');
 process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR = outputDir;
 process.env.PLAYWRIGHT_LIVE_OUTPUT_TOKEN = liveArtifactOutputOwnershipToken();
 const guardPath = ${JSON.stringify(guardPath)};
@@ -83,9 +121,9 @@ export default defineConfig({
   testMatch: /synthetic\\.spec\\.mjs/,
   fullyParallel: false,
   workers: 1,
-  retries: 0,
+  retries: ${String(options.retries ?? 0)},
   timeout: 20_000,
-  outputDir,
+  outputDir: projectOutputDir,
   preserveOutput: 'never',
   reporter: [[${JSON.stringify(reporterPath)}]],
   globalTeardown: ${JSON.stringify(teardownPath)},
@@ -97,6 +135,14 @@ export default defineConfig({
     writeFile(specPath, specSource.replaceAll('__POLICY_URL__', policyUrl), 'utf8'),
     writeFile(reporterPath, reporterSource, 'utf8')
   ]);
+  const childEnvironment: NodeJS.ProcessEnv = {
+    ...process.env,
+    HERMES_TEST_PASSWORD: 'synthetic-password'
+  };
+  if (options.runnerDebug === undefined) delete childEnvironment.PW_RUNNER_DEBUG;
+  else childEnvironment.PW_RUNNER_DEBUG = options.runnerDebug;
+  if (options.reportOutputRoot) childEnvironment.SYNTHETIC_REPORT_OUTPUT_ROOT = '1';
+  else delete childEnvironment.SYNTHETIC_REPORT_OUTPUT_ROOT;
 
   try {
     try {
@@ -105,7 +151,7 @@ export default defineConfig({
         [playwrightCliPath, 'test', '--config', configPath],
         {
           cwd: appRoot,
-          env: { ...process.env, HERMES_TEST_PASSWORD: 'synthetic-password' },
+          env: childEnvironment,
           maxBuffer: 4 * 1024 * 1024,
           timeout: 10_000,
           encoding: 'utf8'
@@ -229,6 +275,13 @@ describe('live Playwright artifact policy', () => {
     expect(unlistedFormMarkup).not.toContain('unlisted-option');
     expect(unlistedFormMarkup).not.toContain('unlisted-editable');
     expect(liveCredentialValues({})).toContain('hermternal-test');
+  });
+
+  it('rejects Playwright debug mode before the live worker can start', () => {
+    expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: '1' })).toThrow(
+      'PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane'
+    );
+    expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: undefined })).not.toThrow();
   });
 
   it('structurally redacts textarea and select bodies and fails closed on malformed forms', () => {
@@ -774,6 +827,46 @@ describe('live Playwright artifact policy', () => {
     }
   });
 
+  it('redacts Playwright binary stdio and attachment transport fields', () => {
+    const secretBytes = Buffer.from('synthetic-password', 'utf8').toString('base64');
+    const safeBytes = Buffer.from('safe-binary', 'utf8').toString('base64');
+    const safeStdout = redactLiveTransportMessage(
+      { method: '__dispatch__', params: { method: 'stdOut', params: { buffer: safeBytes } } },
+      ['synthetic-password']
+    ) as { params: { params: { buffer: string } } };
+    const redactedStdout = redactLiveTransportMessage(
+      { method: '__dispatch__', params: { method: 'stdErr', params: { buffer: secretBytes } } },
+      ['synthetic-password']
+    ) as { params: { params: { buffer: string } } };
+    const redactedAttachment = redactLiveTransportMessage(
+      { method: '__dispatch__', params: { method: 'attach', params: { body: secretBytes } } },
+      ['synthetic-password']
+    ) as { params: { params: { body: string } } };
+
+    expect(safeStdout.params.params.buffer).toBe(safeBytes);
+    expect(redactedStdout.params.params.buffer).toBe(
+      Buffer.from(LIVE_ARTIFACT_REDACTION, 'utf8').toString('base64')
+    );
+    expect(redactedAttachment.params.params.body).toBe(
+      Buffer.from(LIVE_ARTIFACT_REDACTION, 'utf8').toString('base64')
+    );
+    expect(() =>
+      redactLiveTransportMessage(
+        { method: '__dispatch__', params: { method: 'stdOut', params: { buffer: 'not-base64!' } } },
+        ['synthetic-password']
+      )
+    ).toThrow();
+    expect(() =>
+      redactLiveTransportMessage(
+        {
+          method: '__dispatch__',
+          params: { method: 'stdOut', params: { buffer: 'A'.repeat(256 * 1024 + 4) } }
+        },
+        ['synthetic-password']
+      )
+    ).toThrow();
+  });
+
   it('protects frozen read-only TestInfo errors at the actual Playwright IPC boundary', async () => {
     const result = await runSyntheticPlaywright(`
 import { test } from ${JSON.stringify(playwrightEntryUrl)};
@@ -850,6 +943,75 @@ test('step IPC before cleanup', async () => {
     expect(result.code).toBe(0);
     expect(result.stdout + result.stderr).not.toContain('synthetic-password');
     expect(result.stdout).toContain(LIVE_ARTIFACT_REDACTION);
+  }, 30_000);
+
+  it('captures immutable credential values before worker test code can delete them', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { finalizeLiveTest } from '__POLICY_URL__';
+const secret = 'synthetic-password';
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test('preload credential capture', async () => {
+  test.fail();
+  delete process.env.HERMES_TEST_PASSWORD;
+  await test.step('credential-bearing step', async () => {
+    throw new Error(secret);
+  });
+});
+`);
+    expect(result.code).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain('synthetic-password');
+    expect(result.stdout).toContain(LIVE_ARTIFACT_REDACTION);
+  }, 30_000);
+
+  it('redacts binary worker stdio and attachment bodies while preserving safe bytes', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { finalizeLiveTest } from '__POLICY_URL__';
+const secret = 'synthetic-password';
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test('binary transport diagnostics', async ({}, testInfo) => {
+  process.stdout.write(Buffer.from(secret, 'utf8'));
+  process.stdout.write(Buffer.from('safe-stdout', 'utf8'));
+  process.stderr.write(Buffer.from(secret, 'utf8'));
+  process.stderr.write(Buffer.from('safe-stderr', 'utf8'));
+  await testInfo.attach('binary-secret', {
+    body: Buffer.from(secret, 'utf8'),
+    contentType: 'application/octet-stream'
+  });
+  await testInfo.attach('binary-safe', {
+    body: Buffer.from('safe-attachment', 'utf8'),
+    contentType: 'application/octet-stream'
+  });
+});
+`);
+    const output = result.stdout + result.stderr;
+    expect(result.code).toBe(0);
+    expect(output).not.toContain('synthetic-password');
+    expect(output).toContain(LIVE_ARTIFACT_REDACTION);
+    expect(output).toContain('safe-stdout');
+    expect(output).toContain('safe-stderr');
+    expect(output).toContain('safe-attachment');
+    expect(result.stdout).toContain('END:passed');
+  }, 30_000);
+
+  it('rejects PW_RUNNER_DEBUG before a live worker can start', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+const secret = 'synthetic-password';
+test('debug mode must be rejected', async () => {
+  throw new Error(secret);
+});
+`, { runnerDebug: '1' });
+    const output = result.stdout + result.stderr;
+    expect(result.code).not.toBe(0);
+    expect(output).not.toContain('synthetic-password');
+    expect(output).toContain('PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane');
+    expect(output).not.toContain('TEST:');
   }, 30_000);
 
   it('runs attachment and output cleanup before propagating a redaction failure', async () => {
@@ -1089,15 +1251,87 @@ test('second owned test sees the same root', async ({}, testInfo) => {
     expect(result.stdout).toContain('END:passed');
   }, 30_000);
 
+  it('preserves one run root across a retry and sequential worker tests until global teardown', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { finalizeLiveTest } from '__POLICY_URL__';
+const root = process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+if (!root) throw new Error('missing synthetic output root');
+const secret = 'synthetic-password';
+const present = async (path) => {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+test.describe.configure({ mode: 'serial' });
+test.afterEach(async ({}, testInfo) => {
+  await finalizeLiveTest({ testInfo, secrets: [secret] });
+});
+test('retry keeps the owned root', async ({}, testInfo) => {
+  await mkdir(testInfo.outputDir, { recursive: true });
+  await writeFile(
+    join(testInfo.outputDir, 'attempt.txt'),
+    String(testInfo.retry),
+    'utf8'
+  );
+  if (testInfo.retry === 0) {
+    await writeFile(join(root, 'run-level.txt'), 'root-level-survives', 'utf8');
+    await writeFile(join(root, 'first-output-dir.txt'), testInfo.outputDir, 'utf8');
+    throw new Error('synthetic retry only');
+  }
+  const firstOutputDir = (await readFile(join(root, 'first-output-dir.txt'), 'utf8')).trim();
+  if (await present(firstOutputDir)) throw new Error('first retry output survived');
+  const marker = await readFile(join(root, '.hermternal-live-artifact-owner'), 'utf8');
+  if (!marker.endsWith('\\n')) throw new Error('run marker was not preserved');
+  const runLevel = await readFile(join(root, 'run-level.txt'), 'utf8');
+  if (runLevel !== 'root-level-survives') throw new Error('root-level artifact was removed');
+  await writeFile(join(root, 'retry-output-dir.txt'), testInfo.outputDir, 'utf8');
+});
+test('sequential test sees the same root', async ({}, testInfo) => {
+  const marker = await readFile(join(root, '.hermternal-live-artifact-owner'), 'utf8');
+  if (!marker.endsWith('\\n')) throw new Error('run marker was not preserved');
+  const runLevel = await readFile(join(root, 'run-level.txt'), 'utf8');
+  if (runLevel !== 'root-level-survives') throw new Error('root-level artifact was removed');
+  const firstOutputDir = (await readFile(join(root, 'first-output-dir.txt'), 'utf8')).trim();
+  const retryOutputDir = (await readFile(join(root, 'retry-output-dir.txt'), 'utf8')).trim();
+  if (await present(firstOutputDir) || await present(retryOutputDir))
+    throw new Error('per-test output survived until the next sequential test');
+  await mkdir(testInfo.outputDir, { recursive: true });
+});
+`, { retries: 1, reportOutputRoot: true });
+    const output = result.stdout + result.stderr;
+    const rootStart = output.indexOf('ROOT:');
+    const root = rootStart < 0
+      ? undefined
+      : output.slice(rootStart + 'ROOT:'.length).split('\\n', 1)[0].trim();
+    try {
+      expect(result.code).toBe(0);
+      expect(output).not.toContain('synthetic-password');
+      expect(result.stdout).toContain('END:passed');
+      expect(root).toBeTruthy();
+      expect(root && await exists(root)).toBe(false);
+    } finally {
+      if (root) await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('pins the live config to no media artifacts, no retained output, and safe reporting', async () => {
     const config = await readFile(resolve(appRoot, 'playwright.live.config.ts'), 'utf8');
 
-    expect(config).toContain('outputDir: liveOutputDirectory');
+    expect(config).toContain('outputDir: livePlaywrightOutputDirectory');
+    expect(config).toContain("join(liveOutputDirectory, '.playwright-output')");
     expect(config).toContain('PLAYWRIGHT_LIVE_OUTPUT_TOKEN');
     expect(config).toContain("preserveOutput: 'never'");
     expect(config).toContain("reporter: [['./tests/live/safe-reporter.mjs']]");
     expect(config).toContain("globalTeardown: './tests/live/live-artifact-teardown.mjs'");
+    expect(config).toContain("process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = '/dev/null'");
     expect(config).toContain('live-ipc-guard.cjs');
+    expect(config).toContain('assertLiveRunnerDebugDisabled');
     expect(config).toContain('NODE_OPTIONS');
     expect(config).toContain("trace: 'off'");
     expect(config).toContain("video: 'off'");
