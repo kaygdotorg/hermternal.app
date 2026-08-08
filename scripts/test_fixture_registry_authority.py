@@ -119,6 +119,27 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         if completed.returncode != 0:
             temporary.cleanup()
             raise AssertionError(completed.stderr or completed.stdout)
+        # A linear restack can leave the historical authority outside the
+        # checkout's reachable tip. Seed the exact reviewed object explicitly,
+        # matching the separate plain object-repository contract.
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(object_repo),
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                str(ROOT),
+                f"{verifier.EXPECTED_AUTHORITY_COMMIT}:refs/fixture-authority/historical",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            temporary.cleanup()
+            raise AssertionError(completed.stderr or completed.stdout)
         return temporary, object_repo
 
     def copy_checkout(self) -> tempfile.TemporaryDirectory[str]:
