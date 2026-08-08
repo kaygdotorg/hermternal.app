@@ -11,8 +11,11 @@ W-Term renderer, session coordinator, workspace shell, or Chat UI.
 ## Interface
 
 `createFreshPtyTicketProvider` adapts the reviewed authenticated request seam to
-one same-origin `POST /api/auth/ws-ticket` request per call. It requires the
-closed `{ ticket }` response shape and keeps no reusable credential state.
+one same-origin `POST /api/auth/ws-ticket` request per call. The shared HTTP
+boundary validates the exact `{ "ticket": "<URL-safe value>", "ttl_seconds": 30 }`
+response, rejects duplicate or extra fields, and returns only normalized
+`{ ticket }` to this PTY adapter. The adapter keeps no reusable credential state
+and does not duplicate raw-response validation.
 
 `createPtyTransport` exposes state and byte/event subscriptions plus these
 operations:
@@ -24,6 +27,9 @@ operations:
   attach, and process identity input, validates the 30-minute detached window,
   and mints a fresh single-use ticket. A `4409` superseded socket is blocked
   from reattaching because its replacement is already the active attachment.
+  Permanent close classifications and expired/invalid attachment evidence expose
+  `reconnectSupported: false`; `4401` remains recoverable through the auth path,
+  while `4403`, `4409`, `4410`, and other deterministic failures stay fail-closed.
 - `sendInput()` sends UTF-8 text or copied raw bytes only while attached.
 - `resize()` sends one binary `ESC [RESIZE:<cols>;<rows>]` frame after clamping
   exact integers to `1..2000` columns and `1..1000` rows.
@@ -42,7 +48,10 @@ operations:
   and reattach notices/readiness are rechecked after observer callbacks. State
   events are captured before observers, but `onStateChange` runs only if that
   transition still owns the generation after `onEvent`. Ticket-pending
-  cancellation is rechecked before ticket minting or socket creation. A detach
+  cancellation is rechecked before ticket minting or socket creation. The
+  browser adapter converts the current HTTP origin to `ws:` or `wss:` and passes
+  the transport-owned abort signal to the injected socket factory, so a PTY
+  attempt can close its socket even when its caller has no signal. A detach
   timestamp is recorded only if adapter-controlled socket close returns without
   a replacement claiming the generation, so an old A cleanup cannot write
   evidence after reentrant B connects. Late socket-factory values are closed
@@ -75,6 +84,38 @@ reattach it emits `output-may-be-truncated` with the normative 1 MiB server
 capacity and marks every received byte event as potentially retained or live.
 It preserves receive order and inserts no replay separator because the pinned
 source exposes no replay boundary.
+
+## Current-session browser adapter
+
+`current-session-terminal.ts` composes this transport for the normal Svelte
+workspace. `createBrowserPtyTransport()` requests a fresh same-origin ticket for
+each transport attempt and constructs the same-origin `/api/pty` upgrade without
+exposing the ticket, URL, socket, attach handle, or process identity to
+presentation state. `CurrentSessionTerminalBridge` owns one transport and one
+same-session binding at a time. It rejects stale PTY generations before byte
+forwarding, invalidates a binding after unsolicited detach/failure/exit, and
+maps `4401` to `authentication-required` while leaving `4403` as
+`incompatible-origin`. `reconnectBinding()` creates a fresh opaque binding for
+coordinator-owned attach-mode recovery; callers must not use the direct
+transport reconnect method as a workspace lease. The coordinator may supply a
+binding-adoption callback; the bridge invokes it before starting reconnect so a
+synchronous transport `attached` event cannot outrun the new lease. Explicit
+detach/close also rejects renderer-gated waiters synchronously.
+
+The pinned source has no client-visible attach-token issuance route. The normal
+browser bridge therefore connects in legacy mode and reports reconnect as
+unsupported; it never fakes an attach identity or silently creates a replacement
+PTY. Callers with a separately reviewed opaque attach/process-identity provider
+may pass it to the bridge, in which case `reconnectBinding()` delegates to the
+transport's exact attach-mode retention and supersession rules while returning a
+new coordinator lease. Deterministic transport blocks hide retry rather than
+presenting a reconnect action that cannot succeed.
+
+The bridge can wait for the lazy TerminalSurface renderer-ready signal before
+its first `connect()` and before an attach-mode `reconnect()`. This prevents
+replay bytes from arriving before a renderer sink exists without adding a second
+application-level replay buffer. The renderer owns bounded output queues; the
+bridge and workspace snapshot do not retain terminal bytes.
 
 ## Verification scope
 

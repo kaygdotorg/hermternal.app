@@ -7,23 +7,37 @@
   export let session: LiveWorkspaceSession;
   export let appearance: Appearance = 'light';
   export let onReturnToSignIn: () => void = () => {};
+  /** Root auth owns the shared session; standalone previews retain local cleanup. */
+  export let disposeSessionOnDestroy = true;
 
   let snapshot: Readonly<LiveWorkspaceSnapshot> = session.current;
   let unsubscribe: (() => void) | undefined;
+  let coordinator = session.coordinator;
+  let terminal = session.terminal;
 
   onMount(() => {
+    coordinator = session.coordinator;
+    terminal = session.terminal;
     unsubscribe = session.subscribe((next) => {
       snapshot = next;
+      coordinator = session.coordinator;
+      terminal = session.terminal;
     });
     void session.initialize();
   });
 
   onDestroy(() => {
     unsubscribe?.();
-    session.dispose();
+    if (disposeSessionOnDestroy) session.dispose();
   });
 
   function handleAction(action: WorkspaceAction): void {
+    if (action.type === 'return-to-sign-in') {
+      if (snapshot.permanentFailure?.reason === 'authentication-required' || snapshot.terminal?.failure === 'authentication-required') {
+        onReturnToSignIn();
+      }
+      return;
+    }
     if (action.type === 'back-to-sessions' || action.type === 'dismiss') {
       // Both visible permanent-error exits lead back to sign-in only when the
       // transport proved that authentication is required. Incompatible-origin
@@ -33,6 +47,10 @@
       }
       return;
     }
+    if (action.type === 'set-mode') void session.activateMode(action.mode);
+    if (action.type === 'terminal-reconnect') void session.reconnectTerminal();
+    if (action.type === 'terminal-detach') session.detachTerminal();
+    if (action.type === 'terminal-close') session.closeTerminal();
     if (action.type === 'new-session') void session.createSession();
     if (action.type === 'select-session') void session.selectSession(action.sessionId);
     if (action.type === 'send') session.sendPrompt(action.text);
@@ -50,6 +68,11 @@
 <WorkspacePreview
   activeSessionId={snapshot.activeSessionId ?? ''}
   artifactInspectorEnabled={false}
+  coordinator={snapshot.coordinator ?? coordinator?.state}
+  focusIntent={snapshot.coordinator?.focusIntent}
+  mode={snapshot.mode ?? coordinator?.mode ?? 'chat'}
+  modeActionsEnabled={true}
+  terminal={terminal}
   {appearance}
   dataMode="live"
   interactionEnabled={snapshot.activeSessionId !== undefined}

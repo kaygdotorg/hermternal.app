@@ -38,7 +38,12 @@
   <PrototypeShell transport={fixtureTransport} />
 {:else if routeMode === 'live' && liveContext}
   <BrowserAuthView session={liveContext.auth}>
-    <LiveWorkspaceView session={liveContext.workspace} onReturnToSignIn={returnLiveWorkspaceToSignIn} />
+    <!-- The root keeps this session reusable across auth expiry and remount. -->
+    <LiveWorkspaceView
+      session={liveContext.workspace}
+      disposeSessionOnDestroy={false}
+      onReturnToSignIn={returnLiveWorkspaceToSignIn}
+    />
   </BrowserAuthView>
 {:else}
   <main aria-busy="true" aria-label="Starting Hermternal"></main>

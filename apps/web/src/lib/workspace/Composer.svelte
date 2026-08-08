@@ -1,18 +1,32 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
+  import type { FocusIntent, SessionCoordinatorState } from '$lib/session/coordinator';
   import type { WorkspaceActionHandler } from './types';
 
   export let model = 'Atlas · balanced';
   export let disabled = false;
   export let isStreaming = false;
   export let placeholder = 'Message Hermes…';
+  export let coordinator: SessionCoordinatorState | undefined = undefined;
+  export let focusIntent: FocusIntent | undefined = undefined;
   export let onAction: WorkspaceActionHandler = () => {};
 
   let draft = '';
   let selectedModel = model;
   let lastSubmittedText = '';
   let editedSinceSubmit = true;
+  let editor: HTMLTextAreaElement | undefined;
+  let lastFocusSequence = 0;
+  let pendingFocusSequence: number | undefined;
+
+  // Focus is an intent, not a command. Consume it only when the coordinator
+  // still owns the same Chat session and generation; disabled/loading states
+  // leave it pending so re-enabling can complete the original request once.
+  // Read the gating props here so a disabled-to-enabled or streaming-to-idle
+  // transition retries the same intent even when its object identity is stable.
+  $: if (focusIntent && coordinator && !disabled && !isStreaming) void consumeFocusIntent(focusIntent);
 
   function sendMessage(): void {
     const text = draft.trim();
@@ -44,6 +58,47 @@
   function handleModelChange(): void {
     onAction({ type: 'set-model', model: selectedModel });
   }
+
+  function isValidFocusIntent(intent: FocusIntent): boolean {
+    return (
+      intent.mode === 'chat' &&
+      intent.target === 'composer' &&
+      Number.isSafeInteger(intent.sessionGeneration) &&
+      intent.sessionGeneration > 0 &&
+      Number.isSafeInteger(intent.sequence) &&
+      intent.sequence > lastFocusSequence &&
+      coordinator?.mode === 'chat' &&
+      coordinator.activeSessionId === intent.sessionId &&
+      coordinator.sessionGeneration === intent.sessionGeneration
+    );
+  }
+
+  async function consumeFocusIntent(intent: FocusIntent): Promise<void> {
+    if (
+      !isValidFocusIntent(intent) ||
+      disabled ||
+      isStreaming ||
+      pendingFocusSequence === intent.sequence
+    ) {
+      return;
+    }
+
+    pendingFocusSequence = intent.sequence;
+    await tick();
+    if (
+      !isValidFocusIntent(intent) ||
+      disabled ||
+      isStreaming ||
+      pendingFocusSequence !== intent.sequence
+    ) {
+      if (pendingFocusSequence === intent.sequence) pendingFocusSequence = undefined;
+      return;
+    }
+
+    lastFocusSequence = intent.sequence;
+    pendingFocusSequence = undefined;
+    editor?.focus();
+  }
 </script>
 
 <form aria-label="Message composer" class="composer" onsubmit={handleSubmit}>
@@ -51,6 +106,7 @@
     <span class="sr-only">Message Hermes</span>
     <textarea
       aria-label="Message Hermes"
+      bind:this={editor}
       bind:value={draft}
       {disabled}
       {placeholder}

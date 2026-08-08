@@ -8,8 +8,64 @@
 - The controller replaces presentation arrays after each server read. It does not keep a secondary transcript store.
 - One JSON-RPC transport belongs to one selected session. A session change closes that transport before creating another one.
 - Generation numbers and abort signals prevent stale session reads from publishing after a newer selection.
+- A new workspace generation revokes the coordinator's PTY/session lease synchronously before the replacement snapshot is published. Coordinator callbacks are accepted only when the workspace generation, coordinator session generation, selected identity, and visible snapshot agree.
+- Chat fallback state is tagged to its workspace generation; an old transport callback cannot poison a replacement Terminal activation while Chat is being rebuilt.
 - Approval and clarification replies capture their generation, transport identity, and pending-map owner. A late completion or failure cannot mutate a replacement chat, disposed workspace, or newer interactive item.
 - `invalidate()` detaches the chat identity before close, aborts reads, and removes session and timeline references before subscribers receive the signed-out view. `dispose()` marks the workspace closed and clears subscribers before close callbacks can re-enter.
+
+## Chat and Terminal mode continuity
+
+The normal route keeps one `LiveWorkspaceSession` mounted while the user switches
+between Chat and Terminal. The session's coordinator receives a façade over the
+existing Chat transport and a single current-session PTY bridge. Mode actions
+reuse the selected opaque session; they do not call `createSession()`, create a
+second Chat transport, or dispose Chat. Terminal state, notices, and byte
+publications are owned by the current workspace generation, selected session,
+and coordinator identity. A stale event is rejected before it can update the
+workspace snapshot, and the matching bridge binding is invalidated/detached
+rather than merely hidden. The bridge's public state getter removes the stale session identity after
+rejection and suppresses reconnect, while preserving a classified terminal
+outcome such as PTY `4401` or `4403` for recovery guidance. User detach and
+close publish truthful `detached`/`exited` or `closed` state even when a generic
+adapter keeps its attached snapshot. A session replacement clears the old
+terminal presentation state after synchronous PTY invalidation, so a late old
+terminal publication cannot appear on the replacement session. During
+attach-mode recovery, the coordinator adopts the fresh bridge lease before the
+transport can publish its recovered `attached` transition; an invalidated
+callback-adopted lease cannot republish that transition.
+
+`TerminalSurface` remains mounted while Chat is selected and hides only its
+presentation layer. It owns the host, lazy W-Term/Ghostty import, renderer mount
+and disposal, resize forwarding, focus intents, lifecycle notices, native
+selection/copy, and accessible recovery actions. The bridge forwards raw
+`Uint8Array` output directly to that renderer and stores only redacted
+lifecycle state. The renderer-ready gate delays the first PTY connection until
+the lazy sink is mounted; reconnect keeps that mounted sink in place so a PTY
+generation change cannot open a zero-byte-loss window. Attach-mode reconnect is
+routed through coordinator-owned `reconnectBinding()` so a fresh lease is
+adopted before the recovered PTY is exposed. An explicit Terminal close is a
+user-selected detach; an unexpected PTY exit is the failure path, and both
+revoke the coordinator lease before another Terminal action. Detach/close also
+cancel renderer-gated waiters, while a renderer import or mount failure keeps
+readiness closed and detaches rather than attaching behind an error surface.
+
+The pinned server source does not expose a client-visible attach-token issuance
+route. The normal browser composition therefore uses a legacy PTY and labels
+reattach as unavailable instead of presenting a reconnect action that would
+silently create a second process. A reviewed attach provider can opt into the
+transport's exact session/attach/process-identity reconnect contract later.
+
+`4401` remains an authentication-required recovery path for Chat and PTY. The
+root composition expires the authenticated BrowserAuthSession from a PTY `4401`
+even while Chat hides TerminalSurface. `4403` remains an incompatible-origin
+failure and never invokes sign-in recovery. The root-owned `LiveWorkspaceSession`
+uses a non-disposing authenticated view so auth expiry can unmount and later
+remount the child without permanently destroying the reusable session; explicit
+root/session disposal still clears all resources. Composer focus intents remain
+pending through disabled or streaming states and are consumed only when the
+same Chat session and coordinator generation are current. These are prototype
+boundaries backed by synthetic tests; same-session proof against hermternal-dev
+is still required after review and merge.
 
 ## Prompt delivery
 

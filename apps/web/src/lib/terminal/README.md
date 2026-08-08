@@ -2,6 +2,27 @@
 
 `renderer.ts` owns the browser-only Terminal boundary for W-22. It does not import Chat, PTY transport, session coordination, credentials, or live Hermes code.
 
+`current-session-terminal.ts` is the separate current-session bridge. It owns one
+`PtyTransport`, exposes one opaque `TerminalBinding`, and maps only the reviewed
+lifecycle state into the workspace. It forwards generation-tagged raw
+`Uint8Array` views without decoding or retaining them. A renderer-ready gate may
+delay the first PTY attach until the lazy TerminalSurface has a mounted sink;
+headless coordinator tests leave that gate disabled. TerminalSurface closes the
+gate before sink teardown, so a pending attach remains blocked for a later mount
+or is rejected by bridge disposal; teardown never resolves readiness, and no
+application-level byte buffer repairs a late attach. Workspace ownership
+rejection also invalidates the matching stale binding and detaches its PTY;
+stale state, notices, and bytes are not hidden while an old binding remains
+active. After that rejection, the bridge's public state getter projects a
+session-less detached state until a later attach or reconnect owns the session;
+the transport's opaque session identity remains private for recovery. Attach-mode
+reconnect is coordinator-owned and returns a fresh binding lease; the bridge
+invokes the coordinator's adoption callback before transport reconnect can
+publish a synchronous recovered attachment. Direct bridge transport reconnect
+is not a workspace action. Renderer import or mount failure keeps readiness
+closed and detaches any pending lease instead of attaching without a mounted
+sink.
+
 ## Runtime contract
 
 - `createTerminalRenderer()` returns a small `TerminalRenderer` interface with `mount`, `write`, `resize`, `focus`, `whenIdle`, and `dispose`. `whenIdle()` is a renderer-call drain fence only; production W-Term DOM work is confirmed separately with a visible sentinel in browser workloads.

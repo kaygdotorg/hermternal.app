@@ -1,9 +1,10 @@
 # Shared Chat and Terminal session coordinator
 
 `coordinator.ts` owns the browser runtime's one selected Hermes session identity.
-It is a narrow prototype seam between the reviewed W-07 Chat transport and a
-future W-Term adapter. It does not render either workspace, open a PTY, create a
-Hermes session, or mirror transcript content.
+It is a narrow prototype seam between the reviewed W-07 Chat transport and the
+current-session W-Term adapter. It does not render either workspace, create a
+Hermes session, or mirror transcript content; the adapter owns the PTY and the
+Svelte TerminalSurface owns renderer lifecycle.
 
 ## Invariants
 
@@ -25,6 +26,10 @@ Hermes session, or mirror transcript content.
   settles without suppressing later cleanup. If overlapping attaches return the
   same raw object, a stale completion never cleans the raw binding owned by the
   active lease; a distinct stale binding still receives exactly-once cleanup.
+- `reconnectTerminal()` invalidates the old lease before asking the adapter for a
+  fresh exact-identity binding. The adapter cannot expose a recovered PTY through
+  the direct transport reconnect seam; the coordinator adopts the new lease first
+  so later input, resize, session replacement, and logout retain ownership.
 - `logout()` and `dispose()` claim lifecycle state before adapter cleanup. They
   close Chat and clean the active Terminal lease at most once, increment the
   session generation once, and treat `disposed` as higher precedence than
@@ -33,7 +38,9 @@ Hermes session, or mirror transcript content.
   transport remains open and usable. Switching back to Chat focuses the composer
   without retrying or replaying a prompt.
 - `reconnect()` coalesces concurrent calls to the existing Chat transport. It
-  does not reattach an already valid Terminal binding.
+  does not reattach an already valid Terminal binding. Terminal recovery uses
+  `reconnectTerminal()`, which requires the adapter's fresh-binding seam rather
+  than bypassing the coordinator lease.
 - `restore(sessionId)` uses the server-backed Chat restore boundary after a
   browser refresh. No messages, prompt text, or local transcript mirror are
   retained by this module.
@@ -83,19 +90,40 @@ const coordinator = createSessionCoordinator({
 
 `chat` is the existing `JsonRpcChatTransport` shape from issue #118. The
 `terminal` adapter returns an opaque `{ sessionId, invalidate() }` binding. It
-must not return PTY bytes or transcript data. The coordinator owns each returned
-binding through an attachment lease. One lease calls `invalidate()` and then
-optional `release()` exactly once; a later lease may wrap the same raw object
-after the earlier lease settles. During overlapping attaches, a stale result
-that matches the raw binding currently owned by the active lease is not wrapped
-in a second lease or cleaned; a distinct stale result receives its own lease and
-is cleaned exactly once. This ordering applies on session replacement, logout,
-disposal, and a stale asynchronous completion; a late binding is never installed
-into the new session.
+must not return PTY bytes or transcript data. An attach-mode adapter may also
+implement `reconnectBinding(sessionId, signal, onBindingReady)`; it must return
+a fresh binding, not merely reconnect the underlying transport. The optional
+callback lets the coordinator adopt that lease before a synchronous transport
+`attached` event can reach workspace presentation. The coordinator owns each
+returned binding through an attachment lease. One lease calls `invalidate()` and
+then optional `release()` exactly once; a later lease may wrap the same raw
+object after the earlier lease settles. During overlapping attaches, a stale
+result that matches the raw binding currently owned by the active lease is not
+wrapped in a second lease or cleaned; a distinct stale result receives its own
+lease and is cleaned exactly once. This ordering applies on session replacement,
+logout, disposal, and a stale asynchronous completion; a late binding is never
+installed into the new session.
 
 This is offline prototype evidence. The injected adapters are the only places
 where a later runtime may connect to a server or renderer; this change itself
 makes no network request and does not claim live Hermes compatibility.
+
+## Chat and Terminal continuity
+
+`LiveWorkspaceSession` creates one coordinator around the existing Chat transport
+and one `CurrentSessionTerminalBridge` around the current opaque session. Chat and
+Terminal mode actions only change the coordinator mode; they do not call
+`createSession()`, create another Chat transport, or tear down Chat. The
+coordinator's `TerminalBinding` is a lease, so a session replacement invalidates
+the old PTY binding before the replacement can attach.
+
+The bridge forwards `Uint8Array` output directly to the renderer and projects only
+redacted lifecycle state. Terminal bytes, attach handles, process identities,
+tickets, and transport diagnostics do not enter the workspace snapshot. The
+TerminalSurface stays mounted while Chat is selected, loads W-Term/Ghostty only
+after Terminal activation, and releases the renderer on generation changes or
+component disposal. These are prototype seams with synthetic tests; live same-
+session Hermes proof remains a separate gate.
 
 ## Verification
 
