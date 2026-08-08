@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './live-test-fixtures';
 
 const password = process.env.HERMES_TEST_PASSWORD;
 const username = process.env.HERMES_TEST_USERNAME ?? 'hermternal-test';
