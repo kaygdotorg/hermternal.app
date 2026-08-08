@@ -769,6 +769,66 @@ function throwRedactionFailure() {
 }
 
 /**
+ * Node's IPC serializer invokes an inherited `toJSON` on the ordinary object
+ * literals produced by Playwright's worker-side `toTestInfoErrorPayload`.
+ * Keep the normal Array push/map/iterator lifecycle intact, but pin the two
+ * ambient prototype hooks to a detached null-prototype serializer before the
+ * worker returns the test result. A non-configurable hostile hook cannot be
+ * made safe, so the live lane fails closed rather than allowing an untrusted
+ * IPC payload.
+ */
+/** @this {Record<string, unknown> | unknown[]} */
+function safeWorkerToJSON() {
+  const source = this;
+  if (Array.isArray(source)) {
+    /** @type {unknown[]} */
+    const snapshot = [];
+    // A null prototype keeps Vitest/Node serializers from calling this hook
+    // again while preserving Array.isArray and JSON array transport semantics.
+    Object.setPrototypeOf(snapshot, null);
+    for (let index = 0; index < source.length; index += 1) snapshot[index] = source[index];
+    return snapshot;
+  }
+  const snapshot = Object.create(null);
+  for (const key of Object.keys(source)) snapshot[key] = source[key];
+  return snapshot;
+}
+
+function installSafeWorkerSerialization() {
+  for (const prototype of [Object.prototype, Array.prototype]) {
+    let descriptor;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(prototype, 'toJSON');
+    } catch {
+      throwRedactionFailure();
+    }
+    if (descriptor && !('value' in descriptor) && !descriptor.configurable) {
+      throwRedactionFailure();
+    }
+    if (descriptor && 'value' in descriptor && !descriptor.configurable && descriptor.writable === false) {
+      throwRedactionFailure();
+    }
+    try {
+      Object.defineProperty(prototype, 'toJSON', {
+        configurable: descriptor?.configurable ?? true,
+        enumerable: descriptor?.enumerable ?? false,
+        value: safeWorkerToJSON,
+        writable: descriptor?.writable ?? true
+      });
+    } catch {
+      throwRedactionFailure();
+    }
+    try {
+      if (Object.getOwnPropertyDescriptor(prototype, 'toJSON')?.value !== safeWorkerToJSON) {
+        throwRedactionFailure();
+      }
+    } catch {
+      throwRedactionFailure();
+    }
+  }
+}
+
+/**
  * @param {RedactionState} state
  * @param {number} depth
  */
@@ -1091,11 +1151,26 @@ export async function scrubLivePage(page) {
 }
 
 /**
+ * Remove an empty quarantine parent without recursively trusting its path. A
+ * replacement or an unverified remnant makes the non-recursive remove fail,
+ * which preserves that unrelated content for the caller to inspect.
+ *
+ * @param {string} quarantineParent
+ * @returns {Promise<void>}
+ */
+async function removeEmptyQuarantineParent(quarantineParent) {
+  // rmdir is intentionally non-recursive and refuses symlinks/non-empty
+  // directories, so a replacement cannot be removed as a cleanup side effect.
+  await fsPromises.rmdir(quarantineParent).catch(() => undefined);
+}
+
+/**
  * Remove a live output directory only after an identity-bound atomic handoff.
- * The owned root is first renamed into a private temporary quarantine. Its
- * device/inode identity and run marker are reverified at that new path before
- * recursive deletion, so a replacement at the original path cannot become the
- * deletion target during the validation-to-remove window.
+ * The owned root is first renamed into a private temporary quarantine. It is
+ * then renamed again to an unguessable tombstone and reverified at that final
+ * path before recursive deletion. The second rename means a replacement at the
+ * quarantine path is never passed directly to rm; an identity mismatch fails
+ * closed and safe remnants are cleaned without recursive path trust.
  *
  * @param {string} directory
  * @returns {Promise<void>}
@@ -1111,16 +1186,39 @@ export async function removeLiveArtifacts(directory) {
     quarantinePath = join(quarantineParent, basename(evidence.candidate));
     await fsPromises.rename(evidence.candidate, quarantinePath);
   } catch {
-    if (quarantineParent) {
-      await fsPromises.rm(quarantineParent, { recursive: true, force: true }).catch(() => undefined);
-    }
+    if (quarantineParent) await removeEmptyQuarantineParent(quarantineParent);
     return;
   }
 
-  if (!isVerifiedQuarantine(quarantinePath, evidence)) return;
+  if (!isVerifiedQuarantine(quarantinePath, evidence)) {
+    await removeEmptyQuarantineParent(quarantineParent);
+    return;
+  }
 
-  await fsPromises.rm(quarantinePath, { recursive: true, force: true });
-  await fsPromises.rm(quarantineParent, { recursive: false, force: true }).catch(() => undefined);
+  const deletionPath = join(
+    quarantineParent,
+    `.${basename(evidence.candidate)}-delete-${randomBytes(16).toString('hex')}`
+  );
+  try {
+    await fsPromises.rename(quarantinePath, deletionPath);
+  } catch {
+    await removeEmptyQuarantineParent(quarantineParent);
+    return;
+  }
+
+  if (!isVerifiedQuarantine(deletionPath, evidence)) {
+    // Do not move an unverified entry back over a path that may now belong to
+    // another process. Leaving the non-empty private quarantine parent is the
+    // safe outcome; the caller can inspect or remove those untrusted remnants.
+    await removeEmptyQuarantineParent(quarantineParent);
+    return;
+  }
+
+  try {
+    await fsPromises.rm(deletionPath, { recursive: true, force: true });
+  } finally {
+    await removeEmptyQuarantineParent(quarantineParent);
+  }
 }
 
 /**
@@ -1189,6 +1287,15 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
     }
     try {
       replaceDiagnosticArray(testInfo, safeErrors ?? [LIVE_ARTIFACT_REDACTION]);
+    } catch (error) {
+      redactionError ??= error;
+    }
+    try {
+      // Playwright maps this array into ordinary IPC payload objects after the
+      // hook returns. Pin inherited serializers before that worker handoff;
+      // replacing only the source array would leave those mapped objects
+      // exposed to Object.prototype.toJSON.
+      installSafeWorkerSerialization();
     } catch (error) {
       redactionError ??= error;
     }

@@ -585,6 +585,78 @@ describe('live Playwright artifact policy', () => {
     expect(await exists(outputRoot)).toBe(false);
   });
 
+  it('protects Playwright worker-mapped IPC errors from inherited serializers', async () => {
+    const objectToJSON = Object.getOwnPropertyDescriptor(Object.prototype, 'toJSON');
+    const arrayToJSON = Object.getOwnPropertyDescriptor(Array.prototype, 'toJSON');
+    const outputRoot = liveArtifactOutputDirectory();
+    const leak = () => ({ leaked: 'synthetic-password' });
+    const mapToTestInfoErrorPayload = (error: Record<string, unknown>): Record<string, unknown> => {
+      const payload: Record<string, unknown> = {};
+      for (const key of ['message', 'stack', 'value']) {
+        if (error[key] !== undefined) payload[key] = error[key];
+      }
+      if (error.cause !== undefined && error.cause !== null) {
+        payload.cause = mapToTestInfoErrorPayload(error.cause as Record<string, unknown>);
+      }
+      return payload;
+    };
+
+    Object.defineProperty(Object.prototype, 'toJSON', {
+      configurable: true,
+      enumerable: false,
+      value: leak,
+      writable: true
+    });
+    Object.defineProperty(Array.prototype, 'toJSON', {
+      configurable: true,
+      enumerable: false,
+      value: leak,
+      writable: true
+    });
+
+    try {
+      await mkdir(outputRoot, { recursive: true });
+      const testInfo: {
+        attachments: unknown[];
+        errors: Array<Record<string, unknown>>;
+        outputDir: string;
+      } = {
+        attachments: [],
+        errors: [{ message: 'synthetic-password', stack: 'Error: synthetic-password' }],
+        outputDir: outputRoot
+      };
+      const vulnerableMapping = testInfo.errors.map((error) => ({ message: error.message }));
+      expect(JSON.stringify(vulnerableMapping)).toContain('synthetic-password');
+
+      await finalizeLiveTest({ testInfo, secrets: ['synthetic-password'] });
+
+      // This mirrors Playwright's worker-side
+      // `testInfo.errors.map(toTestInfoErrorPayload)` followed by IPC
+      // serialization. The mapped objects are ordinary `{}` payloads, so the
+      // source array's safe own `toJSON` alone would not protect this boundary.
+      const mappedErrors = testInfo.errors.map((error) =>
+        mapToTestInfoErrorPayload(error as Record<string, unknown>)
+      );
+      expect(JSON.stringify(mappedErrors)).not.toContain('synthetic-password');
+      expect(mappedErrors).toHaveLength(1);
+      expect(mappedErrors[0].message).toBe(LIVE_ARTIFACT_REDACTION);
+
+      // The real worker keeps using the array after afterEach: push, map, and
+      // iteration must remain ordinary Playwright-compatible operations.
+      testInfo.errors.push({ message: LIVE_ARTIFACT_REDACTION });
+      expect([...testInfo.errors]).toHaveLength(2);
+      expect(JSON.stringify(testInfo.errors.map((error) => ({ message: error.message })))).not.toContain(
+        'synthetic-password'
+      );
+    } finally {
+      if (objectToJSON) Object.defineProperty(Object.prototype, 'toJSON', objectToJSON);
+      else delete (Object.prototype as { toJSON?: unknown }).toJSON;
+      if (arrayToJSON) Object.defineProperty(Array.prototype, 'toJSON', arrayToJSON);
+      else delete (Array.prototype as { toJSON?: unknown }).toJSON;
+      await rm(outputRoot, { recursive: true, force: true });
+    }
+  });
+
   it('runs attachment and output cleanup before propagating a redaction failure', async () => {
     const outputRoot = liveArtifactOutputDirectory();
     await mkdir(outputRoot, { recursive: true });
@@ -652,6 +724,81 @@ describe('live Playwright artifact policy', () => {
     }
     await rm(outputRoot, { recursive: true, force: true });
     await rm(backupRoot, { recursive: true, force: true });
+  });
+
+  it('preserves a quarantine replacement across the final identity check', async () => {
+    const outputRoot = liveArtifactOutputDirectory();
+    const ownedArtifact = join(outputRoot, 'owned-only.txt');
+    let quarantinePath = '';
+    let deletionPath = '';
+    let ownedBackup = '';
+    let renameCalls = 0;
+    await mkdir(outputRoot, { recursive: true });
+    await writeFile(ownedArtifact, 'owned-content', 'utf8');
+
+    const originalRename = fsPromises.rename;
+    fsPromises.rename = async (source, target) => {
+      renameCalls += 1;
+      const sourcePath = String(source);
+      const targetPath = String(target);
+      if (renameCalls === 2) {
+        quarantinePath = sourcePath;
+        deletionPath = targetPath;
+        ownedBackup = `${sourcePath}-owned-backup`;
+        await originalRename(source, ownedBackup);
+        await mkdir(sourcePath, { recursive: true });
+        await writeFile(join(sourcePath, 'replacement.txt'), 'replacement-survives', 'utf8');
+      }
+      return originalRename(source, target);
+    };
+
+    try {
+      await removeLiveArtifacts(outputRoot);
+    } finally {
+      fsPromises.rename = originalRename;
+    }
+
+    expect(renameCalls).toBeGreaterThanOrEqual(2);
+    expect(await exists(join(deletionPath, 'replacement.txt'))).toBe(true);
+    expect(await exists(join(ownedBackup, 'owned-only.txt'))).toBe(true);
+    expect(await exists(outputRoot)).toBe(false);
+
+    await rm(deletionPath, { recursive: true, force: true });
+    await rm(ownedBackup, { recursive: true, force: true });
+    if (deletionPath) {
+      await rm(resolve(deletionPath, '..'), { recursive: true, force: true });
+    }
+  });
+
+  it('cleans an empty quarantine parent after verification fails closed', async () => {
+    const outputRoot = liveArtifactOutputDirectory();
+    let quarantinePath = '';
+    let removedByRace = false;
+    await mkdir(outputRoot, { recursive: true });
+    await writeFile(join(outputRoot, 'owned-only.txt'), 'owned-content', 'utf8');
+
+    const originalRename = fsPromises.rename;
+    const originalRm = fsPromises.rm;
+    fsPromises.rename = async (source, target) => {
+      const result = await originalRename(source, target);
+      if (String(source) === outputRoot && !removedByRace) {
+        removedByRace = true;
+        quarantinePath = String(target);
+        await originalRm(target, { recursive: true, force: true });
+      }
+      return result;
+    };
+
+    try {
+      await removeLiveArtifacts(outputRoot);
+    } finally {
+      fsPromises.rename = originalRename;
+    }
+
+    expect(removedByRace).toBe(true);
+    expect(quarantinePath).not.toBe('');
+    expect(await exists(quarantinePath)).toBe(false);
+    expect(await exists(resolve(quarantinePath, '..'))).toBe(false);
   });
 
   it('keeps live output outside retained test-results and removes the complete run root', async () => {
