@@ -462,27 +462,36 @@ describe('LiveWorkspaceSession', () => {
     expect(session.current).toMatchObject({ state: 'empty', activeSessionId: 'session-1' });
   });
 
-  it('rejects foreign history on pre-identity restore retry before creating chat', async () => {
+  it('rejects an A-to-B detail response on pre-identity retry before history or Chat ownership', async () => {
     const rest = createRest([]);
-    vi.mocked(rest.getSessionMessages)
-      .mockRejectedValueOnce(new Error('synthetic history parse failure'))
-      .mockResolvedValueOnce(
-        sessionMessagesFor('foreign-session', [
-          { role: 'user', content: 'Foreign retry prompt' },
-          { role: 'assistant', content: 'Foreign retry answer' }
-        ])
-      );
+    vi.mocked(rest.getSession)
+      .mockResolvedValueOnce({ ...SESSION, id: 'foreign-session', title: 'Foreign detail' });
+    vi.mocked(rest.getSessionMessages).mockRejectedValueOnce(
+      new Error('synthetic history parse failure')
+    );
     const chat = createChatHarness();
     const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    const published: string[] = [];
+    session.subscribe((snapshot) => published.push(JSON.stringify(snapshot)));
 
     await session.initialize();
     await session.retryConnection();
 
+    expect(rest.getSession).toHaveBeenCalledWith('session-1', expect.any(AbortSignal));
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(1);
+    expect(rest.getSessionMessages).toHaveBeenCalledWith(
+      'session-1',
+      { limit: 500, offset: 0 },
+      expect.any(AbortSignal)
+    );
     expect(session.current).toMatchObject({ state: 'retryable-error' });
     expect(session.current.activeSessionId).toBeUndefined();
     expect(session.current.timeline).toEqual([]);
     expect(chat.createChat).not.toHaveBeenCalled();
-    expect(JSON.stringify(session.current)).not.toContain('Foreign retry');
+    expect(chat.transport.createSession).not.toHaveBeenCalled();
+    expect(chat.transport.reconnect).not.toHaveBeenCalled();
+    expect(chat.transport.promoteSession).not.toHaveBeenCalled();
+    expect(published.every((snapshot) => !snapshot.includes('Foreign'))).toBe(true);
   });
 
   it('retries a pre-identity restore through history and session.resume in order', async () => {
@@ -692,31 +701,33 @@ describe('LiveWorkspaceSession', () => {
     expect(chat.createChat).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects foreign history during session replacement without publishing or committing it', async () => {
+  it('rejects a canonicalized detail during session replacement before history or Chat ownership', async () => {
     const rest = createRest([{ role: 'assistant', content: 'Owned session answer' }]);
-    const replacement = { ...SESSION, id: 'session-2', title: 'Replacement', isActive: false };
+    const requestedSession = { ...SESSION, id: 'session-2', title: 'Replacement', isActive: false };
+    const foreignDetail = { ...requestedSession, id: 'foreign-session', title: 'Foreign replacement' };
     vi.mocked(rest.getSession)
       .mockResolvedValueOnce(SESSION)
-      .mockResolvedValueOnce(replacement);
+      .mockResolvedValueOnce(foreignDetail);
     vi.mocked(rest.getSessionMessages)
       .mockResolvedValueOnce(sessionMessages([{ role: 'assistant', content: 'Owned session answer' }]))
-      .mockResolvedValueOnce(
-        sessionMessagesFor('foreign-session', [
-          { role: 'user', content: 'Foreign replacement prompt' },
-          { role: 'assistant', content: 'Foreign replacement answer' }
-        ])
-      );
+      .mockRejectedValueOnce(new Error('foreign replacement history must not be read'));
     const chat = createChatHarness();
     const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
     const published: string[] = [];
     session.subscribe((snapshot) => published.push(JSON.stringify(snapshot)));
 
     await session.initialize();
-    await session.selectSession(replacement.id);
+    await session.selectSession(requestedSession.id);
 
-    expect(session.current).toMatchObject({ state: 'retryable-error', activeSessionId: replacement.id });
+    expect(rest.getSession).toHaveBeenLastCalledWith(requestedSession.id, expect.any(AbortSignal));
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(1);
+    expect(session.current).toMatchObject({
+      state: 'retryable-error',
+      activeSessionId: requestedSession.id
+    });
     expect(session.current.timeline).toEqual([]);
     expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(chat.transport.createSession).not.toHaveBeenCalled();
     expect(chat.transport.promoteSession).not.toHaveBeenCalled();
     expect(published.every((snapshot) => !snapshot.includes('Foreign replacement'))).toBe(true);
   });
