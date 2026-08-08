@@ -110,6 +110,16 @@ export interface FocusIntent {
   readonly sequence: number;
 }
 
+/**
+ * Identifies the coordinator generation that owned a Terminal callback when it
+ * was created. Session IDs can be selected again, so either field alone is not
+ * a sufficient stale-callback fence.
+ */
+export interface TerminalSettlement {
+  readonly sessionId: string;
+  readonly sessionGeneration: number;
+}
+
 export interface SessionCoordinatorState {
   readonly status: SessionCoordinatorStatus;
   readonly mode: WorkspaceMode;
@@ -142,10 +152,24 @@ export interface SessionCoordinator {
   readonly mode: WorkspaceMode;
   activate(mode: WorkspaceMode, signal?: AbortSignal): Promise<SessionCoordinatorState>;
   switchMode(mode: WorkspaceMode, signal?: AbortSignal): Promise<SessionCoordinatorState>;
+  /**
+   * Synchronously revoke the selected session and its Terminal lease. Callers
+   * use this before exposing a replacement live-workspace snapshot; it never
+   * selects or restores Chat.
+   */
+  invalidateSession(): void;
+  /**
+   * Reconcile an unsolicited Terminal settlement without selecting Chat. The
+   * callback must carry the session ID and generation it captured at start.
+   * Returns false when that ownership is already stale.
+   */
+  invalidateTerminalBinding(settlement: TerminalSettlement): boolean;
   setSession(sessionId: string, signal?: AbortSignal): Promise<SessionCoordinatorState>;
   /** Restore server-owned state after a browser refresh without transcript mirroring. */
   restore(sessionId: string, signal?: AbortSignal): Promise<SessionCoordinatorState>;
   reconnect(signal?: AbortSignal): Promise<SessionCoordinatorState>;
+  /** Reacquire Terminal and issue the normal generation-owned focus intent. */
+  reconnectTerminal(signal?: AbortSignal): Promise<SessionCoordinatorState>;
   logout(): void;
   dispose(): void;
   subscribe(listener: (state: SessionCoordinatorState) => void): () => void;
@@ -409,6 +433,13 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     publish();
   };
 
+  // A Terminal settlement must not erase a newer Chat composer intent after a
+  // mode switch. It only owns focus that was issued for its Terminal lease.
+  const clearTerminalFocus = (): void => {
+    if (lastFocusIntent?.mode !== 'terminal') return;
+    lastFocusIntent = undefined;
+  };
+
   const cancelSession = (): void => {
     const pending = pendingSession;
     if (!pending) return;
@@ -471,6 +502,45 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     terminalBindingFocusOwnerSequence = undefined;
     terminalStatus = 'detached';
     if (lease) cleanupBinding(lease);
+  };
+
+  /**
+   * This is deliberately synchronous: a live-workspace owner can make the old
+   * identity unobservable before it publishes its replacement snapshot. Chat
+   * selection is asynchronous and therefore belongs to a later `setSession`.
+   */
+  const invalidateSession = (): void => {
+    if (disposed || loggedOut || activeSessionId === undefined) return;
+
+    cancelSession();
+    cancelTerminal();
+    cancelReconnect();
+    activeSessionId = undefined;
+    sessionGeneration += 1;
+    terminalStatus = 'detached';
+    lastError = undefined;
+    lastFocusIntent = undefined;
+    lifecycle = 'empty';
+    invalidateBinding();
+
+    // Binding cleanup may reenter logout or disposal; its final lifecycle wins.
+    if (!disposed && !loggedOut) publish();
+  };
+
+  /**
+   * Terminal adapters may report detach/failure after an async operation. Both
+   * captured ownership fields are required so an old callback cannot revoke a
+   * same-ID selection or a newer recovery lease.
+   */
+  const invalidateTerminalBinding = (settlement: TerminalSettlement): boolean => {
+    if (!current(settlement.sessionGeneration, settlement.sessionId)) return false;
+
+    cancelTerminal();
+    invalidateBinding();
+    clearTerminalFocus();
+    if (mode === 'terminal') lifecycle = 'idle';
+    publish();
+    return true;
   };
 
   const assertCurrent = (generation: number, sessionId: string): void => {
@@ -909,6 +979,29 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     }
   };
 
+  const reconnectTerminal = async (signal?: AbortSignal): Promise<SessionCoordinatorState> => {
+    assertUsable();
+    const sessionId = assertSession();
+    const generation = sessionGeneration;
+    // Recovery uses the same activation and focus ownership as an explicit
+    // Terminal selection, but never calls Chat connect, restore, or reconnect.
+    const activation = beginModeActivation('terminal', generation, sessionId);
+
+    try {
+      if (!current(generation, sessionId)) return state();
+      await ensureTerminalForCurrentSession(signal, activation.sequence);
+      assertCurrent(generation, sessionId);
+      if (!isCurrentModeActivation(activation)) return state();
+      lifecycle = 'active';
+      publish();
+      publishFocus(activation);
+      return state();
+    } catch (error) {
+      if (isStale(error)) return state();
+      throw error;
+    }
+  };
+
   const closeChatOnce = (): void => {
     if (chatClosed) return;
     chatClosed = true;
@@ -1007,9 +1100,12 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     },
     activate,
     switchMode: activate,
+    invalidateSession,
+    invalidateTerminalBinding,
     setSession,
     restore,
     reconnect,
+    reconnectTerminal,
     logout,
     dispose,
     subscribe
