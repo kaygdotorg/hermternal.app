@@ -42,9 +42,11 @@ class BrowserChatSocket implements JsonRpcWebSocket {
   onerror: ((event?: unknown) => void) | null = null;
   onclose: ((event?: { readonly code?: number; readonly reason?: string }) => void) | null = null;
   readonly sent: string[] = [];
+  onSend: ((data: string) => void) | undefined;
 
   send(data: string): void {
     this.sent.push(data);
+    this.onSend?.(data);
   }
 
   close(code?: number, reason?: string): void {
@@ -150,6 +152,20 @@ function latestPromptId(socket: BrowserChatSocket): string {
     if (parsed.method === 'prompt.submit' && parsed.id) return parsed.id;
   }
   throw new Error('prompt frame was not sent');
+}
+
+async function waitForSocketMethod(
+  socket: BrowserChatSocket,
+  method: string
+): Promise<Record<string, unknown>> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    for (const frame of socket.sent) {
+      const parsed = JSON.parse(frame) as Record<string, unknown>;
+      if (parsed.method === method) return parsed;
+    }
+    await flush();
+  }
+  throw new Error(`socket method was not sent: ${method}`);
 }
 
 function createUnauthorizedChatFactory() {
@@ -353,6 +369,189 @@ describe('LiveWorkspaceSession', () => {
     expect(chat.createChat).toHaveBeenCalledTimes(1);
     expect(chat.transport.createSession).not.toHaveBeenCalled();
     expect(session.current).toMatchObject({ state: 'empty', activeSessionId: 'session-1' });
+  });
+
+  it('retries a pre-identity restore through history and session.resume in order', async () => {
+    const events: string[] = [];
+    const detailSessionIds: string[] = [];
+    const historySessionIds: string[] = [];
+    const selectedSessionIds: Array<string | undefined> = [];
+    const resumedSessionIds: string[] = [];
+    const retryHistory = createDeferred<SessionMessages>();
+    let historyCall = 0;
+    const rest = createRest([]);
+    vi.mocked(rest.getSession).mockImplementation(async (sessionId, signal) => {
+      expect(signal).toBeInstanceOf(AbortSignal);
+      detailSessionIds.push(sessionId);
+      events.push('detail');
+      return SESSION;
+    });
+    vi.mocked(rest.getSessionMessages).mockImplementation((sessionId, _options, signal) => {
+      expect(signal).toBeInstanceOf(AbortSignal);
+      historyCall += 1;
+      historySessionIds.push(sessionId);
+      events.push(`history-${historyCall}`);
+      if (historyCall === 1) return Promise.reject(new Error('synthetic history parse failure'));
+      return retryHistory.promise;
+    });
+
+    const sockets: BrowserChatSocket[] = [];
+    let restoredTransport: JsonRpcChatTransport | undefined;
+    const createChat = vi.fn((options: BrowserChatOptions) => {
+      events.push('createChat');
+      selectedSessionIds.push(options.selectedSessionId);
+      const transport = createBrowserChatTransport({
+        ...options,
+        fetch: async () => {
+          events.push('ticket');
+          return new Response('{"ticket":"fresh-ticket-1","ttl_seconds":30}', {
+            headers: { 'content-type': 'application/json' }
+          });
+        },
+        createSocket: () => {
+          events.push('socket');
+          const socket = new BrowserChatSocket();
+          socket.onSend = (data) => {
+            const frame = JSON.parse(data) as {
+              method?: string;
+              params?: { session_id?: unknown };
+            };
+            if (frame.method === 'session.resume') {
+              events.push('session.resume');
+              if (typeof frame.params?.session_id === 'string') {
+                resumedSessionIds.push(frame.params.session_id);
+              }
+            }
+          };
+          sockets.push(socket);
+          return socket;
+        }
+      });
+      restoredTransport = transport;
+      const connect = transport.connect.bind(transport);
+      vi.spyOn(transport, 'connect').mockImplementation((signal) => {
+        events.push('connect');
+        return connect(signal);
+      });
+      vi.spyOn(transport, 'createSession');
+      return transport;
+    });
+    const session = new LiveWorkspaceSession({ rest, createChat });
+
+    await session.initialize();
+
+    expect(session.current).toMatchObject({ state: 'retryable-error' });
+    expect(session.current.activeSessionId).toBeUndefined();
+    events.length = 0;
+
+    type RetryOperation = { readonly generation: number; readonly signal: AbortSignal };
+    type WorkspaceInternals = {
+      readonly generation: number;
+      readonly factoryRetryGeneration: number | undefined;
+      readonly controller: AbortController | undefined;
+      readonly disposed: boolean;
+      ownsOperation(operation: RetryOperation): boolean;
+      ownsFactoryRetry(operation: RetryOperation): boolean;
+    };
+    const internals = session as unknown as WorkspaceInternals;
+    const ownershipTrace: Array<{
+      readonly stage: 'ownsOperation' | 'ownsFactoryRetry';
+      readonly generation: number;
+      readonly currentGeneration: number;
+      readonly factoryRetryGeneration: number | undefined;
+      readonly controllerOwns: boolean;
+      readonly signalAborted: boolean;
+      readonly disposed: boolean;
+      readonly owns: boolean;
+    }> = [];
+    const recordOwnership = (
+      stage: 'ownsOperation' | 'ownsFactoryRetry',
+      operation: RetryOperation,
+      owns: boolean
+    ): void => {
+      ownershipTrace.push({
+        stage,
+        generation: operation.generation,
+        currentGeneration: internals.generation,
+        factoryRetryGeneration: internals.factoryRetryGeneration,
+        controllerOwns: internals.controller?.signal === operation.signal,
+        signalAborted: operation.signal.aborted,
+        disposed: internals.disposed,
+        owns
+      });
+    };
+    const originalOwnsOperation = internals.ownsOperation.bind(session);
+    const originalOwnsFactoryRetry = internals.ownsFactoryRetry.bind(session);
+    vi.spyOn(internals, 'ownsOperation').mockImplementation((operation) => {
+      const owns = originalOwnsOperation(operation);
+      recordOwnership('ownsOperation', operation, owns);
+      return owns;
+    });
+    vi.spyOn(internals, 'ownsFactoryRetry').mockImplementation((operation) => {
+      const owns = originalOwnsFactoryRetry(operation);
+      recordOwnership('ownsFactoryRetry', operation, owns);
+      return owns;
+    });
+
+    const retry = session.retryConnection();
+    await flush();
+
+    expect(events).toEqual(['detail', 'history-2']);
+    expect(historySessionIds).toEqual([SESSION.id, SESSION.id]);
+    expect(session.current.activeSessionId).toBeUndefined();
+    expect(
+      ownershipTrace.some(
+        (entry) => entry.stage === 'ownsFactoryRetry' && entry.owns && entry.signalAborted === false
+      )
+    ).toBe(true);
+    expect(ownershipTrace.every((entry) => entry.owns)).toBe(true);
+
+    retryHistory.resolve(sessionMessages([{ role: 'user', content: 'Retry server history' }]));
+    const socket = await waitForSocket(sockets);
+
+    expect(events).toEqual(['detail', 'history-2', 'createChat', 'connect', 'ticket', 'socket']);
+    expect(selectedSessionIds).toEqual([SESSION.id]);
+    expect(restoredTransport?.selectedSessionId).toBe(SESSION.id);
+
+    socket.emitOpen();
+    events.push('gateway.ready');
+    socket.emitGatewayReady();
+    const resumeFrame = await waitForSocketMethod(socket, 'session.resume');
+    const resumeId = typeof resumeFrame.id === 'string' ? resumeFrame.id : undefined;
+    if (!resumeId) throw new Error('session resume request did not have an id');
+    socket.emitResponse(resumeId);
+    await retry;
+
+    expect(events).toEqual([
+      'detail',
+      'history-2',
+      'createChat',
+      'connect',
+      'ticket',
+      'socket',
+      'gateway.ready',
+      'session.resume'
+    ]);
+    expect(detailSessionIds).toEqual([SESSION.id]);
+    expect(historySessionIds).toEqual([SESSION.id, SESSION.id]);
+    expect(selectedSessionIds).toEqual([SESSION.id]);
+    expect(resumedSessionIds).toEqual([SESSION.id]);
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(2);
+    expect(rest.getSessionMessages).toHaveBeenNthCalledWith(
+      2,
+      SESSION.id,
+      { limit: 500, offset: 0 },
+      expect.any(AbortSignal)
+    );
+    expect(restoredTransport?.connect).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(restoredTransport?.createSession).not.toHaveBeenCalled();
+    expect(socket.sent.map((frame) => (JSON.parse(frame) as { method?: string }).method)).toEqual([
+      'session.resume'
+    ]);
+    expect(session.current).toMatchObject({ state: 'ready', activeSessionId: SESSION.id });
+    expect(session.current.timeline).toEqual([
+      { kind: 'user-message', id: 'session-1:message:0', text: 'Retry server history' }
+    ]);
   });
 
   it('suppresses a stale session read after a newer selection starts', async () => {
