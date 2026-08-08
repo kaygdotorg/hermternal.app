@@ -122,11 +122,14 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   registration, update/reload control, real offline cached navigation, and no-network requests.
 - Axe runs against success, empty, and failure states in both light and dark color schemes.
 - The password preview regression delays the hydration focus frame, sends rapid keyboard input, repeats
-  field transitions, and submits from the password control. The opt-in live lane uses one run-owned 0700
-  temporary root with an owner marker, disabled media artifacts, and a status-only reporter. The
-  Playwright project output directory is a disposable child of that root because Playwright clears its
-  project output before a run; workers adopt the inherited root only after validating its marker and
-  token, so retries and sequential workers share one run owner. Every Playwright worker preloads
+  field transitions, and submits from the password control. Ordinary Vitest does not resolve the browser
+  cache or Python publication child; only genuinely browser-dependent tests skip, while filesystem
+  publication tests use controlled pinned provenance. The live browser lane requires the explicit
+  `HERMTERNAL_LIVE_SCREENSHOT_BROWSER_PREREQUISITE=1` gate and is never part of ordinary test commands.
+  The opt-in live lane uses one run-owned 0700 temporary root with an owner marker, disabled media
+  artifacts, and a status-only reporter. The Playwright project output directory is a disposable child
+  of that root because Playwright clears its project output before a run; workers adopt the inherited root
+  only after validating its marker and token, so retries and sequential workers share one run owner. Every Playwright worker preloads
   `tests/live/live-ipc-guard.cjs` through `NODE_OPTIONS --require` before the
   test body. `PW_RUNNER_DEBUG` is incompatible with this lane: the config rejects any truthy value before
   worker spawn because Playwright otherwise inherits worker stderr directly. The guard captures the
@@ -138,7 +141,7 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   values are replaced or not forwarded, so Playwright cannot fall back to serializing the unsafe source
   graph. Per-test finalization validates every path ancestor and only quarantines strict child output directories;
   symlink ancestors fail closed. It preserves the shared marker, root, and root-level artifacts. The config routes Playwright's post-teardown
-  `LastRunReporter` to `/dev/null`, so it cannot recreate a markerless `.last-run.json` directory after
+  `LastRunReporter` to the platform null sink, so it cannot recreate a markerless `.last-run.json` directory after
   global teardown. Global teardown alone removes the complete root by atomic quarantine plus bounded
   known-entry non-recursive `unlink`/`rmdir`, retaining any unknown, replaced, or raced remnant. Detached descriptor-aware snapshots cover native Error causes, Playwright
   `errorContext`, matcher results, logs, ARIA snapshots, and structured form values without retaining the
@@ -152,7 +155,15 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   the proof unless `page.isClosed()` returns `true`; generic error text such as `page crashed` is never
   accepted as termination proof. Attachments and safe output cleanup run in `finally` even when redaction
   fails, so a failed proof cannot retain synthetic credentials in traces, screenshots, reports, error
-  contexts, or `test-results`.
+  contexts, or `test-results`. The official proof stores only a bounded typed ledger of method, route,
+  event, request/session identity, status, boolean-match, and count projections. It requires the
+  ordered auth/ticket/upgrade, server-first readiness, session, one-prompt acknowledgement, correlated
+  delta/completion, and canonical REST history chain, then performs same-context logout and browser
+  storage absence checks. Screenshot retention uses a trusted private staging parent anchored by
+  device/inode, an absolute trusted Python child with `-I -S` and a credential-free environment, and
+  exclusive no-overwrite publication. Source swaps, parent swaps, quarantine remnants, attachment
+  failures, and cleanup errors are surfaced without recursive pathname deletion. No live Hermes run or
+  retainable live screenshot was performed for this correction.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target
