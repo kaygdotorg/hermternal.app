@@ -96,6 +96,17 @@ interface FailedRestoreOwnership {
 }
 
 /**
+ * A created chat is displayed under its future REST ID before its first turn
+ * exists. Its live socket ID is deliberately not resumable until a successful
+ * post-completion REST read confirms that Hermes persisted the row.
+ */
+interface CreatedDraftOwnership {
+  readonly generation: number;
+  readonly sessionId: string;
+  readonly chat: JsonRpcChatTransport;
+}
+
+/**
  * Coordinates REST restoration and one user-led browser chat connection.
  * Server reads replace local presentation arrays. Disconnects never reconnect or
  * replay a prompt automatically, and disposal drops every session reference.
@@ -137,6 +148,7 @@ export class LiveWorkspaceSession {
   // revoke it immediately.
   private pendingCompletion: PendingCompletionOwnership | undefined;
   private failedRestore: FailedRestoreOwnership | undefined;
+  private createdDraft: CreatedDraftOwnership | undefined;
   private disposed = false;
 
   constructor(options: LiveWorkspaceSessionOptions) {
@@ -234,6 +246,11 @@ export class LiveWorkspaceSession {
         return;
       }
       const model = created.model?.trim() || 'Hermes';
+      this.createdDraft = {
+        generation: operation.generation,
+        sessionId: created.storedSessionId,
+        chat
+      };
       const draft: SessionSummary = {
         id: created.storedSessionId,
         title: 'Untitled chat',
@@ -422,6 +439,14 @@ export class LiveWorkspaceSession {
     try {
       await chat.reconnect(retry.controller.signal);
       if (!this.ownsRetry(generation, chat, sessionId, refreshEpoch, retry)) return;
+      if (this.ownsCreatedDraft(generation, sessionId, chat)) {
+        // The server has not confirmed this draft exists yet. The transport
+        // intentionally reconnects without session.resume or a REST read; keep
+        // the composer disabled until the user explicitly starts a replacement
+        // draft rather than presenting an empty-looking stale live identity.
+        this.publish({ ...this.snapshot, state: 'retryable-error' });
+        return;
+      }
       await this.refreshMessages(sessionId, generation, chat, retry.controller.signal, refreshEpoch);
       if (!this.ownsRetry(generation, chat, sessionId, refreshEpoch, retry)) return;
     } catch (error) {
@@ -821,6 +846,13 @@ export class LiveWorkspaceSession {
         return;
       }
       if (expectedChat) {
+        if (this.ownsCreatedDraft(generation, sessionId, expectedChat)) {
+          // A completed first turn plus this successful server read establishes
+          // persistence. Promote only this exact chat, generation, and stored
+          // ID so stale completions cannot change a replacement's reconnect key.
+          expectedChat.promoteSession(sessionId);
+          this.createdDraft = undefined;
+        }
         this.commitHistory(generation, sessionId, expectedChat);
         if (completionOwnership) {
           this.commitCompletionHistory(completionOwnership);
@@ -983,6 +1015,7 @@ export class LiveWorkspaceSession {
     this.assertActive();
     this.generation += 1;
     this.failedRestore = undefined;
+    this.createdDraft = undefined;
     this.advanceRefreshEpoch();
     this.supersedeRetry();
     this.controller?.abort();
@@ -1000,6 +1033,7 @@ export class LiveWorkspaceSession {
   private resetForInvalidation(publishSnapshot: boolean): void {
     this.generation += 1;
     this.failedRestore = undefined;
+    this.createdDraft = undefined;
     this.advanceRefreshEpoch();
     this.supersedeRetry();
     this.controller?.abort();
@@ -1238,6 +1272,21 @@ export class LiveWorkspaceSession {
 
   private ownsChat(generation: number, chat: JsonRpcChatTransport, sessionId: string): boolean {
     return this.isCurrent(generation) && this.chat === chat && this.snapshot.activeSessionId === sessionId;
+  }
+
+  private ownsCreatedDraft(
+    generation: number,
+    sessionId: string,
+    chat: JsonRpcChatTransport
+  ): boolean {
+    const draft = this.createdDraft;
+    return (
+      draft !== undefined &&
+      draft.generation === generation &&
+      draft.sessionId === sessionId &&
+      draft.chat === chat &&
+      this.ownsChat(generation, chat, sessionId)
+    );
   }
 
   private publish(snapshot: LiveWorkspaceSnapshot): void {

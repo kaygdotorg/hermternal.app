@@ -254,6 +254,7 @@ function createChatHarness(options: {
       storedSessionId: 'stored-draft',
       model: 'Hermes 4'
     }),
+    promoteSession: vi.fn(),
     restore: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
     sendPrompt,
@@ -325,6 +326,62 @@ describe('LiveWorkspaceSession', () => {
     expect(session.current.sessions).toEqual([
       expect.objectContaining({ id: 'stored-draft', title: 'Untitled chat', group: 'recent' })
     ]);
+  });
+
+  it('reconnects an unpersisted draft without loading or resuming its future REST identity', async () => {
+    const rest = createRest();
+    vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+    await session.createSession();
+    await session.retryConnection();
+
+    expect(chat.transport.reconnect).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(rest.getSessionMessages).not.toHaveBeenCalled();
+    expect(chat.transport.promoteSession).not.toHaveBeenCalled();
+    expect(session.current.state).toBe('retryable-error');
+    session.sendPrompt('must not send a stale live draft');
+    expect(chat.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('promotes a created draft only after its first completion commits server history', async () => {
+    const rest = createRest();
+    vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+    await session.createSession();
+    session.sendPrompt('first persisted turn');
+    chat.emit({ type: 'message.complete', requestId: 'request-1', payload: { status: 'ok' } });
+    chat.complete({ type: 'message.complete', requestId: 'request-1', payload: { status: 'ok' } });
+    await flush();
+
+    expect(rest.getSessionMessages).toHaveBeenCalledWith(
+      'stored-draft',
+      { limit: 500, offset: 0 },
+      expect.any(AbortSignal)
+    );
+    expect(chat.transport.promoteSession).toHaveBeenCalledWith('stored-draft');
+  });
+
+  it('does not let a replaced draft promote from a stale completion callback', async () => {
+    const rest = createRest();
+    vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+    await session.createSession();
+    session.sendPrompt('old draft prompt');
+    await session.createSession();
+    chat.emit({ type: 'message.complete', requestId: 'request-1', payload: { status: 'ok' } });
+    chat.complete({ type: 'message.complete', requestId: 'request-1', payload: { status: 'ok' } });
+    await flush();
+
+    expect(chat.transport.promoteSession).not.toHaveBeenCalled();
   });
 
   it('restores the active server session before enabling chat', async () => {

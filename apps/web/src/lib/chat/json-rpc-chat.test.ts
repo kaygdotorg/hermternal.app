@@ -320,6 +320,113 @@ describe("createJsonRpcChatTransport", () => {
     });
   });
 
+  it("does not resume an unpersisted created draft on a fresh-ticket reconnect", async () => {
+    const harness = makeHarness({ selectedSessionId: undefined });
+    const connection = harness.transport.connect();
+    await flush();
+    const first = harness.sockets[0];
+    if (!first) throw new Error("first socket was not created");
+    first.emitOpen();
+    emitEvent(first, JSON_RPC_GATEWAY_READY_EVENT, { skin: "created" });
+    await connection;
+
+    const creation = harness.transport.createSession();
+    const create = frame(first, 0);
+    emitResponse(first, create.id as string, {
+      session_id: "live-draft-reconnect",
+      stored_session_id: "stored-draft-reconnect",
+    });
+    await creation;
+    await expect(harness.transport.restore()).rejects.toMatchObject({
+      code: "invalid-input",
+    });
+
+    const reconnect = harness.transport.reconnect();
+    await flush();
+    const replacement = harness.sockets[1];
+    if (!replacement) throw new Error("replacement socket was not created");
+    replacement.emitOpen();
+    emitEvent(replacement, JSON_RPC_GATEWAY_READY_EVENT, { skin: "replacement" });
+    await reconnect;
+
+    expect(harness.tickets).toEqual(["ticket-1", "ticket-2"]);
+    expect(replacement.sent).toEqual([]);
+    expect(() => harness.transport.promoteSession("stored-draft-reconnect")).toThrowError(
+      expect.objectContaining({ code: "invalid-input" }),
+    );
+    expect(() => harness.transport.sendPrompt("never replay a live draft")).toThrowError(
+      expect.objectContaining({ code: "invalid-input" }),
+    );
+  });
+
+  it("rejects a stale draft promotion after session replacement", async () => {
+    const harness = makeHarness({ selectedSessionId: undefined });
+    const connection = harness.transport.connect();
+    await flush();
+    const socket = harness.sockets[0];
+    if (!socket) throw new Error("fake socket was not created");
+    socket.emitOpen();
+    emitEvent(socket, JSON_RPC_GATEWAY_READY_EVENT, { skin: "created" });
+    await connection;
+
+    const creation = harness.transport.createSession();
+    const create = frame(socket, 0);
+    emitResponse(socket, create.id as string, {
+      session_id: "live-stale-draft",
+      stored_session_id: "stored-stale-draft",
+    });
+    await creation;
+    const replacement = harness.transport.restore("replacement-session");
+    const resume = frame(socket, 1);
+    emitResponse(socket, resume.id as string, { restored: true });
+    await replacement;
+
+    expect(() => harness.transport.promoteSession("stored-stale-draft")).toThrowError(
+      expect.objectContaining({ code: "invalid-input" }),
+    );
+    expect(harness.transport.selectedSessionId).toBe("replacement-session");
+  });
+
+  it("promotes only the stored session identity for reconnect after persistence", async () => {
+    const harness = makeHarness({ selectedSessionId: undefined });
+    const connection = harness.transport.connect();
+    await flush();
+    const first = harness.sockets[0];
+    if (!first) throw new Error("first socket was not created");
+    first.emitOpen();
+    emitEvent(first, JSON_RPC_GATEWAY_READY_EVENT, { skin: "created" });
+    await connection;
+
+    const creation = harness.transport.createSession();
+    const create = frame(first, 0);
+    emitResponse(first, create.id as string, {
+      session_id: "live-draft-persisted",
+      stored_session_id: "stored-draft-persisted",
+    });
+    await creation;
+    const request = harness.transport.sendPrompt("first durable prompt");
+    emitEvent(first, "message.complete", { status: "ok" }, { request_id: request.id });
+    await request.completion;
+    harness.transport.promoteSession("stored-draft-persisted");
+
+    const reconnect = harness.transport.reconnect();
+    await flush();
+    const replacement = harness.sockets[1];
+    if (!replacement) throw new Error("replacement socket was not created");
+    replacement.emitOpen();
+    emitEvent(replacement, JSON_RPC_GATEWAY_READY_EVENT, { skin: "replacement" });
+    await flush();
+    const resume = frame(replacement, 0);
+    expect(resume).toMatchObject({
+      method: JSON_RPC_SESSION_RESUME_METHOD,
+      params: { session_id: "stored-draft-persisted" },
+    });
+    expect(JSON.stringify(replacement.sent)).not.toContain("first durable prompt");
+    emitResponse(replacement, resume.id as string, { restored: true });
+    await reconnect;
+    expect(harness.transport.selectedSessionId).toBe("stored-draft-persisted");
+  });
+
   it("uses exact prompt, interrupt, approval, and clarification methods with opaque source payloads", async () => {
     const events: JsonRpcChatEvent[] = [];
     const harness = makeHarness();

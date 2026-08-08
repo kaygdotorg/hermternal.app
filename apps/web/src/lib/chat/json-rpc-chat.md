@@ -129,10 +129,18 @@ durable history; the transport does not mirror it.
 
 An authenticated empty workspace can explicitly call `session.create` after
 readiness. Hermes returns a short-lived live session ID and a distinct stored
-session ID. The first prompt uses only the live ID; REST reconciliation uses the
-stored ID after that prompt makes the row durable. The client validates both
-identifiers, does not retry creation, and does not invent a durable session from
-an empty REST list.
+session ID. The first prompt uses only the live ID on the socket that created
+it. Until a successful post-completion REST read confirms persistence, the
+stored ID is presentation-only and reconnect (or parameterless `restore()`) sends
+no `session.resume` for that empty draft. The workspace then calls
+`promoteSession(storedSessionId)` for the exact active transport; only that
+server-owned ID becomes both the selected and reconnect identity. After a
+pre-persistence reconnect, the workspace keeps the stale draft non-sendable
+until the user explicitly starts its replacement. Stale completions, callbacks
+from a replaced session, reconnect generations, and failed reads cannot promote
+an ID. The client validates both identifiers, does not retry creation, does not
+replay a prompt, and does not invent a durable
+session from an empty REST list.
 
 ## Reviewed wire methods and events
 
@@ -363,8 +371,10 @@ The unit suite uses a deterministic fake WebSocket and covers:
 - the strict restore barrier, event-before-ack state preservation, and
   completion-before-ack tombstones;
 - disconnect before and after acknowledgement;
-- fresh-ticket reconnect, stale-generation suppression, explicit close/offline
-  cleanup, reconnect suppression, and no prompt replay;
+- fresh-ticket reconnect before a first prompt without resuming the ephemeral
+  draft, durable stored-ID promotion after server persistence, stale-generation
+  suppression, explicit close/offline cleanup, reconnect suppression, and no
+  prompt replay;
 - abort-triggered socket closure, send-failure cleanup, late control-ack
   suppression, pre-adoption socket cleanup, reconnect ticket replacement, and
   genuine-401 `auth_required` publication;
