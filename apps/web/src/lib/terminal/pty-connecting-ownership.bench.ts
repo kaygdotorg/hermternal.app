@@ -1,6 +1,12 @@
 import {
+  capturePtyBenchmarkProvenance,
+  distribution,
+  roundSample,
+} from "./pty-benchmark-provenance";
+import {
   createPtyTransport,
   type PtyConnectionInput,
+  type PtyTransport,
   type PtyTransportEvent,
   type PtyWebSocket,
   type PtyWebSocketUpgradeRequest,
@@ -8,6 +14,7 @@ import {
 
 const REPETITIONS = 30;
 const WARMUPS = 5;
+const TIMEOUT_MS = 1_000;
 const INPUT: PtyConnectionInput = {
   sessionId: "benchmark-session-a",
   attach: "benchmark-attach-a",
@@ -18,56 +25,74 @@ const REPLACEMENT_INPUT: PtyConnectionInput = {
   attach: "benchmark-attach-b",
   processIdentity: "benchmark-process-b",
 };
-
-type Cancellation = "abort" | "close" | "detach" | "replace";
+const ACTIONS = ["abort", "close", "detach", "replace"] as const;
+type Action = (typeof ACTIONS)[number];
 
 class BenchmarkSocket implements PtyWebSocket {
+  readonly identity: string;
   onopen: ((event?: unknown) => void) | null = null;
   onmessage: ((event: { readonly data: unknown }) => void) | null = null;
   onerror: ((event?: unknown) => void) | null = null;
   onclose: ((event?: { readonly code?: number }) => void) | null = null;
   readyState = 0;
-  closes = 0;
+  opened = false;
+  closed = false;
+  closeCalls = 0;
+
+  constructor(identity: string) {
+    this.identity = identity;
+  }
 
   send(): void {}
 
   close(): void {
-    this.closes += 1;
+    this.closeCalls += 1;
+    this.closed = true;
     this.readyState = 3;
   }
 
   open(): void {
+    if (this.closed) throw new Error("benchmark attempted to open a cleaned-up socket");
     this.readyState = 1;
+    this.opened = true;
     this.onopen?.();
   }
 }
 
-interface Proof {
-  readonly factoryCalls: number;
-  readonly staleFactoryCalls: number;
-  readonly allocatedSockets: number;
+interface RunProof {
+  readonly sampleMs: number;
+  readonly ticketRequests: number;
+  readonly socketFactoryCalls: number;
   readonly openedSockets: number;
-  readonly staleStateEvents: number;
   readonly cleanupCalls: number;
+  readonly duplicateOwnerViolations: number;
+  readonly activeOwnerCount: number;
+  readonly staleOpenCalls: number;
+  readonly assertions: Readonly<Record<string, boolean>>;
+}
+
+async function within<T>(promise: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`PTY benchmark timed out while waiting for ${label}`)), TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function flush(): Promise<void> {
-  for (let index = 0; index < 64; index += 1) await Promise.resolve();
+  for (let index = 0; index < 96; index += 1) await Promise.resolve();
 }
 
-function percentile(sorted: readonly number[], quantile: number): number {
-  const position = (sorted.length - 1) * quantile;
-  const lower = Math.floor(position);
-  const upper = Math.ceil(position);
-  if (lower === upper) return sorted[lower]!;
-  const fraction = position - lower;
-  return sorted[lower]! + (sorted[upper]! - sorted[lower]!) * fraction;
-}
-
-async function expectAborted(operation: Promise<void>): Promise<void> {
+async function expectAborted(operation: Promise<void>, label: string): Promise<void> {
   try {
-    await operation;
-    throw new Error("cancelled operation unexpectedly succeeded");
+    await within(operation, label);
+    throw new Error(`${label} unexpectedly resolved`);
   } catch (error) {
     if (
       typeof error !== "object" ||
@@ -80,165 +105,153 @@ async function expectAborted(operation: Promise<void>): Promise<void> {
   }
 }
 
-async function runOwnershipDecision(cancellation: Cancellation): Promise<{
-  readonly elapsedMs: number;
-  readonly proof: Proof;
-}> {
+async function runAction(action: Action): Promise<RunProof> {
   const controller = new AbortController();
   const sockets: BenchmarkSocket[] = [];
-  let transport!: ReturnType<typeof createPtyTransport>;
-  let replacement: Promise<void> | undefined;
-  let cancellationStartedAt = Number.NaN;
-  let factoryCalls = 0;
-  let staleFactoryCalls = 0;
+  let transport!: PtyTransport;
+  let replacementPromise: Promise<void> | undefined;
+  let actionTaken = false;
+  let ticketRequests = 0;
+  let socketFactoryCalls = 0;
   let openedSockets = 0;
-  let staleStateEvents = 0;
-  let cancelled = false;
 
   const onEvent = (event: PtyTransportEvent): void => {
-    if (event.type !== "state") return;
-    // Only replacement makes generation one stale. Close, Detach, and caller
-    // abort legitimately settle their still-current generation as detached.
-    if (
-      cancellation === "replace" &&
-      Number.isFinite(cancellationStartedAt) &&
-      event.state.generation === 1
-    ) {
-      staleStateEvents += 1;
-    }
-    if (cancelled || event.state.status !== "connecting") return;
-    cancelled = true;
-    cancellationStartedAt = performance.now();
-    if (cancellation === "abort") controller.abort();
-    if (cancellation === "close") transport.close();
-    if (cancellation === "detach") transport.detach();
-    if (cancellation === "replace") {
-      replacement = transport.connect(REPLACEMENT_INPUT);
-    }
+    if (actionTaken || event.type !== "state" || event.state.status !== "connecting") return;
+    actionTaken = true;
+    if (action === "abort") controller.abort();
+    if (action === "close") transport.close();
+    if (action === "detach") transport.detach();
+    if (action === "replace") replacementPromise = transport.connect(REPLACEMENT_INPUT);
   };
-
   const createWebSocket = (upgrade: PtyWebSocketUpgradeRequest): BenchmarkSocket => {
-    factoryCalls += 1;
-    if (upgrade.query.attach === INPUT.attach) staleFactoryCalls += 1;
-    const socket = new BenchmarkSocket();
+    socketFactoryCalls += 1;
+    const socket = new BenchmarkSocket(upgrade.query.resume);
     sockets.push(socket);
     return socket;
   };
 
   transport = createPtyTransport({
     validateAttachment: () => true,
-    ticketProvider: async () => "benchmark-ticket",
+    ticketProvider: async () => {
+      ticketRequests += 1;
+      return `benchmark-ticket-${ticketRequests}`;
+    },
     createWebSocket,
     onEvent,
   });
 
-  const cancelledAttempt = transport.connect(INPUT, controller.signal);
-  await expectAborted(cancelledAttempt);
-  const elapsedMs = performance.now() - cancellationStartedAt;
+  const started = performance.now();
+  const cancelled = transport.connect(INPUT, controller.signal);
+  await expectAborted(cancelled, `${action} cancelled operation`);
+  const sampleMs = roundSample(performance.now() - started);
+  if (!actionTaken) throw new Error(`${action} did not run a connecting observer action`);
+  await flush();
 
-  if (replacement) {
-    await flush();
-    const replacementSocket = sockets[0];
-    if (!replacementSocket) throw new Error("replacement did not allocate a socket");
+  const replacementSocket = sockets.find((socket) => socket.identity === REPLACEMENT_INPUT.sessionId);
+  if (action === "replace") {
+    if (!replacementPromise || !replacementSocket) {
+      throw new Error("replacement action did not allocate an identity-owned socket");
+    }
     replacementSocket.open();
     openedSockets += 1;
-    await replacement;
+    await within(replacementPromise, "replacement onopen");
+  }
+  const replacementAttached = action !== "replace" || transport.state.status === "attached";
+  const staleSockets = sockets.filter((socket) => socket.identity === INPUT.sessionId);
+  const staleOpenCalls = staleSockets.filter((socket) => socket.opened).length;
+  const activeOwnerCount = sockets.filter((socket) => socket.opened && !socket.closed).length;
+  const duplicateOwnerViolations = activeOwnerCount > 1 ? 1 : 0;
+  transport.close();
+  await flush();
+  const cleanupCalls = sockets.reduce((total, socket) => total + socket.closeCalls, 0);
+  const assertions = {
+    connectingGuard: staleSockets.length === 0,
+    staleSocketNeverOpened: staleOpenCalls === 0,
+    expectedFactoryCount: socketFactoryCalls === (action === "replace" ? 1 : 0),
+    expectedTicketCount: ticketRequests === (action === "replace" ? 2 : 1),
+    replacementOpenedExactlyOnce: action !== "replace" || (replacementSocket?.opened === true && openedSockets === 1),
+    replacementAttached,
+    noDuplicateOwners: duplicateOwnerViolations === 0,
+    cleanupRecorded: action !== "replace" || cleanupCalls === 1,
+  };
+  if (Object.values(assertions).some((value) => !value)) {
+    throw new Error(`${action} proof assertion failed: ${JSON.stringify(assertions)}`);
   }
 
   return {
-    elapsedMs,
-    proof: {
-      factoryCalls,
-      staleFactoryCalls,
-      allocatedSockets: sockets.length,
-      openedSockets,
-      staleStateEvents,
-      cleanupCalls: sockets.reduce((total, socket) => total + socket.closes, 0),
-    },
+    sampleMs,
+    ticketRequests,
+    socketFactoryCalls,
+    openedSockets,
+    cleanupCalls,
+    duplicateOwnerViolations,
+    activeOwnerCount,
+    staleOpenCalls,
+    assertions,
   };
 }
 
-async function measure(cancellation: Cancellation): Promise<{
-  readonly samples: number[];
-  readonly proofs: Proof[];
+async function measure(action: Action): Promise<{
+  readonly samples: readonly number[];
+  readonly runs: readonly RunProof[];
 }> {
-  for (let index = 0; index < WARMUPS; index += 1) {
-    await runOwnershipDecision(cancellation);
-  }
+  for (let index = 0; index < WARMUPS; index += 1) await runAction(action);
   const samples: number[] = [];
-  const proofs: Proof[] = [];
+  const runs: RunProof[] = [];
   for (let index = 0; index < REPETITIONS; index += 1) {
-    const result = await runOwnershipDecision(cancellation);
-    samples.push(result.elapsedMs);
-    proofs.push(result.proof);
+    const proof = await runAction(action);
+    samples.push(proof.sampleMs);
+    runs.push(proof);
   }
-  return { samples, proofs };
+  return { samples, runs };
 }
 
-const results = await Promise.all(
-  (["abort", "close", "detach", "replace"] as const).map(async (cancellation) => {
-    const { samples, proofs } = await measure(cancellation);
-    const sorted = samples.toSorted((left, right) => left - right);
-    const total = (key: keyof Proof): number =>
-      proofs.reduce((sum, proof) => sum + proof[key], 0);
-    return {
-      cancellation,
-      distribution: {
-        min: Number(sorted[0]!.toFixed(6)),
-        median: Number(percentile(sorted, 0.5).toFixed(6)),
-        p95: Number(percentile(sorted, 0.95).toFixed(6)),
-      },
-      totals: {
-        factoryCalls: total("factoryCalls"),
-        staleFactoryCalls: total("staleFactoryCalls"),
-        allocatedSockets: total("allocatedSockets"),
-        openedSockets: total("openedSockets"),
-        staleStateEvents: total("staleStateEvents"),
-        cleanupCalls: total("cleanupCalls"),
-      },
-    };
-  }),
-);
-
-console.log(
-  JSON.stringify(
-    {
-      schema: "hermternal.pty-connecting-ownership-benchmark.v1",
-      operation: "post-connecting ownership decision before socket factory",
-      metric: {
-        name: "ownership_decision_settle_wall_time",
-        unit: "ms",
-        clock: "performance.now",
-        start: "reentrant connecting observer cancellation",
-        end: "cancelled operation rejects",
-      },
-      method: "R-7 inclusive linear interpolation",
-      provenance: {
-        // The artifact is committed after this source revision. This avoids a
-        // circular self-hash while retaining an immutable reproducer.
-        sourceRevision: process.env.GIT_SOURCE_REVISION ?? "unrecorded",
-        command:
-          "GIT_SOURCE_REVISION=<source-sha> bun src/lib/terminal/pty-connecting-ownership.bench.ts",
-        exitStatus: 0,
-        runtime: `Bun ${process.versions.bun ?? "unknown"}`,
-        platform: process.platform,
-        architecture: process.arch,
-        mode: "test",
-      },
-      repetitions: REPETITIONS,
-      warmups: WARMUPS,
-      exclusions: [
-        "ticket minting before connecting",
-        "network",
-        "Hermes",
-        "credentials",
-        "PTY bytes",
-        "rendering",
-      ],
-      results,
-      threshold: null,
+const results: Array<Record<string, unknown>> = [];
+for (const action of ACTIONS) {
+  const measured = await measure(action);
+  const total = (key: keyof RunProof): number =>
+    measured.runs.reduce((sum, run) => sum + (typeof run[key] === "number" ? run[key] as number : 0), 0);
+  results.push({
+    stage: action,
+    samples: measured.samples,
+    distribution: distribution(measured.samples),
+    runs: measured.runs,
+    totals: {
+      ticketRequests: total("ticketRequests"),
+      socketFactoryCalls: total("socketFactoryCalls"),
+      openedSockets: total("openedSockets"),
+      cleanupCalls: total("cleanupCalls"),
+      duplicateOwnerViolations: total("duplicateOwnerViolations"),
     },
-    null,
-    2,
+  });
+}
+
+const artifact = {
+  schema: "hermternal.pty-connecting-ownership-benchmark.v2",
+  operation: "connecting observer ownership decision before socket factory",
+  metric: {
+    name: "ownership_decision_settle_wall_time",
+    unit: "ms",
+    clock: "performance.now",
+    start: "connecting state observer action",
+    end: "cancelled operation rejects",
+  },
+  method: "R-7 inclusive linear interpolation over rounded raw samples",
+  sourcePath: "apps/web/src/lib/terminal/pty-connecting-ownership.bench.ts",
+  command: "bun src/lib/terminal/pty-connecting-ownership.bench.ts",
+  stageOrder: [...ACTIONS],
+  sequential: true,
+  concurrentStages: false,
+  repetitions: REPETITIONS,
+  warmups: WARMUPS,
+  networkPolicy: "synthetic-only",
+  exclusions: ["network", "Hermes", "credentials", "PTY bytes", "rendering", "latency threshold"],
+  provenance: capturePtyBenchmarkProvenance(
+    "apps/web/src/lib/terminal/pty-connecting-ownership.bench.ts",
+    "bun src/lib/terminal/pty-connecting-ownership.bench.ts",
   ),
-);
+  results,
+  threshold: null,
+};
+
+console.log(JSON.stringify(artifact, null, 2));

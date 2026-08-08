@@ -12,7 +12,9 @@ W-Term renderer, session coordinator, workspace shell, or Chat UI.
 
 `createFreshPtyTicketProvider` adapts the reviewed authenticated request seam to
 one same-origin `POST /api/auth/ws-ticket` request per call. It requires the
-closed `{ ticket }` response shape and keeps no reusable credential state.
+closed `{ ticket }` response shape and keeps no reusable credential state. Ticket
+HTTP 401 and 403 both become the workspace-neutral `authentication-required`
+error; response bodies, credentials, and ticket fragments never enter the error.
 
 `createPtyTransport` exposes state and byte/event subscriptions plus these
 operations:
@@ -29,28 +31,42 @@ operations:
   exact integers to `1..2000` columns and `1..1000` rows.
 - `detach()` and `close()` remove every socket callback before closing. Attach
   mode enters `detached`; legacy mode enters `exited` because its bridge owns
-  the child process lifetime. Explicit `close()` latches the reconnect denial;
-  later cleanup such as `detach()` cannot weaken it. Only a new `connect()` call
-  makes replacement user intent current again.
+  the child process lifetime. Ordinary detach preserves an unresolved validator,
+  ticket, or socket-factory quarantine, so same-identity `connect()` and
+  `reconnect()` return the deterministic aborted result until that raw adapter
+  settles. Explicit `close()` authorizes a same-identity replacement after an
+  ordinary user Close, but it does not erase a server 4403 or 4409 fence; only a
+  different identity or the documented 4401 recovery transition clears those
+  fences. Close is therefore an explicit replacement path, not a retry bypass.
 - An established attach socket that reports `onerror` without `onclose` enters
   `detached` and remains eligible for explicit reconnect. Before its callbacks
   are removed, that error records one write-once local retention anchor for the
   exact session, attach, and process identity. Repeated or stale errors cannot
   move that anchor; explicit reattach is permitted through the reviewed
-  30-minute window and rejected after it. An error or close before `onopen`
-  remains `failed` and cannot seed or extend a detach-retention window. Changing
-  current-session identity discards the old expiry evidence.
+  30-minute window and rejected after it. Every pre-open error or close remains
+  `failed` and removes no existing anchor, but it cannot seed or extend one.
+  Established 4401 also remains `failed`, retains the exact anchor, and blocks
+  `reconnect()` with `authentication-required`; after authentication, an
+  explicit same-identity `connect()` is the only recovery action and performs
+  one bounded reattach. Established 4403 remains a host/origin fence, and 4409
+  remains a supersession fence, across detach and Close cleanup. Changing
+  current-session identity discards old expiry evidence and clears those fences.
   Cleanup and state observers are generation-guarded so a synchronous retry or
   replacement cannot be overwritten by the old failure or Close path. A new
   attempt claims its generation and active slot before aborting the old adapter,
   and reattach notices/readiness are rechecked after observer callbacks. State
   events are captured before observers, but `onStateChange` runs only if that
-  transition still owns the generation after `onEvent`. Ticket-pending
-  cancellation is rechecked before ticket minting, and `connecting` cancellation
-  is rechecked again before constructing the opaque upgrade or invoking the
-  socket factory. Therefore a reentrant observer cannot allocate a stale socket
-  or consume a replacement generation's factory work. A detach timestamp is
-  recorded only if adapter-controlled socket close returns without
+  transition still owns the generation after `onEvent`. The external caller's
+  `AbortSignal` is registered with the attempt before the validator is invoked;
+  synchronous validator, `onStateChange`, `onEvent`, and `subscribe(listener)`
+  cancellation or replacement therefore prevents ticket and socket work. The
+  owner is rechecked before every validator, ticket, upgrade, and socket-factory
+  stage. `ticket_pending` cancellation is rechecked before ticket minting, and
+  `connecting` cancellation is rechecked again before constructing the opaque
+  upgrade or invoking the socket factory. Therefore a reentrant observer cannot
+  allocate a stale socket or consume a replacement generation's factory work. A
+  detach timestamp is recorded only if adapter-controlled socket close returns
+  without
   a replacement claiming the generation, so an old A cleanup cannot write
   evidence after reentrant B connects. Late socket-factory values are closed
   exactly once even when cancellation wins before the abort listener is
@@ -142,30 +158,43 @@ latency evidence defines a budget. Reproduce it with
 `bun src/lib/terminal/pty-error-retention.bench.ts` from `apps/web`.
 
 `pty-reconnect-supersession.bench.ts` captures 30 deterministic cancellation
-bursts per ignored adapter stage (validator, ticket, and factory), after five
-warmups. Its checked-in sanitized test-mode artifact records min, median, and
-p95 settle time plus ticket, validator, factory, opened-socket, cleanup, and
-duplicate-owner totals. `provenance.sourceRevision` is the immutable source
-commit at which the benchmark ran; the artifact is committed afterward, so it
-does not claim an impossible self-hash. Reproduce it with
-`GIT_SOURCE_REVISION=$(git rev-parse HEAD) bun src/lib/terminal/pty-reconnect-supersession.bench.ts`
-from `apps/web`, then commit the resulting evidence separately. The current
-artifact reports zero duplicate-owner violations; a latency threshold remains
-`null` because this issue establishes a baseline rather than inventing a budget.
+runs for each ignored adapter stage (validator, ticket, and factory), after five
+warmups. Stages execute sequentially, never with `Promise.all`. Each run retains
+its rounded raw settle sample, ticket and factory counters, socket-open and
+cleanup counters, active-owner count, and boolean proof assertions. The harness
+identifies sockets by connection identity, exercises the real replacement
+`onopen`, bounds every wait, and proves that a late factory value is closed
+without opening or publishing stale state. The checked-in
+`pty-reconnect-supersession-benchmark.json` artifact is therefore evidence of
+behavior and cleanup, not a latency claim; `threshold` remains `null` because no
+reviewed budget exists.
 
-`pty-connecting-ownership.bench.ts` measures only the post-`connecting`
-ownership-decision path: from a reentrant observer's cancellation or replacement
-to the old operation's aborted settlement. It deliberately excludes ticket
-minting before `connecting`, network, credentials, PTY bytes, rendering, and the
-replacement's successful open. Thirty deterministic runs plus five warmups cover
-caller abort, Close, Detach, and replacement. Its sanitized
-`pty-connecting-ownership-benchmark.json` artifact records factory,
-stale-factory, allocation, open, stale-state, and cleanup totals so a stale
-generation must have zero factory calls and zero allocated sockets. At source
-revision `7b02c3b25c95bee7928ef528ad6db97a95375fd8`, all 30 abort, Close, and
-Detach runs had zero factory/allocation/open/stale-state/cleanup totals; all 30
-replacement runs had one valid replacement socket and zero stale totals.
-`provenance.sourceRevision` names the committed source revision measured before
-its artifact is committed, avoiding a circular self-hash. Reproduce with
-`GIT_SOURCE_REVISION=$(git rev-parse HEAD) bun src/lib/terminal/pty-connecting-ownership.bench.ts`
-from `apps/web`; no latency threshold is claimed.
+`pty-connecting-ownership.bench.ts` measures the post-`connecting` ownership
+path for caller Abort, Close, Detach, and explicit replacement. It excludes
+network, Hermes, credentials, PTY bytes, rendering, and unsupported latency
+budgets. Its v2 artifact retains all raw samples and per-run proof assertions,
+including the connecting guard, zero stale socket opens, identity-owned
+replacement `onopen`, expected ticket/factory counts, duplicate-owner checks,
+and cleanup. The validator recomputes every distribution and total from those
+raw runs and rejects failed assertions, concurrent-stage metadata, missing
+provenance, or arbitrary source revisions.
+
+Both v2 artifacts record the actual full source commit, source tree, git blob
+and SHA-256 hashes for the benchmark, transport, package manifest, and lockfile,
+plus clean-checkout, runtime, OS, architecture, and CPU provenance. Generate
+evidence from a clean detached source checkout, writing outside the repository
+so the output file cannot make the checkout dirty:
+
+```sh
+git switch --detach <sourceRevision>
+bun src/lib/terminal/pty-reconnect-supersession.bench.ts > /tmp/pty-reconnect.json
+bun src/lib/terminal/pty-connecting-ownership.bench.ts > /tmp/pty-connecting.json
+```
+
+Run those commands from `apps/web`, then copy the two JSON files into
+`src/lib/terminal/` and commit them in a later evidence-only change. The
+provenance helper derives `sourceRevision` from the actual `HEAD`; it rejects an
+arbitrary `GIT_SOURCE_REVISION` override. Validate both artifacts from `apps/web`
+with `bun run test:benchmark:pty`, which runs normal and `--optimized` validator
+modes. The benchmark command is synthetic-only and never contacts Hermes,
+opens a live endpoint, logs a ticket, or uses credentials.

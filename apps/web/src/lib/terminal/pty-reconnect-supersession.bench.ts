@@ -1,17 +1,25 @@
 import {
+  capturePtyBenchmarkProvenance,
+  distribution,
+  roundSample,
+} from "./pty-benchmark-provenance";
+import {
   createPtyTransport,
   type PtyConnectionInput,
+  type PtyTransport,
   type PtyWebSocket,
 } from "./pty-transport";
 
 const REPETITIONS = 30;
 const WARMUPS = 5;
+const TIMEOUT_MS = 1_000;
 const INPUT: PtyConnectionInput = {
   sessionId: "benchmark-session",
   attach: "benchmark-attach",
   processIdentity: "benchmark-process",
-  detachedAtMs: 1,
 };
+const STAGES = ["validator", "ticket", "factory"] as const;
+type Stage = (typeof STAGES)[number];
 
 class BenchmarkSocket implements PtyWebSocket {
   onopen: ((event?: unknown) => void) | null = null;
@@ -19,173 +27,251 @@ class BenchmarkSocket implements PtyWebSocket {
   onerror: ((event?: unknown) => void) | null = null;
   onclose: ((event?: { readonly code?: number }) => void) | null = null;
   readyState = 0;
-  closes = 0;
+  opened = false;
+  closed = false;
+  closeCalls = 0;
 
   send(): void {}
 
   close(): void {
-    this.closes += 1;
+    this.closeCalls += 1;
+    this.closed = true;
     this.readyState = 3;
+  }
+
+  open(): void {
+    if (this.closed) throw new Error("benchmark attempted to open a cleaned-up socket");
+    this.readyState = 1;
+    this.opened = true;
+    this.onopen?.();
   }
 }
 
-type Stage = "validator" | "ticket" | "factory";
-
-interface Proof {
+interface RunProof {
+  readonly sampleMs: number;
   readonly ticketRequests: number;
-  readonly validatorCalls: number;
   readonly socketFactoryCalls: number;
   readonly openedSockets: number;
   readonly cleanupCalls: number;
   readonly duplicateOwnerViolations: number;
+  readonly activeOwnerCount: number;
+  readonly staleCleanupCalls: number;
+  readonly staleOpenCalls: number;
+  readonly assertions: Readonly<Record<string, boolean>>;
+}
+
+function timeoutError(label: string): Error {
+  return new Error(`PTY benchmark timed out while waiting for ${label}`);
+}
+
+async function within<T>(promise: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(timeoutError(label)), TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function flush(): Promise<void> {
-  for (let index = 0; index < 64; index += 1) await Promise.resolve();
+  for (let index = 0; index < 96; index += 1) await Promise.resolve();
 }
 
-function percentile(sorted: readonly number[], quantile: number): number {
-  const position = (sorted.length - 1) * quantile;
-  const lower = Math.floor(position);
-  const upper = Math.ceil(position);
-  if (lower === upper) return sorted[lower]!;
-  const fraction = position - lower;
-  return sorted[lower]! + (sorted[upper]! - sorted[lower]!) * fraction;
-}
-
-async function expectAborted(operation: Promise<void>): Promise<void> {
+async function expectCode(operation: Promise<void>, code: string, label: string): Promise<void> {
   try {
-    await operation;
-    throw new Error("cancelled operation unexpectedly succeeded");
+    await within(operation, label);
+    throw new Error(`${label} unexpectedly resolved`);
   } catch (error) {
     if (
       typeof error !== "object" ||
       error === null ||
       !("code" in error) ||
-      error.code !== "aborted"
+      error.code !== code
     ) {
       throw error;
     }
   }
 }
 
-async function runBurst(stage: Stage): Promise<Proof> {
-  let resolveValidator!: (value: boolean) => void;
+async function runStage(stage: Stage): Promise<RunProof> {
+  let resolveValidation!: (value: boolean) => void;
   let resolveTicket!: (value: string) => void;
-  let resolveSocket!: (value: BenchmarkSocket) => void;
+  let resolveFactory!: (value: BenchmarkSocket) => void;
   let ticketRequests = 0;
-  let validatorCalls = 0;
   let socketFactoryCalls = 0;
   let openedSockets = 0;
-  let cleanupCalls = 0;
-  const transport = createPtyTransport({
+  const sockets: BenchmarkSocket[] = [];
+  let staleSocket: BenchmarkSocket | undefined;
+  let transport!: PtyTransport;
+
+  const validateAttachment = (): Promise<boolean> | true => {
+    if (stage !== "validator") return true;
+    return new Promise<boolean>((resolve) => {
+      resolveValidation = resolve;
+    });
+  };
+  const ticketProvider = (): Promise<string> => {
+    ticketRequests += 1;
+    if (stage === "ticket" && ticketRequests === 1) {
+      return new Promise<string>((resolve) => {
+        resolveTicket = resolve;
+      });
+    }
+    return Promise.resolve(`benchmark-ticket-${ticketRequests}`);
+  };
+  const createWebSocket = (): Promise<BenchmarkSocket> | BenchmarkSocket => {
+    socketFactoryCalls += 1;
+    const socket = new BenchmarkSocket();
+    sockets.push(socket);
+    if (stage === "factory" && socketFactoryCalls === 1) {
+      staleSocket = socket;
+      return new Promise<BenchmarkSocket>((resolve) => {
+        resolveFactory = resolve;
+      });
+    }
+    return socket;
+  };
+
+  transport = createPtyTransport({
     now: () => 1,
-    validateAttachment: () => {
-      validatorCalls += 1;
-      return stage === "validator"
-        ? new Promise<boolean>((resolve) => {
-            resolveValidator = resolve;
-          })
-        : true;
-    },
-    ticketProvider: async () => {
-      ticketRequests += 1;
-      return stage === "ticket"
-        ? new Promise<string>((resolve) => {
-            resolveTicket = resolve;
-          })
-        : "benchmark-ticket";
-    },
-    createWebSocket: () => {
-      socketFactoryCalls += 1;
-      return stage === "factory"
-        ? new Promise<BenchmarkSocket>((resolve) => {
-            resolveSocket = resolve;
-          })
-        : new BenchmarkSocket();
-    },
+    validateAttachment,
+    ticketProvider,
+    createWebSocket,
   });
 
-  const cancelled = transport.connect(INPUT);
+  const started = performance.now();
+  const cancelledAttempt = transport.connect(INPUT);
   await flush();
-  transport.detach();
-  await expectAborted(cancelled);
-  await expectAborted(transport.reconnect());
+  if (stage === "validator" && !resolveValidation) throw new Error("validator stage did not start");
+  if (stage === "ticket" && ticketRequests !== 1) throw new Error("ticket stage did not start");
+  if (stage === "factory" && socketFactoryCalls !== 1) throw new Error("factory stage did not start");
 
-  if (stage === "validator") resolveValidator(true);
-  if (stage === "ticket") resolveTicket("benchmark-ticket");
+  transport.detach();
+  await expectCode(cancelledAttempt, "aborted", `${stage} cancelled attempt`);
+  await expectCode(transport.reconnect(), "aborted", `${stage} quarantined reconnect`);
+
+  if (stage === "validator") resolveValidation(true);
+  if (stage === "ticket") resolveTicket(`benchmark-ticket-${ticketRequests}`);
   if (stage === "factory") {
-    const staleSocket = new BenchmarkSocket();
-    resolveSocket(staleSocket);
-    await flush();
-    cleanupCalls = staleSocket.closes;
+    if (!staleSocket || !resolveFactory) throw new Error("factory stage lost stale socket ownership");
+    resolveFactory(staleSocket);
   }
   await flush();
+  const sampleMs = roundSample(performance.now() - started);
+
+  // Recovery is outside the measured quarantine-settlement interval. It proves
+  // that late cleanup released exactly one owner and that the replacement's
+  // real onopen callback, not a synthetic counter, reached attached state.
+  const recovery = transport.reconnect();
+  await flush();
+  const replacement = sockets.find((socket) => socket !== staleSocket && !socket.closed && !socket.opened);
+  if (!replacement) throw new Error(`${stage} recovery did not allocate an owned replacement socket`);
+  replacement.open();
+  openedSockets += 1;
+  await within(recovery, `${stage} recovery open`);
+  const recoveryAttached = transport.state.status === "attached";
+  const activeOwnerCountBeforeCleanup = sockets.filter((socket) => socket.opened && !socket.closed).length;
+  transport.close();
+  await flush();
+
+  const cleanupCalls = sockets.reduce((total, socket) => total + socket.closeCalls, 0);
+  const staleCleanupCalls = staleSocket?.closeCalls ?? 0;
+  const staleOpenCalls = staleSocket?.opened ? 1 : 0;
+  const duplicateOwnerViolations = activeOwnerCountBeforeCleanup > 1 ? 1 : 0;
+  const assertions = {
+    quarantineTicketFence: ticketRequests === (stage === "validator" ? 0 : 1),
+    quarantineFactoryFence: socketFactoryCalls === (stage === "factory" ? 1 : 0),
+    staleSocketClosedOnce: stage !== "factory" || staleCleanupCalls === 1,
+    staleSocketNeverOpened: staleOpenCalls === 0,
+    replacementOpenedExactlyOnce: replacement.opened && openedSockets === 1,
+    replacementReachedAttached: recoveryAttached,
+    noDuplicateOwners: duplicateOwnerViolations === 0,
+    cleanupRecorded: cleanupCalls >= 1,
+  };
+  if (Object.values(assertions).some((value) => !value)) {
+    throw new Error(`${stage} proof assertion failed: ${JSON.stringify(assertions)}`);
+  }
 
   return {
+    sampleMs,
     ticketRequests,
-    validatorCalls,
     socketFactoryCalls,
     openedSockets,
     cleanupCalls,
-    duplicateOwnerViolations: Math.max(0, ticketRequests - 1, validatorCalls - 1, socketFactoryCalls - 1),
+    duplicateOwnerViolations,
+    activeOwnerCount: activeOwnerCountBeforeCleanup,
+    staleCleanupCalls,
+    staleOpenCalls,
+    assertions,
   };
 }
 
-async function measure(stage: Stage): Promise<{ readonly samples: number[]; readonly proofs: Proof[] }> {
-  for (let index = 0; index < WARMUPS; index += 1) await runBurst(stage);
+async function measure(stage: Stage): Promise<{
+  readonly samples: readonly number[];
+  readonly runs: readonly RunProof[];
+}> {
+  for (let index = 0; index < WARMUPS; index += 1) await runStage(stage);
   const samples: number[] = [];
-  const proofs: Proof[] = [];
+  const runs: RunProof[] = [];
   for (let index = 0; index < REPETITIONS; index += 1) {
-    const started = performance.now();
-    proofs.push(await runBurst(stage));
-    samples.push(performance.now() - started);
+    const proof = await runStage(stage);
+    samples.push(proof.sampleMs);
+    runs.push(proof);
   }
-  return { samples, proofs };
+  return { samples, runs };
 }
 
-const results = await Promise.all((["validator", "ticket", "factory"] as const).map(async (stage) => {
-  const { samples, proofs } = await measure(stage);
-  const sorted = samples.toSorted((left, right) => left - right);
-  const total = (key: keyof Proof): number => proofs.reduce((sum, proof) => sum + proof[key], 0);
-  return {
+const results: Array<Record<string, unknown>> = [];
+for (const stage of STAGES) {
+  const measured = await measure(stage);
+  const total = (key: keyof RunProof): number =>
+    measured.runs.reduce((sum, run) => sum + (typeof run[key] === "number" ? run[key] as number : 0), 0);
+  results.push({
     stage,
-    distribution: {
-      min: Number(sorted[0]!.toFixed(6)),
-      median: Number(percentile(sorted, 0.5).toFixed(6)),
-      p95: Number(percentile(sorted, 0.95).toFixed(6)),
-    },
+    samples: measured.samples,
+    distribution: distribution(measured.samples),
+    runs: measured.runs,
     totals: {
       ticketRequests: total("ticketRequests"),
-      validatorCalls: total("validatorCalls"),
       socketFactoryCalls: total("socketFactoryCalls"),
       openedSockets: total("openedSockets"),
       cleanupCalls: total("cleanupCalls"),
       duplicateOwnerViolations: total("duplicateOwnerViolations"),
     },
-  };
-}));
+  });
+}
 
-console.log(JSON.stringify({
-  schema: "hermternal.pty-reconnect-supersession-benchmark.v1",
-  operation: "same-identity reconnect after ignored cancellation",
-  metric: { name: "reconnect_burst_settle_wall_time", unit: "ms", clock: "performance.now" },
-  method: "R-7 inclusive linear interpolation",
-  provenance: {
-    // Evidence is committed after the measured source revision, avoiding an
-    // impossible self-hash while keeping the benchmark's code relationship
-    // independently reproducible from the immutable parent commit.
-    sourceRevision: process.env.GIT_SOURCE_REVISION ?? "unrecorded",
-    command: "GIT_SOURCE_REVISION=<source-sha> bun src/lib/terminal/pty-reconnect-supersession.bench.ts",
-    exitStatus: 0,
-    runtime: `Bun ${process.versions.bun ?? "unknown"}`,
-    platform: process.platform,
-    architecture: process.arch,
-    mode: "test",
+const artifact = {
+  schema: "hermternal.pty-reconnect-supersession-benchmark.v2",
+  operation: "same-identity reconnect after ordinary detach quarantine",
+  metric: {
+    name: "quarantine_settle_wall_time",
+    unit: "ms",
+    clock: "performance.now",
+    start: "connect attempt starts",
+    end: "ignored adapter settles after detach and blocked reconnect",
   },
+  method: "R-7 inclusive linear interpolation over rounded raw samples",
+  sourcePath: "apps/web/src/lib/terminal/pty-reconnect-supersession.bench.ts",
+  command: "bun src/lib/terminal/pty-reconnect-supersession.bench.ts",
+  stageOrder: [...STAGES],
+  sequential: true,
+  concurrentStages: false,
   repetitions: REPETITIONS,
   warmups: WARMUPS,
-  exclusions: ["network", "Hermes", "credentials", "PTY bytes", "rendering"],
+  networkPolicy: "synthetic-only",
+  exclusions: ["network", "Hermes", "credentials", "PTY bytes", "rendering", "latency threshold"],
+  provenance: capturePtyBenchmarkProvenance(
+    "apps/web/src/lib/terminal/pty-reconnect-supersession.bench.ts",
+    "bun src/lib/terminal/pty-reconnect-supersession.bench.ts",
+  ),
   results,
   threshold: null,
-}, null, 2));
+};
+
+console.log(JSON.stringify(artifact, null, 2));

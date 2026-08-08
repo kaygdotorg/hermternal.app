@@ -44,6 +44,7 @@ export type PtyCloseClassification =
 
 export type PtyErrorCode =
   | "aborted"
+  | "authentication-required"
   | "closed"
   | "attachment-superseded"
   | "connection-failed"
@@ -59,6 +60,7 @@ export type PtyErrorCode =
 
 const ERROR_MESSAGES: Record<PtyErrorCode, string> = {
   aborted: "The Terminal connection attempt was cancelled.",
+  "authentication-required": "Terminal authentication is required.",
   "attachment-superseded": "The Terminal attachment was superseded.",
   closed: "The Terminal transport is closed.",
   "connection-failed": "The Terminal WebSocket connection failed.",
@@ -76,12 +78,15 @@ const ERROR_MESSAGES: Record<PtyErrorCode, string> = {
 export class PtyTransportError extends Error {
   readonly code: PtyErrorCode;
   readonly generation?: number;
+  /** Safe protocol status metadata; response bodies and credentials stay out. */
+  readonly status?: number;
 
-  constructor(code: PtyErrorCode, generation?: number) {
+  constructor(code: PtyErrorCode, generation?: number, status?: number) {
     super(ERROR_MESSAGES[code]);
     this.name = code === "aborted" ? "AbortError" : "PtyTransportError";
     this.code = code;
     this.generation = generation;
+    this.status = status;
   }
 }
 
@@ -257,6 +262,11 @@ export function createFreshPtyTicketProvider(
     } catch (error) {
       if (signal.aborted || isAbortLike(error)) {
         throw new PtyTransportError("aborted");
+      }
+      if (error instanceof PtyTransportError) throw error;
+      const status = statusFromUnknown(error);
+      if (status === 401 || status === 403) {
+        throw new PtyTransportError("authentication-required", 0, status);
       }
       throw new PtyTransportError("connection-failed");
     }
@@ -490,9 +500,17 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       const opened = context.opened;
       invalidateContext(context);
       clearAttempt(context.generation);
-      context.rejectReady(new PtyTransportError("connection-failed", generation));
+      context.rejectReady(errorForClose(observation, generation));
       const status = statusForClose(context.mode, observation, opened);
-      if (status === "detached") markDetached(input, now());
+      // 4401 is a post-auth recovery boundary, not a reason to discard the
+      // exact PTY identity. Keep one bounded anchor even though the public
+      // state is failed; only an explicit recovery connect may consume it.
+      if (
+        status === "detached" ||
+        (opened && observation.classification === "authentication-rejected")
+      ) {
+        markDetached(input, now());
+      }
       reattachBlocked = retryBlockForClose(observation.classification);
       setState(status, generation, input, observation);
     };
@@ -589,30 +607,48 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     input: PtyConnectionInput,
     reattaching: boolean,
     signal?: AbortSignal,
+    authorizedRecovery = false,
   ): Promise<void> => {
     const normalized = validateInput(input);
     const staleAttempt = activeAttempt;
+    const sameIdentity =
+      currentInput !== undefined && sameConnectionInput(currentInput, normalized);
+    const closeReplacementAuthorized = explicitlyClosed && sameIdentity;
+    const authRecoveryAuthorized =
+      authorizedRecovery &&
+      sameIdentity &&
+      reattachBlocked === "authentication-required" &&
+      detachedAtFor(normalized) !== undefined;
+
     if (
       staleAttempt &&
-      currentInput &&
-      sameConnectionInput(currentInput, normalized) &&
-      // Reconnect cannot overtake quarantined work, but explicit connect is new
-      // user intent after Close. It safely claims a generation while the old
-      // adapter remains fenced and retains its late-value cleanup.
-      (reattaching || !staleAttempt.quarantined)
+      sameIdentity &&
+      // Ordinary detach, reconnect, and duplicate callers must remain behind
+      // an ignored adapter until its raw operation settles. Only a deliberate
+      // same-identity connect after Close, or the documented post-auth
+      // recovery transition, may claim a new generation immediately.
+      !closeReplacementAuthorized &&
+      !authRecoveryAuthorized
     ) {
       return waitForAttempt(staleAttempt, signal);
     }
     if (signal?.aborted) {
       return Promise.reject(new PtyTransportError("aborted", currentGeneration));
     }
+    const identityTransition = !sameIdentity;
     if (
       detachedAttachment &&
-      !sameConnectionInput(detachedAttachment.input, normalized)
+      identityTransition
     ) {
       // Retention belongs to one exact PTY identity. Do not let an old
       // session's expiry evidence reject a replacement current-session attach.
       detachedAttachment = undefined;
+    }
+    if (identityTransition || authRecoveryAuthorized) {
+      // 4403/4409 fences survive ordinary detach and Close cleanup. They are
+      // cleared only by a different PTY identity or this explicit auth-recovery
+      // action; no retry path may silently weaken the fence.
+      reattachBlocked = undefined;
     }
 
     // Claim the replacement generation and its active-attempt slot before any
@@ -621,7 +657,6 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     const generation = ++currentGeneration;
     const controller = new AbortController();
     currentInput = normalized;
-    reattachBlocked = undefined;
     userClosed = false;
     explicitlyClosed = false;
 
@@ -685,7 +720,14 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       if (owned) safeClose(owned);
     };
 
-    if (!ownsAttempt()) return waitForAttempt(attempt, signal);
+    // Bind the caller's ownership before invoking any adapter. A synchronous
+    // validator can abort its caller while it is being called; registering the
+    // waiter first makes that abort reach the shared controller before ticket
+    // minting or socket construction. Coalesced callers still share the raw
+    // operation, so one caller's abort cannot cancel another caller's owner.
+    const wait = waitForAttempt(attempt, signal);
+    if (signal?.aborted) attempt.controller.abort();
+    if (!ownsAttempt()) return wait;
 
     // `awaitWithAbort` returns promptly to the caller, but a provider or factory
     // can ignore AbortSignal. Track the raw operation separately so the aborted
@@ -822,7 +864,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
         if (!attempt.quarantined) clearAttempt(generation);
       }
     })();
-    return waitForAttempt(attempt, signal);
+    return wait;
   };
 
   const stop = (closing: boolean): void => {
@@ -830,9 +872,19 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     // Close is an authorization latch. Later cleanup calls cannot weaken it;
     // only an explicit connect records replacement user intent.
     if (closing) explicitlyClosed = true;
-    reattachBlocked = undefined;
+    // Retry fences are transport evidence, not socket cleanup state. Ordinary
+    // detach and Close must not erase deterministic 4403/4409 decisions.
     const generation = ++currentGeneration;
     const input = currentInput;
+    const priorObservation =
+      currentState.closeClassification !== undefined
+        ? {
+            ...(currentState.closeCode !== undefined
+              ? { code: currentState.closeCode }
+              : {}),
+            classification: currentState.closeClassification,
+          }
+        : undefined;
     const attempt = activeAttempt;
     // Keep a cancelled, adapter-owned operation in the slot until its raw work
     // settles. Reconnect observes this fence instead of racing a second ticket
@@ -857,10 +909,10 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     // reentrant observer can therefore start a replacement without the old
     // cleanup path later overwriting that replacement's state.
     if (closing && currentGeneration === generation) {
-      setState("closing", generation, input);
+      setState("closing", generation, input, priorObservation);
     }
     if (currentGeneration !== generation) return;
-    setState(detachedStatus(input), generation, input);
+    setState(detachedStatus(input), generation, input, priorObservation);
   };
 
   return {
@@ -869,16 +921,25 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     },
     connect(input, signal) {
       const normalized = validateInput(input);
+      const authRecovery =
+        reattachBlocked === "authentication-required" &&
+        currentInput !== undefined &&
+        sameConnectionInput(currentInput, normalized) &&
+        detachedAtFor(normalized) !== undefined;
       if (
         reattachBlocked &&
         currentInput &&
-        sameConnectionInput(currentInput, normalized)
+        sameConnectionInput(currentInput, normalized) &&
+        !authRecovery
       ) {
         return Promise.reject(
           new PtyTransportError(reattachBlocked, currentGeneration),
         );
       }
-      return start(normalized, false, signal);
+      // A same-identity connect after established 4401 is the sole explicit
+      // post-auth recovery transition. It consumes the retained anchor and
+      // performs one guarded reattach; reconnect() never does this implicitly.
+      return start(normalized, authRecovery, signal, authRecovery);
     },
     reconnect(signal) {
       if (explicitlyClosed && currentInput && modeFor(currentInput) === "attach") {
@@ -1056,7 +1117,19 @@ function detachedStatus(input: PtyConnectionInput | undefined): PtyStatus {
   return modeFor(input) === "attach" ? "detached" : "exited";
 }
 
+function statusFromUnknown(value: unknown): number | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const status = (value as { readonly status?: unknown }).status;
+  return typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+    ? status
+    : undefined;
+}
+
 function parseTicketResponse(response: unknown): string {
+  const status = statusFromUnknown(response);
+  if (status === 401 || status === 403) {
+    throw new PtyTransportError("authentication-required", 0, status);
+  }
   try {
     if (
       typeof response !== "object" ||
@@ -1139,6 +1212,9 @@ function statusForClose(
 function retryBlockForClose(
   classification: PtyCloseClassification,
 ): PtyErrorCode | undefined {
+  if (classification === "authentication-rejected") {
+    return "authentication-required";
+  }
   if (classification === "attachment-superseded") {
     return "attachment-superseded";
   }
@@ -1154,9 +1230,26 @@ function retryBlockForClose(
   return undefined;
 }
 
+function errorForClose(
+  observation: { readonly code?: number; readonly classification: PtyCloseClassification },
+  generation: number,
+): PtyTransportError {
+  if (observation.classification === "authentication-rejected") {
+    return new PtyTransportError("authentication-required", generation, observation.code);
+  }
+  if (observation.classification === "attachment-superseded") {
+    return new PtyTransportError("attachment-superseded", generation, observation.code);
+  }
+  return new PtyTransportError("connection-failed", generation, observation.code);
+}
+
 function sanitizeError(error: unknown, signal: AbortSignal, generation: number): PtyTransportError {
   if (signal.aborted || isAbortLike(error)) return new PtyTransportError("aborted", generation);
   if (error instanceof PtyTransportError) return error;
+  const status = statusFromUnknown(error);
+  if (status === 401 || status === 403) {
+    return new PtyTransportError("authentication-required", generation, status);
+  }
   return new PtyTransportError("connection-failed", generation);
 }
 
