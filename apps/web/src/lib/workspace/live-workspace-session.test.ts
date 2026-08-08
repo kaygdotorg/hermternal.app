@@ -768,6 +768,79 @@ describe('LiveWorkspaceSession', () => {
     expect(published.every((snapshot) => !snapshot.includes('Foreign detail'))).toBe(true);
   });
 
+  it.each([
+    ['inherited dynamic getter', 'inherited'],
+    ['own accessor', 'accessor'],
+    ['Proxy wrapper', 'proxy'],
+    ['non-enumerable descriptor', 'descriptor']
+  ] as const)('rejects %s detail before history publication or Chat adoption', async (_label, variant) => {
+    let inheritedReads = 0;
+    const inheritedPrototype = {
+      get id(): string {
+        inheritedReads += 1;
+        return inheritedReads === 1 ? SESSION.id : 'foreign-session';
+      }
+    };
+    const inheritedDetail = Object.create(inheritedPrototype) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(SESSION)) {
+      if (key !== 'id') Object.defineProperty(inheritedDetail, key, { value, enumerable: true });
+    }
+
+    const accessorDetail = { ...SESSION };
+    let accessorReads = 0;
+    Object.defineProperty(accessorDetail, 'id', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        accessorReads += 1;
+        return accessorReads === 1 ? SESSION.id : 'foreign-session';
+      }
+    });
+
+    let proxyReads = 0;
+    const proxyDetail = new Proxy({ ...SESSION }, {
+      get: (target, key, receiver) => {
+        if (key === 'id') {
+          proxyReads += 1;
+          return proxyReads === 1 ? SESSION.id : 'foreign-session';
+        }
+        return Reflect.get(target, key, receiver);
+      }
+    });
+
+    const descriptorDetail = { ...SESSION };
+    Object.defineProperty(descriptorDetail, 'id', {
+      configurable: true,
+      enumerable: false,
+      value: SESSION.id,
+      writable: true
+    });
+
+    const details = {
+      inherited: inheritedDetail,
+      accessor: accessorDetail,
+      proxy: proxyDetail,
+      descriptor: descriptorDetail
+    } as const;
+    const rest = createRest([]);
+    vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+    vi.mocked(rest.getSession).mockResolvedValue(details[variant] as LiveSession);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    const published: string[] = [];
+    session.subscribe((snapshot) => published.push(JSON.stringify(snapshot)));
+
+    await session.selectSession(SESSION.id);
+
+    expect(rest.getSessionMessages).not.toHaveBeenCalled();
+    expect(chat.createChat).not.toHaveBeenCalled();
+    expect(published.every((snapshot) => !snapshot.includes('foreign-session'))).toBe(true);
+    expect(session.current.timeline).toEqual([]);
+    expect(inheritedReads).toBe(0);
+    expect(accessorReads).toBe(0);
+    expect(proxyReads).toBe(0);
+  });
+
   it('adopts a trusted REST canonical alias only after valid history and Chat setup', async () => {
     const requestedSessionId = 'alias-session';
     const canonicalSession = {

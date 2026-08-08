@@ -1042,6 +1042,90 @@ describe('createLiveRestTransport', () => {
     ).rejects.toMatchObject({ code: 'invalid-response' });
   });
 
+  it('captures an exact-ID custom detail as one immutable projection', async () => {
+    const source = { ...LIVE_SESSION_FIXTURE };
+    const adapter: LiveRestTransport = {
+      getProviders: vi.fn(),
+      getAuthState: vi.fn(),
+      listSessions: vi.fn(),
+      getSessions: vi.fn(),
+      getSession: vi.fn().mockResolvedValue(source),
+      getSessionMessages: vi.fn()
+    };
+
+    const captured = await getLiveRestSessionForWorkspace(adapter, {}, source.id);
+
+    expect(captured).not.toBe(source);
+    expect(Object.isFrozen(captured)).toBe(true);
+    expect(captured).toEqual(source);
+    source.id = 'foreign-session';
+    source.title = 'mutated source';
+    expect(captured.id).toBe(LIVE_SESSION_FIXTURE.id);
+    expect(captured.title).toBe(LIVE_SESSION_FIXTURE.title);
+  });
+
+  it('rejects inherited, accessor, Proxy, and descriptor-variant details before use', async () => {
+    let inheritedReads = 0;
+    const inheritedDetail = Object.create({
+      get id(): string {
+        inheritedReads += 1;
+        return inheritedReads === 1 ? LIVE_SESSION_FIXTURE.id : 'foreign-session';
+      }
+    }) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(LIVE_SESSION_FIXTURE)) {
+      if (key !== 'id') Object.defineProperty(inheritedDetail, key, { value, enumerable: true });
+    }
+
+    let accessorReads = 0;
+    const accessorDetail = { ...LIVE_SESSION_FIXTURE };
+    Object.defineProperty(accessorDetail, 'id', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        accessorReads += 1;
+        return accessorReads === 1 ? LIVE_SESSION_FIXTURE.id : 'foreign-session';
+      }
+    });
+
+    let proxyReads = 0;
+    const proxyDetail = new Proxy({ ...LIVE_SESSION_FIXTURE }, {
+      get: (target, key, receiver) => {
+        if (key === 'id') {
+          proxyReads += 1;
+          return proxyReads === 1 ? LIVE_SESSION_FIXTURE.id : 'foreign-session';
+        }
+        return Reflect.get(target, key, receiver);
+      }
+    });
+
+    const descriptorDetail = { ...LIVE_SESSION_FIXTURE };
+    Object.defineProperty(descriptorDetail, 'id', {
+      configurable: true,
+      enumerable: false,
+      value: LIVE_SESSION_FIXTURE.id,
+      writable: true
+    });
+
+    const variants = [inheritedDetail, accessorDetail, proxyDetail, descriptorDetail];
+    for (const detail of variants) {
+      const adapter: LiveRestTransport = {
+        getProviders: vi.fn(),
+        getAuthState: vi.fn(),
+        listSessions: vi.fn(),
+        getSessions: vi.fn(),
+        getSession: vi.fn().mockResolvedValue(detail),
+        getSessionMessages: vi.fn()
+      };
+      await expect(
+        getLiveRestSessionForWorkspace(adapter, {}, LIVE_SESSION_FIXTURE.id)
+      ).rejects.toMatchObject({ code: 'invalid-response' });
+      expect(adapter.getSessionMessages).not.toHaveBeenCalled();
+    }
+    expect(inheritedReads).toBe(0);
+    expect(accessorReads).toBe(0);
+    expect(proxyReads).toBe(0);
+  });
+
   it('rejects oversized, wrong-media, malformed-UTF8, redirected, and non-success responses', async () => {
     const oversized = fetchSequence(response('{"providers":[]}'));
     await expect(

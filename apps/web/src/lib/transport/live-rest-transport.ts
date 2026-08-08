@@ -94,6 +94,8 @@ export interface LiveRestTransport {
   ): Promise<SessionMessages>;
 }
 
+type CapturedLiveSession = Readonly<LiveSession>;
+
 interface CanonicalAliasRecord {
   readonly requestedSessionId: string;
   readonly canonicalSessionId: string;
@@ -114,6 +116,11 @@ const liveRestAliasAuthorities = new WeakMap<object, LiveRestAliasAuthority>();
  * Fetches a session for one exact workspace. Real transports use their private
  * validated request closure; structural/custom adapters can only return an
  * exact-ID detail and cannot authorize an alias response.
+ *
+ * The returned value is one frozen, detached projection. Detail validation reads
+ * only own enumerable data descriptors, so an accessor, inherited field, proxy,
+ * or descriptor variant cannot change what the workspace later uses for history,
+ * publication, selection, or Chat creation.
  */
 export async function getLiveRestSessionForWorkspace(
   rest: LiveRestTransport,
@@ -129,28 +136,28 @@ export async function getLiveRestSessionForWorkspace(
   const session = authority
     ? await authority.fetchSession(requested, signal)
     : await rest.getSession(requested, signal);
-  if (!isValidLiveSessionDetail(session)) {
+  const captured = captureLiveSessionDetail(session);
+  if (!captured) {
     throw new LiveRestError('invalid-response');
   }
-  if (session.id === requested) return session;
+  if (captured.id === requested) return captured;
   if (!authority) {
     throw new LiveRestError('invalid-response');
   }
 
-  // Freeze only the validated alias detail. Its projection contains no mutable
-  // nested data, so a caller cannot turn an issued identity into malformed data
-  // before the one-shot consume gate runs.
-  const frozenSession = Object.freeze(session);
+  // Alias authority binds the exact detached projection, not the adapter's raw
+  // object. Clones and wrappers therefore cannot consume a canonical identity,
+  // while the frozen projection remains safe across every later workspace read.
   let pending = authority.pendingByWorkspace.get(workspace);
   if (!pending) {
     pending = new WeakMap<object, CanonicalAliasRecord>();
     authority.pendingByWorkspace.set(workspace, pending);
   }
-  pending.set(frozenSession, {
+  pending.set(captured, {
     requestedSessionId: requested,
-    canonicalSessionId: frozenSession.id
+    canonicalSessionId: captured.id
   });
-  return frozenSession;
+  return captured;
 }
 
 /**
@@ -177,12 +184,13 @@ export function consumeLiveRestCanonicalAlias(
   authority.consumedDetails.add(detail);
   if (
     record.requestedSessionId !== requested ||
-    !isValidLiveSessionDetail(detail) ||
-    detail.id !== record.canonicalSessionId ||
-    detail.id === record.requestedSessionId
+    record.canonicalSessionId === record.requestedSessionId
   ) {
     throw new LiveRestError('invalid-response');
   }
+  // The pending map is keyed by the frozen projection returned by
+  // getLiveRestSessionForWorkspace. Do not re-read or revalidate the detail
+  // here: a second read would reopen the accessor/proxy TOCTOU boundary.
   return record.canonicalSessionId;
 }
 
@@ -404,42 +412,129 @@ function isBoundedCounter(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000_000;
 }
 
-// Structural adapters need the same bounded shape check, but passing it never
-// grants alias authority; only the private real-transport fetch closure can do that.
-function isValidLiveSessionDetail(value: unknown): value is LiveSession {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const session = value as Partial<LiveSession>;
-  if (
-    typeof session.id !== 'string' ||
-    !SESSION_ID_PATTERN.test(session.id) ||
-    !isNullableText(session.source, MAX_SHORT_TEXT_LENGTH) ||
-    !isNullableText(session.model, MAX_SHORT_TEXT_LENGTH) ||
-    !isNullableText(session.title, MAX_TEXT_LENGTH) ||
-    !isBoundedTimestamp(session.startedAt) ||
-    !(session.endedAt === null || isBoundedTimestamp(session.endedAt)) ||
-    !isBoundedCounter(session.messageCount) ||
-    !isBoundedCounter(session.toolCallCount) ||
-    !isBoundedCounter(session.inputTokens) ||
-    !isBoundedCounter(session.outputTokens)
-  ) {
-    return false;
+const SESSION_DETAIL_REQUIRED_KEYS = [
+  'id',
+  'source',
+  'model',
+  'title',
+  'startedAt',
+  'endedAt',
+  'messageCount',
+  'toolCallCount',
+  'inputTokens',
+  'outputTokens'
+] as const;
+
+/**
+ * Captures one immutable detail projection for structural adapters. Reflection
+ * never reads through the source object: every accepted field comes from one
+ * own data descriptor, and all own keys must be enumerable data properties on a
+ * plain object. structuredClone is a fail-closed proxy check; its result is not
+ * used because the descriptor values above are the single captured snapshot.
+ */
+function captureLiveSessionDetail(value: unknown): CapturedLiveSession | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+
+  const descriptors = new Map<string, PropertyDescriptor>();
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') return undefined;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !('value' in descriptor) || descriptor.enumerable !== true) {
+        return undefined;
+      }
+      descriptors.set(key, descriptor);
+    }
+
+    const clone = globalThis.structuredClone;
+    if (typeof clone !== 'function') return undefined;
+    // Native structured cloning rejects Proxy objects without invoking their
+    // get traps. Accessors were rejected above before this check can run.
+    clone(value);
+  } catch {
+    return undefined;
   }
-  if (session.lastActive !== undefined && !isBoundedTimestamp(session.lastActive)) return false;
-  if (session.isActive !== undefined && typeof session.isActive !== 'boolean') return false;
-  if (session.preview !== undefined && !isNullableText(session.preview, MAX_TEXT_LENGTH)) return false;
+
+  const read = (key: string): unknown => descriptors.get(key)?.value;
+  for (const key of SESSION_DETAIL_REQUIRED_KEYS) {
+    if (!descriptors.has(key)) return undefined;
+  }
+
+  const id = read('id');
+  const source = read('source');
+  const model = read('model');
+  const title = read('title');
+  const startedAt = read('startedAt');
+  const endedAt = read('endedAt');
+  const messageCount = read('messageCount');
+  const toolCallCount = read('toolCallCount');
+  const inputTokens = read('inputTokens');
+  const outputTokens = read('outputTokens');
+
   if (
-    session.parentSessionId !== undefined &&
+    typeof id !== 'string' ||
+    !SESSION_ID_PATTERN.test(id) ||
+    !isNullableText(source, MAX_SHORT_TEXT_LENGTH) ||
+    !isNullableText(model, MAX_SHORT_TEXT_LENGTH) ||
+    !isNullableText(title, MAX_TEXT_LENGTH) ||
+    !isBoundedTimestamp(startedAt) ||
+    !(endedAt === null || isBoundedTimestamp(endedAt)) ||
+    !isBoundedCounter(messageCount) ||
+    !isBoundedCounter(toolCallCount) ||
+    !isBoundedCounter(inputTokens) ||
+    !isBoundedCounter(outputTokens)
+  ) {
+    return undefined;
+  }
+
+  const lastActive = read('lastActive');
+  const isActive = read('isActive');
+  const preview = read('preview');
+  const parentSessionId = read('parentSessionId');
+  const archived = read('archived');
+  const pinned = read('pinned');
+  const profile = read('profile');
+  const isDefaultProfile = read('isDefaultProfile');
+
+  if (lastActive !== undefined && !isBoundedTimestamp(lastActive)) return undefined;
+  if (isActive !== undefined && typeof isActive !== 'boolean') return undefined;
+  if (preview !== undefined && !isNullableText(preview, MAX_TEXT_LENGTH)) return undefined;
+  if (
+    parentSessionId !== undefined &&
     !(
-      session.parentSessionId === null ||
-      (typeof session.parentSessionId === 'string' && SESSION_ID_PATTERN.test(session.parentSessionId))
+      parentSessionId === null ||
+      (typeof parentSessionId === 'string' && SESSION_ID_PATTERN.test(parentSessionId))
     )
   )
-    return false;
-  if (session.archived !== undefined && typeof session.archived !== 'boolean') return false;
-  if (session.pinned !== undefined && typeof session.pinned !== 'boolean') return false;
-  if (session.profile !== undefined && !isBoundedText(session.profile, MAX_SHORT_TEXT_LENGTH)) return false;
-  if (session.isDefaultProfile !== undefined && typeof session.isDefaultProfile !== 'boolean') return false;
-  return true;
+    return undefined;
+  if (archived !== undefined && typeof archived !== 'boolean') return undefined;
+  if (pinned !== undefined && typeof pinned !== 'boolean') return undefined;
+  if (profile !== undefined && !isBoundedText(profile, MAX_SHORT_TEXT_LENGTH)) return undefined;
+  if (isDefaultProfile !== undefined && typeof isDefaultProfile !== 'boolean') return undefined;
+
+  return Object.freeze({
+    id,
+    source,
+    model,
+    title,
+    startedAt,
+    endedAt,
+    ...(lastActive !== undefined && { lastActive }),
+    ...(isActive !== undefined && { isActive }),
+    messageCount,
+    toolCallCount,
+    inputTokens,
+    outputTokens,
+    ...(preview !== undefined && { preview }),
+    ...(parentSessionId !== undefined && { parentSessionId }),
+    ...(archived !== undefined && { archived }),
+    ...(pinned !== undefined && { pinned }),
+    ...(profile !== undefined && { profile }),
+    ...(isDefaultProfile !== undefined && { isDefaultProfile })
+  });
 }
 
 export function normalizeApiBaseUrl(value = API_ROOT): string {

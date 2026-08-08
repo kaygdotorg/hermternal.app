@@ -122,16 +122,20 @@ budgets:
   closed.
 - A returned session ID is validated independently. It may differ from the
   requested path because Hermes resolves aliases and continuation sessions to a
-  canonical ID before returning session details or messages. No authority is
-  attached to the returned detail object. The exact transport instance created
-  here is registered in a module-private `WeakMap`; when that instance resolves
-  an alias, the exact workspace instance, requested alias, canonical ID, and
-  exact returned detail object are recorded in workspace-scoped private state.
-  The workspace consumes that record once. Clones, reflected properties,
-  descriptor copies, wrappers, custom adapters, wrong aliases, replay, and
-  cross-workspace or cross-transport transfer fail closed. History remains a
-  strict commit key, so a foreign message response cannot replace the selected
-  timeline or identity.
+  canonical ID before returning session details or messages. Detail responses
+  are accepted only when a plain object exposes own enumerable data
+  descriptors; accessors, inherited fields, symbols, non-enumerable descriptor
+  variants, revoked objects, and Proxy wrappers fail closed. The transport then
+  captures one immutable normalized projection and the workspace never reads
+  the adapter's raw object again. The exact transport instance created here is
+  registered in a module-private `WeakMap`; when that instance resolves an
+  alias, the exact workspace instance, requested alias, canonical ID, and exact
+  frozen projection are recorded in workspace-scoped private state. The
+  workspace consumes that record once. Clones, reflected properties, descriptor
+  copies, wrappers, custom adapters, wrong aliases, replay, and cross-workspace
+  or cross-transport transfer fail closed. History remains a strict commit key,
+  so a foreign message response cannot replace the selected timeline or
+  identity.
 - Source-defined strings stay bounded but may be empty when the pinned
   TypeScript type says only `string`. This includes the identity's optional
   profile metadata (`email`, `display_name`, and `org_id`), nullable session
