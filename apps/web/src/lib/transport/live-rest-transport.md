@@ -122,11 +122,15 @@ budgets:
   closed.
 - A returned session ID is validated independently. It may differ from the
   requested path because Hermes resolves aliases and continuation sessions to a
-  canonical ID before returning session details or messages. Only a detail
-  response produced by this constructed transport receives its private,
-  request-bound canonical-alias marker; the workspace may use that marker to
-  adopt the validated canonical detail ID. History remains a strict commit key,
-  so a custom adapter or foreign message response cannot replace the selected
+  canonical ID before returning session details or messages. No authority is
+  attached to the returned detail object. The exact transport instance created
+  here is registered in a module-private `WeakMap`; when that instance resolves
+  an alias, the exact workspace instance, requested alias, canonical ID, and
+  exact returned detail object are recorded in workspace-scoped private state.
+  The workspace consumes that record once. Clones, reflected properties,
+  descriptor copies, wrappers, custom adapters, wrong aliases, replay, and
+  cross-workspace or cross-transport transfer fail closed. History remains a
+  strict commit key, so a foreign message response cannot replace the selected
   timeline or identity.
 - Source-defined strings stay bounded but may be empty when the pinned
   TypeScript type says only `string`. This includes the identity's optional

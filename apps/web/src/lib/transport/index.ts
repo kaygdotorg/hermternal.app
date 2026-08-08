@@ -17,7 +17,6 @@ export {
   LiveRestError,
   createLiveRestTransport,
   createLiveTransport,
-  isLiveRestCanonicalAlias,
   normalizeApiBaseUrl,
   validateSessionId
 } from './live-rest';

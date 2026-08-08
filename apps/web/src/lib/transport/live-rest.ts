@@ -1,7 +1,6 @@
 export {
   createLiveRestTransport,
   createLiveTransport,
-  isLiveRestCanonicalAlias,
   LiveRestError,
   normalizeApiBaseUrl,
   validateSessionId

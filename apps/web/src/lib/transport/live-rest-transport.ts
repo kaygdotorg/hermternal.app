@@ -40,14 +40,6 @@ const PROVIDER_NAME_MAX_LENGTH = 96;
 const PROVIDER_NAME_FORBIDDEN_PATTERN = /[\s/\\\p{C}]/u;
 const PROVIDER_CONTROL_PATTERN = /\p{C}/u;
 
-// Only the constructed browser REST transport can authorize a detail response
-// whose validated ID differs from the requested path. Keep the marker private
-// so a structural/custom adapter remains strict at the workspace boundary.
-const LIVE_REST_CANONICAL_ALIAS: unique symbol = Symbol('live-rest-canonical-alias');
-type LiveRestCanonicalAlias = {
-  readonly [LIVE_REST_CANONICAL_ALIAS]: string;
-};
-
 export type LiveRestErrorCode =
   | 'aborted'
   | 'timeout'
@@ -102,19 +94,103 @@ export interface LiveRestTransport {
   ): Promise<SessionMessages>;
 }
 
+interface CanonicalAliasRecord {
+  readonly requestedSessionId: string;
+  readonly canonicalSessionId: string;
+}
+
+interface LiveRestAliasAuthority {
+  readonly fetchSession: (sessionId: string, signal?: AbortSignal) => Promise<LiveSession>;
+  readonly pendingByWorkspace: WeakMap<object, WeakMap<object, CanonicalAliasRecord>>;
+  readonly consumedDetails: WeakSet<object>;
+}
+
+// Trust never travels on a returned detail object. Only the exact transport
+// object created below can issue authority, and only the exact workspace that
+// requested an alias can consume its exact returned detail once.
+const liveRestAliasAuthorities = new WeakMap<object, LiveRestAliasAuthority>();
+
 /**
- * Returns true only for a detail response branded by this module after its
- * validated ID resolved from the supplied request-path alias. The marker is
- * intentionally not part of LiveSession, so custom adapters cannot opt in by
- * satisfying a public structural type.
+ * Fetches a session for one exact workspace. Real transports use their private
+ * validated request closure; structural/custom adapters can only return an
+ * exact-ID detail and cannot authorize an alias response.
  */
-export function isLiveRestCanonicalAlias(
-  value: unknown,
+export async function getLiveRestSessionForWorkspace(
+  rest: LiveRestTransport,
+  workspace: object,
+  requestedSessionId: string,
+  signal?: AbortSignal
+): Promise<LiveSession> {
+  if (!isWeakKey(rest) || !isWeakKey(workspace)) {
+    throw new LiveRestError('invalid-response');
+  }
+  const requested = validateSessionId(requestedSessionId);
+  const authority = liveRestAliasAuthorities.get(rest);
+  const session = authority
+    ? await authority.fetchSession(requested, signal)
+    : await rest.getSession(requested, signal);
+  if (!isValidLiveSessionDetail(session)) {
+    throw new LiveRestError('invalid-response');
+  }
+  if (session.id === requested) return session;
+  if (!authority) {
+    throw new LiveRestError('invalid-response');
+  }
+
+  // Freeze only the validated alias detail. Its projection contains no mutable
+  // nested data, so a caller cannot turn an issued identity into malformed data
+  // before the one-shot consume gate runs.
+  const frozenSession = Object.freeze(session);
+  let pending = authority.pendingByWorkspace.get(workspace);
+  if (!pending) {
+    pending = new WeakMap<object, CanonicalAliasRecord>();
+    authority.pendingByWorkspace.set(workspace, pending);
+  }
+  pending.set(frozenSession, {
+    requestedSessionId: requested,
+    canonicalSessionId: frozenSession.id
+  });
+  return frozenSession;
+}
+
+/**
+ * Consumes one alias detail issued for the exact transport/workspace pair.
+ * Returning `undefined` means no authority exists for this object; a detail
+ * that was issued but was altered, replayed, or presented with another alias
+ * fails closed with `invalid-response`.
+ */
+export function consumeLiveRestCanonicalAlias(
+  rest: LiveRestTransport,
+  workspace: object,
+  detail: unknown,
   requestedSessionId: string
-): value is LiveSession {
-  if (value === null || typeof value !== 'object') return false;
-  const marker = (value as Partial<LiveRestCanonicalAlias>)[LIVE_REST_CANONICAL_ALIAS];
-  return marker === requestedSessionId;
+): string | undefined {
+  if (!isWeakKey(rest) || !isWeakKey(workspace) || !isWeakKey(detail)) return undefined;
+  const authority = liveRestAliasAuthorities.get(rest);
+  if (!authority || authority.consumedDetails.has(detail)) return undefined;
+  const requested = validateSessionId(requestedSessionId);
+  const pending = authority.pendingByWorkspace.get(workspace);
+  const record = pending?.get(detail);
+  if (!record) return undefined;
+
+  pending?.delete(detail);
+  authority.consumedDetails.add(detail);
+  if (
+    record.requestedSessionId !== requested ||
+    !isValidLiveSessionDetail(detail) ||
+    detail.id !== record.canonicalSessionId ||
+    detail.id === record.requestedSessionId
+  ) {
+    throw new LiveRestError('invalid-response');
+  }
+  return record.canonicalSessionId;
+}
+
+/** Clear unconsumed alias authority for one workspace without reviving details. */
+export function resetLiveRestCanonicalAliasScope(rest: LiveRestTransport, workspace: object): void {
+  if (!isWeakKey(rest) || !isWeakKey(workspace)) return;
+  const authority = liveRestAliasAuthorities.get(rest);
+  authority?.pendingByWorkspace.set(workspace, new WeakMap<object, CanonicalAliasRecord>());
 }
 
 /**
@@ -240,7 +316,16 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
     }
   }
 
-  return {
+  const fetchSession = (sessionId: string, signal?: AbortSignal): Promise<LiveSession> => {
+    const requestedSessionId = validateSessionId(sessionId);
+    return request(
+      `/sessions/${encodeURIComponent(requestedSessionId)}`,
+      validateSession,
+      signal
+    );
+  };
+
+  const transport: LiveRestTransport = {
     getProviders(signal?: AbortSignal): Promise<ProviderDiscovery> {
       return request('/auth/providers', validateProviderDiscovery, signal);
     },
@@ -259,17 +344,7 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
       return request(`/sessions${query}`, validateSessionList, signal);
     },
 
-    async getSession(sessionId: string, signal?: AbortSignal): Promise<LiveSession> {
-      const requestedSessionId = validateSessionId(sessionId);
-      const session = await request(
-        `/sessions/${encodeURIComponent(requestedSessionId)}`,
-        validateSession,
-        signal
-      );
-      return session.id === requestedSessionId
-        ? session
-        : markCanonicalAlias(session, requestedSessionId);
-    },
+    getSession: fetchSession,
 
     getSessionMessages(
       sessionId: string,
@@ -285,6 +360,13 @@ export function createLiveRestTransport(options: LiveRestTransportOptions = {}):
       );
     }
   };
+
+  liveRestAliasAuthorities.set(transport, {
+    fetchSession,
+    pendingByWorkspace: new WeakMap<object, WeakMap<object, CanonicalAliasRecord>>(),
+    consumedDetails: new WeakSet<object>()
+  });
+  return transport;
 }
 
 /** Alias retained so callers can name the reviewed boundary by its domain role. */
@@ -295,6 +377,69 @@ export function validateSessionId(sessionId: string): string {
     throw new LiveRestError('invalid-session-id');
   }
   return sessionId;
+}
+
+function isWeakKey(value: unknown): value is object {
+  return (typeof value === 'object' && value !== null) || typeof value === 'function';
+}
+
+function isBoundedText(value: unknown, maximum: number): value is string {
+  return typeof value === 'string' && value.length <= maximum;
+}
+
+function isNullableText(value: unknown, maximum: number): value is string | null {
+  return value === null || isBoundedText(value, maximum);
+}
+
+function isBoundedTimestamp(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= MAX_UNIX_SECONDS
+  );
+}
+
+function isBoundedCounter(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000_000;
+}
+
+// Structural adapters need the same bounded shape check, but passing it never
+// grants alias authority; only the private real-transport fetch closure can do that.
+function isValidLiveSessionDetail(value: unknown): value is LiveSession {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const session = value as Partial<LiveSession>;
+  if (
+    typeof session.id !== 'string' ||
+    !SESSION_ID_PATTERN.test(session.id) ||
+    !isNullableText(session.source, MAX_SHORT_TEXT_LENGTH) ||
+    !isNullableText(session.model, MAX_SHORT_TEXT_LENGTH) ||
+    !isNullableText(session.title, MAX_TEXT_LENGTH) ||
+    !isBoundedTimestamp(session.startedAt) ||
+    !(session.endedAt === null || isBoundedTimestamp(session.endedAt)) ||
+    !isBoundedCounter(session.messageCount) ||
+    !isBoundedCounter(session.toolCallCount) ||
+    !isBoundedCounter(session.inputTokens) ||
+    !isBoundedCounter(session.outputTokens)
+  ) {
+    return false;
+  }
+  if (session.lastActive !== undefined && !isBoundedTimestamp(session.lastActive)) return false;
+  if (session.isActive !== undefined && typeof session.isActive !== 'boolean') return false;
+  if (session.preview !== undefined && !isNullableText(session.preview, MAX_TEXT_LENGTH)) return false;
+  if (
+    session.parentSessionId !== undefined &&
+    !(
+      session.parentSessionId === null ||
+      (typeof session.parentSessionId === 'string' && SESSION_ID_PATTERN.test(session.parentSessionId))
+    )
+  )
+    return false;
+  if (session.archived !== undefined && typeof session.archived !== 'boolean') return false;
+  if (session.pinned !== undefined && typeof session.pinned !== 'boolean') return false;
+  if (session.profile !== undefined && !isBoundedText(session.profile, MAX_SHORT_TEXT_LENGTH)) return false;
+  if (session.isDefaultProfile !== undefined && typeof session.isDefaultProfile !== 'boolean') return false;
+  return true;
 }
 
 export function normalizeApiBaseUrl(value = API_ROOT): string {
@@ -684,19 +829,6 @@ function validateSessionList(value: StrictJsonValue): SessionList {
   const offset = requireBoundedInteger(object.offset, 0, 1_000_000);
 
   return { sessions, total, limit, offset };
-}
-
-function markCanonicalAlias<T extends object>(
-  value: T,
-  requestedSessionId: string
-): T & LiveRestCanonicalAlias {
-  Object.defineProperty(value, LIVE_REST_CANONICAL_ALIAS, {
-    configurable: false,
-    enumerable: false,
-    value: requestedSessionId,
-    writable: false
-  });
-  return value as T & LiveRestCanonicalAlias;
 }
 
 function validateSession(value: StrictJsonValue): LiveSession {
