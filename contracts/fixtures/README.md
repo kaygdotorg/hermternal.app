@@ -49,9 +49,9 @@ commit and four artifact records for the combined checkout:
 `contracts/fixtures/index.json`, `contracts/fixtures/validator/test_validate.py`,
 `contracts/fixtures/validator/validate.py`, and
 `contracts/fixtures/validator/validation-baseline.json`. The source commit must
-be the authority introduction commit's direct first parent, so the authority
-cannot self-authorize scanner or baseline changes in the same commit. Both
-loaders enforce exact key order, blob OIDs, byte sizes, SHA-256 digests,
+be the authority binding commit's direct first parent, so the authority cannot
+self-authorize scanner or baseline changes in the same commit. Both loaders
+enforce exact key order, blob OIDs, byte sizes, SHA-256 digests,
 `synthetic_only: true`, and `live_claim: false` before comparing checkout bytes.
 The v1 and bootstrap v2 records remain historical compatibility evidence; they
 are not fallbacks for either exact-pinned v2 trust root. The historical final
