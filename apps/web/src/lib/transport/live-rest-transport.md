@@ -64,7 +64,9 @@ Pinned source citations at `f5be9236e00ddf2f2a412697f267078fc4ee068e`:
   profile metadata and may be empty for the pinned Basic provider. The source
   also defines `SessionInfo` with required source fields, numeric
   `started_at`/`last_active`, nullable numeric `ended_at`, required
-  activity/token counters, and optional `parent_session_id`.
+  activity/token counters, and optional `parent_session_id`. That type is the
+  richer list projection, not a guarantee that every field appears on the
+  raw session-detail route.
 - The same pinned web type defines `SessionMessage.content` as `string | null`
   and permits optional `tool_calls`, `tool_name`, `tool_call_id`, and numeric
   `timestamp`. Official history can serialize any of those optional tool fields
@@ -81,6 +83,17 @@ Pinned source citations at `f5be9236e00ddf2f2a412697f267078fc4ee068e`:
   returns the resolved session ID, raw `messages`, and a source-observed
   `pagination` object. The frontend interface omits that additive envelope, but
   this transport requires the pinned backend route's bounded pagination fields.
+- [`web_routers/sessions.py`](https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/web_routers/sessions.py)
+  uses a rich list query for `GET /api/sessions`, computes `is_active`, and
+  normalizes `archived`/`pinned` to JSON booleans. The detail handler calls
+  `SessionDB.get_session`, which returns the raw database row; it does not add
+  list-derived `last_active`, `is_active`, or `preview`, and it leaves the
+  SQLite archive/pin integers unchanged.
+- [`hermes_state.py`](https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/hermes_state.py)
+  selects `sessions.*` for `get_session`, while
+  [`hermes_state_common.py`](https://github.com/NousResearch/hermes-agent/blob/f5be9236e00ddf2f2a412697f267078fc4ee068e/hermes_cli/hermes_state_common.py)
+  defines `archived` and `pinned` as `INTEGER NOT NULL DEFAULT 0`; the source
+  setters write only `0` or `1`.
 - The local manifest's schema policy at
   `contracts/hermes-dashboard/manifest.md:39-45` requires additive-field
   tolerance and says not to infer fields from an unknown JSON object.
@@ -91,12 +104,22 @@ budgets:
 - `expires_at` is a required integer Unix-second value in
   `0..4,294,967,295`. Strings, `null`, fractions, negatives, and excessive
   integers fail closed.
-- Session `started_at` and `last_active` are required finite Unix-second values;
-  `ended_at` is a required nullable finite value. Fractional seconds are preserved
-  because the official Hermes session store emits sub-second timestamps. Source
-  strings are not coerced. Message timestamps use the same bounded rule. The
-  pinned session counters, pagination fields, token totals, and booleans remain
-  integers or exact booleans.
+- Session `started_at` is required, while `ended_at` is required and nullable.
+  List-derived `last_active` is optional on the shared projection because raw
+  detail rows omit it; when present it must be a finite bounded Unix-second
+  value. Fractional seconds are preserved because the official Hermes session
+  store emits sub-second timestamps. Source strings are not coerced. Message
+  timestamps use the same bounded rule. The pinned session counters,
+  pagination fields, and token totals remain integers.
+- List-derived `is_active` and `preview` are also optional on raw detail rows.
+  When present, `is_active` must be a JSON boolean and `preview` must be a
+  bounded string or explicit `null`. Omission remains omission; the client does
+  not synthesize list values for a detail response.
+- `archived` and `pinned` are optional additive flags. The list route supplies
+  booleans, while the raw detail route supplies the SQLite integer encoding;
+  only booleans or exact numeric `0`/`1` are accepted and they are normalized
+  to booleans. `null`, numeric strings, fractions, and other integers fail
+  closed.
 - A returned session ID is validated independently. It may differ from the
   requested path because Hermes resolves aliases and continuation sessions to a
   canonical ID before returning session details or messages.

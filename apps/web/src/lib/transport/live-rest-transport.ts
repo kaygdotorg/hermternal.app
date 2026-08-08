@@ -668,13 +668,10 @@ function validateSession(value: StrictJsonValue): LiveSession {
     'title',
     'started_at',
     'ended_at',
-    'last_active',
-    'is_active',
     'message_count',
     'tool_call_count',
     'input_tokens',
-    'output_tokens',
-    'preview'
+    'output_tokens'
   ]);
   // The route may return a canonical ID after resolving an alias or
   // continuation. The response ID must be safe, but it need not equal the
@@ -688,18 +685,22 @@ function validateSession(value: StrictJsonValue): LiveSession {
     title: requireNullableString(object.title, MAX_TEXT_LENGTH),
     startedAt: requireBoundedTimestamp(object.started_at),
     endedAt: requireNullableBoundedTimestamp(object.ended_at),
-    lastActive: requireBoundedTimestamp(object.last_active),
-    isActive: requireBoolean(object.is_active),
+    ...(object.last_active !== undefined && {
+      lastActive: requireBoundedTimestamp(object.last_active)
+    }),
+    ...(object.is_active !== undefined && { isActive: requireBoolean(object.is_active) }),
     messageCount: requireBoundedInteger(object.message_count, 0, 1_000_000_000),
     toolCallCount: requireBoundedInteger(object.tool_call_count, 0, 1_000_000_000),
     inputTokens: requireBoundedInteger(object.input_tokens, 0, 1_000_000_000),
     outputTokens: requireBoundedInteger(object.output_tokens, 0, 1_000_000_000),
-    preview: requireNullableString(object.preview, MAX_TEXT_LENGTH),
+    ...(object.preview !== undefined && {
+      preview: requireNullableString(object.preview, MAX_TEXT_LENGTH)
+    }),
     ...(object.parent_session_id !== undefined && {
       parentSessionId: requireNullableSessionId(object.parent_session_id)
     }),
-    ...(object.archived !== undefined && { archived: requireBoolean(object.archived) }),
-    ...(object.pinned !== undefined && { pinned: requireBoolean(object.pinned) }),
+    ...(object.archived !== undefined && { archived: requireSessionFlag(object.archived) }),
+    ...(object.pinned !== undefined && { pinned: requireSessionFlag(object.pinned) }),
     ...(object.profile !== undefined && {
       profile: requireBoundedString(object.profile, MAX_SHORT_TEXT_LENGTH)
     }),
@@ -879,6 +880,25 @@ function requireBoolean(value: StrictJsonValue): boolean {
     throw new LiveRestError('invalid-response');
   }
   return value;
+}
+
+/**
+ * Session list responses expose archive/pin flags as booleans, while raw detail
+ * rows expose the SQLite INTEGER representation. Accept only those two
+ * source-backed encodings and never apply JavaScript truthiness to arbitrary
+ * numbers or strings.
+ */
+function requireSessionFlag(value: StrictJsonValue): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (value === 0) {
+    return false;
+  }
+  if (value === 1) {
+    return true;
+  }
+  throw new LiveRestError('invalid-response');
 }
 
 function requireBoundedInteger(value: StrictJsonValue, min: number, max: number): number {

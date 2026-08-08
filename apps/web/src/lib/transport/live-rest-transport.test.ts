@@ -497,6 +497,101 @@ describe('createLiveRestTransport', () => {
     });
   });
 
+  it('accepts raw session-detail omissions and normalizes SQLite archive flags', async () => {
+    const detail = JSON.parse(rawSession()) as Record<string, unknown>;
+    delete detail.last_active;
+    delete detail.is_active;
+    delete detail.preview;
+    detail.archived = 1;
+    detail.pinned = 0;
+
+    const parsed = await createLiveRestTransport({
+      fetch: fetchSequence(response(JSON.stringify(detail))).fetch
+    }).getSession(LIVE_SESSION_FIXTURE.id);
+
+    expect(parsed).toMatchObject({
+      id: LIVE_SESSION_FIXTURE.id,
+      messageCount: LIVE_SESSION_FIXTURE.messageCount,
+      archived: true,
+      pinned: false
+    });
+    expect(parsed).not.toHaveProperty('lastActive');
+    expect(parsed).not.toHaveProperty('isActive');
+    expect(parsed).not.toHaveProperty('preview');
+  });
+
+  it('preserves optional session-detail omission and null distinctions', async () => {
+    const present = JSON.parse(rawSession()) as Record<string, unknown>;
+    present.last_active = 1_767_225_602.125;
+    present.is_active = true;
+    present.preview = null;
+    present.archived = false;
+    present.pinned = true;
+
+    const omitted = JSON.parse(rawSession()) as Record<string, unknown>;
+    delete omitted.last_active;
+    delete omitted.is_active;
+    delete omitted.preview;
+    delete omitted.archived;
+    delete omitted.pinned;
+
+    const fixture = fetchSequence(
+      response(JSON.stringify(present)),
+      response(JSON.stringify(omitted))
+    );
+    const transport = createLiveRestTransport({ fetch: fixture.fetch });
+
+    await expect(transport.getSession(LIVE_SESSION_FIXTURE.id)).resolves.toMatchObject({
+      lastActive: 1_767_225_602.125,
+      isActive: true,
+      preview: null,
+      archived: false,
+      pinned: true
+    });
+
+    const omittedResult = await transport.getSession(LIVE_SESSION_FIXTURE.id);
+    expect(omittedResult).not.toHaveProperty('lastActive');
+    expect(omittedResult).not.toHaveProperty('isActive');
+    expect(omittedResult).not.toHaveProperty('preview');
+    expect(omittedResult).not.toHaveProperty('archived');
+    expect(omittedResult).not.toHaveProperty('pinned');
+  });
+
+  it('rejects malformed optional session fields and unsupported archive flag encodings', async () => {
+    const invalidOptionalFields: Array<{
+      field: 'last_active' | 'is_active' | 'preview';
+      values: unknown[];
+    }> = [
+      { field: 'last_active', values: [null, -1, 4_294_967_296, '1767225600', true, [], {}] },
+      { field: 'is_active', values: [null, 0, 1, 'false', [], {}] },
+      { field: 'preview', values: [true, 42, [], {}, 'x'.repeat(8_193)] }
+    ];
+
+    for (const { field, values } of invalidOptionalFields) {
+      for (const value of values) {
+        const invalid = JSON.parse(rawSession()) as Record<string, unknown>;
+        invalid[field] = value;
+        await expect(
+          createLiveRestTransport({
+            fetch: fetchSequence(response(JSON.stringify(invalid))).fetch
+          }).getSession(LIVE_SESSION_FIXTURE.id)
+        ).rejects.toMatchObject({ code: value === 'x'.repeat(8_193) ? 'malformed-json' : 'invalid-response' });
+      }
+    }
+
+    for (const field of ['archived', 'pinned'] as const) {
+      for (const value of [null, -1, 2, 1.5, '0', [], {}] as const) {
+        const invalid = JSON.parse(rawSession()) as Record<string, unknown>;
+        invalid[field] = value;
+        await expect(
+          createLiveRestTransport({
+            fetch: fetchSequence(response(JSON.stringify(invalid))).fetch
+          }).getSession(LIVE_SESSION_FIXTURE.id)
+        ).rejects.toMatchObject({ code: 'invalid-response' });
+      }
+    }
+  });
+
   it('accepts empty profile metadata while stable identity fields remain non-empty', async () => {
     const providers = JSON.parse(rawProviderDiscovery()) as {
       providers: Array<Record<string, unknown>>;
@@ -713,13 +808,10 @@ describe('createLiveRestTransport', () => {
       'title',
       'started_at',
       'ended_at',
-      'last_active',
-      'is_active',
       'message_count',
       'tool_call_count',
       'input_tokens',
-      'output_tokens',
-      'preview'
+      'output_tokens'
     ]) {
       const missingSessionField = JSON.parse(rawSession()) as Record<string, unknown>;
       delete missingSessionField[field];
