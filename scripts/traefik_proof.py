@@ -548,8 +548,10 @@ def render_dynamic_config(value: Mapping[str, object]) -> dict[str, object]:
     host_rule = _host_rule(host)
 
     routers: dict[str, dict[str, object]] = {
-        # A wrong authority must produce the policy's 421 before a service is
-        # selected.  The service is a harmless local policy endpoint fallback.
+        # Traefik's generated X-Forwarded-Host preserves a noncanonical
+        # authority on this negative route. The adapter passes that single
+        # value to the policy model, which returns the retained edge 421 before
+        # the harmless local policy endpoint service can be selected.
         "wrong_host": _router(
             rule=f"!{host_rule}",
             priority=10000,
@@ -964,6 +966,7 @@ def render_manifest(
                 "static, client, and non-callback REST query mutations are model-denied",
                 "OAuth callback accepts only the reviewed code/state or provider-error query forms",
                 "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Port, X-Forwarded-Proto, and X-Forwarded-Uri",
+                "a present noncanonical X-Forwarded-Host reaches the policy model and returns edge 421; missing, duplicate, or malformed ForwardAuth metadata is adapter-denied",
                 "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
                 "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
                 "the adapter accepts only the generated ForwardAuth set, Origin, and explicit bounded transport headers; Authorization, Cookie, and unknown headers are denied",
@@ -993,6 +996,7 @@ def render_manifest(
                 "actual HTTP requests reach the bounded closed-contract ForwardAuth adapter",
                 "X-Forwarded-Port is checked against the configured HTTPS entrypoint port",
                 "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
+                "a present noncanonical X-Forwarded-Host returns the modeled edge 421 without an upstream request",
                 "C0, DEL, and C1 request-target controls are denied before route matching",
                 "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
                 "blocked edge and network vectors retain upstream_request=false in the annotated evidence",
@@ -2086,8 +2090,17 @@ def _forward_auth_policy_input(
     runtime_inputs: Mapping[str, object],
     headers: Sequence[tuple[str, str]],
 ) -> tuple[str, str, str, list[tuple[str, str]]]:
+    """Extract the bounded ForwardAuth input without masking host denials.
+
+    A present, single but noncanonical ``X-Forwarded-Host`` is a valid request
+    to the policy boundary and must reach ``policy_decision`` so it returns the
+    intended edge ``421``. Missing, duplicate, or malformed metadata remains a
+    ``400`` adapter-contract failure. Keeping that distinction makes a real
+    Traefik wrong-host request behave like the retained vector instead of
+    silently replacing it with a canonical synthetic header.
+    """
+
     inputs = _validate_runtime_inputs(runtime_inputs)
-    authority = _authority(inputs)
     _validate_forward_auth_header_names(headers)
     _validate_forward_auth_transport_headers(headers)
     required = {
@@ -2095,22 +2108,23 @@ def _forward_auth_policy_input(
         for name in TRAEFIK_FORWARDAUTH_GENERATED_HEADERS
     }
     if (
-        required["X-Forwarded-Host"] != authority
-        or required["X-Forwarded-Port"] != str(inputs["https_port"])
+        required["X-Forwarded-Port"] != str(inputs["https_port"])
         or required["X-Forwarded-Proto"] != "https"
     ):
-        raise ValueError("ForwardAuth authority, port, or scheme is not canonical")
+        raise ValueError("ForwardAuth port or scheme is not canonical")
     if not required["X-Forwarded-For"]:
         raise ValueError("ForwardAuth client address is missing")
     method = str(required["X-Forwarded-Method"])
     path, query = _parse_forwarded_uri(str(required["X-Forwarded-Uri"]))
     origin = _single_header(headers, "Origin") or ""
     policy_headers = [
-        ("X-Forwarded-Host", authority),
+        ("X-Forwarded-Host", str(required["X-Forwarded-Host"])),
         ("X-Forwarded-Port", str(inputs["https_port"])),
         ("X-Forwarded-Proto", "https"),
         ("Origin", origin),
     ]
+    # The raw forwarded host is passed through above so a noncanonical value
+    # produces the policy model's 421 instead of a synthetic 400.
     return method, path, query, policy_headers
 
 
@@ -2380,9 +2394,13 @@ def _route_case_headers(runtime_inputs: Mapping[str, object], vector: Mapping[st
     inputs = _validate_runtime_inputs(runtime_inputs)
     authority = _authority(inputs)
     host = authority if vector["host"] == "expected" else "wrong.test:19444"
+    # Traefik preserves the request authority in generated X-Forwarded-Host.
+    # Keep the wrong-host vector noncanonical so it exercises the same edge
+    # 421 path as the real ForwardAuth request instead of masking the mismatch.
+    forwarded_host = authority if vector["host"] == "expected" else host
     headers = [
         ("Host", host),
-        ("X-Forwarded-Host", authority),
+        ("X-Forwarded-Host", forwarded_host),
         ("X-Forwarded-Port", str(inputs["https_port"])),
         ("X-Forwarded-Proto", "https"),
     ]
