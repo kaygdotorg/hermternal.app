@@ -127,8 +127,10 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   structured-error redaction (including native Error causes, Playwright `errorContext`, matcher results,
   logs, and ARIA snapshots) into detached trusted snapshots, with descriptor/read-back checks for data and
   accessor properties and no retained source graph. Snapshot arrays remain real Playwright-compatible arrays
-  with safe own serialization and species behavior; own `toJSON` hooks, stateful or inconsistent properties,
-  incomplete descriptors, malformed values, and over-budget graphs fail closed. Balanced serialized
+  with safe own serialization and species behavior; the live worker also pins inherited `Object.prototype`
+  and `Array.prototype` serializers before Playwright maps `testInfo.errors` into ordinary IPC payloads.
+  Own `toJSON` hooks, stateful or inconsistent properties, incomplete descriptors, malformed values, and
+  over-budget graphs fail closed. Balanced serialized
   contenteditable markup, raw-text textarea bodies, select/option nesting, and actual `value` attributes
   are scanned structurally, including unquoted values. Comments, nested or mismatched form markup,
   unclosed containers, malformed or unknown markup, duplicate or ambiguous attributes, and encoded
