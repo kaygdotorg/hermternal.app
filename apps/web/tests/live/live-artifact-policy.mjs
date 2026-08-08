@@ -280,15 +280,18 @@ export function liveCredentialValues(environment = process.env) {
 }
 
 /**
- * Reject Playwright's debug mode before it can replace worker IPC with direct
- * stderr inheritance. The live lane promises that every worker diagnostic is
- * detached and redacted; a truthy `PW_RUNNER_DEBUG` violates that boundary.
+ * Reject Playwright's debug modes before it can replace worker IPC with direct
+ * stderr inheritance or switch the browser to a headed/UI launch. The live lane
+ * promises detached, redacted diagnostics and deterministic headless capture.
  *
  * @param {Record<string, string | undefined>} [environment]
  */
 export function assertLiveRunnerDebugDisabled(environment = process.env) {
   if (environment.PW_RUNNER_DEBUG) {
     throw new SAFE_ERROR('PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane');
+  }
+  if (environment.PWDEBUG) {
+    throw new SAFE_ERROR('PWDEBUG is incompatible with the deterministic headless live lane');
   }
 }
 

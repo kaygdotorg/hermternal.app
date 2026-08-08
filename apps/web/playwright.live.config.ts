@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { chromium } from 'playwright';
 import { join, resolve } from 'node:path';
 import {
   assertLiveRunnerDebugDisabled,
@@ -7,7 +8,8 @@ import {
 } from './tests/live/live-artifact-policy.mjs';
 
 // Playwright's debug mode inherits worker stderr directly, bypassing the IPC
-// guard. Reject it before the runner can spawn a credential-bearing worker.
+// guard. Reject PW_RUNNER_DEBUG and PWDEBUG before the runner can spawn a
+// credential-bearing worker or switch the browser to a headed/UI mode.
 assertLiveRunnerDebugDisabled();
 
 // Playwright appends LastRunReporter after global teardown. Its default
@@ -35,6 +37,18 @@ const livePlaywrightOutputDirectory = join(liveOutputDirectory, '.playwright-out
 process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR = liveOutputDirectory;
 process.env.PLAYWRIGHT_LIVE_OUTPUT_TOKEN = liveArtifactOutputOwnershipToken();
 
+// Playwright can select chromium-headless-shell for a headless launch even
+// when chromium.executablePath() identifies regular Chrome for Testing. Bind
+// the opt-in capture lane to the resolved regular executable so the helper's
+// pre-evaluate provenance check proves the browser actually launched from the
+// same revision-1234 path. Default-off config imports do not touch the cache.
+const liveCaptureLaunchOptions = {
+  headless: true,
+  ...(process.env.HERMTERNAL_LIVE_SCREENSHOT_CAPTURE === '1'
+    ? { executablePath: chromium.executablePath() }
+    : {})
+};
+
 export default defineConfig({
   testDir: './tests/live',
   fullyParallel: false,
@@ -60,7 +74,8 @@ export default defineConfig({
     trace: 'off',
     video: 'off',
     screenshot: 'off',
-    colorScheme: 'light'
+    colorScheme: 'light',
+    launchOptions: liveCaptureLaunchOptions
   },
   webServer: {
     // This disposable host keeps browser traffic same-origin while Hermes stays

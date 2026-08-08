@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { promises as fsPromises } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -7,9 +9,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import WorkspacePreview from './workspace/WorkspacePreview.svelte';
 import liveConfig from '../../playwright.live.config';
 import {
-  captureLiveChatScreenshot,
   captureLiveChatScreenshotIfEnabled,
   createLiveScreenshotManifest,
+  getLiveScreenshotChromiumProvenance,
+  getLiveScreenshotChromiumRegistry,
   persistApprovedLiveScreenshot,
   sanitizeLiveChatCapturePresentation,
   serializeLiveScreenshotManifest,
@@ -21,24 +24,55 @@ const PNG_BYTES = Buffer.concat([
   Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
   Buffer.from('synthetic-approved-png', 'utf8')
 ]);
-const CLIENT_SHA = 'a'.repeat(40);
+const CLIENT_SHA = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const temporaryRoots: string[] = [];
 
-function fakePage(options: { bytes?: Buffer; route?: string; viewport?: { width: number; height: number } } = {}) {
+type FakePageOptions = {
+  bytes?: Buffer;
+  route?: string;
+  viewport?: { width: number; height: number };
+  browserVersion?: string;
+  executablePath?: string;
+  beforeLocatorScreenshot?: () => Promise<void>;
+};
+
+function captureEnvironment(extra: Record<string, string | undefined> = {}) {
+  return {
+    HERMTERNAL_LIVE_SCREENSHOT_CAPTURE: '1',
+    HERMTERNAL_PAPER_PARITY_APPROVED: '1',
+    HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA: CLIENT_SHA,
+    ...extra
+  };
+}
+
+function fakePage(options: FakePageOptions = {}) {
   const bytes = options.bytes ?? PNG_BYTES;
+  const pinned = getLiveScreenshotChromiumProvenance();
+  const locatorScreenshot = vi.fn(async () => {
+    await options.beforeLocatorScreenshot?.();
+    return bytes;
+  });
   const page = {
     url: () => `http://127.0.0.1:4187${options.route ?? '/'}`,
     viewportSize: () => options.viewport ?? { width: 1440, height: 960 },
     context: () => ({
       browser: () => ({
-        browserType: () => ({ name: () => 'chromium' }),
-        version: () => '140.0.7339.0'
+        browserType: () => ({
+          name: () => 'chromium',
+          executablePath: () => options.executablePath ?? pinned.executablePath
+        }),
+        version: () => options.browserVersion ?? pinned.version
       })
     }),
     emulateMedia: vi.fn(async () => undefined),
     evaluate: vi.fn(async (pageFunction: unknown) => {
       if (pageFunction === sanitizeLiveChatCapturePresentation) {
-        return { sanitized: true, removedValueCount: 3, prohibitedNodeCount: 0 };
+        return {
+          sanitized: true,
+          captureSelector: '[data-capture-root="live-chat"]',
+          removedValueCount: 3,
+          prohibitedNodeCount: 0
+        };
       }
       return {
         devicePixelRatio: 1,
@@ -48,15 +82,22 @@ function fakePage(options: { bytes?: Buffer; route?: string; viewport?: { width:
         zoom: 1
       };
     }),
-    screenshot: vi.fn(async () => bytes)
+    locator: vi.fn((selector: string) => {
+      if (selector !== '[data-capture-root="live-chat"]') throw new Error('unexpected capture selector');
+      return { screenshot: locatorScreenshot };
+    }),
+    screenshot: vi.fn(async () => bytes),
+    locatorScreenshot
   };
   return page;
 }
 
 function manifestFixture() {
+  const pinned = getLiveScreenshotChromiumRegistry();
   return createLiveScreenshotManifest({
     browserName: 'chromium',
-    browserVersion: '140.0.7339.0',
+    browserRevision: pinned.revision,
+    browserVersion: pinned.version,
     clientSha: CLIENT_SHA,
     devicePixelRatio: 1,
     imageSha256: sha256Hex(PNG_BYTES),
@@ -72,6 +113,23 @@ async function temporaryDirectory() {
   const root = await fsPromises.mkdtemp(join(tmpdir(), 'hermternal-live-screenshot-test-'));
   temporaryRoots.push(root);
   return root;
+}
+
+async function startTestOrigin() {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end('<!doctype html><html><body>test origin</body></html>');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error('test origin did not expose a TCP address');
+  }
+  return { server, url: `http://127.0.0.1:${address.port}/` };
 }
 
 afterEach(async () => {
@@ -133,13 +191,19 @@ describe('deterministic live Chat screenshot capture', () => {
     expect(preview?.textContent).toContain('private user prompt');
     expect(preview?.querySelector('[data-live-content="conversation-timeline"]')).toBeTruthy();
     expect(preview?.querySelector('.header-model')).toHaveTextContent('PRIVATE PROVIDER MODEL');
+    expect(preview?.querySelector('.model-control option')).toHaveTextContent('Atlas · balanced');
     expect([...preview!.querySelectorAll('.group-count')].map((node) => node.textContent)).toEqual([
       '0',
       '1'
     ]);
 
     const result = sanitizeLiveChatCapturePresentation();
-    expect(result).toEqual({ sanitized: true, removedValueCount: expect.any(Number), prohibitedNodeCount: 0 });
+    expect(result).toMatchObject({
+      sanitized: true,
+      captureSelector: '[data-capture-root="live-chat"]',
+      removedValueCount: expect.any(Number),
+      prohibitedNodeCount: 0
+    });
     expect(preview?.querySelector('[data-live-content]')).toBeNull();
     expect(preview?.querySelector('.user-message, .assistant-copy, .tool-row')).toBeNull();
     expect(preview?.querySelector('[data-capture-placeholder="conversation"]')).toHaveTextContent(
@@ -158,6 +222,10 @@ describe('deterministic live Chat screenshot capture', () => {
       '—'
     ]);
     expect([...preview!.querySelectorAll('.group-count')].map((node) => node.textContent)).not.toContain('1');
+    expect(preview?.querySelector('.model-control .model-short')).toHaveTextContent('Model');
+    expect([...preview!.querySelectorAll('.model-control option')]).toHaveLength(1);
+    expect(preview?.querySelector('.model-control option')).toHaveTextContent('Model');
+    expect(preview?.querySelector<HTMLSelectElement>('.model-control select')?.value).toBe('Model');
   });
 
   it('scrubs metadata in the real Chromium page realm', async () => {
@@ -202,12 +270,164 @@ describe('deterministic live Chat screenshot capture', () => {
     }
   });
 
+  it('scrubs short metadata values across duplicate nodes, storage, and serialized capture DOM', async () => {
+    const browser = await chromium.launch({ headless: true, executablePath: getLiveScreenshotChromiumProvenance().executablePath });
+    const origin = await startTestOrigin();
+    try {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await page.goto(origin.url);
+      await page.setContent(`
+        <div data-capture-wrapper>
+          <section data-testid="runtime-preview">
+            <section data-live-content="conversation-timeline"><p class="assistant-copy">PRIVATE TRANSCRIPT</p></section>
+            <div class="header-model" data-model="Q" aria-label="Current model Q" title="Q"><span>Q</span></div>
+            <div class="header-model" data-model="7" aria-label="Current model 7" title="7"><span>7</span></div>
+            <span class="group-count" data-count="Q" aria-label="Q" title="Q" value="Q">Q</span>
+            <span class="group-count" data-count="7" aria-label="7" title="7" value="7">7</span>
+            <label class="model-control" data-model="Q" aria-label="Q" title="Q">
+              <span class="model-short">Q</span>
+              <select aria-label="Model" title="Q" data-selected="Q">
+                <option value="Atlas · balanced">Atlas · balanced</option>
+                <option value="Q">Q</option>
+              </select>
+            </label>
+          </section>
+        </div>
+      `);
+      await page.evaluate(() => {
+        localStorage.setItem('Q', '7');
+        sessionStorage.setItem('7', 'Q');
+      });
+
+      await expect(page.evaluate(sanitizeLiveChatCapturePresentation)).resolves.toMatchObject({
+        sanitized: true,
+        captureSelector: '[data-capture-root="live-chat"]',
+        prohibitedNodeCount: 0
+      });
+      const result = await page.evaluate(() => {
+        const source = document.querySelector('[data-testid="runtime-preview"]');
+        return {
+          sourceText: source?.textContent,
+          sourceMarkup: document.documentElement.outerHTML,
+          captureMarkup: document.querySelector('[data-capture-root="live-chat"]')?.outerHTML,
+          metadataMarkup: [...(source?.querySelectorAll('.header-model, .group-count, .model-control, .model-control select, .model-control option') ?? [])]
+            .map((node) => node.outerHTML)
+            .join('\\n'),
+          localStorageLength: localStorage.length,
+          sessionStorageLength: sessionStorage.length,
+          models: [...(source?.querySelectorAll('.header-model') ?? [])].map((node) => node.textContent?.trim()),
+          counts: [...(source?.querySelectorAll('.group-count') ?? [])].map((node) => node.textContent?.trim()),
+          options: [...(source?.querySelectorAll('.model-control option') ?? [])].map((node) => node.textContent?.trim())
+        };
+      });
+      expect(result.sourceText).not.toContain('Q');
+      expect(result.sourceText).not.toContain('7');
+      expect(result.sourceMarkup).not.toContain('Q');
+      expect(result.captureMarkup).not.toContain('Q');
+      expect(result.metadataMarkup).not.toContain('Q');
+      expect(result.metadataMarkup).not.toContain('7');
+      expect(result.localStorageLength).toBe(0);
+      expect(result.sessionStorageLength).toBe(0);
+      expect(result.models).toEqual(['Model', 'Model']);
+      expect(result.counts).toEqual(['—', '—']);
+      expect(result.options).toEqual(['Model']);
+      await context.close();
+    } finally {
+      await browser.close();
+      await new Promise<void>((resolve) => origin.server.close(() => resolve()));
+    }
+  });
+
+  it('captures the frozen clone when the live DOM is repopulated before screenshot', async () => {
+    const browser = await chromium.launch({ headless: true, executablePath: getLiveScreenshotChromiumProvenance().executablePath });
+    const origin = await startTestOrigin();
+    const markup = `
+      <div style="width: 1440px; height: 960px">
+        <section data-testid="runtime-preview">
+          <section data-live-content="conversation-timeline"><div data-capture-placeholder="conversation">Conversation preview</div></section>
+          <div class="header-model" aria-label="Current model"><span>Model</span></div>
+          <span class="group-count">—</span>
+        </section>
+      </div>
+    `;
+    try {
+      const baselineContext = await browser.newContext({ viewport: { width: 1440, height: 960 }, deviceScaleFactor: 1 });
+      const baselinePage = await baselineContext.newPage();
+      await baselinePage.goto(origin.url);
+      await baselinePage.setContent(markup);
+      const baseline = await captureLiveChatScreenshotIfEnabled({
+        page: baselinePage,
+        uiState: 'ready',
+        environment: captureEnvironment()
+      });
+      await baselineContext.close();
+
+      const attackContext = await browser.newContext({ viewport: { width: 1440, height: 960 }, deviceScaleFactor: 1 });
+      const attackPage = await attackContext.newPage();
+      await attackPage.goto(origin.url);
+      await attackPage.setContent(markup);
+      let repopulated = false;
+      const actualLocator = attackPage.locator('[data-capture-root="live-chat"]');
+      const originalScreenshot = actualLocator.screenshot.bind(actualLocator);
+      const mutablePage = attackPage as unknown as {
+        locator: (selector: string) => { screenshot: (options: Record<string, unknown>) => Promise<Buffer> };
+      };
+      mutablePage.locator = (selector) => ({
+        screenshot: async (options) => {
+          await attackPage.evaluate(() => {
+            const preview = document.querySelector('[data-testid="runtime-preview"]');
+            preview?.querySelector('.header-model span')?.replaceChildren(document.createTextNode('HOSTILE PROVIDER Q'));
+            preview?.querySelector('.group-count')?.replaceChildren(document.createTextNode('7'));
+            const transcript = preview?.querySelector('[data-capture-placeholder="conversation"]');
+            const hostileTranscript = document.createElement('div');
+            hostileTranscript.className = 'assistant-copy';
+            transcript?.append(hostileTranscript);
+            localStorage.setItem('Q', '7');
+          });
+          repopulated = true;
+          return originalScreenshot(options);
+        }
+      });
+
+      const captured = await captureLiveChatScreenshotIfEnabled({
+        page: attackPage,
+        uiState: 'ready',
+        environment: captureEnvironment()
+      });
+      expect(repopulated).toBe(true);
+      expect(captured?.bytes.equals(baseline!.bytes)).toBe(true);
+      await expect(
+        attackPage.evaluate(() => ({
+          liveText: document.querySelector('[data-testid="runtime-preview"]')?.textContent,
+          liveStorage: localStorage.getItem('Q'),
+          captureText: document.querySelector('[data-capture-root="live-chat"]')?.textContent
+        }))
+      ).resolves.toEqual({
+        liveText: expect.stringContaining('HOSTILE PROVIDER Q'),
+        liveStorage: '7',
+        captureText: expect.not.stringContaining('HOSTILE PROVIDER Q')
+      });
+      await attackContext.close();
+    } finally {
+      await browser.close();
+      await new Promise<void>((resolve) => origin.server.close(() => resolve()));
+    }
+  });
+
   it('observes the resolved Chromium project viewport and reduced-motion preference', async () => {
     const globalUse = (liveConfig.use ?? {}) as Record<string, unknown>;
     const projectUse = (liveConfig.projects?.[0]?.use ?? {}) as Record<string, unknown>;
     const resolvedUse = { ...globalUse, ...projectUse };
-    const browser = await chromium.launch({ headless: true });
+    const launchOptions = (resolvedUse.launchOptions ?? {}) as Record<string, unknown>;
+    expect(launchOptions.headless).toBe(true);
+    const pinned = getLiveScreenshotChromiumProvenance();
+    const browser = await chromium.launch({
+      headless: true,
+      executablePath: pinned.executablePath
+    });
     try {
+      expect(browser.version()).toBe(pinned.version);
       const contextOptions = (resolvedUse.contextOptions ?? {}) as Record<string, unknown>;
       const context = await browser.newContext({
         viewport: resolvedUse.viewport as { width: number; height: number },
@@ -259,20 +479,137 @@ describe('deterministic live Chat screenshot capture', () => {
     expect(page.screenshot).not.toHaveBeenCalled();
   });
 
-  it('pins the route, dimensions, browser inputs, UI state, attestation, and image hash deterministically', async () => {
-    const first = await captureLiveChatScreenshot({
-      page: fakePage(),
-      clientSha: CLIENT_SHA,
-      paperParityApproved: true,
-      stateStable: true,
-      uiState: 'ready'
+  it('rejects wrong Chromium version, revision, or executable before page mutation', async () => {
+    const pinned = getLiveScreenshotChromiumProvenance();
+    for (const page of [
+      fakePage({ browserVersion: '151.0.7922.35' }),
+      fakePage({ executablePath: pinned.executablePath.replace('chromium-1234', 'chromium-9999') }),
+      fakePage({ executablePath: '/tmp/unapproved-chromium' })
+    ]) {
+      await expect(
+        captureLiveChatScreenshotIfEnabled({
+          page,
+          uiState: 'ready',
+          environment: captureEnvironment()
+        })
+      ).rejects.toThrow('Chromium provenance is not pinned');
+      expect(page.emulateMedia).not.toHaveBeenCalled();
+      expect(page.evaluate).not.toHaveBeenCalled();
+      expect(page.locatorScreenshot).not.toHaveBeenCalled();
+    }
+  });
+
+  it('preflights retention before any page mutation for invalid review or destination', async () => {
+    const root = await temporaryDirectory();
+    const validDestination = join(root, 'valid-destination');
+    await fsPromises.mkdir(validDestination);
+    const victim = join(root, 'victim');
+    await fsPromises.mkdir(victim);
+    const fileDestination = join(root, 'file-destination');
+    await fsPromises.writeFile(fileDestination, 'not a directory', 'utf8');
+    const cases = [
+      {
+        name: 'invalid review',
+        environment: captureEnvironment({
+          HERMTERNAL_LIVE_SCREENSHOT_RETAIN: '1',
+          HERMTERNAL_LIVE_SCREENSHOT_REVIEW: 'pending-independent-review',
+          HERMTERNAL_LIVE_SCREENSHOT_DESTINATION: validDestination
+        }),
+        error: 'independent approval'
+      },
+      {
+        name: 'missing destination',
+        environment: captureEnvironment({
+          HERMTERNAL_LIVE_SCREENSHOT_RETAIN: '1',
+          HERMTERNAL_LIVE_SCREENSHOT_REVIEW: 'independent-approved'
+        }),
+        error: 'explicit destination'
+      },
+      {
+        name: 'nonexistent destination',
+        environment: captureEnvironment({
+          HERMTERNAL_LIVE_SCREENSHOT_RETAIN: '1',
+          HERMTERNAL_LIVE_SCREENSHOT_REVIEW: 'independent-approved',
+          HERMTERNAL_LIVE_SCREENSHOT_DESTINATION: join(root, 'missing')
+        }),
+        error: 'destination is unavailable'
+      },
+      {
+        name: 'non-directory destination',
+        environment: captureEnvironment({
+          HERMTERNAL_LIVE_SCREENSHOT_RETAIN: '1',
+          HERMTERNAL_LIVE_SCREENSHOT_REVIEW: 'independent-approved',
+          HERMTERNAL_LIVE_SCREENSHOT_DESTINATION: fileDestination
+        }),
+        error: 'not a directory'
+      },
+      {
+        name: 'symlink destination',
+        environment: captureEnvironment({
+          HERMTERNAL_LIVE_SCREENSHOT_RETAIN: '1',
+          HERMTERNAL_LIVE_SCREENSHOT_REVIEW: 'independent-approved',
+          HERMTERNAL_LIVE_SCREENSHOT_DESTINATION: join(root, 'symlink-destination')
+        }),
+        error: 'contains a symlink'
+      }
+    ];
+    await fsPromises.symlink(victim, join(root, 'symlink-destination'));
+
+    for (const testCase of cases) {
+      const page = fakePage();
+      await expect(
+        captureLiveChatScreenshotIfEnabled({
+          page,
+          uiState: 'ready',
+          environment: testCase.environment
+        })
+      ).rejects.toThrow(testCase.error);
+      expect(page.emulateMedia).not.toHaveBeenCalled();
+      expect(page.evaluate).not.toHaveBeenCalled();
+      expect(page.locatorScreenshot).not.toHaveBeenCalled();
+      expect(page.screenshot).not.toHaveBeenCalled();
+    }
+  });
+
+  it('captures after valid retention preflight but publishes zero bytes after destination replacement', async () => {
+    const root = await temporaryDirectory();
+    const destination = join(root, 'destination');
+    const replacement = join(root, 'replacement');
+    await fsPromises.mkdir(destination);
+    await fsPromises.mkdir(replacement);
+    const page = fakePage({
+      beforeLocatorScreenshot: async () => {
+        await fsPromises.rm(destination, { recursive: true, force: true });
+        await fsPromises.symlink(replacement, destination);
+      }
     });
-    const second = await captureLiveChatScreenshot({
+
+    await expect(
+      captureLiveChatScreenshotIfEnabled({
+        page,
+        uiState: 'ready',
+        environment: captureEnvironment({
+          HERMTERNAL_LIVE_SCREENSHOT_RETAIN: '1',
+          HERMTERNAL_LIVE_SCREENSHOT_REVIEW: 'independent-approved',
+          HERMTERNAL_LIVE_SCREENSHOT_DESTINATION: destination
+        })
+      })
+    ).rejects.toThrow(/symlink|changed/);
+    expect(page.evaluate).toHaveBeenCalled();
+    expect(page.locatorScreenshot).toHaveBeenCalled();
+    expect(await fsPromises.readdir(replacement)).toEqual([]);
+  });
+
+  it('pins the route, dimensions, browser inputs, UI state, attestation, and image hash deterministically', async () => {
+    const first = await captureLiveChatScreenshotIfEnabled({
       page: fakePage(),
-      clientSha: CLIENT_SHA,
-      paperParityApproved: true,
-      stateStable: true,
-      uiState: 'ready'
+      uiState: 'ready',
+      environment: captureEnvironment()
+    });
+    const second = await captureLiveChatScreenshotIfEnabled({
+      page: fakePage(),
+      uiState: 'ready',
+      environment: captureEnvironment()
     });
 
     expect(first).toBeDefined();
@@ -282,7 +619,12 @@ describe('deterministic live Chat screenshot capture', () => {
       serializeLiveScreenshotManifest(second!.manifest)
     );
     expect(first?.manifest.viewport).toEqual({ width: 1440, height: 960 });
-    expect(first?.manifest.browser).toMatchObject({ name: 'chromium', zoom: 1 });
+    expect(first?.manifest.browser).toMatchObject({
+      name: 'chromium',
+      revision: getLiveScreenshotChromiumRegistry().revision,
+      version: getLiveScreenshotChromiumRegistry().version,
+      zoom: 1
+    });
     expect(first?.manifest.locale).toBe('en-US');
     expect(first?.manifest.reducedMotion).toBe('reduce');
     expect(first?.manifest.hermes).toMatchObject({
@@ -316,27 +658,25 @@ describe('deterministic live Chat screenshot capture', () => {
   it('rejects non-approved routes and dimensions before screenshot bytes exist', async () => {
     const wrongRoute = fakePage({ route: '/?prompt=synthetic' });
     await expect(
-      captureLiveChatScreenshot({
+      captureLiveChatScreenshotIfEnabled({
         page: wrongRoute,
-        clientSha: CLIENT_SHA,
-        paperParityApproved: true,
-        stateStable: true,
-        uiState: 'ready'
+        uiState: 'ready',
+        environment: captureEnvironment()
       })
     ).rejects.toThrow('approved root route');
     expect(wrongRoute.screenshot).not.toHaveBeenCalled();
+    expect(wrongRoute.locatorScreenshot).not.toHaveBeenCalled();
 
     const wrongViewport = fakePage({ viewport: { width: 956, height: 2022 } });
     await expect(
-      captureLiveChatScreenshot({
+      captureLiveChatScreenshotIfEnabled({
         page: wrongViewport,
-        clientSha: CLIENT_SHA,
-        paperParityApproved: true,
-        stateStable: true,
-        uiState: 'ready'
+        uiState: 'ready',
+        environment: captureEnvironment()
       })
     ).rejects.toThrow('1440x960');
     expect(wrongViewport.screenshot).not.toHaveBeenCalled();
+    expect(wrongViewport.locatorScreenshot).not.toHaveBeenCalled();
   });
 
   it('refuses a symlink or path-replaced retention directory', async () => {
@@ -397,6 +737,44 @@ describe('deterministic live Chat screenshot capture', () => {
     }
 
     expect(await fsPromises.readdir(destination)).toEqual([]);
+  });
+
+  it('preserves a replacement staging pathname during cleanup races', async () => {
+    const destination = await temporaryDirectory();
+    const replacementRoot = await temporaryDirectory();
+    const replacement = join(replacementRoot, 'replacement-staging');
+    await fsPromises.mkdir(replacement);
+    await fsPromises.writeFile(join(replacement, 'sentinel.txt'), 'keep me', 'utf8');
+    const originalWriteFile = fsPromises.writeFile;
+    let writeCount = 0;
+    let racedStagingDirectory: string | undefined;
+    fsPromises.writeFile = async (...args: Parameters<typeof originalWriteFile>) => {
+      writeCount += 1;
+      if (writeCount === 2) throw new Error('synthetic manifest staging failure');
+      return originalWriteFile(...args);
+    };
+
+    try {
+      await expect(
+        persistApprovedLiveScreenshot({
+          capture: { bytes: PNG_BYTES, manifest: manifestFixture() },
+          destinationDirectory: destination,
+          review: 'independent-approved',
+          beforeStagingCleanup: async (stagingDirectory) => {
+            racedStagingDirectory = stagingDirectory;
+            await fsPromises.rm(stagingDirectory, { recursive: true, force: true });
+            await fsPromises.symlink(replacement, stagingDirectory);
+          }
+        })
+      ).rejects.toThrow('synthetic manifest staging failure');
+    } finally {
+      fsPromises.writeFile = originalWriteFile;
+    }
+
+    expect(await fsPromises.readFile(join(replacement, 'sentinel.txt'), 'utf8')).toBe('keep me');
+    const replacementStats = await fsPromises.lstat(replacement);
+    expect(replacementStats.isDirectory()).toBe(true);
+    if (racedStagingDirectory) await fsPromises.rm(racedStagingDirectory, { force: true });
   });
 
   it('publishes zero PNG or manifest bytes into a replacement destination during a race', async () => {

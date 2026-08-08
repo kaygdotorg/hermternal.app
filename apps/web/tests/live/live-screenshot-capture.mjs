@@ -1,7 +1,17 @@
+import { createRequire } from 'node:module';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, realpathSync, promises as fsPromises } from 'node:fs';
-import { join, parse, relative, resolve, sep } from 'node:path';
+import {
+  accessSync,
+  constants as fsConstants,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  promises as fsPromises
+} from 'node:fs';
+import { dirname, join, parse, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
 
 /**
  * This module is the only explicit screenshot path in the live lane. It is
@@ -11,7 +21,7 @@ import { join, parse, relative, resolve, sep } from 'node:path';
  * automatic screenshots, traces, videos, output retention, and unsafe reporter.
  */
 
-export const LIVE_SCREENSHOT_MANIFEST_SCHEMA = 'hermternal.live-chat-screenshot.v1';
+export const LIVE_SCREENSHOT_MANIFEST_SCHEMA = 'hermternal.live-chat-screenshot.v2';
 export const LIVE_SCREENSHOT_ISSUE = 353;
 export const LIVE_SCREENSHOT_ROUTE = '/';
 export const LIVE_SCREENSHOT_TEST_COMMAND = 'bun run --cwd apps/web test:e2e:live';
@@ -22,6 +32,113 @@ export const LIVE_SCREENSHOT_RETAIN_ENV = 'HERMTERNAL_LIVE_SCREENSHOT_RETAIN';
 export const LIVE_SCREENSHOT_REVIEW_ENV = 'HERMTERNAL_LIVE_SCREENSHOT_REVIEW';
 export const LIVE_SCREENSHOT_DESTINATION_ENV = 'HERMTERNAL_LIVE_SCREENSHOT_DESTINATION';
 export const LIVE_SCREENSHOT_FILE_STEM = 'hermternal-chat-proof';
+export const LIVE_SCREENSHOT_CAPTURE_SELECTOR = '[data-capture-root="live-chat"]';
+
+const LIVE_SCREENSHOT_PLAYWRIGHT_VERSION = '1.62.1';
+const LIVE_SCREENSHOT_CHROMIUM_REVISION = '1234';
+const LIVE_SCREENSHOT_CHROMIUM_VERSION = '151.0.7922.34';
+const CHROMIUM_REVISION_PATTERN = /(?:^|[\\/])chromium-([0-9]+)(?:[\\/]|$)/u;
+
+/** @typedef {{ playwrightVersion: string, revision: string, version: string }} ChromiumRegistry */
+/** @typedef {{ playwrightVersion: string, revision: string, version: string, executablePath: string, canonicalPath: string }} ChromiumProvenance */
+/** @type {ChromiumRegistry | undefined} */
+let pinnedChromiumRegistry;
+/** @type {ChromiumProvenance | undefined} */
+let pinnedChromiumProvenance;
+
+/**
+ * Resolve the registry metadata only after the explicit capture gate has been
+ * accepted. Importing the default-off helper must not require a browser cache.
+ * The package, app manifest, and lockfile are checked together so dependency
+ * drift cannot silently select a different browsers.json.
+ */
+function readPinnedChromiumRegistry() {
+  if (pinnedChromiumRegistry) return pinnedChromiumRegistry;
+  try {
+    const require = createRequire(import.meta.url);
+    const playwrightCoreEntry = require.resolve('playwright-core');
+    const packagePath = join(dirname(playwrightCoreEntry), 'package.json');
+    const browsersPath = join(dirname(playwrightCoreEntry), 'browsers.json');
+    const packageManifest = JSON.parse(readFileSync(packagePath, 'utf8'));
+    const browsersManifest = JSON.parse(readFileSync(browsersPath, 'utf8'));
+    const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+    const appPackage = JSON.parse(readFileSync(join(appRoot, 'package.json'), 'utf8'));
+    const lockfile = readFileSync(join(appRoot, 'bun.lock'), 'utf8');
+    const browserEntries = /** @type {Array<{ name?: unknown, revision?: unknown, browserVersion?: unknown }>} */ (
+      browsersManifest.browsers ?? []
+    );
+    const chromiumEntry = browserEntries.find((entry) => entry.name === 'chromium');
+    const playwrightDependency = appPackage.devDependencies?.playwright;
+    const testDependency = appPackage.devDependencies?.['@playwright/test'];
+    if (
+      packageManifest.name !== 'playwright-core' ||
+      packageManifest.version !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
+      playwrightDependency !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
+      testDependency !== LIVE_SCREENSHOT_PLAYWRIGHT_VERSION ||
+      !lockfile.includes(`@playwright/test@${LIVE_SCREENSHOT_PLAYWRIGHT_VERSION}`) ||
+      !lockfile.includes(`playwright@${LIVE_SCREENSHOT_PLAYWRIGHT_VERSION}`) ||
+      !lockfile.includes(`playwright-core@${LIVE_SCREENSHOT_PLAYWRIGHT_VERSION}`) ||
+      !chromiumEntry ||
+      chromiumEntry.revision !== LIVE_SCREENSHOT_CHROMIUM_REVISION ||
+      chromiumEntry.browserVersion !== LIVE_SCREENSHOT_CHROMIUM_VERSION
+    ) {
+      throw new Error('pinned Playwright or Chromium metadata is unavailable');
+    }
+    pinnedChromiumRegistry = Object.freeze({
+      playwrightVersion: LIVE_SCREENSHOT_PLAYWRIGHT_VERSION,
+      revision: chromiumEntry.revision,
+      version: chromiumEntry.browserVersion
+    });
+    return pinnedChromiumRegistry;
+  } catch {
+    throw new Error('live screenshot capture could not derive pinned Chromium registry');
+  }
+}
+
+/**
+ * Resolve and validate the registry-derived executable path at capture time.
+ * The path is an observation used to bind the running browser; it is never
+ * retained in the public manifest or accepted from environment input.
+ */
+function readPinnedChromiumProvenance() {
+  if (pinnedChromiumProvenance) return pinnedChromiumProvenance;
+  const registry = readPinnedChromiumRegistry();
+  try {
+    const executablePath = chromium.executablePath();
+    if (typeof executablePath !== 'string' || !CHROMIUM_REVISION_PATTERN.test(executablePath)) {
+      throw new Error('pinned Chromium executable path is unavailable');
+    }
+    const revisionMatch = executablePath.match(CHROMIUM_REVISION_PATTERN);
+    if (!revisionMatch || revisionMatch[1] !== registry.revision) {
+      throw new Error('pinned Chromium executable revision is not approved');
+    }
+    const stats = lstatSync(executablePath);
+    accessSync(executablePath, fsConstants.X_OK);
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      throw new Error('pinned Chromium executable is not a regular file');
+    }
+    const canonicalPath = realpathSync(executablePath);
+    if (canonicalPath !== executablePath) {
+      throw new Error('pinned Chromium executable path is not canonical');
+    }
+    pinnedChromiumProvenance = Object.freeze({
+      ...registry,
+      executablePath,
+      canonicalPath
+    });
+    return pinnedChromiumProvenance;
+  } catch {
+    throw new Error('live screenshot capture could not derive pinned Chromium provenance');
+  }
+}
+
+export function getLiveScreenshotChromiumRegistry() {
+  return readPinnedChromiumRegistry();
+}
+
+export function getLiveScreenshotChromiumProvenance() {
+  return readPinnedChromiumProvenance();
+}
 
 export const LIVE_SCREENSHOT_VIEWPORT = Object.freeze({ width: 1440, height: 960 });
 export const LIVE_SCREENSHOT_DEVICE_PIXEL_RATIO = 1;
@@ -123,7 +240,7 @@ const MANIFEST_KEYS = [
   'review'
 ];
 const VIEWPORT_KEYS = ['width', 'height'];
-const BROWSER_KEYS = ['name', 'version', 'zoom'];
+const BROWSER_KEYS = ['name', 'version', 'revision', 'zoom'];
 const HERMES_KEYS = ['imageDigest', 'sourceSha', 'attestation'];
 
 /** @param {unknown} value */
@@ -225,6 +342,21 @@ export function validateLiveScreenshotManifest(value) {
   ) {
     throw new Error('live screenshot manifest browser version is not bounded');
   }
+  if (FORBIDDEN_PUBLIC_TEXT_PATTERN.test(manifest.browser.version)) {
+    throw new Error('live screenshot manifest browser.version contains unsafe metadata');
+  }
+  if (manifest.browser.version !== readPinnedChromiumRegistry().version) {
+    throw new Error('live screenshot manifest Chromium version is not pinned');
+  }
+  if (
+    typeof manifest.browser.revision !== 'string' ||
+    !/^[0-9]+$/u.test(manifest.browser.revision)
+  ) {
+    throw new Error('live screenshot manifest browser revision is not bounded');
+  }
+  if (manifest.browser.revision !== readPinnedChromiumRegistry().revision) {
+    throw new Error('live screenshot manifest Chromium revision is not pinned');
+  }
   if (manifest.browser.zoom !== LIVE_SCREENSHOT_BROWSER_ZOOM) {
     throw new Error('live screenshot manifest browser zoom is not pinned');
   }
@@ -276,6 +408,7 @@ export function validateLiveScreenshotManifest(value) {
     ['route', manifest.route],
     ['browser.name', manifest.browser.name],
     ['browser.version', manifest.browser.version],
+    ['browser.revision', manifest.browser.revision],
     ['theme', manifest.theme],
     ['reducedMotion', manifest.reducedMotion],
     ['locale', manifest.locale],
@@ -296,6 +429,7 @@ export function validateLiveScreenshotManifest(value) {
 /**
  * @typedef {{
  *   browserName: string,
+ *   browserRevision: string,
  *   browserVersion: string,
  *   clientSha: string,
  *   devicePixelRatio: number,
@@ -328,6 +462,7 @@ export function createLiveScreenshotManifest(input) {
     browser: {
       name: input.browserName,
       version: input.browserVersion,
+      revision: input.browserRevision,
       zoom: input.zoom
     },
     theme: input.theme,
@@ -361,18 +496,24 @@ export function isLiveScreenshotCaptureEnabled(environment = process.env) {
 
 /**
  * Replace every live-derived conversation surface with bounded, semantic
- * placeholders before the PNG is rendered. This function is intentionally
- * self-contained because Playwright serializes it into the page realm. The
- * component markers identify the only DOM regions that may contain live
- * session, transcript, provider/model metadata, or composer data; the
- * post-transform assertions fail closed if a marker or a known live value
- * remains.
+ * placeholders before the PNG is rendered. The live Svelte tree is never the
+ * screenshot target: after validation this function creates an inert,
+ * listener-free DOM clone that cannot receive WebSocket or component updates.
+ * This function is self-contained because Playwright serializes it into the
+ * page realm.
  */
 export function sanitizeLiveChatCapturePresentation() {
   const preview = document.querySelector('[data-testid="runtime-preview"]');
   if (!(preview instanceof HTMLElement)) {
     throw new Error('live screenshot capture workspace is unavailable');
   }
+  const sourceContainer = preview.parentElement;
+  if (!(sourceContainer instanceof HTMLElement)) {
+    throw new Error('live screenshot capture workspace container is unavailable');
+  }
+  const captureSelector = '[data-capture-root="live-chat"]';
+  document.querySelector(captureSelector)?.remove();
+
   // Keep placeholders inside this page-evaluated function; Playwright does not
   // serialize module lexical bindings with the function body.
   const modelPlaceholder = 'Model';
@@ -398,6 +539,60 @@ export function sanitizeLiveChatCapturePresentation() {
     const candidate = /** @type {Element & { value?: unknown }} */ (element);
     if ('value' in candidate) remember(candidate.value);
   };
+  /** @param {Element} element */
+  const rememberMetadataElement = (element) => {
+    const nodes = [element, ...element.querySelectorAll('*')];
+    for (const node of nodes) {
+      rememberMetadata(node.textContent);
+      for (const name of node.getAttributeNames()) {
+        if (name === 'class' || name === 'style') continue;
+        rememberMetadata(node.getAttribute(name));
+      }
+      const candidate = /** @type {Element & { value?: unknown }} */ (node);
+      if ('value' in candidate) rememberMetadata(candidate.value);
+    }
+  };
+  /** @param {Element} element */
+  const clearMetadataAttributes = (element) => {
+    for (const name of element.getAttributeNames()) {
+      if (name.startsWith('aria-') || name === 'title' || name === 'value' || name.startsWith('data-')) {
+        element.removeAttribute(name);
+      }
+    }
+  };
+  /** @param {Element} element @param {string} value */
+  const metadataSurfaceContains = (element, value) => {
+    const nodes = [element, ...element.querySelectorAll('*')];
+    return nodes.some((node) => {
+      if (node.textContent?.trim() === value) return true;
+      const candidate = /** @type {Element & { value?: unknown }} */ (node);
+      if (typeof candidate.value === 'string' && candidate.value.includes(value)) return true;
+      return node.getAttributeNames().some((name) => {
+        if (name === 'class' || name === 'style' || name === 'data-capture-sanitized') return false;
+        if (!name.startsWith('aria-') && name !== 'title' && name !== 'value' && !name.startsWith('data-')) {
+          return false;
+        }
+        return node.getAttribute(name)?.includes(value) ?? false;
+      });
+    });
+  };
+  /** @param {Element} element */
+  const serializeMetadataSurface = (element) => {
+    const projection = /** @type {Element} */ (element.cloneNode(true));
+    [projection, ...projection.querySelectorAll('*')].forEach((node) => {
+      node.getAttributeNames().forEach((name) => {
+        if (
+          name === 'class' ||
+          name === 'style' ||
+          name === 'data-capture-sanitized' ||
+          (!name.startsWith('aria-') && name !== 'title' && name !== 'value' && !name.startsWith('data-'))
+        ) {
+          node.removeAttribute(name);
+        }
+      });
+    });
+    return projection.outerHTML;
+  };
 
   const timeline = preview.querySelector('[data-live-content="conversation-timeline"]');
   if (!(timeline instanceof HTMLElement)) {
@@ -417,14 +612,10 @@ export function sanitizeLiveChatCapturePresentation() {
     if (button) rememberDynamicAttributes(button);
   });
 
-  preview.querySelectorAll('.header-model').forEach((model) => {
-    rememberMetadata(model.textContent);
-    rememberMetadata(model.getAttribute('aria-label'));
-    rememberMetadata(model.getAttribute('title'));
-  });
-  preview.querySelectorAll('.group-count').forEach((count) => {
-    rememberMetadata(count.textContent);
-  });
+  const metadataElements = [
+    ...preview.querySelectorAll('.header-model, .group-count, .model-control, .model-control select, .model-control option')
+  ];
+  metadataElements.forEach(rememberMetadataElement);
 
   preview.querySelectorAll('[data-live-content="conversation-title"]').forEach((region) => {
     region.querySelectorAll('[aria-label="Edit conversation title"] .pill-label').forEach((label) => {
@@ -442,7 +633,7 @@ export function sanitizeLiveChatCapturePresentation() {
   conversationPlaceholder.setAttribute('data-capture-placeholder', 'conversation');
   conversationPlaceholder.textContent = 'Conversation preview';
   timeline.append(conversationPlaceholder);
-  timeline.setAttribute('data-capture-sanitized', '1');
+  timeline.setAttribute('data-capture-sanitized', 'true');
   timeline.removeAttribute('data-live-content');
 
   preview.querySelectorAll('[data-live-content="session-list"]').forEach((list) => {
@@ -455,21 +646,67 @@ export function sanitizeLiveChatCapturePresentation() {
       if (label) label.textContent = 'Conversation';
       button.querySelector('.pill-description')?.remove();
     });
-    list.setAttribute('data-capture-sanitized', '1');
+    list.setAttribute('data-capture-sanitized', 'true');
     list.removeAttribute('data-live-content');
   });
 
   preview.querySelectorAll('.header-model').forEach((model) => {
     const label = model.querySelector('span');
     if (label) label.textContent = modelPlaceholder;
-    else model.textContent = modelPlaceholder;
+    else {
+      const replacement = document.createElement('span');
+      replacement.textContent = modelPlaceholder;
+      model.append(replacement);
+    }
+    clearMetadataAttributes(model);
     model.setAttribute('aria-label', 'Current model');
     model.setAttribute('title', 'Current model');
-    model.setAttribute('data-capture-sanitized', '1');
+    model.setAttribute('data-capture-sanitized', 'true');
   });
   preview.querySelectorAll('.group-count').forEach((count) => {
     count.textContent = sessionCountPlaceholder;
-    count.setAttribute('data-capture-sanitized', '1');
+    clearMetadataAttributes(count);
+    count.setAttribute('data-capture-sanitized', 'true');
+  });
+  preview.querySelectorAll('.model-control').forEach((control) => {
+    clearMetadataAttributes(control);
+    const shortLabel = control.querySelector('.model-short');
+    if (shortLabel) shortLabel.textContent = modelPlaceholder;
+    const select = control.querySelector('select');
+    if (select) {
+      const width = select.getBoundingClientRect().width;
+      select.replaceChildren();
+      const option = document.createElement('option');
+      option.value = modelPlaceholder;
+      option.textContent = modelPlaceholder;
+      option.selected = true;
+      select.append(option);
+      select.value = modelPlaceholder;
+      clearMetadataAttributes(select);
+      select.setAttribute('aria-label', 'Model');
+      if (width > 0) select.style.width = `${width}px`;
+    }
+    control.setAttribute('data-capture-sanitized', 'true');
+  });
+
+  // Clear metadata-bearing attributes on descendants as well as the root. The
+  // desktop and mobile copies contain separate icon/select subtrees, so a
+  // source value in an aria/data/title/value attribute must not survive only
+  // because the visible root was replaced.
+  preview.querySelectorAll('.header-model, .group-count, .model-control').forEach((root) => {
+    [root, ...root.querySelectorAll('*')].forEach(clearMetadataAttributes);
+  });
+  preview.querySelectorAll('.header-model').forEach((model) => {
+    model.setAttribute('aria-label', 'Current model');
+    model.setAttribute('title', 'Current model');
+    model.setAttribute('data-capture-sanitized', 'true');
+  });
+  preview.querySelectorAll('.group-count').forEach((count) => {
+    count.setAttribute('data-capture-sanitized', 'true');
+  });
+  preview.querySelectorAll('.model-control').forEach((control) => {
+    control.setAttribute('data-capture-sanitized', 'true');
+    control.querySelector('select')?.setAttribute('aria-label', 'Model');
   });
 
   preview.querySelectorAll('[data-live-content="conversation-title"]').forEach((region) => {
@@ -485,7 +722,7 @@ export function sanitizeLiveChatCapturePresentation() {
       input.removeAttribute('value');
       input.setAttribute('placeholder', 'Chat session');
     });
-    region.setAttribute('data-capture-sanitized', '1');
+    region.setAttribute('data-capture-sanitized', 'true');
     region.removeAttribute('data-live-content');
   });
 
@@ -498,7 +735,7 @@ export function sanitizeLiveChatCapturePresentation() {
     composer.querySelectorAll('[contenteditable="true"]').forEach((element) => {
       element.textContent = '';
     });
-    composer.setAttribute('data-capture-sanitized', '1');
+    composer.setAttribute('data-capture-sanitized', 'true');
     composer.removeAttribute('data-live-content');
   });
 
@@ -511,14 +748,32 @@ export function sanitizeLiveChatCapturePresentation() {
     throw new Error('live screenshot capture retained an unsanitized live DOM marker');
   }
 
-  let storageText = '';
+  /** @param {Storage} storage */
+  const scrubStorage = (storage) => {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key !== null) {
+        rememberMetadata(key);
+        rememberMetadata(storage.getItem(key));
+      }
+    }
+    storage.clear();
+    if (storage.length !== 0) throw new Error('live screenshot capture storage was not cleared');
+  };
   try {
-    storageText = `${Object.values(localStorage).join('\n')}\n${Object.values(sessionStorage).join('\n')}`;
+    scrubStorage(localStorage);
+    scrubStorage(sessionStorage);
   } catch {
-    // Some jsdom and opaque browser documents do not expose storage. The DOM
-    // marker and value checks above remain mandatory in those realms.
+    // jsdom and opaque about:blank probes do not expose origin storage. The
+    // real live lane always runs on the configured same-origin HTTP page and
+    // therefore remains fail-closed when storage is unavailable there.
+    const origin = typeof window === 'object' && window.location ? window.location.origin : '';
+    const userAgent = typeof navigator === 'object' ? navigator.userAgent : '';
+    if (origin !== 'null' && !/jsdom/iu.test(userAgent)) {
+      throw new Error('live screenshot capture storage boundary is unavailable');
+    }
   }
-  const serializedPage = `${document.documentElement.outerHTML}\n${storageText}`;
+
   const fixedPresentationText = new Set([
     'Hermes',
     'Model',
@@ -532,25 +787,94 @@ export function sanitizeLiveChatCapturePresentation() {
     'Message Hermes',
     'Conversation title'
   ]);
+  const serializedPage = `${document.documentElement.outerHTML}`;
+  const metadataValueSet = new Set(oldMetadataValues);
   const residual = [...new Set(oldLiveValues)].filter(
-    (value) => value.length >= 3 && !fixedPresentationText.has(value) && serializedPage.includes(value)
+    (value) =>
+      !metadataValueSet.has(value) &&
+      !fixedPresentationText.has(value) &&
+      serializedPage.includes(value)
   );
-  const metadataResidual = [...new Set(oldMetadataValues)].filter((value) => {
-    if (fixedPresentationText.has(value)) return false;
-    return [...preview.querySelectorAll('.header-model, .group-count')].some((element) => {
-      return (
-        element.textContent?.includes(value) ||
-        element.getAttribute('aria-label')?.includes(value) ||
-        element.getAttribute('title')?.includes(value)
-      );
-    });
-  });
+  const metadataSurfaces = [
+    ...preview.querySelectorAll('.header-model, .group-count, .model-control, .model-control select, .model-control option')
+  ];
+  const serializedMetadata = metadataSurfaces.map(serializeMetadataSurface).join('\n');
+  const metadataResidual = [...new Set(oldMetadataValues)].filter(
+    (value) =>
+      !fixedPresentationText.has(value) &&
+      (metadataSurfaces.some((element) => metadataSurfaceContains(element, value)) ||
+        serializedMetadata.includes(value))
+  );
   if (residual.length > 0 || metadataResidual.length > 0) {
-    throw new Error('live screenshot capture found prohibited live text or data');
+    throw new Error(
+      `live screenshot capture found prohibited live text or data (${residual.length} general, ${metadataResidual.length} metadata lengths ${metadataResidual.map((value) => value.length).join(',')})`
+    );
+  }
+
+  const body = document.body;
+  if (!(body instanceof HTMLElement)) {
+    throw new Error('live screenshot capture document body is unavailable');
+  }
+  const captureHost = document.createElement('div');
+  captureHost.setAttribute('data-capture-root', 'live-chat');
+  captureHost.setAttribute('aria-hidden', 'true');
+  captureHost.setAttribute('inert', '');
+  captureHost.style.position = 'fixed';
+  captureHost.style.top = '0';
+  captureHost.style.left = '0';
+  captureHost.style.width = '1440px';
+  captureHost.style.height = '960px';
+  captureHost.style.overflow = 'hidden';
+  captureHost.style.zIndex = '2147483647';
+  captureHost.style.pointerEvents = 'none';
+  captureHost.style.contain = 'layout paint size';
+  captureHost.style.isolation = 'isolate';
+  const backgroundCandidates = [sourceContainer, preview, body]
+    .map((element) => getComputedStyle(element).backgroundColor)
+    .filter((color) => color && !/^transparent$/iu.test(color) && !/rgba?\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/iu.test(color));
+  captureHost.style.backgroundColor = backgroundCandidates[0] ?? '#fff';
+
+  const captureClone = /** @type {HTMLElement} */ (sourceContainer.cloneNode(true));
+  captureClone.setAttribute('data-capture-clone', 'true');
+  captureClone.style.width = '100%';
+  captureClone.style.height = '960px';
+  captureClone.style.minHeight = '960px';
+  captureHost.append(captureClone);
+  body.append(captureHost);
+
+  const captureRect = captureHost.getBoundingClientRect();
+  if (
+    (captureRect.width !== 0 || captureRect.height !== 0) &&
+    (captureRect.width !== 1440 || captureRect.height !== 960)
+  ) {
+    captureHost.remove();
+    throw new Error('live screenshot capture clone dimensions are not pinned');
+  }
+  const cloneMetadataSurfaces = [
+    ...captureHost.querySelectorAll('.header-model, .group-count, .model-control, .model-control select, .model-control option')
+  ];
+  const cloneSerializedMetadata = cloneMetadataSurfaces.map(serializeMetadataSurface).join('\n');
+  const cloneMetadataResidual = [...new Set(oldMetadataValues)].filter(
+    (value) =>
+      !fixedPresentationText.has(value) &&
+      (cloneMetadataSurfaces.some((element) => metadataSurfaceContains(element, value)) ||
+        cloneSerializedMetadata.includes(value))
+  );
+  if (
+    captureHost.querySelector('[data-live-content], .user-message, .assistant-copy, .tool-row') ||
+    cloneMetadataResidual.length > 0 ||
+    cloneMetadataSurfaces.some((element) => {
+      const candidate = /** @type {Element & { value?: unknown }} */ (element);
+      return typeof candidate.value === 'string' && candidate.value.length > 0 && candidate.value !== modelPlaceholder;
+    })
+  ) {
+    captureHost.remove();
+    throw new Error('live screenshot capture clone was not sanitized');
   }
 
   return Object.freeze({
     sanitized: true,
+    captureSelector,
     removedValueCount: oldLiveValues.length,
     prohibitedNodeCount: 0
   });
@@ -612,7 +936,7 @@ function requirePageMethod(page, method) {
  *   reducedMotion?: 'reduce' | 'no-preference'
  * }} options
  */
-export async function captureLiveChatScreenshot({
+async function captureLiveChatScreenshot({
   page,
   clientSha,
   enabled = true,
@@ -647,7 +971,7 @@ export async function captureLiveChatScreenshot({
   requirePageMethod(page, 'context');
   requirePageMethod(page, 'emulateMedia');
   requirePageMethod(page, 'evaluate');
-  requirePageMethod(page, 'screenshot');
+  requirePageMethod(page, 'locator');
 
   const url = new URL(page.url());
   if (url.pathname !== LIVE_SCREENSHOT_ROUTE || url.search || url.hash) {
@@ -662,11 +986,7 @@ export async function captureLiveChatScreenshot({
     throw new Error('live screenshot capture viewport is not 1440x960');
   }
 
-  await page.emulateMedia({
-    colorScheme: theme,
-    reducedMotion
-  });
-
+  const pinnedChromium = readPinnedChromiumProvenance();
   const browser = page.context().browser?.();
   if (!browser || typeof browser.browserType !== 'function' || typeof browser.version !== 'function') {
     throw new Error('live screenshot capture browser provenance is unavailable');
@@ -674,9 +994,21 @@ export async function captureLiveChatScreenshot({
   const browserType = browser.browserType();
   const browserName = browserType?.name?.();
   const browserVersion = browser.version();
-  if (browserName !== 'chromium' || typeof browserVersion !== 'string') {
-    throw new Error('live screenshot capture requires Chromium browser provenance');
+  const runtimeExecutablePath = browserType?.executablePath?.();
+  if (
+    browserName !== 'chromium' ||
+    browserVersion !== pinnedChromium.version ||
+    runtimeExecutablePath !== pinnedChromium.executablePath ||
+    !CHROMIUM_REVISION_PATTERN.test(runtimeExecutablePath ?? '') ||
+    runtimeExecutablePath.match(CHROMIUM_REVISION_PATTERN)?.[1] !== pinnedChromium.revision
+  ) {
+    throw new Error('live screenshot capture Chromium provenance is not pinned');
   }
+
+  await page.emulateMedia({
+    colorScheme: theme,
+    reducedMotion
+  });
 
   const observed = await page.evaluate(() => ({
     devicePixelRatio: window.devicePixelRatio,
@@ -697,26 +1029,33 @@ export async function captureLiveChatScreenshot({
     throw new Error('live screenshot capture browser inputs are not pinned');
   }
 
-  // Complete all live proof assertions before this call. The page is then
-  // transformed in-place into a capture-only presentation that contains no
-  // user, assistant, tool, title, provider/model metadata, session counts, or
-  // composer values. The sanitizer validates the DOM and storage boundary
-  // immediately before the screenshot operation.
+  // Complete all live proof assertions before this call. The sanitizer leaves
+  // the Svelte-owned tree only as a checked source and creates an inert clone;
+  // the screenshot locator targets that clone, never the mutable live page.
   const presentation = await page.evaluate(sanitizeLiveChatCapturePresentation);
-  if (!presentation || presentation.sanitized !== true || presentation.prohibitedNodeCount !== 0) {
+  if (
+    !presentation ||
+    presentation.sanitized !== true ||
+    presentation.prohibitedNodeCount !== 0 ||
+    presentation.captureSelector !== LIVE_SCREENSHOT_CAPTURE_SELECTOR
+  ) {
     throw new Error('live screenshot capture presentation was not sanitized');
   }
 
+  const captureLocator = page.locator(presentation.captureSelector);
+  if (!captureLocator || typeof captureLocator.screenshot !== 'function') {
+    throw new Error('live screenshot capture locator is unavailable');
+  }
   const bytes = assertImageBytes(
-    await page.screenshot({
+    await captureLocator.screenshot({
       type: 'png',
       animations: 'disabled',
-      caret: 'hide',
-      fullPage: false
+      caret: 'hide'
     })
   );
   const manifest = createLiveScreenshotManifest({
     browserName,
+    browserRevision: pinnedChromium.revision,
     browserVersion,
     clientSha,
     devicePixelRatio: observed.devicePixelRatio,
@@ -745,6 +1084,20 @@ export async function captureLiveChatScreenshotIfEnabled({
 }) {
   if (!isLiveScreenshotCaptureEnabled(environment)) return undefined;
   const clientSha = requireCaptureGate(environment);
+  let retentionDestination;
+  if (environment[LIVE_SCREENSHOT_RETAIN_ENV] === '1') {
+    if (environment[LIVE_SCREENSHOT_REVIEW_ENV] !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
+      throw new Error('live screenshot retention requires independent approval');
+    }
+    const destination = environment[LIVE_SCREENSHOT_DESTINATION_ENV];
+    if (!destination) {
+      throw new Error('live screenshot retention requires an explicit destination');
+    }
+    // Validate review and destination identity before any page method can
+    // mutate the live page or create a screenshot. Persistence repeats this
+    // check after capture to close the preflight-to-publish TOCTOU window.
+    retentionDestination = safeDestinationEvidence(destination);
+  }
   const capture = await captureLiveChatScreenshot({
     page,
     clientSha,
@@ -754,17 +1107,10 @@ export async function captureLiveChatScreenshotIfEnabled({
     uiState
   });
   if (!capture) throw new Error('live screenshot capture result is unavailable');
-  if (environment[LIVE_SCREENSHOT_RETAIN_ENV] === '1') {
-    if (environment[LIVE_SCREENSHOT_REVIEW_ENV] !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
-      throw new Error('live screenshot retention requires independent approval');
-    }
-    const destination = environment[LIVE_SCREENSHOT_DESTINATION_ENV];
-    if (!destination) {
-      throw new Error('live screenshot retention requires an explicit destination');
-    }
+  if (retentionDestination) {
     await persistApprovedLiveScreenshot({
       capture,
-      destinationDirectory: destination,
+      destinationDirectory: retentionDestination.candidate,
       fileStem: LIVE_SCREENSHOT_FILE_STEM,
       review: LIVE_SCREENSHOT_APPROVED_REVIEW
     });
@@ -896,11 +1242,75 @@ async function assertDestinationHandle(handle, evidence) {
   }
 }
 
-/** @param {string} directory */
 /** @param {string} path */
 function pathExists(path) {
   try {
     lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove only the two files this module created, and only while the original
+ * staging directory identity is still present at its pathname. A replacement
+ * directory or symlink is never followed and is left untouched.
+ *
+ * @param {string} directory
+ * @param {{ dev: number, ino: number }} expected
+ */
+async function removePrivateStagingDirectory(directory, expected) {
+  let stats;
+  try {
+    stats = lstatSync(directory);
+  } catch {
+    return false;
+  }
+  if (!stats.isDirectory() || stats.isSymbolicLink() || stats.dev !== expected.dev || stats.ino !== expected.ino) {
+    return false;
+  }
+
+  let entries;
+  try {
+    entries = (await fsPromises.readdir(directory)).sort();
+  } catch {
+    return false;
+  }
+  const ownedEntries = ['manifest.json', 'screenshot.png'];
+  if (entries.some((entry) => !ownedEntries.includes(entry))) return false;
+
+  for (const entry of entries) {
+    try {
+      const current = lstatSync(directory);
+      if (
+        !current.isDirectory() ||
+        current.isSymbolicLink() ||
+        current.dev !== expected.dev ||
+        current.ino !== expected.ino
+      ) {
+        return false;
+      }
+      const entryPath = join(directory, entry);
+      const entryStats = lstatSync(entryPath);
+      if (!entryStats.isFile() || entryStats.isSymbolicLink()) return false;
+      await fsPromises.unlink(entryPath);
+    } catch {
+      return false;
+    }
+  }
+
+  try {
+    const current = lstatSync(directory);
+    if (
+      !current.isDirectory() ||
+      current.isSymbolicLink() ||
+      current.dev !== expected.dev ||
+      current.ino !== expected.ino
+    ) {
+      return false;
+    }
+    await fsPromises.rmdir(directory);
     return true;
   } catch {
     return false;
@@ -1011,7 +1421,8 @@ async function publishStagedBundle({ stagingDirectory, destination, beforeAtomic
  *   destinationDirectory: string,
  *   fileStem?: string,
  *   review: 'independent-approved',
- *   beforeAtomicPublish?: () => Promise<void>
+ *   beforeAtomicPublish?: () => Promise<void>,
+ *   beforeStagingCleanup?: (directory: string) => Promise<void>
  * }} options
  */
 export async function persistApprovedLiveScreenshot({
@@ -1019,7 +1430,8 @@ export async function persistApprovedLiveScreenshot({
   destinationDirectory,
   fileStem = LIVE_SCREENSHOT_FILE_STEM,
   review,
-  beforeAtomicPublish
+  beforeAtomicPublish,
+  beforeStagingCleanup
 }) {
   if (review !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
     throw new Error('live screenshot retention requires independent approval');
@@ -1045,6 +1457,7 @@ export async function persistApprovedLiveScreenshot({
   }
   const manifest = createLiveScreenshotManifest({
     browserName: sourceManifest.browser.name,
+    browserRevision: sourceManifest.browser.revision,
     browserVersion: sourceManifest.browser.version,
     clientSha: sourceManifest.clientSha,
     devicePixelRatio: sourceManifest.devicePixelRatio,
@@ -1064,11 +1477,17 @@ export async function persistApprovedLiveScreenshot({
   }
 
   let stagingDirectory;
+  let stagingIdentity;
   let published = false;
   try {
     // Stage outside the destination pathname. Require the same filesystem so
     // the final publication remains a single atomic rename, never a copy.
     stagingDirectory = await fsPromises.mkdtemp(join(resolve(process.env.TMPDIR ?? '/tmp'), `.${fileStem}-capture-`));
+    const createdStagingStats = lstatSync(stagingDirectory);
+    if (!createdStagingStats.isDirectory() || createdStagingStats.isSymbolicLink()) {
+      throw new Error('live screenshot staging directory is not private');
+    }
+    stagingIdentity = { dev: createdStagingStats.dev, ino: createdStagingStats.ino };
     await fsPromises.chmod(stagingDirectory, 0o700);
     await fsPromises.writeFile(join(stagingDirectory, 'screenshot.png'), bytes, {
       encoding: null,
@@ -1102,14 +1521,15 @@ export async function persistApprovedLiveScreenshot({
       manifest
     };
   } finally {
-    if (stagingDirectory && !published) {
+    if (stagingDirectory && stagingIdentity && !published) {
       try {
-        const stats = lstatSync(stagingDirectory);
-        if (stats.isDirectory() && !stats.isSymbolicLink()) {
-          await fsPromises.rm(stagingDirectory, { recursive: true, force: true });
-        }
+        // Test-only race hook runs before identity-anchored cleanup. If it
+        // replaces the pathname, the helper observes the inode mismatch and
+        // leaves the replacement untouched.
+        await beforeStagingCleanup?.(stagingDirectory);
+        await removePrivateStagingDirectory(stagingDirectory, stagingIdentity);
       } catch {
-        // Never follow or recursively remove a replaced staging path.
+        // Cleanup is best effort and never follows a replaced staging path.
       }
     }
   }
