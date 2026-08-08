@@ -110,6 +110,22 @@ export interface FocusIntent {
   readonly sequence: number;
 }
 
+/**
+ * Identifies the coordinator generation that owned a Terminal callback when it
+ * was created. Session IDs can be selected again, so either field alone is not
+ * a sufficient stale-callback fence.
+ */
+export interface TerminalSettlement {
+  readonly sessionId: string;
+  readonly sessionGeneration: number;
+  /**
+   * Coordinator-issued ownership token from the state observed when the Terminal
+   * operation started. Optional only for legacy callers; after a retry in the
+   * same session generation, a tokenless settlement is rejected conservatively.
+   */
+  readonly terminalLeaseSequence?: number;
+}
+
 export interface SessionCoordinatorState {
   readonly status: SessionCoordinatorStatus;
   readonly mode: WorkspaceMode;
@@ -119,6 +135,8 @@ export interface SessionCoordinatorState {
   readonly chatStatus: JsonRpcConnectionStatus;
   readonly terminalStatus: TerminalBindingStatus;
   readonly terminalSessionId?: string;
+  /** Coordinator-issued ownership token for the attached or attaching Terminal lease. */
+  readonly terminalLeaseSequence?: number;
   readonly focusIntent?: FocusIntent;
   readonly lastError?: SessionCoordinatorErrorCode;
 }
@@ -142,10 +160,24 @@ export interface SessionCoordinator {
   readonly mode: WorkspaceMode;
   activate(mode: WorkspaceMode, signal?: AbortSignal): Promise<SessionCoordinatorState>;
   switchMode(mode: WorkspaceMode, signal?: AbortSignal): Promise<SessionCoordinatorState>;
+  /**
+   * Synchronously revoke the selected session and its Terminal lease. Callers
+   * use this before exposing a replacement live-workspace snapshot; it never
+   * selects or restores Chat.
+   */
+  invalidateSession(): void;
+  /**
+   * Reconcile an unsolicited Terminal settlement without selecting Chat. The
+   * callback must carry the session ID and generation it captured at start.
+   * Returns false when that ownership is already stale.
+   */
+  invalidateTerminalBinding(settlement: TerminalSettlement): boolean;
   setSession(sessionId: string, signal?: AbortSignal): Promise<SessionCoordinatorState>;
   /** Restore server-owned state after a browser refresh without transcript mirroring. */
   restore(sessionId: string, signal?: AbortSignal): Promise<SessionCoordinatorState>;
   reconnect(signal?: AbortSignal): Promise<SessionCoordinatorState>;
+  /** Reacquire Terminal and issue the normal generation-owned focus intent. */
+  reconnectTerminal(signal?: AbortSignal): Promise<SessionCoordinatorState>;
   logout(): void;
   dispose(): void;
   subscribe(listener: (state: SessionCoordinatorState) => void): () => void;
@@ -161,12 +193,15 @@ interface PendingSessionOperation {
 
 interface TerminalBindingLease {
   readonly binding: TerminalBinding;
+  /** Unique coordinator ownership, independent of an adapter's raw binding object. */
+  readonly terminalLeaseSequence: number;
   cleaned: boolean;
 }
 
 interface PendingTerminalAttach {
   readonly generation: number;
   readonly sessionId: string;
+  readonly terminalLeaseSequence: number;
   readonly controller: AbortController;
   readonly promise: Promise<TerminalBinding>;
   focusOwnerSequence: number | undefined;
@@ -315,9 +350,17 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   let terminalStatus: TerminalBindingStatus = 'detached';
   let terminalBinding: TerminalBindingLease | undefined;
   let terminalBindingFocusOwnerSequence: number | undefined;
+  // This token fences retries within one session generation; raw adapter binding
+  // identity cannot do so because adapters may intentionally reuse an object.
+  let terminalLeaseSequence: number | undefined;
+  let nextTerminalLeaseSequence = 0;
+  let terminalLeaseCountForSession = 0;
   let lastError: SessionCoordinatorErrorCode | undefined;
   let lastFocusIntent: FocusIntent | undefined;
   let nextFocusSequence = 0;
+  // Nested observer transitions synchronously publish a newer state. This
+  // monotonic fence prevents an outer publish from delivering its stale snapshot.
+  let publicationRevision = 0;
   let nextModeActivationSequence = 0;
   const latestModeActivationSequence: Record<WorkspaceMode, number> = { chat: 0, terminal: 0 };
   let disposed = false;
@@ -366,6 +409,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
       terminalStatus,
       ...(activeSessionId === undefined ? {} : { activeSessionId }),
       ...(terminalBinding === undefined ? {} : { terminalSessionId: terminalBinding.binding.sessionId }),
+      ...(terminalLeaseSequence === undefined ? {} : { terminalLeaseSequence }),
       ...(lastFocusIntent === undefined ? {} : { focusIntent: lastFocusIntent }),
       ...(lastError === undefined ? {} : { lastError })
     };
@@ -373,9 +417,16 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
   };
 
   const publish = (): void => {
+    const revision = ++publicationRevision;
     const snapshot = state();
     safeCall(options.onStateChange, snapshot);
-    for (const listener of [...listeners]) safeCall(listener, snapshot);
+    // `onStateChange` and subscribers are synchronous extension points. If one
+    // reenters the lifecycle it publishes a newer revision, whose state must win.
+    if (revision !== publicationRevision) return;
+    for (const listener of [...listeners]) {
+      if (revision !== publicationRevision) return;
+      safeCall(listener, snapshot);
+    }
   };
 
   const current = (generation: number, sessionId: string): boolean =>
@@ -409,6 +460,13 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     publish();
   };
 
+  // A Terminal settlement must not erase a newer Chat composer intent after a
+  // mode switch. It only owns focus that was issued for its Terminal lease.
+  const clearTerminalFocus = (): void => {
+    if (lastFocusIntent?.mode !== 'terminal') return;
+    lastFocusIntent = undefined;
+  };
+
   const cancelSession = (): void => {
     const pending = pendingSession;
     if (!pending) return;
@@ -424,6 +482,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     pending.cancelled = true;
     safeAbort(pending.controller);
     pendingTerminal = undefined;
+    if (terminalLeaseSequence === pending.terminalLeaseSequence) terminalLeaseSequence = undefined;
     void pending.promise.catch(() => undefined);
   };
 
@@ -462,15 +521,95 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     if (ownsActiveTerminalLease(value)) return;
     const invalidate = (value as { invalidate?: unknown }).invalidate;
     if (typeof invalidate !== 'function') return;
-    cleanupBinding({ binding: value as TerminalBinding, cleaned: false });
+    cleanupBinding({ binding: value as TerminalBinding, terminalLeaseSequence: -1, cleaned: false });
   };
 
   const invalidateBinding = (): void => {
     const lease = terminalBinding;
     terminalBinding = undefined;
     terminalBindingFocusOwnerSequence = undefined;
+    // Every caller has already cancelled any pending attach, so this is the
+    // terminal lifecycle's destructive boundary even when cleanup reentered
+    // after the binding reference was cleared.
+    terminalLeaseSequence = undefined;
     terminalStatus = 'detached';
     if (lease) cleanupBinding(lease);
+  };
+
+  /**
+   * This is deliberately synchronous: a live-workspace owner can make the old
+   * identity unobservable before it publishes its replacement snapshot. Chat
+   * selection is asynchronous and therefore belongs to a later `setSession`.
+   */
+  const invalidateSession = (): void => {
+    if (disposed || loggedOut || activeSessionId === undefined) return;
+
+    cancelSession();
+    cancelTerminal();
+    cancelReconnect();
+    activeSessionId = undefined;
+    sessionGeneration += 1;
+    terminalLeaseCountForSession = 0;
+    terminalStatus = 'detached';
+    lastError = undefined;
+    lastFocusIntent = undefined;
+    lifecycle = 'empty';
+    invalidateBinding();
+    terminalLeaseSequence = undefined;
+
+    // Binding cleanup may reenter logout or disposal; its final lifecycle wins.
+    if (!disposed && !loggedOut) publish();
+  };
+
+  /**
+   * Terminal adapters may report detach/failure after an async operation. The
+   * lease token fences recoveries in the same session generation; tokenless
+   * legacy settlements are accepted only before that generation has retried.
+   */
+  const invalidateTerminalBinding = (settlement: TerminalSettlement): boolean => {
+    if (!current(settlement.sessionGeneration, settlement.sessionId)) return false;
+    const activeLeaseSequence =
+      terminalBinding?.terminalLeaseSequence ?? pendingTerminal?.terminalLeaseSequence;
+    if (activeLeaseSequence === undefined) return false;
+    if (
+      (settlement.terminalLeaseSequence !== undefined &&
+        settlement.terminalLeaseSequence !== activeLeaseSequence) ||
+      (settlement.terminalLeaseSequence === undefined && terminalLeaseCountForSession > 1)
+    ) {
+      return false;
+    }
+
+    // Retain this token through adapter cleanup. Either callback may synchronously
+    // start another lifecycle transition, so the original settlement may finish
+    // only if it still owns this exact, otherwise-unobservable lease transition.
+    const lifecycleBeforeCleanup = lifecycle;
+    const pending = pendingTerminal;
+    if (pending?.terminalLeaseSequence === activeLeaseSequence) {
+      pending.cancelled = true;
+      safeAbort(pending.controller);
+      pendingTerminal = undefined;
+      void pending.promise.catch(() => undefined);
+    }
+    const lease = terminalBinding;
+    terminalBinding = undefined;
+    terminalBindingFocusOwnerSequence = undefined;
+    terminalStatus = 'detached';
+    if (lease) cleanupBinding(lease);
+
+    if (
+      !current(settlement.sessionGeneration, settlement.sessionId) ||
+      terminalLeaseSequence !== activeLeaseSequence ||
+      lifecycle !== lifecycleBeforeCleanup ||
+      terminalBinding !== undefined ||
+      pendingTerminal !== undefined
+    ) {
+      return false;
+    }
+    terminalLeaseSequence = undefined;
+    clearTerminalFocus();
+    if (mode === 'terminal') lifecycle = 'idle';
+    publish();
+    return true;
   };
 
   const assertCurrent = (generation: number, sessionId: string): void => {
@@ -503,6 +642,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     invalidateBinding();
     activeSessionId = undefined;
     sessionGeneration += 1;
+    terminalLeaseCountForSession = 0;
     terminalStatus = 'detached';
     lastError = code;
     lifecycle = 'blocked';
@@ -633,59 +773,78 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     }
     if (existing) cancelTerminal();
 
-    terminalStatus = 'attaching';
-    lastError = undefined;
-    publish();
-    if (!current(generation, sessionId)) {
-      return Promise.reject(new SessionCoordinatorError('stale-operation'));
-    }
+    // Install an owned operation, not merely its token, before starting the
+    // adapter or publishing `attaching`. A synchronous observer may settle the
+    // published token while the adapter is still pending.
+    const leaseSequence = ++nextTerminalLeaseSequence;
     const controller = new AbortController();
-    const pending = {
+    let startAttach!: () => void;
+    let pending!: PendingTerminalAttach;
+    const operation = new Promise<TerminalBinding>((resolve, reject) => {
+      startAttach = () => {
+        void (async (): Promise<TerminalBinding> => {
+          try {
+            const value = await terminal.attach(sessionId, controller.signal);
+            if (!current(generation, sessionId) || pending.cancelled) {
+              cleanupUnknownBinding(value);
+              throw new SessionCoordinatorError('stale-operation');
+            }
+            const binding = normalizeBinding(value, sessionId);
+            const lease: TerminalBindingLease = {
+              binding,
+              terminalLeaseSequence: pending.terminalLeaseSequence,
+              cleaned: false
+            };
+            if (!current(generation, sessionId) || pending.cancelled) {
+              cleanupBinding(lease);
+              throw new SessionCoordinatorError('stale-operation');
+            }
+            terminalBinding = lease;
+            terminalBindingFocusOwnerSequence = pending.focusOwnerSequence;
+            terminalStatus = 'attached';
+            lastError = undefined;
+            lifecycle = 'active';
+            publish();
+            return binding;
+          } catch (error) {
+            if (isStale(error) || pending.cancelled) throw new SessionCoordinatorError('stale-operation');
+            const normalized = normalizeTerminalError();
+            if (current(generation, sessionId)) {
+              if (terminalLeaseSequence === pending.terminalLeaseSequence) {
+                terminalLeaseSequence = undefined;
+              }
+              terminalStatus = 'failed';
+              lastError = normalized.code;
+              lifecycle = mode === 'terminal' ? 'terminal-attach-failed' : 'active';
+              publish();
+            }
+            throw normalized;
+          }
+        })().then(resolve, reject);
+      };
+    });
+    const promise = operation.finally(() => {
+      if (pendingTerminal === pending) pendingTerminal = undefined;
+    });
+    pending = {
       generation,
       sessionId,
+      terminalLeaseSequence: leaseSequence,
       controller,
       focusOwnerSequence,
       cancelled: false,
-      promise: undefined as unknown as Promise<TerminalBinding>
-    } satisfies Omit<PendingTerminalAttach, 'promise'> & { promise: Promise<TerminalBinding> };
-
-    const promise = (async (): Promise<TerminalBinding> => {
-      try {
-        const value = await terminal.attach(sessionId, controller.signal);
-        if (!current(generation, sessionId) || pending.cancelled) {
-          cleanupUnknownBinding(value);
-          throw new SessionCoordinatorError('stale-operation');
-        }
-        const binding = normalizeBinding(value, sessionId);
-        const lease: TerminalBindingLease = { binding, cleaned: false };
-        if (!current(generation, sessionId) || pending.cancelled) {
-          cleanupBinding(lease);
-          throw new SessionCoordinatorError('stale-operation');
-        }
-        terminalBinding = lease;
-        terminalBindingFocusOwnerSequence = pending.focusOwnerSequence;
-        terminalStatus = 'attached';
-        lastError = undefined;
-        lifecycle = 'active';
-        publish();
-        return binding;
-      } catch (error) {
-        if (isStale(error) || pending.cancelled) throw new SessionCoordinatorError('stale-operation');
-        const normalized = normalizeTerminalError();
-        if (current(generation, sessionId)) {
-          terminalStatus = 'failed';
-          lastError = normalized.code;
-          lifecycle = mode === 'terminal' ? 'terminal-attach-failed' : 'active';
-          publish();
-        }
-        throw normalized;
-      }
-    })().finally(() => {
-      if (pendingTerminal === pending) pendingTerminal = undefined;
-    });
-    pending.promise = promise;
+      promise
+    };
+    terminalLeaseSequence = leaseSequence;
+    terminalLeaseCountForSession += 1;
+    terminalStatus = 'attaching';
+    lastError = undefined;
     pendingTerminal = pending;
     void promise.catch(() => undefined);
+    // Start the adapter only after its cancellation ownership is installed; the
+    // following publish may synchronously settle this still-pending lease.
+    startAttach();
+    publish();
     return awaitWithAbort(promise, signal);
   };
 
@@ -777,6 +936,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     }
     activeSessionId = sessionId;
     sessionGeneration += 1;
+    terminalLeaseCountForSession = 0;
     terminalStatus = 'detached';
     lastError = undefined;
     const generation = sessionGeneration;
@@ -909,6 +1069,29 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     }
   };
 
+  const reconnectTerminal = async (signal?: AbortSignal): Promise<SessionCoordinatorState> => {
+    assertUsable();
+    const sessionId = assertSession();
+    const generation = sessionGeneration;
+    // Recovery uses the same activation and focus ownership as an explicit
+    // Terminal selection, but never calls Chat connect, restore, or reconnect.
+    const activation = beginModeActivation('terminal', generation, sessionId);
+
+    try {
+      if (!current(generation, sessionId)) return state();
+      await ensureTerminalForCurrentSession(signal, activation.sequence);
+      assertCurrent(generation, sessionId);
+      if (!isCurrentModeActivation(activation)) return state();
+      lifecycle = 'active';
+      publish();
+      publishFocus(activation);
+      return state();
+    } catch (error) {
+      if (isStale(error)) return state();
+      throw error;
+    }
+  };
+
   const closeChatOnce = (): void => {
     if (chatClosed) return;
     chatClosed = true;
@@ -928,6 +1111,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     loggedOut = true;
     activeSessionId = undefined;
     sessionGeneration += 1;
+    terminalLeaseCountForSession = 0;
     terminalStatus = 'detached';
     lastError = undefined;
     lastFocusIntent = undefined;
@@ -971,6 +1155,7 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     disposed = true;
     activeSessionId = undefined;
     sessionGeneration += 1;
+    terminalLeaseCountForSession = 0;
     terminalStatus = 'detached';
     lastError = undefined;
     lastFocusIntent = undefined;
@@ -1007,9 +1192,12 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     },
     activate,
     switchMode: activate,
+    invalidateSession,
+    invalidateTerminalBinding,
     setSession,
     restore,
     reconnect,
+    reconnectTerminal,
     logout,
     dispose,
     subscribe

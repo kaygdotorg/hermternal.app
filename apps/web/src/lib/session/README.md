@@ -16,15 +16,39 @@ Hermes session, or mirror transcript content.
   focus ownership to the latest Terminal request without starting another attach.
   A late Terminal completion may leave its binding attached after switching to
   Chat, but it never restores W-Term focus while Chat is the active mode.
-- `setSession()` increments the session generation, invalidates and releases the
-  current Terminal binding lease before awaiting Chat restoration, and ignores
-  late completions from the previous generation. Cleanup is rechecked before the
-  replacement identity is installed because adapter invalidation or release may
-  synchronously log out or dispose the coordinator. Each attach gets a fresh
-  lease, so an adapter may reuse one raw binding object after an earlier lease
-  settles without suppressing later cleanup. If overlapping attaches return the
-  same raw object, a stale completion never cleans the raw binding owned by the
-  active lease; a distinct stale binding still receives exactly-once cleanup.
+- `invalidateSession()` is the synchronous replacement boundary: it revokes the
+  selected session and invalidates/releases its Terminal lease before a live
+  workspace exposes a replacement snapshot. It deliberately does not select,
+  connect, or restore Chat. The owner may call asynchronous `setSession()` only
+  after that snapshot boundary. `setSession()` increments the session generation,
+  invalidates and releases the current Terminal binding lease before awaiting Chat
+  restoration, and ignores late completions from the previous generation. Cleanup
+  is rechecked before the replacement identity is installed because adapter
+  invalidation or release may synchronously log out or dispose the coordinator.
+  Each attach gets a fresh lease, so an adapter may reuse one raw binding object
+  after an earlier lease settles without suppressing later cleanup. If overlapping
+  attaches return the same raw object, a stale completion never cleans the raw
+  binding owned by the active lease; a distinct stale binding still receives
+  exactly-once cleanup.
+- `invalidateTerminalBinding({ sessionId, sessionGeneration,
+  terminalLeaseSequence })` reconciles an unsolicited Terminal detach/failure
+  without selecting Chat. The coordinator publishes a fresh opaque
+  `terminalLeaseSequence` for every attach, including an in-generation
+  `reconnectTerminal()` recovery; the pending lease ownership is installed
+  before its `attaching` snapshot is observable, so a synchronous observer can
+  settle the published token and a late adapter completion is cleaned instead
+  of becoming attached. Settlement must return that token so a stale lease
+  cannot cancel a newly pending or attached same-session recovery lease. During
+  invalidation, cleanup callbacks may reenter the coordinator; the outer
+  settlement rechecks its identity, generation, token, lifecycle, and ownership
+  before it clears focus or publishes, so the nested transition wins. Publication
+  is also revision-fenced: if `onStateChange` or a subscriber synchronously
+  causes a newer publication, remaining recipients never receive the obsolete
+  snapshot. The token is optional only for source compatibility: a legacy two-field settlement is
+  accepted for the first attach in a session generation and is rejected
+  conservatively after a retry. `reconnectTerminal()` uses the existing Terminal
+  activation and focus contract to acquire a new lease; it does not call Chat
+  connect, restore, or reconnect.
 - `logout()` and `dispose()` claim lifecycle state before adapter cleanup. They
   close Chat and clean the active Terminal lease at most once, increment the
   session generation once, and treat `disposed` as higher precedence than
