@@ -640,13 +640,36 @@ test('password preview submits only a credential-free local fixture action', asy
   await expect(password).toHaveAttribute('data-fixture-field', 'password');
   await expect(password).toHaveAttribute('autocomplete', 'off');
 
-  await username.fill('sam');
-  await password.fill('browser-only-fixture');
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await username.fill('fixture-user');
+  await password.fill('pointer-only-fixture');
+  const signIn = page.getByRole('button', { name: 'Sign in' });
+  await signIn.evaluate((button) => button.setAttribute('data-pointer-owner', 'password-submit'));
+  const signInBox = await signIn.boundingBox();
+  expect(signInBox).not.toBeNull();
+  await page.mouse.move(
+    (signInBox?.x ?? 0) + (signInBox?.width ?? 0) / 2,
+    (signInBox?.y ?? 0) + (signInBox?.height ?? 0) / 2
+  );
+  await page.mouse.down();
 
+  // Pointer-down activation clears both controls and publishes the local action
+  // before pointer up. The button must stay mounted to consume its one matching
+  // compatibility click instead of replacing the form mid-gesture.
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting');
-  await expect(page.getByRole('textbox', { name: 'Password' })).toHaveValue('');
-  await expect(page.locator('.section-note').nth(1)).toHaveText('submit-password-fixture');
+  await expect(username).toHaveValue('');
+  await expect(password).toHaveValue('');
+  await expect(page.getByRole('button', { name: 'Signing in' })).toHaveAttribute(
+    'data-pointer-owner',
+    'password-submit'
+  );
+  const authActionNote = page.locator('.section-note').nth(1);
+  await expect(authActionNote).toHaveText('submit-password-fixture');
+  await expect(authActionNote).toHaveAttribute('data-auth-action-count', '1');
+  await page.mouse.up();
+
+  await expect(authActionNote).toHaveText('submit-password-fixture');
+  await expect(authActionNote).toHaveAttribute('data-auth-action-count', '1');
+  expect(await page.locator('html').textContent()).not.toContain('pointer-only-fixture');
   await expect(page.getByText(/sent only to the configured/i)).not.toBeVisible();
 });
 
@@ -663,6 +686,7 @@ test('hydrated password submission remains keyboard accessible and credential-fr
   await expect(username).toHaveValue('');
   await expect(password).toHaveValue('');
   await expect(page.locator('.section-note').nth(1)).toHaveText('submit-password-fixture');
+  await expect(page.locator('.section-note').nth(1)).toHaveAttribute('data-auth-action-count', '1');
   expect(await page.locator('html').textContent()).not.toContain('keyboard-only-value');
 });
 

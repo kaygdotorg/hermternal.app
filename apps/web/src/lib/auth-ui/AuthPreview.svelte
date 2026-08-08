@@ -43,8 +43,19 @@
   let componentMounted = false;
 
   $: if (effectiveState !== previousState) {
-    resetPasswordEntry();
-    previousState = effectiveState;
+    const enteredState = effectiveState;
+    const exitedState = previousState;
+    // Password submission starts on pointer down. Keep the owned form mounted
+    // through the matching pointer up/click so replacing its reset button cannot
+    // cancel the gesture before the credential-free action settles.
+    if (exitedState === 'password' && enteredState === 'password-submitting') {
+      passwordVisible = false;
+      fieldOwnershipReady = false;
+      focusGeneration += 1;
+    } else {
+      resetPasswordEntry();
+    }
+    previousState = enteredState;
     void focusEnteredState();
   }
   $: isProviderState = isProviderPanelState(effectiveState);
@@ -225,8 +236,9 @@
     const password = passwordInput?.value ?? '';
     // Snapshot only the transient live values, then synchronously clear the DOM
     // before either the fixture action or live authentication callback can run.
+    // Do not key-replace the form inside the pointer-down gesture: reset() clears
+    // the controls without detaching the button that owns the compatibility click.
     passwordForm.reset();
-    formResetKey += 1;
     passwordVisible = false;
 
     if (discoveryMode === 'live') {
