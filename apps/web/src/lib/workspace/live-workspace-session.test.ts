@@ -776,37 +776,51 @@ describe('LiveWorkspaceSession', () => {
       title: 'Canonical session',
       isActive: false
     };
+    const rawHistory = (sessionId: string, content?: string): string =>
+      JSON.stringify({
+        session_id: sessionId,
+        messages: content === undefined ? [] : [{ role: 'assistant', content }],
+        pagination: { limit: 500, offset: 0, returned: content === undefined ? 0 : 1 }
+      });
+    const responses = [
+      new Response(
+        JSON.stringify({
+          sessions: [JSON.parse(rawSessionDetail(SESSION))],
+          total: 1,
+          limit: 100,
+          offset: 0
+        }),
+        { headers: { 'content-type': 'application/json' } }
+      ),
+      new Response(rawHistory(SESSION.id), { headers: { 'content-type': 'application/json' } }),
+      new Response(rawSessionDetail(canonicalSession), {
+        headers: { 'content-type': 'application/json' }
+      }),
+      new Response(rawHistory(canonicalSession.id, 'Canonical history'), {
+        headers: { 'content-type': 'application/json' }
+      })
+    ];
+    const requests: string[] = [];
     const liveRest = createLiveRestTransport({
-      fetch: async () =>
-        new Response(rawSessionDetail(canonicalSession), {
-          headers: { 'content-type': 'application/json' }
-        })
+      fetch: async (input) => {
+        requests.push(String(input));
+        const next = responses.shift();
+        if (!next) throw new Error('missing synthetic REST response');
+        return next;
+      }
     });
-    const rest = createRest([]);
-    vi.mocked(rest.getSession).mockImplementation((sessionId, signal) =>
-      liveRest.getSession(sessionId, signal)
-    );
-    vi.mocked(rest.getSessionMessages).mockImplementation((sessionId) =>
-      Promise.resolve(
-        sessionId === canonicalSession.id
-          ? sessionMessagesFor(canonicalSession.id, [
-              { role: 'assistant', content: 'Canonical history' }
-            ])
-          : sessionMessages([])
-      )
-    );
     const chat = createChatHarness();
-    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    const session = new LiveWorkspaceSession({ rest: liveRest, createChat: chat.createChat });
 
     await session.initialize();
     await session.selectSession(requestedSessionId);
 
-    expect(rest.getSession).toHaveBeenLastCalledWith(requestedSessionId, expect.any(AbortSignal));
-    expect(rest.getSessionMessages).toHaveBeenLastCalledWith(
-      canonicalSession.id,
-      { limit: 500, offset: 0 },
-      expect.any(AbortSignal)
-    );
+    expect(requests).toEqual([
+      '/api/sessions?limit=100&offset=0',
+      `/api/sessions/${SESSION.id}/messages?limit=500&offset=0`,
+      `/api/sessions/${requestedSessionId}`,
+      `/api/sessions/${canonicalSession.id}/messages?limit=500&offset=0`
+    ]);
     expect(chat.createChat).toHaveBeenCalledTimes(2);
     expect(chat.createChat.mock.calls[1]?.[0]).toEqual(
       expect.objectContaining({ selectedSessionId: canonicalSession.id })
@@ -825,6 +839,35 @@ describe('LiveWorkspaceSession', () => {
         status: 'complete'
       }
     ]);
+  });
+
+  it('rejects a wrapper that relays a real REST canonical detail before history or Chat ownership', async () => {
+    const requestedSessionId = 'alias-session';
+    const canonicalSession = { ...SESSION, id: 'canonical-session', isActive: false };
+    const realRest = createLiveRestTransport({
+      fetch: async () =>
+        new Response(rawSessionDetail(canonicalSession), {
+          headers: { 'content-type': 'application/json' }
+        })
+    });
+    const wrapper = createRest([]);
+    vi.mocked(wrapper.getSession).mockImplementation((sessionId, signal) =>
+      realRest.getSession(sessionId, signal)
+    );
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest: wrapper, createChat: chat.createChat });
+
+    await session.initialize();
+    await session.selectSession(requestedSessionId);
+
+    expect(wrapper.getSession).toHaveBeenCalledWith(requestedSessionId, expect.any(AbortSignal));
+    expect(wrapper.getSessionMessages).toHaveBeenCalledTimes(1);
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(session.current).toMatchObject({
+      state: 'retryable-error',
+      activeSessionId: requestedSessionId
+    });
+    expect(session.current.timeline).toEqual([]);
   });
 
   it('shows bounded streaming text and then replaces it from server history', async () => {

@@ -8,12 +8,12 @@ import {
   type JsonRpcCloseClassification,
   type JsonRpcConnectionState
 } from '$lib/chat/json-rpc-chat';
+import { LiveRestError, type LiveRestTransport, type LiveSession } from '$lib/transport';
 import {
-  isLiveRestCanonicalAlias,
-  LiveRestError,
-  type LiveRestTransport,
-  type LiveSession
-} from '$lib/transport';
+  consumeLiveRestCanonicalAlias,
+  getLiveRestSessionForWorkspace,
+  resetLiveRestCanonicalAliasScope
+} from '$lib/transport/live-rest-transport';
 import { mapLiveMessages, mapLiveSessions } from './live-workspace';
 import type { SessionSummary, TimelineItem, WorkspaceRuntimeState } from './types';
 
@@ -206,9 +206,13 @@ export class LiveWorkspaceSession {
     if (!this.ownsOperation(operation)) return;
 
     try {
-      const session = await this.rest.getSession(sessionId, operation.signal);
+      const session = await getLiveRestSessionForWorkspace(
+        this.rest,
+        this,
+        sessionId,
+        operation.signal
+      );
       if (!this.isCurrent(operation.generation)) return;
-      this.assertRequestedSession(session, sessionId);
       await this.openSession(session, this.snapshot.sessions, operation, sessionId);
     } catch (error) {
       this.publishLoadFailure(error, operation.generation);
@@ -392,6 +396,7 @@ export class LiveWorkspaceSession {
     if (this.factoryRetryGeneration === this.generation) {
       // Factory retries have no chat identity yet; abort the workspace
       // operation itself so a late REST result cannot start a new transport.
+      resetLiveRestCanonicalAliasScope(this.rest, this);
       this.controller?.abort();
       this.factoryRetryGeneration = undefined;
     }
@@ -481,9 +486,13 @@ export class LiveWorkspaceSession {
     if (!this.ownsFactoryRetry(operation)) return;
 
     try {
-      const session = await this.rest.getSession(sessionId, operation.signal);
+      const session = await getLiveRestSessionForWorkspace(
+        this.rest,
+        this,
+        sessionId,
+        operation.signal
+      );
       if (!this.ownsFactoryRetry(operation)) return;
-      this.assertRequestedSession(session, sessionId);
       await this.openSession(session, sessions, operation, sessionId);
     } catch (error) {
       if (this.ownsFactoryRetry(operation)) this.publishLoadFailure(error, operation.generation);
@@ -556,7 +565,16 @@ export class LiveWorkspaceSession {
     // read succeeds. This private retry target covers failures that occur
     // before the active session can be published to the presentation state.
     if (!this.ownsOperation(operation)) return;
-    const canonicalizedAlias = this.assertRequestedSession(session, requestedSessionId);
+    const canonicalSessionId = consumeLiveRestCanonicalAlias(
+      this.rest,
+      this,
+      session,
+      requestedSessionId
+    );
+    if (session.id !== requestedSessionId && canonicalSessionId !== session.id) {
+      throw new LiveRestError('invalid-response');
+    }
+    const canonicalizedAlias = canonicalSessionId !== undefined;
     const expectedActiveSessionId = this.snapshot.activeSessionId;
     this.failedRestore = { generation: operation.generation, sessionId: session.id };
     const response = await this.rest.getSessionMessages(session.id, { limit: 500, offset: 0 }, operation.signal);
@@ -566,7 +584,7 @@ export class LiveWorkspaceSession {
     if (!this.ownsOperation(operation)) return;
     // History remains strict even when the detail route resolved an alias. The
     // only permitted mismatch with the provisional snapshot is the canonical ID
-    // authorized by the live REST detail marker; foreign history never reaches
+    // authorized by the private one-shot detail record; foreign history never reaches
     // presentation state or creates a transport that could resume it.
     if (
       response.sessionId !== session.id ||
@@ -1044,22 +1062,10 @@ export class LiveWorkspaceSession {
     this.publish({ ...this.snapshot, state: 'retryable-error', permanentFailure: undefined });
   }
 
-  private assertRequestedSession(session: LiveSession, requestedSessionId: string): boolean {
-    // A canonical alias is trusted only when the constructed live REST
-    // transport branded this exact request/response pair. Structural adapters
-    // remain strict, so a custom A-to-B detail cannot read history, create Chat,
-    // send resume, or adopt B as workspace identity.
-    const canonicalizedAlias =
-      session.id !== requestedSessionId && isLiveRestCanonicalAlias(session, requestedSessionId);
-    if (session.id !== requestedSessionId && !canonicalizedAlias) {
-      throw new LiveRestError('invalid-response');
-    }
-    return canonicalizedAlias;
-  }
-
   private begin(): { readonly generation: number; readonly signal: AbortSignal } {
     this.assertActive();
     this.generation += 1;
+    resetLiveRestCanonicalAliasScope(this.rest, this);
     this.failedRestore = undefined;
     this.createdDraft = undefined;
     this.advanceRefreshEpoch();
@@ -1078,6 +1084,7 @@ export class LiveWorkspaceSession {
 
   private resetForInvalidation(publishSnapshot: boolean): void {
     this.generation += 1;
+    resetLiveRestCanonicalAliasScope(this.rest, this);
     this.failedRestore = undefined;
     this.createdDraft = undefined;
     this.advanceRefreshEpoch();

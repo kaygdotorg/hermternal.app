@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  consumeLiveRestCanonicalAlias,
   createLiveRestTransport,
-  isLiveRestCanonicalAlias,
+  getLiveRestSessionForWorkspace,
   LiveRestError,
   normalizeApiBaseUrl,
-  validateSessionId
+  resetLiveRestCanonicalAliasScope,
+  validateSessionId,
+  type LiveRestTransport
 } from './live-rest-transport';
 import {
   LIVE_AUTH_IDENTITY_FIXTURE,
@@ -15,6 +18,7 @@ import {
   LIVE_SESSION_MESSAGES_FIXTURE
 } from './live-rest-fixtures';
 import { parseStrictJson, StrictJsonError } from './strict-json';
+import type { LiveSession } from './live-rest-types';
 
 type FetchCall = {
   input: RequestInfo | URL;
@@ -929,13 +933,113 @@ describe('createLiveRestTransport', () => {
       LIVE_SESSION_FIXTURE.id
     );
     expect(resolvedDetail).toMatchObject({ id: 'synthetic-session-0002' });
-    expect(isLiveRestCanonicalAlias(resolvedDetail, LIVE_SESSION_FIXTURE.id)).toBe(true);
-    expect(isLiveRestCanonicalAlias({ ...resolvedDetail }, LIVE_SESSION_FIXTURE.id)).toBe(false);
+    expect(Object.getOwnPropertySymbols(resolvedDetail)).toEqual([]);
+    expect(Reflect.ownKeys(resolvedDetail)).toEqual(Object.keys(resolvedDetail));
 
     const resolvedMessagesId = fetchSequence(response(rawSessionMessages('synthetic-session-0002')));
     await expect(
       createLiveRestTransport({ fetch: resolvedMessagesId.fetch }).getSessionMessages(LIVE_SESSION_FIXTURE.id)
     ).resolves.toMatchObject({ sessionId: 'synthetic-session-0002' });
+  });
+
+  it('binds canonical alias authority to the exact transport, workspace, and detail once', async () => {
+    const alias = LIVE_SESSION_FIXTURE.id;
+    const canonical = 'synthetic-session-0002';
+    const fixture = fetchSequence(
+      response(rawSession({ ...LIVE_SESSION_FIXTURE, id: canonical })),
+      response(rawSession({ ...LIVE_SESSION_FIXTURE, id: canonical })),
+      response(rawSession({ ...LIVE_SESSION_FIXTURE, id: canonical }))
+    );
+    const transport = createLiveRestTransport({ fetch: fixture.fetch });
+    const otherTransport = createLiveRestTransport({
+      fetch: fetchSequence(response(rawSession({ ...LIVE_SESSION_FIXTURE, id: canonical }))).fetch
+    });
+    const workspace = {};
+    const otherWorkspace = {};
+
+    const detail = await getLiveRestSessionForWorkspace(transport, workspace, alias);
+    expect(detail.id).toBe(canonical);
+    expect(Object.getOwnPropertySymbols(detail)).toEqual([]);
+    expect(Object.getOwnPropertyDescriptors(detail)).toEqual(
+      expect.objectContaining({ id: expect.any(Object) })
+    );
+
+    const spreadClone = { ...detail };
+    const descriptorClone = Object.create(
+      Object.getPrototypeOf(detail),
+      Object.getOwnPropertyDescriptors(detail)
+    ) as LiveSession;
+    expect(consumeLiveRestCanonicalAlias(transport, workspace, spreadClone, alias)).toBeUndefined();
+    expect(consumeLiveRestCanonicalAlias(transport, workspace, descriptorClone, alias)).toBeUndefined();
+    expect(consumeLiveRestCanonicalAlias(transport, otherWorkspace, detail, alias)).toBeUndefined();
+    expect(consumeLiveRestCanonicalAlias(otherTransport, workspace, detail, alias)).toBeUndefined();
+    expect(() =>
+      consumeLiveRestCanonicalAlias(transport, workspace, detail, 'synthetic-session-0003')
+    ).toThrowError(new LiveRestError('invalid-response'));
+    expect(consumeLiveRestCanonicalAlias(transport, workspace, detail, alias)).toBeUndefined();
+
+    const secondDetail = await getLiveRestSessionForWorkspace(transport, workspace, alias);
+    expect(consumeLiveRestCanonicalAlias(transport, workspace, secondDetail, alias)).toBe(canonical);
+    expect(consumeLiveRestCanonicalAlias(transport, workspace, secondDetail, alias)).toBeUndefined();
+    expect(consumeLiveRestCanonicalAlias(transport, workspace, { id: canonical }, alias)).toBeUndefined();
+
+    const malformedAdapter: LiveRestTransport = {
+      ...transport,
+      getSession: vi.fn().mockResolvedValue({ ...detail, id: 42 })
+    };
+    await expect(
+      getLiveRestSessionForWorkspace(malformedAdapter, {}, alias)
+    ).rejects.toMatchObject({ code: 'invalid-response' });
+  });
+
+  it('clears pending alias authority when a workspace scope resets', async () => {
+    const transport = createLiveRestTransport({
+      fetch: fetchSequence(
+        response(rawSession({ ...LIVE_SESSION_FIXTURE, id: 'synthetic-session-0002' }))
+      ).fetch
+    });
+    const workspace = {};
+    const detail = await getLiveRestSessionForWorkspace(transport, workspace, LIVE_SESSION_FIXTURE.id);
+
+    resetLiveRestCanonicalAliasScope(transport, workspace);
+
+    expect(
+      consumeLiveRestCanonicalAlias(transport, workspace, detail, LIVE_SESSION_FIXTURE.id)
+    ).toBeUndefined();
+  });
+
+  it('rejects a wrapper that relays a real transport alias detail', async () => {
+    const canonical = 'synthetic-session-0002';
+    const realTransport = createLiveRestTransport({
+      fetch: fetchSequence(response(rawSession({ ...LIVE_SESSION_FIXTURE, id: canonical }))).fetch
+    });
+    const wrapper: LiveRestTransport = {
+      ...realTransport,
+      getSession: vi.fn((sessionId, signal) => realTransport.getSession(sessionId, signal))
+    };
+
+    await expect(
+      getLiveRestSessionForWorkspace(wrapper, {}, LIVE_SESSION_FIXTURE.id)
+    ).rejects.toMatchObject({ code: 'invalid-response' });
+  });
+
+  it('rejects malformed direct detail values before alias authority is issued', async () => {
+    const malformed: LiveSession = {
+      ...LIVE_SESSION_FIXTURE,
+      id: 'not-a-valid-session-id'
+    };
+    const adapter: LiveRestTransport = {
+      getProviders: vi.fn(),
+      getAuthState: vi.fn(),
+      listSessions: vi.fn(),
+      getSessions: vi.fn(),
+      getSession: vi.fn().mockResolvedValue(malformed),
+      getSessionMessages: vi.fn()
+    };
+
+    await expect(
+      getLiveRestSessionForWorkspace(adapter, {}, LIVE_SESSION_FIXTURE.id)
+    ).rejects.toMatchObject({ code: 'invalid-response' });
   });
 
   it('rejects oversized, wrong-media, malformed-UTF8, redirected, and non-success responses', async () => {
