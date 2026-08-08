@@ -10,7 +10,8 @@ const harness = vi.hoisted(() => {
   const createTerminalRenderer = vi.fn((options: any) => {
     const instance: any = {
       state: 'idle', error: null, write: vi.fn(), resize: vi.fn(), focus: vi.fn(), whenIdle: vi.fn(), dispose: vi.fn(),
-      mount: vi.fn(async () => { await deferredMount; instance.state = 'ready'; options.onStateChange?.('ready'); }), onInput: options.onInput
+      mount: vi.fn(async () => { await deferredMount; instance.state = 'ready'; options.onStateChange?.('ready'); }), onInput: options.onInput,
+      emitState: (state: string) => { instance.state = state; options.onStateChange?.(state); }
     };
     instances.push(instance);
     return instance;
@@ -65,6 +66,18 @@ describe('TerminalSurface', () => {
     expect(b.setRendererReady).toHaveBeenLastCalledWith(false); expect(b.detach).toHaveBeenCalledTimes(1);
   });
 
+  it('closes the bridge readiness gate after a post-ready renderer failure', async () => {
+    const b = bridge();
+    render(TerminalSurface, { bridge: b, active: true, coordinator: coordinator() });
+    await waitFor(() => expect(harness.instances).toHaveLength(1));
+
+    b.setRendererReady.mockClear();
+    harness.instances[0].emitState('error');
+
+    expect(b.setRendererReady).toHaveBeenCalledWith(false);
+    expect(b.detach).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ['mode', (b: ReturnType<typeof bridge>, view: any) => view.rerender({ bridge: b, active: true, coordinator: coordinator('one', 1, 'chat'), focusIntent: intent() })],
     ['target', (b: ReturnType<typeof bridge>, view: any) => view.rerender({ bridge: b, active: true, coordinator: coordinator(), focusIntent: { ...intent(), target: 'composer' } })],
@@ -85,8 +98,28 @@ describe('TerminalSurface', () => {
     let release!: () => void; harness.setDeferred(new Promise<void>((resolve) => { release = resolve; }));
     const first = bridge(); const second = bridge(); const view = render(TerminalSurface, { bridge: first, active: true, coordinator: coordinator(), focusIntent: intent() });
     await waitFor(() => expect(harness.instances).toHaveLength(1));
-    await view.rerender({ bridge: second, active: true, coordinator: coordinator(), focusIntent: intent() }); view.unmount(); release(); await Promise.resolve();
+    await view.rerender({ bridge: second, active: true, coordinator: coordinator(), focusIntent: intent() });
+    expect(first.setRendererReady).toHaveBeenLastCalledWith(false);
+    view.unmount(); release(); await Promise.resolve();
     expect(harness.instances.every((item) => item.focus.mock.calls.length === 0)).toBe(true);
+  });
+
+  it('focuses only the final terminal intent after a rapid chat transfer during mount', async () => {
+    let release!: () => void;
+    harness.setDeferred(new Promise<void>((resolve) => { release = resolve; }));
+    const b = bridge();
+    const view = render(TerminalSurface, { bridge: b, active: true, coordinator: coordinator(), focusIntent: intent() });
+    await waitFor(() => expect(harness.instances).toHaveLength(1));
+
+    await view.rerender({ bridge: b, active: false, coordinator: coordinator('one', 1, 'chat') });
+    await view.rerender({ bridge: b, active: true, coordinator: coordinator(), focusIntent: intent(2) });
+    release();
+
+    await waitFor(() => expect(harness.instances.at(-1)?.focus).toHaveBeenCalledTimes(1));
+    // The initially mounted renderer receives only the final intent; no stale
+    // continuation creates a second focus call during the transfer.
+    expect(harness.instances[0].focus).toHaveBeenCalledTimes(1);
+    view.unmount();
   });
 
   it('preserves accessible keyboard controls and reduced-motion-safe terminal semantics through rapid terminal-chat-terminal changes', async () => {
@@ -94,7 +127,12 @@ describe('TerminalSurface', () => {
     await waitFor(() => expect(harness.instances).toHaveLength(1));
     await view.rerender({ bridge: b, active: false, coordinator: coordinator('one', 1, 'chat') });
     await view.rerender({ bridge: b, active: true, coordinator: coordinator(), focusIntent: intent(2) });
-    await fireEvent.keyDown(screen.getByRole('button', { name: 'Return to Chat mode' }), { key: 'Enter' });
+    const returnToChat = screen.getByRole('button', { name: 'Return to Chat mode' });
+    expect(returnToChat).toHaveAttribute('type', 'button');
+    // Native Enter/Space activation arrives as a detail-zero click, distinct
+    // from the immediate pointer-down action path of the shared pill.
+    await fireEvent.click(returnToChat, { detail: 0 });
+    expect(onAction).toHaveBeenCalledWith({ type: 'set-mode', mode: 'chat' });
     expect(screen.getByRole('region', { name: 'Terminal input and output' })).toHaveAttribute('aria-describedby', 'terminal-help');
     expect(screen.getByRole('button', { name: 'Detach terminal' })).toBeVisible(); expect(screen.getByRole('button', { name: 'Close terminal' })).toBeVisible();
     await fireEvent.click(screen.getByRole('button', { name: 'Return to Chat mode' })); expect(onAction).toHaveBeenCalledWith({ type: 'set-mode', mode: 'chat' }); view.unmount();

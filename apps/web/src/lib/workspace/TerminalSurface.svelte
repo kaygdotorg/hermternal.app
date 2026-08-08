@@ -83,6 +83,11 @@
   }
 
   function resetBridgeBoundary(): void {
+    // `bridge` has already changed at this point. Close the bridge that owned
+    // the old sink first; otherwise a replaced bridge could keep replay open
+    // after its renderer has been disposed.
+    const previousBridge = subscribedBridge;
+    previousBridge?.setRendererReady(false);
     mountGeneration += 1;
     renderer?.dispose();
     renderer = undefined;
@@ -147,6 +152,13 @@
           if (targetBridge === bridge && generation === mountGeneration) {
             rendererState = state;
             rendererError = created.error;
+            // A runtime renderer failure loses the byte sink just as surely as
+            // a mount rejection. Fail closed before the bridge can replay or
+            // write opaque PTY output into a failed renderer.
+            if (state === 'error' || state === 'disposed') {
+              targetBridge.setRendererReady(false);
+              targetBridge.detach();
+            }
           }
         }
       });
@@ -160,6 +172,10 @@
       rendererError = created.error;
       targetBridge.setRendererReady(rendererState === 'ready');
       forwardResize();
+      // A newer intent may have arrived while this one waited for the lazy
+      // mount. It did not own the in-flight renderer promise, so replay the
+      // latest intent now and let the normal lease fence decide ownership.
+      if (focusIntent) void focusRenderer(focusIntent);
     } catch {
       if (!isCurrentRendererMount(generation, targetBridge)) return;
       targetBridge.setRendererReady(false);
