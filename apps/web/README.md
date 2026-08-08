@@ -21,7 +21,7 @@ The planned chat surface has one profile, provider-neutral discovery, session re
 
 ## Presentation packages
 
-- `src/lib/auth-ui/` owns typed authentication view states, fail-closed validation of synthetic provider arrays, provider cards, password-manager-resistant fixture fields, credential-free form actions, deliberate focus transfer, and live-region semantics. Empty, duplicate, malformed, missing-kind, and future-kind provider data resolves to the unavailable state. The Paper-approved password states begin empty and show `Cleared` while submitting. The primary control is a native reset action with a non-navigating default method: click or focused Enter clears both live values synchronously even if script execution stops, while hydrated submission emits only a fixture action. Live discovery accepts only exact bounded JSON syntax and schemas; malformed declared lengths, rejected responses, caller cancellation, and timeout all cancel active body work before the adapter returns a fixed credential-free diagnostic.
+- `src/lib/auth-ui/` owns typed authentication view states, fail-closed validation of synthetic provider arrays, provider cards, fixture-only password-manager suppression, credential-free form actions, deliberate focus transfer, and live-region semantics. Empty, duplicate, malformed, missing-kind, and future-kind provider data resolves to the unavailable state. The Paper-approved password states begin empty and show `Cleared` while submitting. Synthetic fixture controls retain the ignore markers and `autocomplete=off`/`data-form-type=other` boundary; live username and password controls omit those suppressors, expose stable `autocomplete`/`name` semantics, and remain read-only until hydration completes the explicit username focus transfer. Element refs keep keyboard input and submission channels owned by the correct field. The primary control is a native reset action with a non-navigating default method: click or focused Enter clears both live values synchronously even if script execution stops, while hydrated submission emits only a fixture action. Live discovery accepts only exact bounded JSON syntax and schemas; malformed declared lengths, rejected responses, caller cancellation, and timeout all cancel active body work before the adapter returns a fixed credential-free diagnostic.
 - `src/lib/workspace/` owns the shared pill primitive, runtime-state fixtures, compatibility gates, timeline, composer, session navigation, artifact inspector, and responsive narrow workspace chrome. Compatibility gates guard both emitted actions and local drawer/editor mutation against forced events. A pointer gesture activates a pill once on pointer down while its compatibility click remains consumed across leave, re-entry, and cancellation; keyboard and assistive activation remain independent. The reduced-transparency fallback uses fully opaque computed materials and removes blur and saturation rather than only changing token declarations.
 - `src/routes/ui-preview/` composes both packages and exposes local selectors for state and appearance. It records only action type names as visible test evidence.
 - `src/lib/transport/` remains the independent W-01 mock transport for the root scaffold. The presentation packages do not import it and do not create a hidden production transport path.
@@ -121,6 +121,38 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   reduced-motion behavior, deterministic cancellation, ordinary-startup service-worker
   registration, update/reload control, real offline cached navigation, and no-network requests.
 - Axe runs against success, empty, and failure states in both light and dark color schemes.
+- The password preview regression delays the hydration focus frame, sends rapid keyboard input, repeats
+  field transitions, and submits from the password control. The opt-in live lane uses one run-owned 0700
+  temporary root with an owner marker, disabled media artifacts, and a status-only reporter. The
+  Playwright project output directory is a disposable child of that root because Playwright clears its
+  project output before a run; workers adopt the inherited root only after validating its marker and
+  token, so retries and sequential workers share one run owner. Every Playwright worker preloads
+  `tests/live/live-ipc-guard.cjs` through `NODE_OPTIONS --require` before the
+  test body. `PW_RUNNER_DEBUG` is incompatible with this lane: the config rejects any truthy value before
+  worker spawn because Playwright otherwise inherits worker stderr directly. The guard captures the
+  credential variants once at preload, then pins `process.send`, never mutates `Object.prototype`,
+  `Array.prototype`, or `testInfo.errors`, and detaches/redacts every worker-to-parent payload, including
+  step, test-end, fatal, attachment, stdio, environment, and response messages. Playwright stdio buffers
+  and attachment bodies are bounded-decoded from base64 and replaced when their bytes contain a captured
+  credential encoding or end in any non-empty prefix of one; this closes split-write reconstruction across parent IPC messages while preserving buffers proven safe. Malformed or oversized binary fields fail closed. Unknown, trapped, or over-budget
+  values are replaced or not forwarded, so Playwright cannot fall back to serializing the unsafe source
+  graph. Per-test finalization validates every path ancestor and only quarantines strict child output directories;
+  symlink ancestors fail closed. It preserves the shared marker, root, and root-level artifacts. The config routes Playwright's post-teardown
+  `LastRunReporter` to `/dev/null`, so it cannot recreate a markerless `.last-run.json` directory after
+  global teardown. Global teardown alone removes the complete root by atomic quarantine plus bounded
+  known-entry non-recursive `unlink`/`rmdir`, retaining any unknown, replaced, or raced remnant. Detached descriptor-aware snapshots cover native Error causes, Playwright
+  `errorContext`, matcher results, logs, ARIA snapshots, and structured form values without retaining the
+  source graph. Snapshot arrays remain real Playwright-compatible arrays with normal push/map/iterator
+  behavior and safe own serialization/species behavior. Own `toJSON` hooks, stateful or inconsistent
+  properties, incomplete descriptors, malformed values, and over-budget graphs fail closed. Balanced
+  serialized contenteditable markup, raw-text textarea bodies, select/option nesting, and actual `value`
+  attributes are scanned structurally, including unquoted values. Comments, nested or mismatched form
+  markup, unclosed containers, malformed or unknown markup, duplicate or ambiguous attributes, and encoded
+  credentials fail closed rather than allowing a later editable element to be skipped. Scrub failures fail
+  the proof unless `page.isClosed()` returns `true`; generic error text such as `page crashed` is never
+  accepted as termination proof. Attachments and safe output cleanup run in `finally` even when redaction
+  fails, so a failed proof cannot retain synthetic credentials in traces, screenshots, reports, error
+  contexts, or `test-results`.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target

@@ -53,6 +53,7 @@ describe('BrowserAuthView', () => {
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Hermes password' }));
     await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password'));
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
 
     fireEvent.input(screen.getByLabelText('Username'), {
       target: { value: 'synthetic-user' }
@@ -109,6 +110,7 @@ describe('BrowserAuthView', () => {
     render(BrowserAuthView, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Hermes password' }));
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
     fireEvent.input(screen.getByLabelText('Username'), {
       target: { value: 'synthetic-user' }
     });

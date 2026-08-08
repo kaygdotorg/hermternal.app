@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Icon from '$lib/workspace/Icon.svelte';
   import Pill from '$lib/workspace/Pill.svelte';
   import ProviderCard from './ProviderCard.svelte';
@@ -35,6 +35,12 @@
   let stateHeading: HTMLElement | undefined;
   let passwordForm: HTMLFormElement | undefined;
   let usernameInput: HTMLInputElement | undefined;
+  let passwordInput: HTMLInputElement | undefined;
+  // A password form can be present before the browser has hydrated its event
+  // handlers. Keep both controls read-only until focus ownership is explicit.
+  let fieldOwnershipReady = false;
+  let focusGeneration = 0;
+  let componentMounted = false;
 
   $: if (effectiveState !== previousState) {
     resetPasswordEntry();
@@ -43,6 +49,19 @@
   }
   $: isProviderState = isProviderPanelState(effectiveState);
   $: isPasswordState = effectiveState === 'password' || effectiveState === 'password-submitting';
+
+  onMount(() => {
+    componentMounted = true;
+    // The password state can be the first client-rendered state, so it does not
+    // pass through the state-change reactive block. Establish focus ownership
+    // explicitly after hydration in that case.
+    if (isPasswordState) void focusEnteredState();
+    return () => {
+      componentMounted = false;
+      focusGeneration += 1;
+    };
+  });
+
   $: panelClass = isProviderState
     ? 'provider-panel'
     : effectiveState === 'session-expired' || effectiveState === 'logout-pending' || effectiveState === 'logout-failed'
@@ -147,22 +166,32 @@
   function resetPasswordEntry(): void {
     passwordVisible = false;
     submissionLocked = false;
+    fieldOwnershipReady = false;
+    focusGeneration += 1;
     formResetKey += 1;
   }
 
   async function focusEnteredState(): Promise<void> {
     const enteredState = effectiveState;
+    const generation = focusGeneration;
     await tick();
     await new Promise<void>((resolve) => {
       if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
       else setTimeout(resolve, 0);
     });
-    if (effectiveState !== enteredState) return;
+    if (!componentMounted || generation !== focusGeneration || effectiveState !== enteredState) return;
     // Focus waits until the activating click finishes. Otherwise a pointer-down
     // transition can focus the new task before the browser restores focus to
-    // the provider button that was just removed.
-    if (effectiveState === 'password') usernameInput?.focus();
-    else stateHeading?.focus();
+    // the provider button that was just removed. The controls stay read-only until
+    // this focus transfer completes, so rapid typing cannot cross-populate them.
+    if (effectiveState === 'password') {
+      if (!usernameInput) return;
+      usernameInput.focus();
+      if (document.activeElement !== usernameInput) return;
+    } else {
+      stateHeading?.focus();
+    }
+    fieldOwnershipReady = true;
   }
 
   function handleAction(action: AuthAction): void {
@@ -180,12 +209,20 @@
   }
 
   function activatePasswordFixture(): void {
-    if (effectiveState === 'password-submitting' || submissionLocked || !passwordForm?.checkValidity()) return;
+    if (
+      effectiveState === 'password-submitting' ||
+      submissionLocked ||
+      !fieldOwnershipReady ||
+      !passwordForm?.checkValidity()
+    )
+      return;
 
     submissionLocked = true;
-    const data = new FormData(passwordForm);
-    const username = data.get('username');
-    const password = data.get('password');
+    // Read the two owned controls directly instead of relying on FormData's
+    // name lookup. Explicit refs keep a delayed hydration/focus transfer from
+    // ever swapping the username and password channels.
+    const username = usernameInput?.value ?? '';
+    const password = passwordInput?.value ?? '';
     // Snapshot only the transient live values, then synchronously clear the DOM
     // before either the fixture action or live authentication callback can run.
     passwordForm.reset();
@@ -341,27 +378,32 @@
         {#key formResetKey}
           <!-- `dialog` has no native navigation target outside a dialog. The
                reset-type primary action clears live values without script,
-               while hydrated submit handling stays accessible. -->
+               while hydrated submit handling stays accessible. Synthetic
+               fixtures suppress password managers; live controls intentionally
+               omit those markers so username/current-password semantics remain
+               discoverable while the hydration fence is still active. -->
           <form
             bind:this={passwordForm}
             aria-busy={effectiveState === 'password-submitting'}
             aria-label="Hermes password sign in"
-            autocomplete="off"
+            autocomplete={discoveryMode === 'live' ? undefined : 'off'}
             class="password-form"
-            data-form-type="other"
+            data-field-ownership={fieldOwnershipReady ? 'ready' : 'pending'}
+            data-form-type={discoveryMode === 'live' ? undefined : 'other'}
             method="dialog"
             onsubmit={handlePasswordSubmit}
           >
             <label class="field-label" for="auth-username">Username</label>
             <input
               id="auth-username"
-              autocomplete="off"
-              data-1p-ignore
-              data-lpignore="true"
-              data-fixture-field="username"
+              autocomplete={discoveryMode === 'live' ? 'username' : 'off'}
+              data-1p-ignore={discoveryMode === 'live' ? undefined : ''}
+              data-lpignore={discoveryMode === 'live' ? undefined : 'true'}
+              data-fixture-field={discoveryMode === 'live' ? undefined : 'username'}
               disabled={effectiveState === 'password-submitting'}
               placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter username'}
               name={discoveryMode === 'live' ? 'username' : undefined}
+              readonly={!fieldOwnershipReady}
               required
               onkeydown={handlePasswordKeydown}
               bind:this={usernameInput}
@@ -386,14 +428,16 @@
             <input
               id="auth-password"
               autocomplete={discoveryMode === 'live' ? 'current-password' : 'off'}
-              data-1p-ignore
-              data-lpignore="true"
-              data-fixture-field="password"
+              data-1p-ignore={discoveryMode === 'live' ? undefined : ''}
+              data-lpignore={discoveryMode === 'live' ? undefined : 'true'}
+              data-fixture-field={discoveryMode === 'live' ? undefined : 'password'}
               disabled={effectiveState === 'password-submitting'}
               name={discoveryMode === 'live' ? 'password' : undefined}
               placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter password'}
+              readonly={!fieldOwnershipReady}
               required
               onkeydown={handlePasswordKeydown}
+              bind:this={passwordInput}
               type={passwordVisible ? 'text' : 'password'}
               value=""
             />

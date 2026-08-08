@@ -673,6 +673,7 @@ test('native password activation clears live values without navigation when scri
     await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
     await page.goto(previewUrl('/ui-preview'));
     await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+    await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready');
     const originalUrl = page.url();
     const originalHistoryLength = await page.evaluate(() => history.length);
     const usernameValue = `visible-username-${activation}`;
@@ -723,6 +724,79 @@ test('native password activation clears live values without navigation when scri
 
     page.off('request', onRequest);
     page.off('console', onConsole);
+  }
+});
+
+test('password ownership fences delayed hydration, rapid focus transfer, and keyboard submission', async ({ page }) => {
+  await page.addInitScript(() => {
+    const frames: Array<(timestamp: number) => void> = [];
+    Object.defineProperty(window, 'requestAnimationFrame', {
+      configurable: true,
+      value: (callback: (timestamp: number) => void) => {
+        frames.push(callback);
+        return frames.length;
+      }
+    });
+    Object.defineProperty(window, 'cancelAnimationFrame', {
+      configurable: true,
+      value: (handle: number) => {
+        frames.splice(Math.max(0, handle - 1), 1);
+      }
+    });
+    Object.defineProperty(window, 'releaseAuthFrames', {
+      configurable: true,
+      value: () => {
+        const pending = frames.splice(0);
+        for (const callback of pending) callback(performance.now());
+      }
+    });
+  });
+
+  await page.goto(previewUrl('/ui-preview'));
+  const auth = page.getByTestId('auth-preview');
+  const authState = page.getByRole('combobox', { name: 'Authentication state' });
+  await authState.selectOption('password');
+
+  const form = page.getByRole('form', { name: 'Hermes password sign in' });
+  const username = page.getByLabel('Username');
+  const password = page.getByRole('textbox', { name: 'Password' });
+  await expect(form).toHaveAttribute('data-field-ownership', 'pending');
+  await expect(username).toHaveAttribute('readonly', '');
+  await expect(password).toHaveAttribute('readonly', '');
+
+  // A rapid keyboard event while the focus transfer is queued cannot populate
+  // either field because both controls are still read-only.
+  await password.focus();
+  await page.keyboard.type('queued-password');
+  expect(await username.inputValue()).toBe('');
+  expect(await password.inputValue()).toBe('');
+
+  await page.evaluate(() => {
+    (window as unknown as Window & { releaseAuthFrames: () => void }).releaseAuthFrames();
+  });
+  await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+  await expect(username).toBeFocused();
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.keyboard.type(`fixture-user-${attempt}`);
+    await password.click();
+    await page.keyboard.type(`fixture-password-${attempt}`);
+    expect(await username.inputValue()).toBe(`fixture-user-${attempt}`);
+    expect(await password.inputValue()).toBe(`fixture-password-${attempt}`);
+
+    await password.press('Enter');
+    await expect(auth).toHaveAttribute('data-state', 'password-submitting');
+    await expect(username).toHaveValue('');
+    await expect(password).toHaveValue('');
+
+    if (attempt < 2) {
+      await authState.selectOption('password');
+      await page.evaluate(() => {
+        (window as unknown as Window & { releaseAuthFrames: () => void }).releaseAuthFrames();
+      });
+      await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+      await expect(username).toBeFocused();
+    }
   }
 });
 
