@@ -219,6 +219,7 @@ interface ConnectionAttempt {
   waiters: number;
   unabortableWaiters: number;
   settled: boolean;
+  quarantined: boolean;
 }
 
 interface DetachedAttachment {
@@ -499,7 +500,15 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   };
 
   const clearAttempt = (generation: number): void => {
-    if (activeAttempt?.generation === generation) activeAttempt = undefined;
+    // An aborted adapter may ignore its signal. Keep that owner fenced until its
+    // currently-issued low-level work settles, so a same-identity retry cannot
+    // mint a second ticket or construct a second socket in the overlap window.
+    if (
+      activeAttempt?.generation === generation &&
+      !activeAttempt.quarantined
+    ) {
+      activeAttempt = undefined;
+    }
   };
 
   const maybeAbortAttempt = (attempt: ConnectionAttempt): void => {
@@ -583,7 +592,15 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   ): Promise<void> => {
     const normalized = validateInput(input);
     const staleAttempt = activeAttempt;
-    if (staleAttempt && currentInput && sameConnectionInput(currentInput, normalized)) {
+    if (
+      staleAttempt &&
+      currentInput &&
+      sameConnectionInput(currentInput, normalized) &&
+      // Reconnect cannot overtake quarantined work, but explicit connect is new
+      // user intent after Close. It safely claims a generation while the old
+      // adapter remains fenced and retains its late-value cleanup.
+      (reattaching || !staleAttempt.quarantined)
+    ) {
       return waitForAttempt(staleAttempt, signal);
     }
     if (signal?.aborted) {
@@ -621,6 +638,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
       waiters: 0,
       unabortableWaiters: 0,
       settled: false,
+      quarantined: false,
     };
     activeAttempt = attempt;
 
@@ -669,6 +687,31 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
 
     if (!ownsAttempt()) return waitForAttempt(attempt, signal);
 
+    // `awaitWithAbort` returns promptly to the caller, but a provider or factory
+    // can ignore AbortSignal. Track the raw operation separately so the aborted
+    // owner remains the same-identity fence until that uncooperative work ends.
+    let pendingOperation: Promise<void> | undefined;
+    const trackPendingOperation = (operation: Promise<unknown>): void => {
+      const settlement = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      pendingOperation = settlement;
+      void settlement.then(() => {
+        if (pendingOperation === settlement) pendingOperation = undefined;
+      });
+    };
+    const quarantineUntilPendingSettles = (): boolean => {
+      const pending = pendingOperation;
+      if (!pending) return false;
+      attempt.quarantined = true;
+      void pending.then(() => {
+        attempt.quarantined = false;
+        clearAttempt(generation);
+      });
+      return true;
+    };
+
     void (async (): Promise<void> => {
       try {
         throwIfNotCurrent();
@@ -680,17 +723,21 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
           options,
           controller.signal,
           generation,
+          trackPendingOperation,
         );
         throwIfNotCurrent();
         setState("ticket_pending", generation, normalized);
         // The ticket-pending event is observable and can abort, Close, or
         // replace this attempt before the provider is allowed to mint a ticket.
         throwIfNotCurrent();
+        const ticketPromise = Promise.resolve(options.ticketProvider(controller.signal));
+        trackPendingOperation(ticketPromise);
         const ticket = await awaitWithAbort(
-          Promise.resolve(options.ticketProvider(controller.signal)),
+          ticketPromise,
           controller.signal,
           generation,
         );
+        pendingOperation = undefined;
         // The ticket promise can settle and remove its abort listener before a
         // queued abort or replacement runs this continuation. Do not validate,
         // publish, or invoke the socket factory for a stale owner.
@@ -711,12 +758,14 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
           ownedSocket = socket;
           return socket;
         });
+        trackPendingOperation(socketPromise);
         const socket = await awaitWithAbort(
           socketPromise,
           controller.signal,
           generation,
           (lateSocket) => closeOwnedSocket(lateSocket),
         );
+        pendingOperation = undefined;
         throwIfNotCurrent();
         const context = attachContext(
           socket,
@@ -747,10 +796,13 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
           attemptContext.rejectReady(sanitized);
           safeClose(attemptContext.socket);
         }
-        // Clear before notifying state observers. A synchronous retry from a
-        // failure observer must create a fresh attempt, while the finally block
-        // remains generation-guarded so it cannot clear that replacement.
-        clearAttempt(generation);
+        // Ordinary failures clear before observers, so a synchronous retry can
+        // start fresh. An ignored-abort operation instead stays quarantined;
+        // its public wait is already rejected, but it remains the low-level
+        // same-identity fence until the raw adapter promise has settled.
+        const quarantined =
+          sanitized.code === "aborted" && quarantineUntilPendingSettles();
+        if (!quarantined) clearAttempt(generation);
         if (
           generation === currentGeneration &&
           !userClosed &&
@@ -766,7 +818,7 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
         attempt.settled = true;
         rejectAttempt(sanitized);
       } finally {
-        clearAttempt(generation);
+        if (!attempt.quarantined) clearAttempt(generation);
       }
     })();
     return waitForAttempt(attempt, signal);
@@ -781,7 +833,9 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     const generation = ++currentGeneration;
     const input = currentInput;
     const attempt = activeAttempt;
-    activeAttempt = undefined;
+    // Keep a cancelled, adapter-owned operation in the slot until its raw work
+    // settles. Reconnect observes this fence instead of racing a second ticket
+    // or factory call while a provider ignores the abort signal.
     attempt?.controller.abort();
     let detachedOpenedSocket = false;
     if (activeContext) {
@@ -921,6 +975,7 @@ async function validateAttachPreflight(
   options: PtyTransportOptions,
   signal: AbortSignal,
   generation: number,
+  trackPendingOperation?: (operation: Promise<unknown>) => void,
 ): Promise<void> {
   if (!input.attach) return;
   const detachedAt = localDetachedAtMs ?? input.detachedAtMs;
@@ -929,11 +984,9 @@ async function validateAttachPreflight(
     throw new PtyTransportError("expired-attachment", generation);
   }
   if (!options.validateAttachment) throw new PtyTransportError("invalid-attachment", generation);
-  const valid = await awaitWithAbort(
-    Promise.resolve(options.validateAttachment(input, signal)),
-    signal,
-    generation,
-  );
+  const validation = Promise.resolve(options.validateAttachment(input, signal));
+  trackPendingOperation?.(validation);
+  const valid = await awaitWithAbort(validation, signal, generation);
   if (valid !== true) throw new PtyTransportError("invalid-attachment", generation);
 }
 

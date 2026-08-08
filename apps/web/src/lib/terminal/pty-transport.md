@@ -53,11 +53,20 @@ operations:
   exactly once even when cancellation wins before the abort listener is
   installed. Coalesced callers share one ticket and socket, but each caller's
   abort signal only rejects that caller's wait; the shared attempt continues
-  while another caller still owns a wait. If an established reattach is
-  cancelled after `onopen`, its exact identity's detach-retention evidence is
-  restored. `outputMayBeTruncated` is true only for the current successful
-  reattach and resets on detach, Close, cancellation, failure, replacement, and
-  unrelated generations.
+  while another caller still owns a wait. If cancellation reaches an adapter
+  that ignores its signal, the transport keeps that same-identity owner
+  quarantined until its validator, ticket provider, or socket factory settles.
+  A duplicate reconnect receives the deterministic aborted result instead of
+  minting parallel low-level work; its late ticket or validator cannot publish
+  state, and its late factory socket is closed without handlers. Explicit
+  same-identity `connect()` after Close is different replacement intent: it may
+  safely claim a new generation before the quarantined raw work settles, while
+  `reconnect()` remains denied by the Close latch. A different identity may
+  replace the current generation, but stale settlement can never reclaim it. If
+  an established reattach is cancelled after `onopen`, its exact
+  identity's detach-retention evidence is restored. `outputMayBeTruncated` is
+  true only for the current successful reattach and resets on detach, Close,
+  cancellation, failure, replacement, and unrelated generations.
 
 The transport never queues input or resize frames. It has no prompt or tool
 action method, so reconnect cannot replay those actions. The transport owns one
@@ -98,9 +107,14 @@ observer cancellation during `ticket_pending` and reattach, stale
 retention evidence, abort-listener replacement races, post-ticket stale
 continuations, late socket ownership, duplicate-caller cancellation,
 adapter-close reentrancy, reattach-retention restoration, and prior-true
-truncation resets across failure and replacement transitions. Tests
-also verify that terminal bytes and ticket material are not logged or retained
-in public state.
+truncation resets across failure and replacement transitions. New deterministic
+deferred-adapter regressions prove that ignored validator, ticket, and factory
+cancellation fences the current identity until settlement: no duplicate ticket
+or factory work starts, and a late factory socket is closed without state,
+bytes, notice, or retry publication. Companion Close regressions prove that
+explicit same-identity `connect()` safely supersedes each quarantined stage,
+while reconnect stays closed-latched. Tests also verify that terminal bytes and
+ticket material are not logged or retained in public state.
 
 Accessibility is N/A for this transport-only change. It adds no UI nodes and
 does not alter the renderer contract. Keyboard, focus, semantic naming, browser
@@ -121,3 +135,15 @@ rendering, and network work. The checked-in artifact reports p50 `0.000583 ms`,
 p95 `0.002252 ms`, and p99 `0.004003 ms`; `threshold` is `null` until reviewed
 latency evidence defines a budget. Reproduce it with
 `bun src/lib/terminal/pty-error-retention.bench.ts` from `apps/web`.
+
+`pty-reconnect-supersession.bench.ts` captures 30 deterministic cancellation
+bursts per ignored adapter stage (validator, ticket, and factory), after five
+warmups. Its checked-in sanitized test-mode artifact records min, median, and
+p95 settle time plus ticket, validator, factory, opened-socket, cleanup, and
+duplicate-owner totals. `provenance.sourceRevision` is the immutable source
+commit at which the benchmark ran; the artifact is committed afterward, so it
+does not claim an impossible self-hash. Reproduce it with
+`GIT_SOURCE_REVISION=$(git rev-parse HEAD) bun src/lib/terminal/pty-reconnect-supersession.bench.ts`
+from `apps/web`, then commit the resulting evidence separately. The current
+artifact reports zero duplicate-owner violations; a latency threshold remains
+`null` because this issue establishes a baseline rather than inventing a budget.

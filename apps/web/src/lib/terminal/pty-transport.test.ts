@@ -94,7 +94,7 @@ function makeHarness(
 }
 
 async function flush(): Promise<void> {
-  for (let index = 0; index < 16; index += 1) await Promise.resolve();
+  for (let index = 0; index < 64; index += 1) await Promise.resolve();
 }
 
 async function open(
@@ -280,6 +280,224 @@ describe("PTY transport", () => {
     expect(factoryCalls).toBe(0);
     expect(harness.upgrades).toHaveLength(0);
     expect(harness.transport.state.status).toBe("detached");
+  });
+
+  it("quarantines an ignored ticket after cancellation so reconnect cannot mint a duplicate", async () => {
+    let resolveTicket!: (ticket: string) => void;
+    const retainedInput = { ...ATTACH_INPUT, detachedAtMs: 1 };
+    let ticketCalls = 0;
+    const harness = makeHarness({
+      now: () => 1,
+      ticketProvider: () => {
+        ticketCalls += 1;
+        return ticketCalls === 1
+          ? new Promise<string>((resolve) => {
+              resolveTicket = resolve;
+            })
+          : Promise.resolve(`ticket-${ticketCalls}`);
+      },
+    });
+    const cancelled = harness.transport.connect(retainedInput);
+    await flush();
+    harness.transport.detach();
+    await expect(cancelled).rejects.toMatchObject({ code: "aborted" });
+
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({
+      code: "aborted",
+    });
+    expect(ticketCalls).toBe(1);
+    expect(harness.sockets).toHaveLength(0);
+    expect(harness.transport.state).toMatchObject({
+      status: "detached",
+      generation: 2,
+    });
+
+    resolveTicket("ticket-ignored-after-abort");
+    await flush();
+    expect(harness.sockets).toHaveLength(0);
+
+    const retry = harness.transport.reconnect();
+    await flush();
+    expect(ticketCalls).toBe(2);
+    harness.sockets[0]!.open();
+    await retry;
+    expect(harness.transport.state).toMatchObject({ status: "attached", generation: 3 });
+  });
+
+  it("quarantines an ignored attachment validation before ticket minting", async () => {
+    let resolveValidation!: (valid: boolean) => void;
+    const retainedInput = { ...ATTACH_INPUT, detachedAtMs: 1 };
+    const validator = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveValidation = resolve;
+        }),
+    );
+    const harness = makeHarness({ now: () => 1, validateAttachment: validator });
+    const cancelled = harness.transport.connect(retainedInput);
+    await flush();
+    harness.transport.detach();
+    await expect(cancelled).rejects.toMatchObject({ code: "aborted" });
+
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({
+      code: "aborted",
+    });
+    expect(validator).toHaveBeenCalledTimes(1);
+    expect(harness.ticketProvider).not.toHaveBeenCalled();
+
+    resolveValidation(true);
+    await flush();
+    const retry = harness.transport.reconnect();
+    await flush();
+    expect(validator).toHaveBeenCalledTimes(2);
+    expect(harness.ticketProvider).not.toHaveBeenCalled();
+    resolveValidation(true);
+    await flush();
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+    harness.sockets[0]!.open();
+    await retry;
+  });
+
+  it("closes an ignored factory socket and fences reconnect until it settles", async () => {
+    let resolveSocket!: (socket: FakeSocket) => void;
+    const retainedInput = { ...ATTACH_INPUT, detachedAtMs: 1 };
+    let factoryCalls = 0;
+    const harness = makeHarness({
+      now: () => 1,
+      createWebSocket: () => {
+        factoryCalls += 1;
+        if (factoryCalls === 1) {
+          return new Promise<FakeSocket>((resolve) => {
+            resolveSocket = resolve;
+          });
+        }
+        const socket = new FakeSocket();
+        harness.sockets.push(socket);
+        return socket;
+      },
+    });
+    const controller = new AbortController();
+    const cancelled = harness.transport.connect(retainedInput, controller.signal);
+    await flush();
+    expect(factoryCalls).toBe(1);
+    controller.abort();
+    await expect(cancelled).rejects.toMatchObject({ code: "aborted" });
+
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({
+      code: "aborted",
+    });
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+    expect(factoryCalls).toBe(1);
+
+    const staleSocket = new FakeSocket();
+    resolveSocket(staleSocket);
+    await flush();
+    expect(staleSocket.closes).toEqual([{ code: 1000, reason: "client-detach" }]);
+    expect(harness.transport.state.status).toBe("detached");
+    expect(harness.events.filter((event) => event.type === "notice")).toHaveLength(0);
+
+    const retry = harness.transport.reconnect();
+    await flush();
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(2);
+    expect(factoryCalls).toBe(2);
+    harness.sockets[0]!.open();
+    await retry;
+    expect(harness.transport.state).toMatchObject({ status: "attached", generation: 2 });
+  });
+
+  it("lets explicit same-identity connect supersede a Close-quarantined validator", async () => {
+    let resolveValidation!: (valid: boolean) => void;
+    let validationCalls = 0;
+    const harness = makeHarness({
+      now: () => 1,
+      validateAttachment: () => {
+        validationCalls += 1;
+        return validationCalls === 1
+          ? new Promise<boolean>((resolve) => {
+              resolveValidation = resolve;
+            })
+          : true;
+      },
+    });
+    const first = harness.transport.connect({ ...ATTACH_INPUT, detachedAtMs: 1 });
+    await flush();
+    harness.transport.close();
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({ code: "closed" });
+
+    const replacement = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    expect(validationCalls).toBe(2);
+    expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
+    harness.sockets[0]!.open();
+    await replacement;
+    resolveValidation(true);
+    await flush();
+    expect(harness.transport.state).toMatchObject({ status: "attached", generation: 3 });
+  });
+
+  it("lets explicit same-identity connect supersede a Close-quarantined ticket", async () => {
+    let resolveTicket!: (ticket: string) => void;
+    let ticketCalls = 0;
+    const harness = makeHarness({
+      now: () => 1,
+      ticketProvider: () => {
+        ticketCalls += 1;
+        return ticketCalls === 1
+          ? new Promise<string>((resolve) => {
+              resolveTicket = resolve;
+            })
+          : Promise.resolve(`ticket-${ticketCalls}`);
+      },
+    });
+    const first = harness.transport.connect({ ...ATTACH_INPUT, detachedAtMs: 1 });
+    await flush();
+    harness.transport.close();
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+
+    const replacement = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    expect(ticketCalls).toBe(2);
+    harness.sockets[0]!.open();
+    await replacement;
+    resolveTicket("ticket-late-after-close");
+    await flush();
+    expect(harness.transport.state).toMatchObject({ status: "attached", generation: 3 });
+    expect(harness.sockets).toHaveLength(1);
+  });
+
+  it("lets explicit same-identity connect supersede a Close-quarantined factory", async () => {
+    let resolveSocket!: (socket: FakeSocket) => void;
+    let factoryCalls = 0;
+    const harness = makeHarness({
+      now: () => 1,
+      createWebSocket: () => {
+        factoryCalls += 1;
+        if (factoryCalls === 1) {
+          return new Promise<FakeSocket>((resolve) => {
+            resolveSocket = resolve;
+          });
+        }
+        const socket = new FakeSocket();
+        harness.sockets.push(socket);
+        return socket;
+      },
+    });
+    const first = harness.transport.connect({ ...ATTACH_INPUT, detachedAtMs: 1 });
+    await flush();
+    harness.transport.close();
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+
+    const replacement = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    expect(factoryCalls).toBe(2);
+    harness.sockets[0]!.open();
+    await replacement;
+    const staleSocket = new FakeSocket();
+    resolveSocket(staleSocket);
+    await flush();
+    expect(staleSocket.closes).toEqual([{ code: 1000, reason: "client-detach" }]);
+    expect(harness.transport.state).toMatchObject({ status: "attached", generation: 3 });
   });
 
   it("does not mint a ticket after a ticket-pending observer aborts", async () => {
