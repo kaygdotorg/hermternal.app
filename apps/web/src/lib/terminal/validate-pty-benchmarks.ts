@@ -11,6 +11,14 @@ const EXPECTED_WARMUPS = 5;
 
 const BENCHMARK_SPECS = {
   "hermternal.pty-reconnect-supersession-benchmark.v2": {
+    operation: "same-identity reconnect after ordinary detach quarantine",
+    metric: {
+      name: "quarantine_settle_wall_time",
+      unit: "ms",
+      clock: "performance.now",
+      start: "connect attempt starts",
+      end: "ignored adapter settles after detach and blocked reconnect",
+    },
     source: PTY_BENCHMARK_SOURCES.reconnect,
     stages: ["validator", "ticket", "factory"],
     assertionKeys: [
@@ -105,6 +113,15 @@ const BENCHMARK_SPECS = {
     ],
   },
   "hermternal.pty-connecting-ownership-benchmark.v2": {
+    operation: "connecting observer ownership decision before socket factory",
+    metric: {
+      name: "ownership_decision_settle_wall_time",
+      unit: "ms",
+      clock: "performance.now",
+      start:
+        "performance.now immediately before connecting observer cancellation or replacement action",
+      end: "cancelled operation rejects",
+    },
     source: PTY_BENCHMARK_SOURCES.connecting,
     stages: ["abort", "close", "detach", "replace"],
     assertionKeys: [
@@ -219,7 +236,9 @@ function asSamples(value: unknown, label: string): number[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`${label} must be a non-empty array`);
   }
-  return value.map((sample, index) => asFiniteNumber(sample, `${label}[${index}]`));
+  return value.map((sample, index) =>
+    asFiniteNumber(sample, `${label}[${index}]`),
+  );
 }
 
 function asStringArray(value: unknown, label: string): string[] {
@@ -238,7 +257,10 @@ function asSocketClosures(value: unknown, label: string): SocketClosure[] {
     const closure = asRecord(entry, `${label}[${index}]`);
     return {
       identity: asString(closure.identity, `${label}[${index}].identity`),
-      closeCalls: asFiniteNumber(closure.closeCalls, `${label}[${index}].closeCalls`),
+      closeCalls: asFiniteNumber(
+        closure.closeCalls,
+        `${label}[${index}].closeCalls`,
+      ),
     };
   });
 }
@@ -248,7 +270,10 @@ function expectStringArray(
   expected: readonly string[],
   label: string,
 ): void {
-  if (actual.length !== expected.length || actual.some((value, index) => value !== expected[index])) {
+  if (
+    actual.length !== expected.length ||
+    actual.some((value, index) => value !== expected[index])
+  ) {
     throw new Error(`${label} did not match the expected ownership identities`);
   }
 }
@@ -266,7 +291,9 @@ function expectSocketClosures(
         closure.closeCalls !== expected[index]?.closeCalls,
     )
   ) {
-    throw new Error(`${label} did not match the exact per-socket cleanup ledger`);
+    throw new Error(
+      `${label} did not match the exact per-socket cleanup ledger`,
+    );
   }
 }
 
@@ -324,7 +351,33 @@ function assertExactKeys(
   }
 }
 
-function expectedRunCounters(schema: BenchmarkSchema, stage: string): Record<string, number> {
+// Keep the operation and timing boundaries schema-specific so evidence cannot
+// be relabeled while retaining a valid ownership proof ledger.
+function validateOperationAndMetric(
+  root: RecordLike,
+  schema: BenchmarkSchema,
+): void {
+  const spec = BENCHMARK_SPECS[schema];
+  if (asString(root.operation, `${schema}.operation`) !== spec.operation) {
+    throw new Error(`${schema}.operation did not match the reviewed operation`);
+  }
+
+  const metric = asRecord(root.metric, `${schema}.metric`);
+  const metricKeys = ["name", "unit", "clock", "start", "end"] as const;
+  assertExactKeys(metric, metricKeys, `${schema}.metric`);
+  for (const key of metricKeys) {
+    if (asString(metric[key], `${schema}.metric.${key}`) !== spec.metric[key]) {
+      throw new Error(
+        `${schema}.metric.${key} did not match the reviewed metric contract`,
+      );
+    }
+  }
+}
+
+function expectedRunCounters(
+  schema: BenchmarkSchema,
+  stage: string,
+): Record<string, number> {
   if (schema === "hermternal.pty-reconnect-supersession-benchmark.v2") {
     const factory = stage === "factory";
     const ticket = stage !== "validator";
@@ -378,18 +431,33 @@ function validateRuntimeAndHost(provenance: RecordLike): void {
   const bun = asString(runtime.bun, "provenance.runtime.bun");
   const node = asString(runtime.node, "provenance.runtime.node");
   const hostNode = asString(runtime.hostNode, "provenance.runtime.hostNode");
-  const packageManager = asString(runtime.packageManager, "provenance.runtime.packageManager");
-  const declaredBun = asString(runtime.declaredBun, "provenance.runtime.declaredBun");
-  const declaredNode = asString(runtime.declaredNode, "provenance.runtime.declaredNode");
+  const packageManager = asString(
+    runtime.packageManager,
+    "provenance.runtime.packageManager",
+  );
+  const declaredBun = asString(
+    runtime.declaredBun,
+    "provenance.runtime.declaredBun",
+  );
+  const declaredNode = asString(
+    runtime.declaredNode,
+    "provenance.runtime.declaredNode",
+  );
   const semver = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
   if (!semver.test(bun) || !semver.test(node) || !semver.test(hostNode)) {
-    throw new Error("provenance runtime versions must be exact semantic versions");
+    throw new Error(
+      "provenance runtime versions must be exact semantic versions",
+    );
   }
   if (packageManager !== `bun@${bun}` || declaredBun !== bun) {
-    throw new Error("provenance.runtime Bun fields must match the captured package runtime");
+    throw new Error(
+      "provenance.runtime Bun fields must match the captured package runtime",
+    );
   }
   if (hostNode !== declaredNode || !semver.test(declaredNode)) {
-    throw new Error("provenance.runtime.hostNode must match package.json engines.node");
+    throw new Error(
+      "provenance.runtime.hostNode must match package.json engines.node",
+    );
   }
 
   const os = asRecord(provenance.os, "provenance.os");
@@ -405,7 +473,9 @@ function validateRuntimeAndHost(provenance: RecordLike): void {
     throw new Error("provenance.os.release must identify the host release");
   }
   if (!/^[a-z0-9._-]+$/u.test(architecture) || architecture === "unknown") {
-    throw new Error("provenance.os.architecture must identify the host architecture");
+    throw new Error(
+      "provenance.os.architecture must identify the host architecture",
+    );
   }
   if (cpuModel.trim() === "" || cpuModel === "unknown") {
     throw new Error("provenance.os.cpuModel must identify the captured CPU");
@@ -424,18 +494,33 @@ function validateProvenance(
   const sourcePath = asString(root.sourcePath, `${schema}.sourcePath`);
   const command = asString(root.command, `${schema}.command`);
   if (sourcePath !== spec.source.path || command !== spec.source.command) {
-    throw new Error(`${schema} sourcePath and command were not the reviewed benchmark pair`);
+    throw new Error(
+      `${schema} sourcePath and command were not the reviewed benchmark pair`,
+    );
   }
 
   const provenance = asRecord(root.provenance, `${schema}.provenance`);
-  const sourceRevision = asString(provenance.sourceRevision, "provenance.sourceRevision");
-  const generationCommit = asString(provenance.generationCommit, "provenance.generationCommit");
+  const sourceRevision = asString(
+    provenance.sourceRevision,
+    "provenance.sourceRevision",
+  );
+  const generationCommit = asString(
+    provenance.generationCommit,
+    "provenance.generationCommit",
+  );
   const sourceTree = asString(provenance.sourceTree, "provenance.sourceTree");
   if (!/^[0-9a-f]{40}$/u.test(sourceRevision)) {
-    throw new Error("provenance.sourceRevision must be a full 40-hex commit SHA");
+    throw new Error(
+      "provenance.sourceRevision must be a full 40-hex commit SHA",
+    );
   }
-  if (!/^[0-9a-f]{40}$/u.test(generationCommit) || generationCommit !== sourceRevision) {
-    throw new Error("provenance.generationCommit must equal the measured source commit");
+  if (
+    !/^[0-9a-f]{40}$/u.test(generationCommit) ||
+    generationCommit !== sourceRevision
+  ) {
+    throw new Error(
+      "provenance.generationCommit must equal the measured source commit",
+    );
   }
   if (!/^[0-9a-f]{40}$/u.test(sourceTree)) {
     throw new Error("provenance.sourceTree must be a full 40-hex tree SHA");
@@ -446,11 +531,17 @@ function validateProvenance(
   }
   const evidenceHead = git(["rev-parse", "HEAD"]);
   try {
-    execFileSync("git", ["merge-base", "--is-ancestor", sourceRevision, evidenceHead], {
-      stdio: "ignore",
-    });
+    execFileSync(
+      "git",
+      ["merge-base", "--is-ancestor", sourceRevision, evidenceHead],
+      {
+        stdio: "ignore",
+      },
+    );
   } catch {
-    throw new Error("provenance.sourceRevision was not an ancestor of the evidence checkout");
+    throw new Error(
+      "provenance.sourceRevision was not an ancestor of the evidence checkout",
+    );
   }
   const evidenceChangedPaths = git([
     "diff",
@@ -465,60 +556,106 @@ function validateProvenance(
     "apps/web/src/lib/terminal/pty-connecting-ownership-benchmark.json",
   ]);
   if (evidenceChangedPaths.some((path) => !allowedEvidencePaths.has(path))) {
-    throw new Error("provenance.sourceRevision was not followed only by evidence changes");
+    throw new Error(
+      "provenance.sourceRevision was not followed only by evidence changes",
+    );
   }
   if (provenance.cleanCheckout !== true || provenance.detachedHead !== true) {
-    throw new Error("benchmark evidence must be generated from a detached clean checkout");
+    throw new Error(
+      "benchmark evidence must be generated from a detached clean checkout",
+    );
   }
   if (asString(provenance.command, "provenance.command") !== command) {
     throw new Error("provenance.command must match the artifact command");
   }
-  if (asString(provenance.sourceCheckout, "provenance.sourceCheckout") !== "git switch --detach <sourceRevision>") {
-    throw new Error("provenance.sourceCheckout must document detached source generation");
+  if (
+    asString(provenance.sourceCheckout, "provenance.sourceCheckout") !==
+    "git switch --detach <sourceRevision>"
+  ) {
+    throw new Error(
+      "provenance.sourceCheckout must document detached source generation",
+    );
   }
   validateRuntimeAndHost(provenance);
 
   const blobs = provenance.sourceBlobs;
-  const expectedPaths = [spec.source.path, TRANSPORT_SOURCE, PACKAGE_SOURCE, LOCKFILE_SOURCE];
+  const expectedPaths = [
+    spec.source.path,
+    TRANSPORT_SOURCE,
+    PACKAGE_SOURCE,
+    LOCKFILE_SOURCE,
+  ];
   if (!Array.isArray(blobs) || blobs.length !== expectedPaths.length) {
-    throw new Error("provenance.sourceBlobs must pin the benchmark source and transport inputs");
+    throw new Error(
+      "provenance.sourceBlobs must pin the benchmark source and transport inputs",
+    );
   }
   const seen = new Set<string>();
   for (const [index, rawBlob] of blobs.entries()) {
     const blob = asRecord(rawBlob, `provenance.sourceBlobs[${index}]`);
     const path = asString(blob.path, `provenance.sourceBlobs[${index}].path`);
-    const gitBlobSha = asString(blob.gitBlobSha, `provenance.sourceBlobs[${index}].gitBlobSha`);
-    const fileSha256 = asString(blob.sha256, `provenance.sourceBlobs[${index}].sha256`);
-    if (seen.has(path)) throw new Error(`duplicate provenance blob path ${path}`);
+    const gitBlobSha = asString(
+      blob.gitBlobSha,
+      `provenance.sourceBlobs[${index}].gitBlobSha`,
+    );
+    const fileSha256 = asString(
+      blob.sha256,
+      `provenance.sourceBlobs[${index}].sha256`,
+    );
+    if (seen.has(path))
+      throw new Error(`duplicate provenance blob path ${path}`);
     seen.add(path);
     if (!expectedPaths.includes(path as (typeof expectedPaths)[number])) {
-      throw new Error(`provenance blob ${path} was not an expected benchmark input`);
+      throw new Error(
+        `provenance blob ${path} was not an expected benchmark input`,
+      );
     }
-    if (!/^[0-9a-f]{40}$/u.test(gitBlobSha) || !/^[0-9a-f]{64}$/u.test(fileSha256)) {
+    if (
+      !/^[0-9a-f]{40}$/u.test(gitBlobSha) ||
+      !/^[0-9a-f]{64}$/u.test(fileSha256)
+    ) {
       throw new Error(`invalid provenance hash for ${path}`);
     }
     if (git(["rev-parse", `${sourceRevision}:${path}`]) !== gitBlobSha) {
       throw new Error(`git blob drift for ${path}`);
     }
-    if (sha256(gitBytes(["show", `${sourceRevision}:${path}`])) !== fileSha256) {
+    if (
+      sha256(gitBytes(["show", `${sourceRevision}:${path}`])) !== fileSha256
+    ) {
       throw new Error(`file hash drift for ${path}`);
     }
     if (path.endsWith(".bench.ts")) {
-      const source = new TextDecoder().decode(gitBytes(["show", `${sourceRevision}:${path}`]));
+      const source = new TextDecoder().decode(
+        gitBytes(["show", `${sourceRevision}:${path}`]),
+      );
       if (/Promise\.all\s*\(/u.test(source)) {
-        throw new Error(`${path} must not run benchmark stages with Promise.all`);
+        throw new Error(
+          `${path} must not run benchmark stages with Promise.all`,
+        );
       }
     }
   }
   if (seen.size !== expectedPaths.length) {
-    throw new Error("provenance.sourceBlobs omitted an expected benchmark input");
+    throw new Error(
+      "provenance.sourceBlobs omitted an expected benchmark input",
+    );
   }
-  if (optimized && blobs.some((rawBlob, index) => asRecord(rawBlob, "provenance blob").path !== expectedPaths[index])) {
-    throw new Error("optimized provenance validation requires canonical source blob ordering");
+  if (
+    optimized &&
+    blobs.some(
+      (rawBlob, index) =>
+        asRecord(rawBlob, "provenance blob").path !== expectedPaths[index],
+    )
+  ) {
+    throw new Error(
+      "optimized provenance validation requires canonical source blob ordering",
+    );
   }
 
   const packageSource = JSON.parse(
-    new TextDecoder().decode(gitBytes(["show", `${sourceRevision}:${PACKAGE_SOURCE}`])),
+    new TextDecoder().decode(
+      gitBytes(["show", `${sourceRevision}:${PACKAGE_SOURCE}`]),
+    ),
   ) as {
     readonly packageManager?: unknown;
     readonly engines?: { readonly bun?: unknown; readonly node?: unknown };
@@ -529,11 +666,17 @@ function validateProvenance(
     runtime.declaredBun !== packageSource.engines?.bun ||
     runtime.declaredNode !== packageSource.engines?.node
   ) {
-    throw new Error("provenance runtime metadata did not match the declared package engines");
+    throw new Error(
+      "provenance runtime metadata did not match the declared package engines",
+    );
   }
 }
 
-function validateDistribution(samples: readonly number[], value: unknown, label: string): void {
+function validateDistribution(
+  samples: readonly number[],
+  value: unknown,
+  label: string,
+): void {
   const distribution = asRecord(value, label);
   const sorted = samples.toSorted((left, right) => left - right);
   const expected = {
@@ -554,15 +697,18 @@ function validateOwnershipProof(
   run: RecordLike,
   label: string,
 ): void {
-  const reconnect = schema === "hermternal.pty-reconnect-supersession-benchmark.v2";
+  const reconnect =
+    schema === "hermternal.pty-reconnect-supersession-benchmark.v2";
   const replacement = stage === "replace";
   const expectedOwnerIdentity = reconnect
     ? "benchmark-session"
     : replacement
       ? "benchmark-session-b"
       : null;
-  const expectedActiveIdentities = expectedOwnerIdentity === null ? [] : [expectedOwnerIdentity];
-  const expectedStaleIdentities = reconnect && stage === "factory" ? ["benchmark-session"] : [];
+  const expectedActiveIdentities =
+    expectedOwnerIdentity === null ? [] : [expectedOwnerIdentity];
+  const expectedStaleIdentities =
+    reconnect && stage === "factory" ? ["benchmark-session"] : [];
   const expectedSocketClosures = reconnect
     ? stage === "factory"
       ? [
@@ -576,20 +722,33 @@ function validateOwnershipProof(
 
   if (expectedOwnerIdentity === null) {
     if (run.expectedOwnerIdentity !== null) {
-      throw new Error(`${label}.expectedOwnerIdentity must be null without a replacement owner`);
+      throw new Error(
+        `${label}.expectedOwnerIdentity must be null without a replacement owner`,
+      );
     }
     if (run.replacementSocketIdentity !== null) {
-      throw new Error(`${label}.replacementSocketIdentity must be null without a replacement socket`);
+      throw new Error(
+        `${label}.replacementSocketIdentity must be null without a replacement socket`,
+      );
     }
   } else {
-    if (asString(run.expectedOwnerIdentity, `${label}.expectedOwnerIdentity`) !== expectedOwnerIdentity) {
-      throw new Error(`${label}.expectedOwnerIdentity did not match the authorized owner`);
-    }
     if (
-      asString(run.replacementSocketIdentity, `${label}.replacementSocketIdentity`) !==
+      asString(run.expectedOwnerIdentity, `${label}.expectedOwnerIdentity`) !==
       expectedOwnerIdentity
     ) {
-      throw new Error(`${label}.replacementSocketIdentity did not match the authorized owner`);
+      throw new Error(
+        `${label}.expectedOwnerIdentity did not match the authorized owner`,
+      );
+    }
+    if (
+      asString(
+        run.replacementSocketIdentity,
+        `${label}.replacementSocketIdentity`,
+      ) !== expectedOwnerIdentity
+    ) {
+      throw new Error(
+        `${label}.replacementSocketIdentity did not match the authorized owner`,
+      );
     }
   }
 
@@ -606,7 +765,9 @@ function validateOwnershipProof(
   if (reconnect) {
     const expectedStaleIdentity = expectedStaleIdentities[0] ?? null;
     if (run.staleSocketIdentity !== expectedStaleIdentity) {
-      throw new Error(`${label}.staleSocketIdentity did not match the deferred socket ledger`);
+      throw new Error(
+        `${label}.staleSocketIdentity did not match the deferred socket ledger`,
+      );
     }
   }
   expectSocketClosures(
@@ -615,7 +776,9 @@ function validateOwnershipProof(
     `${label}.socketClosures`,
   );
   if (run.allCallbacksNullAfterClose !== true) {
-    throw new Error(`${label}.allCallbacksNullAfterClose did not prove callback disownership`);
+    throw new Error(
+      `${label}.allCallbacksNullAfterClose did not prove callback disownership`,
+    );
   }
 }
 
@@ -629,20 +792,28 @@ function validateResults(root: RecordLike, schema: BenchmarkSchema): void {
     repetitions !== EXPECTED_REPETITIONS ||
     warmups !== EXPECTED_WARMUPS
   ) {
-    throw new Error(`${schema} repetition metadata is not the reviewed deterministic run count`);
+    throw new Error(
+      `${schema} repetition metadata is not the reviewed deterministic run count`,
+    );
   }
   if (root.sequential !== true || root.concurrentStages !== false) {
-    throw new Error(`${schema} must explicitly record sequential stage execution`);
+    throw new Error(
+      `${schema} must explicitly record sequential stage execution`,
+    );
   }
-  if (root.threshold !== null) throw new Error(`${schema} must not claim an unsupported threshold`);
-  if (root.networkPolicy !== "synthetic-only") throw new Error(`${schema} must be synthetic-only`);
+  if (root.threshold !== null)
+    throw new Error(`${schema} must not claim an unsupported threshold`);
+  if (root.networkPolicy !== "synthetic-only")
+    throw new Error(`${schema} must be synthetic-only`);
   const stageOrder = root.stageOrder;
   if (
     !Array.isArray(stageOrder) ||
     stageOrder.length !== spec.stages.length ||
     stageOrder.some((stage, index) => stage !== spec.stages[index])
   ) {
-    throw new Error(`${schema}.stageOrder is not the deterministic sequential order`);
+    throw new Error(
+      `${schema}.stageOrder is not the deterministic sequential order`,
+    );
   }
   const results = root.results;
   if (!Array.isArray(results) || results.length !== spec.stages.length) {
@@ -650,14 +821,25 @@ function validateResults(root: RecordLike, schema: BenchmarkSchema): void {
   }
   for (const [resultIndex, rawResult] of results.entries()) {
     const result = asRecord(rawResult, `${schema}.results[${resultIndex}]`);
-    const stage = asString(result.stage, `${schema}.results[${resultIndex}].stage`);
-    if (stage !== spec.stages[resultIndex]) throw new Error(`${schema} stage order drift at ${stage}`);
+    const stage = asString(
+      result.stage,
+      `${schema}.results[${resultIndex}].stage`,
+    );
+    if (stage !== spec.stages[resultIndex])
+      throw new Error(`${schema} stage order drift at ${stage}`);
     const samples = asSamples(result.samples, `${schema}.${stage}.samples`);
-    if (samples.length !== repetitions) throw new Error(`${schema}.${stage} sample count drift`);
-    validateDistribution(samples, result.distribution, `${schema}.${stage}.distribution`);
+    if (samples.length !== repetitions)
+      throw new Error(`${schema}.${stage} sample count drift`);
+    validateDistribution(
+      samples,
+      result.distribution,
+      `${schema}.${stage}.distribution`,
+    );
     const runs = result.runs;
     if (!Array.isArray(runs) || runs.length !== repetitions) {
-      throw new Error(`${schema}.${stage}.runs must retain every raw run proof`);
+      throw new Error(
+        `${schema}.${stage}.runs must retain every raw run proof`,
+      );
     }
     const totals = asRecord(result.totals, `${schema}.${stage}.totals`);
     const sums = new Map<string, number>();
@@ -667,13 +849,18 @@ function validateResults(root: RecordLike, schema: BenchmarkSchema): void {
       const run = asRecord(rawRun, `${schema}.${stage}.runs[${runIndex}]`);
       const runLabel = `${schema}.${stage}.runs[${runIndex}]`;
       assertExactKeys(run, spec.runKeys, runLabel);
-      if (round(asFiniteNumber(run.sampleMs, `${runLabel}.sampleMs`)) !== samples[runIndex]) {
+      if (
+        round(asFiniteNumber(run.sampleMs, `${runLabel}.sampleMs`)) !==
+        samples[runIndex]
+      ) {
         throw new Error(`${runLabel} does not match its raw sample`);
       }
       for (const counter of spec.runCounters) {
         const value = asFiniteNumber(run[counter], `${runLabel}.${counter}`);
         if (value !== expectedCounters[counter]) {
-          throw new Error(`${runLabel}.${counter} did not match the expected ownership ledger`);
+          throw new Error(
+            `${runLabel}.${counter} did not match the expected ownership ledger`,
+          );
         }
         sums.set(counter, (sums.get(counter) ?? 0) + value);
       }
@@ -687,15 +874,23 @@ function validateResults(root: RecordLike, schema: BenchmarkSchema): void {
       }
     }
     for (const counter of spec.totalCounters) {
-      const total = asFiniteNumber(totals[counter], `${schema}.${stage}.totals.${counter}`);
+      const total = asFiniteNumber(
+        totals[counter],
+        `${schema}.${stage}.totals.${counter}`,
+      );
       if (total !== sums.get(counter)) {
-        throw new Error(`${schema}.${stage}.totals.${counter} does not match raw runs`);
+        throw new Error(
+          `${schema}.${stage}.totals.${counter} does not match raw runs`,
+        );
       }
     }
   }
 }
 
-function validateOptimizedShape(root: RecordLike, schema: BenchmarkSchema): void {
+function validateOptimizedShape(
+  root: RecordLike,
+  schema: BenchmarkSchema,
+): void {
   const expectedTopLevel = [
     "schema",
     "operation",
@@ -717,10 +912,23 @@ function validateOptimizedShape(root: RecordLike, schema: BenchmarkSchema): void
   assertExactKeys(root, expectedTopLevel, `${schema} artifact`);
   const spec = BENCHMARK_SPECS[schema];
   const blobs = asRecord(root.provenance, `${schema}.provenance`).sourceBlobs;
-  if (!Array.isArray(blobs)) throw new Error(`${schema}.provenance.sourceBlobs must be an array`);
-  const expectedPaths = [spec.source.path, TRANSPORT_SOURCE, PACKAGE_SOURCE, LOCKFILE_SOURCE];
-  if (blobs.some((rawBlob, index) => asRecord(rawBlob, "provenance blob").path !== expectedPaths[index])) {
-    throw new Error(`${schema} optimized validation rejected non-canonical provenance order`);
+  if (!Array.isArray(blobs))
+    throw new Error(`${schema}.provenance.sourceBlobs must be an array`);
+  const expectedPaths = [
+    spec.source.path,
+    TRANSPORT_SOURCE,
+    PACKAGE_SOURCE,
+    LOCKFILE_SOURCE,
+  ];
+  if (
+    blobs.some(
+      (rawBlob, index) =>
+        asRecord(rawBlob, "provenance blob").path !== expectedPaths[index],
+    )
+  ) {
+    throw new Error(
+      `${schema} optimized validation rejected non-canonical provenance order`,
+    );
   }
 }
 
@@ -732,6 +940,7 @@ export function validatePtyBenchmarkArtifact(
   const schema = asString(root.schema, "benchmark.schema");
   expectedSpec(schema);
   const benchmarkSchema = schema as BenchmarkSchema;
+  validateOperationAndMetric(root, benchmarkSchema);
   validateProvenance(root, benchmarkSchema, options.optimized === true);
   validateResults(root, benchmarkSchema);
   if (options.optimized === true) validateOptimizedShape(root, benchmarkSchema);

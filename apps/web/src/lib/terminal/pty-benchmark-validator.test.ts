@@ -8,8 +8,10 @@ import {
   validatePtyBenchmarkFile,
 } from "./validate-pty-benchmarks";
 
-const RECONNECT_ARTIFACT = "src/lib/terminal/pty-reconnect-supersession-benchmark.json";
-const CONNECTING_ARTIFACT = "src/lib/terminal/pty-connecting-ownership-benchmark.json";
+const RECONNECT_ARTIFACT =
+  "src/lib/terminal/pty-reconnect-supersession-benchmark.json";
+const CONNECTING_ARTIFACT =
+  "src/lib/terminal/pty-connecting-ownership-benchmark.json";
 const CLI = "src/lib/terminal/pty-benchmark-validator.ts";
 
 type MutableArtifact = Record<string, any>;
@@ -22,23 +24,43 @@ function cloneArtifact(path: string): MutableArtifact {
   return JSON.parse(JSON.stringify(readArtifact(path))) as MutableArtifact;
 }
 
-function runCli(path: string, optimized = false): { readonly ok: boolean; readonly output: string } {
+function runCli(
+  path: string,
+  optimized = false,
+): { readonly ok: boolean; readonly output: string } {
   try {
     const output = execFileSync(
       "bun",
       [CLI, ...(optimized ? ["--optimized"] : []), path],
-      { cwd: process.cwd(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
     );
     return { ok: true, output };
   } catch (error) {
-    const failure = error as { readonly stdout?: string | Uint8Array; readonly stderr?: string | Uint8Array };
+    const failure = error as {
+      readonly stdout?: string | Uint8Array;
+      readonly stderr?: string | Uint8Array;
+    };
     const stringify = (value: string | Uint8Array | undefined): string =>
-      typeof value === "string" ? value : value ? new TextDecoder().decode(value) : "";
-    return { ok: false, output: `${stringify(failure.stdout)}${stringify(failure.stderr)}` };
+      typeof value === "string"
+        ? value
+        : value
+          ? new TextDecoder().decode(value)
+          : "";
+    return {
+      ok: false,
+      output: `${stringify(failure.stdout)}${stringify(failure.stderr)}`,
+    };
   }
 }
 
-function withTempArtifact<T>(artifact: MutableArtifact, callback: (path: string) => T): T {
+function withTempArtifact<T>(
+  artifact: MutableArtifact,
+  callback: (path: string) => T,
+): T {
   const directory = mkdtempSync(join(tmpdir(), "hermternal-pty-validator-"));
   const path = join(directory, "artifact.json");
   writeFileSync(path, JSON.stringify(artifact, null, 2));
@@ -49,7 +71,11 @@ function withTempArtifact<T>(artifact: MutableArtifact, callback: (path: string)
   }
 }
 
-function expectCliFailure(artifact: MutableArtifact, pattern: RegExp, optimized = false): void {
+function expectCliFailure(
+  artifact: MutableArtifact,
+  pattern: RegExp,
+  optimized = false,
+): void {
   withTempArtifact(artifact, (path) => {
     const result = runCli(path, optimized);
     expect(result.ok).toBe(false);
@@ -92,10 +118,55 @@ describe("PTY benchmark evidence validator", () => {
     });
   });
 
+  it("rejects schema-specific operation and metric metadata drift through the CLI", () => {
+    const cases = [
+      {
+        path: RECONNECT_ARTIFACT,
+        operation: "same-identity reconnect after ordinary detach quarantine",
+        metric: {
+          name: "quarantine_settle_wall_time",
+          unit: "ms",
+          clock: "performance.now",
+          start: "connect attempt starts",
+          end: "ignored adapter settles after detach and blocked reconnect",
+        },
+      },
+      {
+        path: CONNECTING_ARTIFACT,
+        operation:
+          "connecting observer ownership decision before socket factory",
+        metric: {
+          name: "ownership_decision_settle_wall_time",
+          unit: "ms",
+          clock: "performance.now",
+          start:
+            "performance.now immediately before connecting observer cancellation or replacement action",
+          end: "cancelled operation rejects",
+        },
+      },
+    ] as const;
+
+    for (const { path, operation, metric } of cases) {
+      const operationDrift = cloneArtifact(path);
+      operationDrift.operation = `${operation} drift`;
+      expectCliFailure(operationDrift, /operation/iu);
+
+      for (const field of ["name", "unit", "clock", "start", "end"] as const) {
+        const metricDrift = cloneArtifact(path);
+        metricDrift.metric[field] = `${metric[field]} drift`;
+        expectCliFailure(metricDrift, new RegExp(`metric\\.${field}`, "iu"));
+      }
+    }
+  });
+
   it("rejects arbitrary tracked blobs and source or command drift", () => {
     const arbitraryBlob = cloneArtifact(RECONNECT_ARTIFACT);
-    arbitraryBlob.provenance.sourceBlobs[0].path = "apps/web/src/lib/terminal/pty-transport.md";
-    expectCliFailure(arbitraryBlob, /expected benchmark input|omitted an expected/iu);
+    arbitraryBlob.provenance.sourceBlobs[0].path =
+      "apps/web/src/lib/terminal/pty-transport.md";
+    expectCliFailure(
+      arbitraryBlob,
+      /expected benchmark input|omitted an expected/iu,
+    );
 
     const sourcePath = cloneArtifact(RECONNECT_ARTIFACT);
     sourcePath.sourcePath = "apps/web/src/lib/terminal/pty-transport.md";
@@ -185,11 +256,15 @@ describe("PTY benchmark evidence validator", () => {
 
   it("fails generation on the attached checkout instead of fabricating evidence", () => {
     expect(() =>
-      execFileSync("bun", ["src/lib/terminal/pty-reconnect-supersession.bench.ts"], {
-        cwd: process.cwd(),
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }),
+      execFileSync(
+        "bun",
+        ["src/lib/terminal/pty-reconnect-supersession.bench.ts"],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      ),
     ).toThrow(/detached clean checkout/iu);
   });
 
