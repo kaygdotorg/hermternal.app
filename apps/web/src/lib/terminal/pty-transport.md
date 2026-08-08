@@ -144,6 +144,114 @@ remain owned by the Terminal renderer and workspace integration issues.
 
 Performance evidence is limited to the bounded implementation rules: no local
 replay accumulation, one serialized conversion chain per active socket, and
-immediate stale-context release. No
-reviewed runtime latency or memory budget exists, so this issue does not claim a
-threshold.
+immediate stale-context release. No reviewed runtime latency or memory budget
+exists, so this issue does not claim a threshold.
+
+`pty-retry-authorization.bench.ts` measures only the synchronous same-identity
+retry decision after a prepared `4409`; ticket minting, socket creation,
+rendering, and network work remain outside the timed region. The checked-in
+1,000-evaluation artifact reports p50 `0.000708 ms`, p95 `0.002461 ms`, and p99
+`0.004835 ms`, with one setup ticket/socket and no blocked-attempt ticket/socket.
+`threshold` is `null` because no reviewed latency budget exists. Reproduce it
+with `bun src/lib/terminal/pty-retry-authorization.bench.ts` from `apps/web`.
+
+`pty-error-retention.bench.ts` measures 1,000 opened attach adapter-error cleanup
+and retention-anchor captures. It excludes setup ticket minting, socket creation,
+rendering, and network work. The checked-in artifact reports p50 `0.000583 ms`,
+p95 `0.002252 ms`, and p99 `0.004003 ms`; `threshold` is `null` until reviewed
+latency evidence defines a budget. Reproduce it with
+`bun src/lib/terminal/pty-error-retention.bench.ts` from `apps/web`.
+
+The retry-authorization and error-retention artifacts are legacy v1 PTY
+benchmarks. They are intentionally outside the current v2 default validator:
+the v2 validator accepts only the two reviewed reconnect and connecting
+ownership schemas, so those legacy files need separate reviewed coverage before
+any release validation includes them.
+
+`pty-reconnect-supersession.bench.ts` captures 30 deterministic cancellation
+runs for each ignored adapter stage (`validator`, `ticket`, and `factory`), after
+five warmups. Stages execute sequentially, never with `Promise.all`. The
+transport's PTY owner is the full structured tuple `{ sessionId, attach,
+processIdentity }`; `detachedAtMs` is local expiry evidence and is not part of
+that identity. The v2 JSON proof intentionally records that complete
+deterministic synthetic tuple in `expectedOwnerIdentity`,
+`activeOwnerIdentities`, `staleSocketIdentity`, and `replacementSocketIdentity`
+because the validator must prove identity continuity; these values are fixture
+labels, not live credentials or runtime handles. Each socket allocation remains
+a separate ordered `socketClosures` row containing its synthetic `socketId`,
+owner tuple, `opened` state, and exact `closeCalls` count. These are unique
+per-socket records, not a promise that the serialized owner label is globally
+unique: same-owner stale and replacement sockets can share a label, but cannot
+be collapsed into one cleanup count. Live attach handles, live process
+identities, credentials, PTY bytes, socket reasons, and real user data must
+never enter retained evidence. The validator requires the expected owner set,
+no duplicate active owner, exact per-socket cleanup, and exactly-once close
+proofs.
+
+Each run retains its rounded raw settle sample, exact validator counts
+(`validatorCalls` is `2` and `validatorCallsBeforeRecovery` is `1`),
+stage-dependent ticket and socket-factory counts before and after recovery,
+opened-socket count, stale/replacement identities and close counts, callback
+nulling, all four late-callback dispatch counts, post-close state/bytes/notice
+counts, and exact proof assertions. The harness exercises the real replacement
+`onopen`, late `onmessage`/`onerror`/server-close emitters, and bounded waits.
+Recovery is outside the measured quarantine-settlement interval. The checked-in
+artifact is evidence of behavior and cleanup, not a latency claim;
+`threshold` remains `null` because no reviewed budget exists.
+
+`pty-connecting-ownership.bench.ts` measures only the ownership decision after
+the `connecting` state observer runs. Its timer starts immediately before the
+observer's Abort, Close, Detach, or replacement action and ends when the
+cancelled operation rejects; ticket/connect setup before that observer is not in
+the metric. It excludes network, Hermes, credentials, PTY bytes, rendering, and
+unsupported latency budgets. Its synthetic validator returns immediately and
+is not a timed or serialized validator-call metric. For Abort, Close, and
+Detach, the connecting guard wins before socket allocation: the artifact must
+show one ticket request, zero socket-factory calls, no socket allocation,
+identity row, or callbacks, and zero late-event dispatches. In those runs,
+`connectingGuard` is the primary proof; callback-null and late-callback
+assertions are conditional over the
+empty socket set, not fabricated callback coverage. Replacement allocates one
+identity-owned socket, proves its real `onopen`, and then proves callback nulling,
+late-event suppression, and exactly-once close. The v2 artifact retains raw
+samples, expected ticket/factory counts, duplicate-owner checks, the ordered
+per-socket cleanup ledger, and the conditional callback proof.
+
+The validator recomputes every distribution from rounded raw samples and every
+total from the raw run counters. It enforces exact schema-specific run,
+counter, assertion, owner, and close-ledger expectations; sequential stage
+metadata; and all proven-true cleanup and late-event assertions. Standard
+validation (`bun run validate:benchmark:pty`) is schema-strict but ignores JSON
+object-key order, including nested metadata and `sourceBlobs` order. Optimized
+validation (`--optimized`) reruns the same checks and additionally requires the
+exact canonical key order for the root, nested metadata, ledgers, and source
+blobs; it is a stricter evidence mode, not a different benchmark. Both modes
+reject failed or renamed proofs, wrong validator/ticket/factory counts,
+concurrent-stage metadata, missing provenance, or arbitrary source revisions.
+
+Both v2 artifacts record the actual full source commit and generation commit,
+source tree, and Git blob plus SHA-256 hashes for exactly the declared benchmark
+source, transport, package manifest, lockfile, and provenance helper. The helper
+is execution-critical because changing it changes the evidence contract.
+Provenance also records a clean detached checkout. Runtime provenance distinguishes Bun's embedded Node
+version from the host Node executable, records Bun/package-manager and declared
+engine versions, and requires the host Node to match `package.json`; it also
+records OS release, architecture, CPU model, and CPU count. Detached checkout
+provenance describes evidence generation and is separate from PTY
+`detachedAtMs`. The helper derives `sourceRevision` from the actual `HEAD` and
+rejects an arbitrary `GIT_SOURCE_REVISION` override. Generate evidence from a
+clean detached source checkout, writing outside the repository so the output
+file cannot make the checkout dirty:
+
+```sh
+git switch --detach <sourceRevision>
+bun src/lib/terminal/pty-reconnect-supersession.bench.ts > /tmp/pty-reconnect.json
+bun src/lib/terminal/pty-connecting-ownership.bench.ts > /tmp/pty-connecting.json
+```
+
+Run those commands from `apps/web`, then copy the two JSON files into
+`src/lib/terminal/` and commit them in a later evidence-only change. Validate
+both artifacts from `apps/web` with `bun run test:benchmark:pty`, which runs
+standard and `--optimized` validator modes. The benchmark command is
+synthetic-only and never contacts Hermes, opens a live endpoint, logs a ticket,
+or uses credentials.
