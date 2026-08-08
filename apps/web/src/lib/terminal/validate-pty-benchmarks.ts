@@ -858,11 +858,9 @@ function validateProvenance(
     .split("\n")
     .map((path) => path.trim())
     .filter(Boolean);
-  const allowedEvidencePaths = new Set([
-    "apps/web/src/lib/terminal/pty-reconnect-supersession-benchmark.json",
-    "apps/web/src/lib/terminal/pty-connecting-ownership-benchmark.json",
-  ]);
-  if (evidenceChangedPaths.some((path) => !allowedEvidencePaths.has(path))) {
+  if (
+    evidenceChangedPaths.some((path) => !ALLOWED_EVIDENCE_CHANGE_PATHS.has(path))
+  ) {
     throw new Error(
       "provenance.sourceRevision was not followed only by evidence changes",
     );
