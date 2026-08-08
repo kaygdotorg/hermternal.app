@@ -41,6 +41,8 @@
   let fieldOwnershipReady = false;
   let focusGeneration = 0;
   let componentMounted = false;
+  let passwordClearGeneration = 0;
+  let passwordClearTimer: ReturnType<typeof setTimeout> | undefined;
 
   $: if (effectiveState !== previousState) {
     const enteredState = effectiveState;
@@ -50,6 +52,16 @@
     // cancel the gesture before the credential-free action settles.
     if (exitedState === 'password' && enteredState === 'password-submitting') {
       passwordVisible = false;
+      fieldOwnershipReady = false;
+      focusGeneration += 1;
+    } else if (exitedState === 'password-submitting' && enteredState === 'password') {
+      // Cancellation also starts on pointer down. Keep this keyed form and its
+      // Pill instance through the compatibility click so the new Back control
+      // cannot consume the old gesture. Focus ownership is re-established only
+      // after that handoff, so the synchronous return remains deterministic.
+      clearPasswordInputs();
+      passwordVisible = false;
+      submissionLocked = false;
       fieldOwnershipReady = false;
       focusGeneration += 1;
     } else {
@@ -68,8 +80,13 @@
     // explicitly after hydration in that case.
     if (isPasswordState) void focusEnteredState();
     return () => {
+      // Teardown can race a password callback or auth swap. Scrub while the
+      // bound controls still exist, before invalidating delayed work and letting
+      // detached nodes await garbage collection.
+      clearPasswordInputs();
       componentMounted = false;
       focusGeneration += 1;
+      invalidatePasswordClearTasks();
     };
   });
 
@@ -174,7 +191,67 @@
     return 'Live boundary · unavailable · no credentials';
   }
 
+  function clearPasswordInputs(clearDefaults = true): void {
+    for (const input of [usernameInput, passwordInput]) {
+      if (!input) continue;
+      // Clear the live property first. A reset event is cancelable and hostile
+      // listeners can otherwise restore a retained default after the action has
+      // already been observed. Guarding empty writes avoids retriggering an
+      // observer during the final property-only pass.
+      if (input.value !== '') input.value = '';
+      if (!clearDefaults) continue;
+      if (input.defaultValue !== '') input.defaultValue = '';
+      if (input.hasAttribute('value')) input.removeAttribute('value');
+    }
+  }
+
+  function invalidatePasswordClearTasks(): void {
+    passwordClearGeneration += 1;
+    if (passwordClearTimer !== undefined) {
+      clearTimeout(passwordClearTimer);
+      passwordClearTimer = undefined;
+    }
+  }
+
+  function schedulePasswordInputClear(): void {
+    const generation = ++passwordClearGeneration;
+    if (passwordClearTimer !== undefined) {
+      clearTimeout(passwordClearTimer);
+      passwordClearTimer = undefined;
+    }
+    // The callback/action may have synchronously repopulated a field before it
+    // returned. The scheduler owns its own synchronous scrub before yielding.
+    clearPasswordInputs();
+
+    const isCurrent = (): boolean => componentMounted && generation === passwordClearGeneration;
+    const enqueueMicrotask = (callback: () => void): void => {
+      if (typeof queueMicrotask === 'function') queueMicrotask(callback);
+      else void Promise.resolve().then(callback);
+    };
+    enqueueMicrotask(() => {
+      if (!isCurrent()) return;
+      clearPasswordInputs();
+      // A hostile observer can queue its own microtask after observing the
+      // synchronous clear. A second bounded microtask closes that handoff
+      // without starting an unbounded observer fight.
+      enqueueMicrotask(() => {
+        if (!isCurrent()) return;
+        clearPasswordInputs();
+        passwordClearTimer = setTimeout(() => {
+          passwordClearTimer = undefined;
+          if (!isCurrent()) return;
+          // Defaults and value attributes are scrubbed by the earlier bounded
+          // passes. The queued-task pass only touches the live property, so it
+          // cannot retrigger a MutationObserver with no later scrub.
+          clearPasswordInputs(false);
+        }, 0);
+      });
+    });
+  }
+
   function resetPasswordEntry(): void {
+    invalidatePasswordClearTasks();
+    clearPasswordInputs();
     passwordVisible = false;
     submissionLocked = false;
     fieldOwnershipReady = false;
@@ -199,15 +276,33 @@
       if (!usernameInput) return;
       usernameInput.focus();
       if (document.activeElement !== usernameInput) return;
+      // The reactive submitting -> password handoff intentionally does not
+      // invalidate the current cancel scrub: its bounded microtask/task fence
+      // must survive that flush. Once focus ownership is ready for a new entry,
+      // supersede any leftover operation scrub before new input can be retained.
+      invalidatePasswordClearTasks();
     } else {
       stateHeading?.focus();
     }
     fieldOwnershipReady = true;
   }
 
+  function handlePasswordInput(): void {
+    if (!fieldOwnershipReady) return;
+    // A user edit is an explicit ownership handoff. An old clamped task must
+    // never clear credentials belonging to this new attempt.
+    invalidatePasswordClearTasks();
+  }
+
   function handleAction(action: AuthAction): void {
     if (action.type === 'toggle-password-visibility') passwordVisible = !passwordVisible;
-    if (
+    if (action.type === 'cancel-sign-in') {
+      // Cancellation is a distinct lifecycle action. Scrub before handing the
+      // synchronous return to the owner so a session or fixture callback can
+      // inspect only credential-free DOM state while it restores focus.
+      invalidatePasswordClearTasks();
+      clearPasswordInputs();
+    } else if (
       action.type === 'back-to-providers' ||
       action.type === 'cancel-callback' ||
       action.type === 'choose-provider-again' ||
@@ -216,7 +311,11 @@
     ) {
       resetPasswordEntry();
     }
-    onAction(action);
+    try {
+      onAction(action);
+    } finally {
+      if (action.type === 'cancel-sign-in') schedulePasswordInputClear();
+    }
   }
 
   function activatePasswordFixture(): void {
@@ -228,35 +327,62 @@
     )
       return;
 
+    // Starting a fresh submission is another ownership boundary. Supersede any
+    // delayed scrub from a prior cancel/retry before reading the new values.
+    invalidatePasswordClearTasks();
     submissionLocked = true;
     // Read the two owned controls directly instead of relying on FormData's
     // name lookup. Explicit refs keep a delayed hydration/focus transfer from
     // ever swapping the username and password channels.
     const username = usernameInput?.value ?? '';
     const password = passwordInput?.value ?? '';
-    // Snapshot only the transient live values, then synchronously clear the DOM
-    // before either the fixture action or live authentication callback can run.
-    // Do not key-replace the form inside the pointer-down gesture: reset() clears
-    // the controls without detaching the button that owns the compatibility click.
-    passwordForm.reset();
+    // Snapshot only the transient live values, then directly clear both input
+    // properties and their reset defaults before any cancelable reset event or
+    // credential-observing callback can run. The follow-up clear protects the
+    // boundary if a reset listener prevents default or writes a value back.
+    clearPasswordInputs();
+    try {
+      passwordForm.reset();
+    } catch {
+      // Direct property clearing is the security boundary. A hostile reset
+      // listener must not block the credential-free action from completing.
+    } finally {
+      clearPasswordInputs();
+    }
     passwordVisible = false;
 
     if (discoveryMode === 'live') {
       if (onPasswordSubmit && typeof username === 'string' && typeof password === 'string') {
         // The live callback receives transient values once. Auth actions and observable
         // component state remain credential-free, and the keyed form is cleared now.
-        onPasswordSubmit({ username, password });
+        try {
+          onPasswordSubmit({ username, password });
+        } finally {
+          schedulePasswordInputClear();
+        }
       } else {
         submissionLocked = false;
       }
       return;
     }
-    onAction({ type: 'submit-password-fixture' });
+    try {
+      onAction({ type: 'submit-password-fixture' });
+    } finally {
+      schedulePasswordInputClear();
+    }
   }
 
   function handlePasswordSubmit(event: SubmitEvent): void {
     event.preventDefault();
     activatePasswordFixture();
+  }
+
+  function handlePasswordReset(event: Event): void {
+    // Hydrated JS already scrubbed the controls before this cancelable event;
+    // keep native reset inert so a listener cannot repopulate a credential.
+    clearPasswordInputs();
+    event.preventDefault();
+    schedulePasswordInputClear();
   }
 
   function handlePasswordKeydown(event: KeyboardEvent): void {
@@ -388,9 +514,15 @@
         </header>
 
         {#key formResetKey}
-          <!-- `dialog` has no native navigation target outside a dialog. The
-               reset-type primary action clears live values without script,
-               while hydrated submit handling stays accessible. Synthetic
+          <!-- This form has no native navigation target outside a dialog. The
+               reset-type primary action uses native reset semantics: click or
+               focused-button Enter reaches the reset path, which clears live
+               values and prevents a credential post. After hydration, field
+               Enter is intercepted and clears/submits through the local handler.
+               If JavaScript is lost after hydration, field Enter has no native
+               reset target; its fail-closed guarantee is limited to no
+               navigation, post, or storage. Direct property clearing happens
+               before every reset event and transient callback. Synthetic
                fixtures suppress password managers; live controls intentionally
                omit those markers so username/current-password semantics remain
                discoverable while the hydration fence is still active. -->
@@ -403,6 +535,7 @@
             data-field-ownership={fieldOwnershipReady ? 'ready' : 'pending'}
             data-form-type={discoveryMode === 'live' ? undefined : 'other'}
             method="dialog"
+            onreset={handlePasswordReset}
             onsubmit={handlePasswordSubmit}
           >
             <label class="field-label" for="auth-username">Username</label>
@@ -417,6 +550,7 @@
               name={discoveryMode === 'live' ? 'username' : undefined}
               readonly={!fieldOwnershipReady}
               required
+              oninput={handlePasswordInput}
               onkeydown={handlePasswordKeydown}
               bind:this={usernameInput}
               value=""
@@ -448,6 +582,7 @@
               placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter password'}
               readonly={!fieldOwnershipReady}
               required
+              oninput={handlePasswordInput}
               onkeydown={handlePasswordKeydown}
               bind:this={passwordInput}
               type={passwordVisible ? 'text' : 'password'}
@@ -467,7 +602,9 @@
             <Pill
               label={effectiveState === 'password-submitting' ? 'Cancel sign-in' : 'Back to providers'}
               variant="ghost"
-              onActivate={() => handleAction({ type: 'back-to-providers' })}
+              onActivate={() =>
+                handleAction({ type: effectiveState === 'password-submitting' ? 'cancel-sign-in' : 'back-to-providers' })
+              }
             />
           </form>
         {/key}

@@ -82,6 +82,74 @@ describe('BrowserAuthView', () => {
     expect(onAuthenticated).toHaveBeenCalledWith(identity);
   });
 
+  it('routes cancel-sign-in to session.cancel and keeps Back to providers on clearSelection', async () => {
+    const pendingLogin = deferred<{ identity: AuthIdentity; next: '/' }>();
+    const session = new BrowserAuthSession({
+      client: {
+        verify: vi.fn(async () => {
+          throw new BrowserAuthError('identity-unverified', 401);
+        }),
+        loginWithPassword: vi.fn(() => pendingLogin.promise),
+        logout: vi.fn(async () => undefined)
+      },
+      discoverProviders: vi.fn(async () => ({
+        providers: [
+          {
+            id: 'basic',
+            name: 'Hermes password',
+            monogram: 'H',
+            kind: 'password' as const,
+            description: 'Username and password supported'
+          }
+        ]
+      })),
+      invalidateLocalSession: vi.fn()
+    });
+    const cancel = vi.spyOn(session, 'cancel');
+    const clearSelection = vi.spyOn(session, 'clearSelection');
+    render(BrowserAuthView, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Hermes password' }));
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to providers' }));
+    expect(clearSelection).toHaveBeenCalledTimes(1);
+    expect(cancel).not.toHaveBeenCalled();
+    const clearSelectionCallsBeforeCancel = clearSelection.mock.calls.length;
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Hermes password' }));
+    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+    fireEvent.input(screen.getByLabelText('Username'), { target: { value: 'cancel-user' } });
+    fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'cancel-password' } });
+    fireEvent.submit(screen.getByRole('form', { name: 'Hermes password sign in' }));
+    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting'));
+
+    // A compatibility click can arrive on the same node before Svelte flushes the
+    // cancellation state; keep both deliveries in one synchronous turn.
+    const cancelButton = screen.getByRole('button', { name: 'Cancel sign-in' });
+    cancelButton.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+    cancelButton.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(clearSelection).toHaveBeenCalledTimes(clearSelectionCallsBeforeCancel);
+    await waitFor(() => {
+      expect(session.current.status).toBe('signed_out');
+      expect(session.current.selectedProviderId).toBe('basic');
+      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
+      expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready');
+      expect(screen.getByLabelText('Username')).toHaveFocus();
+    });
+    expect(screen.getByLabelText('Username')).toHaveValue('');
+    expect(screen.getByLabelText('Password')).toHaveValue('');
+    pendingLogin.resolve({ identity, next: '/' });
+    await waitFor(() => {
+      expect(session.current.status).toBe('signed_out');
+      expect(session.current.selectedProviderId).toBe('basic');
+      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
+      expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Connect to Hermes' })).not.toBeInTheDocument();
+    });
+  });
+
   it('renders fixed login errors without copying submitted credentials', async () => {
     const client: BrowserAuthClient = {
       verify: vi.fn(async () => {

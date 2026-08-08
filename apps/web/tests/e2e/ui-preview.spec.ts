@@ -690,6 +690,89 @@ test('hydrated password submission remains keyboard accessible and credential-fr
   expect(await page.locator('html').textContent()).not.toContain('keyboard-only-value');
 });
 
+test('password cancellation keeps the current action name and returns to owned password entry', async ({ page }) => {
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+
+  const auth = page.getByTestId('auth-preview');
+  const form = page.getByRole('form', { name: 'Hermes password sign in' });
+  const username = page.getByLabel('Username');
+  const password = page.getByRole('textbox', { name: 'Password' });
+  await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+  await username.fill('cancel-user');
+  await password.fill('cancel-password');
+  await password.press('Enter');
+  await expect(auth).toHaveAttribute('data-state', 'password-submitting');
+
+  const cancel = page.getByRole('button', { name: 'Cancel sign-in' });
+  await expect(cancel).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Back to providers' })).toHaveCount(0);
+  await cancel.click();
+
+  await expect(auth).toHaveAttribute('data-state', 'password');
+  await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+  await expect(username).toHaveValue('');
+  await expect(password).toHaveValue('');
+  await expect(username).toBeFocused();
+  await expect(page.locator('.section-note').nth(1)).toHaveText('cancel-sign-in');
+});
+
+test('password cancellation preserves one Pill gesture across pointerup, pointercancel, and compatibility click', async ({ page }) => {
+  for (const terminalEvent of ['pointerup', 'pointercancel'] as const) {
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+
+    const auth = page.getByTestId('auth-preview');
+    const form = page.getByRole('form', { name: 'Hermes password sign in' });
+    const username = page.getByLabel('Username');
+    const password = page.getByRole('textbox', { name: 'Password' });
+    const actionNote = page.locator('.section-note').nth(1);
+    await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+    await username.fill(`gesture-user-${terminalEvent}`);
+    await password.fill(`gesture-password-${terminalEvent}`);
+    await password.press('Enter');
+    await expect(auth).toHaveAttribute('data-state', 'password-submitting');
+    await expect(actionNote).toHaveAttribute('data-auth-action-count', '1');
+
+    const cancel = page.getByRole('button', { name: 'Cancel sign-in' });
+    await cancel.evaluate((button) => button.setAttribute('data-pointer-owner', 'cancel-sign-in'));
+    await cancel.dispatchEvent('pointerdown', { button: 0, pointerType: 'mouse' });
+    await expect(auth).toHaveAttribute('data-state', 'password');
+
+    const returned = page.getByRole('button', { name: 'Back to providers' });
+    await expect(returned).toHaveAttribute('data-pointer-owner', 'cancel-sign-in');
+    if (terminalEvent === 'pointerup') {
+      await returned.dispatchEvent('pointerup', { button: 0, pointerType: 'mouse' });
+    } else {
+      await returned.dispatchEvent('pointercancel', { pointerType: 'mouse' });
+    }
+    await returned.dispatchEvent('click', { detail: 1 });
+
+    await expect(auth).toHaveAttribute('data-state', 'password');
+    await expect(actionNote).toHaveText('cancel-sign-in');
+    await expect(actionNote).toHaveAttribute('data-auth-action-count', '2');
+    await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+    await expect(username).toHaveValue('');
+    await expect(password).toHaveValue('');
+    await expect(username).toBeFocused();
+  }
+});
+
+test('first-load no-script product route exposes only the inert loading boundary', async ({ page }) => {
+  const cdp = await page.context().newCDPSession(page);
+  const requestUrls: string[] = [];
+  page.on('request', (request) => requestUrls.push(request.url()));
+  await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+  await page.goto(previewUrl('/'));
+
+  await expect(page.getByLabel('Starting Hermternal')).toHaveAttribute('aria-busy', 'true');
+  await expect(page.getByTestId('auth-preview')).toHaveCount(0);
+  await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveCount(0);
+  await expect(page.locator('input[type="password"]')).toHaveCount(0);
+  expect(await page.locator('html').textContent()).not.toContain('password');
+  expect(requestUrls.some((url) => /\/api\/auth\//u.test(url))).toBe(false);
+});
+
 test('native password activation clears live values without navigation when script execution stops', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
 
@@ -822,6 +905,56 @@ test('password ownership fences delayed hydration, rapid focus transfer, and key
       await expect(username).toBeFocused();
     }
   }
+});
+
+test('native field Enter preserves live values while failing closed without navigation, requests, storage, or serialization', async ({ page }) => {
+  const cdp = await page.context().newCDPSession(page);
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+  const form = page.getByRole('form', { name: 'Hermes password sign in' });
+  await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+
+  const originalUrl = page.url();
+  const originalHistoryLength = await page.evaluate(() => history.length);
+  const usernameValue = 'native-field-enter-user';
+  const passwordValue = 'native-field-enter-password';
+  const requestUrls: string[] = [];
+  const navigationRequests: string[] = [];
+  const onRequest = (request: { isNavigationRequest(): boolean; url(): string }) => {
+    requestUrls.push(request.url());
+    if (request.isNavigationRequest()) navigationRequests.push(request.url());
+  };
+  page.on('request', onRequest);
+
+  await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+  const username = page.getByLabel('Username');
+  await username.fill(usernameValue);
+  const password = page.getByRole('textbox', { name: 'Password' });
+  await password.fill(passwordValue);
+  await password.press('Enter');
+
+  // With handlers disabled, input Enter has no native reset target. The live
+  // values remain in their controls even though submission fails closed.
+  await expect(username).toHaveValue(usernameValue);
+  await expect(password).toHaveValue(passwordValue);
+
+  await expect(page).toHaveURL(originalUrl);
+  expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
+  expect(navigationRequests).toEqual([]);
+  expect(requestUrls).toEqual([]);
+  expect(
+    await page.evaluate(([username, password]) => ({
+      localStorage: Object.values(localStorage).some((value) => value.includes(username) || value.includes(password)),
+      sessionStorage: Object.values(sessionStorage).some((value) => value.includes(username) || value.includes(password)),
+      html: document.documentElement.outerHTML
+    }), [usernameValue, passwordValue])
+  ).toEqual({
+    localStorage: false,
+    sessionStorage: false,
+    html: expect.not.stringContaining(passwordValue)
+  });
+
+  page.off('request', onRequest);
 });
 
 test('Pill consumes one pointer gesture across leave, re-entry, and compatibility click', async ({ page }) => {
