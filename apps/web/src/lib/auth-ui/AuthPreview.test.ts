@@ -3,22 +3,20 @@ import { describe, expect, it, vi } from 'vitest';
 import AuthPreview from './AuthPreview.svelte';
 import { DEFAULT_PROVIDERS } from './fixtures';
 
-async function flushBoundedEventLoop(bound = 8): Promise<void> {
-  for (let phase = 0; phase < bound; phase += 1) {
-    await Promise.resolve();
-    await Promise.resolve();
-    if (vi.getTimerCount() === 0) {
-      await Promise.resolve();
-      await Promise.resolve();
-      if (vi.getTimerCount() === 0) return;
-    }
-    await vi.runOnlyPendingTimersAsync();
-  }
+type PasswordDomState = [string, string, string, string, string | null, string | null];
 
-  await Promise.resolve();
-  await Promise.resolve();
-  expect(vi.getTimerCount()).toBe(0);
+function readPasswordDomState(username: HTMLInputElement, password: HTMLInputElement): PasswordDomState {
+  return [
+    username.value,
+    password.value,
+    username.defaultValue,
+    password.defaultValue,
+    username.getAttribute('value'),
+    password.getAttribute('value')
+  ];
 }
+
+const EMPTY_PASSWORD_DOM_STATE: PasswordDomState = ['', '', '', '', null, null];
 
 describe('AuthPreview', () => {
   it('renders provider selection without exposing search or deep-link controls', () => {
@@ -187,18 +185,13 @@ describe('AuthPreview', () => {
     expect(screen.getByLabelText('Username')).toHaveFocus();
   });
 
-  it('scrubs all input representations after hostile observer tasks settle', async () => {
+  it('scrubs all input representations after bounded observer deliveries and tasks', async () => {
     let view!: ReturnType<typeof render>;
-    let callbackDom: [string, string, string, string] | undefined;
+    let callbackDom: PasswordDomState | undefined;
     const onPasswordSubmit = vi.fn(() => {
       const callbackUsername = screen.getByLabelText('Username') as HTMLInputElement;
       const callbackPassword = screen.getByLabelText('Password') as HTMLInputElement;
-      callbackDom = [
-        callbackUsername.value,
-        callbackPassword.value,
-        callbackUsername.defaultValue,
-        callbackPassword.defaultValue
-      ];
+      callbackDom = readPasswordDomState(callbackUsername, callbackPassword);
       void view.rerender({ state: 'password-submitting' });
     });
     view = render(AuthPreview, { discoveryMode: 'live', state: 'password', onPasswordSubmit });
@@ -212,24 +205,78 @@ describe('AuthPreview', () => {
     username.defaultValue = 'retained-default-user';
     password.defaultValue = 'retained-default-password';
 
-    const resetObservation: Array<[string, string, string, string]> = [];
+    const resetObservation: PasswordDomState[] = [];
     form.addEventListener('reset', (event) => {
-      resetObservation.push([username.value, password.value, username.defaultValue, password.defaultValue]);
+      resetObservation.push(readPasswordDomState(username, password));
       event.preventDefault();
       username.value = 'reset-listener-user';
       password.value = 'reset-listener-password';
     });
+    const observerSnapshots: PasswordDomState[] = [];
+    const restorationSnapshots: PasswordDomState[] = [];
+    const hostileTaskSnapshots: PasswordDomState[] = [];
     let observerCount = 0;
     let lateTaskQueued = false;
     let lateTaskRan = false;
+    let restoring = false;
+    let notifyMutation: (() => void) | undefined;
+    class FakeMutationObserver {
+      private pending = false;
+
+      constructor(private readonly callback: () => void) {
+        notifyMutation = () => {
+          if (this.pending) return;
+          this.pending = true;
+          queueMicrotask(() => {
+            this.pending = false;
+            this.callback();
+          });
+        };
+      }
+
+      observe(): void {}
+      disconnect(): void {
+        notifyMutation = undefined;
+      }
+      takeRecords(): MutationRecord[] {
+        return [];
+      }
+    }
+    vi.stubGlobal('MutationObserver', FakeMutationObserver);
+    const notifyAttributeMutation = (): void => {
+      if (!restoring) notifyMutation?.();
+    };
+    const removeAttributeSpies = [username, password].map((input) =>
+      vi.spyOn(input, 'removeAttribute').mockImplementation((name: string) => {
+        HTMLInputElement.prototype.removeAttribute.call(input, name);
+        if (name === 'value') notifyAttributeMutation();
+      })
+    );
+    const setAttributeSpies = [username, password].map((input) =>
+      vi.spyOn(input, 'setAttribute').mockImplementation((name: string, value: string) => {
+        HTMLInputElement.prototype.setAttribute.call(input, name, value);
+        if (name === 'value') notifyAttributeMutation();
+      })
+    );
     const observer = new MutationObserver(() => {
       observerCount += 1;
-      if (lateTaskQueued) return;
+      observerSnapshots.push(readPasswordDomState(username, password));
+      if (observerCount === 1) {
+        restoring = true;
+        username.value = 'observer-sync-user';
+        password.value = 'observer-sync-password';
+        username.defaultValue = 'observer-sync-default';
+        password.defaultValue = 'observer-sync-default';
+        username.setAttribute('value', 'observer-sync-attr');
+        password.setAttribute('value', 'observer-sync-attr');
+        restorationSnapshots.push(readPasswordDomState(username, password));
+        restoring = false;
+        return;
+      }
+      if (observerCount !== 2) return;
       lateTaskQueued = true;
-      // This task is queued by an earlier attribute mutation, before the
-      // component's final bounded timer. Keep the observer connected so the
-      // late attribute writes also exercise a second observer delivery without
-      // creating an unbounded feedback loop.
+      // This task is queued by the observer delivery caused by the second
+      // bounded clear, after the component's staging timer already exists.
       setTimeout(() => {
         lateTaskRan = true;
         username.value = 'late';
@@ -238,6 +285,7 @@ describe('AuthPreview', () => {
         password.defaultValue = 'late-default';
         username.setAttribute('value', 'late-attr');
         password.setAttribute('value', 'late-attr');
+        hostileTaskSnapshots.push(readPasswordDomState(username, password));
       }, 0);
     });
     observer.observe(form, { attributes: true, subtree: true, attributeFilter: ['value'] });
@@ -247,23 +295,42 @@ describe('AuthPreview', () => {
       fireEvent.submit(form);
 
       expect(onPasswordSubmit).toHaveBeenCalledWith({ username: 'hostile-user', password: 'hostile-password' });
-      expect(callbackDom).toEqual(['', '', '', '']);
-      expect(resetObservation).toEqual([['', '', '', '']]);
-      await flushBoundedEventLoop();
+      expect(callbackDom).toEqual(EMPTY_PASSWORD_DOM_STATE);
+      expect(resetObservation).toEqual([EMPTY_PASSWORD_DOM_STATE]);
 
+      // The first bounded observer delivery restores the representations so
+      // the first and second clears produce separate later deliveries.
+      await Promise.resolve();
+      expect(observerSnapshots[0]).toEqual(EMPTY_PASSWORD_DOM_STATE);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(restorationSnapshots).toEqual([['observer-sync-user', 'observer-sync-password', 'observer-sync-attr', 'observer-sync-attr', 'observer-sync-attr', 'observer-sync-attr']]);
+      expect(observerSnapshots[1]).toEqual(EMPTY_PASSWORD_DOM_STATE);
       expect(lateTaskQueued).toBe(true);
+
+      // Advance the same-time staging and hostile tasks together. The
+      // component's final timer must remain pending after that bounded work.
+      await vi.advanceTimersToNextTimerAsync();
       expect(lateTaskRan).toBe(true);
-      expect(observerCount).toBeGreaterThan(0);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      expect(hostileTaskSnapshots).toEqual([['late', 'late', 'late-attr', 'late-attr', 'late-attr', 'late-attr']]);
+
+      // The hostile task causes one more bounded observer delivery. Its values
+      // and serialized attributes must still be visible before the final scrub.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(observerSnapshots.at(-1)).toEqual(hostileTaskSnapshots[0]);
+
+      await vi.advanceTimersToNextTimerAsync();
+      expect(readPasswordDomState(username, password)).toEqual(EMPTY_PASSWORD_DOM_STATE);
+      expect(observerCount).toBeGreaterThanOrEqual(3);
       expect(observerCount).toBeLessThanOrEqual(4);
-      expect(username).toHaveValue('');
-      expect(password).toHaveValue('');
-      expect(username.defaultValue).toBe('');
-      expect(password.defaultValue).toBe('');
-      expect(username.getAttribute('value')).toBeNull();
-      expect(password.getAttribute('value')).toBeNull();
       expect(JSON.stringify(callbackDom)).not.toContain('hostile-password');
     } finally {
       observer.disconnect();
+      removeAttributeSpies.forEach((spy) => spy.mockRestore());
+      setAttributeSpies.forEach((spy) => spy.mockRestore());
+      vi.unstubAllGlobals();
       vi.useRealTimers();
     }
   });

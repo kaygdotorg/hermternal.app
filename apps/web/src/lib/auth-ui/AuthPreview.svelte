@@ -238,14 +238,21 @@
       enqueueMicrotask(() => {
         if (!isCurrent()) return;
         clearPasswordInputs();
+        // The second clear can itself be delivered to a hostile observer. Give
+        // that finite delivery one task boundary to enqueue its bounded task,
+        // then enqueue the final scrub from this fence so it runs afterward.
+        // Neither component phase schedules another observer-driven scrub, so
+        // the protection stays bounded rather than becoming an observer loop.
         passwordClearTimer = setTimeout(() => {
-          passwordClearTimer = undefined;
           if (!isCurrent()) return;
-          // Earlier observer tasks can restore the live property, reset default,
-          // and serialized value after the microtask passes. The final bounded
-          // task must scrub all three representations before quiescence; it does
-          // not schedule another observer fight.
-          clearPasswordInputs();
+          passwordClearTimer = undefined;
+          passwordClearTimer = setTimeout(() => {
+            if (!isCurrent()) return;
+            passwordClearTimer = undefined;
+            // Restore-resistant final phase: clear the live property, reset
+            // default, and serialized value attribute after the observer task.
+            clearPasswordInputs();
+          }, 0);
         }, 0);
       });
     });
