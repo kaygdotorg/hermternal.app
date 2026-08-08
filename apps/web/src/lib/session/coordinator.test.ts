@@ -6,7 +6,9 @@ import {
   createSessionCoordinator,
   type ChatSessionPort,
   type TerminalBinding,
-  type TerminalSessionPort
+  type TerminalLease,
+  type TerminalSessionPort,
+  type TerminalSettlement
 } from './coordinator';
 import type { JsonRpcConnectionStatus } from '../chat/json-rpc-chat';
 
@@ -197,6 +199,12 @@ function expectInvalidatedThenReleased(terminal: FakeTerminalHarness, binding: T
   ]);
 }
 
+function settlementForAttach(terminal: FakeTerminalHarness, index: number): TerminalSettlement {
+  const lease = terminal.attach.mock.calls[index]?.[2] as TerminalLease | undefined;
+  if (!lease) throw new Error(`missing Terminal lease for attach ${index}`);
+  return lease;
+}
+
 describe('createSessionCoordinator', () => {
   it('switches Chat to Terminal without changing the selected session', async () => {
     const focus: string[] = [];
@@ -209,7 +217,14 @@ describe('createSessionCoordinator', () => {
 
     expect(harness.coordinator.activeSessionId).toBe('session-old');
     expect(harness.terminal.attach).toHaveBeenCalledTimes(1);
-    expect(harness.terminal.attach).toHaveBeenCalledWith('session-old', expect.any(AbortSignal));
+    expect(harness.terminal.attach).toHaveBeenCalledWith(
+      'session-old',
+      expect.any(AbortSignal),
+      expect.objectContaining({
+        sessionId: 'session-old',
+        sessionGeneration: harness.coordinator.state.sessionGeneration
+      })
+    );
     expect(focus).toEqual(['composer', 'w-term-input']);
   });
 
@@ -361,10 +376,7 @@ describe('createSessionCoordinator', () => {
     const harness = createCoordinator();
     await harness.coordinator.activate('terminal');
     const oldBinding = await harness.terminal.attach.mock.results[0]!.value;
-    const oldSettlement = {
-      sessionId: 'session-old',
-      sessionGeneration: harness.coordinator.state.sessionGeneration
-    };
+    const oldSettlement = settlementForAttach(harness.terminal, 0);
 
     harness.coordinator.invalidateSession();
     await harness.coordinator.setSession('session-old');
@@ -387,10 +399,7 @@ describe('createSessionCoordinator', () => {
       onFocusIntent: (intent) => focus.push(intent.target)
     });
     await harness.coordinator.activate('terminal');
-    const settlement = {
-      sessionId: 'session-old',
-      sessionGeneration: harness.coordinator.state.sessionGeneration
-    };
+    const settlement = settlementForAttach(harness.terminal, 0);
     await harness.coordinator.activate('chat');
 
     expect(harness.coordinator.invalidateTerminalBinding(settlement)).toBe(true);
@@ -403,16 +412,13 @@ describe('createSessionCoordinator', () => {
     });
   });
 
-  it('reacquires Terminal without asynchronous Chat selection and focuses the recovered lease', async () => {
+  it('ensures Terminal without asynchronous Chat selection and focuses the recovered lease', async () => {
     const focus: Array<{ target: string; sessionGeneration: number }> = [];
     const harness = createCoordinator(undefined, undefined, {
       onFocusIntent: (intent) => focus.push(intent)
     });
     await harness.coordinator.activate('terminal');
-    const settlement = {
-      sessionId: 'session-old',
-      sessionGeneration: harness.coordinator.state.sessionGeneration
-    };
+    const settlement = settlementForAttach(harness.terminal, 0);
     const restoreCalls = harness.chat.restore.mock.calls.length;
     const reconnectCalls = harness.chat.reconnect.mock.calls.length;
 
@@ -426,13 +432,57 @@ describe('createSessionCoordinator', () => {
     expect(focus.at(-1)).toMatchObject({ sessionGeneration: settlement.sessionGeneration });
   });
 
+  it('rotates the opaque settlement lease for same-generation recovery and accepts only B', async () => {
+    const harness = createCoordinator();
+    await harness.coordinator.activate('terminal');
+    const settlementA = settlementForAttach(harness.terminal, 0);
+
+    expect(harness.coordinator.invalidateTerminalBinding(settlementA)).toBe(true);
+    const pendingB = harness.terminal.deferNext('session-old');
+    const recoveryB = harness.coordinator.reconnectTerminal();
+    await flush();
+    const settlementB = settlementForAttach(harness.terminal, 1);
+
+    expect(settlementB.sessionGeneration).toBe(settlementA.sessionGeneration);
+    expect(settlementB.leaseIdentity).not.toBe(settlementA.leaseIdentity);
+    expect(harness.coordinator.invalidateTerminalBinding(settlementA)).toBe(false);
+    expect(harness.coordinator.state.terminalStatus).toBe('attaching');
+
+    pendingB.deferred.resolve(pendingB.binding);
+    await recoveryB;
+    expect(harness.coordinator.invalidateTerminalBinding(settlementA)).toBe(false);
+    expect(harness.coordinator.state.terminalStatus).toBe('attached');
+
+    expect(harness.coordinator.invalidateTerminalBinding(settlementB)).toBe(true);
+    expect(harness.coordinator.state.terminalStatus).toBe('detached');
+    expect(harness.coordinator.invalidateTerminalBinding(settlementB)).toBe(false);
+  });
+
+  it('keeps the recovery lease through rapid mode changes and rejects it after disposal', async () => {
+    const harness = createCoordinator();
+    await harness.coordinator.activate('terminal');
+    const settlementA = settlementForAttach(harness.terminal, 0);
+    expect(harness.coordinator.invalidateTerminalBinding(settlementA)).toBe(true);
+
+    const pendingB = harness.terminal.deferNext('session-old');
+    const recoveryB = harness.coordinator.reconnectTerminal();
+    await flush();
+    const settlementB = settlementForAttach(harness.terminal, 1);
+    const chat = harness.coordinator.activate('chat');
+    const terminal = harness.coordinator.activate('terminal');
+    pendingB.deferred.resolve(pendingB.binding);
+    await Promise.all([recoveryB, chat, terminal]);
+
+    expect(harness.coordinator.invalidateTerminalBinding(settlementA)).toBe(false);
+    expect(harness.coordinator.state.terminalStatus).toBe('attached');
+    harness.coordinator.dispose();
+    expect(harness.coordinator.invalidateTerminalBinding(settlementB)).toBe(false);
+  });
+
   it('does not let an old recovery settlement revoke a rapid same-ID reselect lease', async () => {
     const harness = createCoordinator();
     await harness.coordinator.activate('terminal');
-    const oldSettlement = {
-      sessionId: 'session-old',
-      sessionGeneration: harness.coordinator.state.sessionGeneration
-    };
+    const oldSettlement = settlementForAttach(harness.terminal, 0);
     expect(harness.coordinator.invalidateTerminalBinding(oldSettlement)).toBe(true);
 
     const recovering = harness.terminal.deferNext('session-old');

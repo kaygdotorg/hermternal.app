@@ -30,12 +30,15 @@ Hermes session, or mirror transcript content.
   attaches return the same raw object, a stale completion never cleans the raw
   binding owned by the active lease; a distinct stale binding still receives
   exactly-once cleanup.
-- `invalidateTerminalBinding({ sessionId, sessionGeneration })` reconciles an
-  unsolicited Terminal detach/failure without selecting Chat. Both fields are
-  required: a session ID can be selected again, and a late callback for an old
-  generation must not revoke the new same-ID lease. `reconnectTerminal()` uses
-  the existing Terminal activation and focus contract to acquire a new lease;
-  it does not call Chat connect, restore, or reconnect.
+- `invalidateTerminalBinding({ sessionId, sessionGeneration, leaseIdentity })`
+  reconciles an unsolicited Terminal detach/failure without selecting Chat. All
+  three fields are required: a session ID can be selected again, and recovery
+  can start a new lease without changing its session generation. The coordinator
+  creates and atomically rotates the opaque identity before every attach, so a
+  duplicate or late settlement from lease A cannot revoke pending or active
+  lease B. `reconnectTerminal()` uses the existing Terminal activation and focus
+  contract to ensure/recover a lease; it does not call Chat connect, restore, or
+  reconnect.
 - `logout()` and `dispose()` claim lifecycle state before adapter cleanup. They
   close Chat and clean the active Terminal lease at most once, increment the
   session generation once, and treat `disposed` as higher precedence than
@@ -94,15 +97,18 @@ const coordinator = createSessionCoordinator({
 
 `chat` is the existing `JsonRpcChatTransport` shape from issue #118. The
 `terminal` adapter returns an opaque `{ sessionId, invalidate() }` binding. It
-must not return PTY bytes or transcript data. The coordinator owns each returned
-binding through an attachment lease. One lease calls `invalidate()` and then
-optional `release()` exactly once; a later lease may wrap the same raw object
-after the earlier lease settles. During overlapping attaches, a stale result
-that matches the raw binding currently owned by the active lease is not wrapped
-in a second lease or cleaned; a distinct stale result receives its own lease and
-is cleaned exactly once. This ordering applies on session replacement, logout,
-disposal, and a stale asynchronous completion; a late binding is never installed
-into the new session.
+must not return PTY bytes or transcript data. As a backwards-compatible optional
+third `attach` argument, it receives a coordinator-created `{ sessionId,
+sessionGeneration, leaseIdentity }` settlement fence. The adapter must retain
+that exact opaque identity for an unsolicited callback; it is neither state nor
+transport data. The coordinator owns each returned binding through an attachment
+lease. One lease calls `invalidate()` and then optional `release()` exactly once;
+a later lease may wrap the same raw object after the earlier lease settles.
+During overlapping attaches, a stale result that matches the raw binding
+currently owned by the active lease is not wrapped in a second lease or cleaned;
+a distinct stale result receives its own lease and is cleaned exactly once. This
+ordering applies on session replacement, logout, disposal, and a stale
+asynchronous completion; a late binding is never installed into the new session.
 
 This is offline prototype evidence. The injected adapters are the only places
 where a later runtime may connect to a server or renderer; this change itself
