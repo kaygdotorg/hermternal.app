@@ -48,7 +48,7 @@ test('normal route keeps one current session across Chat and Terminal mode round
   await page.route('**/api/auth/ws-ticket', (route) => {
     ticketRequests += 1;
     const ticket = `e2e-ticket-${ticketRequests}`;
-    const body = ticketRequests === 1 ? { ticket, ttl_seconds: 30 } : { ticket };
+    const body = { ticket, ttl_seconds: 30 };
     void route.fulfill({
       status: 200,
       headers: jsonHeaders(),

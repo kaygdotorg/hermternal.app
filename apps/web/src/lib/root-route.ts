@@ -53,7 +53,7 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
   const createPtySocket: BrowserPtyWebSocketFactory | undefined =
     dependencies.createPtySocket ??
     (dependencies.createSocket
-      ? (url, _signal) => dependencies.createSocket?.(url) as unknown as ReturnType<BrowserPtyWebSocketFactory>
+      ? (url, signal) => dependencies.createSocket?.(url, signal) as unknown as ReturnType<BrowserPtyWebSocketFactory>
       : undefined);
   const workspace = new LiveWorkspaceSession({
     rest,

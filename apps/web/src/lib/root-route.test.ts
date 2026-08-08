@@ -135,23 +135,31 @@ describe('root route composition', () => {
   it('routes the shared root socket seam into the normal PTY upgrade', async () => {
     const harness = createSocketHarness();
     const urls: string[] = [];
+    const signals: Array<AbortSignal | undefined> = [];
     const fetch: LiveRestFetch = vi.fn(async (input) => {
-      if (String(input) === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket' });
+      if (String(input) === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket', ttl_seconds: 30 });
       throw new Error('unexpected request');
     });
-    const createSocket = vi.fn((url: string) => {
+    const createSocket = vi.fn((url: string, signal?: AbortSignal) => {
       urls.push(url);
+      signals.push(signal);
       return harness.socket;
     });
     const context = createLiveRootContext({ fetch, createSocket });
     const terminal = context.workspace.terminal;
     if (!terminal) throw new Error('terminal bridge was not composed');
 
-    const pending = terminal.attach('session-1', new AbortController().signal);
+    const controller = new AbortController();
+    const pending = terminal.attach('session-1', controller.signal);
     await flush();
 
     expect(createSocket).toHaveBeenCalledTimes(1);
+    // The PTY owns an internal abort controller so transport cancellation can
+    // close the socket even when the attach caller has no signal.
+    expect(signals[0]).toEqual(expect.any(AbortSignal));
+    expect(signals[0]).not.toBe(controller.signal);
     const upgrade = new URL(urls[0] ?? 'http://invalid');
+    expect(upgrade.protocol).toBe('ws:');
     expect(upgrade.pathname).toBe('/api/pty');
     expect(upgrade.searchParams.get('resume')).toBe('session-1');
     expect(upgrade.searchParams.get('ticket')).toBe('pty-ticket');
@@ -168,7 +176,7 @@ describe('root route composition', () => {
     const fetch: LiveRestFetch = vi.fn(async (input) => {
       const path = String(input);
       if (path === '/api/auth/me') return jsonResponse(IDENTITY);
-      if (path === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket' });
+      if (path === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket', ttl_seconds: 30 });
       throw new Error('unexpected request');
     });
     const context = createLiveRootContext({
@@ -202,7 +210,7 @@ describe('root route composition', () => {
     const fetch: LiveRestFetch = vi.fn(async (input) => {
       const path = String(input);
       if (path === '/api/auth/me') return jsonResponse(IDENTITY);
-      if (path === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket' });
+      if (path === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'pty-ticket', ttl_seconds: 30 });
       throw new Error('unexpected request');
     });
     const context = createLiveRootContext({
