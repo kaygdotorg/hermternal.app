@@ -114,7 +114,15 @@
       "X-Forwarded-Uri"
     ],
     "hop_by_hop": "direct injected hop-by-hop fields are rejected; only transport Connection: close is tolerated",
-    "port": "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
+    "parser_provenance": {
+      "implementation_blob": "f862b539e1adef539301f45a6433342d1cf11dc4",
+      "implementation_commit": "9985738d377ec5d8133baa5e6bea363fa0866d57",
+      "implementation_path": "scripts/traefik_proof.py",
+      "implementation_sha256": "bd0819cec3e2d4439ef2b3d817930ac359ffef5b4d3f5bf0179e8054e9adcd6d",
+      "test_path": "scripts/test_traefik_proof.py",
+      "test_source_sha256": "eda4b1669cb5fe603a9f480980085286781807d80129afdc79ea7f96586be7be"
+    },
+    "port": "X-Forwarded-Port must use canonical decimal syntax and equal the configured HTTPS entrypoint port",
     "runtime_observed": false,
     "transport_headers": [
       "Host",
@@ -144,6 +152,8 @@
       "OAuth callback accepts only the reviewed code/state or provider-error query forms",
       "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Port, X-Forwarded-Proto, and X-Forwarded-Uri",
       "a present syntactically valid noncanonical X-Forwarded-Host reaches the policy model and returns edge 421; empty, whitespace/control, malformed-authority, missing, or duplicate metadata is adapter-denied with 400",
+      "configured hosts and forwarded DNS authorities share per-label validation, reject trailing dots, and enforce 63-byte labels and a 253-byte host bound",
+      "ForwardAuth ports use canonical decimal syntax in the 1..65535 range; parser-leading OWS is normalized consistently across generated metadata and Origin, while trailing/internal OWS and obs-fold are rejected before policy",
       "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
       "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
       "the adapter accepts only the generated ForwardAuth set, Origin, and explicit bounded transport headers; Authorization, Cookie, and unknown headers are denied",
@@ -382,6 +392,7 @@
       "X-Forwarded-Port is checked against the configured HTTPS entrypoint port",
       "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
       "a present syntactically valid noncanonical X-Forwarded-Host returns modeled edge 421; empty, whitespace/control, or malformed authority returns adapter 400",
+      "raw ForwardAuth tests accept parser-leading OWS across generated metadata and Origin but reject trailing/internal OWS plus canonical and noncanonical obs-fold before header normalization",
       "C0, DEL, and C1 request-target controls are denied before route matching",
       "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
       "blocked edge and network vectors retain upstream_request=false in the annotated evidence",
