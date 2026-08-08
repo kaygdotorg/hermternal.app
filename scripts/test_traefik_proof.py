@@ -553,28 +553,32 @@ class TraefikRendererTests(unittest.TestCase):
         self.assertEqual(observation["retry"], "disabled")
 
     def test_pty_lifecycle_detaches_and_reaps_without_retaining_input(self) -> None:
-        boundary = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=30)
+        ttl_seconds = traefik_proof.PTY_DETACHED_TTL_SECONDS
+        boundary = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=ttl_seconds)
         self.assertEqual(boundary.attach("fixtureAttach", now=0), "attached")
         self.assertEqual(boundary.send_input("fixtureAttach", b"synthetic-input"), "forwarded")
         self.assertEqual(boundary.detach("fixtureAttach", now=0), "detached")
-        # Exactly 30 seconds remains reconnectable and is not reaped.
-        self.assertEqual(boundary.reap(now=30), 0)
-        self.assertEqual(boundary.reattach("fixtureAttach", now=30), "reattached")
+        # Exactly 1800 seconds remains eligible for reattach before reap.
+        self.assertEqual(boundary.reattach("fixtureAttach", now=ttl_seconds), "reattached")
         self.assertEqual(boundary.send_input("fixtureAttach", b"after-reattach"), "forwarded")
 
-        expired = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=30)
+        expired = traefik_proof.SyntheticPtyLifecycle(ttl_seconds=ttl_seconds)
         self.assertEqual(expired.attach("fixtureExpired", now=0), "attached")
         self.assertEqual(expired.detach("fixtureExpired", now=0), "detached")
-        # Cleanup starts strictly after the 30-second retention boundary.
-        self.assertEqual(expired.reap(now=31), 1)
+        # Reattach rejects 1801 seconds even when periodic cleanup has not run.
+        with self.assertRaisesRegex(ValueError, "exceeded retention TTL"):
+            expired.reattach("fixtureExpired", now=ttl_seconds + 1)
+        # Periodic cleanup still starts strictly after the 1800-second boundary.
+        self.assertEqual(expired.reap(now=ttl_seconds + 1), 1)
         with self.assertRaises(ValueError):
-            expired.reattach("fixtureExpired", now=31)
+            expired.reattach("fixtureExpired", now=ttl_seconds + 1)
 
         observation = traefik_proof.synthetic_pty_lifecycle_observation()
-        self.assertEqual(observation["boundary_elapsed_seconds"], 30 * 60)
+        self.assertEqual(observation["boundary_elapsed_seconds"], ttl_seconds)
         self.assertEqual(observation["boundary_reap"], 0)
         self.assertEqual(observation["boundary_reattach"], "reattached")
-        self.assertEqual(observation["expired_elapsed_seconds"], 30 * 60 + 1)
+        self.assertEqual(observation["expired_elapsed_seconds"], ttl_seconds + 1)
+        self.assertEqual(observation["expired_reattach_before_reap"], "rejected")
         self.assertEqual(observation["before_ttl_reap"], 0)
         self.assertEqual(observation["ttl_reap"], 1)
         self.assertEqual(observation["retry"], "disabled")
@@ -1080,6 +1084,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         self.assertEqual(self.evidence["cookie_proof"]["status"], "not_proven")
         self.assertEqual(self.evidence["cookie_proof"]["synthetic_model"]["value"], "redacted")
         self.assertEqual(self.evidence["ticket_lifecycle"]["retry"], "disabled")
+        self.assertEqual(self.evidence["pty_lifecycle"]["expired_reattach_before_reap"], "rejected")
         self.assertEqual(self.evidence["pty_lifecycle"]["ttl_reap"], 1)
         self.assertEqual(self.evidence["upgrade_retry_policy"], {"chat": "disabled", "pty": "disabled"})
         self.assertEqual(self.evidence["hermes_boundary"], traefik_proof.private_hermes_boundary_observation())
