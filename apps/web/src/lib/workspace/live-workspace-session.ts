@@ -625,7 +625,11 @@ export class LiveWorkspaceSession {
       if (
         !ownership ||
         ownership.request !== request ||
-        !this.ownsPromptCompletion(ownership)
+        !this.ownsPromptCompletion(ownership) ||
+        // JsonRpcChatTransport already fails closed when a wire event names a
+        // different session. Keep the optional projected ID in this ownership
+        // check too, so an adapter cannot promote a cross-session completion.
+        (event.sessionId !== undefined && event.sessionId !== ownership.sessionId)
       ) {
         return;
       }
@@ -839,6 +843,13 @@ export class LiveWorkspaceSession {
       if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) {
         if (completionOwnership) this.clearPendingCompletion(completionOwnership.request);
         return;
+      }
+      // REST may resolve aliases to canonical IDs at the transport boundary,
+      // but every workspace history refresh is owned by the requested durable
+      // session. A different response must not replace the timeline, promote a
+      // draft, or commit either history ownership record for a foreign session.
+      if (response.sessionId !== sessionId || response.sessionId !== this.snapshot.activeSessionId) {
+        throw new LiveRestError('invalid-response');
       }
       const timeline = mapLiveMessages(sessionId, response.messages, this.snapshot.model);
       if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) {
