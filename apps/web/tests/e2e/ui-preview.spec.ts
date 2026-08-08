@@ -292,6 +292,8 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
       menuId: 'desktop-account-menu',
       menuWidth: 242,
       menuHeight: 159,
+      menuX: 28,
+      menuY: 638,
       hintHeight: 32
     },
     {
@@ -302,6 +304,8 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
       menuId: 'desktop-account-menu',
       menuWidth: 242,
       menuHeight: 159,
+      menuX: 28,
+      menuY: 638,
       hintHeight: 32
     },
     {
@@ -312,6 +316,8 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
       menuId: 'mobile-account-menu',
       menuWidth: 308,
       menuHeight: 143,
+      menuX: 28,
+      menuY: 528,
       hintHeight: 16
     },
     {
@@ -322,6 +328,8 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
       menuId: 'mobile-account-menu',
       menuWidth: 308,
       menuHeight: 143,
+      menuX: 28,
+      menuY: 528,
       hintHeight: 16
     }
   ]) {
@@ -335,17 +343,26 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
     }
 
     const scope = page.locator(viewport.scope);
+    const mobileDrawer = viewport.width < 760 ? page.getByTestId('mobile-session-drawer') : undefined;
+    const workspace = page.locator('.workspace-preview');
     const trigger = scope.getByRole('button', { name: 'Open account menu' });
     await expect(trigger).toBeVisible();
-    await trigger.click();
+    // Dispatch the pointer activation without Playwright's auto-scroll. The
+    // approved coordinates are relative to the workspace artboard, and the
+    // following assertion verifies focus does not move the mobile drawer.
+    await trigger.dispatchEvent('pointerdown', { button: 0, pointerType: 'mouse' });
     await expect(trigger).toHaveAttribute('aria-expanded', 'true');
     await expect(trigger).toHaveAttribute('aria-controls', viewport.menuId);
 
     const menu = page.locator(`#${viewport.menuId}`);
     await expect(menu).toHaveRole('menu');
     const menuBox = await menu.boundingBox();
+    const workspaceBox = await workspace.boundingBox();
+    expect(workspaceBox).not.toBeNull();
     expect(menuBox?.width).toBe(viewport.menuWidth);
     expect(menuBox?.height).toBe(viewport.menuHeight);
+    expect(menuBox?.x).toBe((workspaceBox?.x ?? 0) + viewport.menuX);
+    expect(menuBox?.y).toBe((workspaceBox?.y ?? 0) + viewport.menuY);
     await expect(menu.getByText('Account', { exact: true })).toBeVisible();
     await expect(menu.getByText('⌘K', { exact: true })).toBeVisible();
     await expect(menu.getByRole('separator')).toBeVisible();
@@ -354,8 +371,12 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
     expect(hintBox?.height).toBe(viewport.hintHeight);
     const menuA11y = await new AxeBuilder({ page }).include(`#${viewport.menuId}`).analyze();
     expect(menuA11y.violations).toEqual([]);
-    await expect(menu.getByRole('menuitem', { name: 'Sign out' })).toBeFocused();
-    await expect(menu.getByRole('menuitem', { name: 'Sign out' })).toHaveCSS('min-height', '44px');
+    const signOut = menu.getByRole('menuitem', { name: 'Sign out' });
+    await expect(signOut).toBeFocused();
+    await expect(signOut).toHaveCSS('min-height', '44px');
+    if (mobileDrawer) {
+      await expect.poll(() => mobileDrawer.evaluate((element) => element.scrollTop)).toBe(0);
+    }
     await page.keyboard.press('Escape');
     await expect(menu).toBeHidden();
     await expect(trigger).toBeFocused();

@@ -29,9 +29,38 @@
     });
   }
 
+  function focusWithoutScroll(element: HTMLElement | null | undefined): void {
+    if (!element) return;
+
+    const scrollPositions: Array<{ element: HTMLElement; top: number; left: number }> = [];
+    const seen = new Set<HTMLElement>();
+    let ancestor = element.parentElement as HTMLElement | null;
+    while (ancestor) {
+      if (!seen.has(ancestor)) {
+        seen.add(ancestor);
+        scrollPositions.push({ element: ancestor, top: ancestor.scrollTop, left: ancestor.scrollLeft });
+      }
+      ancestor = ancestor.parentElement;
+    }
+
+    const documentScroller = document.scrollingElement as HTMLElement | null;
+    if (documentScroller && !seen.has(documentScroller)) {
+      scrollPositions.push({ element: documentScroller, top: documentScroller.scrollTop, left: documentScroller.scrollLeft });
+    }
+
+    element.focus({ preventScroll: true });
+    for (const position of scrollPositions) {
+      position.element.scrollTop = position.top;
+      position.element.scrollLeft = position.left;
+    }
+  }
+
   async function focusAccountMenuStart(): Promise<void> {
     await afterActivationFrame();
-    accountMenu?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus();
+    // The mobile drawer is a scroll container. Preserve its Paper position while
+    // moving focus into the newly-rendered menu instead of letting focus reveal
+    // the menu item by scrolling the drawer.
+    focusWithoutScroll(accountMenu?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])'));
   }
 
   async function openAccountMenu(): Promise<void> {
@@ -44,7 +73,7 @@
     accountMenuOpen = false;
     if (!restoreFocus) return;
     await afterActivationFrame();
-    accountMenuTrigger?.focus();
+    focusWithoutScroll(accountMenuTrigger);
   }
 
   function toggleAccountMenu(): void {
@@ -380,8 +409,8 @@
 
   .account-menu {
     position: absolute;
-    bottom: 147px;
-    left: 12px;
+    bottom: 146px;
+    left: 11px;
     z-index: 8;
     box-sizing: border-box;
     display: flex;
@@ -494,8 +523,8 @@
 
   @media (max-width: 760px) {
     .account-menu {
-      bottom: 159px;
-      left: 16px;
+      bottom: 158px;
+      left: 15px;
       width: min(308px, calc(100% - 32px));
       max-width: calc(100% - 32px);
     }
