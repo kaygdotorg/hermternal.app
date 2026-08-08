@@ -308,7 +308,9 @@ def read_or_create_password(spec: InstanceSpec) -> str:
         if len(raw) > 256:
             raise LauncherError("credential_file_invalid")
         try:
-            password = raw.decode("ascii").strip()
+            # The launcher writes one LF terminator. Remove only terminal CR/LF
+            # bytes so other whitespace cannot be silently accepted as a password.
+            password = raw.decode("ascii").rstrip("\r\n")
         except UnicodeDecodeError:
             raise LauncherError("credential_file_invalid") from None
         if not re.fullmatch(r"[0-9a-f]{48}", password):

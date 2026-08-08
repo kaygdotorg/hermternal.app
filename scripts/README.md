@@ -157,33 +157,56 @@ profile or container socket, or apply custom capability, CPU, memory, PID,
 security, or log settings. The dedicated test VM may use its available
 resources.
 
-Run one instance from the repository root on the authorized VM:
+Run one instance from the repository root on the authorized VM. Provide the
+exact instance name and the free loopback port owned by that instance; never
+copy a port from an older proof:
 
 ```sh
-python3 scripts/hermes_agent.py start \
-  --instance playwright-auth \
-  --port 19119
+INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
+PORT="${HERMES_PORT:?set a free loopback port for this instance}"
+launcher_output="$(
+  python3 scripts/hermes_agent.py start \
+    --instance "$INSTANCE" \
+    --port "$PORT"
+)"
+# The start result must report .result.status exactly "ready"; it is not the
+# liveness probe. Separately, continue only when the status result is exactly
+# "running".
+python3 scripts/hermes_agent.py status --instance "$INSTANCE"
+endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
+
+A successful `start` result has `.result.status` `ready`; the separate `status`
+probe must report `running` immediately before the parsed endpoint and credential
+file are used. A stopped, removed, or absent instance must abort the handoff;
+retained endpoint metadata is not proof of a live listener. The status probe is
+an operator check only, not liveness enforcement. Issue #345 remains open.
 
 Run any requested count with unique names and consecutive loopback ports:
 
 ```sh
 python3 scripts/hermes_agent.py start-many \
-  --prefix playwright \
-  --count 4 \
-  --base-port 19120
+  --prefix "${HERMES_INSTANCE_PREFIX:?set the fleet prefix}" \
+  --count "${HERMES_INSTANCE_COUNT:?set the fleet count}" \
+  --base-port "${HERMES_BASE_PORT:?set the first free loopback port}"
 ```
 
 Other operations are:
 
 ```sh
-python3 scripts/hermes_agent.py status --instance playwright-auth
-python3 scripts/hermes_agent.py endpoint --instance playwright-auth
-python3 scripts/hermes_agent.py credential-file --instance playwright-auth
-python3 scripts/hermes_agent.py stop --instance playwright-auth
-python3 scripts/hermes_agent.py stop --instance playwright-auth --purge-data
+# Continue only when this separate status probe reports .result.status == "running".
+python3 scripts/hermes_agent.py status --instance "$INSTANCE"
+launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
+endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+python3 scripts/hermes_agent.py stop --instance "$INSTANCE"
+python3 scripts/hermes_agent.py stop --instance "$INSTANCE" --purge-data
 python3 scripts/hermes_agent.py stop-many \
-  --prefix playwright --count 4 --base-port 19120 --purge-data
+  --prefix "${HERMES_INSTANCE_PREFIX:?set the fleet prefix}" \
+  --count "${HERMES_INSTANCE_COUNT:?set the fleet count}" \
+  --base-port "${HERMES_BASE_PORT:?set the first free loopback port}" \
+  --purge-data
 ```
 
 Every result is one JSON object. Public output may contain the instance,
@@ -193,6 +216,29 @@ and live outside Git under `~/.config/hermternal-tests/hermes-agent/` by
 default. Data defaults to `~/.local/share/hermternal-tests/hermes-agent/` and
 non-secret launcher state defaults to
 `~/.local/state/hermternal/hermes-agent/`. Tests may override all three roots.
+
+The preceding `status` command must report `.result.status` as `running`
+immediately before the endpoint and credential-file values are used. A successful
+`start` result is `ready`, not `running`; the following `endpoint` command is the
+source of truth for the selected instance only after the separate status probe.
+`read_launcher_result.py` parses `.result.endpoint` and `.result.credential_file`;
+it never infers a port or substitutes a remembered listener. Retained metadata
+after a stop is not proof of a live listener. This status probe is an operator
+check only, not liveness enforcement. Issue #345 remains open. Use the checked
+values at the local live-proof handoff:
+
+```sh
+HERMES_LIVE_TARGET="$endpoint" \
+  python3 scripts/with_live_credential.py "$credential_file" -- \
+  bun run --cwd apps/web test:e2e:live
+```
+
+The helper reads the credential file as bytes, removes only trailing CR/LF, and
+requires exactly 48 lowercase hexadecimal characters. It then replaces itself
+with the child command and supplies `HERMES_TEST_PASSWORD` only in that child
+process environment. It never prints or writes the password; invalid input
+fails locally before the child starts. The launcher-generated `password\n` file
+format is unchanged.
 
 `start` first requires local rootless Podman and verifies the requested official
 repository digest. It then polls bounded `GET /api/auth/providers` responses.
@@ -226,14 +272,20 @@ Offline verification:
 
 ```sh
 python3 -m py_compile scripts/hermes_agent.py scripts/test_hermes_agent.py
+python3 -m py_compile scripts/with_live_credential.py scripts/test_with_live_credential.py
+python3 -m py_compile scripts/read_launcher_result.py scripts/test_read_launcher_result.py
 python3 scripts/test_hermes_agent.py
+python3 scripts/test_with_live_credential.py
+python3 scripts/test_read_launcher_result.py
 python3 -O scripts/test_hermes_agent.py
-python3 -m unittest scripts.test_hermes_agent
-python3 -O -m unittest scripts.test_hermes_agent
+python3 -m unittest scripts.test_hermes_agent scripts.test_with_live_credential scripts.test_read_launcher_result
+python3 -O -m unittest scripts.test_hermes_agent scripts.test_with_live_credential scripts.test_read_launcher_result
 ```
 
-The 28-test suite uses a fake Podman boundary and local synthetic HTTP server.
-It never starts Hermes or reads a real credential. It covers immutable image
+The 29-test launcher suite uses a fake Podman boundary and local synthetic HTTP
+server. The 6-test credential handoff and 6-test launcher-result suites use only
+synthetic bytes and mocked local process boundaries. None of these suites starts
+Hermes or reads a real credential. The launcher suite covers immutable image
 binding, rootless checks, environment cleanup, deterministic scaling, upstream
 command preservation, absence of custom policy flags, credential redaction,
 provider readiness, existing stopped-container recovery and exact-once rollback,

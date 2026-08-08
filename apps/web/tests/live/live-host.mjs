@@ -7,7 +7,6 @@ import { cwd } from 'node:process';
 import { parseRawRequestTarget } from '../../src/lib/static-route-grammar.mjs';
 import { resolveStaticPath } from '../static/static-host.mjs';
 
-const DEFAULT_LIVE_TARGET = 'http://127.0.0.1:19131';
 const PROXY_PREFIXES = Object.freeze(['/api/', '/auth/']);
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -207,7 +206,10 @@ export function validateLiveTarget(value) {
     }
   }
 
-  if (port !== undefined && (!/^(?:0|[1-9]\d*)$/u.test(port) || Number(port) < 1 || Number(port) > 65_535)) {
+  if (port === undefined) {
+    throw new Error('The disposable Hermes target must include an explicit port.');
+  }
+  if (!/^(?:0|[1-9]\d*)$/u.test(port) || Number(port) < 1 || Number(port) > 65_535) {
     throw new Error('The disposable Hermes target port is invalid.');
   }
   if (target.pathname !== '/') throw new Error('The disposable Hermes target must not include a path.');
@@ -231,9 +233,15 @@ function isCanonicalLoopbackIpv4(host) {
  */
 export function createLiveHost({
   buildDirectory = resolve(cwd(), 'build'),
-  target = process.env.HERMES_LIVE_TARGET ?? DEFAULT_LIVE_TARGET
+  target
 } = {}) {
-  const validatedTarget = validateLiveTarget(target);
+  // Credentialed proofs must bind to explicit launcher metadata; a fallback can
+  // silently send auth traffic to an unrelated local listener.
+  const configuredTarget = target ?? process.env.HERMES_LIVE_TARGET;
+  if (configuredTarget === undefined) {
+    throw new Error('HERMES_LIVE_TARGET is required for the credentialed live lane.');
+  }
+  const validatedTarget = validateLiveTarget(configuredTarget);
 
   const server = createServer(async (request, response) => {
     const rawTarget = request.url ?? '';
