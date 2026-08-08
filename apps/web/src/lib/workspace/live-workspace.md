@@ -23,9 +23,11 @@ second Chat transport, or dispose Chat. Terminal state, notices, and byte
 publications are owned by the current workspace generation, selected session,
 and coordinator identity. A stale event is rejected before it can update the
 workspace snapshot, and the matching bridge binding is invalidated/detached
-rather than merely hidden. A session replacement clears the old terminal
-presentation state after synchronous PTY invalidation, so a late old terminal
-publication cannot appear on the replacement session.
+rather than merely hidden. The bridge's public state getter also projects a
+session-less detached state after rejection, while retaining the opaque
+transport identity only for later recovery. A session replacement clears the
+old terminal presentation state after synchronous PTY invalidation, so a late
+old terminal publication cannot appear on the replacement session.
 
 `TerminalSurface` remains mounted while Chat is selected and hides only its
 presentation layer. It owns the host, lazy W-Term/Ghostty import, renderer mount

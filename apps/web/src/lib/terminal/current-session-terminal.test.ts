@@ -195,6 +195,8 @@ describe('CurrentSessionTerminalBridge', () => {
     expect(staleBinding.isValid?.()).toBe(false);
     expect(fake.detach).toHaveBeenCalledTimes(1);
     expect(events).toEqual([]);
+    expect(bridge.state.status).toBe('detached');
+    expect(bridge.state.sessionId).toBeUndefined();
 
     const freshBinding = await bridge.attach('session-one', new AbortController().signal);
     const bytes = new Uint8Array([0xff, 0x00, 0x80]);
