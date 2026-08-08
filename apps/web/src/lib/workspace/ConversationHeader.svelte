@@ -81,6 +81,7 @@
     <Pill
       ariaLabel="Chat mode selected"
       icon="conversation"
+      iconOnly
       label="Chat"
       selected
       title="Chat mode is current in this preview"
@@ -90,13 +91,21 @@
     <Pill
       ariaLabel="Open terminal mode"
       icon="terminal"
+      iconOnly
       label="Terminal"
       title="Terminal mode is deferred in this preview"
       variant="ghost"
     />
   </div>
 
-  <Pill ariaLabel="Workspace options" icon="menu" iconOnly label="Workspace options" variant="ghost" />
+  <Pill
+    ariaLabel="Workspace options"
+    icon="share"
+    iconOnly
+    label="Workspace options"
+    title="Sharing is deferred in this preview"
+    variant="ghost"
+  />
 
   <div class="header-model" aria-label={`Current model ${model}`}>
     <Icon name="spark" size={14} />
@@ -110,14 +119,15 @@
     display: flex;
     min-height: 72px;
     align-items: center;
-    gap: 10px;
+    gap: 14px;
     padding: 8px 8px 8px 12px;
     border-bottom: 1px solid var(--line-soft);
   }
 
   .title-region {
+    width: min(486px, 100%);
     min-width: 0;
-    flex: 1 1 auto;
+    flex: 0 1 486px;
   }
 
   .title-region :global(.pill) {
@@ -149,18 +159,25 @@
   }
 
   .mode-controls {
+    box-sizing: border-box;
     display: flex;
-    flex: 0 0 auto;
+    width: 92px;
+    height: 44px;
+    flex: 0 0 92px;
+    align-items: center;
     gap: 2px;
-    padding: 2px;
+    padding: 0;
     border: 1px solid var(--line-soft);
     border-radius: var(--radius-pill);
     background: color-mix(in srgb, var(--muted) 8%, transparent);
   }
 
   .mode-controls :global(.pill) {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
     min-height: 44px;
-    padding-inline: 10px;
+    padding-inline: 8px;
   }
 
   .mode-controls :global(.pill.ghost) {
@@ -168,26 +185,19 @@
   }
 
   .mode-controls :global(.pill-label) {
-    font-size: 13px;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .header-model {
     display: none;
-    align-items: center;
-    gap: 6px;
-    color: var(--muted);
-    font-size: 12px;
-    line-height: 16px;
-    white-space: nowrap;
   }
 
-  @media (min-width: 1280px) {
-    .header-model {
-      display: inline-flex;
-    }
-  }
-
-  @media (max-width: 620px) {
+  @container workspace-preview (max-width: 760px) {
     .conversation-header {
       gap: 6px;
     }

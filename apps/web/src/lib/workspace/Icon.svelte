@@ -73,6 +73,12 @@
   {:else if name === 'send'}
     <path d="m4 5 16 7-16 7 3-7-3-7Z" />
     <path d="M7 12h13" />
+  {:else if name === 'share'}
+    <circle cx="18" cy="5" r="2.5" />
+    <circle cx="6" cy="12" r="2.5" />
+    <circle cx="18" cy="19" r="2.5" />
+    <path d="m8.2 10.8 7.6-4.4" />
+    <path d="m8.2 13.2 7.6 4.4" />
   {:else if name === 'shield'}
     <path d="M12 4 19 7v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V7l7-3Z" />
     <path d="m9 12 2 2 4-4" />

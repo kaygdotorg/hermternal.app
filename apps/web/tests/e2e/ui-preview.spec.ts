@@ -136,22 +136,34 @@ test('narrow absolute surfaces stay contained and Send activates the local actio
   await page.goto(previewUrl('/ui-preview'));
 
   const auth = page.locator('.auth-preview');
-  const statusBar = page.locator('.mobile-status-bar');
+  const authStatusBar = page.locator('.mobile-status-bar');
   const authBox = await auth.boundingBox();
-  const statusBox = await statusBar.boundingBox();
+  const authStatusBox = await authStatusBar.boundingBox();
   expect(authBox).not.toBeNull();
-  expect(statusBox).not.toBeNull();
-  expect(Math.abs((statusBox?.y ?? 0) - (authBox?.y ?? 0))).toBeLessThanOrEqual(1);
+  expect(authStatusBox).not.toBeNull();
+  expect(Math.abs((authStatusBox?.y ?? 0) - (authBox?.y ?? 0))).toBeLessThanOrEqual(1);
 
   await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
   await page.getByRole('button', { name: 'Open conversations' }).click();
   const workspace = page.locator('.workspace-preview');
-  const sidebar = page.locator('.workspace-preview .sidebar');
+  const statusBar = workspace.locator('.workspace-mobile-status-bar');
+  const toolbar = workspace.locator('.mobile-toolbar');
+  const composerBox = await page.getByRole('form', { name: 'Message composer' }).boundingBox();
   const workspaceBox = await workspace.boundingBox();
+  const workspaceStatusBox = await statusBar.boundingBox();
+  const toolbarBox = await toolbar.boundingBox();
+  const sidebar = page.locator('.workspace-preview .sidebar');
   const sidebarBox = await sidebar.boundingBox();
   expect(workspaceBox).not.toBeNull();
+  expect(workspaceStatusBox).not.toBeNull();
+  expect(toolbarBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
   expect(sidebarBox).not.toBeNull();
-  expect(Math.abs((sidebarBox?.y ?? 0) - ((workspaceBox?.y ?? 0) + 64))).toBeLessThanOrEqual(1);
+  expect(workspaceStatusBox?.height).toBe(62);
+  expect(toolbarBox?.height).toBe(64);
+  expect(composerBox?.height).toBe(100);
+  // The approved mobile shell reserves a 62px status bar above the 64px header.
+  expect(Math.abs((sidebarBox?.y ?? 0) - ((workspaceBox?.y ?? 0) + 126))).toBeLessThanOrEqual(1);
   expect((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0)).toBeLessThanOrEqual(
     (workspaceBox?.x ?? 0) + (workspaceBox?.width ?? 0) + 1
   );
@@ -682,6 +694,31 @@ test('narrow reduced-transparency mode computes fully opaque materials without b
     expect(material.backgroundColor).toMatch(/^rgb\(/);
     expect(material.backgroundColor).not.toMatch(/^rgba\(/);
   }
+});
+
+test('forced-colors mode keeps the workspace chrome and focus ring discoverable', async ({ page }) => {
+  await page.emulateMedia({ forcedColors: 'active' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+  expect(await page.evaluate(() => matchMedia('(forced-colors: active)').matches)).toBe(true);
+  const chrome = await page.locator('.workspace-preview').evaluate((preview) => {
+    const element = preview.querySelector('.composer');
+    if (!element) throw new Error('Missing workspace composer.');
+    const style = getComputedStyle(element);
+    return { backgroundColor: style.backgroundColor, borderColor: style.borderColor, boxShadow: style.boxShadow };
+  });
+
+  expect(chrome.backgroundColor).toMatch(/^rgb/);
+  expect(chrome.borderColor).toMatch(/^rgb/);
+  expect(chrome.boxShadow).toBe('none');
+
+  const conversations = page.getByRole('button', { name: 'Open conversations' });
+  await conversations.focus();
+  await expect(conversations).toBeFocused();
+  const outline = await conversations.evaluate((element) => getComputedStyle(element).outlineColor);
+  expect(outline).toMatch(/^rgb/);
 });
 
 test('UI preview stays local at the 200% browser-zoom reflow equivalent with reduced motion', async ({ page }) => {

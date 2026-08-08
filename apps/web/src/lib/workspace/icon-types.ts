@@ -16,6 +16,7 @@ export type IconName =
   | 'plus'
   | 'refresh'
   | 'send'
+  | 'share'
   | 'shield'
   | 'spark'
   | 'stop'

@@ -154,8 +154,13 @@
     data-testid="workspace-underlay"
     inert={compatibilityBlocked || mobileTitleEditing}
   >
+    <div aria-hidden="true" class="workspace-mobile-status-bar">
+      <span class="status-time">9:41</span>
+      <span class="status-system"><span>5G</span><span class="status-battery"><span></span></span></span>
+    </div>
+
     <div class="mobile-toolbar">
-    <div class="mobile-title-island" aria-label="Navigation and conversation">
+      <div class="mobile-title-island" aria-label="Navigation and conversation">
       <Pill
         ariaLabel="Open conversations"
         icon="menu"
@@ -272,17 +277,17 @@
 
 <style>
   .workspace-preview {
-    --canvas: #f3f5f8;
-    --surface: #ffffff;
-    --ink: #16181d;
-    --muted: #667080;
-    --line: #d8dde5;
+    --canvas: var(--color-canvas);
+    --surface: var(--color-paper);
+    --ink: var(--color-ink);
+    --muted: var(--color-muted);
+    --line: var(--color-line);
     --line-soft: color-mix(in srgb, var(--line) 70%, transparent);
-    --signal: #4c6fff;
-    --courier: #e88a2a;
+    --signal: var(--color-signal);
+    --courier: var(--color-courier);
     --courier-ink: #8a4b00;
-    --success: #2da568;
-    --danger: #d94a4a;
+    --success: var(--color-success);
+    --danger: var(--color-danger);
     --focus: #2348c7;
     --action-ink: #040b1e;
     --gate-action: var(--color-gate-light-action);
@@ -305,6 +310,8 @@
     --radius-glass: 22px;
     position: relative;
     box-sizing: border-box;
+    container-name: workspace-preview;
+    container-type: inline-size;
     width: 100%;
     min-width: 0;
     min-height: 960px;
@@ -378,6 +385,10 @@
     display: contents;
   }
 
+  /* Keep the approved desktop family intact: the sidebar and inspector stay
+     present while the conversation flexes down to the available width. The
+     named container switches the whole surface to the mobile family instead
+     of introducing intermediate navigation substitutions. */
   .workspace-grid {
     box-sizing: border-box;
     display: grid;
@@ -388,7 +399,11 @@
   }
 
   .workspace-grid.inspector-hidden {
-    grid-template-columns: minmax(220px, 276px) minmax(0, 1fr);
+    grid-template-columns: minmax(220px, 276px) minmax(0, 720px);
+  }
+
+  .workspace-mobile-status-bar {
+    display: none;
   }
 
   .sidebar,
@@ -451,6 +466,7 @@
     max-width: 400px;
   }
 
+  .workspace-mobile-status-bar,
   .mobile-toolbar,
   .mobile-workspace-drawer,
   .mobile-title-edit-layer {
@@ -480,26 +496,60 @@
     white-space: nowrap;
   }
 
-  @media (max-width: 1320px) {
-    .workspace-grid {
-      grid-template-columns: minmax(210px, 248px) minmax(0, 1fr) minmax(248px, 320px);
-    }
-  }
-
-  @media (max-width: 1120px) {
-    .workspace-grid {
-      grid-template-columns: minmax(210px, 248px) minmax(0, 1fr);
-    }
-
-    .workspace-grid :global(.inspector) {
-      display: none;
-    }
-  }
-
-  @media (max-width: 760px) {
+  @container workspace-preview (max-width: 760px) {
     .workspace-preview {
       min-height: 0;
       overflow: visible;
+    }
+
+    .workspace-mobile-status-bar {
+      box-sizing: border-box;
+      display: flex;
+      width: 100%;
+      height: 62px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 21px 24px 19px;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 16px;
+    }
+
+    .status-system {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-battery {
+      position: relative;
+      display: inline-flex;
+      width: 23px;
+      height: 12px;
+      align-items: center;
+      padding: 2px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+    }
+
+    .status-battery::after {
+      position: absolute;
+      top: 3px;
+      right: -3px;
+      width: 2px;
+      height: 4px;
+      border-radius: 0 2px 2px 0;
+      background: currentColor;
+      content: '';
+    }
+
+    .status-battery span {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border-radius: 2px;
+      background: currentColor;
     }
 
     .mobile-toolbar {
@@ -573,21 +623,21 @@
 
     .workspace-grid {
       display: block;
-      min-height: calc(100dvh - 64px);
-      padding: 8px;
+      min-height: calc(100dvh - 126px);
+      padding: 0;
     }
 
     .sidebar {
       position: absolute;
-      top: 64px;
-      left: 8px;
+      top: 126px;
+      left: 16px;
       z-index: 8;
       display: none;
       box-sizing: border-box;
-      width: min(276px, calc(100% - 16px));
-      max-width: calc(100% - 16px);
-      height: min(720px, calc(100dvh - 80px));
-      max-height: calc(100dvh - 80px);
+      width: min(358px, calc(100% - 32px));
+      max-width: calc(100% - 32px);
+      height: min(720px, calc(100dvh - 142px));
+      max-height: calc(100dvh - 142px);
       overflow: auto;
       contain: layout paint;
     }
@@ -598,12 +648,12 @@
 
     .mobile-workspace-drawer {
       position: absolute;
-      top: 64px;
-      right: 8px;
+      top: 126px;
+      right: 16px;
       z-index: 8;
       display: block;
-      width: min(320px, calc(100% - 16px));
-      max-height: calc(100dvh - 80px);
+      width: min(358px, calc(100% - 32px));
+      max-height: calc(100dvh - 142px);
       overflow: auto;
       contain: layout paint;
     }
@@ -618,7 +668,7 @@
       inset: 0;
       z-index: 20;
       display: block;
-      min-height: 844px;
+      min-height: 100%;
     }
 
     .title-edit-dimmer {
@@ -745,7 +795,7 @@
     }
 
     .conversation-panel {
-      min-height: calc(100dvh - 72px);
+      min-height: calc(100dvh - 126px);
       border-radius: var(--radius-nested-glass);
     }
 
@@ -758,7 +808,7 @@
     }
   }
 
-  @media (max-width: 420px) {
+  @container workspace-preview (max-width: 420px) {
     .workspace-grid {
       padding: 0;
     }
@@ -806,6 +856,49 @@
     .title-edit-dimmer,
     .state-layer.compatibility-layer {
       backdrop-filter: none;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .workspace-preview {
+      --line: CanvasText;
+      --line-soft: CanvasText;
+      --chrome-line: CanvasText;
+      --focus: Highlight;
+      --signal: Highlight;
+      --ink: CanvasText;
+      --muted: CanvasText;
+      --surface: Canvas;
+      --canvas: Canvas;
+    }
+
+    .workspace-preview :global(.session-list),
+    .workspace-preview :global(.inspector),
+    .workspace-preview :global(.composer),
+    .conversation-panel,
+    .mobile-title-island,
+    .mobile-toolbar > :global(.pill),
+    .mobile-workspace-drawer,
+    .title-edit-dimmer,
+    .workspace-preview :global(.artifact-card),
+    .workspace-preview :global(.approval-card),
+    .workspace-preview :global(.clarification-card),
+    .workspace-preview :global(.image-card),
+    .workspace-preview :global(.stopped-card),
+    .workspace-preview :global(.loading-card),
+    .workspace-preview :global(.error-card) {
+      border-color: CanvasText;
+      background: Canvas;
+      box-shadow: none;
+      forced-color-adjust: auto;
+    }
+
+    .workspace-preview :global(.pill:focus-visible),
+    .workspace-preview :global(button:focus-visible),
+    .workspace-preview :global(textarea:focus-visible),
+    .workspace-preview :global(input:focus-visible) {
+      outline: 2px solid Highlight;
+      outline-offset: 2px;
     }
   }
 </style>

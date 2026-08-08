@@ -75,7 +75,7 @@
       <Pill
         ariaLabel="Open security policy"
         icon="shield"
-        label="Security policy"
+        label="Restricted"
         variant="ghost"
         {disabled}
         onActivate={() => onAction({ type: 'set-policy' })}
@@ -87,6 +87,7 @@
       <label class="model-control">
         <span class="sr-only">Model</span>
         <Icon name="spark" size={14} />
+        <span aria-hidden="true" class="model-short">Atlas</span>
         <select aria-label="Model" bind:value={selectedModel} {disabled} onchange={handleModelChange}>
           <option>Atlas · balanced</option>
           <option>Atlas · fast</option>
@@ -121,11 +122,12 @@
   .composer {
     position: absolute;
     right: 36px;
-    bottom: 16px;
+    bottom: 32px;
     left: 36px;
     z-index: 3;
     box-sizing: border-box;
     display: flex;
+    height: 112px;
     min-height: 112px;
     flex-direction: column;
     gap: 4px;
@@ -232,6 +234,14 @@
     cursor: pointer;
   }
 
+  .model-short {
+    display: none;
+    color: var(--ink);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 16px;
+  }
+
   .model-control select:disabled {
     cursor: not-allowed;
   }
@@ -245,18 +255,13 @@
     white-space: nowrap;
   }
 
-  @media (min-width: 1280px) {
-    .field-hint {
-      display: inline-block;
-    }
-  }
-
-  @media (max-width: 620px) {
+  @container workspace-preview (max-width: 760px) {
     .composer {
       right: 16px;
-      bottom: 12px;
+      bottom: 16px;
       left: 16px;
-      min-height: 132px;
+      height: 100px;
+      min-height: 100px;
     }
 
     .composer-controls {
@@ -290,9 +295,14 @@
     }
 
     .model-control {
-      width: 44px;
+      width: 60px;
+      min-width: 60px;
       justify-content: center;
       padding-inline: 6px;
+    }
+
+    .model-short {
+      display: inline;
     }
 
     .model-control select {

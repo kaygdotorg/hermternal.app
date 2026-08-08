@@ -39,10 +39,7 @@
 
 <aside aria-label="Workspace inspector" class="inspector">
   <header class="inspector-header">
-    <div>
-      <p class="eyebrow">Workspace</p>
-      <h2>Artifact inspector</h2>
-    </div>
+    <h2>Workspace</h2>
     <Pill
       ariaLabel="Close workspace inspector"
       icon="close"
@@ -98,14 +95,14 @@
     </header>
 
     <figure class="artifact-preview" aria-labelledby="artifact-caption">
-      <figcaption id="artifact-caption">Synthetic container load by hub</figcaption>
+      <figcaption id="artifact-caption">Container load by hub</figcaption>
       <div aria-hidden="true" class="thumbnail-bars">
-        <span class="bar bar-one"></span>
-        <span class="bar bar-two"></span>
-        <span class="bar bar-three"></span>
-        <span class="bar bar-four"></span>
+        <div class="hub-bar"><span class="bar bar-one"></span><span>FRA</span></div>
+        <div class="hub-bar"><span class="bar bar-two"></span><span>AMS</span></div>
+        <div class="hub-bar"><span class="bar bar-three"></span><span>LHR</span></div>
+        <div class="hub-bar"><span class="bar bar-four"></span><span>RTM</span></div>
       </div>
-      <p class="thumbnail-note">Presentation-only thumbnail · no live analytics</p>
+      <p class="thumbnail-note">Delay signal · 12% · synthetic fixture</p>
     </figure>
 
     <div class="artifact-actions">
@@ -178,16 +175,6 @@
     gap: 12px;
   }
 
-  .eyebrow {
-    margin: 0 0 2px;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    line-height: 16px;
-    text-transform: uppercase;
-  }
-
   .inspector-header h2,
   .artifact-header h3,
   .empty-tab h3 {
@@ -241,7 +228,9 @@
   }
 
   .artifact-card {
+    box-sizing: border-box;
     display: flex;
+    min-height: 326px;
     flex-direction: column;
     gap: 12px;
     padding: 16px;
@@ -312,13 +301,28 @@
     height: 92px;
     align-items: flex-end;
     gap: 8px;
-    padding: 8px 10px;
+    padding: 8px 10px 0;
     border-bottom: 1px solid var(--line-soft);
+  }
+
+  .hub-bar {
+    display: flex;
+    min-width: 0;
+    height: 100%;
+    flex: 1 1 0;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 14px;
   }
 
   .bar {
     display: block;
-    width: 25%;
+    width: 100%;
+    min-height: 8px;
     border-radius: 4px 4px 0 0;
     background: var(--signal);
   }
