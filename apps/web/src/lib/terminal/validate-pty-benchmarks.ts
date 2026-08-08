@@ -263,4 +263,3 @@ export function validatePtyBenchmarkArtifact(artifact: unknown): void {
 export function validatePtyBenchmarkFile(path: string): void {
   validatePtyBenchmarkArtifact(JSON.parse(readFileSync(path, "utf8")));
 }
-
