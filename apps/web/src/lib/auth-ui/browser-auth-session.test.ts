@@ -193,6 +193,46 @@ describe('BrowserAuthSession', () => {
     unsubscribe();
   });
 
+  it('allows a password retry after cancellation and fences the stale first completion', async () => {
+    const first = deferred<{ identity: AuthIdentity; next: '/' }>();
+    const retry = deferred<{ identity: AuthIdentity; next: '/' }>();
+    let callCount = 0;
+    const loginWithPassword = vi.fn<BrowserAuthClient['loginWithPassword']>(() => {
+      callCount += 1;
+      return callCount === 1 ? first.promise : retry.promise;
+    });
+    const session = new BrowserAuthSession({
+      client: client({ loginWithPassword }),
+      discoverProviders: async () => ({ providers: [passwordProvider] }),
+      invalidateLocalSession: vi.fn()
+    });
+    await session.retryDiscovery();
+    session.chooseProvider(passwordProvider.id);
+
+    const firstLogin = session.loginWithPassword({ username: 'first-user', password: 'first-secret' });
+    session.cancel();
+    const secondLogin = session.loginWithPassword({ username: 'retry-user', password: 'retry-secret' });
+
+    expect(loginWithPassword).toHaveBeenCalledTimes(2);
+    expect(session.current).toMatchObject({
+      status: 'password_submitting',
+      providers: [passwordProvider],
+      selectedProviderId: passwordProvider.id
+    });
+
+    first.resolve({ identity, next: '/' });
+    await firstLogin;
+    expect(session.current).toMatchObject({
+      status: 'password_submitting',
+      providers: [passwordProvider],
+      selectedProviderId: passwordProvider.id
+    });
+
+    retry.resolve({ identity, next: '/' });
+    await secondLogin;
+    expect(session.current).toEqual({ status: 'authenticated', identity, providers: [] });
+  });
+
   it('ignores stale password errors after cancellation', async () => {
     const pending = deferred<{ identity: AuthIdentity; next: '/' }>();
     let requestSignal: AbortSignal | undefined;

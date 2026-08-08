@@ -238,21 +238,19 @@
       enqueueMicrotask(() => {
         if (!isCurrent()) return;
         clearPasswordInputs();
-        // Let one bounded observer/task delivery settle before scheduling the
-        // final scrub. The fence itself does not write to the fields, so it does
-        // not create another mutation delivery or start an unbounded observer
-        // fight.
+        // The second clear can itself be delivered to a hostile observer. Give
+        // that finite delivery one task boundary to enqueue its bounded task,
+        // then enqueue the final scrub from this fence so it runs afterward.
+        // Neither component phase schedules another observer-driven scrub, so
+        // the protection stays bounded rather than becoming an observer loop.
         passwordClearTimer = setTimeout(() => {
           if (!isCurrent()) return;
           passwordClearTimer = undefined;
-          // A later observer task can restore live value, reset default, and the
-          // serialized value attribute after the microtask passes. Schedule the
-          // final full scrub only from the fence so that bounded later work runs
-          // first. Both callbacks re-check ownership before touching the timer
-          // handle, so stale work cannot clobber a newer retry generation.
           passwordClearTimer = setTimeout(() => {
             if (!isCurrent()) return;
             passwordClearTimer = undefined;
+            // Restore-resistant final phase: clear the live property, reset
+            // default, and serialized value attribute after the observer task.
             clearPasswordInputs();
           }, 0);
         }, 0);
