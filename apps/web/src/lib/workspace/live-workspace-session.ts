@@ -565,19 +565,30 @@ export class LiveWorkspaceSession {
     // read succeeds. This private retry target covers failures that occur
     // before the active session can be published to the presentation state.
     if (!this.ownsOperation(operation)) return;
+    // getLiveRestSessionForWorkspace returns one frozen detached projection.
+    // Capture the values once so every later history, mapping, publication, and
+    // Chat decision uses the same identity snapshot rather than re-reading a
+    // mutable adapter object.
+    const capturedSessionId = session.id;
+    const capturedModel = session.model;
+    const capturedTitle = session.title;
     const canonicalSessionId = consumeLiveRestCanonicalAlias(
       this.rest,
       this,
       session,
       requestedSessionId
     );
-    if (session.id !== requestedSessionId && canonicalSessionId !== session.id) {
+    if (capturedSessionId !== requestedSessionId && canonicalSessionId !== capturedSessionId) {
       throw new LiveRestError('invalid-response');
     }
     const canonicalizedAlias = canonicalSessionId !== undefined;
     const expectedActiveSessionId = this.snapshot.activeSessionId;
-    this.failedRestore = { generation: operation.generation, sessionId: session.id };
-    const response = await this.rest.getSessionMessages(session.id, { limit: 500, offset: 0 }, operation.signal);
+    this.failedRestore = { generation: operation.generation, sessionId: capturedSessionId };
+    const response = await this.rest.getSessionMessages(
+      capturedSessionId,
+      { limit: 500, offset: 0 },
+      operation.signal
+    );
     // Cancellation may leave the generation unchanged while aborting the
     // controller. Do not publish a late provisional timeline over the user's
     // explicit offline state when a REST adapter resolves after abort.
@@ -587,15 +598,15 @@ export class LiveWorkspaceSession {
     // authorized by the private one-shot detail record; foreign history never reaches
     // presentation state or creates a transport that could resume it.
     if (
-      response.sessionId !== session.id ||
+      response.sessionId !== capturedSessionId ||
       (expectedActiveSessionId !== undefined &&
         response.sessionId !== expectedActiveSessionId &&
         !(canonicalizedAlias && expectedActiveSessionId === requestedSessionId))
     ) {
       throw new LiveRestError('invalid-response');
     }
-    const model = session.model?.trim() || 'Hermes';
-    const timeline = mapLiveMessages(session.id, response.messages, model);
+    const model = capturedModel?.trim() || 'Hermes';
+    const timeline = mapLiveMessages(capturedSessionId, response.messages, model);
     // Once history is available, the normal snapshot now carries the selected
     // identity and subsequent retry routing can use that public session ID.
     this.failedRestore = undefined;
@@ -607,8 +618,8 @@ export class LiveWorkspaceSession {
     this.publish({
       state: 'loading',
       sessions,
-      activeSessionId: session.id,
-      title: session.title?.trim() || 'Untitled chat',
+      activeSessionId: capturedSessionId,
+      title: capturedTitle?.trim() || 'Untitled chat',
       model,
       timeline
     });
@@ -617,7 +628,7 @@ export class LiveWorkspaceSession {
     let chat: JsonRpcChatTransport;
     try {
       chat = this.createChat({
-        selectedSessionId: session.id,
+        selectedSessionId: capturedSessionId,
         onEvent: (event) => this.handleEvent(operation.generation, event),
         onStateChange: (state) => this.handleConnectionState(operation.generation, state),
         onUncertainDelivery: () => this.publishUncertainDelivery(operation.generation)
@@ -646,7 +657,7 @@ export class LiveWorkspaceSession {
     // and session resume have succeeded. A pre-ticket/connect failure must
     // remain retryable; a late generic callback after this commit must not
     // erase the server-owned timeline that is already on screen.
-    this.commitHistory(operation.generation, session.id, chat);
+    this.commitHistory(operation.generation, capturedSessionId, chat);
     this.publish({ ...this.snapshot, state: timeline.length === 0 ? 'empty' : 'ready' });
   }
 
