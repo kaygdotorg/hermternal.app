@@ -277,11 +277,14 @@ describe('live Playwright artifact policy', () => {
     expect(liveCredentialValues({})).toContain('hermternal-test');
   });
 
-  it('rejects Playwright debug mode before the live worker can start', () => {
+  it('rejects Playwright runner and UI debug modes before the live worker can start', () => {
     expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: '1' })).toThrow(
       'PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane'
     );
-    expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: undefined })).not.toThrow();
+    expect(() => assertLiveRunnerDebugDisabled({ PWDEBUG: '1' })).toThrow(
+      'PWDEBUG is incompatible with the deterministic headless live lane'
+    );
+    expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: undefined, PWDEBUG: undefined })).not.toThrow();
   });
 
   it('structurally redacts textarea and select bodies and fails closed on malformed forms', () => {
@@ -1459,6 +1462,10 @@ test('sequential test sees the same root', async ({}, testInfo) => {
     expect(config).toContain("process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = '/dev/null'");
     expect(config).toContain('live-ipc-guard.cjs');
     expect(config).toContain('assertLiveRunnerDebugDisabled');
+    expect(config).toContain('PWDEBUG');
+    expect(config).toContain('headless: true');
+    expect(config).toContain('launchOptions: liveCaptureLaunchOptions');
+    expect(config).toContain('chromium.executablePath()');
     expect(config).toContain('NODE_OPTIONS');
     expect(config).toContain("trace: 'off'");
     expect(config).toContain("video: 'off'");
