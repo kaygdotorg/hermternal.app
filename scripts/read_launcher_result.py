@@ -3,8 +3,8 @@
 
 ``hermes_agent.py`` returns public metadata under ``.result``. This helper reads
 that JSON from stdin and emits only the requested endpoint or credential-file
-path, so live-proof commands use the launcher-owned instance rather than a
-remembered or inferred port.
+path, so live-proof commands use the launcher-owned instance and its explicit
+port rather than a remembered or inferred port.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sys
 from typing import Mapping, Sequence
+from urllib.parse import urlsplit
 
 
 FIELDS = frozenset({"endpoint", "credential-file"})
@@ -34,6 +35,20 @@ def _metadata(value: object) -> str:
     return value
 
 
+def _endpoint(value: object) -> str:
+    endpoint = _metadata(value)
+    try:
+        parsed = urlsplit(endpoint)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise LauncherResultError() from None
+    # An endpoint without a port can silently fall back to an unrelated service.
+    if parsed.scheme != "http" or hostname is None or port is None or port < 1:
+        raise LauncherResultError()
+    return endpoint
+
+
 def parse_launcher_result(raw: bytes | str) -> Mapping[str, str]:
     """Return the public endpoint and credential-file metadata under ``result``."""
 
@@ -47,7 +62,7 @@ def parse_launcher_result(raw: bytes | str) -> Mapping[str, str]:
     if not isinstance(result, dict):
         raise LauncherResultError()
     return {
-        "endpoint": _metadata(result.get("endpoint")),
+        "endpoint": _endpoint(result.get("endpoint")),
         "credential-file": _metadata(result.get("credential_file")),
     }
 

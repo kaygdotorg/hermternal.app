@@ -169,9 +169,16 @@ launcher_output="$(
     --instance "$INSTANCE" \
     --port "$PORT"
 )"
+# Continue only when .result.status from this command is exactly "running".
+python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
+
+The status command must report `.result.status` exactly as `running` immediately
+before the parsed endpoint and credential-file values are used. A stopped,
+removed, or absent instance must abort the handoff; retained endpoint metadata is
+not proof of a live listener. This operator trust gap is tracked in issue #345.
 
 Run any requested count with unique names and consecutive loopback ports:
 
@@ -185,6 +192,7 @@ python3 scripts/hermes_agent.py start-many \
 Other operations are:
 
 ```sh
+# Continue only when this reports .result.status == "running".
 python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
@@ -206,10 +214,14 @@ default. Data defaults to `~/.local/share/hermternal-tests/hermes-agent/` and
 non-secret launcher state defaults to
 `~/.local/state/hermternal/hermes-agent/`. Tests may override all three roots.
 
-The preceding `endpoint` command is the source of truth for the selected
-instance. `read_launcher_result.py` parses `.result.endpoint` and
+The preceding `status` command must report `.result.status` as `running`
+immediately before the endpoint and credential-file values are used. The
+following `endpoint` command is the source of truth for the selected instance
+only after that check. `read_launcher_result.py` parses `.result.endpoint` and
 `.result.credential_file`; it never infers a port or substitutes a remembered
-listener. Use those values at the local live-proof handoff:
+listener. Retained metadata after a stop is not proof of a live listener; this
+operator trust gap is tracked in issue #345. Use the checked values at the local
+live-proof handoff:
 
 ```sh
 HERMES_LIVE_TARGET="$endpoint" \
@@ -217,7 +229,7 @@ HERMES_LIVE_TARGET="$endpoint" \
   bun --cwd apps/web run test:e2e:live
 ```
 
-The helper reads the launcher line as bytes, removes only trailing CR/LF, and
+The helper reads the credential file as bytes, removes only trailing CR/LF, and
 requires exactly 48 lowercase hexadecimal characters. It then replaces itself
 with the child command and supplies `HERMES_TEST_PASSWORD` only in that child
 process environment. It never prints or writes the password; invalid input
@@ -267,7 +279,7 @@ python3 -O -m unittest scripts.test_hermes_agent scripts.test_with_live_credenti
 ```
 
 The 29-test launcher suite uses a fake Podman boundary and local synthetic HTTP
-server. The 5-test credential handoff and 5-test launcher-result suites use only
+server. The 5-test credential handoff and 6-test launcher-result suites use only
 synthetic bytes and mocked local process boundaries. None of these suites starts
 Hermes or reads a real credential. The launcher suite covers immutable image
 binding, rootless checks, environment cleanup, deterministic scaling, upstream

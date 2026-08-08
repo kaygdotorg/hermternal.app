@@ -46,6 +46,8 @@ launcher_output="$(
     --instance "$INSTANCE" \
     --port "$PORT"
 )"
+# Continue only when .result.status from this command is exactly "running".
+python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
@@ -53,7 +55,10 @@ credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launche
 The launcher emits public metadata under `.result`. `read_launcher_result.py`
 parses `.result.endpoint` and `.result.credential_file`; it never prints the
 password or infers a port. `endpoint` is the authoritative private loopback
-Dashboard URL for this launcher-owned instance.
+Dashboard URL for this launcher-owned instance only after the status check
+reports `running`. Do not hand a retained endpoint or credential file to a
+proof command when status is `stopped`, `removed`, or `absent`; this operator
+trust boundary is tracked in issue #345.
 
 Do not print the credential file. A local test process may read it through the
 repository helper. `with_live_credential.py` removes only terminal CR/LF bytes,
@@ -91,16 +96,20 @@ prefix, count, or remembered deployment.
 
 ```sh
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
+# Continue only when .result.status is exactly "running".
+python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
-python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 ```
 
-The endpoint command is the source of truth: use its parsed `.result.endpoint`
-and `.result.credential_file` values for this instance. If a browser runs outside
-the VM, use the approved tunnel with the endpoint selected from that output; do
-not replace it with a sample port or an unrelated listener.
+The status check must report `.result.status` exactly as `running` immediately
+before the endpoint and credential-file values are used. The endpoint command is
+the source of truth for the selected instance only after that check. If a browser
+runs outside the VM, use the approved tunnel with the endpoint selected from that
+output; do not replace it with a sample port or an unrelated listener. Retained
+state after a stop is not proof of a live listener; this trust gap is tracked in
+issue #345.
 
 ## Stop and clean up
 

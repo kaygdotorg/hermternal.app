@@ -1,6 +1,6 @@
 # Official Hermes browser proof
 
-This lane serves the production static build and proxies only `/api/*`, `/auth/*`, and the `/api/ws` WebSocket upgrade to a disposable local HTTP target. `HERMES_LIVE_TARGET` is accepted only as a plain HTTP loopback URL: canonical IPv4 in `127.0.0.0/8`, `[::1]`, or `localhost`, with an optional unambiguous decimal port and an optional root slash. Set it from the selected launcher `.result.endpoint` (or an approved tunnel URL whose remote side was selected from that endpoint); do not use a remembered or inferred port. Hermes and its Dashboard stay on the VM loopback interface.
+This lane serves the production static build and proxies only `/api/*`, `/auth/*`, and the `/api/ws` WebSocket upgrade to a disposable local HTTP target. `HERMES_LIVE_TARGET` is accepted only as a plain HTTP loopback URL: canonical IPv4 in `127.0.0.0/8`, `[::1]`, or `localhost`, with an explicit unambiguous decimal port and an optional root slash. Set it from the selected launcher `.result.endpoint` (or an approved tunnel URL whose remote side was selected from that endpoint); do not use a remembered or inferred port. Hermes and its Dashboard stay on the VM loopback interface.
 
 The host rejects HTTPS, userinfo, non-loopback names, IPv4-mapped IPv6, decimal/octal/short IPv4 encodings, percent-encoded or backslash-containing authorities, ambiguous ports, and any path, query, or fragment before creating the proxy-capable server. This validation is the disposable proof boundary; it prevents auth traffic from being sent to a target that URL parsing could reinterpret.
 
@@ -11,6 +11,8 @@ parse the selected launcher result before starting Playwright:
 
 ```sh
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
+# Continue only when .result.status is exactly "running".
+python3 scripts/hermes_agent.py status --instance "$INSTANCE"
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
@@ -19,6 +21,10 @@ HERMES_LIVE_TARGET="$endpoint" \
   bun --cwd apps/web run test:e2e:live
 ```
 
+The status command must report `.result.status` exactly as `running` immediately
+before the endpoint and credential-file values are used. A stopped, removed, or
+absent instance must abort the handoff; retained endpoint metadata is not proof
+of a live listener. This operator trust gap is tracked in issue #345.
 `read_launcher_result.py` parses `.result.endpoint` and `.result.credential_file`
 from the launcher output. The handoff strips only trailing CR/LF, validates
 exactly 48 lowercase hexadecimal characters, and passes the value only as

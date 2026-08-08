@@ -51,6 +51,11 @@ class LauncherResultTests(unittest.TestCase):
         parsed = parser.parse_launcher_result(json.dumps(self.document))
         self.assertEqual(parsed["endpoint"], "http://127.0.0.1:19287")
 
+    def test_endpoint_requires_explicit_port(self) -> None:
+        self.document["result"]["endpoint"] = "http://127.0.0.1"
+        with self.assertRaises(parser.LauncherResultError):
+            parser.parse_launcher_result(json.dumps(self.document))
+
     def test_cli_emits_only_requested_metadata(self) -> None:
         raw = json.dumps(self.document).encode("utf-8")
         with mock_stdin(raw), contextlib.redirect_stdout(io.StringIO()) as stdout:

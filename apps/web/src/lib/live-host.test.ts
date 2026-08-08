@@ -14,8 +14,25 @@ describe('disposable live proof target', () => {
     expect(target.pathname).toBe('/');
   });
 
+  it('requires an explicit HERMES_LIVE_TARGET when no target is supplied', () => {
+    const previousTarget = process.env.HERMES_LIVE_TARGET;
+    delete process.env.HERMES_LIVE_TARGET;
+    try {
+      expect(() => createLiveHost()).toThrow(/HERMES_LIVE_TARGET is required/iu);
+    } finally {
+      if (previousTarget === undefined) delete process.env.HERMES_LIVE_TARGET;
+      else process.env.HERMES_LIVE_TARGET = previousTarget;
+    }
+  });
+
+  it('requires an explicit port in the live target', () => {
+    expect(() => validateLiveTarget('http://127.0.0.1')).toThrow(/explicit port/iu);
+  });
+
   it.each([
     'https://127.0.0.1:19131',
+    'http://localhost/',
+    'http://[::1]',
     'http://127.0.0.1.evil.example:19131',
     'http://2130706433:19131',
     'http://0177.0.0.1:19131',
