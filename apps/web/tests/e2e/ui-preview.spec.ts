@@ -346,11 +346,11 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
     const mobileDrawer = viewport.width < 760 ? page.getByTestId('mobile-session-drawer') : undefined;
     const workspace = page.locator('.workspace-preview');
     const trigger = scope.getByRole('button', { name: 'Open account menu' });
+    const documentScrollBeforeActivation = await page.evaluate(() => ({ top: window.scrollY, left: window.scrollX }));
     await expect(trigger).toBeVisible();
-    // Dispatch the pointer activation without Playwright's auto-scroll. The
-    // approved coordinates are relative to the workspace artboard, and the
-    // following assertion verifies focus does not move the mobile drawer.
-    await trigger.dispatchEvent('pointerdown', { button: 0, pointerType: 'mouse' });
+    // Use a genuine locator activation so the browser must exercise the same
+    // pre-pointerdown auto-scroll path as a real pointer click.
+    await trigger.click();
     await expect(trigger).toHaveAttribute('aria-expanded', 'true');
     await expect(trigger).toHaveAttribute('aria-controls', viewport.menuId);
 
@@ -376,6 +376,7 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
     await expect(signOut).toHaveCSS('min-height', '44px');
     if (mobileDrawer) {
       await expect.poll(() => mobileDrawer.evaluate((element) => element.scrollTop)).toBe(0);
+      await expect.poll(() => page.evaluate(() => ({ top: window.scrollY, left: window.scrollX }))).toEqual(documentScrollBeforeActivation);
     }
     await page.keyboard.press('Escape');
     await expect(menu).toBeHidden();

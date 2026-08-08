@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Pill from './Pill.svelte';
   import type { SessionSummary, WorkspaceActionHandler } from './types';
+
+  type ScrollPosition = { element: HTMLElement; top: number; left: number };
 
   export let sessions: SessionSummary[] = [];
   export let activeSessionId = '';
@@ -13,6 +15,44 @@
   let signOutPending = false;
   let accountMenuTrigger: HTMLButtonElement | undefined;
   let accountMenu: HTMLElement | undefined;
+  let restingScrollPositions: ScrollPosition[] = [];
+
+  function captureScrollPositions(element: HTMLElement | null | undefined): ScrollPosition[] {
+    const scrollPositions: ScrollPosition[] = [];
+    const seen = new Set<HTMLElement>();
+    let ancestor = element?.parentElement as HTMLElement | null;
+    while (ancestor) {
+      if (!seen.has(ancestor)) {
+        seen.add(ancestor);
+        scrollPositions.push({ element: ancestor, top: ancestor.scrollTop, left: ancestor.scrollLeft });
+      }
+      ancestor = ancestor.parentElement;
+    }
+
+    const documentScroller = document.scrollingElement as HTMLElement | null;
+    if (documentScroller && !seen.has(documentScroller)) {
+      scrollPositions.push({ element: documentScroller, top: documentScroller.scrollTop, left: documentScroller.scrollLeft });
+    }
+    return scrollPositions;
+  }
+
+  function restoreRestingScroll(): void {
+    // A real browser may reveal a deeply nested account trigger by scrolling the
+    // document and drawer before pointerdown reaches Pill. Restore the modal's
+    // resting positions before rendering the menu so its Paper offset survives
+    // that pre-event browser work.
+    for (const position of restingScrollPositions) {
+      position.element.scrollTop = position.top;
+      position.element.scrollLeft = position.left;
+    }
+  }
+
+  onMount(() => {
+    // The drawer is mounted at its approved resting position. Keep this snapshot
+    // separate from focusWithoutScroll: it also covers scroll that happens before
+    // Svelte receives the genuine pointer activation.
+    restingScrollPositions = captureScrollPositions(accountMenuTrigger);
+  });
 
   $: pinned = sessions.filter((session) => session.group === 'pinned');
   $: recent = sessions.filter((session) => session.group === 'recent');
@@ -32,22 +72,7 @@
   function focusWithoutScroll(element: HTMLElement | null | undefined): void {
     if (!element) return;
 
-    const scrollPositions: Array<{ element: HTMLElement; top: number; left: number }> = [];
-    const seen = new Set<HTMLElement>();
-    let ancestor = element.parentElement as HTMLElement | null;
-    while (ancestor) {
-      if (!seen.has(ancestor)) {
-        seen.add(ancestor);
-        scrollPositions.push({ element: ancestor, top: ancestor.scrollTop, left: ancestor.scrollLeft });
-      }
-      ancestor = ancestor.parentElement;
-    }
-
-    const documentScroller = document.scrollingElement as HTMLElement | null;
-    if (documentScroller && !seen.has(documentScroller)) {
-      scrollPositions.push({ element: documentScroller, top: documentScroller.scrollTop, left: documentScroller.scrollLeft });
-    }
-
+    const scrollPositions = captureScrollPositions(element);
     element.focus({ preventScroll: true });
     for (const position of scrollPositions) {
       position.element.scrollTop = position.top;
@@ -65,6 +90,7 @@
 
   async function openAccountMenu(): Promise<void> {
     if (signOutPending) return;
+    restoreRestingScroll();
     accountMenuOpen = true;
     void focusAccountMenuStart();
   }
