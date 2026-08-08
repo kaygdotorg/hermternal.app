@@ -446,6 +446,186 @@ describe("createJsonRpcChatTransport", () => {
     );
   });
 
+  it("projects sole-operation correlation onto request-ID-free stream events", async () => {
+    const events: JsonRpcChatEvent[] = [];
+    const harness = makeHarness();
+    harness.transport.subscribe((event) => events.push(event));
+    const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt("official request-ID-free events");
+
+    emitEvent(socket, "message.delta", { text: "partial" });
+    expect(events.at(-1)).toMatchObject({
+      type: "message.delta",
+      requestId: request.id,
+      payload: { text: "partial" },
+    });
+    expect(request.state).toEqual({ id: request.id, status: "streaming" });
+
+    emitEvent(socket, "message.complete", { text: "complete", status: "ok" });
+    await expect(request.completion).resolves.toMatchObject({
+      type: "message.complete",
+      requestId: request.id,
+      payload: { text: "complete", status: "ok" },
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "message.complete",
+      requestId: request.id,
+    });
+  });
+
+  it("projects request-ID-free error and interaction events without conflating owner IDs", async () => {
+    const events: JsonRpcChatEvent[] = [];
+    const harness = makeHarness();
+    harness.transport.subscribe((event) => events.push(event));
+    const socket = await connectHarness(harness);
+    const clarificationRequest = harness.transport.sendPrompt("clarify owner separation");
+
+    emitEvent(socket, "clarify.request", {
+      request_id: "interaction-owner-1",
+      question: "Continue?",
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "clarify.request",
+      requestId: clarificationRequest.id,
+      clarificationId: "interaction-owner-1",
+    });
+    emitEvent(socket, "message.complete", { status: "ok" });
+    await clarificationRequest.completion;
+
+    const errorHarness = makeHarness();
+    const errorEvents: JsonRpcChatEvent[] = [];
+    errorHarness.transport.subscribe((event) => errorEvents.push(event));
+    const errorSocket = await connectHarness(errorHarness);
+    const failedRequest = errorHarness.transport.sendPrompt("request-free error");
+    const failure = failedRequest.completion.catch((error: unknown) => error);
+
+    emitEvent(errorSocket, "error", { message: "bounded failure" });
+
+    expect(errorEvents.at(-1)).toMatchObject({
+      type: "error",
+      requestId: failedRequest.id,
+    });
+    await expect(failure).resolves.toMatchObject({ code: "server-rejected" });
+  });
+
+  it("keeps session.info outside prompt correlation", async () => {
+    const events: JsonRpcChatEvent[] = [];
+    const harness = makeHarness();
+    harness.transport.subscribe((event) => events.push(event));
+    const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt("active while session info arrives");
+
+    emitEvent(socket, "session.info", { model: "synthetic/model" });
+
+    expect(events.at(-1)).toEqual({
+      type: "session.info",
+      payload: { model: "synthetic/model" },
+    });
+    emitEvent(socket, "message.complete", { status: "ok" });
+    await request.completion;
+  });
+
+  it("fails closed when a request-ID-free event names another session", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt("session-bound operation");
+    const completion = request.completion.catch((error: unknown) => error);
+
+    emitEvent(
+      socket,
+      "message.delta",
+      { text: "wrong session" },
+      { session_id: "replacement-session" },
+    );
+
+    expect(socket.closed?.code).toBe(1002);
+    await expect(completion).resolves.toMatchObject({ code: "uncertain-delivery" });
+  });
+
+  it("rejects session replacement while a prompt operation is active", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt("active restore guard");
+
+    await expect(harness.transport.restore("replacement-session")).rejects.toMatchObject({
+      code: "invalid-input",
+    });
+    await expect(harness.transport.createSession()).rejects.toMatchObject({
+      code: "invalid-input",
+    });
+    expect(harness.transport.selectedSessionId).toBe("session-marker-001");
+
+    emitEvent(socket, "message.complete", { status: "ok" });
+    await expect(request.completion).resolves.toMatchObject({ requestId: request.id });
+  });
+
+  it("reserves an asynchronous session transition before prompts can start", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const creation = harness.transport.createSession();
+    const create = frame(socket, 1);
+
+    expect(() => harness.transport.sendPrompt("must wait for session.create")).toThrowError(
+      expect.objectContaining({ code: "invalid-input" }),
+    );
+    await expect(harness.transport.restore("replacement-session")).rejects.toMatchObject({
+      code: "invalid-input",
+    });
+
+    emitResponse(socket, create.id as string, {
+      session_id: "live-draft-2",
+      stored_session_id: "stored-draft-2",
+      messages: [],
+    });
+    await expect(creation).resolves.toMatchObject({
+      sessionId: "live-draft-2",
+      storedSessionId: "stored-draft-2",
+    });
+
+    const request = harness.transport.sendPrompt("allowed after session.create");
+    emitEvent(socket, "message.complete", { status: "ok" });
+    await expect(request.completion).resolves.toMatchObject({ requestId: request.id });
+  });
+
+  it("keeps request-ID-free sequence mode fail-closed", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const request = harness.transport.sendPrompt("request-free sequence");
+    const completion = request.completion.catch((error: unknown) => error);
+
+    emitEvent(socket, "message.delta", { text: "first" }, { sequence: 1 });
+    emitEvent(socket, "message.delta", { text: "missing sequence" });
+
+    expect(socket.closed?.code).toBe(1002);
+    await expect(completion).resolves.toMatchObject({ code: "uncertain-delivery" });
+  });
+
+  it("fails closed instead of inventing correlation for no active operation", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+
+    emitEvent(socket, "message.delta", { text: "orphaned" });
+
+    expect(socket.closed?.code).toBe(1002);
+    expect(harness.transport.state.status).toBe("failed");
+  });
+
+  it("fails closed instead of inventing correlation across active operations", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const first = harness.transport.sendPrompt("first active operation");
+    const second = harness.transport.sendPrompt("second active operation");
+    const firstCompletion = first.completion.catch((error: unknown) => error);
+    const secondCompletion = second.completion.catch((error: unknown) => error);
+
+    emitEvent(socket, "message.delta", { text: "ambiguous" });
+
+    expect(socket.closed?.code).toBe(1002);
+    expect(harness.transport.state.status).toBe("failed");
+    await expect(firstCompletion).resolves.toMatchObject({ code: "uncertain-delivery" });
+    await expect(secondCompletion).resolves.toMatchObject({ code: "uncertain-delivery" });
+  });
+
   it("preserves event-derived streaming state when acknowledgement arrives later", async () => {
     const harness = makeHarness();
     const socket = await connectHarness(harness);
