@@ -1,7 +1,7 @@
 import {
   createWsTicketRequestBoundary,
-  type WsTicketFetch
-} from '$lib/chat/ws-ticket';
+  type WsTicketFetch,
+} from "$lib/chat/ws-ticket";
 import {
   PtyTransportError,
   createFreshPtyTicketProvider,
@@ -13,17 +13,20 @@ import {
   type PtyTransport,
   type PtyTransportEvent,
   type PtyWebSocket,
-  type PtyWebSocketFactory
-} from './pty-transport';
-import type { LiveRestFetch } from '$lib/transport';
-import type { TerminalBinding, TerminalSessionPort } from '$lib/session/coordinator';
+  type PtyWebSocketFactory,
+} from "./pty-transport";
+import type { LiveRestFetch } from "$lib/transport";
+import type {
+  TerminalBinding,
+  TerminalSessionPort,
+} from "$lib/session/coordinator";
 
 /**
  * The workspace-facing state deliberately omits attach/process identities. They
  * remain transport-owned opaque values and never become presentation state.
  */
 export type CurrentSessionTerminalState = Readonly<{
-  status: PtyConnectionState['status'];
+  status: PtyConnectionState["status"];
   generation: number;
   sessionId?: string;
   closeCode?: number;
@@ -32,16 +35,21 @@ export type CurrentSessionTerminalState = Readonly<{
   explicitlyClosed: boolean;
   /** True only when the transport owns an opaque attach identity. */
   reconnectSupported?: boolean;
-  failure?: 'authentication-required' | 'incompatible-origin';
+  failure?: "authentication-required" | "incompatible-origin";
 }>;
 
 export type CurrentSessionTerminalEvent =
-  | Readonly<{ type: 'bytes'; generation: number; bytes: Uint8Array; outputMayBeTruncated: boolean }>
-  | Readonly<{ type: 'state'; state: CurrentSessionTerminalState }>
   | Readonly<{
-      type: 'notice';
+      type: "bytes";
       generation: number;
-      notice: 'output-may-be-truncated';
+      bytes: Uint8Array;
+      outputMayBeTruncated: boolean;
+    }>
+  | Readonly<{ type: "state"; state: CurrentSessionTerminalState }>
+  | Readonly<{
+      type: "notice";
+      generation: number;
+      notice: "output-may-be-truncated";
       replayCapacityBytes: number;
     }>;
 
@@ -56,11 +64,13 @@ export type CurrentSessionTerminalLifecycleIdentity = Readonly<{
   nativeTransportGeneration: number;
 }>;
 
-export type CurrentSessionTerminalListener = (event: CurrentSessionTerminalEvent) => void;
+export type CurrentSessionTerminalListener = (
+  event: CurrentSessionTerminalEvent,
+) => void;
 
 export type BrowserPtyWebSocketFactory = (
   url: string,
-  signal: AbortSignal
+  signal: AbortSignal,
 ) => PtyWebSocket;
 
 export type BrowserPtyTransportOptions = Readonly<{
@@ -79,10 +89,16 @@ export type CurrentSessionTerminalAttachment = Readonly<{
 
 export type CurrentSessionTerminalAttachmentProvider = (
   sessionId: string,
-  signal: AbortSignal
-) => CurrentSessionTerminalAttachment | Promise<CurrentSessionTerminalAttachment>;
+  signal: AbortSignal,
+) =>
+  CurrentSessionTerminalAttachment | Promise<CurrentSessionTerminalAttachment>;
 
 export type CurrentSessionTerminalBridgeOptions = Readonly<{
+  /**
+   * The bridge serializes replacement until an invalidated operation settles.
+   * This keeps the merged PtyTransport's native generation as the sole late
+   * settlement owner; arbitrary adapters need no undocumented cleanup hook.
+   */
   createTransport: () => PtyTransport;
   /** Optional reviewed attach issuance seam. Omitted normal-route PTYs stay legacy and cannot reconnect. */
   createAttachment?: CurrentSessionTerminalAttachmentProvider;
@@ -95,7 +111,7 @@ interface ActiveBinding extends TerminalBinding {
   isValid(): boolean;
 }
 
-type TransportCleanup = 'detach' | 'close';
+type TransportCleanup = "detach" | "close";
 
 /**
  * Tracks one adapter call that can still claim the bridge's sole PTY owner.
@@ -117,6 +133,9 @@ interface PendingTransportOperation {
   initialCleanupMode?: TransportCleanup;
   cleanupIssued: boolean;
   cleanup: TransportCleanup;
+  /** Resolves only after this call's one deferred cleanup has completed. */
+  readonly completion: Promise<void>;
+  resolveCompletion: () => void;
 }
 
 /**
@@ -130,14 +149,16 @@ interface PendingTransportOperation {
  */
 export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   private readonly transport: PtyTransport;
-  private readonly createAttachment: CurrentSessionTerminalAttachmentProvider | undefined;
+  private readonly createAttachment:
+    CurrentSessionTerminalAttachmentProvider | undefined;
   private readonly listeners = new Set<CurrentSessionTerminalListener>();
   private readonly unsubscribeTransport: () => void;
   private currentState: CurrentSessionTerminalState;
   private activeBinding: ActiveBinding | undefined;
   /** The active call is replaceable; invalidated calls remain here only for late cleanup. */
   private pendingTransportOperation: PendingTransportOperation | undefined;
-  private readonly quarantinedTransportOperations = new Set<PendingTransportOperation>();
+  private readonly quarantinedTransportOperations =
+    new Set<PendingTransportOperation>();
   private disposed = false;
   private explicitlyClosed = false;
   private rendererReadyGateEnabled = false;
@@ -157,7 +178,9 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     this.transport = options.createTransport();
     this.createAttachment = options.createAttachment;
     this.currentState = projectState(this.transport.state, false);
-    this.unsubscribeTransport = this.transport.subscribe((event) => this.handleTransportEvent(event));
+    this.unsubscribeTransport = this.transport.subscribe((event) =>
+      this.handleTransportEvent(event),
+    );
   }
 
   get lifecycleIdentity(): CurrentSessionTerminalLifecycleIdentity {
@@ -165,7 +188,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     // actual lease. This deliberately exposes no bridge/root-created counter.
     return Object.freeze({
       binding: this.activeBinding?.valid ? this.activeBinding : undefined,
-      nativeTransportGeneration: this.currentState.generation
+      nativeTransportGeneration: this.currentState.generation,
     });
   }
 
@@ -180,15 +203,19 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       // detach/close and initial 4401/4403 failures must not be relabeled as a
       // generic detached snapshot merely because no binding remains.
       const terminalStatus =
-        this.currentState.status === 'detached' ||
-        this.currentState.status === 'failed' ||
-        this.currentState.status === 'exited' ||
-        this.currentState.status === 'closed';
-      const { sessionId: _sessionId, reconnectSupported: _reconnectSupported, ...safeState } = this.currentState;
+        this.currentState.status === "detached" ||
+        this.currentState.status === "failed" ||
+        this.currentState.status === "exited" ||
+        this.currentState.status === "closed";
+      const {
+        sessionId: _sessionId,
+        reconnectSupported: _reconnectSupported,
+        ...safeState
+      } = this.currentState;
       return Object.freeze({
         ...safeState,
-        status: terminalStatus ? this.currentState.status : 'detached',
-        reconnectSupported: false
+        status: terminalStatus ? this.currentState.status : "detached",
+        reconnectSupported: false,
       });
     }
     return this.currentState;
@@ -205,7 +232,8 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     if (!ready) return;
     for (const waiter of [...this.rendererReadyWaiters]) {
       this.rendererReadyWaiters.delete(waiter);
-      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort);
+      if (waiter.signal && waiter.onAbort)
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
       waiter.resolve();
     }
   }
@@ -223,7 +251,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       this.activeBinding !== undefined
     ) {
       try {
-        listener({ type: 'state', state: this.currentState });
+        listener({ type: "state", state: this.currentState });
       } catch {
         // A presentation observer cannot interrupt bridge setup or transport flow.
       }
@@ -231,17 +259,33 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     return () => this.listeners.delete(listener);
   }
 
-  async attach(sessionId: string, signal: AbortSignal): Promise<TerminalBinding> {
-    if (this.disposed) throw new PtyTransportError('closed');
-    if (signal.aborted) throw new PtyTransportError('aborted');
-    if (this.activeBinding?.valid && this.activeBinding.sessionId === sessionId) {
+  async attach(
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<TerminalBinding> {
+    if (this.disposed) throw new PtyTransportError("closed");
+    if (signal.aborted) throw new PtyTransportError("aborted");
+    if (
+      this.activeBinding?.valid &&
+      this.activeBinding.sessionId === sessionId
+    ) {
       return this.activeBinding;
     }
+    // An arbitrary adapter can ignore cancellation and claim raw PTY ownership
+    // after its caller leaves. Invalidate A, then wait for its one cleanup before
+    // recursively rechecking ownership and allowing B to touch the shared adapter.
+    if (
+      this.pendingTransportOperation !== undefined ||
+      this.quarantinedTransportOperations.size > 0
+    ) {
+      this.invalidateActiveBinding();
+      await this.waitForQuarantinedTransportOperations(signal);
+      return this.attach(sessionId, signal);
+    }
     this.invalidateActiveBinding();
-    if (this.pendingTransportOperation !== undefined) throw new PtyTransportError('aborted');
     await this.waitForRendererReady(signal);
-    if (this.disposed) throw new PtyTransportError('closed');
-    if (signal.aborted) throw new PtyTransportError('aborted');
+    if (this.disposed) throw new PtyTransportError("closed");
+    if (signal.aborted) throw new PtyTransportError("aborted");
 
     this.explicitlyClosed = false;
     const token = {};
@@ -255,31 +299,44 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         if (this.activeBinding?.token !== token) return;
         this.activeBinding = undefined;
         this.reconnectingSessionId =
-          this.reconnectingSessionId === sessionId ? undefined : this.reconnectingSessionId;
+          this.reconnectingSessionId === sessionId
+            ? undefined
+            : this.reconnectingSessionId;
         this.invalidatedSessionId = sessionId;
-        if (!this.invalidatePendingTransportOperation(token, 'detach')) {
-          this.cleanupTransport('detach');
+        if (!this.invalidatePendingTransportOperation(token, "detach")) {
+          this.cleanupTransport("detach");
         }
       },
-      isValid: () => binding.valid
+      isValid: () => binding.valid,
     };
     this.reconnectingSessionId = undefined;
     this.activeBinding = binding;
 
     try {
-      const attachment = this.createAttachment
-        ? await this.createAttachment(sessionId, signal)
-        : undefined;
-      if (this.disposed || !binding.valid || this.activeBinding?.token !== token) {
+      let attachment: CurrentSessionTerminalAttachment | undefined;
+      try {
+        attachment = this.createAttachment
+          ? await this.createAttachment(sessionId, signal)
+          : undefined;
+      } catch (error) {
+        throw normalizeBridgeError(error, "invalid-attachment");
+      }
+      if (
+        this.disposed ||
+        !binding.valid ||
+        this.activeBinding?.token !== token
+      ) {
         binding.valid = false;
-        throw new PtyTransportError('aborted');
+        throw new PtyTransportError("aborted");
       }
       const operation = this.beginTransportOperation(token, sessionId);
       try {
         operation.transportStarted = true;
         await this.transport.connect(
-          attachment === undefined ? { sessionId } : { sessionId, ...attachment },
-          signal
+          attachment === undefined
+            ? { sessionId }
+            : { sessionId, ...attachment },
+          signal,
         );
         operation.transportSettled = true;
         if (
@@ -289,13 +346,16 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
           this.activeBinding?.token !== token
         ) {
           binding.valid = false;
-          throw new PtyTransportError('aborted');
+          throw new PtyTransportError("aborted");
         }
         return binding;
       } catch (error) {
         operation.transportSettled = true;
         if (!operation.invalidated) {
-          this.invalidateTransportOperation(operation, this.disposed ? 'close' : 'detach');
+          this.invalidateTransportOperation(
+            operation,
+            this.disposed ? "close" : "detach",
+          );
         }
         throw error;
       } finally {
@@ -306,10 +366,12 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       if (this.activeBinding?.token === token) {
         this.activeBinding = undefined;
         this.reconnectingSessionId =
-          this.reconnectingSessionId === sessionId ? undefined : this.reconnectingSessionId;
+          this.reconnectingSessionId === sessionId
+            ? undefined
+            : this.reconnectingSessionId;
         this.invalidatedSessionId = sessionId;
       }
-      throw error;
+      throw normalizeBridgeError(error, "connection-failed");
     }
   }
 
@@ -324,8 +386,20 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
    * hidden while the PTY remains active. A later attach clears the marker when
    * its own transport state is observed.
    */
-  invalidateBindingForSession(sessionId: string): void {
+  invalidateBindingForSession(
+    sessionId: string,
+    expected: CurrentSessionTerminalLifecycleIdentity,
+  ): void {
     const binding = this.activeBinding;
+    // A workspace callback must carry the binding plus the real native
+    // generation it observed. A stale A callback cannot detach same-session B.
+    if (
+      expected.binding === undefined ||
+      binding !== expected.binding ||
+      expected.nativeTransportGeneration !== this.currentState.generation ||
+      binding.sessionId !== sessionId
+    )
+      return;
     const pending = this.pendingTransportOperation;
     const reconnecting = this.reconnectingSessionId === sessionId;
     const pendingMatches = pending?.sessionId === sessionId;
@@ -340,39 +414,49 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       this.invalidateActiveBinding();
     } else if (pendingMatches) {
       this.reconnectingSessionId = undefined;
-      this.invalidateTransportOperation(pending, 'detach');
+      this.invalidateTransportOperation(pending, "detach");
     } else if (reconnecting) {
       this.reconnectingSessionId = undefined;
-      this.cleanupTransport('detach');
+      this.cleanupTransport("detach");
     }
   }
 
   sendInput(input: string | Uint8Array): void {
-    if (this.disposed) throw new PtyTransportError('closed');
+    if (this.disposed) throw new PtyTransportError("closed");
     this.transport.sendInput(input);
   }
 
   resize(cols: number, rows: number): void {
-    if (this.disposed) throw new PtyTransportError('closed');
+    if (this.disposed) throw new PtyTransportError("closed");
     this.transport.resize(cols, rows);
   }
 
   async reconnect(signal?: AbortSignal): Promise<void> {
-    if (this.disposed) throw new PtyTransportError('closed');
+    if (this.disposed) throw new PtyTransportError("closed");
     if (!this.currentState.reconnectSupported) {
       // The pinned server source has no client-visible attach-token issuance
       // route. Never relabel a legacy PTY as reattachable or silently spawn a
       // replacement process behind a Reconnect action.
-      throw new PtyTransportError('legacy-reattach-prohibited', this.currentState.generation);
+      throw new PtyTransportError(
+        "legacy-reattach-prohibited",
+        this.currentState.generation,
+      );
     }
-    this.invalidatePendingTransportOperation(undefined, 'detach');
-    if (this.pendingTransportOperation !== undefined) throw new PtyTransportError('aborted');
+    if (
+      this.pendingTransportOperation !== undefined ||
+      this.quarantinedTransportOperations.size > 0
+    ) {
+      this.invalidatePendingTransportOperation(undefined, "detach");
+      await this.waitForQuarantinedTransportOperations(signal);
+      return this.reconnect(signal);
+    }
     await this.waitForRendererReady(signal);
-    if (this.disposed) throw new PtyTransportError('closed');
-    if (signal?.aborted) throw new PtyTransportError('aborted');
+    if (this.disposed) throw new PtyTransportError("closed");
+    if (signal?.aborted) throw new PtyTransportError("aborted");
     this.explicitlyClosed = false;
     const reconnectingSessionId = this.currentState.sessionId;
-    if (reconnectingSessionId === undefined) throw new PtyTransportError('aborted');
+    if (reconnectingSessionId === undefined)
+      throw new PtyTransportError("aborted");
 
     // Direct bridge reconnect is also a lease-owning operation. Without this
     // binding, a recovered transport could report attached while a later user
@@ -388,17 +472,22 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         if (this.activeBinding?.token !== token) return;
         this.activeBinding = undefined;
         this.reconnectingSessionId =
-          this.reconnectingSessionId === reconnectingSessionId ? undefined : this.reconnectingSessionId;
+          this.reconnectingSessionId === reconnectingSessionId
+            ? undefined
+            : this.reconnectingSessionId;
         this.invalidatedSessionId = reconnectingSessionId;
-        if (!this.invalidatePendingTransportOperation(token, 'detach')) {
-          this.cleanupTransport('detach');
+        if (!this.invalidatePendingTransportOperation(token, "detach")) {
+          this.cleanupTransport("detach");
         }
       },
-      isValid: () => binding.valid
+      isValid: () => binding.valid,
     };
     this.activeBinding = binding;
     this.reconnectingSessionId = reconnectingSessionId;
-    const operation = this.beginTransportOperation(token, reconnectingSessionId);
+    const operation = this.beginTransportOperation(
+      token,
+      reconnectingSessionId,
+    );
     try {
       operation.transportStarted = true;
       await this.transport.reconnect(signal);
@@ -410,58 +499,54 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         this.activeBinding?.token !== token
       ) {
         binding.valid = false;
-        throw new PtyTransportError('aborted');
+        throw new PtyTransportError("aborted");
       }
     } catch (error) {
       operation.transportSettled = true;
       if (!operation.invalidated) {
-        this.invalidateTransportOperation(operation, this.disposed ? 'close' : 'detach');
+        this.invalidateTransportOperation(
+          operation,
+          this.disposed ? "close" : "detach",
+        );
       }
       binding.valid = false;
       if (this.activeBinding?.token === token) this.activeBinding = undefined;
       if (this.reconnectingSessionId === reconnectingSessionId) {
         this.reconnectingSessionId = undefined;
       }
-      throw error;
+      throw normalizeBridgeError(error, "connection-failed");
     } finally {
       this.completeTransportOperation(operation);
     }
   }
 
-
   detach(): void {
     if (this.disposed) return;
     this.explicitlyClosed = false;
     this.reconnectingSessionId = undefined;
-    this.cancelRendererReadyWaiters(new PtyTransportError('aborted'));
-    this.invalidateActiveBinding('detach');
+    this.cancelRendererReadyWaiters(new PtyTransportError("aborted"));
+    this.invalidateActiveBinding("detach");
     // A generic adapter may not emit a state transition from detach(). Publish a
     // truthful detached/exited projection rather than leaving an attached
     // snapshot visible; never overwrite a reentrant replacement binding.
     if (this.activeBinding !== undefined) return;
     const transportState = this.transport.state;
-    const status = transportState.mode === 'attach' ? 'detached' : 'exited';
-    this.publishState(
-      projectState({ ...transportState, status }, false),
-      true
-    );
+    const status = transportState.mode === "attach" ? "detached" : "exited";
+    this.publishState(projectState({ ...transportState, status }, false), true);
   }
 
   close(): void {
     if (this.disposed) return;
     this.explicitlyClosed = true;
     this.reconnectingSessionId = undefined;
-    this.cancelRendererReadyWaiters(new PtyTransportError('closed'));
-    this.invalidateActiveBinding('close');
+    this.cancelRendererReadyWaiters(new PtyTransportError("closed"));
+    this.invalidateActiveBinding("close");
     if (this.activeBinding !== undefined) return;
     // Close is an explicit user terminal state even if the adapter keeps its
     // last attached snapshot or does not synchronously report its own close.
     this.publishState(
-      projectState(
-        { ...this.transport.state, status: 'closed' },
-        true
-      ),
-      true
+      projectState({ ...this.transport.state, status: "closed" }, true),
+      true,
     );
   }
 
@@ -476,22 +561,30 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     this.reconnectingSessionId = undefined;
     this.unsubscribeTransport();
     this.listeners.clear();
-    this.cancelRendererReadyWaiters(new PtyTransportError('closed'));
-    this.invalidateActiveBinding('close');
+    this.cancelRendererReadyWaiters(new PtyTransportError("closed"));
+    this.invalidateActiveBinding("close");
   }
 
   private cancelRendererReadyWaiters(error: PtyTransportError): void {
     for (const waiter of [...this.rendererReadyWaiters]) {
       this.rendererReadyWaiters.delete(waiter);
-      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort);
+      if (waiter.signal && waiter.onAbort)
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
       waiter.reject(error);
     }
   }
 
-  private beginTransportOperation(token: object, sessionId: string): PendingTransportOperation {
+  private beginTransportOperation(
+    token: object,
+    sessionId: string,
+  ): PendingTransportOperation {
     if (this.pendingTransportOperation !== undefined) {
-      throw new PtyTransportError('aborted');
+      throw new PtyTransportError("aborted");
     }
+    let resolveCompletion = (): void => {};
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
     const operation: PendingTransportOperation = {
       token,
       sessionId,
@@ -502,7 +595,9 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       terminalObserved: false,
       initialCleanupIssued: false,
       cleanupIssued: false,
-      cleanup: 'detach'
+      cleanup: "detach",
+      completion,
+      resolveCompletion,
     };
     this.pendingTransportOperation = operation;
     return operation;
@@ -510,17 +605,21 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
 
   private invalidatePendingTransportOperation(
     token: object | undefined,
-    cleanup: TransportCleanup
+    cleanup: TransportCleanup,
   ): boolean {
     const operation = this.pendingTransportOperation;
-    if (operation === undefined || (token !== undefined && operation.token !== token)) return false;
+    if (
+      operation === undefined ||
+      (token !== undefined && operation.token !== token)
+    )
+      return false;
     this.invalidateTransportOperation(operation, cleanup);
     return true;
   }
 
   private invalidateTransportOperation(
     operation: PendingTransportOperation,
-    cleanup: TransportCleanup
+    cleanup: TransportCleanup,
   ): void {
     if (!operation.invalidated) {
       operation.invalidated = true;
@@ -533,17 +632,20 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         this.pendingTransportOperation = undefined;
         this.quarantinedTransportOperations.add(operation);
       }
-    } else if (cleanup === 'close') {
+    } else if (cleanup === "close") {
       // Explicit close/disposal is stronger than a prior lease detach. Keep the
       // late-completion cleanup closed even if detachment was already requested.
-      operation.cleanup = 'close';
+      operation.cleanup = "close";
     }
 
-    if (operation.transportStarted && !operation.cleanupIssued) {
-      // Current PtyTransport owns cancellation and late socket settlement for
-      // its native generation. The bridge therefore issues exactly one cleanup
-      // decision for this operation; a later Close may strengthen metadata but
-      // must not send a second Detach/Close into a replacement generation.
+    if (
+      operation.transportStarted &&
+      operation.transportSettled &&
+      !operation.cleanupIssued
+    ) {
+      // An ignored abort can attach only after its promise settles. Defer this
+      // operation's single cleanup until then, while replacement is serialized,
+      // so the cleanup still targets A and can never detach B.
       operation.cleanupIssued = true;
       operation.initialCleanupIssued = true;
       operation.initialCleanupMode = operation.cleanup;
@@ -553,29 +655,86 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     if (operation.transportSettled) this.finalizeTransportOperation(operation);
   }
 
-  private finalizeTransportOperation(operation: PendingTransportOperation): void {
-    if (!operation.invalidated || !operation.transportStarted || operation.terminalObserved) return;
+  private finalizeTransportOperation(
+    operation: PendingTransportOperation,
+  ): void {
+    if (
+      !operation.invalidated ||
+      !operation.transportStarted ||
+      operation.terminalObserved
+    )
+      return;
     // Settlement only releases quarantine. Calling the adapter again here would
     // duplicate the cleanup decision or tear down a replacement generation.
     // PtyTransport's native generation guard owns late adapter settlement.
   }
 
-  private completeTransportOperation(operation: PendingTransportOperation): void {
+  private completeTransportOperation(
+    operation: PendingTransportOperation,
+  ): void {
     operation.transportSettled = true;
+    if (
+      operation.invalidated &&
+      operation.transportStarted &&
+      !operation.cleanupIssued
+    ) {
+      // This is the late-settlement ownership fence. It runs before completion
+      // releases the quarantine, so a queued replacement cannot share cleanup.
+      operation.cleanupIssued = true;
+      operation.initialCleanupIssued = true;
+      operation.initialCleanupMode = operation.cleanup;
+      this.cleanupTransport(operation.cleanup);
+    }
     this.finalizeTransportOperation(operation);
-    if (this.pendingTransportOperation === operation) this.pendingTransportOperation = undefined;
+    if (this.pendingTransportOperation === operation)
+      this.pendingTransportOperation = undefined;
     this.quarantinedTransportOperations.delete(operation);
+    operation.resolveCompletion();
+  }
+
+  private waitForQuarantinedTransportOperations(
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const operations = [
+      ...(this.pendingTransportOperation === undefined
+        ? []
+        : [this.pendingTransportOperation]),
+      ...this.quarantinedTransportOperations,
+    ];
+    if (operations.length === 0) return Promise.resolve();
+    if (signal?.aborted)
+      return Promise.reject(new PtyTransportError("aborted"));
+    if (!signal)
+      return Promise.all(
+        operations.map((operation) => operation.completion),
+      ).then(() => {});
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => reject(new PtyTransportError("aborted"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      void Promise.all(
+        operations.map((operation) => operation.completion),
+      ).then(
+        () => {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        },
+        () => {
+          signal.removeEventListener("abort", onAbort);
+          reject(new PtyTransportError("aborted"));
+        },
+      );
+    });
   }
 
   private cleanupTransport(cleanup: TransportCleanup): void {
     try {
-      if (cleanup === 'close') this.transport.close();
+      if (cleanup === "close") this.transport.close();
       else this.transport.detach();
     } catch {
       // A stale adapter must not escape the bridge's cleanup boundary. If a
       // detach implementation throws, close is the fail-closed fallback that
       // prevents an adapter from retaining raw PTY ownership indefinitely.
-      if (cleanup === 'detach') {
+      if (cleanup === "detach") {
         try {
           this.transport.close();
         } catch {
@@ -586,8 +745,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   }
 
   private waitForRendererReady(signal?: AbortSignal): Promise<void> {
-    if (!this.rendererReadyGateEnabled || this.rendererReady) return Promise.resolve();
-    if (signal?.aborted) return Promise.reject(new PtyTransportError('aborted'));
+    if (!this.rendererReadyGateEnabled || this.rendererReady)
+      return Promise.resolve();
+    if (signal?.aborted)
+      return Promise.reject(new PtyTransportError("aborted"));
     return new Promise<void>((resolve, reject) => {
       const waiter: {
         resolve: () => void;
@@ -598,20 +759,22 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         resolve,
         reject,
         signal,
-        onAbort: undefined
+        onAbort: undefined,
       };
       if (signal) {
         waiter.onAbort = () => {
           this.rendererReadyWaiters.delete(waiter);
-          reject(new PtyTransportError('aborted'));
+          reject(new PtyTransportError("aborted"));
         };
-        signal.addEventListener('abort', waiter.onAbort, { once: true });
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
       }
       this.rendererReadyWaiters.add(waiter);
     });
   }
 
-  private invalidateActiveBinding(cleanup: TransportCleanup = 'detach'): boolean {
+  private invalidateActiveBinding(
+    cleanup: TransportCleanup = "detach",
+  ): boolean {
     const binding = this.activeBinding;
     this.activeBinding = undefined;
     if (binding) {
@@ -620,7 +783,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     }
 
     const pending = this.pendingTransportOperation;
-    if (pending !== undefined && (binding === undefined || pending.sessionId === binding.sessionId)) {
+    if (
+      pending !== undefined &&
+      (binding === undefined || pending.sessionId === binding.sessionId)
+    ) {
       this.invalidateTransportOperation(pending, cleanup);
       return true;
     }
@@ -636,21 +802,39 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     // Reject stale native work before it can invalidate a lease or update
     // bridge state. Session identity alone cannot distinguish A from a later
     // same-session B replacement.
-    if (event.type === 'state' && event.state.generation < this.currentState.generation) return;
+    if (
+      event.type === "state" &&
+      event.state.generation < this.currentState.generation
+    )
+      return;
     const pending = this.pendingTransportOperation;
-    const eventSessionId = event.type === 'state' ? event.state.sessionId : this.currentState.sessionId;
+    const eventGeneration =
+      event.type === "state" ? event.state.generation : event.generation;
+    // A pending B has not established ownership until it advances the native
+    // generation it observed at start. Admit neither terminal nor streaming A
+    // events at or below that floor, even when A and B share a session id.
+    if (
+      !pending?.invalidated &&
+      pending !== undefined &&
+      eventGeneration <= pending.nativeGeneration
+    )
+      return;
+    const eventSessionId =
+      event.type === "state"
+        ? event.state.sessionId
+        : this.currentState.sessionId;
     if (
       pending !== undefined &&
       !pending.invalidated &&
-      event.type === 'state' &&
+      event.type === "state" &&
       pending.sessionId === event.state.sessionId &&
       // A terminal result belongs only to this operation after the transport
       // has advanced past its captured native generation. Otherwise an old A
       // callback for the same session could invalidate B's active lease.
       event.state.generation > pending.nativeGeneration &&
-      (event.state.status === 'detached' ||
-        event.state.status === 'failed' ||
-        event.state.status === 'exited')
+      (event.state.status === "detached" ||
+        event.state.status === "failed" ||
+        event.state.status === "exited")
     ) {
       // PTY close classification is the authoritative result of this attach.
       // Do not call detach/close again: a reentrant cleanup would overwrite a
@@ -658,7 +842,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       pending.terminalObserved = true;
       pending.invalidated = true;
       pending.initialCleanupIssued = true;
-      pending.initialCleanupMode = 'detach';
+      pending.initialCleanupMode = "detach";
       this.pendingTransportOperation = undefined;
       this.quarantinedTransportOperations.add(pending);
       if (this.activeBinding?.sessionId === pending.sessionId) {
@@ -686,12 +870,15 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       // Quarantine every callback from an invalidated adapter call until its
       // promise settles. The adapter may emit attached or bytes synchronously
       // after ignoring AbortSignal; those events cannot establish ownership.
-      if (event.type === 'state' && event.state.generation >= this.currentState.generation) {
+      if (
+        event.type === "state" &&
+        event.state.generation >= this.currentState.generation
+      ) {
         this.currentState = projectState(event.state, this.explicitlyClosed);
       }
       return;
     }
-    if (event.type === 'bytes') {
+    if (event.type === "bytes") {
       // Generation is checked before forwarding, while the payload remains an
       // opaque view. The renderer owns its bounded queue; this bridge never
       // copies, decodes, inspects, or retains terminal bytes. A session rejected
@@ -699,21 +886,21 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       if (event.generation !== this.currentState.generation) return;
       if (this.invalidatedSessionId === this.currentState.sessionId) return;
       this.emit({
-        type: 'bytes',
+        type: "bytes",
         generation: event.generation,
         bytes: event.bytes,
-        outputMayBeTruncated: event.outputMayBeTruncated
+        outputMayBeTruncated: event.outputMayBeTruncated,
       });
       return;
     }
-    if (event.type === 'notice') {
+    if (event.type === "notice") {
       if (event.generation !== this.currentState.generation) return;
       if (this.invalidatedSessionId === this.currentState.sessionId) return;
       this.emit({
-        type: 'notice',
+        type: "notice",
         generation: event.generation,
         notice: event.notice,
-        replayCapacityBytes: event.replayCapacityBytes
+        replayCapacityBytes: event.replayCapacityBytes,
       });
       return;
     }
@@ -731,7 +918,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       this.reconnectingSessionId !== undefined &&
       this.reconnectingSessionId === event.state.sessionId &&
       event.state.generation >= this.currentState.generation;
-    if (event.state.sessionId !== undefined && this.activeBinding?.sessionId === event.state.sessionId) {
+    if (
+      event.state.sessionId !== undefined &&
+      this.activeBinding?.sessionId === event.state.sessionId
+    ) {
       // A new binding owns the transport again. It may clear a prior workspace
       // rejection only after its own state, not an old callback, is observed.
       this.invalidatedSessionId = undefined;
@@ -742,10 +932,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       // events allowed to clear the stale marker.
       this.invalidatedSessionId = undefined;
       if (
-        event.state.status === 'attached' ||
-        event.state.status === 'detached' ||
-        event.state.status === 'failed' ||
-        event.state.status === 'exited'
+        event.state.status === "attached" ||
+        event.state.status === "detached" ||
+        event.state.status === "failed" ||
+        event.state.status === "exited"
       ) {
         this.reconnectingSessionId = undefined;
       }
@@ -760,7 +950,11 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       this.currentState = projectState(event.state, this.explicitlyClosed);
       return;
     }
-    if (event.state.status === 'detached' || event.state.status === 'failed' || event.state.status === 'exited') {
+    if (
+      event.state.status === "detached" ||
+      event.state.status === "failed" ||
+      event.state.status === "exited"
+    ) {
       if (
         pending !== undefined &&
         pending.sessionId === event.state.sessionId &&
@@ -774,8 +968,11 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       // next Terminal activation must be allowed to attach again. If the state
       // belongs to a still-pending adapter call, quarantine that call too; its
       // promise may otherwise resolve into a second attached transition.
-      if (pending !== undefined && pending.sessionId === event.state.sessionId) {
-        this.invalidateTransportOperation(pending, 'detach');
+      if (
+        pending !== undefined &&
+        pending.sessionId === event.state.sessionId
+      ) {
+        this.invalidateTransportOperation(pending, "detach");
       }
       if (this.activeBinding) this.activeBinding.valid = false;
       this.activeBinding = undefined;
@@ -783,23 +980,29 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     this.publishState(projectState(event.state, this.explicitlyClosed));
   }
 
-  private publishState(state: CurrentSessionTerminalState, allowInvalidated = false): void {
+  private publishState(
+    state: CurrentSessionTerminalState,
+    allowInvalidated = false,
+  ): void {
     this.currentState = state;
-    this.emit({ type: 'state', state }, allowInvalidated);
+    this.emit({ type: "state", state }, allowInvalidated);
   }
 
-  private emit(event: CurrentSessionTerminalEvent, allowInvalidated = false): void {
+  private emit(
+    event: CurrentSessionTerminalEvent,
+    allowInvalidated = false,
+  ): void {
     for (const listener of [...this.listeners]) {
       if (
         !allowInvalidated &&
-        event.type !== 'state' &&
+        event.type !== "state" &&
         this.invalidatedSessionId === this.currentState.sessionId
       ) {
         return;
       }
       if (
         !allowInvalidated &&
-        event.type === 'state' &&
+        event.type === "state" &&
         event.state.sessionId !== undefined &&
         event.state.sessionId === this.invalidatedSessionId &&
         !this.activeBinding
@@ -815,30 +1018,46 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   }
 }
 
-function projectState(state: PtyConnectionState, explicitlyClosed: boolean): CurrentSessionTerminalState {
+function normalizeBridgeError(
+  error: unknown,
+  fallback: "invalid-attachment" | "connection-failed",
+): PtyTransportError {
+  // Issuance and transport adapters are privileged seams. Preserve the reviewed
+  // closed error type, but never leak arbitrary provider/socket error text.
+  return error instanceof PtyTransportError
+    ? error
+    : new PtyTransportError(fallback);
+}
+
+function projectState(
+  state: PtyConnectionState,
+  explicitlyClosed: boolean,
+): CurrentSessionTerminalState {
   const failure =
-    state.closeClassification === 'authentication-rejected'
-      ? 'authentication-required'
-      : state.closeClassification === 'host-or-origin-rejected'
-        ? 'incompatible-origin'
+    state.closeClassification === "authentication-rejected"
+      ? "authentication-required"
+      : state.closeClassification === "host-or-origin-rejected"
+        ? "incompatible-origin"
         : undefined;
   return Object.freeze({
     status: state.status,
     generation: state.generation,
     ...(state.sessionId === undefined ? {} : { sessionId: state.sessionId }),
     ...(state.closeCode === undefined ? {} : { closeCode: state.closeCode }),
-    ...(state.closeClassification === undefined ? {} : { closeClassification: state.closeClassification }),
+    ...(state.closeClassification === undefined
+      ? {}
+      : { closeClassification: state.closeClassification }),
     outputMayBeTruncated: state.outputMayBeTruncated,
     explicitlyClosed,
     // Current PtyTransport deliberately keeps attach/process values opaque.
     // Its reviewed attach mode and terminal classification are the only public
     // reconnect evidence; no adapter-specific state flag is trusted here.
     reconnectSupported:
-      state.mode === 'attach' &&
-      state.status !== 'failed' &&
-      state.status !== 'exited' &&
-      state.status !== 'closed',
-    ...(failure === undefined ? {} : { failure })
+      state.mode === "attach" &&
+      state.status !== "failed" &&
+      state.status !== "exited" &&
+      state.status !== "closed",
+    ...(failure === undefined ? {} : { failure }),
   });
 }
 
@@ -846,12 +1065,14 @@ function projectState(state: PtyConnectionState, explicitlyClosed: boolean): Cur
  * Browser-only transport composition. The ticket response is handed straight
  * to the PTY parser; no ticket, URL, or socket diagnostic enters bridge state.
  */
-export function createBrowserPtyTransport(options: BrowserPtyTransportOptions = {}): PtyTransport {
+export function createBrowserPtyTransport(
+  options: BrowserPtyTransportOptions = {},
+): PtyTransport {
   // Capture and validate browser authority before ticket minting. SSR, opaque,
   // or malformed location evidence must not route a fresh ticket elsewhere.
   const origin = currentBrowserOrigin();
   const fetcher = options.fetch ?? globalThis.fetch?.bind(globalThis);
-  if (!fetcher) throw new PtyTransportError('invalid-options');
+  if (!fetcher) throw new PtyTransportError("invalid-options");
   const createSocket = options.createSocket ?? defaultBrowserPtySocket;
   // Keep PTY ticket acquisition on the shared bounded HTTP boundary. It owns
   // the exact `{ ticket, ttl_seconds: 30 }` response check; this adapter only
@@ -864,34 +1085,43 @@ export function createBrowserPtyTransport(options: BrowserPtyTransportOptions = 
     validateAttachment: options.validateAttachment,
     createWebSocket: (upgrade, signal) => {
       const url = new URL(upgrade.path, origin);
-      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-      url.searchParams.set('ticket', upgrade.query.ticket);
-      url.searchParams.set('resume', upgrade.query.resume);
-      if (upgrade.query.attach !== undefined) url.searchParams.set('attach', upgrade.query.attach);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("ticket", upgrade.query.ticket);
+      url.searchParams.set("resume", upgrade.query.resume);
+      if (upgrade.query.attach !== undefined)
+        url.searchParams.set("attach", upgrade.query.attach);
       return createSocket(url.toString(), signal);
-    }
+    },
   });
 }
 
 function currentBrowserOrigin(): string {
   const value = globalThis.location?.origin;
-  if (typeof value !== 'string' || value.length === 0) throw new PtyTransportError('invalid-options');
+  if (typeof value !== "string" || value.length === 0)
+    throw new PtyTransportError("invalid-options");
   try {
     const origin = new URL(value);
-    if ((origin.protocol !== 'http:' && origin.protocol !== 'https:') || origin.origin !== value) {
-      throw new PtyTransportError('invalid-options');
+    if (
+      (origin.protocol !== "http:" && origin.protocol !== "https:") ||
+      origin.origin !== value
+    ) {
+      throw new PtyTransportError("invalid-options");
     }
     return origin.toString();
   } catch (error) {
     if (error instanceof PtyTransportError) throw error;
-    throw new PtyTransportError('invalid-options');
+    throw new PtyTransportError("invalid-options");
   }
 }
 
-function defaultBrowserPtySocket(url: string, signal: AbortSignal): PtyWebSocket {
-  if (typeof WebSocket === 'undefined') throw new PtyTransportError('invalid-options');
+function defaultBrowserPtySocket(
+  url: string,
+  signal: AbortSignal,
+): PtyWebSocket {
+  if (typeof WebSocket === "undefined")
+    throw new PtyTransportError("invalid-options");
   const nativeSocket = new WebSocket(url);
-  nativeSocket.binaryType = 'arraybuffer';
+  nativeSocket.binaryType = "arraybuffer";
   let closeIssued = false;
   const closeOnce = (code?: number, reason?: string): void => {
     if (closeIssued) return;
@@ -911,15 +1141,16 @@ function defaultBrowserPtySocket(url: string, signal: AbortSignal): PtyWebSocket
     close: closeOnce,
     get readyState() {
       return nativeSocket.readyState;
-    }
+    },
   };
-  const closeOnAbort = (): void => adapter.close(1000, 'cancelled');
-  signal.addEventListener('abort', closeOnAbort, { once: true });
+  const closeOnAbort = (): void => adapter.close(1000, "cancelled");
+  signal.addEventListener("abort", closeOnAbort, { once: true });
   nativeSocket.onopen = (event) => adapter.onopen?.(event);
-  nativeSocket.onmessage = (event: MessageEvent) => adapter.onmessage?.({ data: event.data } as PtyMessageEvent);
+  nativeSocket.onmessage = (event: MessageEvent) =>
+    adapter.onmessage?.({ data: event.data } as PtyMessageEvent);
   nativeSocket.onerror = (event) => adapter.onerror?.(event);
   nativeSocket.onclose = (event) => {
-    signal.removeEventListener('abort', closeOnAbort);
+    signal.removeEventListener("abort", closeOnAbort);
     adapter.onclose?.({ code: event.code });
   };
   return adapter;
