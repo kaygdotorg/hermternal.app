@@ -38,12 +38,21 @@ service. The retained evidence names this dependency instead of implying that
 Traefik's native matchers alone prove exact query denial.
 
 Traefik router rules use the normalized host name (`traefik-92.test`) because
-that is the router matcher contract. The executable policy adapter separately
-requires exactly one case-sensitive `Host` and `X-Forwarded-Host` authority,
-including `:19444`; missing, malformed, wrong-port, or duplicate
-case-insensitive values fail closed. The raw target is required and must agree
-exactly with method, path, query, and forwarded URI, so a bare `?` cannot be
-silently normalized away.
+that is the router matcher contract. The executable policy adapter requires the
+standard ForwardAuth metadata: exactly one `X-Forwarded-Host` authority with
+`:19444`, `X-Forwarded-Method`, `X-Forwarded-Proto: https`, `X-Forwarded-Uri`,
+and a non-empty `X-Forwarded-For`. The adapter's ordinary `Host` is the
+ForwardAuth service authority and is not treated as the public authority.
+`X-Forwarded-Uri` includes the query and is parsed for the closed route grammar;
+it is not raw request-target evidence. No separate raw-target, path, query,
+Upgrade, or Connection observation is claimed at the adapter boundary.
+
+WebSocket `Upgrade` and `Connection` enforcement is represented by the
+Traefik router matcher (`HeaderRegexp`) only. Path-only exclusion routers send
+malformed or non-GET WebSocket requests to an always-deny local endpoint so
+they cannot fall through to the generic static router. The runtime rule syntax
+and routing behavior remain unvalidated because no Traefik binary was
+available in the recording environment.
 
 ## Reviewed routing cases
 
@@ -59,49 +68,51 @@ The policy model and renderer cover:
 - chat upgrades with one non-empty bounded `ticket` query;
 - PTY upgrades with `ticket` plus `resume` and optional `attach`, in any key
   order, with duplicate, extra, empty, and `fresh` values denied;
-- wrong Host (`421`), wrong WebSocket Origin (`403`), unknown paths or methods
-  (`404`), traversal, encoded separators or dots, duplicate prefixes, malformed
-  upgrades, and query mutations before upstream access; and
+- model-denied wrong Host (`421`), wrong WebSocket Origin (`403`), unknown paths
+  or methods (`404`), traversal, encoded separators or dots, duplicate prefixes,
+  malformed upgrades, and query mutations before modeled upstream access; and
 - invalid, expired, or reused ticket outcomes remaining Hermes-layer results
   after the edge accepted the request.
 
 Inbound forwarding fields are not trusted. The static entry point disables
 insecure forwarded-header trust, and the executable adapter accepts only the
-closed `X-Forwarded-*` contract, rejects unknown forwarding metadata, rejects
-direct hop-by-hop spoofing, and requires exact authority and raw-target
-agreement. The generated Hermes middleware emits a finite known-field override map:
-private upstream `Host` and `Origin`, synthetic public
-`Forwarded`/`X-Forwarded-*` metadata, one optional `/hermes` prefix, and only
-the canonical WebSocket upgrade pair. Empty values express the intended
-finite removal map, but this offline fixture does not prove Traefik's runtime
-removal of RFC hop-by-hop headers or `Connection`-listed tokens. Traefik's
-`customRequestHeaders` has no wildcard delete for arbitrary inbound
-`X-Forwarded-*` names, so this fixture does not claim arbitrary forwarding
-alias deletion either. Those runtime guarantees remain a future real Traefik
-plus recording-upstream capture requirement or a dedicated sanitizer boundary,
-outside this offline harness. Root and dashboard WebSocket routes use separate
-header middleware so
-prefix stripping does not erase the `/hermes` contract. The proof does not
-claim that a cookie has `Secure`, `HttpOnly`, `SameSite`, or `Path`: no real
-`Set-Cookie` response is captured, so `cookie_proof.status` remains
-`not_proven`.
+standard ForwardAuth metadata plus copied `Origin`; unknown `X-Forwarded-*`
+metadata and direct hop-by-hop spoofing fail closed. The generated Hermes
+middleware emits a finite known-field override map: private upstream `Host`
+and `Origin`, synthetic public `Forwarded`/`X-Forwarded-*` metadata, one
+optional `/hermes` prefix, and only the canonical WebSocket upgrade pair.
+Empty values express the intended finite removal map, but this offline fixture
+does not prove Traefik's runtime removal of RFC hop-by-hop headers or
+`Connection`-listed tokens. Traefik's `customRequestHeaders` has no wildcard
+delete for arbitrary inbound `X-Forwarded-*` names, so this fixture does not
+claim arbitrary forwarding alias deletion either. Those runtime guarantees
+remain a future real Traefik plus recording-upstream capture requirement or a
+dedicated sanitizer boundary, outside this offline harness. Root and
+dashboard WebSocket routes use separate header middleware so prefix stripping
+does not erase the `/hermes` contract. The proof does not claim that a cookie
+has `Secure`, `HttpOnly`, `SameSite`, or `Path`: no real `Set-Cookie` response
+is captured, so `cookie_proof.status` remains `not_proven`.
 
 ## Offline harness and generated files
 
 The regression suite starts `make_forward_auth_server()` on an ephemeral
 loopback port and sends real standard-library `http.client` requests through
 the adapter. The server bounds the request line, header count and bytes,
-content length, and forwarded metadata. It rejects symlinks, FIFOs, special
-files, replacement races, and digest traversal or byte/time budget overruns.
-This is an executable local policy harness only: it does not start Traefik,
-Hermes, a provider, or any deployment listener.
+content length, and standard ForwardAuth metadata. It rejects symlinks, FIFOs,
+special files, replacement races, and digest traversal or byte/time budget
+overruns. Adapter allows are ForwardAuth `200` decisions; they are not
+WebSocket `101` observations. This is an executable local policy harness only:
+it does not start Traefik, Hermes, a provider, or any deployment listener.
 
 `render_to_directory()` writes `traefik-static.json` and
 `traefik-dynamic.json` under the requested output directory and binds the file
 provider to that exact absolute dynamic filename. A Traefik `check-config`
 probe runs only when a local `traefik` binary is available. The retained
 recording was made without that binary, so `offline_harness.traefik_check_config`
-is explicitly `skipped_unavailable`; no binary validation is claimed.
+is explicitly `skipped_unavailable`, `traefik_runtime.status` is `not_run`,
+and `traefik_runtime.version` is `not_recorded`; no binary or runtime
+compatibility validation is claimed. The generated router syntax is recorded
+as the intended Traefik v3 `HeaderRegexp` model output only.
 
 ## Evidence bindings
 

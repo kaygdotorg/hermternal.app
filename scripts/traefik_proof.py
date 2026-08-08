@@ -32,9 +32,13 @@ from types import MappingProxyType
 from urllib.parse import urlsplit
 
 
-SCHEMA = "hermternal.traefik-proof.v1"
+SCHEMA = "hermternal.traefik-proof.v2"
 RUNTIME_INPUT_SCHEMA = "hermternal.traefik-proof.runtime-inputs.v1"
 BROWSER_EVIDENCE_SCHEMA = "hermternal.traefik-proof.browser-evidence.v1"
+TRAEFIK_RUNTIME_STATUS = "not_run"
+TRAEFIK_RUNTIME_VERSION = "not_recorded"
+TRAEFIK_RUNTIME_BINARY = "unavailable_in_recording_environment"
+TRAEFIK_RULE_SYNTAX = "Traefik v3 HeaderRegexp; model output not runtime-validated"
 DEFAULT_HOST = "traefik-92.test"
 DEFAULT_HTTPS_PORT = 19444
 DEFAULT_HERMES_PORT = 19257
@@ -99,30 +103,32 @@ MAX_REQUEST_TARGET_BYTES = 8192
 MAX_FORWARD_HEADER_BYTES = 16384
 MAX_FORWARD_HEADER_COUNT = 32
 MAX_POLICY_BODY_BYTES = 4096
+MAX_RUNTIME_PATH_BYTES = 512
 MAX_DIGEST_FILES = 128
+MAX_DIGEST_DIRECTORIES = 64
+MAX_DIGEST_ENTRIES = 256
+MAX_DIGEST_PENDING_DIRECTORIES = 64
 MAX_DIGEST_DEPTH = 8
 MAX_DIGEST_PATH_BYTES = 512
 MAX_DIGEST_FILE_BYTES = 1 << 20
 MAX_DIGEST_TOTAL_BYTES = 4 << 20
 MAX_DIGEST_CHUNK_BYTES = 64 << 10
+MAX_DIGEST_INPUT_BYTES = MAX_DIGEST_TOTAL_BYTES
 MAX_DIGEST_SECONDS = 2.0
 
-# ForwardAuth receives original request metadata in this explicit contract.
-# Hermes sees only the canonical fields below; unknown forwarding metadata is
-# outside the proof contract and is not treated as trusted input.
-FORWARD_AUTH_HEADERS = (
-    "Host",
+# Traefik ForwardAuth always supplies these five generated metadata headers.
+# ``authRequestHeaders`` only selects additional original request headers; this
+# fixture copies Origin for the edge Origin policy. No separate raw target,
+# path, query, Upgrade, Connection, or original Host field is claimed here.
+TRAEFIK_FORWARDAUTH_GENERATED_HEADERS = (
+    "X-Forwarded-For",
     "X-Forwarded-Host",
     "X-Forwarded-Method",
-    "X-Forwarded-Path",
-    "X-Forwarded-Raw-Target",
-    "X-Forwarded-Query",
-    "X-Forwarded-Uri",
     "X-Forwarded-Proto",
-    "X-Forwarded-Upgrade",
-    "X-Forwarded-Connection",
-    "Origin",
+    "X-Forwarded-Uri",
 )
+FORWARD_AUTH_HEADERS = ("Origin",)
+TRAEFIK_FORWARDAUTH_HEADERS = TRAEFIK_FORWARDAUTH_GENERATED_HEADERS + FORWARD_AUTH_HEADERS
 HERMES_FORWARDING_ALLOWLIST = (
     "Connection",
     "Forwarded",
@@ -152,6 +158,7 @@ HOP_BY_HOP_HEADERS = (
     "Transfer-Encoding",
     "Upgrade",
 )
+HOP_BY_HOP_HEADER_NAMES = frozenset(header.lower() for header in HOP_BY_HOP_HEADERS)
 
 STATIC_PATHS = (
     "/",
@@ -253,7 +260,14 @@ def _validate_port(value: int, name: str) -> int:
 def _validate_path(value: str, name: str) -> str:
     """Reject parser-context changes before a path enters JSON configuration."""
 
-    if type(value) is not str or not value or not Path(value).is_absolute():
+    if type(value) is not str or not value:
+        raise ValueError(f"{name} must be an absolute path")
+    if len(value) > MAX_RUNTIME_PATH_BYTES:
+        raise ValueError(f"{name} exceeds the path size limit")
+    encoded = value.encode("utf-8")
+    if len(encoded) > MAX_RUNTIME_PATH_BYTES:
+        raise ValueError(f"{name} exceeds the path size limit")
+    if not Path(value).is_absolute():
         raise ValueError(f"{name} must be an absolute path")
     if any(character in value for character in ('"', "'", "\\")):
         raise ValueError(f"{name} must not contain quotes or backslashes")
@@ -263,7 +277,30 @@ def _validate_path(value: str, name: str) -> str:
 
 
 def _validate_runtime_inputs(value: Mapping[str, object]) -> dict[str, object]:
-    if not isinstance(value, Mapping) or set(value) != set(DEFAULT_RUNTIME_INPUTS):
+    if not isinstance(value, Mapping):
+        raise ValueError("runtime_inputs must contain the exact renderer input keys")
+    expected_keys = tuple(DEFAULT_RUNTIME_INPUTS)
+    try:
+        declared_count = len(value)
+    except (TypeError, ValueError):
+        declared_count = None
+    if declared_count is not None and declared_count > len(expected_keys):
+        raise ValueError("runtime_inputs must contain the exact renderer input keys")
+    keys: list[object] = []
+    try:
+        for index, key in enumerate(value):
+            if index >= len(expected_keys):
+                raise ValueError("runtime_inputs must contain the exact renderer input keys")
+            keys.append(key)
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith("runtime_inputs"):
+            raise
+        raise ValueError("runtime_inputs must contain the exact renderer input keys") from exc
+    try:
+        exact_keys = frozenset(keys)
+    except TypeError as exc:
+        raise ValueError("runtime_inputs must contain the exact renderer input keys") from exc
+    if len(keys) != len(expected_keys) or exact_keys != frozenset(expected_keys):
         raise ValueError("runtime_inputs must contain the exact renderer input keys")
     normalized = {
         "host": _validate_host(value["host"]),
@@ -290,6 +327,26 @@ def reconstruction_inputs() -> dict[str, object]:
     """Return safe inputs used to reconstruct retained evidence."""
 
     return dict(DEFAULT_RUNTIME_INPUTS)
+
+
+def _require_exact_mapping_keys(value: Mapping[str, object], expected: Sequence[str], label: str) -> None:
+    """Validate a small closed mapping without materializing unbounded keys."""
+
+    try:
+        iterator = iter(value)
+    except TypeError as exc:
+        raise ValueError(f"{label} must be a mapping") from exc
+    keys: list[object] = []
+    for index, key in enumerate(iterator):
+        if index >= len(expected):
+            raise ValueError(f"{label} keys are outside the closed contract")
+        keys.append(key)
+    try:
+        exact_keys = frozenset(keys)
+    except TypeError as exc:
+        raise ValueError(f"{label} keys are malformed") from exc
+    if len(keys) != len(expected) or exact_keys != frozenset(expected):
+        raise ValueError(f"{label} keys are outside the closed contract")
 
 
 def digest_bytes(value: bytes) -> str:
@@ -332,6 +389,21 @@ def _path_rule(paths: Iterable[str]) -> str:
 
 def _method_path_rule(host: str, method: str, paths: Iterable[str]) -> str:
     return f"{_host_rule(host)} && Method(`{method}`) && ({_path_rule(paths)})"
+
+
+def _websocket_rule(host: str, path: str) -> str:
+    """Require the client handshake at the Traefik router boundary.
+
+    ForwardAuth does not guarantee Upgrade or Connection metadata at its
+    service boundary, so those hop-by-hop checks belong in the router matcher,
+    not in the executable policy adapter.
+    """
+
+    return (
+        f"{_host_rule(host)} && Method(`GET`) && Path(`{path}`) && "
+        "HeaderRegexp(`Upgrade`, `(?i)^websocket$`) && "
+        "HeaderRegexp(`Connection`, `(?i)(^|.*,\\s*)Upgrade(\\s*,.*|$)`)"
+    )
 
 
 def _session_path_rule(prefix: str, suffix: str) -> str:
@@ -419,8 +491,10 @@ def render_dynamic_config(value: Mapping[str, object]) -> dict[str, object]:
     """Render routes and local policy middleware for one proof run.
 
     Traefik's native Query/QueryRegexp matchers permit extra unknown query
-    keys.  Every router therefore runs the local forward-auth policy first;
-    that policy applies the closed raw-query grammar in ``policy_decision``.
+    keys. Every router therefore runs the local ForwardAuth policy first; that
+    policy parses Traefik's standard X-Forwarded-Uri into the closed query
+    grammar in ``policy_decision``. WebSocket Upgrade and Connection checks are
+    router-level matchers because ForwardAuth does not guarantee those headers.
     This keeps edge denials before either Hermes or static upstream access.
     """
 
@@ -489,17 +563,30 @@ def render_dynamic_config(value: Mapping[str, object]) -> dict[str, object]:
         )
 
     routers["root_chat_ws"] = _router(
-        rule=f"{host_rule} && Method(`GET`) && Path(`/api/ws`)",
+        rule=_websocket_rule(host, "/api/ws"),
         priority=720,
         middlewares=["edge-policy", "root-websocket-hermes-headers"],
         service="hermes",
     )
     routers["root_pty_ws"] = _router(
-        rule=f"{host_rule} && Method(`GET`) && Path(`/api/pty`)",
+        rule=_websocket_rule(host, "/api/pty"),
         priority=720,
         middlewares=["edge-policy", "root-websocket-hermes-headers"],
         service="hermes",
     )
+    # A path-only deny router prevents malformed handshakes and non-GET
+    # requests from falling through to the generic static host router. The
+    # positive HeaderRegexp routers above remain the only path to Hermes.
+    for name, path in (
+        ("root_chat_ws_deny", "/api/ws"),
+        ("root_pty_ws_deny", "/api/pty"),
+    ):
+        routers[name] = _router(
+            rule=f"{host_rule} && Path(`{path}`)",
+            priority=710,
+            middlewares=["edge-deny"],
+            service="policy-deny",
+        )
     routers["client_deep_link"] = _router(
         rule=f"{host_rule} && Method(`GET`, `HEAD`) && PathRegexp(`{CLIENT_ROUTE_PATTERN}`)",
         priority=650,
@@ -509,10 +596,20 @@ def render_dynamic_config(value: Mapping[str, object]) -> dict[str, object]:
 
     for name, path in (("dashboard_chat_ws", "/hermes/api/ws"), ("dashboard_pty_ws", "/hermes/api/pty")):
         routers[name] = _router(
-            rule=f"{host_rule} && Method(`GET`) && Path(`{path}`)",
+            rule=_websocket_rule(host, path),
             priority=720,
             middlewares=["edge-policy", "strip-hermes", "dashboard-websocket-hermes-headers"],
             service="hermes",
+        )
+    for name, path in (
+        ("dashboard_chat_ws_deny", "/hermes/api/ws"),
+        ("dashboard_pty_ws_deny", "/hermes/api/pty"),
+    ):
+        routers[name] = _router(
+            rule=f"{host_rule} && Path(`{path}`)",
+            priority=710,
+            middlewares=["edge-deny"],
+            service="policy-deny",
         )
 
     # The /hermes prefix is routed to the same Hermes service only after the
@@ -542,7 +639,20 @@ def render_dynamic_config(value: Mapping[str, object]) -> dict[str, object]:
                     "forwardAuth": {
                         "address": f"http://127.0.0.1:{policy_port}/check",
                         "trustForwardHeader": False,
+                        # Traefik supplies the five X-Forwarded-* metadata
+                        # fields itself; only Origin is copied from the client.
                         "authRequestHeaders": list(FORWARD_AUTH_HEADERS),
+                    }
+                },
+                # Invalid WebSocket handshakes must not fall through to the
+                # generic host router. The deny endpoint always returns 404,
+                # so these path-only exclusion routers never reach Hermes or
+                # the static service.
+                "edge-deny": {
+                    "forwardAuth": {
+                        "address": f"http://127.0.0.1:{policy_port}/deny",
+                        "trustForwardHeader": False,
+                        "authRequestHeaders": [],
                     }
                 },
                 "strip-hermes": {
@@ -642,8 +752,7 @@ def _resolve_browser_journey(
         raise ValueError("browser evidence must be a mapping")
     if browser_journey is not None and (type(browser_journey) is not str or browser_journey not in BROWSER_JOURNEYS):
         raise ValueError("browser_journey is outside the fixed proof vocabulary")
-    if set(browser_evidence) != set(BROWSER_EVIDENCE_ROOT_KEYS):
-        raise ValueError("browser evidence must contain the closed root key set")
+    _require_exact_mapping_keys(browser_evidence, BROWSER_EVIDENCE_ROOT_KEYS, "browser evidence")
     if browser_evidence["schema"] != BROWSER_EVIDENCE_SCHEMA:
         raise ValueError("browser evidence schema is unsupported")
     status = browser_evidence["status"]
@@ -652,29 +761,32 @@ def _resolve_browser_journey(
     if browser_journey is not None and browser_journey != status:
         raise ValueError("browser_journey does not match browser evidence")
     provenance = browser_evidence["provenance"]
-    if not isinstance(provenance, Mapping) or set(provenance) != set(BROWSER_EVIDENCE_PROVENANCE_KEYS):
+    if not isinstance(provenance, Mapping):
         raise ValueError("browser evidence provenance keys are incomplete")
+    _require_exact_mapping_keys(provenance, BROWSER_EVIDENCE_PROVENANCE_KEYS, "browser evidence provenance")
     if dict(provenance) != dict(expected_provenance):
         raise ValueError("browser evidence provenance is stale or mismatched")
     observations = browser_evidence["observations"]
     if not isinstance(observations, Mapping):
         raise ValueError("browser evidence observations must be a mapping")
     if status == "passed":
-        if set(observations) != {"events"}:
-            raise ValueError("passed browser evidence must contain only events")
+        _require_exact_mapping_keys(observations, ("events",), "passed browser evidence")
         events = observations["events"]
-        if not isinstance(events, Mapping) or set(events) != set(BROWSER_COMPLETION_EVIDENCE):
+        if not isinstance(events, Mapping):
             raise ValueError("passed browser evidence must contain the closed event set")
+        _require_exact_mapping_keys(events, tuple(BROWSER_COMPLETION_EVIDENCE), "browser completion events")
         normalized_events = {event: events[event] for event in BROWSER_COMPLETION_EVIDENCE}
         if normalized_events != BROWSER_COMPLETION_EVIDENCE:
             raise ValueError("passed browser evidence does not prove a complete journey")
         normalized_observations: dict[str, object] = {"events": normalized_events}
     elif status in BROWSER_BLOCKED_JOURNEYS:
-        if set(observations) != {"blocker"} or observations["blocker"] != BROWSER_BLOCKER_CODES[status]:
+        _require_exact_mapping_keys(observations, ("blocker",), "blocked browser evidence")
+        if observations["blocker"] != BROWSER_BLOCKER_CODES[status]:
             raise ValueError("blocked browser evidence does not match its status")
         normalized_observations = {"blocker": BROWSER_BLOCKER_CODES[status]}
     else:
-        if set(observations) != {"failure"} or observations["failure"] != BROWSER_FAILURE_CODE:
+        _require_exact_mapping_keys(observations, ("failure",), "failed browser evidence")
+        if observations["failure"] != BROWSER_FAILURE_CODE:
             raise ValueError("failed browser evidence does not match its status")
         normalized_observations = {"failure": BROWSER_FAILURE_CODE}
     return status, {
@@ -697,6 +809,25 @@ def _synthetic_proof_run() -> dict[str, object]:
         "required_live_topology": PROOF_RUN_REQUIRED_TOPOLOGY,
         "completion_gate": PROOF_RUN_COMPLETION_GATE,
     }
+
+
+def _annotated_cases(cases: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Attach the observation level without turning model cases into runtime proof."""
+
+    annotated: list[dict[str, object]] = []
+    for case in cases:
+        case_id = str(case.get("id", ""))
+        if case_id in {"ws_upgrade", "pty_upgrade", "malformed_upgrade"}:
+            proof_level = "model_plus_router_rule"
+            observed_by = "policy_model;traefik_runtime_not_run"
+        elif case_id == "direct_private_port":
+            proof_level = "model_boundary_only"
+            observed_by = "offline_model_only"
+        else:
+            proof_level = "model"
+            observed_by = "offline_policy_model"
+        annotated.append({**dict(case), "proof_level": proof_level, "observed_by": observed_by})
+    return annotated
 
 
 def render_manifest(
@@ -743,6 +874,21 @@ def render_manifest(
             "public_listener": "loopback-only-disposable",
             "edge_policy": "local-forward-auth-closed-query-gate",
         },
+        "traefik_runtime": {
+            "status": TRAEFIK_RUNTIME_STATUS,
+            "version": TRAEFIK_RUNTIME_VERSION,
+            "binary": TRAEFIK_RUNTIME_BINARY,
+            "rule_syntax": TRAEFIK_RULE_SYNTAX,
+        },
+        "forward_auth_contract": {
+            "generated_headers": list(TRAEFIK_FORWARDAUTH_GENERATED_HEADERS),
+            "copied_headers": list(FORWARD_AUTH_HEADERS),
+            "auth_request_host": "auth-service-authority-not-public-authority",
+            "uri": "X-Forwarded-Uri includes query; it is not raw-target evidence",
+            "websocket": "router-matcher-only; Upgrade and Connection are not ForwardAuth observations",
+            "hop_by_hop": "direct injected hop-by-hop fields are rejected; Traefik observation is not claimed",
+            "runtime_observed": False,
+        },
         "product": {
             "build_commit": build_sha,
             "static_manifest_sha256": build_digest,
@@ -755,8 +901,8 @@ def render_manifest(
         "browser_evidence": normalized_evidence,
         # Return defensive copies so a caller cannot mutate the retained
         # evidence vocabulary used by a later manifest render.
-        "positive_cases": [dict(case) for case in POSITIVE_CASES],
-        "negative_cases": [dict(case) for case in NEGATIVE_CASES],
+        "positive_cases": _annotated_cases(POSITIVE_CASES),
+        "negative_cases": _annotated_cases(NEGATIVE_CASES),
         "model_assertions": {
             "scope": "pure Traefik renderer and policy model assertions",
             "route_vectors": "shared static-route grammar and deep-link fixture identities",
@@ -765,8 +911,10 @@ def render_manifest(
                 "root-only scenario query is accepted by the model",
                 "static, client, and non-callback REST query mutations are model-denied",
                 "OAuth callback accepts only the reviewed code/state or provider-error query forms",
-                "forwarding contract is reconstructed from canonical renderer fields",
-                "the upstream Host is mapped to the private synthetic Hermes authority and Origin is rebuilt from that authority",
+                "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Proto, and X-Forwarded-Uri",
+                "only Origin is selected as an additional original request header; the auth request Host is not treated as the public authority",
+                "X-Forwarded-Uri is parsed for path and query policy but is not raw-target evidence",
+                "WebSocket Upgrade and Connection enforcement is represented only by router HeaderRegexp matchers",
                 "finite known fields are overridden, while Traefik runtime deletion of RFC hop-by-hop and Connection-listed tokens remains unproven",
                 "arbitrary inbound forwarding aliases are outside the finite Traefik override claim and require separate live deployment proof",
                 "chat and PTY upgrade grammars remain distinct in the model",
@@ -779,9 +927,9 @@ def render_manifest(
             "traefik_binary": "unavailable_in_recording_environment",
             "traefik_check_config": "skipped_unavailable",
             "assertions": [
-                "actual HTTP requests reach the bounded policy adapter",
+                "actual HTTP requests reach the bounded standard-header policy adapter",
                 "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
-                "raw target, method, path, query, and websocket fields are contract-bound",
+                "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
             ],
         },
         "cookie_proof": {
@@ -886,6 +1034,81 @@ def _digest_regular_file(path: Path) -> str:
     return _stream_regular_file(path)[0]
 
 
+def _read_bounded_regular_file(path: Path, limit: int, label: str) -> bytes:
+    """Read a small regular file without following links or unbounded growth."""
+
+    if type(limit) is not int or limit < 0:
+        raise ValueError("bounded file limit must be non-negative")
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be inspected") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ValueError(f"{label} must be a regular non-symlink file")
+    if before.st_size > limit:
+        raise ValueError(f"{label} exceeds the bounded input size")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be opened safely") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _file_identity(opened) != _file_identity(before):
+            raise ValueError(f"{label} changed before reading")
+        content = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(MAX_DIGEST_CHUNK_BYTES, limit - len(content) + 1))
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > limit:
+                raise ValueError(f"{label} exceeds the bounded input size")
+        after = os.fstat(descriptor)
+        try:
+            current = os.lstat(path)
+        except OSError as exc:
+            raise ValueError(f"{label} disappeared after reading") from exc
+        if (
+            _file_identity(after) != _file_identity(before)
+            or _file_identity(current) != _file_identity(before)
+            or len(content) != before.st_size
+        ):
+            raise ValueError(f"{label} changed while reading")
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
+def _digest_stdin(stream: object, *, limit: int = MAX_DIGEST_INPUT_BYTES) -> str:
+    """Hash stdin incrementally and stop before retaining oversized input."""
+
+    if type(limit) is not int or limit < 0:
+        raise ValueError("stdin digest limit must be non-negative")
+    effective_limit = min(limit, MAX_DIGEST_TOTAL_BYTES)
+    hasher = hashlib.sha256()
+    total = 0
+    started = time.monotonic()
+    while True:
+        _check_digest_budget(started, files=1, total_bytes=total)
+        remaining = effective_limit - total
+        if remaining < 0:
+            raise ValueError("stdin digest exceeded its byte limit")
+        try:
+            chunk = stream.read(min(MAX_DIGEST_CHUNK_BYTES, remaining + 1))  # type: ignore[attr-defined]
+        except (AttributeError, TypeError) as exc:
+            raise ValueError("stdin digest input is not readable") from exc
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise ValueError("stdin digest input must provide bytes")
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > effective_limit:
+            raise ValueError("stdin digest exceeded its byte limit")
+        hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def _open_directory(path: Path, expected: os.stat_result | None = None) -> tuple[int, os.stat_result]:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -910,7 +1133,12 @@ def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
     collected: list[tuple[Path, os.stat_result]] = []
     stack: list[tuple[Path, int, os.stat_result]] = [(site_root, 0, root_metadata)]
     total_bytes = 0
+    directory_count = 1
+    entry_count = 0
     while stack:
+        _check_digest_budget(started, files=len(collected), total_bytes=total_bytes)
+        if len(stack) > MAX_DIGEST_PENDING_DIRECTORIES:
+            raise ValueError("static digest exceeded its pending-directory budget")
         directory, depth, expected = stack.pop()
         if depth > MAX_DIGEST_DEPTH:
             raise ValueError("static digest exceeded its directory-depth budget")
@@ -920,11 +1148,17 @@ def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
             try:
                 with os.scandir(descriptor) as iterator:
                     for entry in iterator:
+                        entry_count += 1
+                        if entry_count > MAX_DIGEST_ENTRIES:
+                            raise ValueError("static digest exceeded its directory-entry budget")
+                        _check_digest_budget(started, files=len(collected), total_bytes=total_bytes)
                         try:
                             metadata = entry.stat(follow_symlinks=False)
                         except OSError as exc:
                             raise ValueError("static digest entry cannot be inspected") from exc
                         entries.append((entry.name, metadata))
+            except ValueError:
+                raise
             except OSError as exc:
                 raise ValueError("site_root cannot be traversed safely") from exc
         finally:
@@ -943,12 +1177,23 @@ def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
             if stat.S_ISLNK(metadata.st_mode):
                 raise ValueError("static digest rejects symlinks")
             if stat.S_ISDIR(metadata.st_mode):
+                if directory_count >= MAX_DIGEST_DIRECTORIES:
+                    raise ValueError("static digest exceeded its directory-count budget")
+                if len(stack) >= MAX_DIGEST_PENDING_DIRECTORIES:
+                    raise ValueError("static digest exceeded its pending-directory budget")
+                if depth + 1 > MAX_DIGEST_DEPTH:
+                    raise ValueError("static digest exceeded its directory-depth budget")
+                directory_count += 1
                 stack.append((entry_path, depth + 1, metadata))
                 continue
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError("static digest rejects special files")
             if metadata.st_size > MAX_DIGEST_FILE_BYTES:
                 raise ValueError("static digest entry exceeds the per-file limit")
+            if len(collected) >= MAX_DIGEST_FILES:
+                raise ValueError("static digest exceeded its file-count budget")
+            if total_bytes + metadata.st_size > MAX_DIGEST_TOTAL_BYTES:
+                raise ValueError("static digest exceeded its byte budget")
             collected.append((entry_path, metadata))
             total_bytes += metadata.st_size
             _check_digest_budget(started, files=len(collected), total_bytes=total_bytes)
@@ -984,14 +1229,29 @@ def _build_static_digest(site_root: Path) -> str:
 
 
 def _header_items(headers: Mapping[str, str] | Sequence[tuple[str, str]] | None) -> list[tuple[str, str]]:
+    """Copy only a bounded, validated header sequence."""
+
     if headers is None:
         return []
-    items = list(headers.items()) if isinstance(headers, Mapping) else list(headers)
-    if len(items) > MAX_FORWARD_HEADER_COUNT:
+    try:
+        declared_count = len(headers)
+    except (TypeError, ValueError):
+        declared_count = None
+    if declared_count is not None and declared_count > MAX_FORWARD_HEADER_COUNT:
         raise ValueError("forwarded request has too many headers")
+    try:
+        iterator = iter(headers.items() if isinstance(headers, Mapping) else headers)
+    except (AttributeError, TypeError) as exc:
+        raise ValueError("forwarded request headers are not iterable") from exc
     total = 0
     normalized: list[tuple[str, str]] = []
-    for name, value in items:
+    for index, item in enumerate(iterator):
+        if index >= MAX_FORWARD_HEADER_COUNT:
+            raise ValueError("forwarded request has too many headers")
+        try:
+            name, value = item
+        except (TypeError, ValueError) as exc:
+            raise ValueError("forwarded request contains malformed headers") from exc
         if type(name) is not str or type(value) is not str or not name or "\r" in name or "\n" in name:
             raise ValueError("forwarded request contains malformed headers")
         if "\r" in value or "\n" in value:
@@ -1004,8 +1264,26 @@ def _header_items(headers: Mapping[str, str] | Sequence[tuple[str, str]] | None)
 
 
 def _header_values(headers: Sequence[tuple[str, str]], name: str) -> list[str]:
+    try:
+        declared_count = len(headers)
+    except (TypeError, ValueError):
+        declared_count = None
+    if declared_count is not None and declared_count > MAX_FORWARD_HEADER_COUNT:
+        raise ValueError("forwarded request has too many headers")
     wanted = name.lower()
-    return [value for key, value in headers if key.lower() == wanted]
+    values: list[str] = []
+    for index, item in enumerate(headers):
+        if index >= MAX_FORWARD_HEADER_COUNT:
+            raise ValueError("forwarded request has too many headers")
+        try:
+            key, value = item
+        except (TypeError, ValueError) as exc:
+            raise ValueError("forwarded request contains malformed headers") from exc
+        if type(key) is not str or type(value) is not str:
+            raise ValueError("forwarded request contains malformed headers")
+        if key.lower() == wanted:
+            values.append(value)
+    return values
 
 
 def _single_header(headers: Sequence[tuple[str, str]], name: str, *, required: bool = False) -> str | None:
@@ -1027,12 +1305,35 @@ def _query_matches(query: str, patterns: Iterable[str]) -> bool:
     return any(re.fullmatch(pattern, query) for pattern in patterns)
 
 
+def _bounded_request_uri(path: str, query: str) -> str:
+    """Compose a request URI only after checking direct caller sizes."""
+
+    if type(path) is not str or type(query) is not str:
+        raise ValueError("request path and query must be strings")
+    if len(path) > MAX_REQUEST_TARGET_BYTES or len(query) > MAX_REQUEST_TARGET_BYTES:
+        raise ValueError("request path or query is oversized")
+    if not path.startswith("/"):
+        raise ValueError("request path must be origin-form")
+    path_bytes = len(path.encode("utf-8"))
+    query_bytes = len(query.encode("utf-8"))
+    total = path_bytes + (1 + query_bytes if query else 0)
+    if total > MAX_REQUEST_TARGET_BYTES:
+        raise ValueError("request target is oversized")
+    return path + ("?" + query if query else "")
+
+
 def _unsafe_target(path: str, query: str, raw_target: str) -> bool:
     if type(path) is not str or type(query) is not str or type(raw_target) is not str:
         return True
-    if not raw_target or len(raw_target.encode("utf-8")) > MAX_REQUEST_TARGET_BYTES:
+    if len(raw_target) > MAX_REQUEST_TARGET_BYTES:
         return True
-    if not path.startswith("/") or raw_target.endswith("?") or "#" in raw_target:
+    try:
+        expected = _bounded_request_uri(path, query)
+        if len(raw_target.encode("utf-8")) > MAX_REQUEST_TARGET_BYTES:
+            return True
+    except (UnicodeError, ValueError):
+        return True
+    if not raw_target or not path.startswith("/") or raw_target.endswith("?") or "#" in raw_target:
         return True
     try:
         parsed = urlsplit(raw_target)
@@ -1040,10 +1341,36 @@ def _unsafe_target(path: str, query: str, raw_target: str) -> bool:
         return True
     if parsed.scheme or parsed.netloc or parsed.fragment:
         return True
-    expected = path + ("?" + query if query else "")
     if parsed.path != path or parsed.query != query or raw_target != expected:
         return True
     return bool(RAW_UNSAFE_RE.search(raw_target) or DOT_SEGMENT_RE.search(raw_target))
+
+
+def _parse_forwarded_uri(uri: str) -> tuple[str, str]:
+    """Parse only Traefik's standard X-Forwarded-Uri field.
+
+    This is a URI policy check, not a raw-target proof. ForwardAuth does not
+    provide separate path, query, or raw-target fields, so callers must not
+    label this parsed value as raw request-target evidence.
+    """
+
+    if type(uri) is not str or not uri or len(uri) > MAX_REQUEST_TARGET_BYTES:
+        raise ValueError("ForwardAuth URI is missing or oversized")
+    if len(uri.encode("utf-8")) > MAX_REQUEST_TARGET_BYTES:
+        raise ValueError("ForwardAuth URI is missing or oversized")
+    if "#" in uri:
+        raise ValueError("ForwardAuth URI contains a fragment")
+    try:
+        parsed = urlsplit(uri)
+    except ValueError as exc:
+        raise ValueError("ForwardAuth URI is malformed") from exc
+    if parsed.scheme or parsed.netloc or parsed.fragment or not parsed.path.startswith("/"):
+        raise ValueError("ForwardAuth URI must be an origin-form path")
+    path = parsed.path
+    query = parsed.query
+    if _unsafe_target(path, query, uri):
+        raise ValueError("ForwardAuth URI is outside the reviewed path grammar")
+    return path, query
 
 
 def _session_route(method: str, path: str) -> bool:
@@ -1068,13 +1395,28 @@ def _canonical_upgrade_headers(headers: Sequence[tuple[str, str]]) -> tuple[str,
 
 
 def _validate_forward_auth_header_names(headers: Sequence[tuple[str, str]]) -> None:
-    allowed = {name.lower() for name in FORWARD_AUTH_HEADERS} | {"content-length"}
-    for name, _value in headers:
+    try:
+        declared_count = len(headers)
+    except (TypeError, ValueError):
+        declared_count = None
+    if declared_count is not None and declared_count > MAX_FORWARD_HEADER_COUNT:
+        raise ValueError("forwarded request has too many headers")
+    allowed_forwarded = {name.lower() for name in TRAEFIK_FORWARDAUTH_GENERATED_HEADERS}
+    allowed_forwarded.add("origin")
+    for index, item in enumerate(headers):
+        if index >= MAX_FORWARD_HEADER_COUNT:
+            raise ValueError("forwarded request has too many headers")
+        try:
+            name, _value = item
+        except (TypeError, ValueError) as exc:
+            raise ValueError("forwarded request contains malformed headers") from exc
+        if type(name) is not str:
+            raise ValueError("forwarded request contains malformed headers")
         lowered = name.lower()
-        if lowered in {item.lower() for item in HOP_BY_HOP_HEADERS}:
-            raise ValueError("direct hop-by-hop headers are not accepted at ForwardAuth")
-        if lowered.startswith("x-forwarded-") and lowered not in allowed:
-            raise ValueError("unknown forwarded metadata is outside the contract")
+        if lowered in HOP_BY_HOP_HEADER_NAMES:
+            raise ValueError("hop-by-hop metadata is outside the Traefik contract")
+        if lowered.startswith("x-forwarded-") and lowered not in allowed_forwarded:
+            raise ValueError("unknown forwarded metadata is outside the Traefik contract")
 
 
 def policy_decision(
@@ -1084,24 +1426,37 @@ def policy_decision(
     path: str,
     query: str = "",
     headers: Mapping[str, str] | Sequence[tuple[str, str]] | None = None,
-    raw_target: str,
+    raw_target: str | None = None,
+    require_websocket_headers: bool = True,
 ) -> dict[str, object]:
-    """Model the local ForwardAuth policy without retaining request material.
+    """Model the local policy without retaining request material.
 
-    The expected authority comes only from the validated runtime manifest. The
-    raw target is mandatory so `/path` and `/path?` cannot collapse together.
+    ``raw_target`` is an optional model-only input. The executable ForwardAuth
+    adapter does not receive it; it consumes only Traefik's X-Forwarded-Uri.
+    Likewise, WebSocket handshake headers are required only by the model when
+    supplied directly. The generated Traefik router enforces them before the
+    adapter because ForwardAuth does not guarantee Upgrade or Connection.
     """
 
     inputs = _validate_runtime_inputs(runtime_inputs)
     authority = _authority(inputs)
     expected_origin = f"https://{authority}"
+    if type(method) is not str or not method or len(method) > MAX_REQUEST_TARGET_BYTES:
+        return {"status": 404, "layer": "edge", "upstream_request": False}
+    try:
+        _bounded_request_uri(path, query)
+    except (UnicodeError, ValueError):
+        return {"status": 404, "layer": "edge", "upstream_request": False}
     try:
         header_items = _header_items(headers)
         host_values = _header_values(header_items, "Host")
         forwarded_host_values = _header_values(header_items, "X-Forwarded-Host")
-        if len(host_values) != 1 or host_values[0] != authority:
+        forwarded_proto_values = _header_values(header_items, "X-Forwarded-Proto")
+        if host_values and (len(host_values) != 1 or host_values[0] != authority):
             return {"status": 421, "layer": "edge", "upstream_request": False}
         if len(forwarded_host_values) != 1 or forwarded_host_values[0] != authority:
+            return {"status": 421, "layer": "edge", "upstream_request": False}
+        if len(forwarded_proto_values) != 1 or forwarded_proto_values[0] != "https":
             return {"status": 421, "layer": "edge", "upstream_request": False}
         origin = _single_header(header_items, "Origin")
     except ValueError:
@@ -1110,7 +1465,7 @@ def policy_decision(
         upgrade, connection = _canonical_upgrade_headers(header_items)
     except ValueError:
         return {"status": 404, "layer": "edge", "upstream_request": False}
-    if _unsafe_target(path, query, raw_target):
+    if raw_target is not None and _unsafe_target(path, query, raw_target):
         return {"status": 404, "layer": "edge", "upstream_request": False}
 
     dashboard = path.startswith("/hermes")
@@ -1121,7 +1476,9 @@ def policy_decision(
         return {"status": 404, "layer": "edge", "upstream_request": False}
 
     if upstream_path in WEBSOCKET_ROUTES:
-        if method != "GET" or upgrade != "websocket" or connection != "Upgrade":
+        if method != "GET":
+            return {"status": 404, "layer": "edge", "upstream_request": False}
+        if require_websocket_headers and (upgrade != "websocket" or connection != "Upgrade"):
             return {"status": 404, "layer": "edge", "upstream_request": False}
         if origin != expected_origin:
             return {"status": 403, "layer": "edge", "upstream_request": False}
@@ -1131,7 +1488,12 @@ def policy_decision(
             accepted = _query_matches(query, PTY_QUERY_PATTERNS)
         if not accepted:
             return {"status": 404, "layer": "edge", "upstream_request": False}
-        return {"status": 101, "layer": "hermes", "upstream_request": True}
+        return {
+            "status": 101 if require_websocket_headers else 200,
+            "layer": "hermes",
+            "upstream_request": True,
+            "websocket_headers": "verified" if require_websocket_headers else "not_observed",
+        }
 
     if any(route_method == method and route_path == upstream_path for route_method, route_path in EXACT_REST_ROUTES):
         accepted_query = (
@@ -1159,16 +1521,15 @@ def policy_decision(
     return {"status": 404, "layer": "edge", "upstream_request": False}
 
 
-def build_forward_auth_headers(
+def build_traefik_forward_auth_headers(
     runtime_inputs: Mapping[str, object],
     *,
     method: str,
     path: str,
     query: str,
-    raw_target: str,
     headers: Mapping[str, str] | Sequence[tuple[str, str]] | None = None,
 ) -> list[tuple[str, str]]:
-    """Build the bounded original-request contract sent to ForwardAuth."""
+    """Build only the metadata standard Traefik ForwardAuth supplies."""
 
     inputs = _validate_runtime_inputs(runtime_inputs)
     authority = _authority(inputs)
@@ -1180,73 +1541,47 @@ def build_forward_auth_headers(
         lowered = name.lower()
         if lowered == "forwarded" or lowered.startswith("x-forwarded-") or lowered == "x-real-ip":
             raise ValueError("inbound forwarding metadata is not trusted")
-    origin = _single_header(original, "Origin") or ""
-    upgrade, connection = _canonical_upgrade_headers(original)
-    if _unsafe_target(path, query, raw_target):
-        raise ValueError("original request target is not canonical")
-    if type(method) is not str or not method or "\r" in method or "\n" in method:
+    origin = _single_header(original, "Origin")
+    uri = _bounded_request_uri(path, query)
+    _parse_forwarded_uri(uri)
+    if type(method) is not str or not method or len(method) > MAX_REQUEST_TARGET_BYTES or "\r" in method or "\n" in method:
         raise ValueError("original request method is not canonical")
-    return [
-        ("Host", authority),
+    result = [
+        ("X-Forwarded-For", "127.0.0.1"),
         ("X-Forwarded-Host", authority),
         ("X-Forwarded-Method", method),
-        ("X-Forwarded-Path", path),
-        ("X-Forwarded-Raw-Target", raw_target),
-        ("X-Forwarded-Query", query),
-        ("X-Forwarded-Uri", raw_target),
         ("X-Forwarded-Proto", "https"),
-        ("X-Forwarded-Upgrade", upgrade),
-        ("X-Forwarded-Connection", connection),
-        ("Origin", origin),
+        ("X-Forwarded-Uri", uri),
     ]
+    if origin is not None:
+        result.append(("Origin", origin))
+    return result
 
 
 def _forward_auth_policy_input(
     runtime_inputs: Mapping[str, object],
     headers: Sequence[tuple[str, str]],
-) -> tuple[str, str, str, str, list[tuple[str, str]]]:
+) -> tuple[str, str, str, list[tuple[str, str]]]:
     inputs = _validate_runtime_inputs(runtime_inputs)
     authority = _authority(inputs)
     _validate_forward_auth_header_names(headers)
-    host = _single_header(headers, "Host", required=True)
-    if host != authority:
-        raise ValueError("ForwardAuth Host authority is not canonical")
     required = {
         name: _single_header(headers, name, required=True)
-        for name in (
-            "X-Forwarded-Host",
-            "X-Forwarded-Method",
-            "X-Forwarded-Path",
-            "X-Forwarded-Raw-Target",
-            "X-Forwarded-Query",
-            "X-Forwarded-Uri",
-            "X-Forwarded-Proto",
-        )
+        for name in TRAEFIK_FORWARDAUTH_GENERATED_HEADERS
     }
     if required["X-Forwarded-Host"] != authority or required["X-Forwarded-Proto"] != "https":
         raise ValueError("ForwardAuth authority or scheme is not canonical")
-    if required["X-Forwarded-Uri"] != required["X-Forwarded-Raw-Target"]:
-        raise ValueError("ForwardAuth URI and raw target differ")
+    if not required["X-Forwarded-For"]:
+        raise ValueError("ForwardAuth client address is missing")
     method = str(required["X-Forwarded-Method"])
-    path = str(required["X-Forwarded-Path"])
-    raw_target = str(required["X-Forwarded-Raw-Target"])
-    query = str(required["X-Forwarded-Query"])
-    forwarded_upgrade = (_single_header(headers, "X-Forwarded-Upgrade") or "").strip().lower()
-    forwarded_connection = (_single_header(headers, "X-Forwarded-Connection") or "").strip().lower()
-    if forwarded_upgrade not in {"", "websocket"} or forwarded_connection not in {"", "upgrade"}:
-        raise ValueError("ForwardAuth upgrade metadata is outside the fixed contract")
-    if bool(forwarded_upgrade) != bool(forwarded_connection):
-        raise ValueError("ForwardAuth upgrade metadata must be paired")
-    upgrade, connection = (("websocket", "Upgrade") if forwarded_upgrade else ("", ""))
+    path, query = _parse_forwarded_uri(str(required["X-Forwarded-Uri"]))
     origin = _single_header(headers, "Origin") or ""
     policy_headers = [
-        ("Host", authority),
         ("X-Forwarded-Host", authority),
+        ("X-Forwarded-Proto", "https"),
         ("Origin", origin),
-        ("Upgrade", upgrade),
-        ("Connection", connection),
     ]
-    return method, path, query, raw_target, policy_headers
+    return method, path, query, policy_headers
 
 
 class _HeaderLimitExceeded(ValueError):
@@ -1338,7 +1673,7 @@ class _ForwardAuthHandler(http.server.BaseHTTPRequestHandler):
                 if body_length and len(self.rfile.read(body_length)) != body_length:
                     self._respond(400, "deny")
                     return
-            method, path, query, raw_target, policy_headers = _forward_auth_policy_input(
+            method, path, query, policy_headers = _forward_auth_policy_input(
                 self.runtime_inputs, headers
             )
             result = policy_decision(
@@ -1346,8 +1681,8 @@ class _ForwardAuthHandler(http.server.BaseHTTPRequestHandler):
                 method=method,
                 path=path,
                 query=query,
-                raw_target=raw_target,
                 headers=policy_headers,
+                require_websocket_headers=False,
             )
         except (ValueError, UnicodeError):
             self._respond(400, "deny")
@@ -1398,14 +1733,17 @@ def find_traefik_binary() -> str | None:
     return None
 
 
-def run_traefik_check_config(binary: str, output_dir: Path) -> subprocess.CompletedProcess[str]:
-    """Validate only an emitted local config; callers own skip handling."""
+def run_traefik_check_config(binary: str, output_dir: Path) -> subprocess.CompletedProcess[object]:
+    """Validate emitted config while discarding unbounded diagnostics."""
 
+    # Diagnostics are not retained in synthetic evidence. Redirecting both
+    # streams to the OS sink prevents a noisy or compromised binary from
+    # allocating unbounded stdout/stderr buffers before the timeout expires.
     return subprocess.run(
         [binary, "check-config", f"--configFile={output_dir / 'traefik-static.json'}"],
         cwd=output_dir,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         timeout=5,
         check=False,
     )
@@ -1507,16 +1845,20 @@ def main(argv: list[str] | None = None) -> int:
             render_to_directory(args.output_dir)
         return 0
     if args.command == "digest":
-        content = args.input.read_bytes() if args.input else sys.stdin.buffer.read()
-        print(digest_bytes(content))
+        if args.input is not None:
+            print(_digest_regular_file(args.input))
+        else:
+            print(_digest_stdin(sys.stdin.buffer))
         return 0
     if args.command == "build-digest":
         print(_build_static_digest(args.site_root))
         return 0
     if args.command == "evidence":
-        evidence_bytes = args.browser_evidence.read_bytes()
-        if len(evidence_bytes) > BROWSER_EVIDENCE_MAX_BYTES:
-            raise ValueError("browser evidence exceeds the bounded input size")
+        evidence_bytes = _read_bounded_regular_file(
+            args.browser_evidence,
+            BROWSER_EVIDENCE_MAX_BYTES,
+            "browser evidence",
+        )
         try:
             browser_evidence = json.loads(evidence_bytes.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

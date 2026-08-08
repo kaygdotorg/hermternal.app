@@ -14,6 +14,7 @@ import http.client
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -33,7 +34,7 @@ EVIDENCE_PATH = ROOT / "tests/integration/hermes-traefik/traefik-proof-evidence.
 EVIDENCE_ANCHOR_PATH = ROOT / "tests/integration/hermes-traefik/traefik-proof-evidence-sha256.txt"
 EXPECTED_BUILD_SHA = "521ede32b904a42e22eebb279fd7d404074cd318"
 EXPECTED_BUILD_DIGEST = "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
-EXPECTED_CONFIG_DIGEST = "8e2a8c90f843079e9831cead252a93f6e1ffdbae0667f80bd26ae5d428ae165a"
+EXPECTED_CONFIG_DIGEST = "0c146d6271615ed13726290ae53a0c4c5fd1da82e483cc79bd177b927cf0ebcc"
 
 
 class TraefikRendererTests(unittest.TestCase):
@@ -51,7 +52,12 @@ class TraefikRendererTests(unittest.TestCase):
         self.services = self.http["services"]
 
     def _headers(self, *extra: tuple[str, str]) -> list[tuple[str, str]]:
-        return [("Host", self.authority), ("X-Forwarded-Host", self.authority), *extra]
+        return [
+            ("Host", self.authority),
+            ("X-Forwarded-Host", self.authority),
+            ("X-Forwarded-Proto", "https"),
+            *extra,
+        ]
 
     def _policy(
         self,
@@ -88,6 +94,10 @@ class TraefikRendererTests(unittest.TestCase):
             bad = dict(self.inputs)
             bad["dynamic_filename"] = "/tmp/traefik-dynamic.json"
             traefik_proof._validate_runtime_inputs(bad)
+        with self.assertRaisesRegex(ValueError, "path size"):
+            too_long = dict(self.inputs)
+            too_long["site_root"] = "/" + "x" * traefik_proof.MAX_RUNTIME_PATH_BYTES
+            traefik_proof._validate_runtime_inputs(too_long)
 
     def test_static_config_is_loopback_tls_and_provider_path_is_exact(self) -> None:
         entrypoint = self.static["entryPoints"]["websecure"]
@@ -134,9 +144,46 @@ class TraefikRendererTests(unittest.TestCase):
             with self.subTest(router=name):
                 self.assertEqual(router["entryPoints"], ["websecure"])
                 self.assertEqual(router["tls"], {})
-                self.assertEqual(router["middlewares"][0], "edge-policy")
+                expected_first_middleware = "edge-deny" if name.endswith("_deny") else "edge-policy"
+                self.assertEqual(router["middlewares"][0], expected_first_middleware)
         self.assertNotIn("PathPrefix(`/api`)", json.dumps(self.routers))
         self.assertNotIn("/hermes/*", json.dumps(self.routers))
+
+    def test_websocket_routers_require_client_handshake_headers(self) -> None:
+        websocket_routers = (
+            "root_chat_ws",
+            "root_pty_ws",
+            "dashboard_chat_ws",
+            "dashboard_pty_ws",
+        )
+        expected_matchers = (
+            "HeaderRegexp(`Upgrade`, `(?i)^websocket$`)",
+            "HeaderRegexp(`Connection`, `(?i)(^|.*,\\s*)Upgrade(\\s*,.*|$)`)",
+        )
+        for name in websocket_routers:
+            with self.subTest(router=name):
+                rule = self.routers[name]["rule"]
+                for matcher in expected_matchers:
+                    self.assertIn(matcher, rule)
+                self.assertNotIn("HeadersRegexp", rule)
+
+    def test_malformed_websocket_paths_have_explicit_deny_routers(self) -> None:
+        for name, path in (
+            ("root_chat_ws_deny", "/api/ws"),
+            ("root_pty_ws_deny", "/api/pty"),
+            ("dashboard_chat_ws_deny", "/hermes/api/ws"),
+            ("dashboard_pty_ws_deny", "/hermes/api/pty"),
+        ):
+            with self.subTest(router=name):
+                router = self.routers[name]
+                self.assertEqual(router["rule"], f"Host(`traefik-92.test`) && Path(`{path}`)")
+                self.assertEqual(router["priority"], 710)
+                self.assertEqual(router["middlewares"], ["edge-deny"])
+                self.assertEqual(router["service"], "policy-deny")
+        self.assertEqual(
+            self.middlewares["edge-deny"]["forwardAuth"]["address"],
+            "http://127.0.0.1:19259/deny",
+        )
 
     def test_policy_gate_precedes_every_service_and_wrong_host_has_authority_route(self) -> None:
         self.assertEqual(self.routers["wrong_host"]["rule"], "!Host(`traefik-92.test`)")
@@ -145,6 +192,34 @@ class TraefikRendererTests(unittest.TestCase):
         self.assertFalse(policy["trustForwardHeader"])
         self.assertEqual(policy["authRequestHeaders"], list(traefik_proof.FORWARD_AUTH_HEADERS))
         self.assertNotIn("https://", policy["address"])
+
+    def test_forward_auth_config_matches_adapter_header_contract(self) -> None:
+        policy = self.middlewares["edge-policy"]["forwardAuth"]
+        forwarded = traefik_proof.build_traefik_forward_auth_headers(
+            self.inputs,
+            method="GET",
+            path="/",
+            query="",
+            headers=[("Host", self.authority), ("Origin", f"https://{self.authority}")],
+        )
+        configured_names = [
+            *traefik_proof.TRAEFIK_FORWARDAUTH_GENERATED_HEADERS,
+            *policy["authRequestHeaders"],
+        ]
+        self.assertEqual([name for name, _value in forwarded], configured_names)
+        self.assertEqual(set(configured_names), set(traefik_proof.TRAEFIK_FORWARDAUTH_HEADERS))
+        method, path, query, policy_headers = traefik_proof._forward_auth_policy_input(
+            self.inputs, forwarded
+        )
+        self.assertEqual((method, path, query), ("GET", "/", ""))
+        self.assertEqual(
+            policy_headers,
+            [
+                ("X-Forwarded-Host", self.authority),
+                ("X-Forwarded-Proto", "https"),
+                ("Origin", f"https://{self.authority}"),
+            ],
+        )
 
     def test_upstream_services_are_private_and_static_is_separate_from_hermes(self) -> None:
         hermes = self.services["hermes"]["loadBalancer"]
@@ -314,36 +389,44 @@ class TraefikRendererTests(unittest.TestCase):
                 result = self._policy("GET", path, query, raw_target=raw_target)
                 self.assertEqual((result["status"], result["layer"], result["upstream_request"]), (404, "edge", False))
 
-    def test_adapter_header_builder_reconstructs_exact_contract(self) -> None:
-        original = [("Host", self.authority)]
-        headers = traefik_proof.build_forward_auth_headers(
+    def test_adapter_header_builder_reconstructs_standard_traefik_contract(self) -> None:
+        original = [
+            ("Host", self.authority),
+            ("Origin", f"https://{self.authority}"),
+        ]
+        headers = traefik_proof.build_traefik_forward_auth_headers(
             self.inputs,
             method="GET",
             path="/v1/c/abcdefghijklmnop",
             query="",
-            raw_target="/v1/c/abcdefghijklmnop",
             headers=original,
         )
-        self.assertEqual(dict(headers)["Host"], self.authority)
-        self.assertEqual(dict(headers)["X-Forwarded-Host"], self.authority)
-        self.assertEqual(dict(headers)["X-Forwarded-Raw-Target"], "/v1/c/abcdefghijklmnop")
+        self.assertEqual(
+            headers,
+            [
+                ("X-Forwarded-For", "127.0.0.1"),
+                ("X-Forwarded-Host", self.authority),
+                ("X-Forwarded-Method", "GET"),
+                ("X-Forwarded-Proto", "https"),
+                ("X-Forwarded-Uri", "/v1/c/abcdefghijklmnop"),
+                ("Origin", f"https://{self.authority}"),
+            ],
+        )
+        self.assertEqual(
+            [name for name, _value in headers],
+            [
+                *traefik_proof.TRAEFIK_FORWARDAUTH_GENERATED_HEADERS,
+                *traefik_proof.FORWARD_AUTH_HEADERS,
+            ],
+        )
+        self.assertNotIn("Host", {name for name, _value in headers})
         with self.assertRaises(ValueError):
-            traefik_proof.build_forward_auth_headers(
-                self.inputs,
-                method="GET",
-                path="/v1/c/abcdefghijklmnop",
-                query="",
-                raw_target="/v1/c/abcdefghijklmnop?",
-                headers=original,
-            )
-        with self.assertRaises(ValueError):
-            traefik_proof.build_forward_auth_headers(
+            traefik_proof.build_traefik_forward_auth_headers(
                 self.inputs,
                 method="GET",
                 path="/",
                 query="",
-                raw_target="/",
-                headers=[("Host", self.authority), ("X-Forwarded-Host", "spoof")],
+                headers=[("Host", self.authority), ("host", self.authority)],
             )
 
     def test_runtime_digest_is_stable_and_evidence_is_redacted(self) -> None:
@@ -420,6 +503,27 @@ class TraefikRendererTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "time budget"):
                     traefik_proof._build_static_digest(root)
 
+    def test_bounded_static_digest_rejects_traversal_breadth_and_pending_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index in range(3):
+                (root / f"asset-{index}.js").write_bytes(b"x")
+            with mock.patch.object(traefik_proof, "MAX_DIGEST_ENTRIES", 2):
+                with self.assertRaisesRegex(ValueError, "directory-entry"):
+                    traefik_proof._build_static_digest(root)
+
+            (root / "asset-0.js").unlink()
+            (root / "asset-1.js").unlink()
+            (root / "asset-2.js").unlink()
+            (root / "empty-a").mkdir()
+            (root / "empty-b").mkdir()
+            with mock.patch.object(traefik_proof, "MAX_DIGEST_DIRECTORIES", 2):
+                with self.assertRaisesRegex(ValueError, "directory-count"):
+                    traefik_proof._build_static_digest(root)
+            with mock.patch.object(traefik_proof, "MAX_DIGEST_PENDING_DIRECTORIES", 1):
+                with self.assertRaisesRegex(ValueError, "pending-directory"):
+                    traefik_proof._build_static_digest(root)
+
     def test_bounded_static_digest_rejects_replacement_race(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "asset.js"
@@ -438,6 +542,82 @@ class TraefikRendererTests(unittest.TestCase):
             with mock.patch.object(traefik_proof.os, "read", side_effect=replacing_read):
                 with self.assertRaisesRegex(ValueError, "changed while reading"):
                     traefik_proof._digest_regular_file(path)
+
+    def test_bounded_evidence_and_digest_readers_reject_oversize_and_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = root / "evidence.json"
+            evidence.write_bytes(b"x" * (traefik_proof.BROWSER_EVIDENCE_MAX_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, "bounded input size"):
+                traefik_proof._read_bounded_regular_file(
+                    evidence,
+                    traefik_proof.BROWSER_EVIDENCE_MAX_BYTES,
+                    "browser evidence",
+                )
+            digest_input = root / "digest.bin"
+            digest_input.write_bytes(b"x" * (traefik_proof.MAX_DIGEST_FILE_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, "per-file digest limit"):
+                traefik_proof._digest_regular_file(digest_input)
+            if hasattr(os, "symlink"):
+                link = root / "link.json"
+                link.symlink_to(evidence)
+                with self.assertRaisesRegex(ValueError, "regular non-symlink"):
+                    traefik_proof._read_bounded_regular_file(link, 10, "browser evidence")
+
+    def test_bounded_stdin_digest_reads_incrementally_and_rejects_overflow(self) -> None:
+        class RecordingStream:
+            def __init__(self, content: bytes) -> None:
+                self.content = content
+                self.offset = 0
+                self.read_sizes: list[int] = []
+
+            def read(self, size: int) -> bytes:
+                self.read_sizes.append(size)
+                start = self.offset
+                self.offset += size
+                return self.content[start : start + size]
+
+        stream = RecordingStream(b"fixture")
+        self.assertEqual(
+            traefik_proof._digest_stdin(stream, limit=32),
+            hashlib.sha256(b"fixture").hexdigest(),
+        )
+        self.assertTrue(stream.read_sizes)
+        self.assertLessEqual(max(stream.read_sizes), traefik_proof.MAX_DIGEST_CHUNK_BYTES)
+        overflow = RecordingStream(b"12345")
+        with self.assertRaisesRegex(ValueError, "stdin digest exceeded"):
+            traefik_proof._digest_stdin(overflow, limit=4)
+        self.assertTrue(all(size <= 5 for size in overflow.read_sizes))
+        with mock.patch.object(traefik_proof, "MAX_DIGEST_TOTAL_BYTES", 4):
+            global_overflow = RecordingStream(b"12345")
+            with self.assertRaisesRegex(ValueError, "stdin digest exceeded"):
+                traefik_proof._digest_stdin(global_overflow, limit=16)
+
+    def test_direct_header_and_runtime_mapping_inputs_are_bounded(self) -> None:
+        with self.assertRaisesRegex(ValueError, "too many headers"):
+            traefik_proof._header_items(
+                ((f"X-Extra-{index}", "x") for index in range(traefik_proof.MAX_FORWARD_HEADER_COUNT + 1))
+            )
+        with self.assertRaisesRegex(ValueError, "too many headers"):
+            traefik_proof._header_values(
+                ((f"X-Extra-{index}", "x") for index in range(traefik_proof.MAX_FORWARD_HEADER_COUNT + 1)),
+                "Host",
+            )
+        oversized = dict(self.inputs)
+        oversized.update({f"extra-{index}": index for index in range(128)})
+        with self.assertRaisesRegex(ValueError, "exact renderer input keys"):
+            traefik_proof._validate_runtime_inputs(oversized)
+
+    @mock.patch.object(traefik_proof.subprocess, "run")
+    def test_traefik_check_discards_unbounded_diagnostics(self, run: mock.Mock) -> None:
+        run.return_value = subprocess.CompletedProcess([], 0)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = traefik_proof.run_traefik_check_config("/bin/false", Path(temporary))
+        self.assertEqual(result.returncode, 0)
+        kwargs = run.call_args.kwargs
+        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
+        self.assertNotIn("capture_output", kwargs)
 
     def test_optional_traefik_check_is_explicitly_skipped_when_binary_is_unavailable(self) -> None:
         binary = traefik_proof.find_traefik_binary()
@@ -482,22 +662,22 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def _forwarded(self, *, method: str = "GET", path: str = "/", query: str = "", websocket: bool = False) -> list[tuple[str, str]]:
+    def _forwarded(
+        self,
+        *,
+        method: str = "GET",
+        path: str = "/",
+        query: str = "",
+        origin: str | None = None,
+    ) -> list[tuple[str, str]]:
         original: list[tuple[str, str]] = [("Host", self.authority)]
-        if websocket:
-            original.extend(
-                [
-                    ("Origin", f"https://{self.authority}"),
-                    ("Upgrade", "websocket"),
-                    ("Connection", "Upgrade"),
-                ]
-            )
-        return traefik_proof.build_forward_auth_headers(
+        if origin is not None:
+            original.append(("Origin", origin))
+        return traefik_proof.build_traefik_forward_auth_headers(
             self.inputs,
             method=method,
             path=path,
             query=query,
-            raw_target=path + (f"?{query}" if query else ""),
             headers=original,
         )
 
@@ -506,36 +686,46 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         self.assertEqual(allowed_status, 200)
         self.assertEqual(allowed_headers["x-hermternal-policy"], "allow")
         denied = self._forwarded(path="/", query="", method="GET")
-        denied = [(name, "/?" if name == "X-Forwarded-Raw-Target" else value) for name, value in denied]
-        denied = [(name, "/?" if name == "X-Forwarded-Uri" else value) for name, value in denied]
+        denied = [(name, "/unknown" if name == "X-Forwarded-Uri" else value) for name, value in denied]
         denied_status, denied_headers = self._send(denied)
         self.assertEqual(denied_status, 404)
         self.assertEqual(denied_headers["x-hermternal-policy"], "deny")
 
-    def test_adapter_proves_forwarded_websocket_fields_and_rejects_hop_by_hop_spoofing(self) -> None:
-        status, headers = self._send(self._forwarded(path="/api/ws", query="ticket=fixtureTicket", websocket=True))
+    def test_adapter_accepts_websocket_uri_without_claiming_handshake_metadata(self) -> None:
+        forwarded = self._forwarded(
+            path="/api/ws",
+            query="ticket=fixtureTicket",
+            origin=f"https://{self.authority}",
+        )
+        names = {name for name, _value in forwarded}
+        self.assertNotIn("Upgrade", names)
+        self.assertNotIn("Connection", names)
+        self.assertEqual(
+            names,
+            set(traefik_proof.TRAEFIK_FORWARDAUTH_HEADERS),
+        )
+        status, headers = self._send(forwarded)
         self.assertEqual(status, 200)
         self.assertEqual(headers["x-hermternal-policy"], "allow")
-        malformed = self._forwarded(path="/api/ws", query="ticket=fixtureTicket", websocket=True)
-        malformed = [(name, "") if name == "X-Forwarded-Connection" else (name, value) for name, value in malformed]
-        status, _ = self._send(malformed)
-        self.assertEqual(status, 400)
-        direct_hop = self._forwarded()
-        direct_hop.append(("Connection", "Upgrade"))
-        status, _ = self._send(direct_hop)
-        self.assertEqual(status, 400)
+        deny_status, deny_headers = self._send(self._forwarded(), request_target="/deny")
+        self.assertEqual(deny_status, 404)
+        self.assertEqual(deny_headers["x-hermternal-policy"], "deny")
 
-    def test_adapter_rejects_duplicate_authority_unknown_metadata_and_unbounded_body(self) -> None:
-        headers = self._forwarded()
-        headers.append(("host", self.authority))
-        status, _ = self._send(headers)
-        self.assertEqual(status, 400)
+    def test_adapter_rejects_duplicate_forwarded_metadata_and_unbounded_body(self) -> None:
         headers = self._forwarded()
         headers.append(("X-Forwarded-Host", self.authority))
         status, _ = self._send(headers)
         self.assertEqual(status, 400)
         headers = self._forwarded()
+        headers.append(("X-Forwarded-Uri", "/"))
+        status, _ = self._send(headers)
+        self.assertEqual(status, 400)
+        headers = self._forwarded()
         headers.append(("X-Forwarded-Unknown", "spoof"))
+        status, _ = self._send(headers)
+        self.assertEqual(status, 400)
+        headers = self._forwarded()
+        headers.append(("Connection", "Upgrade"))
         status, _ = self._send(headers)
         self.assertEqual(status, 400)
         status, _ = self._send(self._forwarded(), body=b"x" * (traefik_proof.MAX_POLICY_BODY_BYTES + 1))
@@ -556,12 +746,15 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         )
         self.assertEqual(status, 414)
 
-    def test_adapter_rejects_missing_raw_target_and_malformed_authority(self) -> None:
-        headers = [(name, value) for name, value in self._forwarded() if name != "X-Forwarded-Raw-Target"]
+    def test_adapter_rejects_missing_forwarded_uri_and_malformed_authority(self) -> None:
+        headers = [(name, value) for name, value in self._forwarded() if name != "X-Forwarded-Uri"]
         status, _ = self._send(headers)
         self.assertEqual(status, 400)
         headers = self._forwarded()
-        headers = [(name, "traefik-92.test") if name == "Host" else (name, value) for name, value in headers]
+        headers = [
+            (name, "traefik-92.test") if name == "X-Forwarded-Host" else (name, value)
+            for name, value in headers
+        ]
         status, _ = self._send(headers)
         self.assertEqual(status, 400)
 
@@ -601,6 +794,8 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 "issue",
                 "contract",
                 "deployment",
+                "traefik_runtime",
+                "forward_auth_contract",
                 "product",
                 "proof_run",
                 "browser_journey",
@@ -631,6 +826,22 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         )
         self.assertEqual(set(deployment["runtime_inputs"]), set(traefik_proof.DEFAULT_RUNTIME_INPUTS))
         self.assertEqual(set(deployment["parity_fixtures"]), {"static_route_grammar", "deep_link_cases"})
+        self.assertEqual(
+            self.evidence["traefik_runtime"],
+            {
+                "status": traefik_proof.TRAEFIK_RUNTIME_STATUS,
+                "version": traefik_proof.TRAEFIK_RUNTIME_VERSION,
+                "binary": traefik_proof.TRAEFIK_RUNTIME_BINARY,
+                "rule_syntax": traefik_proof.TRAEFIK_RULE_SYNTAX,
+            },
+        )
+        contract = self.evidence["forward_auth_contract"]
+        self.assertEqual(contract["generated_headers"], list(traefik_proof.TRAEFIK_FORWARDAUTH_GENERATED_HEADERS))
+        self.assertEqual(contract["copied_headers"], list(traefik_proof.FORWARD_AUTH_HEADERS))
+        self.assertFalse(contract["runtime_observed"])
+        self.assertIn("not raw-target", contract["uri"])
+        self.assertIn("router-matcher-only", contract["websocket"])
+        self.assertIn("rejected", contract["hop_by_hop"])
         self.assertEqual(set(self.evidence["browser_evidence"]), set(traefik_proof.BROWSER_EVIDENCE_ROOT_KEYS))
         self.assertEqual(self.evidence["browser_evidence"]["observations"], {"blocker": "provider_unavailable"})
         self.assertEqual(self.evidence["proof_run"], traefik_proof._synthetic_proof_run())
@@ -638,6 +849,10 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         self.assertEqual(self.evidence["offline_harness"]["traefik_check_config"], "skipped_unavailable")
         self.assertEqual(len(self.evidence["positive_cases"]), 11)
         self.assertEqual(len(self.evidence["negative_cases"]), 23)
+        for case in [*self.evidence["positive_cases"], *self.evidence["negative_cases"]]:
+            with self.subTest(case=case["id"]):
+                self.assertIn(case["proof_level"], {"model", "model_plus_router_rule", "model_boundary_only"})
+                self.assertIn("observed_by", case)
 
     def test_proof_run_is_reconstructed_and_not_caller_mutable(self) -> None:
         first = traefik_proof._synthetic_proof_run()
