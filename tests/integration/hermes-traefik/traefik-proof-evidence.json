@@ -16,7 +16,19 @@
   "contract": "dashboard-v0.0.1",
   "cookie_proof": {
     "reason": "Traefik renderer output does not prove HttpOnly, SameSite, Path, or Secure on a real Set-Cookie response",
-    "status": "not_proven"
+    "status": "not_proven",
+    "synthetic_model": {
+      "attributes": [
+        "Secure",
+        "HttpOnly",
+        "SameSite=Lax",
+        "Path=/"
+      ],
+      "name_prefix": "__Host-",
+      "scope": "/hermes",
+      "status": "synthetic_observed",
+      "value": "redacted"
+    }
   },
   "deployment": {
     "edge_policy": "local-forward-auth-closed-query-gate",
@@ -32,8 +44,12 @@
         "sha256": "f0542d97b363b8e2a921e93001d72dd0f56d5f30001f15e95bbca5b2f4165165"
       }
     },
+    "production_topology": "private_non_loopback_hermes_9119_default_deny_proxy_identity",
     "proxy": "traefik",
+    "public_hermes_exposure": false,
     "public_listener": "loopback-only-disposable",
+    "required_hermes_bind_class": "private_non_loopback",
+    "required_hermes_port": 9119,
     "runtime_config_sha256": "3da2c93e74b4c205cac0aee16fcbed93cb6e87948b59e4592e1247a426da5e36",
     "runtime_inputs": {
       "cert_path": "/opt/hermternal/traefik-proof/tls.crt",
@@ -49,6 +65,40 @@
     },
     "runtime_inputs_schema": "hermternal.traefik-proof.runtime-inputs.v1",
     "runtime_inputs_sha256": "4880b6d1ca97fe22b2f0015dce5d5f446354969edf42a282eed1237ce96c0114"
+  },
+  "edge_no_upstream": {
+    "all_blocked_cases_have_no_upstream_request": true,
+    "blocked_case_count": 20,
+    "blocked_case_ids": [
+      "wrong_host",
+      "wrong_websocket_origin",
+      "unknown_route",
+      "unknown_method",
+      "duplicate_prefix",
+      "traversal",
+      "encoded_separator",
+      "encoded_dot",
+      "malformed_upgrade",
+      "missing_ticket",
+      "root_query_mutation",
+      "static_asset_query_mutation",
+      "client_route_query_mutation",
+      "rest_query_mutation",
+      "pty_missing_resume",
+      "pty_extra_parameter",
+      "pty_duplicate_parameter",
+      "pty_empty_value",
+      "pty_fresh_parameter",
+      "direct_private_port"
+    ],
+    "blocked_layers": [
+      "edge",
+      "network"
+    ],
+    "retained_request_material": "redacted",
+    "scope": "annotated policy and network-boundary model",
+    "status": "synthetic_observed",
+    "upstream_request": false
   },
   "forward_auth_contract": {
     "auth_request_host": "transport-only-auth-service-authority-not-public-authority",
@@ -76,6 +126,14 @@
     "uri": "X-Forwarded-Uri includes query; it is not raw-target evidence",
     "websocket": "router-matcher-only; Upgrade and Connection are not ForwardAuth observations"
   },
+  "hermes_boundary": {
+    "bind_class": "private_non_loopback",
+    "direct_result": "connection_denied",
+    "port": 9119,
+    "public_exposure": false,
+    "source_identity": "untrusted",
+    "status": "synthetic_observed"
+  },
   "issue": "92",
   "model_assertions": {
     "assertions": [
@@ -93,7 +151,15 @@
       "finite known fields are overridden, while Traefik runtime deletion of RFC hop-by-hop and Connection-listed tokens remains unproven",
       "arbitrary inbound forwarding aliases are outside the finite Traefik override claim and require separate live deployment proof",
       "the v3.7.6 minimum and HeaderRegexp rule syntax are recorded requirements, not runtime compatibility evidence",
-      "chat and PTY upgrade grammars remain distinct in the model"
+      "chat and PTY upgrade grammars remain distinct in the model",
+      "the /hermes prefix is stripped exactly once; duplicated and near-prefix paths are denied",
+      "SPA fallback maps only canonical client deep links to /200.html",
+      "the synthetic __Host- cookie canary requires Secure, HttpOnly, SameSite=Lax, Path=/, and no Domain",
+      "WebSocket tickets are single-use with a 30-second TTL and retained request material is redacted",
+      "PTY detach is followed by eventual 30-minute TTL cleanup without retaining input bytes",
+      "Chat and PTY WebSocket retries are disabled",
+      "the required Hermes boundary is private non-loopback TCP 9119 with no public exposure",
+      "blocked edge and direct-port vectors retain upstream_request=false"
     ],
     "request_material": "redacted",
     "route_vectors": "shared static-route grammar and deep-link fixture identities",
@@ -291,8 +357,10 @@
       "X-Forwarded-Port is checked against the configured HTTPS entrypoint port",
       "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
       "C0, DEL, and C1 request-target controls are denied before route matching",
-      "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed"
+      "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
+      "blocked edge and network vectors retain upstream_request=false in the annotated evidence"
     ],
+    "no_upstream_observation": "edge_no_upstream evidence is reconstructed from bounded negative case metadata",
     "scope": "loopback-only executable ForwardAuth adapter; no Traefik or Hermes process",
     "status": "regression_tested",
     "traefik_runtime": "not_run; configuration and rule compatibility are not claimed"
@@ -408,6 +476,19 @@
     "status": "synthetic_observed",
     "topology": "loopback_only_disposable"
   },
+  "pty_lifecycle": {
+    "attach": "attached",
+    "before_ttl_reap": 0,
+    "detach": "detached",
+    "host_requirement": "posix_or_wsl",
+    "input": "forwarded",
+    "kill": "not_claimed",
+    "replay_before_live": "not_claimed",
+    "retained_material": "redacted",
+    "retry": "disabled",
+    "status": "synthetic_observed",
+    "ttl_reap": 1
+  },
   "retention": {
     "cookies": "redacted",
     "credentials": "redacted",
@@ -418,11 +499,30 @@
     "transcripts": "redacted"
   },
   "schema": "hermternal.traefik-proof.v4",
+  "ticket_lifecycle": {
+    "expired_use": "expired",
+    "first_use": "accepted",
+    "invalid_use": "invalid",
+    "redaction": {
+      "query": "redacted",
+      "request_target": "redacted",
+      "ticket": "redacted",
+      "ticket_fragment": "redacted"
+    },
+    "retry": "disabled",
+    "reused_use": "reused",
+    "status": "synthetic_observed",
+    "ttl_seconds": 30
+  },
   "traefik_runtime": {
     "required_minimum_version": "v3.7.6",
     "rule_syntax": "Traefik v3 HeaderRegexp model only; v3.7.6 syntax compatibility is not validated",
     "runtime_validation": "not_run; configuration and rule compatibility are not claimed",
     "status": "not_run",
     "version": "not_recorded"
+  },
+  "upgrade_retry_policy": {
+    "chat": "disabled",
+    "pty": "disabled"
   }
 }
