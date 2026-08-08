@@ -970,7 +970,7 @@ def render_manifest(
                 "SPA fallback maps only canonical client deep links to /200.html",
                 "the synthetic __Host- cookie canary requires Secure, HttpOnly, SameSite=Lax, Path=/, and no Domain",
                 "WebSocket tickets are single-use with a 30-second TTL and retained request material is redacted",
-                "PTY detach is followed by eventual 30-minute TTL cleanup without retaining input bytes",
+                "PTY reattach rejects elapsed time beyond the 30-minute TTL before periodic cleanup, while reap deletes the stale handle after the boundary without retaining input bytes",
                 "Chat and PTY WebSocket retries are disabled",
                 "the required Hermes boundary is private non-loopback TCP 9119 with no public exposure",
                 "blocked edge and direct-port vectors retain upstream_request=false",
@@ -1588,8 +1588,13 @@ class SyntheticPtyLifecycle:
             raise ValueError("PTY timestamp is malformed")
         if attach_id not in self._states:
             raise ValueError("PTY attachment has been reaped")
-        if self._states[attach_id] is None:
+        detached_at = self._states[attach_id]
+        if detached_at is None:
             return "already_attached"
+        # Reattach eligibility is checked independently of periodic cleanup so a
+        # stale handle cannot be reused while its detached resource still exists.
+        if float(now) - detached_at > self.ttl_seconds:
+            raise ValueError("PTY attachment has exceeded retention TTL")
         self._states[attach_id] = None
         return "reattached"
 
@@ -1600,7 +1605,8 @@ class SyntheticPtyLifecycle:
             attach_id
             for attach_id, detached_at in self._states.items()
             # Keep the handle reattachable at exactly the retention boundary;
-            # cleanup begins only after the full TTL has elapsed.
+            # reattach() enforces the same strict eligibility check immediately,
+            # while this periodic pass deletes only already-ineligible handles.
             if detached_at is not None and float(now) - detached_at > self.ttl_seconds
         ]
         for attach_id in expired:
@@ -1623,6 +1629,12 @@ def synthetic_pty_lifecycle_observation() -> dict[str, object]:
     expired = SyntheticPtyLifecycle()
     expired.attach("fixtureExpired", now=0)
     expired.detach("fixtureExpired", now=0)
+    try:
+        expired.reattach("fixtureExpired", now=PTY_DETACHED_TTL_SECONDS + 1)
+    except ValueError:
+        expired_reattach_before_reap = "rejected"
+    else:
+        expired_reattach_before_reap = "accepted"
     after_ttl = expired.reap(now=PTY_DETACHED_TTL_SECONDS + 1)
     return {
         "status": "synthetic_observed",
@@ -1634,6 +1646,7 @@ def synthetic_pty_lifecycle_observation() -> dict[str, object]:
         "boundary_reap": boundary_reap,
         "boundary_reattach": boundary_reattach,
         "expired_elapsed_seconds": PTY_DETACHED_TTL_SECONDS + 1,
+        "expired_reattach_before_reap": expired_reattach_before_reap,
         "before_ttl_reap": boundary_reap,
         "ttl_reap": after_ttl,
         "retry": UPGRADE_RETRY_POLICY["pty"],
