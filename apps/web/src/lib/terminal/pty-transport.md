@@ -11,8 +11,11 @@ W-Term renderer, session coordinator, workspace shell, or Chat UI.
 ## Interface
 
 `createFreshPtyTicketProvider` adapts the reviewed authenticated request seam to
-one same-origin `POST /api/auth/ws-ticket` request per call. It requires the
-closed `{ ticket }` response shape and keeps no reusable credential state.
+one same-origin `POST /api/auth/ws-ticket` request per call. The shared HTTP
+boundary validates the exact `{ "ticket": "<URL-safe value>", "ttl_seconds": 30 }`
+response, rejects duplicate or extra fields, and returns only normalized
+`{ ticket }` to this PTY adapter. The adapter keeps no reusable credential state
+and does not duplicate raw-response validation.
 
 `createPtyTransport` exposes state and byte/event subscriptions plus these
 operations:
@@ -54,7 +57,10 @@ operations:
   cancellation is rechecked before ticket minting, and `connecting` cancellation
   is rechecked again before constructing the opaque upgrade or invoking the
   socket factory. Therefore a reentrant observer cannot allocate a stale socket
-  or consume a replacement generation's factory work. A detach timestamp is
+  or consume a replacement generation's factory work. The browser adapter
+  converts the current HTTP origin to `ws:` or `wss:` and passes the
+  transport-owned abort signal to the injected socket factory, so a PTY attempt
+  can close its socket even when its caller has no signal. A detach timestamp is
   recorded only if adapter-controlled socket close returns without
   a replacement claiming the generation, so an old A cleanup cannot write
   evidence after reentrant B connects. Late socket-factory values are closed
