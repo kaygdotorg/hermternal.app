@@ -7,7 +7,9 @@ import {
   createPtyTransport,
   type PtyConnectionInput,
   type PtyTransport,
+  type PtyTransportEvent,
   type PtyWebSocket,
+  type PtyWebSocketUpgradeRequest,
 } from "./pty-transport";
 
 const REPETITIONS = 30;
@@ -21,7 +23,22 @@ const INPUT: PtyConnectionInput = {
 const STAGES = ["validator", "ticket", "factory"] as const;
 type Stage = (typeof STAGES)[number];
 
+interface CallbackSnapshot {
+  readonly onopen: ((event?: unknown) => void) | null;
+  readonly onmessage: ((event: { readonly data: unknown }) => void) | null;
+  readonly onerror: ((event?: unknown) => void) | null;
+  readonly onclose: ((event?: { readonly code?: number }) => void) | null;
+}
+
+interface StaleCallbackDispatches {
+  readonly onopen: number;
+  readonly onmessage: number;
+  readonly onerror: number;
+  readonly onclose: number;
+}
+
 class BenchmarkSocket implements PtyWebSocket {
+  readonly identity: string;
   onopen: ((event?: unknown) => void) | null = null;
   onmessage: ((event: { readonly data: unknown }) => void) | null = null;
   onerror: ((event?: unknown) => void) | null = null;
@@ -30,6 +47,10 @@ class BenchmarkSocket implements PtyWebSocket {
   opened = false;
   closed = false;
   closeCalls = 0;
+
+  constructor(identity: string) {
+    this.identity = identity;
+  }
 
   send(): void {}
 
@@ -45,18 +66,71 @@ class BenchmarkSocket implements PtyWebSocket {
     this.opened = true;
     this.onopen?.();
   }
+
+  captureCallbacks(): CallbackSnapshot {
+    return {
+      onopen: this.onopen,
+      onmessage: this.onmessage,
+      onerror: this.onerror,
+      onclose: this.onclose,
+    };
+  }
+
+  dispatchStaleCallbacks(callbacks: CallbackSnapshot): StaleCallbackDispatches {
+    let onopen = 0;
+    let onmessage = 0;
+    let onerror = 0;
+    let onclose = 0;
+    if (callbacks.onopen) {
+      onopen = 1;
+      callbacks.onopen();
+    }
+    if (callbacks.onmessage) {
+      onmessage = 1;
+      callbacks.onmessage({ data: new Uint8Array([0x42]).buffer });
+    }
+    if (callbacks.onerror) {
+      onerror = 1;
+      callbacks.onerror();
+    }
+    if (callbacks.onclose) {
+      onclose = 1;
+      callbacks.onclose({ code: 1006 });
+    }
+    return { onopen, onmessage, onerror, onclose };
+  }
 }
 
 interface RunProof {
   readonly sampleMs: number;
+  readonly validatorCalls: number;
+  readonly validatorCallsBeforeRecovery: number;
   readonly ticketRequests: number;
+  readonly ticketRequestsBeforeRecovery: number;
   readonly socketFactoryCalls: number;
+  readonly socketFactoryCallsBeforeRecovery: number;
   readonly openedSockets: number;
   readonly cleanupCalls: number;
   readonly duplicateOwnerViolations: number;
   readonly activeOwnerCount: number;
+  readonly expectedOwnerIdentity: string;
+  readonly activeOwnerIdentities: readonly string[];
+  readonly staleSocketIdentities: readonly string[];
+  readonly staleSocketIdentity: string | null;
+  readonly staleSocketCloseCalls: number;
+  readonly replacementSocketIdentity: string;
+  readonly replacementSocketCloseCalls: number;
+  readonly socketClosures: readonly Readonly<{ readonly identity: string; readonly closeCalls: number }>[];
   readonly staleCleanupCalls: number;
   readonly staleOpenCalls: number;
+  readonly allCallbacksNullAfterClose: boolean;
+  readonly staleOnopenDispatches: number;
+  readonly staleOnmessageDispatches: number;
+  readonly staleOnerrorDispatches: number;
+  readonly staleOncloseDispatches: number;
+  readonly postCloseStateEvents: number;
+  readonly postCloseBytesEvents: number;
+  readonly postCloseNoticeEvents: number;
   readonly assertions: Readonly<Record<string, boolean>>;
 }
 
@@ -102,16 +176,18 @@ async function runStage(stage: Stage): Promise<RunProof> {
   let resolveValidation!: (value: boolean) => void;
   let resolveTicket!: (value: string) => void;
   let resolveFactory!: (value: BenchmarkSocket) => void;
-  let validationCalls = 0;
+  let validatorCalls = 0;
   let ticketRequests = 0;
   let socketFactoryCalls = 0;
   let openedSockets = 0;
   const sockets: BenchmarkSocket[] = [];
+  const events: PtyTransportEvent[] = [];
   let staleSocket: BenchmarkSocket | undefined;
   let transport!: PtyTransport;
 
   const validateAttachment = (): Promise<boolean> | true => {
-    if (stage !== "validator" || validationCalls++ > 0) return true;
+    validatorCalls += 1;
+    if (stage !== "validator" || validatorCalls > 1) return true;
     return new Promise<boolean>((resolve) => {
       resolveValidation = resolve;
     });
@@ -125,9 +201,11 @@ async function runStage(stage: Stage): Promise<RunProof> {
     }
     return Promise.resolve(`benchmark-ticket-${ticketRequests}`);
   };
-  const createWebSocket = (): Promise<BenchmarkSocket> | BenchmarkSocket => {
+  const createWebSocket = (
+    upgrade: PtyWebSocketUpgradeRequest,
+  ): Promise<BenchmarkSocket> | BenchmarkSocket => {
     socketFactoryCalls += 1;
-    const socket = new BenchmarkSocket();
+    const socket = new BenchmarkSocket(upgrade.query.resume);
     sockets.push(socket);
     if (stage === "factory" && socketFactoryCalls === 1) {
       staleSocket = socket;
@@ -143,6 +221,7 @@ async function runStage(stage: Stage): Promise<RunProof> {
     validateAttachment,
     ticketProvider,
     createWebSocket,
+    onEvent: (event) => events.push(event),
   });
 
   const started = performance.now();
@@ -164,6 +243,7 @@ async function runStage(stage: Stage): Promise<RunProof> {
   }
   await flush();
   const sampleMs = roundSample(performance.now() - started);
+  const validatorCallsBeforeRecovery = validatorCalls;
   const ticketRequestsBeforeRecovery = ticketRequests;
   const socketFactoryCallsBeforeRecovery = socketFactoryCalls;
 
@@ -180,23 +260,94 @@ async function runStage(stage: Stage): Promise<RunProof> {
   openedSockets += 1;
   await within(recovery, `${stage} recovery open`);
   const recoveryAttached = transport.state.status === "attached";
-  const activeOwnerCountBeforeCleanup = sockets.filter((socket) => socket.opened && !socket.closed).length;
+  const expectedOwnerIdentity = INPUT.sessionId;
+  const activeOwnerIdentities = sockets
+    .filter((socket) => socket.opened && !socket.closed)
+    .map((socket) => socket.identity);
+  const activeOwnerCountBeforeCleanup = activeOwnerIdentities.length;
+  const callbackSnapshots = sockets.map((socket) => ({
+    socket,
+    callbacks: socket.captureCallbacks(),
+  }));
+
+  // Close must detach every adapter callback before its safeClose call. Replay
+  // each callback captured from the live socket after Close to prove stale
+  // open, message, error, and close events cannot publish anything.
   transport.close();
+  const allCallbacksNullAfterClose = sockets.every(
+    (socket) =>
+      socket.onopen === null &&
+      socket.onmessage === null &&
+      socket.onerror === null &&
+      socket.onclose === null,
+  );
+  let staleOnopenDispatches = 0;
+  let staleOnmessageDispatches = 0;
+  let staleOnerrorDispatches = 0;
+  let staleOncloseDispatches = 0;
+  const postCloseEventStart = events.length;
+  for (const { socket, callbacks } of callbackSnapshots) {
+    const dispatches = socket.dispatchStaleCallbacks(callbacks);
+    staleOnopenDispatches += dispatches.onopen;
+    staleOnmessageDispatches += dispatches.onmessage;
+    staleOnerrorDispatches += dispatches.onerror;
+    staleOncloseDispatches += dispatches.onclose;
+  }
   await flush();
+  const postCloseEvents = events.slice(postCloseEventStart);
+  const postCloseStateEvents = postCloseEvents.filter((event) => event.type === "state").length;
+  const postCloseBytesEvents = postCloseEvents.filter((event) => event.type === "bytes").length;
+  const postCloseNoticeEvents = postCloseEvents.filter((event) => event.type === "notice").length;
 
   const cleanupCalls = sockets.reduce((total, socket) => total + socket.closeCalls, 0);
-  const staleCleanupCalls = staleSocket?.closeCalls ?? 0;
+  const staleSocketIdentities = staleSocket ? [staleSocket.identity] : [];
+  const staleSocketIdentity = staleSocket?.identity ?? null;
+  const staleSocketCloseCalls = staleSocket?.closeCalls ?? 0;
+  const replacementSocketIdentity = replacement.identity;
+  const replacementSocketCloseCalls = replacement.closeCalls;
+  const socketClosures = sockets.map((socket) => ({
+    identity: socket.identity,
+    closeCalls: socket.closeCalls,
+  }));
+  const staleCleanupCalls = staleSocketCloseCalls;
   const staleOpenCalls = staleSocket?.opened ? 1 : 0;
   const duplicateOwnerViolations = activeOwnerCountBeforeCleanup > 1 ? 1 : 0;
   const assertions = {
-    quarantineTicketFence: ticketRequestsBeforeRecovery === (stage === "validator" ? 0 : 1),
+    quarantineValidatorFence: validatorCallsBeforeRecovery === 1,
+    quarantineTicketFence:
+      validatorCallsBeforeRecovery === 1 &&
+      ticketRequestsBeforeRecovery === (stage === "validator" ? 0 : 1),
     quarantineFactoryFence: socketFactoryCallsBeforeRecovery === (stage === "factory" ? 1 : 0),
-    staleSocketClosedOnce: stage !== "factory" || staleCleanupCalls === 1,
+    expectedValidatorCount: validatorCalls === 2,
+    expectedTicketCount: ticketRequests === (stage === "validator" ? 1 : 2),
+    expectedFactoryCount: socketFactoryCalls === (stage === "factory" ? 2 : 1),
+    staleSocketIdentityMatchesStage:
+      stage === "factory"
+        ? staleSocketIdentities.length === 1 && staleSocketIdentities[0] === expectedOwnerIdentity
+        : staleSocketIdentities.length === 0,
+    staleSocketClosedExactly: stage !== "factory" || staleSocketCloseCalls === 1,
     staleSocketNeverOpened: staleOpenCalls === 0,
+    replacementIdentityMatchesExpected: replacementSocketIdentity === expectedOwnerIdentity,
     replacementOpenedExactlyOnce: replacement.opened && openedSockets === 1,
+    replacementClosedExactlyOnce: replacementSocketCloseCalls === 1,
     replacementReachedAttached: recoveryAttached,
+    expectedOwnerIsOnlyActiveOwner:
+      activeOwnerIdentities.length === 1 && activeOwnerIdentities[0] === expectedOwnerIdentity,
     noDuplicateOwners: duplicateOwnerViolations === 0,
-    cleanupRecorded: cleanupCalls >= 1,
+    allCallbacksNullAfterClose,
+    staleCallbacksExercised:
+      staleOnopenDispatches === activeOwnerCountBeforeCleanup &&
+      staleOnmessageDispatches === activeOwnerCountBeforeCleanup &&
+      staleOnerrorDispatches === activeOwnerCountBeforeCleanup &&
+      staleOncloseDispatches === activeOwnerCountBeforeCleanup,
+    staleOnopenIgnored: staleOnopenDispatches === activeOwnerCountBeforeCleanup && postCloseStateEvents === 0,
+    staleOnmessageIgnored: staleOnmessageDispatches === activeOwnerCountBeforeCleanup && postCloseBytesEvents === 0,
+    staleOnerrorIgnored: staleOnerrorDispatches === activeOwnerCountBeforeCleanup && postCloseStateEvents === 0,
+    staleOncloseIgnored: staleOncloseDispatches === activeOwnerCountBeforeCleanup && postCloseStateEvents === 0,
+    noPostCloseStateEvents: postCloseStateEvents === 0,
+    noPostCloseBytesEvents: postCloseBytesEvents === 0,
+    noPostCloseNoticeEvents: postCloseNoticeEvents === 0,
+    cleanupRecorded: cleanupCalls === (stage === "factory" ? 2 : 1),
   };
   if (Object.values(assertions).some((value) => !value)) {
     throw new Error(`${stage} proof assertion failed: ${JSON.stringify(assertions)}`);
@@ -204,14 +355,34 @@ async function runStage(stage: Stage): Promise<RunProof> {
 
   return {
     sampleMs,
+    validatorCalls,
+    validatorCallsBeforeRecovery,
     ticketRequests,
+    ticketRequestsBeforeRecovery,
     socketFactoryCalls,
+    socketFactoryCallsBeforeRecovery,
     openedSockets,
     cleanupCalls,
     duplicateOwnerViolations,
     activeOwnerCount: activeOwnerCountBeforeCleanup,
+    expectedOwnerIdentity,
+    activeOwnerIdentities,
+    staleSocketIdentities,
+    staleSocketIdentity,
+    staleSocketCloseCalls,
+    replacementSocketIdentity,
+    replacementSocketCloseCalls,
+    socketClosures,
     staleCleanupCalls,
     staleOpenCalls,
+    allCallbacksNullAfterClose,
+    staleOnopenDispatches,
+    staleOnmessageDispatches,
+    staleOnerrorDispatches,
+    staleOncloseDispatches,
+    postCloseStateEvents,
+    postCloseBytesEvents,
+    postCloseNoticeEvents,
     assertions,
   };
 }
@@ -242,6 +413,7 @@ for (const stage of STAGES) {
     distribution: distribution(measured.samples),
     runs: measured.runs,
     totals: {
+      validatorCalls: total("validatorCalls"),
       ticketRequests: total("ticketRequests"),
       socketFactoryCalls: total("socketFactoryCalls"),
       openedSockets: total("openedSockets"),
