@@ -263,10 +263,15 @@ export class LiveWorkspaceSession {
     if (
       !chat ||
       !sessionId ||
+      this.activeRequest !== undefined ||
       (this.snapshot.state !== 'ready' && this.snapshot.state !== 'empty' && this.snapshot.state !== 'stopped')
     )
       return;
 
+    // Completion publication can synchronously reenter through a subscriber
+    // while the completed request still owns its REST reconciliation. Reject
+    // that send before transport delivery; the post-call guard remains below
+    // for callbacks that originate inside the transport call itself.
     let request: JsonRpcChatRequest;
     try {
       request = chat.sendPrompt(text);

@@ -1042,6 +1042,57 @@ describe('LiveWorkspaceSession', () => {
     expect(session.current.timeline).toEqual([]);
   });
 
+  it('blocks a completion subscriber from sending a second prompt before transport delivery', async () => {
+    const rest = createRest([]);
+    const refresh = createDeferred<SessionMessages>();
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+    let reentrantSendAttempts = 0;
+    let reentrantSendHandled = false;
+
+    session.subscribe((snapshot) => {
+      const completedOriginalPrompt = snapshot.timeline.some(
+        (item) => item.kind === 'assistant-message' && item.text === 'Server answer'
+      );
+      if (reentrantSendHandled || snapshot.state !== 'ready' || !completedOriginalPrompt) return;
+      reentrantSendHandled = true;
+      reentrantSendAttempts += 1;
+      session.sendPrompt('must not cross the transport boundary');
+    });
+
+    session.sendPrompt('Original prompt');
+    const requestId = latestPromptId(socket);
+    socket.emitEvent('message.complete', requestId, { text: 'Server answer' });
+
+    // The ready publication reentered sendPrompt synchronously, but the original
+    // request stays the sole transport operation and owns the pending REST read.
+    expect(reentrantSendAttempts).toBe(1);
+    expect(socket.sent.filter((frame) => JSON.parse(frame).method === 'prompt.submit')).toHaveLength(1);
+    await flush();
+    await flush();
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(2);
+
+    refresh.resolve(
+      sessionMessages([
+        { role: 'user', content: 'Original prompt' },
+        { role: 'assistant', content: 'Server answer' }
+      ])
+    );
+    await flush();
+
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'assistant-message', text: 'Server answer' })
+    );
+    expect(socket.sent.filter((frame) => JSON.parse(frame).method === 'prompt.submit')).toHaveLength(1);
+
+    // A late generic close is stale after the exact completion refresh commits;
+    // it cannot replay the prompt or revoke the server-owned completed history.
+    socket.emitClose(1011, 'redacted');
+    expect(session.current.state).toBe('ready');
+    expect(socket.sent.filter((frame) => JSON.parse(frame).method === 'prompt.submit')).toHaveLength(1);
+  });
+
   it('defers a generic terminal close until completion history commits', async () => {
     const rest = createRest([]);
     const refresh = createDeferred<SessionMessages>();
