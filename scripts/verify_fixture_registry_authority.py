@@ -58,6 +58,10 @@ AUTHORITY_ROLE = "aggregate_predecessor"
 # authority introduction and predecessor.
 EXPECTED_AUTHORITY_COMMIT = "285acdcf9c11c049180a7844e689eee0f1490de4"
 EXPECTED_SOURCE_COMMIT = "263cb75adcf153d6fe252636b064e5fbc3e3f877"
+# The active rotation is supplied to the validator only after this helper's
+# source has passed its independent SHA-256 and Git blob identity checks.
+EXPECTED_ACTIVE_AUTHORITY_COMMIT = "e8f09813bb87eb38dd03d4a3b4d59b0dbe0091e2"
+EXPECTED_ACTIVE_SOURCE_COMMIT = "f82d74224af050fc669273ac57dfff13f588f093"
 EXPECTED_ARTIFACT_PATHS = (
     "contracts/fixtures/index.json",
     "contracts/fixtures/validator/test_validate.py",
