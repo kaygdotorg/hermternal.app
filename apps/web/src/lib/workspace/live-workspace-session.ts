@@ -81,6 +81,10 @@ interface CommittedCompletionOwnership {
   readonly refreshEpoch: number;
 }
 
+interface PendingCompletionOwnership extends CommittedCompletionOwnership {
+  deferredGenericFailure: boolean;
+}
+
 /**
  * Keeps only the opaque persisted session identity needed to route Retry back
  * through restore after history loading fails before the session is published.
@@ -127,6 +131,11 @@ export class LiveWorkspaceSession {
   // successful message.complete and its REST reconciliation committed. Initial
   // restore and reconnect history use committedHistory but never this marker.
   private committedCompletion: CommittedCompletionOwnership | undefined;
+  // A completion event establishes a short-lived owner before the REST response
+  // arrives. A matching generic failure is deferred against this owner rather
+  // than advancing the refresh epoch; auth/origin/uncertain failures still
+  // revoke it immediately.
+  private pendingCompletion: PendingCompletionOwnership | undefined;
   private failedRestore: FailedRestoreOwnership | undefined;
   private disposed = false;
 
@@ -582,8 +591,24 @@ export class LiveWorkspaceSession {
     }
 
     if (event.type === 'message.complete' && request && event.requestId === request.id) {
-      if (this.activePromptOwnership?.request === request && isSuccessfulMessageComplete(event.payload)) {
-        this.activePromptOwnership.completionObserved = true;
+      const ownership = this.activePromptOwnership;
+      if (
+        !ownership ||
+        ownership.request !== request ||
+        !this.ownsPromptCompletion(ownership)
+      ) {
+        return;
+      }
+      if (isSuccessfulMessageComplete(event.payload)) {
+        ownership.completionObserved = true;
+        this.pendingCompletion = {
+          generation: ownership.generation,
+          sessionId: ownership.sessionId,
+          chat: ownership.chat,
+          request: ownership.request,
+          refreshEpoch: ownership.promptEpoch,
+          deferredGenericFailure: false
+        };
       }
       const text = payloadText(event.payload);
       if (text) this.updateStreamingText(request.id, text, true);
@@ -665,16 +690,20 @@ export class LiveWorkspaceSession {
 
     // Hermes can report a generic failed/uncertain callback after REST because
     // prompt events, acknowledgements, and socket close notifications are not
-    // ordered as one client transaction. Only an exact completed-prompt marker
-    // can suppress generic failure; pending history must still lose to a
-    // failure, and auth/origin classifications always remain authoritative.
+    // ordered as one client transaction. An exact completed-prompt marker can
+    // suppress generic failure only after REST commits; while that exact read is
+    // pending, only a matching generic failure may be deferred. Auth/origin and
+    // uncertain classifications remain authoritative immediately.
     const committedHistory = this.ownsCommittedHistory();
     const preserveLateGenericFailure = state.status === 'failed' && this.ownsCommittedCompletion();
+    const deferLateGenericFailure =
+      state.status === 'failed' && this.deferPendingGenericFailure();
     const preserveLateUncertainty = state.status === 'delivery_uncertain' && committedHistory;
 
     if (
       isTerminalConnectionStatus(state.status) &&
       !preserveLateGenericFailure &&
+      !deferLateGenericFailure &&
       !preserveLateUncertainty
     ) {
       this.advanceRefreshEpoch();
@@ -696,6 +725,12 @@ export class LiveWorkspaceSession {
       // reconciliation is stale lifecycle information. Keep the confirmed
       // server history and ready state; a real uncertain or classified close
       // still takes the recovery/permanent path below.
+      return;
+    }
+    if (deferLateGenericFailure) {
+      // The exact prompt completed, but REST has not committed its server-owned
+      // replacement yet. Keep the transient completion view until that read
+      // settles; a failure, cancellation, or ownership loss will revoke it.
       return;
     }
     if (preserveLateUncertainty) {
@@ -734,6 +769,17 @@ export class LiveWorkspaceSession {
       !this.ownsPromptCompletion(ownership)
     )
       return;
+    const completionOwnership = ownership.completionObserved ? ownership : undefined;
+    if (completionOwnership && !this.ownsPendingCompletion(completionOwnership)) {
+      this.pendingCompletion = {
+        generation: completionOwnership.generation,
+        sessionId: completionOwnership.sessionId,
+        chat: completionOwnership.chat,
+        request: completionOwnership.request,
+        refreshEpoch: completionOwnership.promptEpoch,
+        deferredGenericFailure: false
+      };
+    }
     this.activeRequest = undefined;
     this.activePromptOwnership = undefined;
     await this.refreshMessages(
@@ -742,7 +788,7 @@ export class LiveWorkspaceSession {
       ownership.chat,
       ownership.signal,
       ownership.promptEpoch,
-      ownership.completionObserved ? ownership : undefined
+      completionOwnership
     );
   }
 
@@ -760,19 +806,32 @@ export class LiveWorkspaceSession {
         { limit: 500, offset: 0 },
         signal
       );
-      if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
+      if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) {
+        if (completionOwnership) this.clearPendingCompletion(completionOwnership.request);
+        return;
+      }
       const timeline = mapLiveMessages(sessionId, response.messages, this.snapshot.model);
-      if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
+      if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) {
+        if (completionOwnership) this.clearPendingCompletion(completionOwnership.request);
+        return;
+      }
       if (expectedChat) {
         this.commitHistory(generation, sessionId, expectedChat);
-        if (completionOwnership) this.commitCompletionHistory(completionOwnership);
+        if (completionOwnership) {
+          this.commitCompletionHistory(completionOwnership);
+          this.clearPendingCompletion(completionOwnership.request);
+        }
       }
       this.publish({ ...this.snapshot, timeline, state: timeline.length === 0 ? 'empty' : 'ready' });
     } catch (error) {
       // Abort and stale non-abort failures are both deliberately silent. A
       // replacement operation owns the visible state and must not be
       // downgraded to retryable-error by an old REST continuation.
-      if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
+      if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) {
+        if (completionOwnership) this.clearPendingCompletion(completionOwnership.request);
+        return;
+      }
+      if (completionOwnership) this.clearPendingCompletion(completionOwnership.request);
       if (error instanceof LiveRestError && error.code === 'unauthenticated' && error.status === 401) {
         this.publishPermanentFailure(generation, { reason: 'authentication-required' });
         return;
@@ -958,6 +1017,7 @@ export class LiveWorkspaceSession {
     this.refreshEpoch += 1;
     this.committedHistory = undefined;
     this.committedCompletion = undefined;
+    this.pendingCompletion = undefined;
     return this.refreshEpoch;
   }
 
@@ -1122,6 +1182,33 @@ export class LiveWorkspaceSession {
       committed.chat === this.chat &&
       committed.refreshEpoch === this.refreshEpoch
     );
+  }
+
+  private ownsPendingCompletion(
+    ownership?: Pick<CommittedCompletionOwnership, 'request'>
+  ): PendingCompletionOwnership | undefined {
+    const pending = this.pendingCompletion;
+    if (
+      pending === undefined ||
+      (ownership !== undefined && pending.request !== ownership.request) ||
+      pending.generation !== this.generation ||
+      pending.sessionId !== this.snapshot.activeSessionId ||
+      pending.chat !== this.chat ||
+      pending.refreshEpoch !== this.refreshEpoch
+    )
+      return undefined;
+    return pending;
+  }
+
+  private deferPendingGenericFailure(): boolean {
+    const pending = this.ownsPendingCompletion();
+    if (!pending) return false;
+    pending.deferredGenericFailure = true;
+    return true;
+  }
+
+  private clearPendingCompletion(request: JsonRpcChatRequest): void {
+    if (this.pendingCompletion?.request === request) this.pendingCompletion = undefined;
   }
 
   private ownsRefresh(

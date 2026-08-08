@@ -771,11 +771,14 @@ describe('LiveWorkspaceSession', () => {
       requestId: 'request-1',
       payload: { text: 'Server answer' }
     };
+    chat.emit(completeEvent);
     chat.complete(completeEvent);
     await flush();
     await flush();
 
     expect(refreshSignal).toBeInstanceOf(AbortSignal);
+    chat.changeState({ status: 'failed', generation: 1 });
+    expect(session.current.state).toBe('ready');
     session.invalidate();
     expect(refreshSignal?.aborted).toBe(true);
 
@@ -1039,7 +1042,7 @@ describe('LiveWorkspaceSession', () => {
     expect(session.current.timeline).toEqual([]);
   });
 
-  it('keeps a generic terminal close retryable when completion history is still pending', async () => {
+  it('defers a generic terminal close until completion history commits', async () => {
     const rest = createRest([]);
     const refresh = createDeferred<SessionMessages>();
     const { session, socket } = await createConnectedSocketWorkspace(rest);
@@ -1052,13 +1055,106 @@ describe('LiveWorkspaceSession', () => {
     await flush();
 
     socket.emitClose(1011, 'redacted');
-    expect(session.current.state).toBe('retryable-error');
+    // The matching generic failure is owned by the exact completion refresh;
+    // it must not become actionable recovery before REST settles.
+    expect(session.current.state).toBe('ready');
+    expect(socket.sent.filter((frame) => JSON.parse(frame).method === 'prompt.submit')).toHaveLength(1);
 
     refresh.resolve(sessionMessages([{ role: 'assistant', content: 'late history' }]));
     await flush();
 
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'assistant-message', text: 'late history' })
+    );
+    expect(socket.sent.filter((frame) => JSON.parse(frame).method === 'prompt.submit')).toHaveLength(1);
+  });
+
+  it('publishes REST failure after deferring a matching generic terminal close', async () => {
+    const rest = createRest([]);
+    const refresh = createDeferred<SessionMessages>();
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+
+    session.sendPrompt('Complete before history failure');
+    const requestId = latestPromptId(socket);
+    socket.emitEvent('message.complete', requestId, { text: 'Server answer' });
+    await flush();
+    await flush();
+
+    socket.emitClose(1011, 'redacted');
+    expect(session.current.state).toBe('ready');
+
+    refresh.reject(new Error('history read failed'));
+    await flush();
+
     expect(session.current.state).toBe('retryable-error');
-    expect(JSON.stringify(session.current.timeline)).not.toContain('late history');
+    expect(socket.sent.filter((frame) => JSON.parse(frame).method === 'prompt.submit')).toHaveLength(1);
+  });
+
+  it('invalidates deferred completion history on delivery uncertainty', async () => {
+    const rest = createRest([]);
+    const refresh = createDeferred<SessionMessages>();
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+
+    session.sendPrompt('Complete before uncertain delivery');
+    const completion: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'Server answer' }
+    };
+    chat.emit(completion);
+    chat.complete(completion);
+    await flush();
+    await flush();
+
+    chat.changeState({ status: 'delivery_uncertain', generation: 1 });
+    expect(session.current.state).toBe('retryable-error');
+
+    refresh.resolve(sessionMessages([{ role: 'assistant', content: 'must not commit' }]));
+    await flush();
+
+    expect(session.current.state).toBe('retryable-error');
+    expect(session.current.timeline).not.toContainEqual(
+      expect.objectContaining({ text: 'must not commit' })
+    );
+    expect(chat.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a generic failure deferred until a replacement owns the session', async () => {
+    const rest = createRest([]);
+    const refresh = createDeferred<SessionMessages>();
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+    vi.mocked(rest.getSession).mockResolvedValueOnce({ ...SESSION, id: 'session-2', title: 'Replacement' });
+    vi.mocked(rest.getSessionMessages).mockResolvedValueOnce({ ...sessionMessages([]), sessionId: 'session-2' });
+
+    session.sendPrompt('Complete before replacement');
+    const completion: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: 'request-1',
+      payload: { text: 'Server answer' }
+    };
+    chat.emit(completion);
+    chat.complete(completion);
+    await flush();
+    await flush();
+    chat.changeState({ status: 'failed', generation: 1 });
+    expect(session.current.state).toBe('ready');
+
+    const replacement = session.selectSession('session-2');
+    refresh.resolve(sessionMessages([{ role: 'assistant', content: 'stale history' }]));
+    await replacement;
+
+    expect(session.current).toMatchObject({ activeSessionId: 'session-2', title: 'Replacement', state: 'empty' });
+    expect(session.current.timeline).not.toContainEqual(
+      expect.objectContaining({ text: 'stale history' })
+    );
   });
 
   it('keeps committed completion history ready after a late generic terminal callback', async () => {
@@ -2071,14 +2167,8 @@ describe('LiveWorkspaceSession', () => {
     expect(JSON.stringify(session.current.timeline)).not.toContain('late history prompt failure');
   });
 
-  it('keeps same-turn completion events from starting stale history after a terminal close', async () => {
-    const cases = [
-      [4401, 'permanent-error'],
-      [4403, 'permanent-error'],
-      [1011, 'retryable-error']
-    ] as const;
-
-    for (const [closeCode, expectedState] of cases) {
+  it('keeps same-turn classified closes from starting completion history', async () => {
+    for (const closeCode of [4401, 4403] as const) {
       const rest = createRest([]);
       const { session, socket } = await createConnectedSocketWorkspace(rest);
       vi.mocked(rest.getSessionMessages).mockClear();
@@ -2090,8 +2180,33 @@ describe('LiveWorkspaceSession', () => {
       await flush();
 
       expect(rest.getSessionMessages).not.toHaveBeenCalled();
-      expect(session.current.state).toBe(expectedState);
+      expect(session.current.state).toBe('permanent-error');
     }
+  });
+
+  it('starts completion history after a same-turn generic close', async () => {
+    const rest = createRest([]);
+    const refresh = createDeferred<SessionMessages>();
+    const { session, socket } = await createConnectedSocketWorkspace(rest);
+    vi.mocked(rest.getSessionMessages).mockClear();
+    vi.mocked(rest.getSessionMessages).mockImplementationOnce(() => refresh.promise);
+
+    session.sendPrompt('same-turn generic close');
+    const requestId = latestPromptId(socket);
+    socket.emitEvent('message.complete', requestId, { text: 'completed before close' });
+    socket.emitClose(1011, 'redacted');
+    await flush();
+
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(1);
+    expect(session.current.state).toBe('ready');
+
+    refresh.resolve(sessionMessages([{ role: 'assistant', content: 'same-turn history' }]));
+    await flush();
+
+    expect(session.current.state).toBe('ready');
+    expect(session.current.timeline).toContainEqual(
+      expect.objectContaining({ kind: 'assistant-message', text: 'same-turn history' })
+    );
   });
 
   it('lets an explicit retry own the same-turn completion before history refresh starts', async () => {
