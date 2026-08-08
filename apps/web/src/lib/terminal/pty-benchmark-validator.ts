@@ -1,4 +1,7 @@
-import { validatePtyBenchmarkFile } from "./validate-pty-benchmarks";
+import {
+  validatePtyBenchmarkFile,
+  type PtyBenchmarkValidationOptions,
+} from "./validate-pty-benchmarks";
 
 const DEFAULT_ARTIFACTS = [
   "src/lib/terminal/pty-reconnect-supersession-benchmark.json",
@@ -10,8 +13,16 @@ const optimized = args.includes("--optimized");
 const artifactPaths = args.filter((arg) => arg !== "--optimized");
 try {
   const artifacts = artifactPaths.length > 0 ? artifactPaths : DEFAULT_ARTIFACTS;
-  for (const artifactPath of artifacts) validatePtyBenchmarkFile(artifactPath);
-  process.stdout.write(JSON.stringify({ valid: true, optimized, artifacts }) + "\n");
+  const options: PtyBenchmarkValidationOptions = optimized ? { optimized: true } : {};
+  for (const artifactPath of artifacts) validatePtyBenchmarkFile(artifactPath, options);
+  process.stdout.write(
+    JSON.stringify({
+      valid: true,
+      optimized,
+      validationMode: optimized ? "strict-provenance-and-proof-ledger" : "standard-provenance-and-proof-ledger",
+      artifacts,
+    }) + "\n",
+  );
 } catch (error) {
   process.stderr.write(
     JSON.stringify({

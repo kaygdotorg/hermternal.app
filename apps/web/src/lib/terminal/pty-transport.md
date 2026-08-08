@@ -160,30 +160,34 @@ latency evidence defines a budget. Reproduce it with
 `pty-reconnect-supersession.bench.ts` captures 30 deterministic cancellation
 runs for each ignored adapter stage (validator, ticket, and factory), after five
 warmups. Stages execute sequentially, never with `Promise.all`. Each run retains
-its rounded raw settle sample, ticket and factory counters, socket-open and
-cleanup counters, active-owner count, and boolean proof assertions. The harness
-identifies sockets by connection identity, exercises the real replacement
-`onopen`, bounds every wait, and proves that a late factory value is closed
-without opening or publishing stale state. The checked-in
-`pty-reconnect-supersession-benchmark.json` artifact is therefore evidence of
-behavior and cleanup, not a latency claim; `threshold` remains `null` because no
-reviewed budget exists.
+its rounded raw settle sample, validator, ticket, factory, per-socket open and
+close counters, active-owner identity, and exact proof assertions. The harness
+identifies sockets by connection identity, exercises real replacement `onopen`,
+late `onmessage`/`onerror`/server-close emitters, bounds every wait, and proves
+that Close nulls callbacks and late values cannot publish stale state, bytes, or
+notices. The checked-in artifact is evidence of behavior and cleanup, not a
+latency claim; `threshold` remains `null` because no reviewed budget exists.
 
-`pty-connecting-ownership.bench.ts` measures the post-`connecting` ownership
-path for caller Abort, Close, Detach, and explicit replacement. It excludes
-network, Hermes, credentials, PTY bytes, rendering, and unsupported latency
-budgets. Its v2 artifact retains all raw samples and per-run proof assertions,
-including the connecting guard, zero stale socket opens, identity-owned
-replacement `onopen`, expected ticket/factory counts, duplicate-owner checks,
-and cleanup. The validator recomputes every distribution and total from those
-raw runs and rejects failed assertions, concurrent-stage metadata, missing
-provenance, or arbitrary source revisions.
+`pty-connecting-ownership.bench.ts` measures only the ownership decision after
+the `connecting` state observer runs. Its timer starts immediately before the
+observer's Abort, Close, Detach, or replacement action and ends when the
+cancelled operation rejects; ticket/connect setup before that observer is not in
+the metric. It excludes network, Hermes, credentials, PTY bytes, rendering, and
+unsupported latency budgets. Its v2 artifact retains raw samples, exact
+identity-owned replacement `onopen`, callback-null and late-event proof,
+expected ticket/factory counts, duplicate-owner checks, and per-socket cleanup.
+The validator recomputes every distribution and total, binds assertions to the
+expected stage ledger, and rejects failed or renamed proofs, concurrent-stage
+metadata, missing provenance, or arbitrary source revisions.
 
 Both v2 artifacts record the actual full source commit, source tree, git blob
-and SHA-256 hashes for the benchmark, transport, package manifest, and lockfile,
-plus clean-checkout, runtime, OS, architecture, and CPU provenance. Generate
-evidence from a clean detached source checkout, writing outside the repository
-so the output file cannot make the checkout dirty:
+and SHA-256 hashes for the declared benchmark source, transport, package
+manifest, and lockfile. Provenance also records detached/clean checkout state,
+Bun and embedded Node versions, host Node checked against `package.json` engine
+requirements, package runtime declarations, OS release, architecture, CPU
+model, and CPU count. Generate evidence from a clean detached source checkout,
+writing outside the repository so the output file cannot make the checkout
+dirty:
 
 ```sh
 git switch --detach <sourceRevision>

@@ -10,18 +10,35 @@ export interface PtyBenchmarkBlob {
   readonly sha256: string;
 }
 
+export const PTY_BENCHMARK_SOURCES = {
+  reconnect: {
+    path: "apps/web/src/lib/terminal/pty-reconnect-supersession.bench.ts",
+    command: "bun src/lib/terminal/pty-reconnect-supersession.bench.ts",
+  },
+  connecting: {
+    path: "apps/web/src/lib/terminal/pty-connecting-ownership.bench.ts",
+    command: "bun src/lib/terminal/pty-connecting-ownership.bench.ts",
+  },
+} as const;
+
 export interface PtyBenchmarkProvenance {
   readonly sourceRevision: string;
   readonly generationCommit: string;
   readonly sourceTree: string;
   readonly sourceBlobs: readonly PtyBenchmarkBlob[];
   readonly cleanCheckout: true;
+  readonly detachedHead: true;
   readonly command: string;
   readonly sourceCheckout: string;
   readonly runtime: {
-    readonly bun: string;
+    /** Bun's embedded Node-compatible runtime used by the benchmark process. */
     readonly node: string;
+    /** Host Node executable checked against package.json engines.node. */
+    readonly hostNode: string;
+    readonly bun: string;
     readonly packageManager: string;
+    readonly declaredBun: string;
+    readonly declaredNode: string;
   };
   readonly os: {
     readonly platform: string;
@@ -49,27 +66,73 @@ function fileSha256(path: string): string {
   return sha256Bytes(readFileSync(path));
 }
 
-function packageManagerVersion(): string {
+interface PackageRuntime {
+  readonly packageManager: string;
+  readonly declaredBun: string;
+  readonly declaredNode: string;
+}
+
+function packageRuntime(): PackageRuntime {
   try {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       readonly packageManager?: unknown;
+      readonly engines?: { readonly bun?: unknown; readonly node?: unknown };
     };
-    return typeof packageJson.packageManager === "string"
-      ? packageJson.packageManager
-      : "unknown";
-  } catch {
-    return "unknown";
+    if (
+      typeof packageJson.packageManager !== "string" ||
+      typeof packageJson.engines?.bun !== "string" ||
+      typeof packageJson.engines?.node !== "string"
+    ) {
+      throw new Error("package runtime metadata is incomplete");
+    }
+    return {
+      packageManager: packageJson.packageManager,
+      declaredBun: packageJson.engines.bun,
+      declaredNode: packageJson.engines.node,
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    throw new Error(`PTY benchmark package runtime metadata is invalid${detail}`);
   }
 }
 
-function cleanCheckout(): true {
+function hostNodeVersion(): string {
+  try {
+    const version = execFileSync("node", ["--version"], { encoding: "utf8" }).trim();
+    if (!/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(version)) {
+      throw new Error(`unexpected node version ${version}`);
+    }
+    return version.slice(1);
+  } catch (error) {
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    throw new Error(`PTY benchmark host Node version could not be captured${detail}`);
+  }
+}
+
+function cleanCheckout(): { readonly cleanCheckout: true; readonly detachedHead: true } {
   const status = git(["status", "--porcelain=v1", "--untracked-files=all"]);
   if (status !== "") {
     throw new Error(
       "PTY benchmark requires a clean checkout; run it from the pinned source commit before redirecting evidence",
     );
   }
-  return true;
+  if (git(["rev-parse", "--abbrev-ref", "HEAD"]) !== "HEAD") {
+    throw new Error(
+      "PTY benchmark requires a detached clean checkout; use git switch --detach <sourceRevision>",
+    );
+  }
+  return { cleanCheckout: true, detachedHead: true };
+}
+
+function validateBenchmarkSource(benchmarkPath: string, command: string): void {
+  const expected = Object.values(PTY_BENCHMARK_SOURCES).find(
+    (source) => source.path === benchmarkPath,
+  );
+  if (!expected || expected.command !== command) {
+    throw new Error(
+      `PTY benchmark source path and command are not a reviewed pair: ${benchmarkPath} / ${command}`,
+    );
+  }
 }
 
 function validateRevision(revision: string): void {
@@ -83,6 +146,7 @@ export function capturePtyBenchmarkProvenance(
   benchmarkPath: string,
   command: string,
 ): PtyBenchmarkProvenance {
+  validateBenchmarkSource(benchmarkPath, command);
   const sourceRevision = git(["rev-parse", "HEAD"]);
   validateRevision(sourceRevision);
   const declaredRevision = process.env.GIT_SOURCE_REVISION;
@@ -99,19 +163,36 @@ export function capturePtyBenchmarkProvenance(
     gitBlobSha: git(["rev-parse", `${sourceRevision}:${path}`]),
     sha256: fileSha256(join(repoRoot, path)),
   }));
+  const runtime = packageRuntime();
+  const bunVersion = process.versions.bun ?? "";
+  if (runtime.packageManager !== `bun@${bunVersion}` || runtime.declaredBun !== bunVersion) {
+    throw new Error(
+      `PTY benchmark Bun runtime ${bunVersion} does not match package runtime ${runtime.packageManager} / ${runtime.declaredBun}`,
+    );
+  }
+  const hostNode = hostNodeVersion();
+  if (hostNode !== runtime.declaredNode) {
+    throw new Error(
+      `PTY benchmark host Node ${hostNode} does not match package.json engines.node ${runtime.declaredNode}`,
+    );
+  }
   const cpu = cpus();
+  const checkout = cleanCheckout();
   return {
     sourceRevision,
     generationCommit: sourceRevision,
     sourceTree: git(["rev-parse", `${sourceRevision}^{tree}`]),
     sourceBlobs,
-    cleanCheckout: cleanCheckout(),
+    ...checkout,
     command,
     sourceCheckout: "git switch --detach <sourceRevision>",
     runtime: {
-      bun: process.versions.bun ?? "unknown",
-      node: process.versions.node ?? "unknown",
-      packageManager: packageManagerVersion(),
+      bun: bunVersion,
+      node: process.versions.node ?? "",
+      hostNode,
+      packageManager: runtime.packageManager,
+      declaredBun: runtime.declaredBun,
+      declaredNode: runtime.declaredNode,
     },
     os: {
       platform: process.platform,
