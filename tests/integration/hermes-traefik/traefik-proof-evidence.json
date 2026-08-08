@@ -51,7 +51,7 @@
     "runtime_inputs_sha256": "4880b6d1ca97fe22b2f0015dce5d5f446354969edf42a282eed1237ce96c0114"
   },
   "forward_auth_contract": {
-    "auth_request_host": "auth-service-authority-not-public-authority",
+    "auth_request_host": "transport-only-auth-service-authority-not-public-authority",
     "copied_headers": [
       "Origin"
     ],
@@ -63,9 +63,16 @@
       "X-Forwarded-Proto",
       "X-Forwarded-Uri"
     ],
-    "hop_by_hop": "direct injected hop-by-hop fields are rejected; Traefik observation is not claimed",
+    "hop_by_hop": "direct injected hop-by-hop fields are rejected; only transport Connection: close is tolerated",
     "port": "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
     "runtime_observed": false,
+    "transport_headers": [
+      "Host",
+      "Content-Length",
+      "User-Agent",
+      "Accept-Encoding",
+      "Connection"
+    ],
     "uri": "X-Forwarded-Uri includes query; it is not raw-target evidence",
     "websocket": "router-matcher-only; Upgrade and Connection are not ForwardAuth observations"
   },
@@ -78,11 +85,14 @@
       "OAuth callback accepts only the reviewed code/state or provider-error query forms",
       "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Port, X-Forwarded-Proto, and X-Forwarded-Uri",
       "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
-      "only Origin is selected as an additional original request header; the auth request Host is not treated as the public authority",
+      "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
+      "the adapter accepts only the generated ForwardAuth set, Origin, and explicit bounded transport headers; Authorization, Cookie, and unknown headers are denied",
       "X-Forwarded-Uri is parsed for path and query policy but is not raw-target evidence",
+      "request paths and targets reject C0, DEL, and C1 control characters before route matching",
       "WebSocket Upgrade and Connection enforcement is represented only by router HeaderRegexp matchers",
       "finite known fields are overridden, while Traefik runtime deletion of RFC hop-by-hop and Connection-listed tokens remains unproven",
       "arbitrary inbound forwarding aliases are outside the finite Traefik override claim and require separate live deployment proof",
+      "the v3.7.6 minimum and HeaderRegexp rule syntax are recorded requirements, not runtime compatibility evidence",
       "chat and PTY upgrade grammars remain distinct in the model"
     ],
     "request_material": "redacted",
@@ -277,15 +287,15 @@
   ],
   "offline_harness": {
     "assertions": [
-      "actual HTTP requests reach the bounded standard-header policy adapter",
+      "actual HTTP requests reach the bounded closed-contract ForwardAuth adapter",
       "X-Forwarded-Port is checked against the configured HTTPS entrypoint port",
       "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
+      "C0, DEL, and C1 request-target controls are denied before route matching",
       "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed"
     ],
     "scope": "loopback-only executable ForwardAuth adapter; no Traefik or Hermes process",
     "status": "regression_tested",
-    "traefik_binary": "unavailable_in_recording_environment",
-    "traefik_check_config": "skipped_unavailable"
+    "traefik_runtime": "not_run; configuration and rule compatibility are not claimed"
   },
   "positive_cases": [
     {
@@ -407,11 +417,11 @@
     "tickets": "redacted",
     "transcripts": "redacted"
   },
-  "schema": "hermternal.traefik-proof.v3",
+  "schema": "hermternal.traefik-proof.v4",
   "traefik_runtime": {
-    "binary": "unavailable_in_recording_environment",
-    "minimum_safe_version": "v3.7.6",
-    "rule_syntax": "Traefik v3 HeaderRegexp; model output not runtime-validated",
+    "required_minimum_version": "v3.7.6",
+    "rule_syntax": "Traefik v3 HeaderRegexp model only; v3.7.6 syntax compatibility is not validated",
+    "runtime_validation": "not_run; configuration and rule compatibility are not claimed",
     "status": "not_run",
     "version": "not_recorded"
   }

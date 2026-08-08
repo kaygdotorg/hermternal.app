@@ -42,19 +42,24 @@ that is the router matcher contract. The executable policy adapter requires the
 standard ForwardAuth metadata: exactly one `X-Forwarded-Host` authority with
 `:19444`, `X-Forwarded-For`, `X-Forwarded-Method`,
 `X-Forwarded-Port: 19444`, `X-Forwarded-Proto: https`, and `X-Forwarded-Uri`.
-The adapter's ordinary `Host` is the ForwardAuth service authority and is not
-treated as the public authority. The port value is checked against the
-configured HTTPS entrypoint rather than trusted as arbitrary forwarded input.
-`X-Forwarded-Uri` includes the query and is parsed for the closed route grammar;
-it is not raw request-target evidence. No separate raw-target, path, query,
-Upgrade, or Connection observation is claimed at the adapter boundary.
+Only copied `Origin` is permitted beside that generated set. The adapter's
+ordinary `Host` is an ignored ForwardAuth-service transport header, not the
+public authority. `Content-Length`, `User-Agent`, `Accept-Encoding`, and
+`Connection: close` are explicit bounded transport exceptions; they are never
+policy input or upstream forwarding. `Authorization`, `Cookie`, unknown
+headers, and other connection tokens fail closed. The port value is checked
+against the configured HTTPS entrypoint rather than trusted as arbitrary
+forwarded input. `X-Forwarded-Uri` includes the query and is parsed for the
+closed route grammar; it is not raw request-target evidence. No separate
+raw-target, path, query, Upgrade, or Connection observation is claimed at the
+adapter boundary.
 
 WebSocket `Upgrade` and `Connection` enforcement is represented by the
 Traefik router matcher (`HeaderRegexp`) only. Path-only exclusion routers send
 malformed or non-GET WebSocket requests to an always-deny local endpoint so
-they cannot fall through to the generic static router. The runtime rule syntax
-and routing behavior remain unvalidated because no Traefik binary was
-available in the recording environment.
+they cannot fall through to the generic static router. The fixture records
+Traefik `v3.7.6` as the requested minimum only; it does not claim that this
+minimum or the `HeaderRegexp` syntax was accepted by a Traefik runtime.
 
 ## Reviewed routing cases
 
@@ -77,45 +82,49 @@ The policy model and renderer cover:
   after the edge accepted the request.
 
 Inbound forwarding fields are not trusted. The static entry point disables
-insecure forwarded-header trust, and the executable adapter accepts only the
-standard ForwardAuth metadata plus copied `Origin`; unknown `X-Forwarded-*`
-metadata and direct hop-by-hop spoofing fail closed. The generated Hermes
-middleware emits a finite known-field override map: private upstream `Host`
-and `Origin`, synthetic public `Forwarded`/`X-Forwarded-*` metadata, one
-optional `/hermes` prefix, and only the canonical WebSocket upgrade pair.
-Empty values express the intended finite removal map, but this offline fixture
-does not prove Traefik's runtime removal of RFC hop-by-hop headers or
-`Connection`-listed tokens. Traefik's `customRequestHeaders` has no wildcard
-delete for arbitrary inbound `X-Forwarded-*` names, so this fixture does not
-claim arbitrary forwarding alias deletion either. Those runtime guarantees
-remain a future real Traefik plus recording-upstream capture requirement or a
-dedicated sanitizer boundary, outside this offline harness. Root and
-dashboard WebSocket routes use separate header middleware so prefix stripping
-does not erase the `/hermes` contract. The proof does not claim that a cookie
-has `Secure`, `HttpOnly`, `SameSite`, or `Path`: no real `Set-Cookie` response
-is captured, so `cookie_proof.status` remains `not_proven`.
+insecure forwarded-header trust, and the executable adapter enforces a closed
+case-insensitive header contract: the six generated ForwardAuth fields,
+copied `Origin`, and only the explicit transport exceptions documented above.
+`Authorization`, `Cookie`, unknown `X-Forwarded-*` metadata, direct hop-by-hop
+spoofing, and non-`close` `Connection` values fail closed. C0, DEL, and C1
+characters in forwarded request paths or targets are rejected before route
+matching. The generated Hermes middleware emits a finite known-field override
+map: private upstream `Host` and `Origin`, synthetic public
+`Forwarded`/`X-Forwarded-*` metadata, one optional `/hermes` prefix, and only
+the canonical WebSocket upgrade pair. Empty values express the intended finite
+removal map, but this offline fixture does not prove Traefik's runtime removal
+of RFC hop-by-hop headers or `Connection`-listed tokens. Traefik's
+`customRequestHeaders` has no wildcard delete for arbitrary inbound
+`X-Forwarded-*` names, so this fixture does not claim arbitrary forwarding
+alias deletion either. Those runtime guarantees remain a future real Traefik
+plus recording-upstream capture requirement or a dedicated sanitizer boundary,
+outside this offline harness. Root and dashboard WebSocket routes use separate
+header middleware so prefix stripping does not erase the `/hermes` contract.
+The proof does not claim that a cookie has `Secure`, `HttpOnly`, `SameSite`, or
+`Path`: no real `Set-Cookie` response is captured, so `cookie_proof.status`
+remains `not_proven`.
 
 ## Offline harness and generated files
 
 The regression suite starts `make_forward_auth_server()` on an ephemeral
 loopback port and sends real standard-library `http.client` requests through
 the adapter. The server bounds the request line, header count and bytes,
-content length, and standard ForwardAuth metadata. It rejects symlinks, FIFOs,
-special files, replacement races, and digest traversal or byte/time budget
-overruns. Adapter allows are ForwardAuth `200` decisions; they are not
-WebSocket `101` observations. This is an executable local policy harness only:
-it does not start Traefik, Hermes, a provider, or any deployment listener.
+content length, the closed ForwardAuth header contract, and transport framing.
+It rejects C0, DEL, and C1 request-target controls, symlinks, FIFOs, special
+files, replacement races, and digest traversal or byte/time budget overruns.
+Adapter allows are ForwardAuth `200` decisions; they are not WebSocket `101`
+observations. This is an executable local policy harness only: it does not
+start Traefik, Hermes, a provider, or any deployment listener.
 
 `render_to_directory()` writes `traefik-static.json` and
 `traefik-dynamic.json` under the requested output directory and binds the file
-provider to that exact absolute dynamic filename. A Traefik `check-config`
-probe runs only when a local `traefik` binary is available. The retained
-recording was made without that binary, so `offline_harness.traefik_check_config`
-is explicitly `skipped_unavailable`, `traefik_runtime.status` is `not_run`,
-`traefik_runtime.version` is `not_recorded`, and the minimum safe Traefik v3
-version is recorded as `v3.7.6`; no binary or runtime compatibility validation
-is claimed. The generated router syntax is recorded as the intended Traefik v3
-`HeaderRegexp` model output only.
+provider to that exact absolute dynamic filename. This lane does not invoke a
+Traefik CLI or start a runtime. `traefik_runtime.required_minimum_version` is
+`v3.7.6` as an unverified requested boundary, while
+`traefik_runtime.runtime_validation` explicitly records that configuration and
+`HeaderRegexp` compatibility are not claimed. A future live proof must exercise
+an official Traefik build through its documented startup or configuration path
+before making that runtime claim.
 
 ## Evidence bindings
 
@@ -152,10 +161,11 @@ python3 -m py_compile scripts/traefik_proof.py scripts/test_traefik_proof.py
 ```
 
 These checks are offline and use only standard-library policy, renderer, and
-loopback adapter code. The optional Traefik check is skipped explicitly when no
-local binary is installed; a skipped check is not a pass. The suite does not
-claim a live Traefik deployment, a Hermes process, provider availability,
-cookie attributes, firewall behavior, or issue #90 completion. The fixture
-keeps `proof_run.live_run=false` and `proof_run.compatible=false`; only an
-authorized live exercise of the exact reviewed and merged build against real
-Hermes in the required private topology can clear that deployment gate.
+loopback adapter code. They do not invoke a Traefik CLI, and therefore do not
+claim Traefik configuration parsing, `v3.7.6` minimum compatibility, or runtime
+`HeaderRegexp` behavior. The suite does not claim a live Traefik deployment, a
+Hermes process, provider availability, cookie attributes, firewall behavior,
+or issue #90 completion. The fixture keeps `proof_run.live_run=false` and
+`proof_run.compatible=false`; only an authorized live exercise of the exact
+reviewed and merged build against real Hermes in the required private topology
+can clear that deployment gate.

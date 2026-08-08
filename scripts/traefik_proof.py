@@ -21,9 +21,7 @@ import http.server
 import json
 import os
 import re
-import shutil
 import stat
-import subprocess
 import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -32,14 +30,14 @@ from types import MappingProxyType
 from urllib.parse import urlsplit
 
 
-SCHEMA = "hermternal.traefik-proof.v3"
+SCHEMA = "hermternal.traefik-proof.v4"
 RUNTIME_INPUT_SCHEMA = "hermternal.traefik-proof.runtime-inputs.v1"
 BROWSER_EVIDENCE_SCHEMA = "hermternal.traefik-proof.browser-evidence.v1"
 TRAEFIK_RUNTIME_STATUS = "not_run"
 TRAEFIK_RUNTIME_VERSION = "not_recorded"
-TRAEFIK_RUNTIME_BINARY = "unavailable_in_recording_environment"
-TRAEFIK_RUNTIME_MINIMUM_SAFE_VERSION = "v3.7.6"
-TRAEFIK_RULE_SYNTAX = "Traefik v3 HeaderRegexp; model output not runtime-validated"
+TRAEFIK_RUNTIME_REQUIRED_MINIMUM_VERSION = "v3.7.6"
+TRAEFIK_RUNTIME_VALIDATION = "not_run; configuration and rule compatibility are not claimed"
+TRAEFIK_RULE_SYNTAX = "Traefik v3 HeaderRegexp model only; v3.7.6 syntax compatibility is not validated"
 DEFAULT_HOST = "traefik-92.test"
 DEFAULT_HTTPS_PORT = 19444
 DEFAULT_HERMES_PORT = 19257
@@ -132,6 +130,19 @@ TRAEFIK_FORWARDAUTH_GENERATED_HEADERS = (
 )
 FORWARD_AUTH_HEADERS = ("Origin",)
 TRAEFIK_FORWARDAUTH_HEADERS = TRAEFIK_FORWARDAUTH_GENERATED_HEADERS + FORWARD_AUTH_HEADERS
+# A ForwardAuth HTTP request also has transport framing that the policy does
+# not authorize or forward. Keep this set explicit: Host is the auth-service
+# authority, Content-Length only frames the bounded empty/body request, the
+# user-agent and compression hints are ignored, and Connection permits close
+# only. Application headers such as Authorization and Cookie are not transport
+# exceptions and fail closed at the adapter boundary.
+FORWARD_AUTH_TRANSPORT_HEADERS = (
+    "Host",
+    "Content-Length",
+    "User-Agent",
+    "Accept-Encoding",
+    "Connection",
+)
 HERMES_FORWARDING_ALLOWLIST = (
     "Connection",
     "Forwarded",
@@ -162,8 +173,6 @@ HOP_BY_HOP_HEADERS = (
     "Transfer-Encoding",
     "Upgrade",
 )
-HOP_BY_HOP_HEADER_NAMES = frozenset(header.lower() for header in HOP_BY_HOP_HEADERS)
-
 STATIC_PATHS = (
     "/",
     "/index.html",
@@ -884,18 +893,19 @@ def render_manifest(
         "traefik_runtime": {
             "status": TRAEFIK_RUNTIME_STATUS,
             "version": TRAEFIK_RUNTIME_VERSION,
-            "minimum_safe_version": TRAEFIK_RUNTIME_MINIMUM_SAFE_VERSION,
-            "binary": TRAEFIK_RUNTIME_BINARY,
+            "required_minimum_version": TRAEFIK_RUNTIME_REQUIRED_MINIMUM_VERSION,
+            "runtime_validation": TRAEFIK_RUNTIME_VALIDATION,
             "rule_syntax": TRAEFIK_RULE_SYNTAX,
         },
         "forward_auth_contract": {
             "generated_headers": list(TRAEFIK_FORWARDAUTH_GENERATED_HEADERS),
             "copied_headers": list(FORWARD_AUTH_HEADERS),
-            "auth_request_host": "auth-service-authority-not-public-authority",
+            "transport_headers": list(FORWARD_AUTH_TRANSPORT_HEADERS),
+            "auth_request_host": "transport-only-auth-service-authority-not-public-authority",
             "port": "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
             "uri": "X-Forwarded-Uri includes query; it is not raw-target evidence",
             "websocket": "router-matcher-only; Upgrade and Connection are not ForwardAuth observations",
-            "hop_by_hop": "direct injected hop-by-hop fields are rejected; Traefik observation is not claimed",
+            "hop_by_hop": "direct injected hop-by-hop fields are rejected; only transport Connection: close is tolerated",
             "runtime_observed": False,
         },
         "product": {
@@ -922,11 +932,14 @@ def render_manifest(
                 "OAuth callback accepts only the reviewed code/state or provider-error query forms",
                 "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Port, X-Forwarded-Proto, and X-Forwarded-Uri",
                 "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
-                "only Origin is selected as an additional original request header; the auth request Host is not treated as the public authority",
+                "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
+                "the adapter accepts only the generated ForwardAuth set, Origin, and explicit bounded transport headers; Authorization, Cookie, and unknown headers are denied",
                 "X-Forwarded-Uri is parsed for path and query policy but is not raw-target evidence",
+                "request paths and targets reject C0, DEL, and C1 control characters before route matching",
                 "WebSocket Upgrade and Connection enforcement is represented only by router HeaderRegexp matchers",
                 "finite known fields are overridden, while Traefik runtime deletion of RFC hop-by-hop and Connection-listed tokens remains unproven",
                 "arbitrary inbound forwarding aliases are outside the finite Traefik override claim and require separate live deployment proof",
+                "the v3.7.6 minimum and HeaderRegexp rule syntax are recorded requirements, not runtime compatibility evidence",
                 "chat and PTY upgrade grammars remain distinct in the model",
             ],
             "request_material": "redacted",
@@ -934,12 +947,12 @@ def render_manifest(
         "offline_harness": {
             "status": "regression_tested",
             "scope": "loopback-only executable ForwardAuth adapter; no Traefik or Hermes process",
-            "traefik_binary": "unavailable_in_recording_environment",
-            "traefik_check_config": "skipped_unavailable",
+            "traefik_runtime": "not_run; configuration and rule compatibility are not claimed",
             "assertions": [
-                "actual HTTP requests reach the bounded standard-header policy adapter",
+                "actual HTTP requests reach the bounded closed-contract ForwardAuth adapter",
                 "X-Forwarded-Port is checked against the configured HTTPS entrypoint port",
                 "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
+                "C0, DEL, and C1 request-target controls are denied before route matching",
                 "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
             ],
         },
@@ -968,7 +981,19 @@ def _check_digest_budget(started: float, *, files: int, total_bytes: int) -> Non
         raise ValueError("static digest exceeded its byte budget")
 
 
+def _check_digest_path(path: Path, label: str) -> None:
+    """Apply the digest path budget to roots, directories, and files."""
+
+    try:
+        path_bytes = len(os.fsencode(str(path)))
+    except (TypeError, UnicodeError) as exc:
+        raise ValueError(f"{label} path cannot be encoded") from exc
+    if path_bytes > MAX_DIGEST_PATH_BYTES:
+        raise ValueError(f"{label} path exceeds the digest limit")
+
+
 def _regular_stat(path: Path, label: str) -> os.stat_result:
+    _check_digest_path(path, label)
     try:
         metadata = os.lstat(path)
     except OSError as exc:
@@ -977,8 +1002,6 @@ def _regular_stat(path: Path, label: str) -> os.stat_result:
         raise ValueError(f"{label} must be a regular non-symlink file")
     if metadata.st_size > MAX_DIGEST_FILE_BYTES:
         raise ValueError(f"{label} exceeds the per-file digest limit")
-    if len(os.fsencode(str(path))) > MAX_DIGEST_PATH_BYTES:
-        raise ValueError(f"{label} path exceeds the digest limit")
     return metadata
 
 
@@ -1121,6 +1144,7 @@ def _digest_stdin(stream: object, *, limit: int = MAX_DIGEST_INPUT_BYTES) -> str
 
 
 def _open_directory(path: Path, expected: os.stat_result | None = None) -> tuple[int, os.stat_result]:
+    _check_digest_path(path, "static digest directory")
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -1135,6 +1159,7 @@ def _open_directory(path: Path, expected: os.stat_result | None = None) -> tuple
 
 def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
     started = time.monotonic()
+    _check_digest_path(site_root, "site_root")
     try:
         root_metadata = os.lstat(site_root)
     except OSError as exc:
@@ -1182,6 +1207,10 @@ def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
             raise ValueError("static digest directory changed while traversing")
         for name, metadata in sorted(entries, key=lambda item: item[0]):
             entry_path = directory / name
+            _check_digest_path(
+                entry_path,
+                "static digest directory" if stat.S_ISDIR(metadata.st_mode) else "static digest entry",
+            )
             relative = entry_path.relative_to(site_root).as_posix()
             if len(os.fsencode(relative)) > MAX_DIGEST_PATH_BYTES:
                 raise ValueError("static digest entry path exceeds the digest limit")
@@ -1316,11 +1345,24 @@ def _query_matches(query: str, patterns: Iterable[str]) -> bool:
     return any(re.fullmatch(pattern, query) for pattern in patterns)
 
 
+def _contains_request_controls(value: str) -> bool:
+    """Reject C0, DEL, and C1 code points before URI policy can allow them."""
+
+    return any(
+        ord(character) <= 0x1F
+        or ord(character) == 0x7F
+        or 0x80 <= ord(character) <= 0x9F
+        for character in value
+    )
+
+
 def _bounded_request_uri(path: str, query: str) -> str:
     """Compose a request URI only after checking direct caller sizes."""
 
     if type(path) is not str or type(query) is not str:
         raise ValueError("request path and query must be strings")
+    if _contains_request_controls(path) or _contains_request_controls(query):
+        raise ValueError("request path or query contains control characters")
     if len(path) > MAX_REQUEST_TARGET_BYTES or len(query) > MAX_REQUEST_TARGET_BYTES:
         raise ValueError("request path or query is oversized")
     if not path.startswith("/"):
@@ -1344,7 +1386,13 @@ def _unsafe_target(path: str, query: str, raw_target: str) -> bool:
             return True
     except (UnicodeError, ValueError):
         return True
-    if not raw_target or not path.startswith("/") or raw_target.endswith("?") or "#" in raw_target:
+    if (
+        not raw_target
+        or not path.startswith("/")
+        or raw_target.endswith("?")
+        or "#" in raw_target
+        or _contains_request_controls(raw_target)
+    ):
         return True
     try:
         parsed = urlsplit(raw_target)
@@ -1406,14 +1454,17 @@ def _canonical_upgrade_headers(headers: Sequence[tuple[str, str]]) -> tuple[str,
 
 
 def _validate_forward_auth_header_names(headers: Sequence[tuple[str, str]]) -> None:
+    """Enforce the closed adapter contract before any policy decision."""
+
     try:
         declared_count = len(headers)
     except (TypeError, ValueError):
         declared_count = None
     if declared_count is not None and declared_count > MAX_FORWARD_HEADER_COUNT:
         raise ValueError("forwarded request has too many headers")
-    allowed_forwarded = {name.lower() for name in TRAEFIK_FORWARDAUTH_GENERATED_HEADERS}
-    allowed_forwarded.add("origin")
+    allowed = {
+        name.lower() for name in (*TRAEFIK_FORWARDAUTH_HEADERS, *FORWARD_AUTH_TRANSPORT_HEADERS)
+    }
     for index, item in enumerate(headers):
         if index >= MAX_FORWARD_HEADER_COUNT:
             raise ValueError("forwarded request has too many headers")
@@ -1423,11 +1474,26 @@ def _validate_forward_auth_header_names(headers: Sequence[tuple[str, str]]) -> N
             raise ValueError("forwarded request contains malformed headers") from exc
         if type(name) is not str:
             raise ValueError("forwarded request contains malformed headers")
-        lowered = name.lower()
-        if lowered in HOP_BY_HOP_HEADER_NAMES:
-            raise ValueError("hop-by-hop metadata is outside the Traefik contract")
-        if lowered.startswith("x-forwarded-") and lowered not in allowed_forwarded:
-            raise ValueError("unknown forwarded metadata is outside the Traefik contract")
+        if name.lower() not in allowed:
+            raise ValueError("header is outside the closed ForwardAuth contract")
+
+
+def _validate_forward_auth_transport_headers(headers: Sequence[tuple[str, str]]) -> None:
+    """Validate transport-only headers without treating them as policy input."""
+
+    host = _single_header(headers, "Host")
+    if host is not None and (not host or _contains_request_controls(host)):
+        raise ValueError("ForwardAuth transport Host is malformed")
+    content_length = _single_header(headers, "Content-Length")
+    if content_length is not None and not content_length.isdigit():
+        raise ValueError("ForwardAuth Content-Length is malformed")
+    for name in ("User-Agent", "Accept-Encoding"):
+        value = _single_header(headers, name)
+        if value is not None and _contains_request_controls(value):
+            raise ValueError(f"ForwardAuth transport {name} is malformed")
+    connection = _single_header(headers, "Connection")
+    if connection is not None and connection.strip().lower() not in {"", "close"}:
+        raise ValueError("ForwardAuth transport Connection must be close")
 
 
 def policy_decision(
@@ -1581,6 +1647,7 @@ def _forward_auth_policy_input(
     inputs = _validate_runtime_inputs(runtime_inputs)
     authority = _authority(inputs)
     _validate_forward_auth_header_names(headers)
+    _validate_forward_auth_transport_headers(headers)
     required = {
         name: _single_header(headers, name, required=True)
         for name in TRAEFIK_FORWARDAUTH_GENERATED_HEADERS
@@ -1730,44 +1797,6 @@ def make_forward_auth_server(runtime_inputs: Mapping[str, object]) -> http.serve
     server.daemon_threads = True
     server.timeout = 0.25
     return server
-
-
-TRAEFIK_BINARY_PATHS = (
-    "/opt/homebrew/bin/traefik",
-    "/usr/local/bin/traefik",
-    "/usr/bin/traefik",
-    "/opt/local/bin/traefik",
-)
-
-
-def find_traefik_binary() -> str | None:
-    """Find a local executable without treating absence as validation success."""
-
-    candidates = [shutil.which("traefik")]
-    homebrew_prefix = os.environ.get("HOMEBREW_PREFIX")
-    if homebrew_prefix:
-        candidates.append(str(Path(homebrew_prefix) / "bin" / "traefik"))
-    candidates.extend(TRAEFIK_BINARY_PATHS)
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
-            return str(Path(candidate).resolve())
-    return None
-
-
-def run_traefik_check_config(binary: str, output_dir: Path) -> subprocess.CompletedProcess[object]:
-    """Validate emitted config while discarding unbounded diagnostics."""
-
-    # Diagnostics are not retained in synthetic evidence. Redirecting both
-    # streams to the OS sink prevents a noisy or compromised binary from
-    # allocating unbounded stdout/stderr buffers before the timeout expires.
-    return subprocess.run(
-        [binary, "check-config", f"--configFile={output_dir / 'traefik-static.json'}"],
-        cwd=output_dir,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=5,
-        check=False,
-    )
 
 
 def _static_path_matches(path: str, pattern: str) -> bool:

@@ -3,8 +3,8 @@
 
 The tests exercise the renderer, the bounded executable ForwardAuth adapter, and
 bounded static-file hashing only. They never contact Hermes, a provider, a VM,
-a public address, a firewall, or a real credential service. A Traefik binary
-check is optional and is reported as skipped when unavailable.
+a public address, a firewall, or a real credential service. Traefik itself is
+not started or validated by this offline lane.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import http.client
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import threading
@@ -406,6 +405,31 @@ class TraefikRendererTests(unittest.TestCase):
                 result = self._policy("GET", path, query, raw_target=raw_target)
                 self.assertEqual((result["status"], result["layer"], result["upstream_request"]), (404, "edge", False))
 
+    def test_policy_rejects_c0_del_and_c1_request_target_controls(self) -> None:
+        controls = ("\x00", "\x1f", "\x7f", "\x80", "\x9f")
+        for control in controls:
+            with self.subTest(control=ord(control)):
+                path = f"/_app/foo{control}X"
+                result = self._policy("GET", path, raw_target=path)
+                self.assertEqual(
+                    (result["status"], result["layer"], result["upstream_request"]),
+                    (404, "edge", False),
+                )
+                with self.assertRaisesRegex(ValueError, "control"):
+                    traefik_proof._bounded_request_uri(path, "")
+                query = f"scenario=success{control}X"
+                result = self._policy("GET", "/", query, raw_target=f"/?{query}")
+                self.assertEqual(
+                    (result["status"], result["layer"], result["upstream_request"]),
+                    (404, "edge", False),
+                )
+                raw_target = f"/_app/foo{control}X"
+                result = self._policy("GET", "/_app/fooX", raw_target=raw_target)
+                self.assertEqual(
+                    (result["status"], result["layer"], result["upstream_request"]),
+                    (404, "edge", False),
+                )
+
     def test_adapter_header_builder_reconstructs_standard_traefik_contract(self) -> None:
         original = [
             ("Host", self.authority),
@@ -461,9 +485,22 @@ class TraefikRendererTests(unittest.TestCase):
         self.assertEqual(evidence["browser_journey"], "blocked_provider")
         self.assertEqual(evidence["cookie_proof"]["status"], "not_proven")
         self.assertTrue(all(value == "redacted" for value in evidence["retention"].values()))
-        self.assertEqual(evidence["offline_harness"]["traefik_check_config"], "skipped_unavailable")
+        self.assertEqual(
+            evidence["offline_harness"]["traefik_runtime"],
+            "not_run; configuration and rule compatibility are not claimed",
+        )
+        self.assertEqual(evidence["traefik_runtime"]["required_minimum_version"], "v3.7.6")
+        self.assertEqual(evidence["traefik_runtime"]["runtime_validation"], traefik_proof.TRAEFIK_RUNTIME_VALIDATION)
         raw = EVIDENCE_PATH.read_text(encoding="utf-8")
-        for forbidden in ("?ticket=", "Cookie:", "Set-Cookie:", "Authorization:", "Bearer ", "password=", "api_key="):
+        for forbidden in (
+            "?ticket=",
+            "Cookie:",
+            "Set-Cookie:",
+            "Authorization:",
+            "Bearer ",
+            "password=",
+            "api_key=",
+        ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, raw)
         for event in traefik_proof.BROWSER_COMPLETION_EVIDENCE:
@@ -519,6 +556,21 @@ class TraefikRendererTests(unittest.TestCase):
                     traefik_proof._build_static_digest(root)
             with mock.patch.object(traefik_proof, "MAX_DIGEST_SECONDS", 0):
                 with self.assertRaisesRegex(ValueError, "time budget"):
+                    traefik_proof._build_static_digest(root)
+
+    def test_bounded_static_digest_checks_root_and_empty_directory_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root_limit = len(os.fsencode(str(root)))
+            self.assertIsInstance(traefik_proof._build_static_digest(root), str)
+            with mock.patch.object(traefik_proof, "MAX_DIGEST_PATH_BYTES", root_limit - 1):
+                with self.assertRaisesRegex(ValueError, "site_root path"):
+                    traefik_proof._build_static_digest(root)
+            empty_child = root / "empty-directory"
+            empty_child.mkdir()
+            child_limit = len(os.fsencode(str(empty_child)))
+            with mock.patch.object(traefik_proof, "MAX_DIGEST_PATH_BYTES", child_limit - 1):
+                with self.assertRaisesRegex(ValueError, "directory path"):
                     traefik_proof._build_static_digest(root)
 
     def test_bounded_static_digest_rejects_traversal_breadth_and_pending_limits(self) -> None:
@@ -626,28 +678,6 @@ class TraefikRendererTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact renderer input keys"):
             traefik_proof._validate_runtime_inputs(oversized)
 
-    @mock.patch.object(traefik_proof.subprocess, "run")
-    def test_traefik_check_discards_unbounded_diagnostics(self, run: mock.Mock) -> None:
-        run.return_value = subprocess.CompletedProcess([], 0)
-        with tempfile.TemporaryDirectory() as temporary:
-            result = traefik_proof.run_traefik_check_config("/bin/false", Path(temporary))
-        self.assertEqual(result.returncode, 0)
-        kwargs = run.call_args.kwargs
-        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
-        self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
-        self.assertNotIn("capture_output", kwargs)
-
-    def test_optional_traefik_check_is_explicitly_skipped_when_binary_is_unavailable(self) -> None:
-        binary = traefik_proof.find_traefik_binary()
-        if binary is None:
-            self.skipTest("Traefik binary unavailable; check-config is explicitly skipped")
-        with tempfile.TemporaryDirectory() as temporary:
-            output_dir = Path(temporary)
-            traefik_proof.render_to_directory(output_dir)
-            result = traefik_proof.run_traefik_check_config(binary, output_dir)
-            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
-
-
 class ForwardAuthAdapterTests(unittest.TestCase):
     """Exercise actual bounded HTTP requests against the local adapter."""
 
@@ -708,6 +738,38 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         denied_status, denied_headers = self._send(denied)
         self.assertEqual(denied_status, 404)
         self.assertEqual(denied_headers["x-hermternal-policy"], "deny")
+
+    def test_adapter_allows_only_explicit_transport_headers_beside_forwardauth(self) -> None:
+        transport_headers = self._forwarded() + [
+            ("Host", "127.0.0.1:19259"),
+            ("Content-Length", "0"),
+            ("User-Agent", "Traefik/3.7.6"),
+            ("Accept-Encoding", "gzip"),
+            ("Connection", "close"),
+        ]
+        status, response_headers = self._send(transport_headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(response_headers["x-hermternal-policy"], "allow")
+        for forbidden in (
+            ("Authorization", "Bearer synthetic-token"),
+            ("Cookie", "session=synthetic-cookie"),
+            ("Accept", "application/json"),
+            ("X-Forwarded-Unknown", "spoof"),
+        ):
+            with self.subTest(header=forbidden[0]):
+                status, _ = self._send(self._forwarded() + [forbidden])
+                self.assertEqual(status, 400)
+
+    def test_adapter_rejects_c0_del_and_c1_forwarded_uri_controls(self) -> None:
+        for control in ("\x00", "\x1f", "\x7f", "\x80", "\x9f"):
+            with self.subTest(control=ord(control)):
+                forwarded = self._forwarded()
+                forwarded = [
+                    (name, f"/_app/foo{control}X") if name == "X-Forwarded-Uri" else (name, value)
+                    for name, value in forwarded
+                ]
+                status, _ = self._send(forwarded)
+                self.assertEqual(status, 400)
 
     def test_adapter_accepts_websocket_uri_without_claiming_handshake_metadata(self) -> None:
         forwarded = self._forwarded(
@@ -855,14 +917,16 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             {
                 "status": traefik_proof.TRAEFIK_RUNTIME_STATUS,
                 "version": traefik_proof.TRAEFIK_RUNTIME_VERSION,
-                "minimum_safe_version": traefik_proof.TRAEFIK_RUNTIME_MINIMUM_SAFE_VERSION,
-                "binary": traefik_proof.TRAEFIK_RUNTIME_BINARY,
+                "required_minimum_version": traefik_proof.TRAEFIK_RUNTIME_REQUIRED_MINIMUM_VERSION,
+                "runtime_validation": traefik_proof.TRAEFIK_RUNTIME_VALIDATION,
                 "rule_syntax": traefik_proof.TRAEFIK_RULE_SYNTAX,
             },
         )
         contract = self.evidence["forward_auth_contract"]
         self.assertEqual(contract["generated_headers"], list(traefik_proof.TRAEFIK_FORWARDAUTH_GENERATED_HEADERS))
         self.assertEqual(contract["copied_headers"], list(traefik_proof.FORWARD_AUTH_HEADERS))
+        self.assertEqual(contract["transport_headers"], list(traefik_proof.FORWARD_AUTH_TRANSPORT_HEADERS))
+        self.assertIn("transport-only", contract["auth_request_host"])
         self.assertFalse(contract["runtime_observed"])
         self.assertIn("configured HTTPS entrypoint port", contract["port"])
         self.assertIn("not raw-target", contract["uri"])
@@ -872,7 +936,10 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         self.assertEqual(self.evidence["browser_evidence"]["observations"], {"blocker": "provider_unavailable"})
         self.assertEqual(self.evidence["proof_run"], traefik_proof._synthetic_proof_run())
         self.assertEqual(self.evidence["offline_harness"]["status"], "regression_tested")
-        self.assertEqual(self.evidence["offline_harness"]["traefik_check_config"], "skipped_unavailable")
+        self.assertEqual(
+            self.evidence["offline_harness"]["traefik_runtime"],
+            "not_run; configuration and rule compatibility are not claimed",
+        )
         self.assertEqual(len(self.evidence["positive_cases"]), 11)
         self.assertEqual(len(self.evidence["negative_cases"]), 23)
         for case in [*self.evidence["positive_cases"], *self.evidence["negative_cases"]]:
