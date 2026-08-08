@@ -64,6 +64,58 @@ describe('WorkspacePreview', () => {
     expect(onSignOut).not.toHaveBeenCalled();
   });
 
+  it('intercepts immediate mobile Escape before menu focus settles', async () => {
+    render(WorkspacePreview, { state: 'ready' });
+
+    const conversations = screen.getByRole('button', { name: 'Open conversations', hidden: true });
+    await fireEvent.click(conversations);
+    const drawer = screen.getByTestId('mobile-session-drawer');
+    const trigger = within(drawer).getByRole('button', { name: 'Open account menu', hidden: true });
+
+    fireEvent.click(trigger, { detail: 0 });
+    const menu = await within(drawer).findByRole('menu', { name: 'Account menu', hidden: true });
+    expect(menu).toBeInTheDocument();
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+
+    await waitFor(() => expect(within(drawer).queryByRole('menu', { name: 'Account menu', hidden: true })).not.toBeInTheDocument());
+    expect(screen.getByTestId('mobile-session-drawer')).toBe(drawer);
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it('invalidates stale focus continuations across rapid mobile close and reopen', async () => {
+    render(WorkspacePreview, { state: 'ready' });
+
+    const conversations = screen.getByRole('button', { name: 'Open conversations', hidden: true });
+    await fireEvent.click(conversations);
+    const drawer = screen.getByTestId('mobile-session-drawer');
+    const trigger = within(drawer).getByRole('button', { name: 'Open account menu', hidden: true });
+
+    fireEvent.click(trigger, { detail: 0 });
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+    fireEvent.click(trigger, { detail: 0 });
+
+    const menu = await within(drawer).findByRole('menu', { name: 'Account menu', hidden: true });
+    const signOut = within(menu).getByRole('menuitem', { name: 'Sign out', hidden: true });
+    await waitFor(() => expect(signOut).toHaveFocus());
+    expect(screen.getByTestId('mobile-session-drawer')).toBe(drawer);
+    expect(screen.getByRole('menu', { name: 'Account menu', hidden: true })).toBe(menu);
+  });
+
+  it('keeps a cancelled pointer activation single-owned before Escape closes the menu', async () => {
+    render(WorkspacePreview, { state: 'ready' });
+
+    const trigger = screen.getByRole('button', { name: 'Open account menu' });
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' });
+    fireEvent.pointerCancel(trigger);
+    fireEvent.click(trigger, { detail: 1 });
+
+    const menu = await screen.findByRole('menu', { name: 'Account menu' });
+    expect(menu).toBeInTheDocument();
+    expect(screen.getAllByRole('menu', { name: 'Account menu' })).toHaveLength(1);
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('menu', { name: 'Account menu' })).not.toBeInTheDocument());
+  });
+
   it('forwards Sign out once from a pointer gesture and dedupes the compatibility click', async () => {
     const onSignOut = vi.fn();
     render(WorkspacePreview, { state: 'ready', onSignOut });

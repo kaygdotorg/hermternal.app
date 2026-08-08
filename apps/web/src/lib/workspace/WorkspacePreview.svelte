@@ -850,6 +850,13 @@
       box-shadow: none;
     }
 
+    /* Keep the 44px account target inside the clipped Paper drawer. The
+       desktop spacer would leave the last 13px below the modal viewport and
+       make a genuine browser click auto-scroll a fixture that appears visible. */
+    .mobile-session-drawer :global(.sidebar-spacer) {
+      min-height: 16px;
+    }
+
     .mobile-title-edit-layer {
       position: absolute;
       inset: 0;

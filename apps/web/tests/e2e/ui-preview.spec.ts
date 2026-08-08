@@ -346,8 +346,17 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
     const mobileDrawer = viewport.width < 760 ? page.getByTestId('mobile-session-drawer') : undefined;
     const workspace = page.locator('.workspace-preview');
     const trigger = scope.getByRole('button', { name: 'Open account menu' });
-    const documentScrollBeforeActivation = await page.evaluate(() => ({ top: window.scrollY, left: window.scrollX }));
+    // The preview page contains multiple tall boards. Put the real trigger in
+    // the viewport before recording scroll state; otherwise locator.click() is
+    // correctly allowed to reveal an offscreen fixture rather than exercising
+    // account-menu activation at a user's current scroll position.
+    await page.evaluate(() => window.scrollTo(0, 700));
     await expect(trigger).toBeVisible();
+    await expect(trigger).toBeInViewport();
+    const documentScrollBeforeActivation = await page.evaluate(() => ({ top: window.scrollY, left: window.scrollX }));
+    const drawerScrollBeforeActivation = mobileDrawer
+      ? await mobileDrawer.evaluate((element) => ({ top: element.scrollTop, left: element.scrollLeft }))
+      : null;
     // Use a genuine locator activation so the browser must exercise the same
     // pre-pointerdown auto-scroll path as a real pointer click.
     await trigger.click();
@@ -374,9 +383,12 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
     const signOut = menu.getByRole('menuitem', { name: 'Sign out' });
     await expect(signOut).toBeFocused();
     await expect(signOut).toHaveCSS('min-height', '44px');
+    await expect.poll(() => page.evaluate(() => ({ top: window.scrollY, left: window.scrollX }))).toEqual(documentScrollBeforeActivation);
     if (mobileDrawer) {
-      await expect.poll(() => mobileDrawer.evaluate((element) => element.scrollTop)).toBe(0);
-      await expect.poll(() => page.evaluate(() => ({ top: window.scrollY, left: window.scrollX }))).toEqual(documentScrollBeforeActivation);
+      expect(drawerScrollBeforeActivation).toEqual({ top: 0, left: 0 });
+      await expect.poll(() => mobileDrawer.evaluate((element) => ({ top: element.scrollTop, left: element.scrollLeft }))).toEqual(
+        drawerScrollBeforeActivation
+      );
     }
     await page.keyboard.press('Escape');
     await expect(menu).toBeHidden();
@@ -387,6 +399,94 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
       await expect(page.getByTestId('mobile-session-drawer')).toBeHidden();
     }
   }
+});
+
+test('genuine mobile account activation preserves current scroll through immediate Escape and reuse', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 1600 });
+  await page.goto(previewUrl('/ui-preview'));
+  // Isolate scroll preservation from the shared press pulse. The default-motion
+  // account-menu coverage above exercises the normal visual interaction state.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+  await page.getByRole('button', { name: 'Open conversations' }).click();
+
+  const workspace = page.locator('.workspace-preview');
+  const drawer = page.getByTestId('mobile-session-drawer');
+  await expect(drawer.locator('button:not([disabled])').first()).toBeFocused();
+  const trigger = drawer.getByRole('button', { name: 'Open account menu' });
+  const menu = page.locator('#mobile-account-menu');
+
+  // Keep the genuine target inside the clipped drawer while exercising
+  // nonzero, user-owned document and drawer scroll state. The sentinel models
+  // a longer session without changing the Paper-positioned SessionList layout.
+  await drawer.evaluate((element) => {
+    const overflowSentinel = document.createElement('div');
+    overflowSentinel.setAttribute('data-testid', 'account-menu-scroll-fixture');
+    overflowSentinel.style.position = 'absolute';
+    overflowSentinel.style.top = '1000px';
+    overflowSentinel.style.left = '0';
+    overflowSentinel.style.width = '1px';
+    overflowSentinel.style.height = '1px';
+    overflowSentinel.style.pointerEvents = 'none';
+    element.append(overflowSentinel);
+    element.scrollTop = 24;
+  });
+  await page.evaluate(() => window.scrollTo(0, 100));
+  await expect(trigger).toBeVisible();
+  await expect(trigger).toBeInViewport();
+
+  for (let run = 0; run < 3; run += 1) {
+    const documentScrollBefore = await page.evaluate(() => ({ top: window.scrollY, left: window.scrollX }));
+    const drawerScrollBefore = await drawer.evaluate((element) => ({ top: element.scrollTop, left: element.scrollLeft }));
+    expect(documentScrollBefore.top).toBeGreaterThan(0);
+    expect(drawerScrollBefore).toEqual({ top: 24, left: 0 });
+
+    await trigger.click();
+    await expect(menu).toBeVisible();
+    const menuBox = await menu.boundingBox();
+    const workspaceBox = await workspace.boundingBox();
+    expect(workspaceBox).not.toBeNull();
+    expect(menuBox?.width).toBe(308);
+    expect(menuBox?.height).toBe(143);
+    expect(menuBox?.x).toBe((workspaceBox?.x ?? 0) + 28);
+    expect((menuBox?.y ?? 0) + drawerScrollBefore.top).toBe((workspaceBox?.y ?? 0) + 528);
+    await expect.poll(() => page.evaluate(() => ({ top: window.scrollY, left: window.scrollX }))).toEqual(documentScrollBefore);
+    await expect.poll(() => drawer.evaluate((element) => ({ top: element.scrollTop, left: element.scrollLeft }))).toEqual(drawerScrollBefore);
+
+    // Escape is intentionally sent immediately after genuine activation, while
+    // delayed menu focus may still be pending. It must close only the menu.
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+    await expect(drawer).toBeVisible();
+    await expect(trigger).toBeFocused();
+    await expect
+      .poll(async () => {
+        const box = await trigger.boundingBox();
+        return Boolean(box && Math.abs(box.width - 44) < 0.1 && Math.abs(box.height - 44) < 0.1);
+      })
+      .toBe(true);
+
+    if (run === 1) {
+      // Resize and return to the same responsive instance. Re-establish the
+      // current scroll values explicitly, then prove the next open uses them.
+      await page.setViewportSize({ width: 390, height: 1500 });
+      await page.setViewportSize({ width: 390, height: 1600 });
+      await drawer.evaluate((element) => {
+        element.scrollTop = 24;
+      });
+      await page.evaluate(() => window.scrollTo(0, 100));
+      await expect(trigger).toBeInViewport();
+      await expect
+        .poll(async () => {
+          const box = await trigger.boundingBox();
+          return Boolean(box && Math.abs(box.width - 44) < 0.1 && Math.abs(box.height - 44) < 0.1);
+        })
+        .toBe(true);
+    }
+  }
+
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
 });
 
 test('Paper effective width switches exactly at 760px without a tabbed desktop replacement', async ({ page }) => {

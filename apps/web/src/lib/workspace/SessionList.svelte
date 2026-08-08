@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { tick } from 'svelte';
   import Pill from './Pill.svelte';
   import type { SessionSummary, WorkspaceActionHandler } from './types';
 
@@ -15,7 +15,7 @@
   let signOutPending = false;
   let accountMenuTrigger: HTMLButtonElement | undefined;
   let accountMenu: HTMLElement | undefined;
-  let restingScrollPositions: ScrollPosition[] = [];
+  let accountMenuFocusGeneration = 0;
 
   function captureScrollPositions(element: HTMLElement | null | undefined): ScrollPosition[] {
     const scrollPositions: ScrollPosition[] = [];
@@ -31,28 +31,10 @@
 
     const documentScroller = document.scrollingElement as HTMLElement | null;
     if (documentScroller && !seen.has(documentScroller)) {
-      scrollPositions.push({ element: documentScroller, top: documentScroller.scrollTop, left: documentScroller.scrollLeft });
+      scrollPositions.push({ top: documentScroller.scrollTop, left: documentScroller.scrollLeft, element: documentScroller });
     }
     return scrollPositions;
   }
-
-  function restoreRestingScroll(): void {
-    // A real browser may reveal a deeply nested account trigger by scrolling the
-    // document and drawer before pointerdown reaches Pill. Restore the modal's
-    // resting positions before rendering the menu so its Paper offset survives
-    // that pre-event browser work.
-    for (const position of restingScrollPositions) {
-      position.element.scrollTop = position.top;
-      position.element.scrollLeft = position.left;
-    }
-  }
-
-  onMount(() => {
-    // The drawer is mounted at its approved resting position. Keep this snapshot
-    // separate from focusWithoutScroll: it also covers scroll that happens before
-    // Svelte receives the genuine pointer activation.
-    restingScrollPositions = captureScrollPositions(accountMenuTrigger);
-  });
 
   $: pinned = sessions.filter((session) => session.group === 'pinned');
   $: recent = sessions.filter((session) => session.group === 'recent');
@@ -80,58 +62,64 @@
     }
   }
 
-  async function focusAccountMenuStart(): Promise<void> {
+  async function focusAccountMenuStart(generation: number): Promise<void> {
     await afterActivationFrame();
-    // The mobile drawer is a scroll container. Preserve its Paper position while
-    // moving focus into the newly-rendered menu instead of letting focus reveal
-    // the menu item by scrolling the drawer.
+    if (generation !== accountMenuFocusGeneration || !accountMenuOpen) return;
+    // The mobile drawer is a scroll container. Preserve its current position while
+    // moving focus into the newly-rendered menu. Capture at focus time so a real
+    // user's later scroll is never replaced by a stale mount-time snapshot.
     focusWithoutScroll(accountMenu?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])'));
   }
 
-  async function openAccountMenu(): Promise<void> {
+  function openAccountMenu(): void {
     if (signOutPending) return;
-    restoreRestingScroll();
+    const generation = ++accountMenuFocusGeneration;
     accountMenuOpen = true;
-    void focusAccountMenuStart();
+    void focusAccountMenuStart(generation);
   }
 
   async function closeAccountMenu(restoreFocus = true): Promise<void> {
+    const generation = ++accountMenuFocusGeneration;
     accountMenuOpen = false;
     if (!restoreFocus) return;
     await afterActivationFrame();
+    if (generation !== accountMenuFocusGeneration || accountMenuOpen) return;
     focusWithoutScroll(accountMenuTrigger);
   }
 
   function toggleAccountMenu(): void {
     if (accountMenuOpen) void closeAccountMenu();
-    else void openAccountMenu();
+    else openAccountMenu();
   }
 
   function requestSignOut(): void {
     if (signOutPending) return;
     signOutPending = true;
-    accountMenuOpen = false;
+    // Invalidate any delayed menu-focus continuation before removing the menu.
     // The root owns BrowserAuthSession.logout(); this narrow callback keeps the
     // shell independent from auth transport and local workspace invalidation.
+    void closeAccountMenu(false);
     onSignOut();
   }
 
-  function handleWindowKeydown(event: KeyboardEvent): void {
-    if (!accountMenuOpen || event.key !== 'Escape') return;
-    event.preventDefault();
-    void closeAccountMenu();
-  }
-
   function handleAccountMenuKeydown(event: KeyboardEvent): void {
-    if (event.key !== 'Escape') return;
-    // Stop the workspace drawer's global Escape handler from closing the
-    // surrounding mobile modal before this nested account menu restores focus.
+    if (!accountMenuOpen || event.key !== 'Escape') return;
+    // The trigger owns this handler while focus is still settling. Stop before
+    // WorkspacePreview's window handler can close the surrounding mobile drawer.
     event.preventDefault();
     event.stopPropagation();
     void closeAccountMenu();
   }
 
+  function handleWindowKeydown(event: KeyboardEvent): void {
+    if (!accountMenuOpen || event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void closeAccountMenu();
+  }
+
   function handleAccountMenuFocusOut(event: FocusEvent): void {
+    if (!accountMenuOpen) return;
     const next = event.relatedTarget as Node | null;
     if (!next || !accountMenu?.contains(next)) void closeAccountMenu(false);
   }
@@ -231,6 +219,7 @@
         label="Account"
         variant="ghost"
         onActivate={toggleAccountMenu}
+        onKeyDown={handleAccountMenuKeydown}
       />
       <Pill ariaLabel="Open settings" icon="shield" iconOnly label="Settings" variant="ghost" />
       <Pill ariaLabel="Open utilities" icon="menu" iconOnly label="Utilities" variant="ghost" />

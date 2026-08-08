@@ -28,6 +28,8 @@
   export let buttonType: 'button' | 'submit' | 'reset' = 'button';
   export let role: string | undefined = undefined;
   export let onActivate: (() => void) | undefined = undefined;
+  /** Optional native keydown hook for controls that own a nested interaction scope. */
+  export let onKeyDown: ((event: KeyboardEvent) => void) | undefined = undefined;
   export let element: HTMLButtonElement | undefined = undefined;
 
   let driftX = 0;
@@ -127,6 +129,7 @@
   onpointerleave={handlePointerLeave}
   onpointermove={handlePointerMove}
   onpointerup={handlePointerUp}
+  onkeydown={onKeyDown}
   onclick={handleClick}
 >
   {#if monogram}
